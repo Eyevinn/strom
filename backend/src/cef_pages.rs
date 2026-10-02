@@ -22,6 +22,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use gstreamer as gst;
+use gstreamer::glib;
 use gstreamer::prelude::*;
 use strom_types::FlowId;
 use tracing::{debug, warn};
@@ -48,6 +49,14 @@ pub enum PageOwner {
     Block { flow_id: FlowId, block_id: String },
     /// A raw `cefsrc` element in a flow.
     Element { flow_id: FlowId, element_id: String },
+}
+
+impl PageOwner {
+    fn flow_id(&self) -> &FlowId {
+        match self {
+            PageOwner::Block { flow_id, .. } | PageOwner::Element { flow_id, .. } => flow_id,
+        }
+    }
 }
 
 static DEBUG_PORT: OnceLock<u16> = OnceLock::new();
@@ -100,7 +109,7 @@ fn pending() -> &'static Mutex<HashMap<String, String>> {
 /// A page still being born keeps its marker until it is named, and loads
 /// `url` then. Every live URL write goes through here, so it cannot race the
 /// birth.
-pub fn load_url(cefsrc: &gst::Element, url: &str) {
+pub fn load_url(cefsrc: &impl IsA<glib::Object>, url: &str) {
     let mut pending = pending().lock().unwrap_or_else(|e| e.into_inner());
     let current: Option<String> = cefsrc.property(URL_PROPERTY);
     if let Some(next) = current.and_then(|marker| pending.get_mut(&marker)) {
@@ -110,8 +119,29 @@ pub fn load_url(cefsrc: &gst::Element, url: &str) {
     cefsrc.set_property(URL_PROPERTY, url);
 }
 
+/// The URL a `cefsrc` is set to, as anyone outside this module should see it.
+///
+/// While its page is being born the element holds the marker, which means
+/// nothing to an operator and would be saved as the block's URL by a client
+/// that reads a property and writes it back.
+pub fn shown_url(url: String) -> String {
+    if !url.starts_with(MARKER_PREFIX) {
+        return url;
+    }
+    let pending = pending().lock().unwrap_or_else(|e| e.into_inner());
+    pending.get(&url).cloned().unwrap_or(url)
+}
+
+/// Forget the pages of a flow that has stopped. Its pages are closed, and a
+/// restart names new ones.
+pub fn forget_flow(flow_id: &FlowId) {
+    if let Ok(mut pages) = pages().lock() {
+        pages.retain(|owner, _| owner.flow_id() != flow_id);
+    }
+}
+
 /// Load the URL a page being born was waiting for, once and only once.
-fn finish_birth(cefsrc: &gst::Element, marker: &str) {
+fn finish_birth(cefsrc: &impl IsA<glib::Object>, marker: &str) {
     let mut pending = pending().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(url) = pending.remove(marker) {
         cefsrc.set_property(URL_PROPERTY, &url);
@@ -263,6 +293,116 @@ mod tests {
         record(block(flow, "a"), "NEW1".to_string());
         assert_eq!(target_of(&block(flow, "a")).as_deref(), Some("NEW1"));
         assert_eq!(owner_of("OLD1"), None);
+    }
+
+    #[test]
+    fn a_stopped_flow_forgets_its_pages_and_no_one_elses() {
+        let stopped = FlowId::new_v4();
+        let running = FlowId::new_v4();
+        record(block(stopped, "a"), "STOP".to_string());
+        record(block(running, "a"), "RUNS".to_string());
+        forget_flow(&stopped);
+        assert_eq!(target_of(&block(stopped, "a")), None);
+        assert_eq!(target_of(&block(running, "a")).as_deref(), Some("RUNS"));
+    }
+
+    #[test]
+    fn a_page_being_born_shows_the_url_it_will_load() {
+        let marker = format!("{}{}", MARKER_PREFIX, "f00d");
+        pending()
+            .lock()
+            .unwrap()
+            .insert(marker.clone(), "https://example.com/".to_string());
+        assert_eq!(shown_url(marker.clone()), "https://example.com/");
+        assert_eq!(
+            shown_url("https://other.example/".to_string()),
+            "https://other.example/"
+        );
+        pending().lock().unwrap().remove(&marker);
+    }
+
+    /// Stands in for a `cefsrc`: all a page's birth touches is its `url`.
+    mod fake {
+        use gstreamer::glib;
+        use gstreamer::glib::subclass::prelude::*;
+        use gstreamer::prelude::*;
+        use std::cell::RefCell;
+
+        #[derive(Default)]
+        pub struct Imp {
+            url: RefCell<Option<String>>,
+        }
+
+        #[glib::object_subclass]
+        impl ObjectSubclass for Imp {
+            const NAME: &'static str = "StromFakeCefSrc";
+            type Type = FakeCefSrc;
+        }
+
+        impl ObjectImpl for Imp {
+            fn properties() -> &'static [glib::ParamSpec] {
+                static PROPS: std::sync::OnceLock<Vec<glib::ParamSpec>> =
+                    std::sync::OnceLock::new();
+                PROPS.get_or_init(|| vec![glib::ParamSpecString::builder("url").build()])
+            }
+            fn set_property(&self, _id: usize, value: &glib::Value, _pspec: &glib::ParamSpec) {
+                *self.url.borrow_mut() = value.get().unwrap();
+            }
+            fn property(&self, _id: usize, _pspec: &glib::ParamSpec) -> glib::Value {
+                self.url.borrow().to_value()
+            }
+        }
+
+        glib::wrapper! {
+            pub struct FakeCefSrc(ObjectSubclass<Imp>);
+        }
+
+        impl FakeCefSrc {
+            pub fn with_url(url: &str) -> Self {
+                glib::Object::builder().property("url", url).build()
+            }
+            pub fn url(&self) -> Option<String> {
+                self.property("url")
+            }
+        }
+    }
+
+    /// Put a fake element on a marker, as `name_page` does.
+    fn being_born(real: &str) -> (fake::FakeCefSrc, String) {
+        let marker = format!("{}{}", MARKER_PREFIX, uuid::Uuid::new_v4().simple());
+        pending()
+            .lock()
+            .unwrap()
+            .insert(marker.clone(), real.to_string());
+        (fake::FakeCefSrc::with_url(&marker), marker)
+    }
+
+    #[test]
+    fn a_page_goes_to_its_url_once_it_is_named() {
+        let (element, marker) = being_born("https://built.example/");
+        finish_birth(&element, &marker);
+        assert_eq!(element.url().as_deref(), Some("https://built.example/"));
+    }
+
+    #[test]
+    fn a_url_set_on_air_during_birth_is_the_one_loaded() {
+        let (element, marker) = being_born("https://built.example/");
+        load_url(&element, "https://live.example/");
+        // Still on the marker, so Chromium can still find the page.
+        assert_eq!(element.url().as_deref(), Some(marker.as_str()));
+        finish_birth(&element, &marker);
+        assert_eq!(element.url().as_deref(), Some("https://live.example/"));
+    }
+
+    #[test]
+    fn a_url_set_on_air_after_birth_goes_straight_to_the_element() {
+        let (element, marker) = being_born("https://built.example/");
+        finish_birth(&element, &marker);
+        load_url(&element, "https://live.example/");
+        assert_eq!(element.url().as_deref(), Some("https://live.example/"));
+        // A late second finish changes nothing.
+        finish_birth(&element, &marker);
+        assert_eq!(element.url().as_deref(), Some("https://live.example/"));
     }
 
     #[test]

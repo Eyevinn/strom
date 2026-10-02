@@ -433,7 +433,7 @@
         ],
         "responses": {
           "200": {
-            "description": "A link that opens DevTools against this page",
+            "description": "A remote control link for this HTML source",
             "content": {
               "application/json": {
                 "schema": {
@@ -996,7 +996,7 @@
           "devtools"
         ],
         "summary": "Mint a remote control link for one HTML source.",
-        "description": "The block is the name an operator has for a page, so this is the endpoint a\nclient uses; the target id it resolves to is Chromium's business and\nchanges whenever the page is recreated.\n\nThe page is the one the block's `cefsrc` was born with (see\n[`crate::cef_pages`]), whatever URL it is on now and however many other\nblocks share its URL.",
+        "description": "The block is the name an operator has for a page, so this is the endpoint a\nclient uses. The link is for the block: a session opens on the page the\nblock renders at that moment, whatever URL it is on and however many other\nblocks share its URL, and a restarted flow's new page is reached through\nthe same link.",
         "operationId": "create_block_link",
         "parameters": [
           {
@@ -1020,7 +1020,7 @@
         ],
         "responses": {
           "200": {
-            "description": "A link that opens DevTools against this page",
+            "description": "A remote control link for this HTML source",
             "content": {
               "application/json": {
                 "schema": {
@@ -6088,7 +6088,7 @@
           },
           "warning": {
             "type": "string",
-            "description": "What the holder of this link can actually reach. See\n[`REMOTE_CONTROL_WARNING`]."
+            "description": "What the holder of this link can actually reach, in Strom's words: one\nof [`SCREENCAST_CONTROL_WARNING`] (with [`SHARED_CONTEXT_WARNING`]\nappended when sources share a browser context) or\n[`REMOTE_CONTROL_WARNING`]. A client shows it to the operator before\nhanding the link on."
           }
         }
       },
@@ -6097,23 +6097,38 @@
         "description": "One live link, as an operator sees it when reviewing what is outstanding.\n\nDeliberately without the key: the point of a listing is to let someone who\nhas lost track of a link kill it, not to hand the credential back out.",
         "required": [
           "id",
-          "target_url",
+          "flow_id",
+          "flow_name",
+          "block_id",
+          "block_name",
           "expires_in_seconds"
         ],
         "properties": {
+          "block_id": {
+            "type": "string",
+            "description": "The HTML Input block this link controls."
+          },
+          "block_name": {
+            "type": "string",
+            "description": "The block's name, or its id when it has none."
+          },
           "expires_in_seconds": {
             "type": "integer",
             "format": "int64",
             "description": "Seconds left before it expires on its own. Every use starts it over.",
             "minimum": 0
           },
+          "flow_id": {
+            "type": "string",
+            "description": "The flow of the HTML source this link controls."
+          },
+          "flow_name": {
+            "type": "string",
+            "description": "That flow's name, so the operator can tell which link they are about\nto cut off."
+          },
           "id": {
             "type": "string",
             "description": "The non-secret id, for revoking this link."
-          },
-          "target_url": {
-            "type": "string",
-            "description": "The page this link was minted against, so the operator can tell which\nbrowser they are about to cut off."
           }
         }
       },

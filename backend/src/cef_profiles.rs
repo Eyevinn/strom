@@ -33,17 +33,7 @@ fn profiles_in_use<'a>(root: &Path, flows: impl IntoIterator<Item = &'a Flow>) -
             if block.block_definition_id != html_input::BLOCK_ID {
                 continue;
             }
-            // The same properties the builder sees, so the same directory.
-            let mut properties = block.properties.clone();
-            properties.insert(
-                "_flow_id".to_string(),
-                strom_types::PropertyValue::String(flow.id.to_string()),
-            );
-            properties.insert(
-                "_block_id".to_string(),
-                strom_types::PropertyValue::String(block.id.clone()),
-            );
-            used.insert(html_input::profile_dir(root, &properties));
+            used.insert(html_input::stored_block_profile_dir(root, &flow.id, block));
         }
         for element in &flow.elements {
             // A flow that sets isolated-context itself gets no profile from Strom.

@@ -58,6 +58,39 @@ async fn next_event(
     }
 }
 
+/// Take the session back to its own page if it is showing a popup, telling
+/// the client. `false` when the page is gone or the client is.
+async fn back_to_root(
+    port: u16,
+    root: &str,
+    current: &mut String,
+    upstream: &mut Upstream,
+    client: &mut ClientTx,
+) -> bool {
+    if current == root {
+        return true;
+    }
+    let Some(page) = open_page(port, root).await else {
+        return false;
+    };
+    *upstream = page;
+    *current = root.to_string();
+    tell(client, switched(current)).await
+}
+
+/// Tell a client its link cannot be used right now, and why, then hang up.
+pub(super) async fn unavailable(client: WebSocket, reason: &str) {
+    let (mut client_tx, _) = client.split();
+    let message = serde_json::json!({
+        "method": "Strom.unavailable",
+        "params": { "reason": reason }
+    })
+    .to_string();
+    if tell(&mut client_tx, message).await {
+        let _ = client_tx.send(Message::Close(None)).await;
+    }
+}
+
 /// Make an address the block's own URL, and answer the command that asked.
 ///
 /// This writes the block's configuration from a link, which is what the
@@ -111,12 +144,12 @@ pub(super) async fn set_home(
 pub(super) async fn pump(
     client: WebSocket,
     port: u16,
+    root: String,
     session: Session,
     full_devtools: bool,
     app: AppState,
 ) {
     let Session {
-        target_id: root,
         mut source,
         mut cancelled,
         hold,
@@ -199,21 +232,33 @@ pub(super) async fn pump(
                         }
                         None
                     }
+                    // The start page is the source's, and a popup is not
+                    // what the source shows: pinned from one, a one-time
+                    // login address would go on air and stay.
+                    Ok(filter::Forward::SetHome { id, .. }) if current != root => {
+                        Some(filter::refusal(
+                            id,
+                            "A popup cannot be the start page. Load it into the source \
+                             first, then set the start page there.",
+                        ))
+                    }
                     Ok(filter::Forward::SetHome { id, url }) => {
                         Some(set_home(&app, &mut source, id, url).await)
                     }
                     Ok(filter::Forward::GoHome { id }) => {
-                        if current != root {
-                            match open_page(port, &root).await {
-                                Some(page) => {
-                                    upstream = page;
-                                    current = root.clone();
-                                    if !tell(&mut client_tx, switched(&current)).await {
-                                        break;
-                                    }
-                                }
-                                None => break,
-                            }
+                        if let Some(now) = super::placement::running_source(
+                            &app,
+                            &source.flow_id,
+                            &source.block_id,
+                        )
+                        .await
+                        {
+                            source.refresh(&now);
+                        }
+                        if !back_to_root(port, &root, &mut current, &mut upstream, &mut client_tx)
+                            .await
+                        {
+                            break;
                         }
                         let navigate = filter::go_home_message(id, &source.home_url);
                         if upstream.send(WsMessage::Text(navigate.into())).await.is_err() {
@@ -259,17 +304,16 @@ pub(super) async fn pump(
                         match checked {
                             Err(reason) => Some(filter::refusal(id, &reason)),
                             Ok(url) => {
-                                if current != root {
-                                    match open_page(port, &root).await {
-                                        Some(page) => {
-                                            upstream = page;
-                                            current = root.clone();
-                                            if !tell(&mut client_tx, switched(&current)).await {
-                                                break;
-                                            }
-                                        }
-                                        None => break,
-                                    }
+                                if !back_to_root(
+                                    port,
+                                    &root,
+                                    &mut current,
+                                    &mut upstream,
+                                    &mut client_tx,
+                                )
+                                .await
+                                {
+                                    break;
                                 }
                                 info!(
                                     "Remote control loaded a popup's page into block {} in flow {}",
@@ -335,6 +379,11 @@ pub(super) async fn pump(
                 };
                 let back = family.fallback_for(&id);
                 let closed = matches!(event, TargetEvent::Destroyed(_));
+                // The source's page closing is the flow stopping, wherever
+                // the session happens to be looking.
+                if closed && id == root {
+                    break;
+                }
                 family.apply(event);
                 if opened && id != root && family.contains(&id) {
                     // The operator just clicked for this window.
@@ -349,13 +398,20 @@ pub(super) async fn pump(
 
             _ = hold_tick.tick() => {
                 // A backstop for a change that reached the flow without an
-                // event, which is what normally revokes the link.
-                if !super::still_allowed(&app, &source).await {
-                    info!(
-                        "Remote control is no longer allowed for block {}; closing the session",
-                        source.block_id
-                    );
-                    break;
+                // event, which is what normally revokes the link, and for the
+                // flow stopping while the session shows a popup.
+                match super::placement::running_source(&app, &source.flow_id, &source.block_id)
+                    .await
+                {
+                    Some(now) if now.remote_control => source.refresh(&now),
+                    _ => {
+                        info!(
+                            "Block {} is no longer running with remote control on; closing \
+                             the session",
+                            source.block_id
+                        );
+                        break;
+                    }
                 }
                 if std::mem::take(&mut used) {
                     hold.used();

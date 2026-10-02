@@ -440,16 +440,20 @@ or `STROM_CEF_DEBUG_PORT=9222`. Two Strom instances on one host need two
 different ports, the same way they already need two CEF profile directories.
 Chromium binds the port to loopback; leave it there and never publish it.
 
-With a flow running, ask which pages are available:
+With the flow running, mint a link for an HTML Input block that has Remote
+Control switched on. This is what the block's buttons in the UI do:
+
+```bash
+curl -X POST -H "Authorization: Bearer $STROM_API_KEY" \
+  http://localhost:8080/api/flows/<flow-id>/blocks/<block-id>/devtools/link
+```
+
+The link is for the block, so it keeps working across a restart of the flow.
+A page can also be named by Chromium's target id, from the list of pages:
 
 ```bash
 curl -H "Authorization: Bearer $STROM_API_KEY" \
   http://localhost:8080/api/devtools/targets
-```
-
-Mint a link for the one you want:
-
-```bash
 curl -X POST -H "Authorization: Bearer $STROM_API_KEY" \
   http://localhost:8080/api/devtools/targets/<target-id>/link
 ```
@@ -557,7 +561,7 @@ an option for a Strom that renders pages for anyone else.
 - **No H.264 in the page**: the CEF build has no proprietary codecs, so Teams shows no video (see [Which pages work](#which-pages-work))
 - **No hardware video in the page on Linux**: even in GPU mode, Chromium decodes and encodes a page's video in software, because it needs VA-API and NVIDIA has none in the Docker images
 - **Memory usage**: CEF spawns multiple processes (browser, renderer, GPU process)
-- **No audio by default**: Use `cefbin` or `cefdemux` if you need audio from web content
+- **No audio by default**: the HTML Input block has an audio output when its stream mode includes audio; a raw `cefsrc` needs `cefbin` or `cefdemux`
 - **No Chromium sandbox in `strom-full`**: the image runs as root and the entrypoint passes `no-sandbox`, so a Chromium bug in a page is code running in Strom's container. See [Running HTML sources for several customers](#running-html-sources-for-several-customers)
 - **One browser process per instance**: every `cefsrc` shares one CEF process and one debugging port. Cookies and storage are per source only with Strom's gstcefsrc build (see [Browser profiles](#browser-profiles))
 - **A removed block's profile goes at the next restart**: deleting a flow removes its sources' profiles at once. A block or element removed from a flow that is kept, and a named profile no block uses any more, stay until Strom next starts

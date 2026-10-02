@@ -55,6 +55,9 @@ fn black_y4m() -> Vec<u8> {
     y4m
 }
 
+/// The switch that replaces every camera and microphone with a synthetic one.
+pub const FAKE_DEVICE_SWITCH: &str = "use-fake-device-for-media-stream";
+
 /// Write the silence and the black frame into `dir`, and return the
 /// Chromium switches that make them the page's only devices.
 pub fn fake_device_switches(dir: &Path) -> io::Result<Vec<String>> {
@@ -64,7 +67,7 @@ pub fn fake_device_switches(dir: &Path) -> io::Result<Vec<String>> {
     std::fs::write(&audio, silence_wav())?;
     std::fs::write(&video, black_y4m())?;
     Ok(vec![
-        "use-fake-device-for-media-stream".to_string(),
+        FAKE_DEVICE_SWITCH.to_string(),
         format!("use-file-for-fake-audio-capture={}", audio.display()),
         format!("use-file-for-fake-video-capture={}", video.display()),
     ])

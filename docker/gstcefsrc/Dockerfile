@@ -101,8 +101,8 @@ RUN cd /build/gstcefsrc && git apply /build/isolated-context.patch
 
 # Strom's patch: strict-network answers Chromium's Local Network Access prompt
 # (deny when strict, allow otherwise) instead of leaving it to CEF's default,
-# keeps a strict browser's WebRTC off plain UDP, and lets enable-features be
-# repeated in GST_CEF_CHROME_EXTRA_FLAGS, which is split on commas.
+# and lets enable-features be repeated in GST_CEF_CHROME_EXTRA_FLAGS, which is
+# split on commas.
 COPY strict-network.patch /build/strict-network.patch
 RUN cd /build/gstcefsrc && git apply /build/strict-network.patch
 

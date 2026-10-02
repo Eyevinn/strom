@@ -55,14 +55,13 @@
 //! in the profile.
 //!
 //! That is also instance-wide. One CEF process serves every `cefsrc`, so
-//! there is one debug port and one cookie jar, and a key decides which page a
-//! session *starts* on while bounding nothing after that. So with the hatch
-//! open, whoever holds a key reaches every HTML source in the instance,
-//! everything the browser has ever logged in to, and the files this process
-//! can read. That is a debugging setting for an operator on their own
-//! instance. For HTML sources belonging to different customers the isolation
-//! has to come from separate Strom instances, which already get separate CEF
-//! profiles, and this must stay off.
+//! there is one debug port, and a key decides which page a session *starts* on
+//! while bounding nothing after that. Separate browser contexts per source do
+//! not change that: the unfiltered protocol reaches every context. So with
+//! the hatch open, whoever holds a key reaches every HTML source in the
+//! instance, everything they are logged in to, and the files this process can
+//! read. That is a debugging setting for an operator on their own instance,
+//! and it must stay off on a Strom shared between customers.
 
 mod filter;
 mod pages;
@@ -157,12 +156,9 @@ struct Link {
     /// operator still has to be able to see that a link exists and kill it,
     /// and this is what they name when they do.
     id: String,
-    /// The Chromium target the key opens onto.
-    target_id: String,
-    /// The page the link was minted against, so a listing says which browser
-    /// the operator would be revoking.
-    target_url: String,
-    /// The HTML source the link was minted for.
+    /// The HTML source the link was minted for. A link is for the block, not
+    /// one page of it: a session opens on whatever page the block renders when
+    /// it starts, so a link outlives the flow being restarted.
     source: LinkSource,
     /// When the key dies if nobody uses it before then.
     expires: Instant,
@@ -179,7 +175,10 @@ impl Link {
     fn summary(&self, now: Instant) -> DevToolsLinkSummary {
         DevToolsLinkSummary {
             id: self.id.clone(),
-            target_url: self.target_url.clone(),
+            flow_id: self.source.flow_id.to_string(),
+            flow_name: self.source.flow_name.clone(),
+            block_id: self.source.block_id.clone(),
+            block_name: self.source.block_name.clone(),
             expires_in_seconds: self.expires.saturating_duration_since(now).as_secs(),
         }
     }
@@ -208,15 +207,25 @@ struct LinkSource {
 }
 
 impl LinkSource {
+    /// Take on what may have changed in the block since the link was minted:
+    /// its names, where its home button goes, and how strict it is.
+    fn refresh(&mut self, source: &placement::HtmlSource) {
+        self.home_url = source.url.clone();
+        self.strict = source.strict;
+        self.flow_name = source.flow_name.clone();
+        self.block_name = source.block_name.clone();
+    }
+
     /// What the proxy tells the page before anything else, so its header can
-    /// say which source is under control. Not a Chromium event: the name is
+    /// say which source is under control. The block's name only: the page is
+    /// meant to be handed on, or put behind another product, and the flow's
+    /// name is this instance's own business. Not a Chromium event: the name is
     /// ours, and nothing Chromium sends can collide with it.
     fn context_message(&self) -> String {
         serde_json::json!({
             "method": "Strom.context",
             "params": {
-                "flow": self.flow_name,
-                "block": self.block_name,
+                "source": self.block_name,
                 "home": self.home_url,
             }
         })
@@ -226,7 +235,6 @@ impl LinkSource {
 
 /// What a session opened on a link needs to run.
 struct Session {
-    target_id: String,
     source: LinkSource,
     cancelled: broadcast::Receiver<()>,
     hold: LinkHold,
@@ -291,11 +299,11 @@ impl DevToolsState {
         });
     }
 
-    /// Mint a key for a target.
+    /// Mint a key for an HTML source.
     ///
     /// Two v4 UUIDs, hyphens dropped: 244 random bits from the same source a
     /// token crate would use, without taking a dependency for it.
-    fn mint(&self, target_id: String, target_url: String, source: LinkSource) -> MintedLink {
+    fn mint(&self, source: LinkSource) -> MintedLink {
         let key = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let id = Uuid::new_v4().simple().to_string();
         let (cancel, _) = broadcast::channel(1);
@@ -305,8 +313,6 @@ impl DevToolsState {
             key.clone(),
             Link {
                 id: id.clone(),
-                target_id,
-                target_url,
                 source,
                 expires: Instant::now() + LINK_TTL,
                 cancel,
@@ -315,22 +321,23 @@ impl DevToolsState {
         MintedLink { key, id }
     }
 
-    /// Resolve a key to its target, pushing its expiry out.
+    /// Whether a key is a live link, pushing its expiry out.
     ///
-    /// Returns `None` for a key that never existed, was revoked, or went
-    /// unused for too long — all of which are the same answer to whoever is
-    /// asking.
-    fn resolve(&self, key: &str) -> Option<String> {
+    /// `false` for a key that never existed, was revoked, or went unused for
+    /// too long — all of which are the same answer to whoever is asking.
+    fn touch(&self, key: &str) -> bool {
         let mut links = self.links.lock().unwrap();
         let now = Instant::now();
         Self::sweep(&mut links, now);
-        let link = links.get_mut(key)?;
+        let Some(link) = links.get_mut(key) else {
+            return false;
+        };
         link.expires = now + LINK_TTL;
-        Some(link.target_id.clone())
+        true
     }
 
-    /// Resolve a key to its target, its home page, and a signal that fires
-    /// when the link dies.
+    /// Resolve a key to its source and a signal that fires when the link
+    /// dies.
     ///
     /// A session holds the signal for as long as it is open, so revoking or
     /// expiring the link ends the session rather than only refusing the next
@@ -342,7 +349,6 @@ impl DevToolsState {
         let link = links.get_mut(key)?;
         link.expires = now + LINK_TTL;
         Some(Session {
-            target_id: link.target_id.clone(),
             source: link.source.clone(),
             cancelled: link.cancel.subscribe(),
             hold: LinkHold {
@@ -693,7 +699,7 @@ pub async fn list_targets(Extension(state): Extension<DevToolsState>) -> Respons
 
     // No cefsrc has started yet, so CEF has not initialized and nothing is
     // listening. That is ordinary, not a fault.
-    let Some(all) = pages::all_targets(port).await else {
+    let Some(pages) = page_targets(port).await else {
         debug!("DevTools endpoint on port {} did not answer", port);
         return Json(DevToolsTargets {
             enabled: true,
@@ -702,22 +708,12 @@ pub async fn list_targets(Extension(state): Extension<DevToolsState>) -> Respons
         })
         .into_response();
     };
-
-    // Popups belong to the page that opened it, and a link to that page shows
-    // them; listed on their own they would look like HTML sources.
-    let targets = all
+    let targets = pages
         .into_iter()
-        .filter(|t| t.kind == "page" && t.opener.is_none())
-        .filter_map(|t| {
-            if !valid_target_id(&t.id) {
-                warn!("Ignoring DevTools target with an unexpected id shape");
-                return None;
-            }
-            Some(DevToolsTarget {
-                id: t.id,
-                title: t.title,
-                url: t.url,
-            })
+        .map(|t| DevToolsTarget {
+            id: t.id,
+            title: t.title,
+            url: t.url,
         })
         .collect();
 
@@ -730,13 +726,8 @@ pub async fn list_targets(Extension(state): Extension<DevToolsState>) -> Respons
 }
 
 /// Build the answer for a successful mint.
-fn minted(
-    state: &DevToolsState,
-    target_id: String,
-    target_url: String,
-    source: LinkSource,
-) -> Response {
-    let minted = state.mint(target_id, target_url, source);
+fn minted(state: &DevToolsState, source: LinkSource) -> Response {
+    let minted = state.mint(source);
     // The key is the credential, so it is never logged - only the id is.
     info!(
         "Minted remote control link {}, valid for {:?}",
@@ -767,7 +758,7 @@ fn minted(
     tag = "devtools",
     params(("target_id" = String, Path, description = "Chromium target id")),
     responses(
-        (status = 200, description = "A link that opens DevTools against this page", body = DevToolsLink),
+        (status = 200, description = "A remote control link for this HTML source", body = DevToolsLink),
         (status = 400, description = "Malformed target id"),
         (status = 401, description = "Authentication required"),
         (status = 403, description = "No HTML source with remote control on is rendering this page"),
@@ -811,18 +802,16 @@ pub async fn create_link(
             .into_response();
     };
 
-    minted(&state, target.id, target.url, owner.link_source())
+    minted(&state, owner.link_source())
 }
 
 /// Mint a remote control link for one HTML source.
 ///
 /// The block is the name an operator has for a page, so this is the endpoint a
-/// client uses; the target id it resolves to is Chromium's business and
-/// changes whenever the page is recreated.
-///
-/// The page is the one the block's `cefsrc` was born with (see
-/// [`crate::cef_pages`]), whatever URL it is on now and however many other
-/// blocks share its URL.
+/// client uses. The link is for the block: a session opens on the page the
+/// block renders at that moment, whatever URL it is on and however many other
+/// blocks share its URL, and a restarted flow's new page is reached through
+/// the same link.
 #[utoipa::path(
     post,
     path = "/api/flows/{flow_id}/blocks/{block_id}/devtools/link",
@@ -832,7 +821,7 @@ pub async fn create_link(
         ("block_id" = String, Path, description = "Block instance id")
     ),
     responses(
-        (status = 200, description = "A link that opens DevTools against this page", body = DevToolsLink),
+        (status = 200, description = "A remote control link for this HTML source", body = DevToolsLink),
         (status = 401, description = "Authentication required"),
         (status = 403, description = "The block has remote control switched off"),
         (status = 404, description = "No such block, or it is not rendering a page yet")
@@ -883,14 +872,14 @@ pub async fn create_block_link(
         Some(targets) => page_of(&source, &targets),
         None => None,
     };
-    let Some(page) = page else {
+    if page.is_none() {
         return (
             StatusCode::NOT_FOUND,
             "This block's page is still starting. Try again in a moment.",
         )
             .into_response();
-    };
-    minted(&state, page.id, page.url, source.link_source())
+    }
+    minted(&state, source.link_source())
 }
 
 /// List the links that are alive right now.
@@ -967,7 +956,8 @@ pub async fn revoke_link(
     }
 }
 
-/// Open DevTools against the page a key was minted for.
+/// Open the page a key gives: the remote control page, or in full DevTools
+/// mode Chromium's DevTools application.
 ///
 /// This is the link an operator pastes into their own browser. Everything the
 /// DevTools application then asks for lives under the same key, so the
@@ -986,7 +976,7 @@ pub async fn open_link(
         return no_such_link();
     }
     state.revoke_disallowed(&app).await;
-    if state.resolve(&key).is_none() {
+    if !state.touch(&key) {
         return no_such_link();
     }
 
@@ -1064,7 +1054,7 @@ pub async fn proxy_ui(
         return no_such_link();
     }
     state.revoke_disallowed(&app).await;
-    if state.resolve(&key).is_none() {
+    if !state.touch(&key) {
         return no_such_link();
     }
     if !safe_asset_path(&path) {
@@ -1097,12 +1087,37 @@ pub async fn proxy_cdp(
     // the *next* one, and whoever already had the socket would keep control of
     // the browser for as long as they cared to hold it.
     state.revoke_disallowed(&app).await;
-    let Some(session) = state.open_session(&key) else {
+    let Some(mut session) = state.open_session(&key) else {
         return no_such_link();
     };
 
+    // A link is for a block, so the page is whichever one the block renders
+    // now: the flow may have been restarted since the link was minted.
+    let page = match running_source(&app, &session.source.flow_id, &session.source.block_id).await {
+        Some(source) => {
+            session.source.refresh(&source);
+            match page_targets(port).await {
+                Some(targets) => page_of(&source, &targets).map(|page| page.id),
+                None => None,
+            }
+        }
+        None => None,
+    };
+
     let full_devtools = state.config.full_devtools;
-    ws.on_upgrade(move |socket| session::pump(socket, port, session, full_devtools, app))
+    ws.on_upgrade(move |socket| async move {
+        match page {
+            Some(root) => session::pump(socket, port, root, session, full_devtools, app).await,
+            None => {
+                session::unavailable(
+                    socket,
+                    "This source is not rendering a page right now. Start its flow, or wait \
+                     for it to finish starting, and reload this page.",
+                )
+                .await
+            }
+        }
+    })
 }
 
 #[cfg(test)]

@@ -1453,6 +1453,7 @@ impl StromApp {
                             &self.audio_devices,
                             local_devices_loading,
                             &mut self.qr_inline,
+                            self.devtools_link_warning.as_ref(),
                             &mut self.qr_cache,
                             recorder_filename,
                             recorder_start_time,

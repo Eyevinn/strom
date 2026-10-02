@@ -22,6 +22,7 @@ pub mod api;
 pub mod assets;
 pub mod auth;
 pub mod blocks;
+pub mod cef_flags;
 pub mod cef_media;
 pub mod cef_pages;
 pub mod cef_profiles;

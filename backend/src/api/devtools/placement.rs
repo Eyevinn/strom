@@ -15,6 +15,7 @@ use strom_types::{Flow, FlowId};
 #[derive(Clone, Debug)]
 pub(super) struct PageTarget {
     pub(super) id: String,
+    pub(super) title: String,
     pub(super) url: String,
 }
 
@@ -74,6 +75,7 @@ pub(super) async fn page_targets(port: u16) -> Option<Vec<PageTarget>> {
             .filter(|t| t.kind == "page" && t.opener.is_none() && valid_target_id(&t.id))
             .map(|t| PageTarget {
                 id: t.id,
+                title: t.title,
                 url: t.url,
             })
             .collect(),
@@ -149,6 +151,7 @@ mod tests {
     fn target(id: &str, url: &str) -> PageTarget {
         PageTarget {
             id: id.to_string(),
+            title: String::new(),
             url: url.to_string(),
         }
     }
@@ -210,8 +213,11 @@ mod tests {
         let sent: serde_json::Value =
             serde_json::from_str(&src.link_source().context_message()).expect("valid JSON");
         assert_eq!(sent["method"], "Strom.context");
-        assert_eq!(sent["params"]["flow"], "Studio A");
-        assert_eq!(sent["params"]["block"], "Scoreboard");
+        assert_eq!(sent["params"]["source"], "Scoreboard");
+        assert!(
+            sent["params"].get("flow").is_none(),
+            "the flow's name stays with this instance"
+        );
         assert_eq!(sent["params"]["home"], "https://a.example/login");
     }
 }

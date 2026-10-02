@@ -73,8 +73,9 @@ pub const STRICT_NETWORK_PROPERTY: &str = "strict_network";
 pub const ISOLATED_CONTEXT_PROPERTY: &str = "isolated-context";
 
 /// The `cefsrc` property, from Strom's gstcefsrc build, that has Chromium
-/// refuse the page this machine and its local network: Local Network Access is
-/// denied, and WebRTC sends UDP only through a proxy.
+/// refuse the page this machine and its local network by denying Local
+/// Network Access. WebRTC is outside it: a page can still have the browser
+/// send STUN checks to internal addresses.
 pub const CEFSRC_STRICT_NETWORK_PROPERTY: &str = "strict-network";
 
 /// The `cefsrc` property naming the directory an isolated context persists in.
@@ -121,6 +122,26 @@ pub fn profile_dir(
         format!("strom-named-{}", escape_profile_name(&name))
     };
     cache_root.join(leaf)
+}
+
+/// [`profile_dir`] for a block as it is stored in a flow, rather than as the
+/// builder sees it once the flow and block ids have been added to its
+/// properties.
+pub fn stored_block_profile_dir(
+    cache_root: &std::path::Path,
+    flow_id: &FlowId,
+    block: &BlockInstance,
+) -> std::path::PathBuf {
+    let mut properties = block.properties.clone();
+    properties.insert(
+        "_flow_id".to_string(),
+        PropertyValue::String(flow_id.to_string()),
+    );
+    properties.insert(
+        "_block_id".to_string(),
+        PropertyValue::String(block.id.clone()),
+    );
+    profile_dir(cache_root, &properties)
 }
 
 /// Where a raw `cefsrc` element's browser profile lives, under the CEF cache
@@ -173,7 +194,7 @@ pub fn isolate_browser(
     cefsrc.set_property(ISOLATED_CONTEXT_PROPERTY, true);
     // Chromium only persists a context inside its root cache path; without one
     // the context stays in memory, isolated all the same.
-    let Some(root) = std::env::var_os("GST_CEF_CACHE_LOCATION") else {
+    let Some(root) = crate::cef_profiles::cache_root() else {
         warn!(
             "{}: no CEF cache directory, so its browser profile is kept in memory and a \
              login does not survive a flow restart",
@@ -205,7 +226,7 @@ pub fn isolate_browser(
 ///
 /// Strom refuses an internal address as the page's own URL either way; this
 /// is what reaches the page's own requests - its fetches, frames, workers and
-/// WebRTC - which only Chromium sees. A plugin without the property cannot
+/// WebSockets - which only Chromium sees. A plugin without the property cannot
 /// refuse them, and `who` is named in a warning about it.
 pub fn restrict_network(cefsrc: &gst::Element, who: &str, strict: bool) {
     if cefsrc

@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<!-- Strom remote control page, version 5 -->
+<!-- Strom remote control page, version 6 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>Strom HTML remote control</title>
+<title>Remote control</title>
 <style>
   :root {
     color-scheme: dark;
@@ -163,7 +163,7 @@
 <body>
 <header>
   <span class="dot" id="dot"></span>
-  <span class="title">Strom HTML remote control</span>
+  <span class="title">Remote control</span>
   <span class="source" id="source"></span>
   <span class="spacer"></span>
   <span class="status" id="status">Connecting…</span>
@@ -232,7 +232,7 @@
   function send(method, params, onResult) {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     const id = nextId++;
-    if (onResult) pending.set(id, onResult);
+    if (onResult) pending.set(id, { method: method, onResult: onResult });
     socket.send(JSON.stringify({ id: id, method: method, params: params || {} }));
   }
 
@@ -240,12 +240,10 @@
 
   function showSource(params) {
     sourceText.innerHTML = "";
-    const flow = document.createElement("b");
-    flow.textContent = params.flow || "";
-    const block = document.createElement("b");
-    block.textContent = params.block || "";
-    sourceText.append(flow, " › ", block);
-    document.title = (params.block || "HTML") + " – Strom HTML remote control";
+    const name = document.createElement("b");
+    name.textContent = params.source || "";
+    sourceText.append(name);
+    document.title = (params.source ? params.source + " – " : "") + "Remote control";
     document.getElementById("home").title = "Back to " + (params.home || "the page this source is set to");
   }
 
@@ -279,8 +277,13 @@
 
   // The page, and any popups it opened - a login window, typically. The proxy
   // decides which windows these are and switches to a new one by itself.
+  const pinButton = document.getElementById("pin");
+
   function showPages(params) {
     const pages = params.pages || [];
+    // A popup is not what the source shows, so it cannot be its start page.
+    const current = pages.find((page) => page.id === params.current);
+    pinButton.disabled = !!(current && current.popup);
     tabs.innerHTML = "";
     tabs.classList.toggle("shown", pages.length > 1);
     for (const page of pages) {
@@ -563,8 +566,16 @@
       } else if (msg.method === "Strom.pages") {
         showPages(msg.params || {});
       } else if (msg.method === "Strom.switched") {
-        pending.clear();
+        // Chromium's answers to the old window will not come. The proxy's
+        // own commands are answered whichever window is on show.
+        for (const [id, entry] of pending) {
+          if (!entry.method.startsWith("Strom.")) pending.delete(id);
+        }
         startScreencast();
+      } else if (msg.method === "Strom.unavailable") {
+        closedForGood = true;
+        setState("gone", "Not available");
+        show("This source is not available.", (msg.params && msg.params.reason) || "");
       } else if (msg.method === "Strom.context") {
         showSource(msg.params || {});
       } else if (msg.method === "Page.frameNavigated") {
@@ -576,7 +587,7 @@
       } else if (msg.method === "Page.navigatedWithinDocument") {
         refreshHistory();
       } else if (msg.id && pending.has(msg.id)) {
-        const onResult = pending.get(msg.id);
+        const { onResult } = pending.get(msg.id);
         pending.delete(msg.id);
         if (msg.result) onResult(msg.result);
         else if (msg.error) setState("warn", msg.error.message || "Refused");

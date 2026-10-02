@@ -788,8 +788,10 @@ impl AppState {
             let pipelines = self.inner.pipelines.read().await;
             pipelines.contains_key(id)
         };
+        let mut stopped = true;
         if pipeline_active {
             if let Err(e) = self.stop_flow(id).await {
+                stopped = false;
                 error!(
                     "Failed to stop flow {} before delete: {} — pipeline resources may leak",
                     id, e
@@ -819,9 +821,14 @@ impl AppState {
         self.inner.ptp_monitor.unregister_flow(*id);
 
         // The flow is stopped, so its pages are closed. Their profiles hold
-        // whatever they were logged in to; nothing would use them again.
-        if let Some(root) = crate::cef_profiles::cache_root() {
-            crate::cef_profiles::remove_flow_profiles(&root, id);
+        // whatever they were logged in to; nothing would use them again. A
+        // flow that would not stop may still have a browser in one, and the
+        // next startup removes what is left.
+        if stopped {
+            if let Some(root) = crate::cef_profiles::cache_root() {
+                crate::cef_profiles::remove_flow_profiles(&root, id);
+            }
+            crate::cef_pages::forget_flow(id);
         }
 
         // Broadcast event
@@ -1605,6 +1612,7 @@ impl AppState {
 
         // Endpoints, Media Player registry, pipeline, leak check, CPU cores.
         let state = self.teardown_flow(id, Some(manager), None).await?;
+        crate::cef_pages::forget_flow(id);
 
         // Clear runtime_data from all blocks (SDP is only valid while running)
         let flow = {

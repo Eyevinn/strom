@@ -14,7 +14,7 @@ fn link_source(url: &str) -> LinkSource {
         block_id: "html".to_string(),
         home_url: url.to_string(),
         flow_name: "Flow".to_string(),
-        block_name: "html".to_string(),
+        block_name: "Scoreboard".to_string(),
         strict: true,
     }
 }
@@ -67,39 +67,24 @@ fn forwarded_proto_outranks_our_own_socket() {
 }
 
 #[test]
-fn a_key_carries_the_target_and_nothing_else_does() {
+fn a_key_is_the_link_and_spells_out_nothing() {
     let s = state();
-    let minted = s.mint(
-        "4A8CD2F2840F8591A6277A7FFFDAB3A9".to_string(),
-        "https://example.com/".to_string(),
-        link_source("https://example.com/"),
-    );
-    // The key is what a client sees, so it must not spell out the target.
+    let minted = s.mint(link_source("https://example.com/"));
+    // The key is what a client sees, so it must not spell out the source.
     assert!(valid_key(&minted.key));
-    assert!(!minted.key.contains("4A8CD2F2"));
+    assert!(!minted.key.to_lowercase().contains("scoreboard"));
     // The id is a name for the link, not a second copy of the credential.
     assert!(valid_link_id(&minted.id));
     assert_ne!(minted.id, minted.key);
     assert!(!minted.key.contains(&minted.id));
-    assert_eq!(
-        s.resolve(&minted.key).as_deref(),
-        Some("4A8CD2F2840F8591A6277A7FFFDAB3A9")
-    );
+    assert!(s.touch(&minted.key));
 }
 
 #[test]
 fn keys_are_not_guessable_from_each_other() {
     let s = state();
-    let a = s.mint(
-        "AAAA".to_string(),
-        "https://a.example".to_string(),
-        link_source("https://a.example"),
-    );
-    let b = s.mint(
-        "AAAA".to_string(),
-        "https://a.example".to_string(),
-        link_source("https://a.example"),
-    );
+    let a = s.mint(link_source("https://a.example"));
+    let b = s.mint(link_source("https://a.example"));
     assert_ne!(a.key, b.key);
     assert_ne!(a.id, b.id);
 }
@@ -107,7 +92,7 @@ fn keys_are_not_guessable_from_each_other() {
 #[test]
 fn an_unknown_key_resolves_to_nothing() {
     let s = state();
-    assert!(s.resolve(&"f".repeat(64)).is_none());
+    assert!(!s.touch(&"f".repeat(64)));
     assert!(!valid_key("short"));
     assert!(!valid_key(&"z".repeat(64)));
 }
@@ -115,13 +100,9 @@ fn an_unknown_key_resolves_to_nothing() {
 #[test]
 fn a_revoked_key_stops_working() {
     let s = state();
-    let minted = s.mint(
-        "ABCD".to_string(),
-        "https://a.example".to_string(),
-        link_source("https://a.example"),
-    );
+    let minted = s.mint(link_source("https://a.example"));
     assert!(s.revoke_by_id(&minted.id));
-    assert!(s.resolve(&minted.key).is_none());
+    assert!(!s.touch(&minted.key));
     // Revoking twice is not an error the caller can act on differently.
     assert!(!s.revoke_by_id(&minted.id));
 }
@@ -129,27 +110,19 @@ fn a_revoked_key_stops_working() {
 #[test]
 fn an_expired_key_is_gone_even_before_anyone_asks() {
     let s = state();
-    let minted = s.mint(
-        "ABCD".to_string(),
-        "https://a.example".to_string(),
-        link_source("https://a.example"),
-    );
+    let minted = s.mint(link_source("https://a.example"));
     {
         let mut links = s.links.lock().unwrap();
         links.get_mut(&minted.key).unwrap().expires = Instant::now() - Duration::from_secs(1);
     }
-    assert!(s.resolve(&minted.key).is_none());
+    assert!(!s.touch(&minted.key));
     assert!(s.links.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn working_in_a_session_keeps_its_link_alive() {
     let s = state();
-    let minted = s.mint(
-        "ABCD".to_string(),
-        "https://a.example".to_string(),
-        link_source("https://a.example"),
-    );
+    let minted = s.mint(link_source("https://a.example"));
     let session = s.open_session(&minted.key).expect("session opens");
     let expire_soon = || {
         s.links
@@ -182,14 +155,10 @@ async fn working_in_a_session_keeps_its_link_alive() {
 #[test]
 fn using_a_key_pushes_its_expiry_out() {
     let s = state();
-    let minted = s.mint(
-        "ABCD".to_string(),
-        "https://a.example".to_string(),
-        link_source("https://a.example"),
-    );
+    let minted = s.mint(link_source("https://a.example"));
     let first = s.links.lock().unwrap().get(&minted.key).unwrap().expires;
     std::thread::sleep(Duration::from_millis(5));
-    assert!(s.resolve(&minted.key).is_some());
+    assert!(s.touch(&minted.key));
     let second = s.links.lock().unwrap().get(&minted.key).unwrap().expires;
     assert!(second > first, "a session in use must not expire under it");
 }
@@ -201,11 +170,7 @@ async fn revoking_a_link_ends_the_session_already_open_on_it() {
     // Without this, revocation only closes the door to *new* sessions and
     // whoever already holds the socket keeps control of the browser.
     let s = state();
-    let minted = s.mint(
-        "ABCD".to_string(),
-        "https://a.example".to_string(),
-        link_source("https://a.example"),
-    );
+    let minted = s.mint(link_source("https://a.example"));
     let mut cancelled = s
         .open_session(&minted.key)
         .expect("session opens")
@@ -264,7 +229,7 @@ async fn switching_remote_control_off_ends_the_sessions_already_open() {
     let mut source = link_source("https://a.example");
     source.flow_id = flow_id;
     source.block_id = "html1".to_string();
-    let minted = s.mint("ABCD".to_string(), "https://a.example".to_string(), source);
+    let minted = s.mint(source);
     let mut cancelled = s
         .open_session(&minted.key)
         .expect("session opens")
@@ -290,7 +255,7 @@ async fn switching_remote_control_off_ends_the_sessions_already_open() {
         .await
         .expect("the open session must be told within the second");
     assert!(
-        s.resolve(&minted.key).is_none(),
+        !s.touch(&minted.key),
         "the key must not open a new session either"
     );
 }
@@ -300,28 +265,16 @@ async fn a_link_whose_block_is_gone_is_revoked() {
     gstreamer::init().unwrap();
     let app = app_state();
     let s = state();
-    let minted = s.mint(
-        "ABCD".to_string(),
-        "https://a.example".to_string(),
-        link_source("https://a.example"),
-    );
+    let minted = s.mint(link_source("https://a.example"));
     assert_eq!(s.revoke_disallowed(&app).await, 1);
-    assert!(s.resolve(&minted.key).is_none());
+    assert!(!s.touch(&minted.key));
 }
 
 #[tokio::test]
 async fn revoking_everything_ends_every_open_session() {
     let s = state();
-    let a = s.mint(
-        "A".to_string(),
-        "https://a.example".to_string(),
-        link_source("https://a.example"),
-    );
-    let b = s.mint(
-        "B".to_string(),
-        "https://b.example".to_string(),
-        link_source("https://b.example"),
-    );
+    let a = s.mint(link_source("https://a.example"));
+    let b = s.mint(link_source("https://b.example"));
     let mut first = s.open_session(&a.key).expect("session opens").cancelled;
     let mut second = s.open_session(&b.key).expect("session opens").cancelled;
 
@@ -341,11 +294,7 @@ async fn an_expiring_link_ends_the_session_on_it() {
     // The TTL has to bite on a socket that is already open, the same way
     // revocation does - otherwise an established session never expires.
     let s = state();
-    let minted = s.mint(
-        "ABCD".to_string(),
-        "https://a.example".to_string(),
-        link_source("https://a.example"),
-    );
+    let minted = s.mint(link_source("https://a.example"));
     let mut cancelled = s
         .open_session(&minted.key)
         .expect("session opens")
@@ -364,15 +313,13 @@ async fn an_expiring_link_ends_the_session_on_it() {
 #[test]
 fn a_listing_names_links_without_handing_the_key_back() {
     let s = state();
-    let minted = s.mint(
-        "ABCD".to_string(),
-        "https://a.example/login".to_string(),
-        link_source("https://a.example/login"),
-    );
+    let minted = s.mint(link_source("https://a.example/login"));
     let listed = s.list();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, minted.id);
-    assert_eq!(listed[0].target_url, "https://a.example/login");
+    // Named by the source it controls, which is what the operator knows.
+    assert_eq!(listed[0].block_name, "Scoreboard");
+    assert_eq!(listed[0].flow_name, "Flow");
     assert!(listed[0].expires_in_seconds > 0);
     // Whatever else a listing carries, it is not the credential.
     let rendered = serde_json::to_string(&listed[0]).unwrap();

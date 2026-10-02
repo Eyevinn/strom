@@ -45,6 +45,11 @@ pub fn is_rtp_stats_block_def(definition_id: &str) -> bool {
     RTP_STATS_BLOCK_DEFINITION_IDS.contains(&definition_id)
 }
 
+/// Which debounce entry an update belongs to: flow, block and property. The
+/// flow is part of it because block ids repeat across flows - copied flows
+/// keep theirs - and two blocks must never share a pending value.
+pub type LivePropertyKey = (FlowId, String, String);
+
 /// Debounce state for a single element+property combination.
 /// Tracks when the last API call was sent and stores any pending update
 /// that was suppressed by the debounce interval (so the final value is
@@ -66,7 +71,7 @@ pub struct LivePropertyDebounce {
 /// now expired are flushed — this ensures the final slider value is always
 /// delivered even if no new `changed` event arrives.
 pub fn drain_live_updates(
-    debounce_map: &mut std::collections::HashMap<(String, String), LivePropertyDebounce>,
+    debounce_map: &mut std::collections::HashMap<LivePropertyKey, LivePropertyDebounce>,
     incoming: Vec<LivePropertyUpdate>,
 ) -> Vec<LivePropertyUpdate> {
     let now = instant::Instant::now();
@@ -75,12 +80,16 @@ pub fn drain_live_updates(
     let mut to_send: Vec<LivePropertyUpdate> = Vec::new();
 
     // Keys that received a fresh incoming update this frame
-    let mut touched_keys: std::collections::HashSet<(String, String)> =
+    let mut touched_keys: std::collections::HashSet<LivePropertyKey> =
         std::collections::HashSet::new();
 
     // Process incoming updates
     for update in incoming {
-        let key = (update.block_id.clone(), update.property_name.clone());
+        let key = (
+            update.flow_id,
+            update.block_id.clone(),
+            update.property_name.clone(),
+        );
         touched_keys.insert(key.clone());
 
         let entry = debounce_map
@@ -109,7 +118,7 @@ pub fn drain_live_updates(
 
     // Flush any previously-pending updates whose interval has expired
     // (but skip keys we already handled above to avoid double-sends)
-    let expired_keys: Vec<(String, String)> = debounce_map
+    let expired_keys: Vec<LivePropertyKey> = debounce_map
         .iter()
         .filter(|(k, v)| v.pending.is_some() && !touched_keys.contains(*k))
         .filter(|(_, v)| now.duration_since(v.last_sent) >= interval)
@@ -515,6 +524,7 @@ impl PropertyInspector {
         audio_devices: &[strom_types::discovery::DeviceResponse],
         local_devices_loading: bool,
         qr_inline: &mut Option<(String, String)>,
+        devtools_link_warning: Option<&(String, String)>,
         qr_cache: &mut crate::qr::QrCache,
         recorder_filename: Option<&str>,
         recorder_start_time: Option<instant::Instant>,
@@ -751,14 +761,15 @@ impl PropertyInspector {
                         ));
                     }
                     ui.label(egui::RichText::new(url.as_str()).monospace().small());
-                    ui.label(
-                        egui::RichText::new(
-                            "Anyone with this link reaches every HTML source in this Strom \
-                             instance. It expires after 30 minutes unused.",
-                        )
-                        .weak()
-                        .small(),
-                    );
+                }
+                // What the link hands over, in the server's words: it differs
+                // between filtered and full DevTools mode, and with whether
+                // sources share a browser context.
+                if let Some((_, warning)) =
+                    devtools_link_warning.filter(|(bid, _)| bid == &block_id)
+                {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(warning.as_str()).weak().small());
                 }
             }
 
@@ -3105,7 +3116,7 @@ mod tests {
         assert!(drain_live_updates(&mut map, vec![]).is_empty());
 
         // Once it has, only the finished value is sent.
-        let key = ("html1".to_string(), "url".to_string());
+        let key = (FlowId::nil(), "html1".to_string(), "url".to_string());
         let past = instant::Instant::now() - Duration::from_millis(LIVE_TEXT_SETTLE_MS + 50);
         let entry = map.get_mut(&key).unwrap();
         entry.last_input = past;
@@ -3113,6 +3124,30 @@ mod tests {
         let sent = drain_live_updates(&mut map, vec![]);
         assert_eq!(sent.len(), 1);
         assert!(matches!(&sent[0].value, PropertyValue::String(s) if s == "https://example.com"));
+    }
+
+    #[test]
+    fn the_same_block_id_in_two_flows_keeps_two_pending_values() {
+        // Copied flows keep their block ids, so an address typed in one flow
+        // must not be replaced by one typed in the other.
+        let mut map = HashMap::new();
+        let mut other = update("https://b.example", true);
+        other.flow_id = FlowId::from_u128(1);
+        drain_live_updates(&mut map, vec![update("https://a.example", true), other]);
+        let past = instant::Instant::now() - Duration::from_millis(LIVE_TEXT_SETTLE_MS + 50);
+        for entry in map.values_mut() {
+            entry.last_input = past;
+            entry.last_sent = past;
+        }
+        let mut sent: Vec<String> = drain_live_updates(&mut map, vec![])
+            .into_iter()
+            .map(|u| match u.value {
+                PropertyValue::String(s) => s,
+                _ => String::new(),
+            })
+            .collect();
+        sent.sort();
+        assert_eq!(sent, ["https://a.example", "https://b.example"]);
     }
 
     #[test]

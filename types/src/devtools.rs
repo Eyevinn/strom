@@ -41,8 +41,11 @@ pub struct DevToolsLink {
     pub path: String,
     /// How long the link survives without being used. Each use starts it over.
     pub expires_in_seconds: u64,
-    /// What the holder of this link can actually reach. See
-    /// [`REMOTE_CONTROL_WARNING`].
+    /// What the holder of this link can actually reach, in Strom's words: one
+    /// of [`SCREENCAST_CONTROL_WARNING`] (with [`SHARED_CONTEXT_WARNING`]
+    /// appended when sources share a browser context) or
+    /// [`REMOTE_CONTROL_WARNING`]. A client shows it to the operator before
+    /// handing the link on.
     pub warning: String,
 }
 
@@ -55,9 +58,15 @@ pub struct DevToolsLink {
 pub struct DevToolsLinkSummary {
     /// The non-secret id, for revoking this link.
     pub id: String,
-    /// The page this link was minted against, so the operator can tell which
-    /// browser they are about to cut off.
-    pub target_url: String,
+    /// The flow of the HTML source this link controls.
+    pub flow_id: String,
+    /// That flow's name, so the operator can tell which link they are about
+    /// to cut off.
+    pub flow_name: String,
+    /// The HTML Input block this link controls.
+    pub block_id: String,
+    /// The block's name, or its id when it has none.
+    pub block_name: String,
     /// Seconds left before it expires on its own. Every use starts it over.
     pub expires_in_seconds: u64,
 }
