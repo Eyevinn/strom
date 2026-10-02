@@ -2,6 +2,47 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.6.12] - 2026-10-02
+
+### Added
+- Media Player: play live streams, extra tracks and URLs (#945)
+- Auth: sign the login cookie so logins survive a restart. The key comes from `STROM_SESSION_SECRET` (at least 32 bytes) or a `session.key` generated in the data directory; logins are bound to the admin credentials and the cookie is `Secure` when Strom serves TLS (#947)
+- Auth: accept a percent-encoded `?auth_token=` (#908)
+
+### Changed
+- GStreamer: decide video input adapters in one place, and document the block contract (#951)
+
+### Performance
+- WHEP Output: convert a video input once, not once per viewer (#949)
+
+### Fixed
+- Vision Mixer: accept CUDA-memory inputs on the GPU backend, so a media player's clip reaches the mixer on a GPU host (#948)
+- GStreamer: keep NVDEC frames on the GPU into a GL input (#952)
+- Vision Mixer: keep an Auto-format input on formats `videocrop` takes (#925)
+- Audio: run every mixer and router bus at one sample rate and resample each input to it, so an input that links late (every WHIP input) no longer fails with no format (#946)
+- Mixers: stop a late first input rewinding a live aggregator (#895)
+- Mixer: stop the monitor bus stacking the block latency (#920)
+- Mixer: clamp negative counts and live knee writes (#904)
+- WHIP: judge a session by the media it produces, not what arrives (#756)
+- WHIP: null a session bin `whipserversrc` removes mid-teardown (#763)
+- WHEP: unhide player audio controls, and expose `Location` cross-origin (#811)
+- Frontend: fix two request-pad bugs in the graph's pad-name helpers (#911)
+
+### Tests
+- Make backend unit tests guard real code and prune the rest (#907, #909, #910)
+- Consolidate the integration tests and share their helpers (#912); run the two SRT integration tests on Windows again (#929)
+- Cover `auth_middleware` (#908); keep API and MCP test state in a temp dir (#905)
+- AES67: read `drop-on-latency` after the block's handler, not by polling (#923)
+- Vision Mixer: register the `cudadownload` stand-in once (#950); GL: do not build the GL bridge test on Windows (#954)
+
+### CI
+- Install trunk with `--locked` (#940)
+
+### Documentation
+- PR template asks for claims and their evidence (#853)
+
+---
+
 ## [0.6.11] - 2026-09-29
 
 ### Added
