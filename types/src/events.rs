@@ -1,6 +1,7 @@
 //! Events for real-time updates across clients.
 
 use crate::element::PropertyValue;
+use crate::flow::BlockHealthStatus;
 use crate::system_monitor::SystemStats;
 use crate::thread_stats::ThreadStats;
 use crate::FlowId;
@@ -182,6 +183,19 @@ pub enum StromEvent {
         source_flow_id: FlowId,
         output_name: String,
         connected: bool,
+    },
+    /// A block's element chain stopped passing data, or resumed.
+    ///
+    /// Emitted only on a change of status, not on every health poll.
+    BlockHealthChanged {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+        flow_id: FlowId,
+        /// Block instance ID, or element ID for a standalone element
+        block_id: String,
+        /// Whether the block is passing data or has stopped
+        status: BlockHealthStatus,
+        /// Element and pad whose task stopped; None when the block recovered
+        detail: Option<String>,
     },
     /// Quality of Service statistics (aggregated buffer drop info)
     QoSStats {
@@ -541,6 +555,22 @@ impl StromEvent {
             StromEvent::ThreadStats(stats) => {
                 format!("Thread stats: {} active threads", stats.threads.len())
             }
+            StromEvent::BlockHealthChanged {
+                flow_id,
+                block_id,
+                status,
+                detail,
+            } => match status {
+                BlockHealthStatus::Failed => format!(
+                    "Block {} in flow {} stopped passing data: {}",
+                    block_id,
+                    flow_id,
+                    detail.as_deref().unwrap_or("no detail")
+                ),
+                BlockHealthStatus::Ok => {
+                    format!("Block {} in flow {} resumed", block_id, flow_id)
+                }
+            },
             StromEvent::QoSStats {
                 flow_id,
                 block_id,
@@ -895,6 +925,7 @@ impl StromEvent {
             StromEvent::SourceOutputAvailable { .. } => "SourceOutputAvailable",
             StromEvent::SourceOutputUnavailable { .. } => "SourceOutputUnavailable",
             StromEvent::SubscriptionStatusChanged { .. } => "SubscriptionStatusChanged",
+            StromEvent::BlockHealthChanged { .. } => "BlockHealthChanged",
             StromEvent::QoSStats { .. } => "QoSStats",
             StromEvent::StreamDiscovered { .. } => "StreamDiscovered",
             StromEvent::StreamUpdated { .. } => "StreamUpdated",
@@ -938,6 +969,7 @@ impl StromEvent {
             | StromEvent::PipelineEos { flow_id }
             | StromEvent::PropertyChanged { flow_id, .. }
             | StromEvent::PadPropertyChanged { flow_id, .. }
+            | StromEvent::BlockHealthChanged { flow_id, .. }
             | StromEvent::MeterData { flow_id, .. }
             | StromEvent::SpectrumData { flow_id, .. }
             | StromEvent::LoudnessData { flow_id, .. }
@@ -1018,6 +1050,7 @@ impl StromEvent {
             | StromEvent::SourceOutputAvailable { .. }
             | StromEvent::SourceOutputUnavailable { .. }
             | StromEvent::SubscriptionStatusChanged { .. }
+            | StromEvent::BlockHealthChanged { .. }
             | StromEvent::StreamDiscovered { .. }
             | StromEvent::StreamUpdated { .. }
             | StromEvent::StreamRemoved { .. }
@@ -1245,6 +1278,12 @@ mod event_accessor_tests {
                 output_name: "out".to_string(),
                 connected: true,
             },
+            StromEvent::BlockHealthChanged {
+                flow_id: id,
+                block_id: "b0".to_string(),
+                status: BlockHealthStatus::Failed,
+                detail: None,
+            },
             StromEvent::QoSStats {
                 flow_id: id,
                 block_id: None,
@@ -1386,7 +1425,7 @@ mod event_accessor_tests {
     fn every_variant_event_type_matches_its_serde_wire_tag() {
         let events = one_of_each_variant();
 
-        let variant_count = 44;
+        let variant_count = 45;
         assert_eq!(
             events.len(),
             variant_count,
