@@ -240,6 +240,14 @@ impl PipelineManager {
         let pad_name = format!("sink_{}", num_inputs + dsk_index);
         if let Some(pad) = find_pad(mixer, &pad_name) {
             let alpha = if enabled { 1.0f64 } else { 0.0f64 };
+            // A premultiplied DSK pad on the GL mixer blends with a constant
+            // that a binding copies from `alpha` after the write. Enabling
+            // sets it first, so no frame is drawn at alpha 1 with the constant
+            // still 0, which puts the graphic's silhouette on air in black.
+            // Disabling needs no help: the mixer skips pads at alpha 0.
+            if enabled && pad.has_property("blend-constant-color-alpha") {
+                pad.set_property("blend-constant-color-alpha", alpha);
+            }
             pad.set_property("alpha", alpha);
             // Update overlay state for DSK tracking
             if let Some(state) =
