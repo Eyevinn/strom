@@ -12,8 +12,6 @@
 //! |---|---|---|
 //! | [`Consumer::GlUpload`] | raw video in CUDA memory only | [`Adapter::CudaDownload`], or [`MissingFactory`] when `cudadownload` is not installed |
 //! | [`Consumer::GlUpload`] | anything else | none |
-//! | [`Consumer::WebrtcSink`] | raw video in GL memory | [`Adapter::GlDownload`] |
-//! | [`Consumer::WebrtcSink`] | raw video in system or GL memory, 8-bit, not NV12/I420 | [`Adapter::Convert`] to NV12, after any download |
 //! | [`Consumer::Accepts`] | raw video in GL memory only, consumer takes system-memory raw video | [`Adapter::GlDownload`] |
 //!
 //! Encoded video, audio, `ANY` and `EMPTY` need nothing for any consumer, and
@@ -21,17 +19,12 @@
 //! that advertise those really do take them.
 
 use gstreamer as gst;
-use gstreamer::prelude::*;
-use gstreamer_video as gst_video;
 
 /// The caps feature that marks a buffer as living in GL memory.
 pub const GL_MEMORY_FEATURE: &str = "memory:GLMemory";
 
 /// The caps feature that marks a buffer as living in CUDA memory.
 pub const CUDA_MEMORY_FEATURE: &str = "memory:CUDAMemory";
-
-/// The caps feature negotiated caps carry for plain system memory.
-const SYSTEM_MEMORY_FEATURE: &str = "memory:SystemMemory";
 
 /// The element that downloads GL memory to system memory.
 pub const GL_DOWNLOAD_FACTORY: &str = "gldownload";
@@ -41,21 +34,6 @@ pub const GL_DOWNLOAD_FACTORY: &str = "gldownload";
 /// builds only.
 pub const CUDA_DOWNLOAD_FACTORY: &str = "cudadownload";
 
-/// The format a [`Consumer::WebrtcSink`] input is converted to when it needs
-/// converting at all.
-///
-/// `vtenc_h264`/`vtenc_h265` and the NVENC and VA encoders take it natively,
-/// and `x264enc` lists it alongside I420. The VP9 and AV1 software encoders do
-/// not accept NV12 at all (`vp9enc`, `av1enc`, `rav1enc` and `svtav1enc` list
-/// I420), so their consumers still convert NV12 to I420 each. That costs a
-/// couple of points against an encode that costs fifteen.
-pub const NATIVE_FORMAT: &str = "NV12";
-
-/// Formats left alone: 8-bit 4:2:0. Converting one into the other would cost
-/// a pass over every frame and at best move the per-consumer conversion from
-/// one set of encoders to another.
-const NATIVE_FORMATS: &[&str] = &["NV12", "I420"];
-
 /// The input being adapted.
 #[derive(Debug, Clone, Copy)]
 pub enum Consumer<'a> {
@@ -63,14 +41,10 @@ pub enum Consumer<'a> {
     /// DMABuf, but not CUDA memory. The producer caps are what an ACCEPT_CAPS
     /// query or a filtered CAPS query offers.
     GlUpload,
-    /// A `whepserversink` video pad. It advertises GL memory but cannot encode
-    /// it, and builds one encoding chain per viewer, so the format is
-    /// converted once in front of it. The producer caps are the negotiated
-    /// (fixed) caps of the first CAPS event.
-    WebrtcSink,
-    /// A consumer that refused a direct link and accepts these caps, as its
-    /// sink pad answers a caps query. The producer caps are the producer's
-    /// answer to the same query.
+    /// A consumer that takes these caps: what its sink pad answers to a caps
+    /// query (for a link that was refused), or what it can really process
+    /// where it advertises more. The producer caps are the producer's answer
+    /// to the same query, or the negotiated caps.
     Accepts(&'a gst::CapsRef),
 }
 
@@ -81,9 +55,6 @@ pub enum Adapter {
     GlDownload,
     /// `cudadownload`: CUDA memory to GL memory.
     CudaDownload,
-    /// A converter followed by a capsfilter fixing `format`. The caller picks
-    /// the converter element.
-    Convert { format: &'static str },
 }
 
 /// An adaptation is called for, but the element it needs is not installed.
@@ -116,20 +87,6 @@ pub fn decide(
                 })
             }
         }
-        Consumer::WebrtcSink => {
-            // A download comes first: the converter takes system memory only,
-            // and the format it has to produce is the same either way.
-            let mut adapters = Vec::new();
-            if needs_gl_download(producer) {
-                adapters.push(Adapter::GlDownload);
-            }
-            if needs_format_conversion(producer) {
-                adapters.push(Adapter::Convert {
-                    format: NATIVE_FORMAT,
-                });
-            }
-            Ok(adapters)
-        }
         Consumer::Accepts(accepted) => {
             if offers_only_gl_memory(producer) && accepts_system_memory_raw_video(accepted) {
                 Ok(vec![Adapter::GlDownload])
@@ -146,11 +103,10 @@ pub fn factory_available(name: &str) -> bool {
 }
 
 /// Create the elements for `adapters`, in link order, named after
-/// `name_prefix`. `convert_factory` is the converter for [`Adapter::Convert`].
+/// `name_prefix`.
 pub fn build_elements(
     adapters: &[Adapter],
     name_prefix: &str,
-    convert_factory: &str,
 ) -> Result<Vec<gst::Element>, String> {
     let mut elements = Vec::new();
     for adapter in adapters {
@@ -160,21 +116,6 @@ pub fn build_elements(
             }
             Adapter::CudaDownload => {
                 elements.push(make(CUDA_DOWNLOAD_FACTORY, name_prefix, "cudadownload")?)
-            }
-            Adapter::Convert { format } => {
-                let convert = make(convert_factory, name_prefix, "videoconvert")?;
-                // Threads the conversion on macOS, like every other converter
-                // built from the convert mode; a no-op elsewhere.
-                crate::gpu::configure_video_convert(&convert);
-                elements.push(convert);
-                let filter = make("capsfilter", name_prefix, "format")?;
-                filter.set_property(
-                    "caps",
-                    gst::Caps::builder("video/x-raw")
-                        .field("format", *format)
-                        .build(),
-                );
-                elements.push(filter);
             }
         }
     }
@@ -196,68 +137,6 @@ fn offers_only_cuda_memory(caps: &gst::CapsRef) -> bool {
     caps.iter_with_features().all(|(structure, features)| {
         structure.name() == "video/x-raw" && features.contains(CUDA_MEMORY_FEATURE)
     })
-}
-
-/// True when `caps` describe raw video in GL memory.
-///
-/// Encoded video (`video/x-h264` and friends) is never a candidate: there is
-/// nothing to download, and `gldownload` would not even link. Other GPU memory
-/// types are not candidates either — see the module docs.
-fn needs_gl_download(caps: &gst::CapsRef) -> bool {
-    let Some(structure) = caps.structure(0) else {
-        return false;
-    };
-    if structure.name() != "video/x-raw" {
-        return false;
-    }
-    caps.features(0)
-        .is_some_and(|features| features.contains(GL_MEMORY_FEATURE))
-}
-
-/// True when the input should be converted to [`NATIVE_FORMAT`] before the
-/// sink fans it out to its consumers.
-///
-/// GL memory says yes, because the download that precedes the converter lands
-/// the frame in system memory in the same format it had on the GPU. Every
-/// other memory feature says no: the encoder behind that pad consumes it
-/// directly, and a `videoconvert` could not even link to it.
-///
-/// A format carrying more than 8 bits per component is left alone as well.
-/// Converting it would silently drop the input's precision, and the encoders
-/// that can use the extra bits would have kept them.
-fn needs_format_conversion(caps: &gst::CapsRef) -> bool {
-    let Some(structure) = caps.structure(0) else {
-        return false;
-    };
-    if structure.name() != "video/x-raw" {
-        return false;
-    }
-    let convertible_memory = match caps.features(0) {
-        None => true,
-        Some(features) if features.is_any() => false,
-        Some(features) => {
-            features.is_empty()
-                || features
-                    .iter()
-                    .all(|f| f == SYSTEM_MEMORY_FEATURE || f == GL_MEMORY_FEATURE)
-        }
-    };
-    if !convertible_memory {
-        return false;
-    }
-    let Ok(format) = structure.get::<String>("format") else {
-        // An unfixed format means negotiation has not settled on one; there is
-        // nothing to compare against and nothing to convert.
-        return false;
-    };
-    if NATIVE_FORMATS.contains(&format.as_str()) {
-        return false;
-    }
-    let Ok(parsed) = format.parse::<gst_video::VideoFormat>() else {
-        return false;
-    };
-    let info = gst_video::VideoFormatInfo::from_format(parsed);
-    info.depth().iter().copied().max().unwrap_or(8) <= 8
 }
 
 /// True when every format `caps` offers is raw video in GL memory.
@@ -300,6 +179,7 @@ fn accepts_system_memory_raw_video(caps: &gst::CapsRef) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gstreamer::prelude::*;
     use std::str::FromStr;
 
     fn caps(s: &str) -> gst::Caps {
@@ -409,86 +289,6 @@ mod tests {
         }
     }
 
-    // --- Consumer::WebrtcSink -------------------------------------------
-
-    #[test]
-    fn webrtc_sink_gl_nv12_is_only_downloaded() {
-        assert_eq!(
-            decide(
-                &caps("video/x-raw(memory:GLMemory), format=NV12, width=1280, height=720"),
-                Consumer::WebrtcSink,
-                none
-            ),
-            Ok(vec![Adapter::GlDownload])
-        );
-    }
-
-    /// The download has to come first: the converter takes system memory.
-    #[test]
-    fn webrtc_sink_gl_rgba_is_downloaded_then_converted() {
-        assert_eq!(
-            decide(
-                &caps("video/x-raw(memory:GLMemory), format=RGBA, width=1920, height=1080"),
-                Consumer::WebrtcSink,
-                none
-            ),
-            Ok(vec![
-                Adapter::GlDownload,
-                Adapter::Convert { format: "NV12" }
-            ])
-        );
-    }
-
-    #[test]
-    fn webrtc_sink_system_rgba_is_converted() {
-        assert_eq!(
-            decide(
-                &caps("video/x-raw, format=RGBA, width=1920, height=1080"),
-                Consumer::WebrtcSink,
-                none
-            ),
-            Ok(vec![Adapter::Convert { format: "NV12" }])
-        );
-    }
-
-    #[test]
-    fn webrtc_sink_native_system_memory_needs_nothing() {
-        for c in [
-            "video/x-raw, format=NV12, width=1920, height=1080",
-            "video/x-raw(memory:SystemMemory), format=I420",
-        ] {
-            assert_eq!(
-                decide(&caps(c), Consumer::WebrtcSink, none),
-                Ok(vec![]),
-                "{c}"
-            );
-        }
-    }
-
-    /// The consumers that advertise these memory types encode them directly.
-    #[test]
-    fn webrtc_sink_other_gpu_memory_needs_nothing() {
-        for feature in OTHER_GPU_MEMORY {
-            let c = caps(&format!("video/x-raw({}), format=RGBA", feature));
-            assert_eq!(
-                decide(&c, Consumer::WebrtcSink, none),
-                Ok(vec![]),
-                "{feature}"
-            );
-        }
-    }
-
-    #[test]
-    fn webrtc_sink_not_raw_video_needs_nothing() {
-        for c in NOT_RAW_VIDEO {
-            assert_eq!(
-                decide(&caps(c), Consumer::WebrtcSink, none),
-                Ok(vec![]),
-                "{c}"
-            );
-        }
-    }
-
     // --- Consumer::Accepts ----------------------------------------------
 
     const SYSTEM_CONSUMER: &str = "video/x-raw, format=(string){ NV12, I420 }";
@@ -576,150 +376,58 @@ mod tests {
         }
     }
 
-    // --- The WebrtcSink predicates in detail ----------------------------
-
+    /// What a sink that takes system memory only (WHEP Output's corrected
+    /// caps) gets for each producer: a download for GL memory, nothing else.
     #[test]
-    fn gl_memory_raw_video_needs_a_download() {
-        assert!(needs_gl_download(&caps(
-            "video/x-raw(memory:GLMemory), format=NV12, width=1280, height=720"
-        )));
-    }
-
-    #[test]
-    fn system_memory_raw_video_does_not() {
-        assert!(!needs_gl_download(&caps(
-            "video/x-raw, format=NV12, width=1280, height=720"
-        )));
-    }
-
-    #[test]
-    fn other_gpu_memory_types_are_not_downloaded() {
+    fn accepts_plain_raw_video_consumer() {
+        let consumer = caps("video/x-raw");
+        for (producer, expected) in [
+            (
+                "video/x-raw(memory:GLMemory), format=NV12, width=1280, height=720",
+                vec![Adapter::GlDownload],
+            ),
+            (
+                "video/x-raw(memory:GLMemory), format=RGBA, width=1920, height=1080",
+                vec![Adapter::GlDownload],
+            ),
+            ("video/x-raw, format=NV12, width=1280, height=720", vec![]),
+            ("video/x-raw(memory:SystemMemory), format=RGBA", vec![]),
+        ] {
+            assert_eq!(
+                decide(&caps(producer), Consumer::Accepts(&consumer), none),
+                Ok(expected),
+                "{producer}"
+            );
+        }
         for feature in OTHER_GPU_MEMORY {
             let c = caps(&format!("video/x-raw({}), format=NV12", feature));
-            assert!(
-                !needs_gl_download(&c),
-                "{} should not be downloaded",
-                feature
+            assert_eq!(
+                decide(&c, Consumer::Accepts(&consumer), none),
+                Ok(vec![]),
+                "{feature}"
             );
         }
-    }
-
-    #[test]
-    fn not_raw_video_is_never_downloaded_or_converted() {
         for c in NOT_RAW_VIDEO {
-            assert!(!needs_gl_download(&caps(c)), "{c}");
-            assert!(!needs_format_conversion(&caps(c)), "{c}");
-        }
-    }
-
-    /// 8-bit 4:2:0: NV12 is what the hardware encoders take, I420 what the VP9
-    /// and AV1 software encoders take.
-    #[test]
-    fn eight_bit_420_is_left_alone() {
-        for format in ["NV12", "I420"] {
-            assert!(
-                !needs_format_conversion(&caps(&format!(
-                    "video/x-raw, format={}, width=1920, height=1080",
-                    format
-                ))),
-                "{} should be passed through",
-                format
+            assert_eq!(
+                decide(&caps(c), Consumer::Accepts(&consumer), none),
+                Ok(vec![]),
+                "{c}"
             );
         }
     }
 
-    /// Everything webrtcsink would otherwise convert once per consumer: packed
-    /// RGB from a mixer or a screen capture, packed and planar YUV that is not
-    /// 4:2:0, and gray.
     #[test]
-    fn other_eight_bit_formats_are_converted() {
-        for format in [
-            "RGBA", "BGRA", "RGB", "BGRx", "UYVY", "YUY2", "Y42B", "Y444", "GRAY8",
-        ] {
-            assert!(
-                needs_format_conversion(&caps(&format!(
-                    "video/x-raw, format={}, width=1920, height=1080",
-                    format
-                ))),
-                "{} should be converted",
-                format
-            );
-        }
-    }
-
-    /// A download lands the frame in system memory in the format it had on the
-    /// GPU, so a GL input is judged on its format like any other.
-    #[test]
-    fn gl_memory_is_judged_on_its_format() {
-        assert!(needs_format_conversion(&caps(
-            "video/x-raw(memory:GLMemory), format=RGBA, width=1920, height=1080"
-        )));
-        assert!(!needs_format_conversion(&caps(
-            "video/x-raw(memory:GLMemory), format=NV12, width=1920, height=1080"
-        )));
-    }
-
-    #[test]
-    fn other_gpu_memory_is_not_converted() {
-        for feature in OTHER_GPU_MEMORY {
-            assert!(
-                !needs_format_conversion(&caps(&format!("video/x-raw({}), format=RGBA", feature))),
-                "{} should not be converted",
-                feature
-            );
-        }
-    }
-
-    /// Converting these would drop precision the encoder behind the pad may
-    /// well be able to keep.
-    #[test]
-    fn deeper_than_eight_bit_is_left_alone() {
-        for format in ["P010_10LE", "I420_10LE", "AYUV64", "RGBA64_LE", "v210"] {
-            assert!(
-                !needs_format_conversion(&caps(&format!("video/x-raw, format={}", format))),
-                "{} should be passed through",
-                format
-            );
-        }
-    }
-
-    /// Before negotiation settles there is nothing to compare against.
-    #[test]
-    fn unfixed_format_is_left_alone() {
-        assert!(!needs_format_conversion(&caps(
-            "video/x-raw, width=1920, height=1080"
-        )));
-    }
-
-    // --- build_elements -------------------------------------------------
-
-    fn factories(elements: &[gst::Element]) -> Vec<String> {
-        elements
-            .iter()
-            .map(|e| {
-                e.factory()
-                    .map(|f| f.name().to_string())
-                    .unwrap_or_default()
-            })
-            .collect()
-    }
-
-    #[test]
-    fn build_elements_creates_download_converter_and_filter_in_order() {
+    fn build_elements_names_the_download_after_the_prefix() {
         let _ = gst::init();
-        let elements = build_elements(
-            &[Adapter::GlDownload, Adapter::Convert { format: "NV12" }],
-            "in",
-            "videoconvert",
-        )
-        .expect("elements");
-        assert_eq!(
-            factories(&elements),
-            ["gldownload", "videoconvert", "capsfilter"]
-        );
+        let elements = build_elements(&[Adapter::GlDownload], "in").expect("elements");
         let names: Vec<String> = elements.iter().map(|e| e.name().to_string()).collect();
-        assert_eq!(names, ["in_gldownload", "in_videoconvert", "in_format"]);
-        let filter_caps = elements[2].property::<gst::Caps>("caps");
-        assert_eq!(filter_caps, caps("video/x-raw, format=NV12"));
+        assert_eq!(names, ["in_gldownload"]);
+        assert_eq!(
+            elements[0]
+                .factory()
+                .map(|f| f.name().to_string())
+                .as_deref(),
+            Some("gldownload")
+        );
     }
 }

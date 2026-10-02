@@ -35,10 +35,80 @@
 //! events *after* running its probes, so the event that triggered the splice
 //! lands on the newly inserted elements.
 
-use crate::gst::video_adapt::{self, Consumer};
+use crate::gst::video_adapt::{self, Consumer, GL_MEMORY_FEATURE};
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_video as gst_video;
 use tracing::{info, warn};
+
+/// What `whepserversink` can really take on a video pad: raw video in system
+/// memory.
+const SINK_TAKES: &str = "video/x-raw";
+
+/// The caps feature negotiated caps carry for plain system memory.
+const SYSTEM_MEMORY_FEATURE: &str = "memory:SystemMemory";
+
+/// The format the input is converted to when it needs converting at all.
+///
+/// `vtenc_h264`/`vtenc_h265` and the NVENC and VA encoders take it natively,
+/// and `x264enc` lists it alongside I420. The VP9 and AV1 software encoders do
+/// not accept NV12 at all (`vp9enc`, `av1enc`, `rav1enc` and `svtav1enc` list
+/// I420), so their consumers still convert NV12 to I420 each. That costs a
+/// couple of points against an encode that costs fifteen.
+const NATIVE_FORMAT: &str = "NV12";
+
+/// Formats left alone: 8-bit 4:2:0. Converting one into the other would cost
+/// a pass over every frame and at best move the per-consumer conversion from
+/// one set of encoders to another.
+const NATIVE_FORMATS: &[&str] = &["NV12", "I420"];
+
+/// True when the input should be converted to [`NATIVE_FORMAT`] before the
+/// sink fans it out to its consumers.
+///
+/// GL memory says yes, because the download that precedes the converter lands
+/// the frame in system memory in the same format it had on the GPU. Every
+/// other memory feature says no: the encoder behind that pad consumes it
+/// directly, and a `videoconvert` could not even link to it.
+///
+/// A format carrying more than 8 bits per component is left alone as well.
+/// Converting it would silently drop the input's precision, and the encoders
+/// that can use the extra bits would have kept them.
+pub fn needs_format_conversion(caps: &gst::CapsRef) -> bool {
+    let Some(structure) = caps.structure(0) else {
+        return false;
+    };
+    if structure.name() != "video/x-raw" {
+        return false;
+    }
+    // GL memory qualifies because the download spliced in front of the
+    // converter lands the frame in system memory in the same pixel format.
+    let convertible_memory = match caps.features(0) {
+        None => true,
+        Some(features) if features.is_any() => false,
+        Some(features) => {
+            features.is_empty()
+                || features
+                    .iter()
+                    .all(|f| f == SYSTEM_MEMORY_FEATURE || f == GL_MEMORY_FEATURE)
+        }
+    };
+    if !convertible_memory {
+        return false;
+    }
+    let Ok(format) = structure.get::<String>("format") else {
+        // An unfixed format means negotiation has not settled on one; there is
+        // nothing to compare against and nothing to convert.
+        return false;
+    };
+    if NATIVE_FORMATS.contains(&format.as_str()) {
+        return false;
+    }
+    let Ok(parsed) = format.parse::<gst_video::VideoFormat>() else {
+        return false;
+    };
+    let info = gst_video::VideoFormatInfo::from_format(parsed);
+    info.depth().iter().copied().max().unwrap_or(8) <= 8
+}
 
 /// Watch `src_pad` and adapt what arrives on it to what `whepserversink` can
 /// encode, by splicing elements in front of its peer.
@@ -104,15 +174,52 @@ pub fn install_video_input_bridge(src_pad: &gst::Pad, name_prefix: &str, convert
 }
 
 /// Build the elements that adapt `caps`, in the order they must be linked.
-/// [`video_adapt::decide`] says which; this only creates them.
+///
+/// A download comes first: the converter takes system memory only, and the
+/// format it has to produce is the same either way.
 fn build_adapters(
     caps: &gst::CapsRef,
     name_prefix: &str,
     convert_factory: &str,
 ) -> Result<Vec<gst::Element>, String> {
-    let adapters = video_adapt::decide(caps, Consumer::WebrtcSink, video_adapt::factory_available)
-        .map_err(|missing| format!("{} is not installed", missing.factory))?;
-    video_adapt::build_elements(&adapters, name_prefix, convert_factory)
+    // whepserversink advertises GL memory on its video pads but cannot encode
+    // it, so its caps are corrected here to what it can really take. The
+    // download then follows from the same rule the linker uses.
+    let takes = gst::Caps::new_empty_simple(SINK_TAKES);
+    let downloads = video_adapt::decide(
+        caps,
+        Consumer::Accepts(&takes),
+        video_adapt::factory_available,
+    )
+    .map_err(|missing| format!("{} is not installed", missing.factory))?;
+    let mut adapters = video_adapt::build_elements(&downloads, name_prefix)?;
+
+    // Not a caps adaptation: converting once here saves every viewer's
+    // encoding chain its own conversion.
+    if needs_format_conversion(caps) {
+        let convert = gst::ElementFactory::make(convert_factory)
+            .name(format!("{}_videoconvert", name_prefix))
+            .build()
+            .map_err(|e| format!("{} could not be created: {}", convert_factory, e))?;
+        // Threads the conversion on macOS, like every other converter built
+        // from the convert mode; a no-op elsewhere.
+        crate::gpu::configure_video_convert(&convert);
+        adapters.push(convert);
+        adapters.push(
+            gst::ElementFactory::make("capsfilter")
+                .name(format!("{}_format", name_prefix))
+                .property(
+                    "caps",
+                    gst::Caps::builder("video/x-raw")
+                        .field("format", NATIVE_FORMAT)
+                        .build(),
+                )
+                .build()
+                .map_err(|e| format!("capsfilter could not be created: {}", e))?,
+        );
+    }
+
+    Ok(adapters)
 }
 
 /// Insert `adapters`, linked in order, between `src_pad` and its current peer.
@@ -206,6 +313,113 @@ mod tests {
         // Caps parsing needs the type system registered.
         let _ = gst::init();
         gst::Caps::from_str(s).expect("valid caps")
+    }
+
+    /// 8-bit 4:2:0: NV12 is what the hardware encoders take, I420 what the VP9
+    /// and AV1 software encoders take.
+    #[test]
+    fn eight_bit_420_is_left_alone() {
+        for format in ["NV12", "I420"] {
+            assert!(
+                !needs_format_conversion(&caps(&format!(
+                    "video/x-raw, format={}, width=1920, height=1080",
+                    format
+                ))),
+                "{} should be passed through",
+                format
+            );
+        }
+    }
+
+    /// Everything webrtcsink would otherwise convert once per consumer: packed
+    /// RGB from a mixer or a screen capture, packed and planar YUV that is not
+    /// 4:2:0, and gray.
+    #[test]
+    fn other_eight_bit_formats_are_converted() {
+        for format in [
+            "RGBA", "BGRA", "RGB", "BGRx", "UYVY", "YUY2", "Y42B", "Y444", "GRAY8",
+        ] {
+            assert!(
+                needs_format_conversion(&caps(&format!(
+                    "video/x-raw, format={}, width=1920, height=1080",
+                    format
+                ))),
+                "{} should be converted",
+                format
+            );
+        }
+    }
+
+    /// A download lands the frame in system memory in the format it had on the
+    /// GPU, so a GL input is judged on its format like any other.
+    #[test]
+    fn gl_memory_is_judged_on_its_format() {
+        assert!(needs_format_conversion(&caps(
+            "video/x-raw(memory:GLMemory), format=RGBA, width=1920, height=1080"
+        )));
+        assert!(!needs_format_conversion(&caps(
+            "video/x-raw(memory:GLMemory), format=NV12, width=1920, height=1080"
+        )));
+    }
+
+    /// The consumers that advertise these memory types encode them directly,
+    /// and `videoconvert` could not link to them anyway.
+    #[test]
+    fn other_gpu_memory_is_not_converted() {
+        for feature in [
+            "memory:CUDAMemory",
+            "memory:NVMM",
+            "memory:D3D11Memory",
+            "memory:VAMemory",
+            "memory:DMABuf",
+        ] {
+            assert!(
+                !needs_format_conversion(&caps(&format!("video/x-raw({}), format=RGBA", feature))),
+                "{} should not be converted",
+                feature
+            );
+        }
+    }
+
+    /// Converting these would drop precision the encoder behind the pad may
+    /// well be able to keep.
+    #[test]
+    fn deeper_than_eight_bit_is_left_alone() {
+        for format in ["P010_10LE", "I420_10LE", "AYUV64", "RGBA64_LE", "v210"] {
+            assert!(
+                !needs_format_conversion(&caps(&format!("video/x-raw, format={}", format))),
+                "{} should be passed through",
+                format
+            );
+        }
+    }
+
+    /// WHEP Output also takes pre-encoded video, which no converter can touch.
+    #[test]
+    fn encoded_video_is_not_converted() {
+        for c in [
+            "video/x-h264, stream-format=avc, alignment=au",
+            "video/x-h265",
+            "video/x-vp9",
+            "video/x-av1",
+            "audio/x-raw, rate=48000",
+        ] {
+            assert!(
+                !needs_format_conversion(&caps(c)),
+                "{} should be passed through",
+                c
+            );
+        }
+    }
+
+    /// Before negotiation settles there is nothing to compare against.
+    #[test]
+    fn unfixed_format_is_left_alone() {
+        assert!(!needs_format_conversion(&caps(
+            "video/x-raw, width=1920, height=1080"
+        )));
+        assert!(!needs_format_conversion(&caps("ANY")));
+        assert!(!needs_format_conversion(&caps("EMPTY")));
     }
 
     /// GL memory in a format the encoders do not take needs both adaptations,
