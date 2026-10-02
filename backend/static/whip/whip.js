@@ -362,11 +362,8 @@ class WhipClient {
             }
 
             // Get the resource URL for cleanup
-            const locationHeader = response.headers.get('Location');
-            if (locationHeader) {
-                this.resourceUrl = locationHeader.startsWith('/')
-                    ? window.location.origin + locationHeader
-                    : locationHeader;
+            this.resourceUrl = resolveResourceUrl(response.headers.get('Location'), this.endpoint);
+            if (this.resourceUrl) {
                 this._log('Resource URL: ' + this.resourceUrl);
             }
 

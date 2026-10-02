@@ -166,6 +166,7 @@ pub(super) fn build_gpu_pipeline(
         let queue = elements::make_queue(&q_id)?;
         let glupload = elements::make_element("glupload", &up_id)?;
         let glcolorconvert = elements::make_element("glcolorconvert", &cc_id)?;
+        install_input_front(&queue, &glupload, &p.id(&format!("dsk_in_{}", i)));
 
         elems.push((q_id.clone(), queue));
         elems.push((up_id.clone(), glupload));
@@ -356,6 +357,7 @@ pub(super) fn build_gpu_pipeline(
         let glupload = elements::make_element("glupload", &up_id)?;
         let glcolorconvert = elements::make_element("glcolorconvert", &cc_id)?;
         let tee = elements::make_tee(&tee_id)?;
+        install_input_front(&queue, &glupload, &p.id(&format!("video_in_{}", i)));
 
         elems.push((q_id.clone(), queue));
         elems.push((up_id.clone(), glupload));
@@ -601,4 +603,14 @@ pub(super) fn build_gpu_pipeline(
         bus_message_handler,
         pad_properties,
     })
+}
+
+/// Adapt an external video input's front to what its producer offers: the
+/// input's `queue` is where upstream's caps queries land, `glupload` is what
+/// they are answered by. `label` names the input in logs and errors, after its
+/// external pad. See [`crate::gst::gl_input_front`].
+fn install_input_front(queue: &gst::Element, glupload: &gst::Element, label: &str) {
+    if let Some(sink) = queue.static_pad("sink") {
+        crate::gst::gl_input_front::install(&sink, glupload, label);
+    }
 }

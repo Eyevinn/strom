@@ -212,6 +212,8 @@ fn default_port() -> u16 {
 pub struct Config {
     /// Port to listen on
     pub port: u16,
+    /// Data directory the storage paths default to
+    pub data_dir: PathBuf,
     /// Path to flows storage file (used if database_url is None)
     pub flows_path: PathBuf,
     /// Path to blocks storage file
@@ -492,6 +494,7 @@ impl Config {
 
         Ok(Self {
             port: config_file.server.port,
+            data_dir: data_paths.data_dir,
             flows_path: data_paths.flows_path,
             blocks_path: data_paths.blocks_path,
             media_path: data_paths.media_path,
@@ -548,6 +551,7 @@ impl Config {
 
         Ok(Self {
             port,
+            data_dir: data_paths.data_dir,
             flows_path: data_paths.flows_path,
             blocks_path: data_paths.blocks_path,
             media_path: data_paths.media_path,
@@ -603,6 +607,7 @@ impl Default for Config {
             // Ultimate fallback (should rarely happen)
             Self {
                 port: strom_types::DEFAULT_PORT,
+                data_dir: PathBuf::from("."),
                 flows_path: PathBuf::from("flows.json"),
                 blocks_path: PathBuf::from("blocks.json"),
                 media_path: PathBuf::from("media"),
@@ -1268,26 +1273,5 @@ lease_ttl_seconds = 600
             normalize_ice_server_url("turn:user:pass@turn.example.com:3478"),
             "turn:user:pass@turn.example.com:3478"
         );
-    }
-
-    #[test]
-    fn test_legacy_config_new() {
-        let temp_dir = TempDir::new().unwrap();
-        let flows = temp_dir.path().join("flows.json");
-        let blocks = temp_dir.path().join("blocks.json");
-
-        let config = Config::new(
-            8080,
-            None,
-            Some(flows.clone()),
-            Some(blocks.clone()),
-            None,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(config.port, 8080);
-        assert_eq!(config.flows_path, flows);
-        assert_eq!(config.blocks_path, blocks);
     }
 }

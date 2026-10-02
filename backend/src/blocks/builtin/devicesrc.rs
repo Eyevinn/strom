@@ -80,7 +80,7 @@
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gpu::{self, video_convert_mode};
-use crate::gst::gl_bridge;
+use crate::gst::video_adapt;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -201,7 +201,7 @@ impl BlockBuilder for LocalInputBuilder {
                 caps.append_structure(structure.clone());
                 caps.append_structure_full(
                     structure,
-                    Some(gst::CapsFeatures::new([gl_bridge::GL_MEMORY_FEATURE])),
+                    Some(gst::CapsFeatures::new([video_adapt::GL_MEMORY_FEATURE])),
                 );
             }
 
@@ -771,57 +771,48 @@ mod tests {
         assert_eq!(read_stream_mode(&p), StreamMode::default());
     }
 
-    // --- read_string ---
+    // --- read_string / read_bool ---
 
-    #[test]
-    fn read_string_returns_none_for_empty() {
+    fn props_with(value: &Option<PropertyValue>) -> HashMap<String, PropertyValue> {
         let mut p = HashMap::new();
-        p.insert("k".to_string(), prop_string(""));
-        assert_eq!(read_string(&p, "k"), None);
+        if let Some(v) = value {
+            p.insert("k".to_string(), v.clone());
+        }
+        p
     }
 
     #[test]
-    fn read_string_returns_value() {
-        let mut p = HashMap::new();
-        p.insert("k".to_string(), prop_string("hello"));
-        assert_eq!(read_string(&p, "k"), Some("hello".to_string()));
-    }
+    fn read_string_and_bool() {
+        let string_cases: &[(Option<PropertyValue>, Option<&str>)] = &[
+            (None, None),
+            (Some(prop_string("")), None),
+            (Some(prop_string("hello")), Some("hello")),
+            (Some(PropertyValue::Bool(true)), None),
+        ];
+        for (value, expected) in string_cases {
+            assert_eq!(
+                read_string(&props_with(value), "k").as_deref(),
+                *expected,
+                "read_string({:?})",
+                value
+            );
+        }
 
-    #[test]
-    fn read_string_returns_none_for_missing() {
-        let p = HashMap::new();
-        assert_eq!(read_string(&p, "k"), None);
-    }
-
-    // --- read_bool ---
-
-    #[test]
-    fn read_bool_true() {
-        let mut p = HashMap::new();
-        p.insert("k".to_string(), PropertyValue::Bool(true));
-        assert!(read_bool(&p, "k"));
-    }
-
-    #[test]
-    fn read_bool_false() {
-        let mut p = HashMap::new();
-        p.insert("k".to_string(), PropertyValue::Bool(false));
-        assert!(!read_bool(&p, "k"));
-    }
-
-    #[test]
-    fn read_bool_missing_defaults_false() {
-        let p = HashMap::new();
-        assert!(!read_bool(&p, "k"));
-    }
-
-    #[test]
-    fn read_bool_non_bool_value_defaults_false() {
-        let mut p = HashMap::new();
-        p.insert("k".to_string(), prop_string("true"));
-        // PropertyValue::String("true") is NOT PropertyValue::Bool(true) —
-        // we don't coerce, callers should send the right type.
-        assert!(!read_bool(&p, "k"));
+        // No coercion: PropertyValue::String("true") is not Bool(true).
+        let bool_cases: &[(Option<PropertyValue>, bool)] = &[
+            (None, false),
+            (Some(PropertyValue::Bool(true)), true),
+            (Some(PropertyValue::Bool(false)), false),
+            (Some(prop_string("true")), false),
+        ];
+        for (value, expected) in bool_cases {
+            assert_eq!(
+                read_bool(&props_with(value), "k"),
+                *expected,
+                "read_bool({:?})",
+                value
+            );
+        }
     }
 
     // --- parse_fraction_string ---
@@ -899,18 +890,40 @@ mod tests {
 
     #[test]
     fn pads_internal_element_ids_match_build_chain() {
-        // The external-pad `internal_element_id` strings have to match
-        // the actual element IDs `build()` produces (after the
-        // instance-id prefix), otherwise external links resolve to
-        // nothing and the flow won't run.
-        let pads = pads_for_mode("audio_video");
+        // The external-pad `internal_element_id` strings have to match the
+        // element IDs `build()` produces (after the instance-id prefix),
+        // otherwise external links resolve to nothing and the flow won't run.
+        // No device is selected, so build() falls back to autovideosrc and
+        // autoaudiosrc without opening hardware.
+        gst::init().expect("GStreamer init");
+        crate::gpu::detect_gpu_capabilities();
+        let mut p = HashMap::new();
+        p.insert("stream_mode".to_string(), prop_string("audio_video"));
+        let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+        let result = LocalInputBuilder
+            .build("dev", &p, &ctx)
+            .unwrap_or_else(|e| panic!("build failed: {:?}", e));
+        let pads = LocalInputBuilder.get_external_pads(&p).expect("pads");
+
+        assert_eq!(pads.outputs.len(), 2);
         for pad in &pads.outputs {
-            match pad.media_type {
-                MediaType::Video => assert_eq!(pad.internal_element_id, "videocapsfilter"),
-                MediaType::Audio => assert_eq!(pad.internal_element_id, "audiocapsfilter"),
-                _ => panic!("unexpected media type {:?}", pad.media_type),
-            }
-            assert_eq!(pad.internal_pad_name, "src");
+            let full_id = format!("dev:{}", pad.internal_element_id);
+            let (_, element) = result
+                .elements
+                .iter()
+                .find(|(id, _)| *id == full_id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{:?} pad points at {}, which build() did not create",
+                        pad.media_type, full_id
+                    )
+                });
+            assert!(
+                element.static_pad(&pad.internal_pad_name).is_some(),
+                "{} has no {} pad",
+                full_id,
+                pad.internal_pad_name
+            );
         }
     }
 }

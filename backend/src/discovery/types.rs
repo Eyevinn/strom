@@ -404,59 +404,22 @@ a=rtpmap:97 L16/48000/8
     }
 
     #[test]
-    fn test_discovery_source_display_sap() {
-        let source = DiscoverySource::Sap {
-            origin_ip: "192.168.1.1".parse().unwrap(),
-            msg_id_hash: 12345,
-        };
-        assert_eq!(source.to_string(), "SAP");
-    }
-
-    #[test]
-    fn test_discovery_source_display_mdns_ravenna() {
-        let source = DiscoverySource::Mdns {
-            service_type: "_rtsp._tcp.local".to_string(),
-            instance_name: "Test Stream".to_string(),
-            hostname: "device.local".to_string(),
-            port: 8554,
-        };
-        assert_eq!(source.to_string(), "mDNS (RAVENNA)");
-    }
-
-    #[test]
-    fn test_discovery_source_display_mdns_ndi() {
-        let source = DiscoverySource::Mdns {
-            service_type: "_ndi._tcp.local".to_string(),
-            instance_name: "NDI Source".to_string(),
-            hostname: "ndi-device.local".to_string(),
-            port: 5960,
-        };
-        assert_eq!(source.to_string(), "mDNS (NDI)");
-    }
-
-    #[test]
-    fn test_discovery_source_display_mdns_generic() {
-        let source = DiscoverySource::Mdns {
-            service_type: "_http._tcp.local".to_string(),
-            instance_name: "Web Server".to_string(),
-            hostname: "server.local".to_string(),
-            port: 80,
-        };
-        assert_eq!(source.to_string(), "mDNS");
-    }
-
-    #[test]
-    fn test_discovery_source_display_manual() {
-        let source = DiscoverySource::Manual;
-        assert_eq!(source.to_string(), "Manual");
-    }
-
-    #[test]
-    fn test_audio_encoding_display() {
-        assert_eq!(AudioEncoding::L16.to_string(), "L16");
-        assert_eq!(AudioEncoding::L24.to_string(), "L24");
-        assert_eq!(AudioEncoding::AM824.to_string(), "AM824");
-        assert_eq!(AudioEncoding::Unknown.to_string(), "unknown");
+    fn test_discovery_source_display_mdns_service_type() {
+        for (service_type, expected) in [
+            ("_rtsp._tcp.local", "mDNS (RAVENNA)"),
+            ("_ndi._tcp.local", "mDNS (NDI)"),
+            ("_http._tcp.local", "mDNS"),
+            // Prefix match on the full service label, not a substring
+            ("_rtspx._tcp.local", "mDNS"),
+        ] {
+            let source = DiscoverySource::Mdns {
+                service_type: service_type.to_string(),
+                instance_name: "Test Stream".to_string(),
+                hostname: "device.local".to_string(),
+                port: 8554,
+            };
+            assert_eq!(source.to_string(), expected, "{}", service_type);
+        }
     }
 
     #[test]

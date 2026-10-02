@@ -20,7 +20,7 @@
 //!   element, so a crosspoint is a level, not a checkbox.
 //!
 //! ```text
-//! audio_in_I → identity_in_I → deinterleave_in_I → tee_iIcC
+//! audio_in_I → identity_in_I → resample_in_I → rate_in_I → deinterleave_in_I → tee_iIcC
 //!
 //!   tee_iIcC → xp_iIcC_oOcD (volume)      one branch per crosspoint,
 //!            → mixer_O sink pad           the pad placing the mono
@@ -51,6 +51,16 @@
 //! for the mix, and the bus never waits indefinitely on a pad. A queue per
 //! crosspoint would be a thread per crosspoint for decoupling that is already
 //! there; `queue_out_O` is where downstream is decoupled.
+//!
+//! Every output bus runs at the block's `sample_rate`: `caps_out_O` pins the
+//! rate, and `resample_in_I` converts each input to it. `rate_in_I` tells the
+//! resampler which rate to produce: `deinterleave` creates its source pads
+//! only once it has caps, so it cannot pass the buses' rate back upstream. An `audiomixer`
+//! cannot take inputs at different rates (once one sink pad has caps, the
+//! others are held to its rate), so without the resampler a second source at
+//! another rate is refused: `not-negotiated` when both are there at start,
+//! `not-linked` when it joins a running bus. The resampler passes through
+//! untouched when the rates already match.
 //!
 //! Fan-out is one `tee` feeding several crosspoints; fan-in is several
 //! crosspoints landing on the same mixer. An unrouted output channel simply
@@ -129,6 +139,9 @@ const MIX_MATRIX_KEY: &str = "GstAudioConverter.mix-matrix";
 
 /// Name of the output fader property, in dB.
 pub const OUTPUT_FADER_PROPERTY: &str = "output_fader_db";
+
+/// Name of the property setting the rate every output bus runs at.
+pub const SAMPLE_RATE_PROPERTY: &str = "sample_rate";
 
 /// Name of the output soft clipper property.
 pub const OUTPUT_SOFT_CLIP_PROPERTY: &str = "output_soft_clip_enabled";
@@ -326,6 +339,7 @@ impl BlockBuilder for LiveAudioRouterBuilder {
             DEFAULT_OUTPUT_BUFFER_MS,
         )
         .max(1);
+        let sample_rate = parse_sample_rate(properties);
         let fader_db = output_fader_db(properties);
         let soft_clip_enabled = parse_bool(
             properties,
@@ -385,9 +399,11 @@ impl BlockBuilder for LiveAudioRouterBuilder {
 
             // The mixer's own output must be unpositioned: a sink pad's
             // mix-matrix is only applied when the converter is not asked to do
-            // positional mapping as well.
+            // positional mapping as well. The rate is pinned so every bus
+            // runs at `sample_rate` whatever its consumer would pick.
             let caps_id = format!("{instance_id}:caps_out_{out_idx}");
             let mut bus_caps = gst::Caps::builder("audio/x-raw")
+                .field("rate", sample_rate as i32)
                 .field("channels", channels as i32)
                 .field("channel-mask", gst::Bitmask::new(0));
             if sum_in_float {
@@ -474,7 +490,36 @@ impl BlockBuilder for LiveAudioRouterBuilder {
                 .property("silent", true)
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {e}")))?;
+            watch_input_channels(&identity, in_idx, channels);
             elements.push((identity_id.clone(), identity));
+
+            // The buses run at `sample_rate`, so an input at another rate is
+            // converted here rather than refused. It takes the same sample
+            // formats as the crosspoint `volume` elements, so it narrows
+            // nothing an input could negotiate before.
+            let resample_id = format!("{instance_id}:resample_in_{in_idx}");
+            let resample = gst::ElementFactory::make("audioresample")
+                .name(&resample_id)
+                .build()
+                .map_err(|e| BlockBuildError::ElementCreation(format!("audioresample: {e}")))?;
+            elements.push((resample_id.clone(), resample));
+
+            // `deinterleave` answers a caps query before it has source pads,
+            // so the buses' rate never reaches the resampler through it: pin
+            // the rate here, or the resampler passes the input's rate through
+            // and the bus refuses it.
+            let rate_id = format!("{instance_id}:rate_in_{in_idx}");
+            let rate = gst::ElementFactory::make("capsfilter")
+                .name(&rate_id)
+                .property(
+                    "caps",
+                    gst::Caps::builder("audio/x-raw")
+                        .field("rate", sample_rate as i32)
+                        .build(),
+                )
+                .build()
+                .map_err(|e| BlockBuildError::ElementCreation(format!("rate_in: {e}")))?;
+            elements.push((rate_id.clone(), rate));
 
             let deint_id = format!("{instance_id}:deinterleave_in_{in_idx}");
             let deint = gst::ElementFactory::make("deinterleave")
@@ -485,6 +530,14 @@ impl BlockBuilder for LiveAudioRouterBuilder {
 
             internal_links.push((
                 ElementPadRef::pad(&identity_id, "src"),
+                ElementPadRef::pad(&resample_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&resample_id, "src"),
+                ElementPadRef::pad(&rate_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&rate_id, "src"),
                 ElementPadRef::pad(&deint_id, "sink"),
             ));
 
@@ -617,10 +670,11 @@ impl BlockBuilder for LiveAudioRouterBuilder {
 
         info!(
             "LiveAudioRouter '{}' built: {} crosspoints, {} open at build time, \
-             output fader {:.1} dB, soft clipper {}",
+             {} Hz, output fader {:.1} dB, soft clipper {}",
             instance_id,
             crosspoints,
             gains.values().filter(|g| **g > 0.0).count(),
+            sample_rate,
             fader_db,
             if soft_clip_enabled { "on" } else { "off" }
         );
@@ -688,6 +742,64 @@ fn output_fader_db(properties: &HashMap<String, PropertyValue>) -> f64 {
         .clamp(routing::MIN_OUTPUT_FADER_DB, routing::MAX_OUTPUT_FADER_DB)
 }
 
+/// Warn when an input's negotiated channel count differs from its declared
+/// `input_<i>_channels`.
+///
+/// The router does not follow the stream: the declared count is what the saved
+/// routing matrix is indexed by, so resizing underneath it would silently
+/// change what a saved flow means. The operator is told which property to set
+/// instead. The warning goes on the bus from the input's `identity`, which the
+/// pipeline's bus watch forwards to clients as a pipeline warning.
+///
+/// An event probe that acts on CAPS only, so it fires once per negotiation and
+/// never per buffer. It captures no GStreamer object.
+fn watch_input_channels(identity: &gst::Element, in_idx: usize, declared: usize) {
+    let Some(sink) = identity.static_pad("sink") else {
+        return;
+    };
+    sink.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+        let Some(gst::PadProbeData::Event(event)) = &info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::EventView::Caps(caps) = event.view() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let negotiated = caps
+            .caps()
+            .structure(0)
+            .and_then(|s| s.get::<i32>("channels").ok())
+            .map(|n| n.max(0) as usize);
+        let Some(message) = negotiated.and_then(|n| channel_mismatch(in_idx, declared, n)) else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if let Some(element) = pad.parent_element() {
+            gst::element_warning!(element, gst::StreamError::Format, ("{}", message));
+        }
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// The operator-facing message for an input whose stream carries `negotiated`
+/// channels against a declaration of `declared`, or `None` when they agree.
+fn channel_mismatch(in_idx: usize, declared: usize, negotiated: usize) -> Option<String> {
+    if negotiated == declared {
+        return None;
+    }
+    let consequence = if negotiated < declared {
+        format!(
+            "{} of its declared channels carry nothing",
+            declared - negotiated
+        )
+    } else {
+        format!("{} of its channels are not routed", negotiated - declared)
+    };
+    Some(format!(
+        "Live Audio Router input {in_idx} carries {negotiated} channel(s) but \
+         input_{in_idx}_channels is {declared}: {consequence}. Set input_{in_idx}_channels \
+         to {negotiated} and restart the flow."
+    ))
+}
+
 /// capssetter fixing the channel-mask the way `builtin.audiorouter` does:
 /// 1ch = 0x1, 2ch = 0x3, 3+ch = 0x0 (unpositioned).
 fn make_capssetter(id: &str, channels: usize) -> Result<gst::Element, BlockBuildError> {
@@ -716,9 +828,10 @@ fn make_capssetter(id: &str, channels: usize) -> Result<gst::Element, BlockBuild
 /// output format from that query whenever it negotiates before any input has
 /// caps: always when an input joins after the flow started, and whenever the
 /// mixer's first timeout beats the first input. It then picks a format blind
-/// (S32LE at 44100 Hz), and a consumer that takes one format and does not
-/// convert refuses it with `not-negotiated`. Reporting downstream here keeps
-/// that pick to a format the consumer accepts.
+/// (S32LE), and a consumer that takes one format and does not convert refuses
+/// it with `not-negotiated`. Reporting downstream here keeps that pick to a
+/// format the consumer accepts. The rate is not picked here: `caps_out_O`,
+/// upstream of the setter, pins it to the block's `sample_rate`.
 ///
 /// The mixer fixes its output from the first entry of the answer, and also
 /// passes the answer on to its own inputs. So downstream's rates come first,
@@ -821,6 +934,21 @@ fn parse_millis(properties: &HashMap<String, PropertyValue>, key: &str, default:
             _ => None,
         })
         .unwrap_or(default)
+}
+
+/// Read the rate every output bus runs at. Unset gives
+/// `DEFAULT_AUDIO_SAMPLE_RATE`; a value outside the common rates is logged and
+/// falls back to the default too.
+fn parse_sample_rate(properties: &HashMap<String, PropertyValue>) -> u32 {
+    match properties.get(SAMPLE_RATE_PROPERTY) {
+        None => DEFAULT_AUDIO_SAMPLE_RATE,
+        Some(v) => parse_common_audio_sample_rate(v).unwrap_or_else(|| {
+            warn!(
+                "Live Audio Router: unsupported sample_rate {v:?}, using {DEFAULT_AUDIO_SAMPLE_RATE}"
+            );
+            DEFAULT_AUDIO_SAMPLE_RATE
+        }),
+    }
 }
 
 fn parse_bool(properties: &HashMap<String, PropertyValue>, key: &str, default: bool) -> bool {
@@ -963,6 +1091,23 @@ fn liveaudiorouter_definition() -> BlockDefinition {
         mapping: PropertyMapping {
             element_id: "_block".to_string(),
             property_name: "output_buffer_duration".to_string(),
+            transform: None,
+        },
+        live: false,
+        persist: None,
+    });
+
+    exposed_properties.push(ExposedProperty {
+        name: SAMPLE_RATE_PROPERTY.to_string(),
+        label: "Sample Rate".to_string(),
+        description: "Sample rate the router runs at. Every input is resampled to this rate, and every output runs at it. Construction-time only.".to_string(),
+        property_type: PropertyType::Enum {
+            values: common_audio_sample_rate_enum_values(false),
+        },
+        default_value: Some(PropertyValue::String(DEFAULT_AUDIO_SAMPLE_RATE.to_string())),
+        mapping: PropertyMapping {
+            element_id: "_block".to_string(),
+            property_name: SAMPLE_RATE_PROPERTY.to_string(),
             transform: None,
         },
         live: false,

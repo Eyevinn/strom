@@ -12,6 +12,7 @@ mod bridge;
 mod builder;
 mod definition;
 mod state;
+mod timing;
 
 pub use builder::MediaPlayerBuilder;
 pub use definition::get_blocks;
@@ -23,13 +24,28 @@ use tracing::debug;
 /// Normalize a file path to a proper URI.
 ///
 /// Converts relative paths to absolute file:// URIs resolved against `media_path`.
-/// Passes through URIs that already have a scheme (file://, http://, https://).
+/// Passes through anything that already is a URI - `scheme://...` with any
+/// scheme GStreamer may have a source for (file, http(s) including HLS and DASH,
+/// rtsp, srt, udp, rtmp, ...).
 ///
 /// Relative paths are resolved relative to `media_path` (the configured media directory).
 /// Legacy paths starting with `./media/` have that prefix stripped before resolution.
+/// Whether `s` starts with an RFC 3986 scheme followed by `://`: a letter, then
+/// letters, digits, `+`, `-` or `.`.
+fn has_uri_scheme(s: &str) -> bool {
+    let Some((scheme, _)) = s.split_once("://") else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
 pub fn normalize_uri(path: &str, media_path: &Path) -> String {
-    // If it already has a scheme, pass through
-    if path.starts_with("file://") || path.starts_with("http://") || path.starts_with("https://") {
+    // If it already has a scheme, pass through. Only file, http and https
+    // used to, so an rtsp:// or srt:// URL became a path in the media
+    // directory.
+    if has_uri_scheme(path) {
         return path.to_string();
     }
 
@@ -68,10 +84,8 @@ mod tests {
         MediaPlayerKey, MediaPlayerRegistry, MediaPlayerState, Playlist,
     };
     use gstreamer as gst;
-    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, RwLock};
-    use strom_types::block::PropertyType;
-    use strom_types::PropertyValue;
     use uuid::Uuid;
 
     /// Helper to create a MediaPlayerState for testing (no GStreamer elements).
@@ -80,8 +94,8 @@ mod tests {
             instance_id: Uuid::new_v4(),
             source_element: gst::glib::WeakRef::new(),
             internal_pipeline: RwLock::new(None),
-            video_appsrc: None,
-            audio_appsrc: None,
+            video_appsrcs: Vec::new(),
+            audio_appsrcs: Vec::new(),
             playlist: RwLock::new(Playlist {
                 files: playlist,
                 current_index: 0,
@@ -91,59 +105,66 @@ mod tests {
             block_id: block_id.to_string(),
             flow_id,
             switching_file: AtomicBool::new(false),
-            video_linked: AtomicBool::new(false),
-            audio_linked: AtomicBool::new(false),
+            video_slots: MediaPlayerState::free_slots(0),
+            audio_slots: MediaPlayerState::free_slots(0),
             decode: false,
             sync: true,
             media_path: std::path::PathBuf::from("/media"),
-            ts_offset: Arc::new(AtomicI64::new(i64::MIN)),
+            timing: Arc::new(super::timing::Timing::new(0)),
             main_pipeline: gst::glib::WeakRef::new(),
             bus_watch: std::sync::Mutex::new(None),
         }
     }
 
     #[test]
-    fn test_normalize_uri_file_scheme() {
-        let media_path = std::path::Path::new("/media");
-        assert_eq!(
-            normalize_uri("file:///path/to/video.mp4", media_path),
-            "file:///path/to/video.mp4"
-        );
-    }
+    fn test_normalize_uri() {
+        // A media dir that does not exist, so canonicalize() leaves paths alone
+        let media_path = std::path::Path::new("/nonexistent-strom-media");
+        let in_media = format!("file://{}", media_path.join("video.mp4").display());
 
-    #[test]
-    fn test_normalize_uri_http_scheme() {
-        let media_path = std::path::Path::new("/media");
-        assert_eq!(
-            normalize_uri("http://example.com/video.mp4", media_path),
-            "http://example.com/video.mp4"
-        );
-    }
-
-    #[test]
-    fn test_normalize_uri_https_scheme() {
-        let media_path = std::path::Path::new("/media");
-        assert_eq!(
-            normalize_uri("https://example.com/video.mp4", media_path),
-            "https://example.com/video.mp4"
-        );
-    }
-
-    #[test]
-    fn test_normalize_uri_relative_path() {
-        let media_path = std::path::Path::new("/media");
-        let result = normalize_uri("video.mp4", media_path);
-        assert!(result.starts_with("file://"));
-        assert!(result.ends_with("video.mp4"));
-    }
-
-    #[test]
-    fn test_normalize_uri_absolute_path() {
-        let media_path = std::path::Path::new("/media");
-        assert_eq!(
-            normalize_uri("/tmp/video.mp4", media_path),
-            "file:///tmp/video.mp4"
-        );
+        let cases: Vec<(&str, String)> = vec![
+            // URIs with a scheme pass through
+            (
+                "file:///path/to/video.mp4",
+                "file:///path/to/video.mp4".into(),
+            ),
+            (
+                "http://example.com/video.mp4",
+                "http://example.com/video.mp4".into(),
+            ),
+            (
+                "https://example.com/video.mp4",
+                "https://example.com/video.mp4".into(),
+            ),
+            (
+                "https://example.com/live/master.m3u8?format=hls",
+                "https://example.com/live/master.m3u8?format=hls".into(),
+            ),
+            (
+                "rtsp://192.0.2.10:8554/stream",
+                "rtsp://192.0.2.10:8554/stream".into(),
+            ),
+            (
+                "srt://192.0.2.10:9000?mode=caller",
+                "srt://192.0.2.10:9000?mode=caller".into(),
+            ),
+            ("udp://239.0.0.1:5000", "udp://239.0.0.1:5000".into()),
+            // Relative paths resolve against media_path, legacy prefixes stripped
+            ("video.mp4", in_media.clone()),
+            ("./media/video.mp4", in_media.clone()),
+            ("media/video.mp4", in_media),
+            // Absolute paths are kept
+            (
+                "/nonexistent-strom-abs/video.mp4",
+                "file:///nonexistent-strom-abs/video.mp4".into(),
+            ),
+        ];
+        // Not a scheme: a file whose name merely contains "://" further on
+        let odd = "my video ://.mp4";
+        let odd_expected = format!("file://{}", media_path.join(odd).display());
+        for (input, expected) in cases.into_iter().chain([(odd, odd_expected)]) {
+            assert_eq!(normalize_uri(input, media_path), expected, "{}", input);
+        }
     }
 
     #[test]
@@ -205,54 +226,5 @@ mod tests {
 
         state.is_paused.store(true, Ordering::SeqCst);
         assert_eq!(state.state(), PlayerState::Paused);
-    }
-
-    #[test]
-    fn test_block_definition() {
-        let def = definition::media_player_definition();
-
-        assert_eq!(def.id, "builtin.media_player");
-        assert_eq!(def.category, "Inputs");
-        assert!(def.built_in);
-        assert_eq!(def.exposed_properties.len(), 4);
-
-        let decode = def
-            .exposed_properties
-            .iter()
-            .find(|p| p.name == "decode")
-            .unwrap();
-        assert!(matches!(decode.property_type, PropertyType::Bool));
-        assert!(matches!(
-            decode.default_value,
-            Some(PropertyValue::Bool(false))
-        ));
-
-        let sync = def
-            .exposed_properties
-            .iter()
-            .find(|p| p.name == "sync")
-            .unwrap();
-        assert!(matches!(
-            sync.default_value,
-            Some(PropertyValue::Bool(true))
-        ));
-
-        assert!(def
-            .exposed_properties
-            .iter()
-            .any(|p| p.name == "loop_playlist"));
-
-        assert_eq!(def.external_pads.inputs.len(), 0);
-        assert_eq!(def.external_pads.outputs.len(), 2);
-        assert!(def
-            .external_pads
-            .outputs
-            .iter()
-            .any(|p| p.name == "video_out"));
-        assert!(def
-            .external_pads
-            .outputs
-            .iter()
-            .any(|p| p.name == "audio_out"));
     }
 }

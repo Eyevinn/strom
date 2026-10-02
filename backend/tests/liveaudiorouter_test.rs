@@ -4,6 +4,8 @@
 //! the same property set and pad shape as `builtin.audiorouter`, and differ only
 //! in being able to change its crosspoints on a running flow.
 
+pub mod common;
+
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
@@ -72,6 +74,8 @@ fn liveaudiorouter_exposes_the_same_property_set_as_audiorouter() {
         "latency".to_string(),
         "min_upstream_latency".to_string(),
         "output_buffer_duration".to_string(),
+        // ...the rate every bus runs at, resampling each input to it...
+        liveaudiorouter::SAMPLE_RATE_PROPERTY.to_string(),
         // ...including the two that give the bus somewhere to put a fan-in
         // sum. `builtin.audiorouter` has neither and clips the same way.
         liveaudiorouter::OUTPUT_FADER_PROPERTY.to_string(),
@@ -214,22 +218,10 @@ const REQUIRED_ELEMENTS: &[&str] = &[
     "valve",
     "audiotestsrc",
     "audioconvert",
+    "audioresample",
     "level",
     "fakesink",
 ];
-
-fn require_elements() {
-    gst::init().unwrap();
-    let missing: Vec<&str> = REQUIRED_ELEMENTS
-        .iter()
-        .copied()
-        .filter(|n| gst::ElementFactory::find(n).is_none())
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "missing GStreamer elements {missing:?} — install gstreamer1.0-plugins-{{base,good,bad}}"
-    );
-}
 
 struct Harness {
     pipeline: gst::Pipeline,
@@ -259,7 +251,7 @@ fn resolve_pad(element: &gst::Element, name: &str) -> gst::Pad {
 /// Build the block through its real builder and assemble the result into a
 /// pipeline the way the pipeline manager does.
 fn assemble(instance: &str, properties: &HashMap<String, PropertyValue>) -> Harness {
-    require_elements();
+    common::require_elements(REQUIRED_ELEMENTS);
     let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
     let result = liveaudiorouter::LiveAudioRouterBuilder
         .build(instance, properties, &ctx)
@@ -1021,6 +1013,114 @@ fn a_source_that_stops_does_not_stall_the_other_inputs() {
 }
 
 // ============================================================================
+// Declared versus negotiated channel counts — the guard for #785
+// ============================================================================
+
+/// Warnings the block's input `identity_in_{input}` posts within `timeout`.
+/// Returns early on the first one. Any pipeline error fails the test, as in
+/// `observe_peaks`.
+fn observe_input_warnings(
+    pipeline: &gst::Pipeline,
+    instance: &str,
+    input: usize,
+    timeout: Duration,
+) -> Vec<String> {
+    let bus = pipeline.bus().expect("pipeline bus");
+    let source = format!("{instance}:identity_in_{input}");
+    let mut warnings = Vec::new();
+    let start = Instant::now();
+
+    while start.elapsed() < timeout && warnings.is_empty() {
+        let remaining = timeout.saturating_sub(start.elapsed());
+        let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(remaining.as_millis() as u64))
+        else {
+            break;
+        };
+        match msg.view() {
+            gst::MessageView::Error(e) => panic!(
+                "pipeline error from {:?}: {} ({:?})",
+                e.src().map(|s| s.path_string()),
+                e.error(),
+                e.debug()
+            ),
+            gst::MessageView::Warning(w)
+                if w.src().map(|s| s.name()).as_deref() == Some(source.as_str()) =>
+            {
+                warnings.push(w.error().to_string());
+            }
+            _ => {}
+        }
+    }
+
+    warnings
+}
+
+#[test]
+fn an_input_carrying_fewer_channels_than_declared_is_reported() {
+    // Declared stereo, fed mono. The router must not resize its grid to the
+    // stream, but it must tell the operator which property disagrees.
+    let properties = props(&[
+        ("num_inputs", PropertyValue::UInt(1)),
+        ("num_outputs", PropertyValue::UInt(1)),
+        ("input_0_channels", PropertyValue::UInt(2)),
+        ("output_0_channels", PropertyValue::UInt(1)),
+        (
+            "routing_matrix",
+            PropertyValue::String(r#"{"i0c0":["o0c0"]}"#.to_string()),
+        ),
+    ]);
+
+    let h = assemble("live", &properties);
+    feed(&h, "live", 0, &[(440.0, 0.5)]);
+    tap(&h, "live", 0);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let warnings = observe_input_warnings(&h.pipeline, "live", 0, Duration::from_secs(3));
+    assert_eq!(
+        warnings.len(),
+        1,
+        "a mono stream on an input declared with 2 channels must post one warning \
+         from identity_in_0, got {warnings:?}"
+    );
+    assert!(
+        warnings[0].contains("input_0_channels") && warnings[0].contains("carries 1 channel"),
+        "the warning must name the property to change and the negotiated count, got {:?}",
+        warnings[0]
+    );
+}
+
+#[test]
+fn an_input_carrying_the_declared_channels_is_not_reported() {
+    // The counterpart: a stream that matches its declaration stays quiet, so
+    // the warning above cannot be satisfied by warning on every input.
+    let properties = props(&[
+        ("num_inputs", PropertyValue::UInt(1)),
+        ("num_outputs", PropertyValue::UInt(1)),
+        ("input_0_channels", PropertyValue::UInt(1)),
+        ("output_0_channels", PropertyValue::UInt(1)),
+        (
+            "routing_matrix",
+            PropertyValue::String(r#"{"i0c0":["o0c0"]}"#.to_string()),
+        ),
+    ]);
+
+    let h = assemble("live", &properties);
+    feed(&h, "live", 0, &[(440.0, 0.5)]);
+    tap(&h, "live", 0);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let warnings = observe_input_warnings(&h.pipeline, "live", 0, Duration::from_secs(2));
+    assert!(
+        warnings.is_empty(),
+        "an input whose stream matches its declared channel count must not warn, got {warnings:?}"
+    );
+}
+
+// ============================================================================
 // Fades — why a crosspoint is a `volume` element and not a matrix coefficient
 // ============================================================================
 
@@ -1080,7 +1180,7 @@ fn the_crossbar_costs_no_thread_per_crosspoint() {
         ("output_1_channels", PropertyValue::UInt(8)),
     ]);
 
-    require_elements();
+    common::require_elements(REQUIRED_ELEMENTS);
     let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
     let result = liveaudiorouter::LiveAudioRouterBuilder
         .build("live", &properties, &ctx)
@@ -1128,7 +1228,7 @@ const CONTROLLABLE_FLAG: u32 = 1 << 9;
 /// have in saved flows, so it has to keep routing audio exactly as before.
 #[test]
 fn the_original_audiorouter_still_routes_audio() {
-    require_elements();
+    common::require_elements(REQUIRED_ELEMENTS);
     let properties = props(&[
         ("num_inputs", PropertyValue::UInt(2)),
         ("num_outputs", PropertyValue::UInt(1)),
@@ -1221,7 +1321,7 @@ fn the_original_audiorouter_is_not_offered_live_routing_or_gains() {
 /// Which crosspoints a build opens, by (input stream, channel, output stream,
 /// channel), read back from the elements the builder produced.
 fn open_crosspoints(instance: &str, properties: &HashMap<String, PropertyValue>) -> Vec<String> {
-    require_elements();
+    common::require_elements(REQUIRED_ELEMENTS);
     let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
     let result = liveaudiorouter::LiveAudioRouterBuilder
         .build(instance, properties, &ctx)
@@ -1280,7 +1380,7 @@ fn the_original_audiorouter_keeps_its_silent_default() {
     // The default is deliberately not applied to `builtin.audiorouter`: an
     // existing flow whose router was never configured must not start passing
     // audio because of an upgrade.
-    require_elements();
+    common::require_elements(REQUIRED_ELEMENTS);
     let fresh = props(&[
         ("num_inputs", PropertyValue::UInt(1)),
         ("num_outputs", PropertyValue::UInt(1)),
@@ -1772,4 +1872,169 @@ fn the_headroom_properties_are_offered_and_default_to_no_op() {
             "defaulting the soft clipper on would change what every existing flow sounds like"
         )
     };
+}
+
+// ============================================================================
+// Inputs at different sample rates (#886)
+// ============================================================================
+
+/// Two mono inputs, each on its own channel of one stereo output.
+fn two_rate_router(extra: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
+    let mut properties = props(&[
+        ("num_inputs", PropertyValue::UInt(2)),
+        ("num_outputs", PropertyValue::UInt(1)),
+        ("input_0_channels", PropertyValue::UInt(1)),
+        ("input_1_channels", PropertyValue::UInt(1)),
+        ("output_0_channels", PropertyValue::UInt(2)),
+        (
+            "routing_matrix",
+            PropertyValue::String(r#"{"i0c0":["o0c0"],"i1c0":["o0c1"]}"#.to_string()),
+        ),
+    ]);
+    for (k, v) in extra {
+        properties.insert(k.to_string(), v.clone());
+    }
+    properties
+}
+
+/// A live mono tone at `rate`, with no resampler of its own, linked to
+/// `input`. Returns the source and its capsfilter so a late caller can sync
+/// their state.
+fn connect_mono_at_rate(h: &Harness, instance: &str, input: usize, rate: i32) -> [gst::Element; 2] {
+    let src = gst::ElementFactory::make("audiotestsrc")
+        .property("is-live", true)
+        .property("freq", 440.0)
+        .property("volume", 0.5)
+        .build()
+        .expect("audiotestsrc");
+    let caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("channels", 1i32)
+                .field("rate", rate)
+                .field("format", "F32LE")
+                .build(),
+        )
+        .build()
+        .expect("capsfilter");
+    h.pipeline.add_many([&src, &caps]).expect("add source");
+    src.link(&caps).expect("link source");
+    caps.link(&h.elements[&format!("{instance}:identity_in_{input}")])
+        .expect("link input");
+    [src, caps]
+}
+
+/// The rate `mixer_0` negotiated, waiting up to five seconds for it.
+fn bus_rate(h: &Harness, instance: &str) -> i32 {
+    let pad = h.elements[&format!("{instance}:mixer_0")]
+        .static_pad("src")
+        .expect("mixer src pad");
+    let start = Instant::now();
+    loop {
+        if let Some(caps) = pad.current_caps() {
+            return caps.structure(0).unwrap().get::<i32>("rate").unwrap();
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "mixer_0 never negotiated"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn inputs_at_two_rates_connected_at_start_are_both_heard() {
+    let instance = "two_rates";
+    let h = assemble(instance, &two_rate_router(&[]));
+    tap(&h, instance, 0);
+    connect_mono_at_rate(&h, instance, 0, 48_000);
+    connect_mono_at_rate(&h, instance, 1, 44_100);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let peaks = observe_peaks(&h.pipeline, 2, Duration::from_secs(2));
+    assert!(
+        !is_silent(peaks[0]) && !is_silent(peaks[1]),
+        "a 48 kHz and a 44.1 kHz input must both reach the output, got {peaks:?}"
+    );
+    assert_eq!(
+        bus_rate(&h, instance),
+        48_000,
+        "the bus runs at the default"
+    );
+}
+
+#[test]
+fn an_input_at_another_rate_joining_a_running_bus_is_heard() {
+    let instance = "join_rate";
+    let h = assemble(instance, &two_rate_router(&[]));
+    tap(&h, instance, 0);
+    connect_mono_at_rate(&h, instance, 0, 48_000);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+    let first = observe_peaks(&h.pipeline, 2, Duration::from_secs(1));
+    assert!(
+        !is_silent(first[0]),
+        "the first input must be heard before the second joins, got {first:?}"
+    );
+
+    for element in connect_mono_at_rate(&h, instance, 1, 44_100) {
+        element.sync_state_with_parent().expect("sync late source");
+    }
+    let peaks = observe_peaks(&h.pipeline, 2, Duration::from_secs(2));
+    assert!(
+        !is_silent(peaks[0]) && !is_silent(peaks[1]),
+        "a 44.1 kHz input joining a running 48 kHz bus must be heard, got {peaks:?}"
+    );
+}
+
+#[test]
+fn the_sample_rate_property_sets_the_bus_rate() {
+    let instance = "rate_prop";
+    let h = assemble(
+        instance,
+        &two_rate_router(&[(
+            liveaudiorouter::SAMPLE_RATE_PROPERTY,
+            PropertyValue::String("44100".to_string()),
+        )]),
+    );
+    tap(&h, instance, 0);
+    connect_mono_at_rate(&h, instance, 0, 48_000);
+    connect_mono_at_rate(&h, instance, 1, 48_000);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let peaks = observe_peaks(&h.pipeline, 2, Duration::from_secs(2));
+    assert!(
+        !is_silent(peaks[0]) && !is_silent(peaks[1]),
+        "48 kHz inputs must be resampled onto a 44.1 kHz bus, got {peaks:?}"
+    );
+    assert_eq!(bus_rate(&h, instance), 44_100);
+}
+
+#[test]
+fn the_sample_rate_property_offers_the_common_rates_and_defaults_to_48k() {
+    let def = definition(liveaudiorouter::get_blocks(), "builtin.liveaudiorouter");
+    let prop = def
+        .exposed_properties
+        .iter()
+        .find(|p| p.name == liveaudiorouter::SAMPLE_RATE_PROPERTY)
+        .expect("sample_rate is exposed");
+    assert_eq!(
+        format!("{:?}", prop.default_value),
+        format!("{:?}", Some(PropertyValue::String("48000".to_string())))
+    );
+    assert_eq!(
+        format!("{:?}", prop.property_type),
+        format!(
+            "{:?}",
+            strom_types::PropertyType::Enum {
+                values: strom_types::common_audio_sample_rate_enum_values(false)
+            }
+        )
+    );
 }

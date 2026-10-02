@@ -5,7 +5,7 @@
 //!
 //! Pipeline structure (decode=true, default):
 //! ```text
-//! srtsrc -> decodebin -> deinterlace -> video_output (identity) -> [external video_out]
+//! srtsrc -> decodebin -> [deinterlace] -> video_output (identity) -> [external video_out]
 //!                     -> audioconvert -> audioresample -> audio_output_0 (identity) -> [external audio_out_0]
 //! ```
 //!
@@ -563,12 +563,12 @@ fn link_passthrough(
         .map_err(|e| format!("{:?}", e))
 }
 
-/// decodebin (raw) pad -> deinterlace -> identity
+/// decodebin (raw) pad -> [deinterlace] -> identity
 ///
 /// The GL-based vision mixer rejects interlaced frames at `glupload`, so
-/// interlaced broadcast feeds (e.g. 1080i50) are deinterlaced here. See
-/// [`super::decode_chain::link_raw_video_through_deinterlace`] for how the
-/// deinterlace mode is chosen from the negotiated caps.
+/// interlaced broadcast feeds (e.g. 1080i50) are deinterlaced here. A
+/// progressive stream skips `deinterlace`, so a GPU decoder's frames stay in
+/// GPU memory. See [`super::decode_chain::link_raw_video`].
 fn link_decoded_video(
     element: &gst::Element,
     src_pad: &gst::Pad,
@@ -580,20 +580,7 @@ fn link_decoded_video(
         .and_then(|p| p.downcast::<gst::Bin>().ok())
         .ok_or("parent is not a Bin")?;
 
-    super::decode_chain::link_raw_video_through_deinterlace(
-        &bin,
-        src_pad,
-        identity,
-        instance_id,
-        &src_pad.name(),
-    )?;
-
-    debug!(
-        "MPEGTSSRT Input {}: Inserted deinterlace for pad {}",
-        instance_id,
-        src_pad.name()
-    );
-    Ok(())
+    super::decode_chain::link_raw_video(&bin, src_pad, identity, instance_id, &src_pad.name())
 }
 
 /// Dynamically insert audioconvert + audioresample between a decoded audio pad and an identity element.

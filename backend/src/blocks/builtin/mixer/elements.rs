@@ -43,6 +43,8 @@ pub(crate) fn make_audiomixer(
     // causing the aggregator to pick the absolute monotonic clock time as start
     // time and wait for an impossibly far deadline.
     mixer.set_property_from_str("start-time-selection", "zero");
+    // Selected once, at startup: a late first input must not rewind a running bus.
+    crate::gst::aggregator_start::disarm_start_time_selection(&mixer);
 
     // latency: aggregator timeout in nanoseconds
     let latency_ns = latency_ms * 1_000_000;
@@ -63,6 +65,22 @@ pub(crate) fn make_audiomixer(
     }
 
     Ok(mixer)
+}
+
+/// Create the capsfilter that follows a bus mixer and pins it to `rate`.
+/// Only the rate is fixed: format and channels stay with whatever the bus
+/// negotiates.
+pub(super) fn make_rate_pin(name: &str, rate: u32) -> Result<gst::Element, BlockBuildError> {
+    gst::ElementFactory::make("capsfilter")
+        .name(name)
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("rate", rate as i32)
+                .build(),
+        )
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter {}: {}", name, e)))
 }
 
 /// Create a gate element, falling back to identity passthrough if unavailable.

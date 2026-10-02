@@ -10,13 +10,29 @@ use axum::{
     Router,
 };
 use serde_json::{json, Value};
+use strom::create_app_with_state;
+use strom::state::AppState;
+use tempfile::TempDir;
 use tower::ServiceExt; // for `oneshot`
 
-async fn create_test_app() -> Router {
-    use strom::create_app;
-
+/// Create a test app whose state (flows, blocks, media) lives in a temporary
+/// directory, so running the tests never writes into the working directory.
+///
+/// The returned `TempDir` must be kept alive for as long as the app is used.
+async fn create_test_app() -> (Router, TempDir) {
     gstreamer::init().unwrap();
-    create_app().await
+    let dir = TempDir::new().unwrap();
+    let state = AppState::with_json_storage(
+        dir.path().join("flows.json"),
+        dir.path().join("blocks.json"),
+        dir.path().join("media"),
+        vec![],
+        "all".to_string(),
+        vec![],
+        false,
+        false,
+    );
+    (create_app_with_state(state).await, dir)
 }
 
 /// POST a JSON-RPC message to /api/mcp and return (status, body).
@@ -104,7 +120,7 @@ async fn initialize(app: &Router) -> String {
 
 #[tokio::test]
 async fn initialize_assigns_a_session() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
     let session_id = initialize(&app).await;
     assert!(!session_id.is_empty());
 }
@@ -115,7 +131,7 @@ async fn initialize_assigns_a_session() {
 /// which the client cannot match to any request it made.
 #[tokio::test]
 async fn notifications_are_accepted_without_a_response() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
     let session_id = initialize(&app).await;
 
     for notification in [
@@ -147,7 +163,7 @@ async fn notifications_are_accepted_without_a_response() {
 
 #[tokio::test]
 async fn ping_is_answered() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
     let session_id = initialize(&app).await;
 
     let json = post_mcp_json(
@@ -164,7 +180,7 @@ async fn ping_is_answered() {
 
 #[tokio::test]
 async fn tools_list_returns_the_tool_set() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
     let session_id = initialize(&app).await;
 
     let json = post_mcp_json(
@@ -217,7 +233,7 @@ async fn tools_list_returns_the_tool_set() {
 
 #[tokio::test]
 async fn a_round_trip_creates_and_deletes_a_flow() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
     let session_id = initialize(&app).await;
 
     let created = post_mcp_json(
@@ -290,7 +306,7 @@ async fn a_round_trip_creates_and_deletes_a_flow() {
 /// error — the model has to be able to read the reason and recover.
 #[tokio::test]
 async fn a_failing_tool_returns_an_is_error_result() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
     let session_id = initialize(&app).await;
 
     let json = post_mcp_json(
@@ -332,7 +348,7 @@ async fn a_failing_tool_returns_an_is_error_result() {
 /// ("invalid character: found `n` at 0").
 #[tokio::test]
 async fn a_malformed_call_returns_an_actionable_protocol_error() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
     let session_id = initialize(&app).await;
 
     let unknown_tool = post_mcp_json(
@@ -391,7 +407,7 @@ async fn a_malformed_call_returns_an_actionable_protocol_error() {
 
 #[tokio::test]
 async fn an_unknown_request_method_is_a_method_not_found_error() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
     let session_id = initialize(&app).await;
 
     let json = post_mcp_json(
@@ -407,7 +423,7 @@ async fn an_unknown_request_method_is_a_method_not_found_error() {
 
 #[tokio::test]
 async fn an_unknown_session_is_rejected_and_delete_ends_a_known_one() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
     let session_id = initialize(&app).await;
 
     let (status, _) = post_mcp(
@@ -444,7 +460,7 @@ async fn an_unknown_session_is_rejected_and_delete_ends_a_known_one() {
 
 #[tokio::test]
 async fn a_cross_site_origin_is_refused() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let response = app
         .clone()
