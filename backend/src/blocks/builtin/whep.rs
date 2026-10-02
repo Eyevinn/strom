@@ -164,7 +164,10 @@ fn resolve_track_counts(properties: &HashMap<String, PropertyValue>) -> (usize, 
     (num_audio, num_video)
 }
 
-fn explicit_track_count(properties: &HashMap<String, PropertyValue>, name: &str) -> Option<usize> {
+pub(crate) fn explicit_track_count(
+    properties: &HashMap<String, PropertyValue>,
+    name: &str,
+) -> Option<usize> {
     properties.get(name).and_then(|v| match v {
         PropertyValue::UInt(u) => Some((*u as usize).min(8)),
         PropertyValue::Int(i) => Some((*i).clamp(0, 8) as usize),
