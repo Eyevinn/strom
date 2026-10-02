@@ -587,15 +587,20 @@ fn link_pad_through_clocksync(
                 };
 
                 let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-                // A buffer with no PTS stops here. Nothing downstream can place
-                // it: a recorder's `qtmux` answers it with `Buffer has no PTS`
-                // and GST_FLOW_ERROR, which takes the whole flow down. Dropping
-                // one frame of a source is the recoverable failure.
-                let Some(pts) = buffer.pts() else {
+                let pts = buffer.pts();
+                // Placed by its PTS, or by its DTS when it has none: in
+                // passthrough a demuxer or parser may leave an encoded frame
+                // with a DTS only (an MPEG-TS PES between PTS stamps, a parser
+                // that cannot order B-frames), and dropping it breaks the
+                // stream for every consumer. A buffer with neither stops here.
+                // Nothing downstream can place it: a recorder's `qtmux` answers
+                // it with `Buffer has no PTS` and GST_FLOW_ERROR, which takes
+                // the whole flow down.
+                let Some(stamp) = pts.or(buffer.dts()) else {
                     dropped_unstamped += 1;
                     if dropped_unstamped == 1 || dropped_unstamped.is_multiple_of(100) {
                         warn!(
-                            "Media Player bridge: dropped {} buffer(s) with no PTS on the {} stream",
+                            "Media Player bridge: dropped {} buffer(s) with no timestamp on the {} stream",
                             dropped_unstamped, media_type_owned
                         );
                     }
@@ -604,8 +609,8 @@ fn link_pad_through_clocksync(
                 let rt = sample
                     .segment()
                     .and_then(|s| s.downcast_ref::<gst::ClockTime>())
-                    .and_then(|s| s.to_running_time(pts))
-                    .unwrap_or(pts);
+                    .and_then(|s| s.to_running_time(stamp))
+                    .unwrap_or(stamp);
 
                 if main_clock.is_none() {
                     main_clock = main_pipeline_weak
@@ -628,12 +633,17 @@ fn link_pad_through_clocksync(
                     }
                 }
 
-                // Move PTS and DTS by the same step, so their spacing holds.
-                let step = placed.running_time.max(0) - pts.nseconds() as i64;
+                // Move PTS and DTS by the same step, so their spacing holds. A
+                // buffer that came without a PTS leaves without one.
+                let step = placed.running_time.max(0) - stamp.nseconds() as i64;
                 let mut new_buf = buffer.copy();
                 {
                     let buf_ref = new_buf.make_mut();
-                    buf_ref.set_pts(gst::ClockTime::from_nseconds(placed.running_time.max(0) as u64));
+                    if pts.is_some() {
+                        buf_ref.set_pts(gst::ClockTime::from_nseconds(
+                            placed.running_time.max(0) as u64,
+                        ));
+                    }
                     if let Some(dts) = buffer.dts() {
                         let adj = (dts.nseconds() as i64 + step).max(0) as u64;
                         buf_ref.set_dts(gst::ClockTime::from_nseconds(adj));
@@ -1325,11 +1335,11 @@ mod tests {
         }
     }
 
-    /// A buffer with no PTS must not reach the main pipeline: a recorder's
-    /// `qtmux` fails on it with `Buffer has no PTS`, and that error takes the
-    /// whole flow down. Drives the real bridge through `route_pad`: three
-    /// buffers in, the middle one unstamped, and only the two stamped ones may
-    /// arrive.
+    /// A buffer with no timestamp must not reach the main pipeline: a
+    /// recorder's `qtmux` fails on it with `Buffer has no PTS`, and that error
+    /// takes the whole flow down. A buffer with a DTS only is legal encoded
+    /// data in passthrough (an MPEG-TS PES between PTS stamps) and must still
+    /// cross, placed by its DTS. Drives the real bridge through `route_pad`.
     #[test]
     fn an_unstamped_buffer_never_reaches_the_main_pipeline() {
         let _ = gst::init();
@@ -1373,13 +1383,34 @@ mod tests {
             TrackKind::Audio,
             "",
         );
+        // appsrc gives a buffer that has a DTS only its DTS as PTS on the way
+        // out. A demuxer in passthrough does not, so take it off again here,
+        // ahead of the bridge.
+        src.static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, |_, info| {
+                if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_mut() {
+                    if buffer.dts().is_some() && buffer.pts() == buffer.dts() {
+                        buffer.make_mut().set_pts(gst::ClockTime::NONE);
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            });
         internal.set_state(gst::State::Playing).unwrap();
 
-        for pts in [Some(0u64), None, Some(20)] {
+        // (PTS, DTS) in ms: stamped, neither, DTS only, stamped.
+        let pushes = [
+            (Some(0u64), None),
+            (None, None),
+            (None, Some(20u64)),
+            (Some(40), None),
+        ];
+        for (pts, dts) in pushes {
             let mut buf = gst::Buffer::with_size(48 * 20 * 4).unwrap();
             {
                 let b = buf.get_mut().unwrap();
                 b.set_pts(pts.map(gst::ClockTime::from_mseconds));
+                b.set_dts(dts.map(gst::ClockTime::from_mseconds));
                 b.set_duration(gst::ClockTime::from_mseconds(20));
             }
             src.push_buffer(buf).unwrap();
@@ -1387,20 +1418,34 @@ mod tests {
 
         let mut arrived = Vec::new();
         while let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(500)) {
-            arrived.push(sample.buffer().unwrap().pts());
+            let buffer = sample.buffer().unwrap();
+            arrived.push((buffer.pts(), buffer.dts()));
         }
         let _ = internal.set_state(gst::State::Null);
         let _ = main.set_state(gst::State::Null);
 
         assert!(
-            arrived.iter().all(Option::is_some),
-            "a buffer with no PTS reached the main pipeline: {:?}",
+            arrived
+                .iter()
+                .all(|(pts, dts)| pts.is_some() || dts.is_some()),
+            "a buffer with no timestamp reached the main pipeline: {:?}",
             arrived
         );
         assert_eq!(
             arrived.len(),
-            2,
-            "both stamped buffers must arrive: {:?}",
+            3,
+            "the stamped and the DTS-only buffers must all arrive: {:?}",
+            arrived
+        );
+        let (_, dts) = arrived[1];
+        assert!(
+            dts.is_some(),
+            "the DTS-only buffer must keep its DTS: {:?}",
+            arrived
+        );
+        assert!(
+            arrived[0].0 < dts && dts < arrived[2].0,
+            "the DTS-only buffer must be placed between its neighbours: {:?}",
             arrived
         );
     }
