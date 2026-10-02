@@ -1907,12 +1907,19 @@ impl eframe::App for StromApp {
 
                     match action {
                         "play" | "pause" | "stop" | "next" | "previous" => {
-                            let action_str = action.to_string();
+                            use strom_types::mediaplayer::PlayerAction;
+                            let player_action = match action {
+                                "play" => PlayerAction::Play,
+                                "pause" => PlayerAction::Pause,
+                                "stop" => PlayerAction::Stop,
+                                "next" => PlayerAction::Next,
+                                _ => PlayerAction::Previous,
+                            };
                             #[cfg(target_arch = "wasm32")]
                             {
                                 wasm_bindgen_futures::spawn_local(async move {
                                     if let Err(e) =
-                                        api.control_player(flow_id, &block_id, &action_str).await
+                                        api.control_player(flow_id, &block_id, player_action).await
                                     {
                                         tracing::error!("Failed to control player: {}", e);
                                     }
@@ -1925,7 +1932,7 @@ impl eframe::App for StromApp {
                                 if let Ok(handle) = rt {
                                     handle.spawn(async move {
                                         if let Err(e) = api
-                                            .control_player(flow_id, &block_id, &action_str)
+                                            .control_player(flow_id, &block_id, player_action)
                                             .await
                                         {
                                             tracing::error!("Failed to control player: {}", e);

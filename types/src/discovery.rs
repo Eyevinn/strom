@@ -32,7 +32,7 @@ pub struct DiscoveredStreamResponse {
 }
 
 /// Response for announced streams list.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct AnnouncedStreamResponse {
     pub flow_id: String,
@@ -112,6 +112,16 @@ pub struct DeviceResponse {
 }
 
 impl DeviceResponse {
+    /// IP address property, set by the NDI device provider.
+    pub fn ip_address(&self) -> Option<&str> {
+        self.properties.get("ip").map(|s| s.as_str())
+    }
+
+    /// URL address property, set by the NDI device provider.
+    pub fn url_address(&self) -> Option<&str> {
+        self.properties.get("url-address").map(|s| s.as_str())
+    }
+
     /// Human-readable name of the OS media API exposing this device
     /// (e.g. "WASAPI", "PulseAudio", "V4L2").
     ///
@@ -184,7 +194,7 @@ pub struct DeviceCountByCategory {
 }
 
 /// NDI discovery status response.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct NdiDiscoveryStatus {
     /// Whether NDI discovery is available (plugin installed).
@@ -253,5 +263,44 @@ mod tests {
     #[test]
     fn api_label_ignores_empty_device_api() {
         assert_eq!(device("alsadeviceprovider", Some("")).api_label(), "ALSA");
+    }
+
+    // The frontend decodes these responses with the same types the backend serializes.
+    #[test]
+    fn responses_decode_with_optional_fields_absent() {
+        let stream: DiscoveredStreamResponse = serde_json::from_str(
+            r#"{"id":"a","name":"n","source":"sap","multicast_address":"239.0.0.1","port":5004,
+                "channels":2,"sample_rate":48000,"encoding":"L24","origin_host":"192.0.2.1",
+                "first_seen_secs_ago":1,"last_seen_secs_ago":0,"ttl_secs":60}"#,
+        )
+        .unwrap();
+        assert!(stream.received_on_interface.is_none());
+
+        let announced: AnnouncedStreamResponse = serde_json::from_str(
+            r#"{"flow_id":"f","block_id":"b","origin_ip":"192.0.2.1","sdp":"v=0"}"#,
+        )
+        .unwrap();
+        assert!(announced.announce_interface.is_none());
+
+        let ndi: NdiDiscoveryStatus =
+            serde_json::from_str(r#"{"available":true,"source_count":3}"#).unwrap();
+        assert!(ndi.available);
+        assert_eq!(ndi.source_count, 3);
+    }
+
+    #[test]
+    fn device_response_round_trips_with_ndi_addresses() {
+        let mut dev = device("ndideviceprovider", None);
+        dev.category = DeviceCategory::NetworkSource;
+        dev.properties
+            .insert("ip".to_string(), "192.0.2.5".to_string());
+        dev.properties
+            .insert("url-address".to_string(), "192.0.2.5:5961".to_string());
+        let back: DeviceResponse =
+            serde_json::from_str(&serde_json::to_string(&dev).unwrap()).unwrap();
+        assert_eq!(back.category, DeviceCategory::NetworkSource);
+        assert_eq!(back.ip_address(), Some("192.0.2.5"));
+        assert_eq!(back.url_address(), Some("192.0.2.5:5961"));
+        assert_eq!(device("pulsedeviceprovider", None).ip_address(), None);
     }
 }
