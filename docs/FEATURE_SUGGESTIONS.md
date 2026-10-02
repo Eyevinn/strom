@@ -39,6 +39,14 @@ interests you, open a GitHub issue or discussion.
   A/B comparison of encoder settings.
 - **Cloud storage integration** — S3-compatible sinks, CDN push for HLS/DASH, webhook
   notifications on pipeline events.
+- **Audio and video into an HTML source** — today the HTML Input block only takes media out
+  of a page, and a page asking for a camera or microphone gets synthetic ones. Giving the
+  block audio and video inputs would let a page send real media. One example is returning
+  program into a video call it has joined. Two ways to do it: a `getUserMedia` shim
+  injected into the page that hands it a `MediaStream` played from one of Strom's WHEP endpoints, or raw frames pushed
+  into the page and turned into tracks with WebCodecs. The WHEP shim reuses what Strom
+  already serves and keeps encoding in Strom. WebCodecs avoids a WebRTC round trip on the
+  same machine, but it needs a channel for raw frames into the page.
 - **Plugin manager** — discover installed GStreamer plugins, show element capabilities, and
   suggest which plugin to install for a missing element.
 
