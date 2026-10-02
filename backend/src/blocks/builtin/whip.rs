@@ -27,10 +27,11 @@ use crate::whip_session_manager::{
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
+use gstreamer_rtp as gst_rtp;
 use gstreamer_video as gst_video;
 use std::collections::HashMap;
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use strom_types::block::StreamMode;
@@ -770,9 +771,9 @@ fn install_slot_bridge(
     activity: Arc<SessionActivity>,
     session_finished: Arc<AtomicBool>,
 ) {
-    let media_for_log = media_type.to_string();
     // Resolved here, not per buffer: the pad's media type is fixed.
     let pad_is_audio = media_type == "audio";
+    let video_order = VideoPtsOrder::new();
 
     appsink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
@@ -789,7 +790,11 @@ fn install_slot_bridge(
                     &session_finished,
                     &bridge,
                     &main_pipeline_weak,
-                    &media_for_log,
+                    if pad_is_audio {
+                        SlotMedia::Audio
+                    } else {
+                        SlotMedia::Video(&video_order)
+                    },
                     slot,
                 )?;
 
@@ -1303,6 +1308,97 @@ pub fn create_whipserversrc_for_session(
     })
 }
 
+/// How far behind the previous frame's PTS a new frame's may be and still be
+/// treated as landing on it. A run released on one PTS falls behind by 1 ns
+/// per frame already moved; a frame interval is over 8 ms at up to 120 fps.
+const MAX_PTS_NUDGE_NS: u64 = 1_000_000;
+
+/// Gives each of a session's video frames its own PTS when several arrive on one.
+///
+/// The session's jitterbuffer can release a run of packets from different
+/// frames all on one PTS, as it does when a publisher joins a slot. The
+/// slot's `h264parse` takes a PTS only when it differs from the previous
+/// buffer's, so every later frame of the run leaves it with none; a browser
+/// stream has no framerate to derive one from, and the vision mixer's
+/// compositor fails the whole flow on a frame without a timestamp.
+///
+/// Packets of one frame keep their shared PTS. A new frame whose PTS is at
+/// most [`MAX_PTS_NUDGE_NS`] behind the previous frame's is moved 1 ns past it.
+/// Any other PTS passes through: a larger step back is real timing (a B-frame,
+/// sent before the frame it precedes, or a step in the sender's clock), and
+/// holding later frames behind a PTS far ahead would freeze the seat. Only the
+/// appsink's streaming thread touches it.
+struct VideoPtsOrder {
+    /// RTP timestamp of the last frame, `u64::MAX` before the first.
+    last_rtptime: AtomicU64,
+    last_pts: AtomicU64,
+}
+
+impl VideoPtsOrder {
+    fn new() -> Self {
+        Self {
+            last_rtptime: AtomicU64::new(u64::MAX),
+            last_pts: AtomicU64::new(0),
+        }
+    }
+
+    fn order(&self, rtptime: u32, pts: u64) -> u64 {
+        let last_rtptime = self.last_rtptime.load(Ordering::Relaxed);
+        let last_pts = self.last_pts.load(Ordering::Relaxed);
+        if last_rtptime == u64::from(rtptime) {
+            return last_pts;
+        }
+        let duplicate =
+            last_rtptime != u64::MAX && pts <= last_pts && last_pts - pts <= MAX_PTS_NUDGE_NS;
+        let pts = if duplicate { last_pts + 1 } else { pts };
+        self.last_rtptime
+            .store(u64::from(rtptime), Ordering::Relaxed);
+        self.last_pts.store(pts, Ordering::Relaxed);
+        pts
+    }
+}
+
+/// Which of a slot's streams a sample is bridged into.
+#[derive(Clone, Copy)]
+enum SlotMedia<'a> {
+    Audio,
+    Video(&'a VideoPtsOrder),
+}
+
+impl SlotMedia<'_> {
+    fn name(self) -> &'static str {
+        match self {
+            SlotMedia::Audio => "audio",
+            SlotMedia::Video(_) => "video",
+        }
+    }
+}
+
+/// `sample` with its PTS moved by `order`, or `None` when it stays as it is.
+/// Copies the buffer only when the PTS changes. A buffer with no PTS, or one
+/// that is not RTP, is left for the bridge to judge.
+fn order_video_pts(sample: &gst::Sample, order: &VideoPtsOrder) -> Option<gst::Sample> {
+    let buffer = sample.buffer()?;
+    let pts = buffer.pts()?.nseconds();
+    let rtptime = gst_rtp::RTPBuffer::from_buffer_readable(buffer)
+        .ok()?
+        .timestamp();
+    let ordered = order.order(rtptime, pts);
+    if ordered == pts {
+        return None;
+    }
+    let mut new_buffer = buffer.copy();
+    new_buffer
+        .make_mut()
+        .set_pts(gst::ClockTime::from_nseconds(ordered));
+    let mut builder = gst::Sample::builder().buffer(&new_buffer);
+    let caps = sample.caps_owned();
+    if let Some(caps) = caps.as_ref() {
+        builder = builder.caps(caps);
+    }
+    Some(builder.build())
+}
+
 /// Bridge one sample from a session's appsink into its slot's appsrc, shifting
 /// its PTS by the offset shared across the session's audio and video.
 ///
@@ -1320,12 +1416,18 @@ fn forward_sample_to_slot(
     session_finished: &AtomicBool,
     bridge: &SessionBridge,
     main_pipeline: &gst::glib::WeakRef<gst::Pipeline>,
-    media: &str,
+    media: SlotMedia,
     slot: usize,
 ) -> Result<(), gst::FlowError> {
     if session_finished.load(Ordering::Relaxed) {
         return Ok(());
     }
+
+    let ordered = match media {
+        SlotMedia::Video(order) => order_video_pts(sample, order),
+        SlotMedia::Audio => None,
+    };
+    let sample = ordered.as_ref().unwrap_or(sample);
 
     let outcome = bridge
         .forward(sample, appsrc, || {
@@ -1341,7 +1443,7 @@ fn forward_sample_to_slot(
             info!(
                 "WHIP Input: Computed shared ts-offset={}ms from {} stream (slot {})",
                 offset / 1_000_000,
-                media,
+                media.name(),
                 slot
             );
         }
@@ -1349,7 +1451,7 @@ fn forward_sample_to_slot(
             if pipeline_bridge::should_log_drop(dropped) {
                 warn!(
                     "WHIP Input: dropped {} buffer(s) with no PTS on the {} stream (slot {}); forwarding one fails the downstream muxer and takes the whole flow with it",
-                    dropped, media, slot
+                    dropped, media.name(), slot
                 );
             }
         }
@@ -2700,7 +2802,7 @@ mod tests {
             &displaced,
             &bridge,
             &no_main_pipeline,
-            "audio",
+            SlotMedia::Audio,
             0,
         )
         .unwrap();
@@ -2712,7 +2814,7 @@ mod tests {
             &current,
             &bridge,
             &no_main_pipeline,
-            "audio",
+            SlotMedia::Audio,
             0,
         )
         .unwrap();
@@ -2726,6 +2828,128 @@ mod tests {
             first.buffer().unwrap().pts(),
             Some(gst::ClockTime::from_seconds(2)),
             "the first sample in the slot must be the current session's, not the displaced one's"
+        );
+    }
+
+    /// Bridge RTP video packets, given as (RTP timestamp, PTS in ms), through
+    /// one session's `forward_sample_to_slot` and return the PTS each reached
+    /// the slot with, in ns.
+    fn bridge_video_packets(packets: &[(u32, u64)]) -> Vec<u64> {
+        use gst_rtp::prelude::RTPBufferExt;
+        let _ = gst::init();
+
+        let pipeline = gst::Pipeline::new();
+        let appsrc = gst_app::AppSrc::builder().format(gst::Format::Time).build();
+        let appsink = gst_app::AppSink::builder().sync(false).build();
+        pipeline
+            .add_many([appsrc.upcast_ref::<gst::Element>(), appsink.upcast_ref()])
+            .unwrap();
+        appsrc.link(&appsink).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let caps = gst::Caps::builder("application/x-rtp")
+            .field("media", "video")
+            .field("clock-rate", 90000i32)
+            .field("encoding-name", "H264")
+            .build();
+        // No main pipeline, so the bridge forwards every PTS unadjusted and
+        // only the ordering moves it.
+        let bridge = SessionBridge::new();
+        let no_main_pipeline = gst::glib::WeakRef::new();
+        let session_finished = AtomicBool::new(false);
+        let order = VideoPtsOrder::new();
+
+        let mut out = Vec::new();
+        for &(rtptime, pts_ms) in packets {
+            let mut buffer = gst::Buffer::new_rtp_with_sizes(4, 0, 0).unwrap();
+            {
+                let buffer = buffer.get_mut().unwrap();
+                buffer.set_pts(gst::ClockTime::from_mseconds(pts_ms));
+                let mut rtp = gst_rtp::RTPBuffer::from_buffer_writable(buffer).unwrap();
+                rtp.set_timestamp(rtptime);
+            }
+            let sample = gst::Sample::builder().buffer(&buffer).caps(&caps).build();
+            forward_sample_to_slot(
+                &sample,
+                &appsrc,
+                &session_finished,
+                &bridge,
+                &no_main_pipeline,
+                SlotMedia::Video(&order),
+                0,
+            )
+            .unwrap();
+            let pulled = appsink
+                .try_pull_sample(gst::ClockTime::from_seconds(5))
+                .expect("every packet must reach the slot");
+            out.push(pulled.buffer().unwrap().pts().unwrap().nseconds());
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        out
+    }
+
+    /// A session's jitterbuffer can release packets of several frames on one
+    /// PTS. Each frame must still reach the slot with its own, increasing PTS,
+    /// and the packets of one frame with a shared one.
+    #[test]
+    fn video_frames_on_one_pts_reach_the_slot_in_order() {
+        // Two packets of frame A, then frames B and C released on A's PTS,
+        // then frame D on its own later PTS.
+        let out = bridge_video_packets(&[
+            (1000, 1000),
+            (1000, 1000),
+            (4000, 1000),
+            (7000, 1000),
+            (10000, 1100),
+        ]);
+
+        let ms = 1_000_000;
+        assert_eq!(out[0], 1000 * ms);
+        assert_eq!(out[1], out[0], "packets of one frame share a PTS");
+        assert!(out[2] > out[1], "frame B must follow frame A: {:?}", out);
+        assert!(out[3] > out[2], "frame C must follow frame B: {:?}", out);
+        assert_eq!(out[4], 1100 * ms, "a frame already in order keeps its PTS");
+    }
+
+    /// An encoder with B-frames sends a frame after the one it precedes, so
+    /// its PTS is a frame or more behind the previous packet's. It must keep
+    /// that PTS: moving it past the later frame bunches the decoded video.
+    #[test]
+    fn video_b_frames_keep_their_pts() {
+        // Decode order I P B B P, 33 ms per frame: display order I B B P P.
+        let out = bridge_video_packets(&[
+            (0, 1000),
+            (9000, 1100),
+            (3000, 1033),
+            (6000, 1066),
+            (18000, 1200),
+        ]);
+
+        let ms = 1_000_000;
+        assert_eq!(
+            out,
+            vec![1000 * ms, 1100 * ms, 1033 * ms, 1066 * ms, 1200 * ms],
+            "B-frames must reach the slot with their own PTS"
+        );
+    }
+
+    /// One frame with a PTS far ahead of the rest must not hold back the
+    /// frames after it, or the seat freezes until real time catches up.
+    #[test]
+    fn video_frame_far_ahead_does_not_hold_back_later_frames() {
+        let out = bridge_video_packets(&[
+            (0, 1000),
+            (3000, 1033),
+            (6000, 10_000),
+            (9000, 1100),
+            (12000, 1133),
+        ]);
+
+        let ms = 1_000_000;
+        assert_eq!(
+            out,
+            vec![1000 * ms, 1033 * ms, 10_000 * ms, 1100 * ms, 1133 * ms],
+            "frames after an outlier must keep their own PTS"
         );
     }
 }
