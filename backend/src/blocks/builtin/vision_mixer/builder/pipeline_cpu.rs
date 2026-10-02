@@ -341,47 +341,39 @@ pub(super) fn build_cpu_pipeline(
 
         // Capsfilter after videoconvert forces all inputs to the same format before tee split.
         // Without this, the two compositors negotiate independently and tee can't satisfy both.
-        if let Some(ref fmt) = p.output_format {
-            let cf_in_id = p.id(&format!("capsfilter_in_{}", i));
-            let capsfilter_in = gst::ElementFactory::make("capsfilter")
-                .name(&cf_in_id)
-                .property(
-                    "caps",
-                    gst::Caps::builder("video/x-raw")
-                        .field("format", fmt.as_str())
-                        .build(),
-                )
-                .build()
-                .map_err(|e| {
-                    BlockBuildError::ElementCreation(format!("capsfilter_in_{}: {}", i, e))
-                })?;
-            elems.push((cf_in_id.clone(), capsfilter_in));
-            elems.push((tee_id.clone(), tee));
+        //
+        // With no output_format, the filter still limits the tee to formats
+        // videocrop takes: the dist and PVW branches run through it, the
+        // thumbnail branch does not. Left open, the input can settle on a
+        // format only the compositors accept (A444_16LE on GStreamer 1.26),
+        // and the videocrop branches then fail with not-negotiated.
+        let in_caps = match p.output_format {
+            Some(ref fmt) => gst::Caps::builder("video/x-raw")
+                .field("format", fmt.as_str())
+                .build(),
+            None => videocrop_sink_caps()?,
+        };
+        let cf_in_id = p.id(&format!("capsfilter_in_{}", i));
+        let capsfilter_in = gst::ElementFactory::make("capsfilter")
+            .name(&cf_in_id)
+            .property("caps", &in_caps)
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter_in_{}: {}", i, e)))?;
+        elems.push((cf_in_id.clone(), capsfilter_in));
+        elems.push((tee_id.clone(), tee));
 
-            links.push((
-                ElementPadRef::pad(&q_id, "src"),
-                ElementPadRef::pad(&vc_in_id, "sink"),
-            ));
-            links.push((
-                ElementPadRef::pad(&vc_in_id, "src"),
-                ElementPadRef::pad(&cf_in_id, "sink"),
-            ));
-            links.push((
-                ElementPadRef::pad(&cf_in_id, "src"),
-                ElementPadRef::pad(&tee_id, "sink"),
-            ));
-        } else {
-            elems.push((tee_id.clone(), tee));
-
-            links.push((
-                ElementPadRef::pad(&q_id, "src"),
-                ElementPadRef::pad(&vc_in_id, "sink"),
-            ));
-            links.push((
-                ElementPadRef::pad(&vc_in_id, "src"),
-                ElementPadRef::pad(&tee_id, "sink"),
-            ));
-        }
+        links.push((
+            ElementPadRef::pad(&q_id, "src"),
+            ElementPadRef::pad(&vc_in_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&vc_in_id, "src"),
+            ElementPadRef::pad(&cf_in_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&cf_in_id, "src"),
+            ElementPadRef::pad(&tee_id, "sink"),
+        ));
 
         // Queues after tee decouple input processing from compositor backpressure
         let q_dist_id = p.id(&format!("queue_to_dist_{}", i));
@@ -604,4 +596,38 @@ pub(super) fn build_cpu_pipeline(
         bus_message_handler,
         pad_properties,
     })
+}
+
+/// System-memory caps `videocrop` can actually crop, read from its sink pad
+/// template so the list follows the installed GStreamer version.
+///
+/// The template also carries `video/x-raw(ANY)` with no format list, for crop
+/// meta on other memory types. That structure matches system memory too, so
+/// it is dropped here: `videocrop` accepts any format through it at caps query
+/// time and then refuses the ones it cannot crop in `set_info`.
+fn videocrop_sink_caps() -> Result<gst::Caps, BlockBuildError> {
+    let template = gst::ElementFactory::find("videocrop")
+        .ok_or_else(|| BlockBuildError::ElementCreation("videocrop not found".to_string()))?
+        .static_pad_templates()
+        .into_iter()
+        .find(|t| t.direction() == gst::PadDirection::Sink)
+        .ok_or_else(|| {
+            BlockBuildError::ElementCreation("videocrop has no sink template".to_string())
+        })?
+        .caps();
+    let mut caps = gst::Caps::new_empty();
+    {
+        let caps = caps.get_mut().expect("new caps are writable");
+        for (s, features) in template.iter_with_features() {
+            if !features.is_any() {
+                caps.append_structure_full(s.to_owned(), Some(features.to_owned()));
+            }
+        }
+    }
+    if caps.is_empty() {
+        return Err(BlockBuildError::ElementCreation(
+            "videocrop sink template lists no system-memory formats".to_string(),
+        ));
+    }
+    Ok(caps)
 }

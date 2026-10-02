@@ -24,6 +24,8 @@
 //! which encoder that is depends on the host — VideoToolbox on macOS, NVENC on
 //! an NVIDIA box, x264enc on CI. Those paths are not covered here.
 
+pub mod common;
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use strom::blocks::builtin::videoenc::VideoEncBuilder;
@@ -47,33 +49,15 @@ const REQUIRED: &[&str] = &[
     "fakesink",
 ];
 
-/// Skipping on a missing element passes green and guards nothing, so CI sets
-/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure. x264enc comes
-/// from gst-plugins-ugly and x265enc from gst-plugins-bad; the CI workflow
-/// installs both.
+/// Initialises what the encoder builder needs, then see
+/// `common::plugins_available`. x264enc comes from gst-plugins-ugly and
+/// x265enc from gst-plugins-bad; the CI workflow installs both.
 fn plugins_available() -> bool {
     gst::init().expect("gst init");
     // `VideoEncBuilder::build` reads the process-global video convert mode,
     // which panics until this has run.
     strom::gpu::detect_gpu_capabilities();
-    let missing: Vec<&str> = REQUIRED
-        .iter()
-        .copied()
-        .filter(|e| gst::ElementFactory::find(e).is_none())
-        .collect();
-    if missing.is_empty() {
-        return true;
-    }
-    assert!(
-        strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
-        "STROM_REQUIRE_GST_PLUGINS is set but these elements are missing: {}",
-        missing.join(", ")
-    );
-    eprintln!(
-        "skipping: missing GStreamer elements: {}",
-        missing.join(", ")
-    );
-    false
+    common::plugins_available(REQUIRED)
 }
 
 /// The 8-bit 4:2:0 raw formats an H.264 / H.265 encoder may pick for a 4:2:0

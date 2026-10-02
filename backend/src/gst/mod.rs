@@ -1,11 +1,13 @@
 //! GStreamer integration.
 
+pub(crate) mod aggregator_start;
 mod block_expansion;
 pub mod buffer_age_probe;
 pub(crate) mod control_bindings;
 pub(crate) mod crop;
 pub mod discovery;
 pub mod gl_bridge;
+pub mod gl_input_front;
 pub mod gl_link;
 pub mod ice_preflight;
 pub mod keyframe_request;

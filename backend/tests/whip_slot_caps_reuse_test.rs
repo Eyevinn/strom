@@ -16,6 +16,8 @@
 //! The slot must also leave the format to its consumers: one test feeds an
 //! encoder that takes only float, with no converter of its own in front.
 
+pub mod common;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -49,25 +51,6 @@ const REQUIRED: &[&str] = &[
     "mp4mux",
     "fakesink",
 ];
-
-/// Skipping on a missing element passes green and guards nothing, so CI sets
-/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure.
-fn plugins_available() -> bool {
-    let missing: Vec<&str> = REQUIRED
-        .iter()
-        .copied()
-        .filter(|e| gst::ElementFactory::find(e).is_none())
-        .collect();
-    if missing.is_empty() {
-        return true;
-    }
-    assert!(
-        strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
-        "STROM_REQUIRE_GST_PLUGINS is set but these elements are missing: {}",
-        missing.join(", ")
-    );
-    false
-}
 
 /// Buffers each simulated publisher sends. `audiotestsrc` at its default
 /// 1024-sample blocksize gives ~1 s of 48 kHz audio.
@@ -413,7 +396,7 @@ fn reuse_slot(first: &Session, second: &Session, consumer: Consumer) {
 #[test]
 fn slot_accepts_a_second_session_with_a_different_channel_count() {
     gst::init().unwrap();
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         eprintln!("skipping: required GStreamer elements are missing");
         return;
     }
@@ -431,7 +414,7 @@ fn slot_accepts_a_second_session_with_a_different_channel_count() {
 #[test]
 fn slot_normalises_a_second_session_at_a_different_sample_rate() {
     gst::init().unwrap();
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         eprintln!("skipping: required GStreamer elements are missing");
         return;
     }
@@ -449,7 +432,7 @@ fn slot_normalises_a_second_session_at_a_different_sample_rate() {
 #[test]
 fn slot_serves_a_consumer_that_takes_only_float() {
     gst::init().unwrap();
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         eprintln!("skipping: required GStreamer elements are missing");
         return;
     }

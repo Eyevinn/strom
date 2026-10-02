@@ -948,3 +948,29 @@ fn test_solo_does_not_stack_block_latency_with_aux_buses() {
         "monitor {monitor} ms stacks latency on main {main} ms / aux {aux} ms"
     );
 }
+
+/// A live mixer bus that starts with no input outputs silence on its own
+/// timeouts. When the first input buffer arrives it must not move the output
+/// back to 0: one buffer stamped 0 makes `opusenc` fail and ends every WHEP
+/// viewer session, and a WHIP guest's first join is exactly that arrival.
+#[test]
+fn test_make_audiomixer_late_first_input_does_not_rewind() {
+    use crate::gst::aggregator_start::test_support::*;
+    init_gst();
+    let mixer = make_audiomixer("test_mixer_late_first_input", true, 30, 30).unwrap();
+    let caps = gst::Caps::builder("audio/x-raw")
+        .field("format", "S16LE")
+        .field("layout", "interleaved")
+        .field("rate", 48000i32)
+        .field("channels", 2i32)
+        .build();
+    // 10 ms of 48 kHz stereo S16
+    let (pushed, pts) = output_pts_around_late_first_input(
+        &mixer,
+        &caps,
+        480 * 4,
+        gst::ClockTime::from_mseconds(10),
+        std::time::Duration::from_millis(500),
+    );
+    assert_no_rewind(pushed, &pts);
+}

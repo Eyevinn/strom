@@ -155,7 +155,7 @@ const RTMP_SINK_FACTORY: &str = "rtmp2sink";
 ///
 /// Same shape as `ice_package_hint`, so the operator-facing message names what
 /// to install rather than what is missing.
-pub const fn rtmp_package_hint() -> &'static str {
+const fn rtmp_package_hint() -> &'static str {
     #[cfg(target_os = "macos")]
     {
         "brew install gst-plugins-bad"
@@ -175,7 +175,7 @@ pub const fn rtmp_package_hint() -> &'static str {
 ///
 /// Kept separate from the check so its wording is testable on a host where the
 /// element is present.
-pub fn rtmp_missing_message() -> String {
+fn rtmp_missing_message() -> String {
     format!(
         "RTMP Output needs the GStreamer {} element, which this installation does \
          not have. Install it with: {}",
@@ -192,7 +192,7 @@ pub fn rtmp_missing_message() -> String {
 /// pad probe rather than at build time, so a missing one surfaces as a log line
 /// and a published stream with no audio, and an opaque GStreamer error would send
 /// an operator looking in the wrong place.
-pub const fn libav_package_hint() -> &'static str {
+const fn libav_package_hint() -> &'static str {
     #[cfg(target_os = "macos")]
     {
         "brew install gst-libav"
@@ -210,7 +210,7 @@ pub const fn libav_package_hint() -> &'static str {
 
 /// What a `location` turned out to be, once checked.
 #[derive(Debug, PartialEq, Eq)]
-pub struct RtmpLocation {
+struct RtmpLocation {
     /// `true` for `rtmps://`, so the transport is TLS.
     pub tls: bool,
     /// The host, used only to decide whether a plaintext target is loopback.
@@ -242,7 +242,7 @@ pub struct RtmpLocation {
 /// otherwise parse, because the reason it cannot parse may be the credential
 /// itself. Over-redaction is the acceptable direction: a stream name containing
 /// `@` loses some of the log line, and a password never does.
-pub fn redact_location(raw: &str) -> String {
+fn redact_location(raw: &str) -> String {
     // 1. userinfo, by the last '@' anywhere.
     let without_creds = match raw.rfind('@') {
         Some(at) => {
@@ -291,7 +291,7 @@ pub fn redact_location(raw: &str) -> String {
 /// `rtmp2sink` sets its own `scheme` from it, and its `tls-validation-flags`
 /// default to `validate-all`. This block deliberately does not expose a way to
 /// weaken that, see the module docs.
-pub fn parse_rtmp_location(raw: &str) -> Result<RtmpLocation, String> {
+fn parse_rtmp_location(raw: &str) -> Result<RtmpLocation, String> {
     let trimmed = raw.trim();
     let Some((scheme, rest)) = trimmed.split_once("://") else {
         return Err(format!(
@@ -712,7 +712,7 @@ impl BlockBuilder for RtmpOutputBuilder {
 
 /// What this block does with an audio stream, once its caps are known.
 #[derive(Debug, PartialEq, Eq)]
-pub enum AudioPlan {
+enum AudioPlan {
     /// Raw input: encode to AAC inside the block. See the module docs for why.
     Encode,
     /// Already AAC: parse only, so the encoder is not run twice.
@@ -725,7 +725,7 @@ pub enum AudioPlan {
 /// and `progressive-high` are subsets of High that any High decoder plays, so
 /// they are on the list too. `flvmux` itself accepts any profile, which is why
 /// the block has to look: the container cannot catch it.
-pub const RTMP_H264_PROFILES: &[&str] = &[
+const RTMP_H264_PROFILES: &[&str] = &[
     "constrained-baseline",
     "baseline",
     "main",
@@ -742,7 +742,7 @@ pub const RTMP_H264_PROFILES: &[&str] = &[
 ///
 /// Split out from the pad probe so the decision can be tested without a
 /// pipeline. The wiring it leads to still needs a running flow.
-pub fn video_plan(caps_name: &str, profile: Option<&str>) -> Result<(), String> {
+fn video_plan(caps_name: &str, profile: Option<&str>) -> Result<(), String> {
     match caps_name {
         "video/x-h264" => match profile {
             Some(p) if !RTMP_H264_PROFILES.contains(&p) => Err(format!(
@@ -780,7 +780,7 @@ pub fn video_plan(caps_name: &str, profile: Option<&str>) -> Result<(), String> 
 ///
 /// Every refusal names `builtin.audioenc`, because that block is the fix for all
 /// of them: it takes whatever raw or encoded audio reached it and emits AAC.
-pub fn audio_plan(caps_name: &str, mpegversion: i32, layer: i32) -> Result<AudioPlan, String> {
+fn audio_plan(caps_name: &str, mpegversion: i32, layer: i32) -> Result<AudioPlan, String> {
     match caps_name {
         "audio/x-raw" => Ok(AudioPlan::Encode),
         "audio/mpeg" if mpegversion == 2 || mpegversion == 4 => Ok(AudioPlan::Parse),
@@ -1149,5 +1149,367 @@ fn rtmp_output_definition() -> BlockDefinition {
             height: Some(2.0),
             ..Default::default()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_missing_plugin_message_names_what_to_install() {
+        // Runs on a host with the element present, which is why the message is a
+        // separate function from the check.
+        let message = rtmp_missing_message();
+        assert!(message.contains("rtmp2sink"), "{}", message);
+        assert!(message.contains(rtmp_package_hint()), "{}", message);
+    }
+
+    // --- rtmps and the location contract ---------------------------------------
+    //
+    // RTMPS needs no configuration beyond the scheme in the URL, so the thing
+    // worth testing is not that TLS works but that nothing silently downgrades
+    // it and that credentials in the URL never reach a log.
+
+    /// `127.0.0.1.evil.example` resolves somewhere else entirely and used to be
+    /// treated as loopback by a prefix match, suppressing the plaintext warning.
+    #[test]
+    fn a_hostile_hostname_that_starts_like_loopback_is_not_loopback() {
+        let parsed =
+            parse_rtmp_location("rtmp://127.0.0.1.evil.example/live/key").expect("accepted");
+        assert_eq!(parsed.host, "127.0.0.1.evil.example");
+        assert!(!parsed.tls);
+    }
+
+    #[test]
+    fn rtmps_is_recognised_as_tls() {
+        let parsed = parse_rtmp_location("rtmps://example.com/live/key").expect("rtmps accepted");
+        assert!(parsed.tls);
+        assert_eq!(parsed.host, "example.com");
+    }
+
+    #[test]
+    fn rtmp_is_recognised_as_plaintext() {
+        let parsed =
+            parse_rtmp_location("rtmp://example.com:1935/live/key").expect("rtmp accepted");
+        assert!(!parsed.tls);
+        assert_eq!(
+            parsed.host, "example.com",
+            "the port must not be part of the host"
+        );
+    }
+
+    #[test]
+    fn the_default_location_is_accepted_and_is_loopback_plaintext() {
+        let parsed =
+            parse_rtmp_location(strom_types::DEFAULT_RTMP_LOCATION).expect("default accepted");
+        assert!(!parsed.tls);
+        assert_eq!(parsed.host, "127.0.0.1");
+    }
+
+    #[test]
+    fn an_ipv6_host_keeps_its_address_and_loses_its_port() {
+        let parsed =
+            parse_rtmp_location("rtmps://[2001:db8::1]:443/live/key").expect("ipv6 accepted");
+        assert!(parsed.tls);
+        assert_eq!(parsed.host, "2001:db8::1");
+    }
+
+    /// The case that matters: `rtmp2sink` accepts any string and re-serialises what
+    /// it could parse, so this would otherwise become `rtmp:/`, a plaintext
+    /// connection to nowhere, with no error anywhere.
+    #[test]
+    fn a_location_with_no_scheme_is_refused_rather_than_silently_becoming_plaintext() {
+        let err = parse_rtmp_location("not-a-url").expect_err("must be refused");
+        assert!(err.contains("rtmps://"), "{}", err);
+    }
+
+    #[test]
+    fn an_unknown_scheme_is_refused_and_names_the_alternatives() {
+        let err = parse_rtmp_location("https://example.com/live/key").expect_err("must be refused");
+        assert!(err.contains("https"), "{}", err);
+        assert!(err.contains("rtmps://"), "{}", err);
+    }
+
+    #[test]
+    fn a_location_with_no_host_is_refused() {
+        parse_rtmp_location("rtmps:///live/key").expect_err("must be refused");
+    }
+
+    /// Credentials belong to the sink's own `username` and `password` properties,
+    /// which it fills from the URL. The raw string is what a block would naturally
+    /// log, and it is the one that still has them in it.
+    #[test]
+    fn credentials_never_survive_into_something_loggable() {
+        let raw = "rtmps://alice:s3cret@example.com/live/key";
+        let redacted = redact_location(raw);
+        assert!(!redacted.contains("s3cret"), "{}", redacted);
+        assert!(!redacted.contains("alice"), "{}", redacted);
+        assert!(redacted.contains("example.com/live/"), "{}", redacted);
+        // And the parsed form carries only the safe spelling.
+        let parsed = parse_rtmp_location(raw).expect("accepted");
+        assert!(!parsed.redacted.contains("s3cret"), "{}", parsed.redacted);
+        assert_eq!(parsed.host, "example.com");
+    }
+
+    /// The stream key is the second secret in an RTMP URL and for most servers it is
+    /// the whole authorisation, so it is masked even when there are no credentials.
+    /// The host and application survive, because a log line still has to identify
+    /// which output it belongs to.
+    #[test]
+    fn the_stream_key_is_masked_even_with_no_credentials() {
+        let redacted = redact_location("rtmps://example.com/live/key");
+        assert!(!redacted.ends_with("/key"), "{}", redacted);
+        assert!(
+            redacted.starts_with("rtmps://example.com/live/"),
+            "{}",
+            redacted
+        );
+    }
+
+    /// A token in a query string is the same secret by another route.
+    #[test]
+    fn a_query_string_is_masked_because_it_may_carry_a_token() {
+        let redacted = redact_location("rtmps://example.com/live/key?token=SECRET");
+        assert!(!redacted.contains("SECRET"), "{}", redacted);
+        assert!(!redacted.contains("/key?"), "{}", redacted);
+    }
+
+    /// A bare host has no path, so there is nothing to mask and nothing to invent.
+    #[test]
+    fn a_location_with_no_path_is_left_alone() {
+        assert_eq!(
+            redact_location("rtmps://example.com"),
+            "rtmps://example.com"
+        );
+    }
+
+    /// A password containing an `@` would defeat a naive split on the first one.
+    #[test]
+    fn redaction_handles_an_at_sign_inside_the_password() {
+        let redacted = redact_location("rtmp://user:p@ss@example.com/live/key");
+        assert!(!redacted.contains("p@ss"), "{}", redacted);
+        assert!(redacted.contains("example.com/live/"), "{}", redacted);
+    }
+
+    /// The input that defeated the first version of `redact_location`. An unencoded
+    /// `/` in a password meant the authority could not be isolated, and the function
+    /// returned its input unchanged, so the whole credential went into an `info!`.
+    #[test]
+    fn a_slash_inside_the_password_does_not_defeat_redaction() {
+        let redacted = redact_location("rtmp://user:p/ss@host/live/key");
+        assert!(!redacted.contains("p/ss"), "{}", redacted);
+        assert!(redacted.contains("host/live/"), "{}", redacted);
+    }
+
+    /// The refusal path leaked too: with only one slash there is no `://`, so the old
+    /// redaction returned the raw string, and it was embedded in the error message
+    /// that the pipeline builder logs and the API returns.
+    #[test]
+    fn a_credentialed_url_with_a_mistyped_scheme_is_refused_without_echoing_the_secret() {
+        let raw = "rtmp:/user:pass@host/live/key";
+        assert!(
+            !redact_location(raw).contains("pass"),
+            "{}",
+            redact_location(raw)
+        );
+        let err = parse_rtmp_location(raw).expect_err("must be refused");
+        assert!(
+            !err.contains("pass"),
+            "the refusal message leaks the password: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn redaction_of_an_unparseable_string_never_returns_it_unchanged() {
+        // The secret is always the part BEFORE the last '@'; whatever follows is the
+        // host and must survive, which is why the host names here are unremarkable.
+        for (raw, secret) in [
+            ("user:pass@host", "pass"),
+            ("rtmp:/user:topsecret@host/live/key", "topsecret"),
+            ("://user:pw@h", "pw"),
+            ("user:p/w@host/live", "p/w"),
+            ("user:p@w@host/live", "p@w"),
+        ] {
+            let redacted = redact_location(raw);
+            assert!(
+                !redacted.contains(secret),
+                "input {:?} redacted to {:?}, which still contains {:?}",
+                raw,
+                redacted,
+                secret
+            );
+        }
+    }
+
+    /// A stray space around a pasted URL used to pass the parser as TLS while the
+    /// sink quietly reduced it to `rtmp:/`, so the log asserted encryption on an
+    /// output that published nowhere.
+    #[test]
+    fn a_whitespace_padded_location_is_trimmed_before_the_sink_sees_it() {
+        let parsed = parse_rtmp_location("  rtmps://example.com/live/key  ").expect("accepted");
+        assert_eq!(parsed.location, "rtmps://example.com/live/key");
+        assert!(parsed.tls);
+    }
+
+    // --- The codec decision each pad probe makes --------------------------------
+    //
+    // Every arm is here, because the refusals are what an operator sees when a
+    // flow is wired wrongly and a wrong message costs more than a wrong element:
+    // it sends them to fix the wrong block. What the probes do with the decision
+    // is covered in `tests/rtmp_output_test.rs`.
+
+    #[test]
+    fn h264_video_is_accepted() {
+        assert_eq!(video_plan("video/x-h264", None), Ok(()));
+    }
+
+    #[test]
+    fn h264_in_a_profile_rtmp_receivers_take_is_accepted() {
+        for profile in RTMP_H264_PROFILES {
+            assert_eq!(
+                video_plan("video/x-h264", Some(profile)),
+                Ok(()),
+                "{} is on the list RTMP receivers accept",
+                profile
+            );
+        }
+    }
+
+    /// #783: `flvmux` publishes these without a complaint and the platform then
+    /// rejects the stream, so the block is the only place that can say so.
+    #[test]
+    fn h264_in_a_profile_rtmp_receivers_refuse_is_refused_and_names_the_profile() {
+        for profile in ["high-4:4:4", "high-4:2:2", "high-10", "high-10-intra"] {
+            let message = video_plan("video/x-h264", Some(profile))
+                .expect_err("a profile outside High, Main and Baseline must be refused");
+            assert!(
+                message.contains(profile),
+                "the refusal must name the profile that arrived, got: {}",
+                message
+            );
+            assert!(
+                message.contains("builtin.videoenc's profile"),
+                "the refusal must name the property that fixes it, got: {}",
+                message
+            );
+        }
+    }
+
+    #[test]
+    fn raw_video_is_refused_and_names_the_encoder_block() {
+        let message = video_plan("video/x-raw", None).expect_err("raw video must be refused");
+        assert!(
+            message.contains("builtin.videoenc"),
+            "the refusal must name the block to add, got: {}",
+            message
+        );
+    }
+
+    #[test]
+    fn other_video_codecs_are_refused_and_named() {
+        let message = video_plan("video/x-vp8", None).expect_err("VP8 must be refused");
+        assert!(
+            message.contains("video/x-vp8"),
+            "the refusal must name what arrived, got: {}",
+            message
+        );
+    }
+
+    #[test]
+    fn raw_audio_is_encoded_in_the_block() {
+        assert_eq!(audio_plan("audio/x-raw", 0, 0), Ok(AudioPlan::Encode));
+    }
+
+    #[test]
+    fn aac_audio_is_parsed_only() {
+        assert_eq!(audio_plan("audio/mpeg", 4, 0), Ok(AudioPlan::Parse));
+        assert_eq!(audio_plan("audio/mpeg", 2, 0), Ok(AudioPlan::Parse));
+    }
+
+    /// MPEG-1 layer 3 is MP3, which FLV does carry. The block refuses it, and the
+    /// message must not claim FLV cannot: that would send an operator to change a
+    /// container setting that is not the problem.
+    #[test]
+    fn mp3_is_refused_without_blaming_the_container() {
+        let message = audio_plan("audio/mpeg", 1, 3).expect_err("MP3 must be refused");
+        assert!(
+            message.contains("MP3"),
+            "the refusal must name MP3, got: {}",
+            message
+        );
+        assert!(
+            !message.contains("FLV cannot"),
+            "FLV does carry MP3, so the refusal must not blame the container: {}",
+            message
+        );
+    }
+
+    /// MPEG-1 layers 1 and 2 are a different case from MP3: `flvmux` accepts only
+    /// layer 3, so here the container really is the reason.
+    #[test]
+    fn mpeg1_layer_two_is_refused_as_a_container_limit() {
+        let message = audio_plan("audio/mpeg", 1, 2).expect_err("MPEG-1 layer 2 must be refused");
+        assert!(
+            message.contains("layer 2"),
+            "the refusal must name the layer, got: {}",
+            message
+        );
+    }
+
+    #[test]
+    fn other_audio_codecs_are_refused_and_named() {
+        let message = audio_plan("audio/x-opus", 0, 0).expect_err("Opus must be refused");
+        assert!(
+            message.contains("audio/x-opus"),
+            "the refusal must name what arrived, got: {}",
+            message
+        );
+    }
+
+    /// Every audio refusal must name the block that fixes it, the way the video
+    /// refusal names `builtin.videoenc`.
+    ///
+    /// `builtin.audioenc` encodes raw audio to AAC, Opus, MP3 or AC-3, so it is the
+    /// one answer to all three refusals: whatever reached this block, putting that
+    /// one in front with `codec=aac` produces audio flvmux accepts. Without the name
+    /// in the message an operator has to know the block exists, and the two most
+    /// likely wrong moves, changing the RTMP URL or the container, both leave the
+    /// flow just as broken.
+    #[test]
+    fn every_audio_refusal_names_the_audio_encoder_block() {
+        let refusals = [
+            ("MP3", audio_plan("audio/mpeg", 1, 3)),
+            ("MPEG-1 layer 2", audio_plan("audio/mpeg", 1, 2)),
+            ("Opus", audio_plan("audio/x-opus", 0, 0)),
+            ("AC-3", audio_plan("audio/x-ac3", 0, 0)),
+        ];
+        for (what, result) in refusals {
+            let message = result.expect_err(&format!("{} must be refused", what));
+            assert!(
+                message.contains("builtin.audioenc"),
+                "the {} refusal must name the block to add, got: {}",
+                what,
+                message
+            );
+        }
+    }
+
+    /// `builtin.audioenc` on its default codec must produce audio this block parses
+    /// rather than re-encodes.
+    ///
+    /// The two blocks agree today only because `audioenc` emits
+    /// `audio/mpeg,mpegversion=4` and `audio_plan` reads mpegversion 2 and 4 as AAC.
+    /// Nothing links those two facts, so this pins the pairing: if either side
+    /// changes what it calls AAC, an `audioenc -> rtmp_output` flow would silently
+    /// take the encode path and run a second encoder over already-encoded audio.
+    #[test]
+    fn audioenc_default_output_takes_the_parse_only_path() {
+        assert_eq!(
+            audio_plan("audio/mpeg", 4, 0),
+            Ok(AudioPlan::Parse),
+            "builtin.audioenc emits audio/mpeg,mpegversion=4 on its default codec"
+        );
     }
 }

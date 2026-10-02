@@ -11,6 +11,8 @@
 //! Each case here panics if the checked conversion is reverted, which fails
 //! the test.
 
+pub mod common;
+
 use std::collections::HashMap;
 use strom::blocks::BlockRegistry;
 use strom::events::EventBroadcaster;
@@ -21,26 +23,6 @@ use tempfile::NamedTempFile;
 /// `videotestsrc` ships in gstreamer-plugins-base, which the CI job installs,
 /// so these tests run there rather than skipping green.
 const REQUIRED: &[&str] = &["videotestsrc", "fakesink"];
-
-/// Skipping on a missing element passes green and guards nothing, so CI sets
-/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure.
-fn plugins_available() -> bool {
-    gstreamer::init().unwrap();
-    let missing: Vec<&str> = REQUIRED
-        .iter()
-        .copied()
-        .filter(|e| gstreamer::ElementFactory::find(e).is_none())
-        .collect();
-    if missing.is_empty() {
-        return true;
-    }
-    assert!(
-        strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
-        "STROM_REQUIRE_GST_PLUGINS is set but these elements are missing: {}",
-        missing.join(", ")
-    );
-    false
-}
 
 /// `videotestsrc → fakesink`, with `properties` applied to the source.
 fn flow_with_source_properties(name: &str, properties: HashMap<String, PropertyValue>) -> Flow {
@@ -109,7 +91,7 @@ fn expect_invalid_property(flow: &Flow, expected_property: &str) -> String {
 /// The reported repro: an integer for an enum property.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn out_of_range_enum_integer_is_rejected() {
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         return;
     }
     let flow = flow_with_source_properties(
@@ -124,7 +106,7 @@ async fn out_of_range_enum_integer_is_rejected() {
 /// than turned into a second error. The nick string keeps working too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn in_range_enum_integer_is_accepted() {
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         return;
     }
     let flow = flow_with_source_properties(
@@ -143,7 +125,7 @@ async fn in_range_enum_integer_is_accepted() {
 /// A string that is not a number, for a `gint` property.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unparseable_string_for_an_integer_property_is_rejected() {
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         return;
     }
     let flow = flow_with_source_properties(
@@ -161,7 +143,7 @@ async fn unparseable_string_for_an_integer_property_is_rejected() {
 /// would not have caught this one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn integer_below_the_declared_minimum_is_rejected() {
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         return;
     }
     let flow = flow_with_source_properties(
@@ -176,7 +158,7 @@ async fn integer_below_the_declared_minimum_is_rejected() {
 /// panics on it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_property_is_rejected() {
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         return;
     }
     let flow = flow_with_source_properties(
@@ -191,7 +173,7 @@ async fn unknown_property_is_rejected() {
 /// runs. Guards against "fixing" the panic by rejecting everything.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn valid_properties_still_build_and_start() {
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         return;
     }
     let mut properties = one_property("pattern", PropertyValue::String("snow".to_string()));

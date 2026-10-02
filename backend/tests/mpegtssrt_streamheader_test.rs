@@ -20,14 +20,7 @@
 //! connects each replayed a byte-identical video-only PMT ahead of a live PMT
 //! carrying video and audio.
 
-// Not on Windows: `gstsrt.dll` intermittently fails to load inside the test
-// process there (Windows error 127), so `srtsink` cannot be created even though
-// the element is in the registry and works in every other process on the same
-// machine. `ElementFactory::find` succeeds, so the plugins_available() guard
-// below does not catch it. That load failure is its own defect, tracked in
-// #834; excluding this target keeps it from hiding the rest of the Windows
-// suite. Linux and macOS still run this test, so the regression stays guarded.
-#![cfg(not(target_os = "windows"))]
+pub mod common;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -52,25 +45,6 @@ const REQUIRED: &[&str] = &[
     "audioresample",
     "capsfilter",
 ];
-
-/// Skipping on a missing element passes green and guards nothing, so CI sets
-/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure.
-fn plugins_available() -> bool {
-    let missing: Vec<&str> = REQUIRED
-        .iter()
-        .copied()
-        .filter(|e| gst::ElementFactory::find(e).is_none())
-        .collect();
-    if missing.is_empty() {
-        return true;
-    }
-    assert!(
-        strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
-        "STROM_REQUIRE_GST_PLUGINS is set but these elements are missing: {}",
-        missing.join(", ")
-    );
-    false
-}
 
 /// A free UDP port for the SRT listener. Binding one and dropping it races with
 /// anything else on the host, but the socket is never used — srtsink only has
@@ -299,7 +273,7 @@ fn caps_reaching_srtsink() -> CapsSeen {
 #[test]
 fn srtsink_receives_no_streamheader() {
     gst::init().unwrap();
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         eprintln!("skipping: required GStreamer elements are missing");
         return;
     }

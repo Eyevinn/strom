@@ -37,7 +37,7 @@ Make sure you have the following installed:
 
 4. **Trunk** (for building frontend)
    ```bash
-   cargo install trunk
+   cargo install trunk --locked
    ```
 
 ### Optional Cargo Features

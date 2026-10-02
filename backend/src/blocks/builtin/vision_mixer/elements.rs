@@ -124,6 +124,7 @@ fn apply_post_build_properties(
         // for live pipelines using monotonic clock.
         mixer.set_property_from_str("start-time-selection", "zero");
     }
+    crate::gst::aggregator_start::disarm_start_time_selection(mixer);
 }
 
 /// Create a tee element for splitting input to multiple consumers.
