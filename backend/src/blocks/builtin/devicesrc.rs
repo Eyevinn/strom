@@ -80,7 +80,7 @@
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gpu::{self, video_convert_mode};
-use crate::gst::gl_bridge;
+use crate::gst::video_input_bridge;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -201,7 +201,9 @@ impl BlockBuilder for LocalInputBuilder {
                 caps.append_structure(structure.clone());
                 caps.append_structure_full(
                     structure,
-                    Some(gst::CapsFeatures::new([gl_bridge::GL_MEMORY_FEATURE])),
+                    Some(gst::CapsFeatures::new([
+                        video_input_bridge::GL_MEMORY_FEATURE,
+                    ])),
                 );
             }
 
