@@ -847,7 +847,9 @@ async fn a_clip_longer_than_the_output_queue_plays_whole() {
     .await;
 
     // Count each clip frame once, as the newest timestamp the keyed pad has
-    // seen moves forward.
+    // seen moves forward. The first and newest timestamps say, on a failure,
+    // whether the missing frames are at the ends or in between.
+    let first = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let newest = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let arrived = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     {
@@ -862,10 +864,11 @@ async fn a_clip_longer_than_the_output_queue_plays_whole() {
             .into_iter()
             .find(|p| p.name() == "sink_2")
             .expect("keyed input pad");
-        let (newest, arrived) = (newest.clone(), arrived.clone());
+        let (first, newest, arrived) = (first.clone(), newest.clone(), arrived.clone());
         pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
             if let Some(pts) = info.buffer().and_then(|b| b.pts()) {
                 let pts = pts.nseconds() + 1;
+                let _ = first.compare_exchange(0, pts, Ordering::Relaxed, Ordering::Relaxed);
                 if newest.fetch_max(pts, Ordering::Relaxed) < pts {
                     arrived.fetch_add(1, Ordering::Relaxed);
                 }
@@ -892,10 +895,16 @@ async fn a_clip_longer_than_the_output_queue_plays_whole() {
     .await
     .expect("the stinger must complete");
 
+    let (first, newest) = (
+        first.load(Ordering::Relaxed),
+        newest.load(Ordering::Relaxed),
+    );
+    let spanned = (newest.saturating_sub(first) + FRAME_DUR_NS / 2) / FRAME_DUR_NS + 1;
     assert_eq!(
         arrived.load(Ordering::Relaxed),
         LONG_FRAMES,
-        "every clip frame must reach the mixer"
+        "every clip frame must reach the mixer; the frames that arrived span {spanned} \
+         frame times (a missing first or last frame shortens the span)"
     );
     let _ = std::fs::remove_file(&clip);
 }
