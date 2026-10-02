@@ -74,6 +74,8 @@ fn liveaudiorouter_exposes_the_same_property_set_as_audiorouter() {
         "latency".to_string(),
         "min_upstream_latency".to_string(),
         "output_buffer_duration".to_string(),
+        // ...the rate every bus runs at, resampling each input to it...
+        liveaudiorouter::SAMPLE_RATE_PROPERTY.to_string(),
         // ...including the two that give the bus somewhere to put a fan-in
         // sum. `builtin.audiorouter` has neither and clips the same way.
         liveaudiorouter::OUTPUT_FADER_PROPERTY.to_string(),
@@ -216,6 +218,7 @@ const REQUIRED_ELEMENTS: &[&str] = &[
     "valve",
     "audiotestsrc",
     "audioconvert",
+    "audioresample",
     "level",
     "fakesink",
 ];
@@ -1869,4 +1872,169 @@ fn the_headroom_properties_are_offered_and_default_to_no_op() {
             "defaulting the soft clipper on would change what every existing flow sounds like"
         )
     };
+}
+
+// ============================================================================
+// Inputs at different sample rates (#886)
+// ============================================================================
+
+/// Two mono inputs, each on its own channel of one stereo output.
+fn two_rate_router(extra: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
+    let mut properties = props(&[
+        ("num_inputs", PropertyValue::UInt(2)),
+        ("num_outputs", PropertyValue::UInt(1)),
+        ("input_0_channels", PropertyValue::UInt(1)),
+        ("input_1_channels", PropertyValue::UInt(1)),
+        ("output_0_channels", PropertyValue::UInt(2)),
+        (
+            "routing_matrix",
+            PropertyValue::String(r#"{"i0c0":["o0c0"],"i1c0":["o0c1"]}"#.to_string()),
+        ),
+    ]);
+    for (k, v) in extra {
+        properties.insert(k.to_string(), v.clone());
+    }
+    properties
+}
+
+/// A live mono tone at `rate`, with no resampler of its own, linked to
+/// `input`. Returns the source and its capsfilter so a late caller can sync
+/// their state.
+fn connect_mono_at_rate(h: &Harness, instance: &str, input: usize, rate: i32) -> [gst::Element; 2] {
+    let src = gst::ElementFactory::make("audiotestsrc")
+        .property("is-live", true)
+        .property("freq", 440.0)
+        .property("volume", 0.5)
+        .build()
+        .expect("audiotestsrc");
+    let caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("channels", 1i32)
+                .field("rate", rate)
+                .field("format", "F32LE")
+                .build(),
+        )
+        .build()
+        .expect("capsfilter");
+    h.pipeline.add_many([&src, &caps]).expect("add source");
+    src.link(&caps).expect("link source");
+    caps.link(&h.elements[&format!("{instance}:identity_in_{input}")])
+        .expect("link input");
+    [src, caps]
+}
+
+/// The rate `mixer_0` negotiated, waiting up to five seconds for it.
+fn bus_rate(h: &Harness, instance: &str) -> i32 {
+    let pad = h.elements[&format!("{instance}:mixer_0")]
+        .static_pad("src")
+        .expect("mixer src pad");
+    let start = Instant::now();
+    loop {
+        if let Some(caps) = pad.current_caps() {
+            return caps.structure(0).unwrap().get::<i32>("rate").unwrap();
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "mixer_0 never negotiated"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn inputs_at_two_rates_connected_at_start_are_both_heard() {
+    let instance = "two_rates";
+    let h = assemble(instance, &two_rate_router(&[]));
+    tap(&h, instance, 0);
+    connect_mono_at_rate(&h, instance, 0, 48_000);
+    connect_mono_at_rate(&h, instance, 1, 44_100);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let peaks = observe_peaks(&h.pipeline, 2, Duration::from_secs(2));
+    assert!(
+        !is_silent(peaks[0]) && !is_silent(peaks[1]),
+        "a 48 kHz and a 44.1 kHz input must both reach the output, got {peaks:?}"
+    );
+    assert_eq!(
+        bus_rate(&h, instance),
+        48_000,
+        "the bus runs at the default"
+    );
+}
+
+#[test]
+fn an_input_at_another_rate_joining_a_running_bus_is_heard() {
+    let instance = "join_rate";
+    let h = assemble(instance, &two_rate_router(&[]));
+    tap(&h, instance, 0);
+    connect_mono_at_rate(&h, instance, 0, 48_000);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+    let first = observe_peaks(&h.pipeline, 2, Duration::from_secs(1));
+    assert!(
+        !is_silent(first[0]),
+        "the first input must be heard before the second joins, got {first:?}"
+    );
+
+    for element in connect_mono_at_rate(&h, instance, 1, 44_100) {
+        element.sync_state_with_parent().expect("sync late source");
+    }
+    let peaks = observe_peaks(&h.pipeline, 2, Duration::from_secs(2));
+    assert!(
+        !is_silent(peaks[0]) && !is_silent(peaks[1]),
+        "a 44.1 kHz input joining a running 48 kHz bus must be heard, got {peaks:?}"
+    );
+}
+
+#[test]
+fn the_sample_rate_property_sets_the_bus_rate() {
+    let instance = "rate_prop";
+    let h = assemble(
+        instance,
+        &two_rate_router(&[(
+            liveaudiorouter::SAMPLE_RATE_PROPERTY,
+            PropertyValue::String("44100".to_string()),
+        )]),
+    );
+    tap(&h, instance, 0);
+    connect_mono_at_rate(&h, instance, 0, 48_000);
+    connect_mono_at_rate(&h, instance, 1, 48_000);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let peaks = observe_peaks(&h.pipeline, 2, Duration::from_secs(2));
+    assert!(
+        !is_silent(peaks[0]) && !is_silent(peaks[1]),
+        "48 kHz inputs must be resampled onto a 44.1 kHz bus, got {peaks:?}"
+    );
+    assert_eq!(bus_rate(&h, instance), 44_100);
+}
+
+#[test]
+fn the_sample_rate_property_offers_the_common_rates_and_defaults_to_48k() {
+    let def = definition(liveaudiorouter::get_blocks(), "builtin.liveaudiorouter");
+    let prop = def
+        .exposed_properties
+        .iter()
+        .find(|p| p.name == liveaudiorouter::SAMPLE_RATE_PROPERTY)
+        .expect("sample_rate is exposed");
+    assert_eq!(
+        format!("{:?}", prop.default_value),
+        format!("{:?}", Some(PropertyValue::String("48000".to_string())))
+    );
+    assert_eq!(
+        format!("{:?}", prop.property_type),
+        format!(
+            "{:?}",
+            strom_types::PropertyType::Enum {
+                values: strom_types::common_audio_sample_rate_enum_values(false)
+            }
+        )
+    );
 }
