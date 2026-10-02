@@ -13,14 +13,14 @@ ARG VERSION=latest
 FROM eyevinntechnology/strom:${VERSION}
 
 # gstcefsrc build: the CEF version, plus the suffix of Strom's patched build
-# (docker/gstcefsrc: popup-close, isolated-context, strict-network and
-# offscreen-handlers). Each archive is pinned
+# (docker/gstcefsrc: popup-close, isolated-context and strict-network). Each
+# archive is pinned
 # by sha256, so a rebuild published under this name cannot reach an image
 # unnoticed. Changing the version means changing both hashes with it; the
 # build workflow prints them, and the release lists them as asset digests.
-ARG GSTCEFSRC_VERSION=144.0.21-strom4
-ARG GSTCEFSRC_SHA256_AMD64=29d10daf8060e8d35d7c42bbb8c530144b198c9003103e90942dc977ce7ee285
-ARG GSTCEFSRC_SHA256_ARM64=040505f06014a1acaf9c6e6373673c0792582436d7cbfe295317a9fd320ac7c6
+ARG GSTCEFSRC_VERSION=144.0.21-strom5
+ARG GSTCEFSRC_SHA256_AMD64=f369134420ad51c6e85c6b3a75818f3eb004bb8c2002f1f1e830ee774c275bbc
+ARG GSTCEFSRC_SHA256_ARM64=d97c0f19bc6a7ebcd5b3a3dc009366c29a20e264937780deab62de3b412b051b
 ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND=noninteractive
