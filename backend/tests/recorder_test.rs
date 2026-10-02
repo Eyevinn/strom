@@ -11,6 +11,8 @@
 //! - `stalled_track`: a track that stops delivering must not freeze the rest.
 //! - `splitmux_threading`: one upstream streaming task feeding every track must
 //!   not deadlock `splitmuxsink`.
+//! - `file_start_time`: each file's reported start must line its content up with
+//!   the pipeline, and so with every other recorder in the flow.
 
 pub mod common;
 
@@ -73,8 +75,13 @@ impl Recorder {
     /// and before PLAYING. They decide which tracks are connected and get a
     /// `splitmuxsink` pad, so they must run after the inputs are linked.
     fn run_setups(&self) {
+        self.run_setups_for(uuid::Uuid::new_v4(), &EventBroadcaster::with_capacity(16));
+    }
+
+    /// [`Recorder::run_setups`] as part of flow `flow_id`, reporting to `events`.
+    fn run_setups_for(&self, flow_id: uuid::Uuid, events: &EventBroadcaster) {
         for setup in self.ctx.take_element_setups() {
-            setup(uuid::Uuid::new_v4(), EventBroadcaster::with_capacity(16));
+            setup(flow_id, events.clone());
         }
     }
 }
@@ -1422,5 +1429,641 @@ mod splitmux_threading {
             files
         );
         assert!(total_bytes(&files) > 0, "recorded fragments were empty");
+    }
+}
+
+/// `RecorderFileChanged` reports where each file's timeline starts, so that files
+/// from separate recorders can be lined up: a sample at file time `t` was in the
+/// pipeline at running time `start_running_time_ns + t`.
+///
+/// Each test checks every file against what went into the recorder, not against
+/// another file, so a start that is off for one recorder cannot hide behind the
+/// same error in the other.
+mod file_start_time {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use strom_types::StromEvent;
+
+    const ELEMENTS: &[&str] = &[
+        "tee",
+        "valve",
+        "qtdemux",
+        "avdec_h264",
+        "videoconvert",
+        "appsink",
+    ];
+
+    /// 1 ms. Two frames of 30 fps video are 33 ms apart and two AAC frames 21 ms,
+    /// so this identifies a sample unambiguously and is inside the 2 ms the
+    /// alignment has to meet.
+    const TOLERANCE_NS: i64 = 1_000_000;
+
+    /// Per track ("video", "audio"): each sample's file time and size.
+    type Samples = HashMap<String, Vec<(i64, usize)>>;
+
+    struct FileStart {
+        path: PathBuf,
+        start_running_time_ns: u64,
+        start_utc_us: u64,
+    }
+
+    /// The `RecorderFileChanged` events for `block_id` so far, as absolute paths.
+    fn file_starts(
+        rx: &mut tokio::sync::broadcast::Receiver<StromEvent>,
+        media_root: &Path,
+        seen: &mut Vec<(String, FileStart)>,
+    ) {
+        while let Ok(event) = rx.try_recv() {
+            if let StromEvent::RecorderFileChanged {
+                block_id,
+                filename,
+                start_running_time_ns,
+                start_utc_us,
+                ..
+            } = event
+            {
+                seen.push((
+                    block_id,
+                    FileStart {
+                        path: media_root.join(&filename),
+                        start_running_time_ns: start_running_time_ns
+                            .unwrap_or_else(|| panic!("{filename}: no start_running_time_ns")),
+                        start_utc_us: start_utc_us
+                            .unwrap_or_else(|| panic!("{filename}: no start_utc_us")),
+                    },
+                ));
+            }
+        }
+    }
+
+    fn running_time(pad: &gst::Pad, pts: gst::ClockTime) -> Option<u64> {
+        let event = pad.sticky_event::<gst::event::Segment>(0)?;
+        let segment = event.segment().downcast_ref::<gst::ClockTime>()?;
+        segment.to_running_time(pts).map(|t| t.nseconds())
+    }
+
+    /// Record the running time and size of every buffer leaving `element`: what
+    /// the recorder is given, so what its files have to contain.
+    fn log_buffers(element: &gst::Element) -> Arc<Mutex<Vec<(u64, usize)>>> {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&log);
+        element.static_pad("src").unwrap().add_probe(
+            gst::PadProbeType::BUFFER,
+            move |pad, info| {
+                if let Some(buffer) = info.buffer() {
+                    if let Some(rt) = buffer.pts().and_then(|pts| running_time(pad, pts)) {
+                        sink.lock().unwrap().push((rt, buffer.size()));
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
+        log
+    }
+
+    /// Each sample in `file`, per track: its time on the file's timeline (stream
+    /// time, which follows mp4mux's edit lists) and its size.
+    fn demux(file: &Path) -> Samples {
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("filesrc")
+            .property("location", file.to_str().unwrap())
+            .build()
+            .unwrap();
+        let demux = gst::ElementFactory::make("qtdemux").build().unwrap();
+        pipeline.add_many([&src, &demux]).unwrap();
+        src.link(&demux).unwrap();
+
+        let samples: Arc<Mutex<Samples>> = Default::default();
+        let pipeline_weak = pipeline.downgrade();
+        let collected = Arc::clone(&samples);
+        demux.connect_pad_added(move |_, pad| {
+            let Some(pipeline) = pipeline_weak.upgrade() else {
+                return;
+            };
+            let kind = if pad.name().starts_with("video") {
+                "video"
+            } else {
+                "audio"
+            };
+            // Not async: qtdemux feeds every track from one thread, so a sink that
+            // waits to preroll would stop the other track from ever getting data.
+            let sink = gst::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .property("async", false)
+                .build()
+                .unwrap();
+            pipeline.add(&sink).unwrap();
+            sink.sync_state_with_parent().unwrap();
+            pad.link(&sink.static_pad("sink").unwrap()).unwrap();
+            let collected = Arc::clone(&collected);
+            pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+                let buffer = info.buffer().unwrap();
+                let event = pad.sticky_event::<gst::event::Segment>(0).unwrap();
+                let segment = event.segment().downcast_ref::<gst::ClockTime>().unwrap();
+                let file_time = segment.to_stream_time(buffer.pts().unwrap()).unwrap();
+                collected
+                    .lock()
+                    .unwrap()
+                    .entry(kind.to_string())
+                    .or_default()
+                    .push((file_time.nseconds() as i64, buffer.size()));
+                gst::PadProbeReturn::Ok
+            });
+        });
+
+        pipeline.set_state(gst::State::Playing).unwrap();
+        assert!(
+            wait_for_eos(&pipeline, Duration::from_secs(20)),
+            "demuxing {file:?} timed out"
+        );
+        pipeline.set_state(gst::State::Null).unwrap();
+        let samples = samples.lock().unwrap().clone();
+        samples
+    }
+
+    /// Every sample of `track` in `file` must be an input buffer, at running time
+    /// `start + file time`. Matching on time alone would pass a start that is off
+    /// by a whole number of samples, so audio is matched on size too. Video cannot
+    /// be — the recorder's h264parse rewrites every frame — and its content is
+    /// checked with flashes instead.
+    fn assert_samples_are_inputs(
+        file: &FileStart,
+        track: &str,
+        samples: &[(i64, usize)],
+        inputs: &[(u64, usize)],
+    ) {
+        let check_size = track == "audio";
+        assert!(
+            !samples.is_empty(),
+            "{:?} has no {track} samples",
+            file.path
+        );
+        for &(file_time, size) in samples {
+            let at = file.start_running_time_ns as i64 + file_time;
+            let nearest = inputs
+                .iter()
+                .min_by_key(|(rt, _)| (*rt as i64 - at).abs())
+                .unwrap();
+            assert!(
+                (nearest.0 as i64 - at).abs() <= TOLERANCE_NS && (!check_size || nearest.1 == size),
+                "{:?}: the {track} sample at file time {:.3} ms, {size} bytes, maps to running \
+                 time {:.3} ms, but the nearest input buffer is at {:.3} ms with {} bytes",
+                file.path,
+                file_time as f64 / 1e6,
+                at as f64 / 1e6,
+                nearest.0 as f64 / 1e6,
+                nearest.1,
+            );
+        }
+    }
+
+    /// Black 320x240@30 from a live source, with every 30th frame painted white.
+    /// Returns the element to link on and the running times of the white frames.
+    fn flashing_video(
+        pipeline: &gst::Pipeline,
+        num_buffers: i32,
+    ) -> (gst::Element, Arc<Mutex<Vec<u64>>>) {
+        let src = gst::ElementFactory::make("videotestsrc")
+            .property("num-buffers", num_buffers)
+            .property("is-live", true)
+            .property_from_str("pattern", "black")
+            .build()
+            .unwrap();
+        let caps = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                gst::Caps::builder("video/x-raw")
+                    .field("format", "I420")
+                    .field("width", 320i32)
+                    .field("height", 240i32)
+                    .field("framerate", gst::Fraction::new(30, 1))
+                    .build(),
+            )
+            .build()
+            .unwrap();
+        pipeline.add_many([&src, &caps]).unwrap();
+        src.link(&caps).unwrap();
+
+        let flashes = Arc::new(Mutex::new(Vec::new()));
+        let painted = Arc::clone(&flashes);
+        caps.static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+                let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_mut() else {
+                    return gst::PadProbeReturn::Ok;
+                };
+                if buffer.offset() % 30 != 0 {
+                    return gst::PadProbeReturn::Ok;
+                }
+                let rt = running_time(pad, buffer.pts().unwrap()).unwrap();
+                let mut map = buffer.make_mut().map_writable().unwrap();
+                map[..320 * 240].fill(235);
+                painted.lock().unwrap().push(rt);
+                gst::PadProbeReturn::Ok
+            });
+        (caps, flashes)
+    }
+
+    /// `x264enc` keeping a keyframe every `gop` frames, between `from` and `to`.
+    fn encode_video(pipeline: &gst::Pipeline, from: &gst::Element, to: &gst::Element, gop: u32) {
+        let queue = gst::ElementFactory::make("queue").build().unwrap();
+        let enc = gst::ElementFactory::make("x264enc")
+            .property("key-int-max", gop)
+            .property_from_str("tune", "zerolatency")
+            .build()
+            .unwrap();
+        pipeline.add_many([&queue, &enc]).unwrap();
+        gst::Element::link_many([from, &queue, &enc]).unwrap();
+        enc.link(to).unwrap();
+    }
+
+    /// A valve that drops everything until [`open`] — a recorder that starts late.
+    fn closed_valve(pipeline: &gst::Pipeline) -> gst::Element {
+        let valve = gst::ElementFactory::make("valve")
+            .property("drop", true)
+            .build()
+            .unwrap();
+        pipeline.add(&valve).unwrap();
+        valve
+    }
+
+    fn open_after(valve: &gst::Element, delay: Duration) {
+        let valve = valve.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            valve.set_property("drop", false);
+        });
+    }
+
+    /// File times of the white frames in `file`.
+    fn flash_file_times(file: &Path) -> Vec<i64> {
+        let pipeline = gst::parse::launch(&format!(
+            "filesrc location=\"{}\" ! qtdemux ! h264parse ! avdec_h264 ! videoconvert ! \
+             video/x-raw,format=GRAY8 ! appsink name=out sync=false",
+            file.display()
+        ))
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let sink = pipeline
+            .by_name("out")
+            .unwrap()
+            .downcast::<gstreamer_app::AppSink>()
+            .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let mut times = Vec::new();
+        while let Ok(sample) = sink.pull_sample() {
+            let buffer = sample.buffer().unwrap();
+            let map = buffer.map_readable().unwrap();
+            let mean = map.iter().map(|&y| y as u64).sum::<u64>() / map.len() as u64;
+            if mean > 128 {
+                let segment = sample
+                    .segment()
+                    .unwrap()
+                    .downcast_ref::<gst::ClockTime>()
+                    .unwrap();
+                times.push(
+                    segment
+                        .to_stream_time(buffer.pts().unwrap())
+                        .unwrap()
+                        .nseconds() as i64,
+                );
+            }
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        times
+    }
+
+    /// Every white frame in `file` must be at the running time it was painted at,
+    /// one of `flashes`. Returns how many there were.
+    fn assert_flashes_land(file: &FileStart, flashes: &[u64]) -> usize {
+        let times = flash_file_times(&file.path);
+        for &file_time in &times {
+            let at = file.start_running_time_ns as i64 + file_time;
+            let nearest = flashes
+                .iter()
+                .min_by_key(|&&rt| (rt as i64 - at).abs())
+                .unwrap();
+            assert!(
+                (*nearest as i64 - at).abs() <= TOLERANCE_NS,
+                "{:?} shows a flash at file time {:.3} ms, running time {:.3} ms; the \
+                 nearest flash was painted at {:.3} ms",
+                file.path,
+                file_time as f64 / 1e6,
+                at as f64 / 1e6,
+                *nearest as f64 / 1e6,
+            );
+        }
+        times.len()
+    }
+
+    /// Two video recorders on one camera, each with its own encoder: one records
+    /// from the start and splits every second, the other starts 1.3 s late and
+    /// splits every two. Every white frame in either recorder's files must land on
+    /// the running time it was painted at, and the two recorders' UTC starts must
+    /// differ by exactly their running-time difference.
+    #[test]
+    fn two_video_recorders_line_up_by_their_reported_starts() {
+        if !plugins_available() || !common::plugins_available(ELEMENTS) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let events = EventBroadcaster::with_capacity(1024);
+        let mut rx = events.subscribe();
+        let flow_id = uuid::Uuid::new_v4();
+
+        let early = add_recorder(
+            &pipeline,
+            "early",
+            dir.path(),
+            &[
+                ("num_video_tracks", PropertyValue::UInt(1)),
+                ("num_audio_tracks", PropertyValue::UInt(0)),
+                ("max_size_time_secs", PropertyValue::UInt(1)),
+            ],
+        );
+        let late = add_recorder(
+            &pipeline,
+            "late",
+            dir.path(),
+            &[
+                ("num_video_tracks", PropertyValue::UInt(1)),
+                ("num_audio_tracks", PropertyValue::UInt(0)),
+                ("max_size_time_secs", PropertyValue::UInt(2)),
+            ],
+        );
+
+        let (camera, flashes) = flashing_video(&pipeline, 150);
+        let tee = gst::ElementFactory::make("tee").build().unwrap();
+        pipeline.add(&tee).unwrap();
+        camera.link(&tee).unwrap();
+        encode_video(&pipeline, &tee, &early.input("video_input_0"), 15);
+        let valve = closed_valve(&pipeline);
+        tee.link(&valve).unwrap();
+        encode_video(&pipeline, &valve, &late.input("video_input_0"), 20);
+
+        early.run_setups_for(flow_id, &events);
+        late.run_setups_for(flow_id, &events);
+        pipeline.set_state(gst::State::Playing).unwrap();
+        open_after(&valve, Duration::from_millis(1300));
+        assert!(
+            wait_for_eos(&pipeline, Duration::from_secs(30)),
+            "recording timed out"
+        );
+        pipeline.set_state(gst::State::Null).unwrap();
+
+        let mut starts = Vec::new();
+        file_starts(&mut rx, dir.path(), &mut starts);
+        let flashes = flashes.lock().unwrap().clone();
+        let mut zero_utc_us = Vec::new();
+        for block in ["early", "late"] {
+            let files: Vec<&FileStart> = starts
+                .iter()
+                .filter(|(b, _)| b == block)
+                .map(|(_, f)| f)
+                .collect();
+            assert!(
+                files.len() >= 2,
+                "{block} wrote {} files, wanted several",
+                files.len()
+            );
+            let mut seen = 0;
+            for file in files {
+                seen += assert_flashes_land(file, &flashes);
+                zero_utc_us
+                    .push(file.start_utc_us as i64 - (file.start_running_time_ns / 1000) as i64);
+            }
+            assert!(seen >= 2, "{block}: only {seen} flashes recorded");
+        }
+        let (lo, hi) = (
+            zero_utc_us.iter().min().unwrap(),
+            zero_utc_us.iter().max().unwrap(),
+        );
+        assert!(
+            hi - lo <= 1,
+            "files in one flow run map running time to UTC differently: {:?}",
+            zero_utc_us
+        );
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+        assert!(
+            (now_us - starts[0].1.start_utc_us as i64).abs() < 60_000_000,
+            "start_utc_us {} is not near now {now_us}",
+            starts[0].1.start_utc_us
+        );
+    }
+
+    /// An audio-only recorder that starts late, next to a video-only one. Every
+    /// sample in every file must be the input buffer at `start + file time`.
+    #[test]
+    fn one_track_audio_and_video_files_map_to_their_inputs() {
+        if !plugins_available() || !common::plugins_available(ELEMENTS) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let events = EventBroadcaster::with_capacity(4096);
+        let mut rx = events.subscribe();
+        let flow_id = uuid::Uuid::new_v4();
+
+        let video = add_recorder(
+            &pipeline,
+            "video",
+            dir.path(),
+            &[
+                ("num_video_tracks", PropertyValue::UInt(1)),
+                ("num_audio_tracks", PropertyValue::UInt(0)),
+                ("max_size_time_secs", PropertyValue::UInt(1)),
+            ],
+        );
+        let audio = add_recorder(
+            &pipeline,
+            "audio",
+            dir.path(),
+            &[
+                ("num_video_tracks", PropertyValue::UInt(0)),
+                ("num_audio_tracks", PropertyValue::UInt(1)),
+                ("max_size_time_secs", PropertyValue::UInt(1)),
+            ],
+        );
+
+        let (camera, flashes) = flashing_video(&pipeline, 120);
+        let video_tap = gst::ElementFactory::make("identity").build().unwrap();
+        pipeline.add(&video_tap).unwrap();
+        encode_video(&pipeline, &camera, &video_tap, 15);
+        video_tap.link(&video.input("video_input_0")).unwrap();
+        let video_in = log_buffers(&video_tap);
+
+        let audio_enc = audio_source(&pipeline, 200, true);
+        let valve = closed_valve(&pipeline);
+        audio_enc.link(&valve).unwrap();
+        valve.link(&audio.input("audio_input_0")).unwrap();
+        let audio_in = log_buffers(&valve);
+
+        video.run_setups_for(flow_id, &events);
+        audio.run_setups_for(flow_id, &events);
+        pipeline.set_state(gst::State::Playing).unwrap();
+        open_after(&valve, Duration::from_millis(700));
+        assert!(
+            wait_for_eos(&pipeline, Duration::from_secs(30)),
+            "recording timed out"
+        );
+        pipeline.set_state(gst::State::Null).unwrap();
+
+        let mut starts = Vec::new();
+        file_starts(&mut rx, dir.path(), &mut starts);
+        for (block, track, inputs) in [("video", "video", &video_in), ("audio", "audio", &audio_in)]
+        {
+            let inputs = inputs.lock().unwrap().clone();
+            let files: Vec<&FileStart> = starts
+                .iter()
+                .filter(|(b, _)| b == block)
+                .map(|(_, f)| f)
+                .collect();
+            assert!(
+                files.len() >= 2,
+                "{block} wrote {} files, wanted several",
+                files.len()
+            );
+            let mut flashes_seen = 0;
+            for file in files {
+                let samples = demux(&file.path);
+                assert_samples_are_inputs(file, track, &samples[track], &inputs);
+                if track == "video" {
+                    flashes_seen += assert_flashes_land(file, &flashes.lock().unwrap());
+                }
+            }
+            assert!(
+                track == "audio" || flashes_seen >= 2,
+                "only {flashes_seen} flashes recorded"
+            );
+        }
+    }
+
+    /// A recorder with a video and an audio track, where audio arrives half a
+    /// second before video. mp4mux starts the first file at the audio, so that is
+    /// where the reported start has to be — not at the video keyframe
+    /// splitmuxsink hands `format-location-full`.
+    #[test]
+    fn a_first_file_starts_at_the_track_that_arrived_first() {
+        if !plugins_available() || !common::plugins_available(ELEMENTS) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let events = EventBroadcaster::with_capacity(1024);
+        let mut rx = events.subscribe();
+
+        let rec = add_recorder(
+            &pipeline,
+            "rec",
+            dir.path(),
+            &[
+                ("num_video_tracks", PropertyValue::UInt(1)),
+                ("num_audio_tracks", PropertyValue::UInt(1)),
+                ("max_size_time_secs", PropertyValue::UInt(1)),
+            ],
+        );
+
+        let (camera, flashes) = flashing_video(&pipeline, 90);
+        let valve = closed_valve(&pipeline);
+        camera.link(&valve).unwrap();
+        encode_video(&pipeline, &valve, &rec.input("video_input_0"), 10);
+        let video_in = log_buffers(&valve);
+
+        let audio_enc = audio_source(&pipeline, 150, true);
+        audio_enc.link(&rec.input("audio_input_0")).unwrap();
+        let audio_in = log_buffers(&audio_enc);
+
+        rec.run_setups_for(uuid::Uuid::new_v4(), &events);
+        pipeline.set_state(gst::State::Playing).unwrap();
+        open_after(&valve, Duration::from_millis(500));
+        assert!(
+            wait_for_eos(&pipeline, Duration::from_secs(30)),
+            "recording timed out"
+        );
+        pipeline.set_state(gst::State::Null).unwrap();
+
+        let mut starts = Vec::new();
+        file_starts(&mut rx, dir.path(), &mut starts);
+        assert!(
+            starts.len() >= 2,
+            "wrote {} files, wanted several",
+            starts.len()
+        );
+        let video_in = video_in.lock().unwrap().clone();
+        let audio_in = audio_in.lock().unwrap().clone();
+        assert!(
+            video_in[0].0 > audio_in[0].0 + 300_000_000,
+            "video did not start well after audio: {} vs {}",
+            video_in[0].0,
+            audio_in[0].0
+        );
+        let flashes = flashes.lock().unwrap().clone();
+        for (_, file) in &starts {
+            let samples = demux(&file.path);
+            assert_samples_are_inputs(file, "audio", &samples["audio"], &audio_in);
+            assert_flashes_land(file, &flashes);
+        }
+    }
+
+    /// A flow with direct media timing keeps base time 0 on every run, so a run on
+    /// another clock must not reuse the UTC mapping of the run before it. Two runs
+    /// of one flow, as `configure_clock` sets them up: monotonic, then realtime.
+    #[test]
+    fn a_rerun_on_another_clock_maps_to_utc_afresh() {
+        if !plugins_available() || !common::plugins_available(ELEMENTS) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let flow_id = uuid::Uuid::new_v4();
+        let realtime: gst::Clock = gst::glib::Object::builder::<gst::SystemClock>()
+            .property("clock-type", gst::ClockType::Realtime)
+            .build()
+            .upcast();
+        for (run, clock) in [
+            ("monotonic", gst::SystemClock::obtain()),
+            ("realtime", realtime),
+        ] {
+            let pipeline = gst::Pipeline::new();
+            pipeline.use_clock(Some(&clock));
+            pipeline.set_base_time(gst::ClockTime::ZERO);
+            pipeline.set_start_time(gst::ClockTime::NONE);
+            let events = EventBroadcaster::with_capacity(64);
+            let mut rx = events.subscribe();
+            let rec = add_recorder(
+                &pipeline,
+                run,
+                dir.path(),
+                &[
+                    ("num_video_tracks", PropertyValue::UInt(1)),
+                    ("num_audio_tracks", PropertyValue::UInt(0)),
+                ],
+            );
+            feed_video(&pipeline, &rec.input("video_input_0"), 30);
+            rec.run_setups_for(flow_id, &events);
+            pipeline.set_state(gst::State::Playing).unwrap();
+            assert!(
+                wait_for_eos(&pipeline, Duration::from_secs(20)),
+                "{run}: timed out"
+            );
+            pipeline.set_state(gst::State::Null).unwrap();
+
+            let mut starts = Vec::new();
+            file_starts(&mut rx, dir.path(), &mut starts);
+            let now_us = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64;
+            let start_us = starts[0].1.start_utc_us as i64;
+            assert!(
+                (now_us - start_us).abs() < 60_000_000,
+                "{run}: start_utc_us {start_us} is {:.0} s from now",
+                (start_us - now_us) as f64 / 1e6
+            );
+        }
     }
 }

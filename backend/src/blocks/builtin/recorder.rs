@@ -40,7 +40,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use strom_types::{
     block::{EnumValue, *},
@@ -225,6 +225,112 @@ fn add_muxer_intake_probe(pad: &gst::Pad, activity: &Arc<TrackActivity>, epoch: 
             .store(epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
         gst::PadProbeReturn::Ok
     });
+}
+
+/// Running time of `pts` in `pad`'s current segment.
+fn pad_running_time(pad: &gst::Pad, pts: gst::ClockTime) -> Option<gst::ClockTime> {
+    let event = pad.sticky_event::<gst::event::Segment>(0)?;
+    event
+        .segment()
+        .downcast_ref::<gst::ClockTime>()?
+        .to_running_time(pts)
+}
+
+/// Lower `earliest` to the running time of the first timestamped buffer `pad`
+/// takes, then remove itself. Feeds the start of the recorder's first file; see
+/// `file_start_running_time`.
+fn add_first_buffer_probe(pad: &gst::Pad, earliest: &Arc<AtomicU64>) {
+    let earliest = Arc::clone(earliest);
+    pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+        let Some(pts) = info.buffer().and_then(|b| b.pts()) else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if let Some(running_time) = pad_running_time(pad, pts) {
+            earliest.fetch_min(running_time.nseconds(), Ordering::Relaxed);
+        }
+        gst::PadProbeReturn::Remove
+    });
+}
+
+/// Running time of a new file's t=0, from the `format-location-full` sample.
+///
+/// mp4mux starts a file at the earliest first PTS among its tracks and delays the
+/// later tracks with an edit list. The sample is the reference track's first buffer
+/// in the file (the primary video track, else the first track). From the second
+/// file on that is the earliest, because splitmuxsink cuts every track at the
+/// reference's keyframe. The first file also takes everything a non-reference track
+/// received before that keyframe — audio ahead of the first video frame — so it
+/// starts at `earliest_input`, the earliest first buffer of any track. splitmuxsink
+/// opens the first file only once every track has caught up with the reference's
+/// first GOP, so those buffers have all passed the sink pads by then.
+fn file_start_running_time(
+    sample: &gst::Sample,
+    first_file: bool,
+    earliest_input: u64,
+) -> Option<gst::ClockTime> {
+    let pts = sample.buffer()?.pts()?;
+    let reference = sample
+        .segment()?
+        .downcast_ref::<gst::ClockTime>()?
+        .to_running_time(pts)?;
+    if first_file && earliest_input < reference.nseconds() {
+        Some(gst::ClockTime::from_nseconds(earliest_input))
+    } else {
+        Some(reference)
+    }
+}
+
+/// Wall-clock time of running time zero, in nanoseconds since the Unix epoch, per
+/// flow run: the flow, its pipeline clock and its base time. The clock is part of
+/// the key because a flow with direct media timing keeps base time 0 on every run,
+/// whatever clock it runs on.
+///
+/// Sampled once per run rather than per file. The pipeline clock and the system
+/// wall clock drift apart (the monotonic clock on macOS by a few ppm, about 10 ms an
+/// hour), so offsets sampled at different moments would put two recorders' files
+/// out of step by that drift. One anchor keeps every recorder in the run on the
+/// same mapping; only the absolute time drifts.
+type RunAnchor = (gst::glib::WeakRef<gst::Clock>, gst::ClockTime, i128);
+static RUNNING_ZERO_UTC_NS: OnceLock<Mutex<HashMap<FlowId, RunAnchor>>> = OnceLock::new();
+
+/// Wall-clock time, in microseconds since the Unix epoch, of `running_time` in the
+/// pipeline `element` belongs to. `None` until that pipeline has first gone to
+/// PLAYING: it hands out its clock only then.
+///
+/// The pipeline's state is no guide after that. A recorder sink that unlocks once
+/// data arrives makes a live pipeline report PAUSED while it prerolls, with the
+/// base time unchanged.
+fn running_time_to_utc_us(
+    flow_id: FlowId,
+    element: &gst::Element,
+    running_time: gst::ClockTime,
+) -> Option<u64> {
+    let base_time = element.base_time()?;
+    let clock = element.clock()?;
+
+    let mut anchors = RUNNING_ZERO_UTC_NS
+        .get_or_init(Default::default)
+        .lock()
+        .ok()?;
+    let zero_ns = match anchors.get(&flow_id) {
+        Some((anchor_clock, base, zero_ns))
+            if *base == base_time && anchor_clock.upgrade().as_ref() == Some(&clock) =>
+        {
+            *zero_ns
+        }
+        _ => {
+            let before = clock.time();
+            let wall = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?;
+            let after = clock.time();
+            let clock_now = (before.nseconds() as i128 + after.nseconds() as i128) / 2;
+            let zero_ns = wall.as_nanos() as i128 - (clock_now - base_time.nseconds() as i128);
+            anchors.insert(flow_id, (clock.downgrade(), base_time, zero_ns));
+            zero_ns
+        }
+    };
+    u64::try_from((zero_ns + running_time.nseconds() as i128).div_euclid(1000)).ok()
 }
 
 /// End a track, so the muxer stops waiting for it.
@@ -1236,10 +1342,15 @@ impl BlockBuilder for RecorderBuilder {
             instance_id, num_video_tracks, num_audio_tracks, container
         );
 
+        // Running time of the first buffer any track hands splitmuxsink; see
+        // `file_start_running_time`.
+        let earliest_input = Arc::new(AtomicU64::new(u64::MAX));
+
         // Request the sink pads — see the note above the input chains.
         {
             let splitmuxsink_weak = splitmuxsink.downgrade();
             let block_id = instance_id.to_string();
+            let earliest_input = Arc::clone(&earliest_input);
             ctx.register_element_setup(Box::new(move |_flow_id, _events| {
                 let Some(splitmuxsink) = splitmuxsink_weak.upgrade() else {
                     return;
@@ -1281,6 +1392,7 @@ impl BlockBuilder for RecorderBuilder {
                             );
                             let _ = cell.set(pad.name().to_string());
                             add_muxer_intake_probe(&pad, activity, stall_epoch);
+                            add_first_buffer_probe(&pad, &earliest_input);
                             watched.push(WatchedTrack {
                                 label: format!("video {}", vi),
                                 input: input.clone(),
@@ -1324,6 +1436,7 @@ impl BlockBuilder for RecorderBuilder {
                             );
                             let _ = cell.set(pad.name().to_string());
                             add_muxer_intake_probe(&pad, activity, stall_epoch);
+                            add_first_buffer_probe(&pad, &earliest_input);
                             watched.push(WatchedTrack {
                                 label: format!("audio {}", i),
                                 input: input.clone(),
@@ -1344,9 +1457,10 @@ impl BlockBuilder for RecorderBuilder {
             }));
         }
 
-        // Register element setup to connect format-location signal at pipeline start.
-        // The signal fires each time splitmuxsink opens a new file, giving us the actual filename.
-        // Also starts the auto-stop timer if max_duration_mins > 0.
+        // Register element setup to connect format-location-full signal at pipeline start.
+        // The signal fires each time splitmuxsink opens a new file, giving us the actual
+        // filename and the file's first buffer. Also starts the auto-stop timer if
+        // max_duration_mins > 0.
         let splitmuxsink_for_signal = splitmuxsink.clone();
         let location_template = location.clone();
         let relative_location_template = relative_location.clone();
@@ -1356,20 +1470,35 @@ impl BlockBuilder for RecorderBuilder {
             let block_id_clone = block_id_for_signal.clone();
             let location_clone = location_template.clone();
             let relative_location_clone = relative_location_template.clone();
-            splitmuxsink_for_signal.connect("format-location", false, move |args| {
+            let earliest_input = Arc::clone(&earliest_input);
+            let first_file = AtomicBool::new(true);
+            splitmuxsink_for_signal.connect("format-location-full", false, move |args| {
                 let index = args[1].get::<u32>().unwrap_or(0);
                 // Reproduce the filename that splitmuxsink uses (same %05d format)
                 let filename = location_clone.replace("%05d", &format!("{:05}", index));
                 let relative_path =
                     relative_location_clone.replace("%05d", &format!("{:05}", index));
+                let start_running_time = args[2].get::<gst::Sample>().ok().and_then(|sample| {
+                    file_start_running_time(
+                        &sample,
+                        first_file.swap(false, Ordering::Relaxed),
+                        earliest_input.load(Ordering::Relaxed),
+                    )
+                });
+                let start_utc_us = start_running_time.and_then(|running_time| {
+                    let splitmuxsink = args[0].get::<gst::Element>().ok()?;
+                    running_time_to_utc_us(flow_id, &splitmuxsink, running_time)
+                });
                 debug!(
-                    "Recorder {}: writing file index {}: {}",
-                    block_id_clone, index, filename
+                    "Recorder {}: writing file index {}: {} (starts at running time {:?}, UTC {:?} us)",
+                    block_id_clone, index, filename, start_running_time, start_utc_us
                 );
                 events_clone.broadcast(strom_types::StromEvent::RecorderFileChanged {
                     flow_id,
                     block_id: block_id_clone.clone(),
                     filename: relative_path,
+                    start_running_time_ns: start_running_time.map(|t| t.nseconds()),
+                    start_utc_us,
                 });
                 // Return the filename — the signal requires a gchararray return value
                 Some(filename.to_value())

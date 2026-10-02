@@ -280,6 +280,19 @@ pub enum StromEvent {
         block_id: String,
         /// Full path to the file currently being written
         filename: String,
+        /// Running time, in nanoseconds, of the file's t=0: a sample at file time
+        /// `t` carries running time `start_running_time_ns + t`. File time counts
+        /// from the start of the file's timeline; MKV and MPEG-TS carry absolute
+        /// timestamps, so for them it counts from the earliest one. `None` when
+        /// it could not be determined.
+        start_running_time_ns: Option<u64>,
+        /// `start_running_time_ns` on the wall clock, in microseconds since the
+        /// Unix epoch (UTC). Two recorders in one flow run map running time to
+        /// UTC through the same anchor, so a sample at file time `t1` in one and
+        /// `t2` in the other were captured together iff
+        /// `start_utc_us_1 + t1 == start_utc_us_2 + t2`. The absolute value is as
+        /// good as the host's clock. `None` when it could not be determined.
+        start_utc_us: Option<u64>,
     },
     /// Recorder block reached its configured max duration and requests the flow to stop
     RecorderAutoStop {
@@ -713,6 +726,7 @@ impl StromEvent {
                 flow_id,
                 block_id,
                 filename,
+                ..
             } => {
                 format!(
                     "Recorder {} in flow {} writing: {}",
@@ -1306,6 +1320,8 @@ mod event_accessor_tests {
                 flow_id: id,
                 block_id: "rec0".to_string(),
                 filename: "out.mp4".to_string(),
+                start_running_time_ns: Some(1_000_000_000),
+                start_utc_us: Some(1_790_000_000_000_000),
             },
             StromEvent::RecorderAutoStop {
                 flow_id: id,
