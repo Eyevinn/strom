@@ -106,13 +106,6 @@ RUN cd /build/gstcefsrc && git apply /build/isolated-context.patch
 COPY strict-network.patch /build/strict-network.patch
 RUN cd /build/gstcefsrc && git apply /build/strict-network.patch
 
-# Strom's patch: answer every CefClient handler an offscreen source can be
-# reached through - no file dialogs (one aborted the embedding process), no
-# downloads, no JavaScript dialogs, no media access, no context menu, no
-# drops. The table at the top of the patch covers each handler.
-COPY offscreen-handlers.patch /build/offscreen-handlers.patch
-RUN cd /build/gstcefsrc && git apply /build/offscreen-handlers.patch
-
 WORKDIR /build/gstcefsrc
 
 # Build gstcefsrc
@@ -164,7 +157,7 @@ RUN mkdir -p /output/lib/gstreamer-1.0 && \
     # Create version info file
     echo "CEF_VERSION=${CEF_VERSION}" > /output/version.txt && \
     echo "GSTCEFSRC_REF=${GSTCEFSRC_REF}" >> /output/version.txt && \
-    echo "STROM_PATCHES=popup-close isolated-context strict-network offscreen-handlers" >> /output/version.txt && \
+    echo "STROM_PATCHES=popup-close isolated-context strict-network" >> /output/version.txt && \
     echo "TARGETARCH=${TARGETARCH}" >> /output/version.txt && \
     echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /output/version.txt && \
     # List what was built

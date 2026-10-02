@@ -27,8 +27,9 @@
 //! # The link is a capability, and it says nothing else
 //!
 //! Minting a link needs Strom's own authentication, and with no
-//! authentication configured the debug port is never opened at all — a door
-//! with no lock is worse than no door. The link itself is one opaque key and
+//! authentication configured remote control is off — a door with no lock is
+//! worse than no door. The debug port itself is open either way, for guarding
+//! pages, and on loopback. The link itself is one opaque key and
 //! nothing more: no API token, no Chromium target id, no internal address or
 //! port. It is meant to be pasted into a browser or read off a phone screen,
 //! so anything in it is something the operator cannot avoid handing over

@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use strom_types::{Flow, FlowId};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::blocks::builtin::html_input;
 
@@ -60,12 +60,16 @@ fn profiles_in_use<'a>(root: &Path, flows: impl IntoIterator<Item = &'a Flow>) -
 /// block names them.
 pub fn remove_unused_profiles<'a>(root: &Path, flows: impl IntoIterator<Item = &'a Flow>) {
     let used = profiles_in_use(root, flows);
-    remove_profiles(root, |name, path| {
-        (name.starts_with(BLOCK_PREFIX)
-            || name.starts_with(ELEMENT_PREFIX)
-            || name.starts_with(NAMED_PREFIX))
-            && !used.contains(path)
-    });
+    remove_profiles(
+        root,
+        &|name: &str, path: &Path| {
+            (name.starts_with(BLOCK_PREFIX)
+                || name.starts_with(ELEMENT_PREFIX)
+                || name.starts_with(NAMED_PREFIX))
+                && !used.contains(path)
+        },
+        true,
+    );
 }
 
 /// Remove the profiles a deleted flow's blocks and elements had of their own.
@@ -73,18 +77,51 @@ pub fn remove_unused_profiles<'a>(root: &Path, flows: impl IntoIterator<Item = &
 /// Named profiles stay: another flow may share one, and the next startup
 /// removes it if none does. A flow id is a UUID, fixed in length, so the
 /// prefix cannot match another flow's directories.
+///
+/// Chromium goes on writing a profile for a moment after its browser has
+/// closed - measured: removing it right after the flow stopped failed with
+/// "Directory not empty" - so a profile that will not go yet is tried again
+/// a few times, in the background.
 pub fn remove_flow_profiles(root: &Path, flow_id: &FlowId) {
     let block = format!("{}{}-", BLOCK_PREFIX, flow_id);
     let element = format!("{}{}-", ELEMENT_PREFIX, flow_id);
-    remove_profiles(root, |name, _| {
-        name.starts_with(&block) || name.starts_with(&element)
+    let doomed = move |name: &str, _: &Path| name.starts_with(&block) || name.starts_with(&element);
+    let failed = remove_profiles(root, &doomed, false);
+    if failed == 0 {
+        return;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        warn!(
+            "{} browser profile(s) of flow {} could not be removed yet; the next startup \
+             removes them",
+            failed, flow_id
+        );
+        return;
+    };
+    let root = root.to_path_buf();
+    handle.spawn(async move {
+        for attempt in 1..=PROFILE_RETRIES {
+            tokio::time::sleep(PROFILE_RETRY_DELAY).await;
+            let last = attempt == PROFILE_RETRIES;
+            if remove_profiles(&root, &doomed, last) == 0 {
+                return;
+            }
+        }
     });
 }
 
-fn remove_profiles(root: &Path, doomed: impl Fn(&str, &Path) -> bool) {
+/// How often, and how far apart, a profile Chromium is still writing is
+/// tried again.
+const PROFILE_RETRIES: u32 = 5;
+const PROFILE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Remove every profile `doomed` picks, and return how many would not go.
+/// A failure is only warned about when `last` says nothing will try again.
+fn remove_profiles(root: &Path, doomed: &impl Fn(&str, &Path) -> bool, last: bool) -> usize {
     let Ok(entries) = std::fs::read_dir(root) else {
-        return;
+        return 0;
     };
+    let mut failed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
@@ -95,13 +132,22 @@ fn remove_profiles(root: &Path, doomed: impl Fn(&str, &Path) -> bool) {
         }
         match std::fs::remove_dir_all(&path) {
             Ok(()) => info!("Removed unused browser profile {}", path.display()),
-            Err(e) => warn!(
-                "Could not remove unused browser profile {}: {}",
-                path.display(),
-                e
-            ),
+            Err(e) => {
+                failed += 1;
+                if last {
+                    warn!(
+                        "Could not remove unused browser profile {}: {} - the next startup \
+                         removes it",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    debug!("Browser profile {} is still in use: {}", path.display(), e);
+                }
+            }
         }
     }
+    failed
 }
 
 /// Clear a process lock Chromium would refuse to break.

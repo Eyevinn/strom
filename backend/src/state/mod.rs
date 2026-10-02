@@ -1612,7 +1612,7 @@ impl AppState {
 
         // Endpoints, Media Player registry, pipeline, leak check, CPU cores.
         let state = self.teardown_flow(id, Some(manager), None).await?;
-        crate::cef_pages::close_leftover_pages(id).await;
+        crate::cef_pages::report_leftover_pages(id).await;
         crate::cef_pages::forget_flow(id);
 
         // Clear runtime_data from all blocks (SDP is only valid while running)

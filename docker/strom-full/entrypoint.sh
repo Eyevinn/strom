@@ -76,9 +76,9 @@ rm -rf /tmp/cef-cache
 mkdir -p /tmp/cef-cache
 
 # CEF's own logging, to stderr. Warnings and errors only: verbose writes
-# everything Chromium does into the container log. A page's console messages
-# do not go here at all with Strom's gstcefsrc build; they are in the
-# cef_console GStreamer debug category (GST_DEBUG=cef_console:5).
+# everything Chromium does into the container log. Chromium logs a page's
+# console messages at info, console.error included, so warning also keeps a
+# page logging in a loop out of the log. GST_CEF_LOG_SEVERITY=info shows them.
 export GST_CEF_LOG_SEVERITY="${GST_CEF_LOG_SEVERITY:-warning}"
 
 # LD_PRELOAD the mallinfo shim to neutralise the MemoryInfra SIGILL crash.

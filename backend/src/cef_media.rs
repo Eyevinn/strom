@@ -3,9 +3,11 @@
 //! A page renders to video and has no business with the server's own devices,
 //! which on a broadcast server may be capture cards. Some pages will not start
 //! without a camera and a microphone, though: a video call joined to be
-//! watched, for one. Chromium can replace every device with a synthetic one
-//! (`use-fake-device-for-media-stream`), and Strom's gstcefsrc grants a page
-//! camera and microphone only when it does.
+//! watched, for one. gstcefsrc runs Chromium with `enable-media-stream`,
+//! which grants every media request without asking the element, so the
+//! switch that replaces every device with a synthetic one
+//! (`use-fake-device-for-media-stream`) is what keeps the server's own out of
+//! reach. Screen capture is refused by the page guard in `cef_pages`.
 //!
 //! The synthetic devices play a file each. Chromium's own default is a beep
 //! every second and a green test card, which the other people on a call would

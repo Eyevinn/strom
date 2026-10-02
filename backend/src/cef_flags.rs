@@ -25,13 +25,16 @@ pub struct CefSetup<'a> {
     pub auth_configured: bool,
 }
 
-/// Set CEF up, and return Chromium's debug port, if it is opened.
+/// Set CEF up, and return the debug port remote control links may use: none
+/// without authentication.
 ///
-/// The port is how Strom guards every page (see [`crate::cef_pages`]) and what
-/// remote control links go through, so it is opened whenever authentication
-/// is configured, on a free loopback port unless one is configured. Nothing
-/// outside Strom connects to it, so its number does not matter. Whether a
-/// block hands out links is the block's Remote Control switch.
+/// The port is how Strom guards every page (see [`crate::cef_pages`]), so it
+/// is always opened, on a free loopback port unless one is configured.
+/// Nothing outside Strom connects to it, so its number does not matter, and
+/// Strom's authentication does not change who can reach it: that is whatever
+/// can reach loopback. What authentication gates is minting links, so without
+/// it remote control is off. Whether a block hands out links is the block's
+/// Remote Control switch.
 pub fn configure(setup: CefSetup<'_>) -> Option<u16> {
     configure_cache(setup.cache_path);
     quiet_page_console();
@@ -40,11 +43,35 @@ pub fn configure(setup: CefSetup<'_>) -> Option<u16> {
     let mut flags = network_checks(&existing);
     flags.extend(fake_media_switches());
 
-    let port = debug_port(&mut flags, setup.debug_port, setup.auth_configured);
+    let port = debug_port(&mut flags, setup.debug_port);
     std::env::set_var(EXTRA_FLAGS, flags.join(","));
 
     if let Some(port) = port {
         crate::cef_pages::set_debug_port(port);
+    }
+
+    // Minting a link is reached through the authenticated API, so with no
+    // authentication configured there is no door in front of it at all:
+    // anyone who can reach the HTTP port could mint one.
+    if !setup.auth_configured {
+        if setup.debug_port.is_some() {
+            error!(
+                "A CEF debug port is configured but authentication is not, so minting a \
+                 remote control link would take no credentials at all. Remote control is \
+                 off; pages are still guarded. Set STROM_ADMIN_USER together with \
+                 STROM_ADMIN_PASSWORD_HASH, or STROM_API_KEY, and start again to use it"
+            );
+        } else if let Some(port) = port {
+            info!(
+                "CEF debug port on 127.0.0.1:{}, for guarding HTML sources. Remote control is \
+                 off without authentication",
+                port
+            );
+        }
+        return None;
+    }
+
+    if let Some(port) = port {
         if setup.full_devtools {
             warn!(
                 "CEF remote debugging on 127.0.0.1:{} with full DevTools - a remote control \
@@ -206,27 +233,7 @@ fn flag_value(flags: &[String], name: &str) -> Option<Option<String>> {
 /// is logged out again even with a warm profile. Chromium writes the cookie
 /// store on a timer, so a login survives a graceful restart but not a kill in
 /// the first half minute after it.
-fn debug_port(
-    flags: &mut Vec<String>,
-    configured: Option<u16>,
-    auth_configured: bool,
-) -> Option<u16> {
-    // Minting a link is reached through the authenticated API, so with no
-    // authentication configured there is no door in front of it at all:
-    // anyone who can reach the HTTP port could mint one. Rather than open the
-    // debug port and rely on a lock that is not fitted, do not open it.
-    if !auth_configured {
-        if configured.is_some() {
-            error!(
-                "A CEF debug port is configured but authentication is not, so minting a \
-                 remote control link would take no credentials at all. The port stays shut. \
-                 Set STROM_ADMIN_USER together with STROM_ADMIN_PASSWORD_HASH, or \
-                 STROM_API_KEY, and start again to use it"
-            );
-        }
-        return None;
-    }
-
+fn debug_port(flags: &mut Vec<String>, configured: Option<u16>) -> Option<u16> {
     // Whatever port Chromium ends up listening on is the one the proxy has to
     // dial. An operator who put the flag in GST_CEF_CHROME_EXTRA_FLAGS
     // themselves keeps it - but then a configured value is not where the
@@ -321,29 +328,21 @@ mod tests {
     }
 
     #[test]
-    fn with_authentication_a_free_port_is_opened_unasked() {
+    fn a_free_port_is_opened_unasked() {
         let mut flags = Vec::new();
-        let port = debug_port(&mut flags, None, true).expect("a free loopback port");
+        let port = debug_port(&mut flags, None).expect("a free loopback port");
         assert_ne!(port, 0);
         assert!(flags.contains(&format!("remote-debugging-port={}", port)));
     }
 
     #[test]
-    fn the_debug_port_stays_shut_without_authentication() {
-        let mut flags = Vec::new();
-        assert_eq!(debug_port(&mut flags, Some(9222), false), None);
-        assert_eq!(debug_port(&mut flags, None, false), None);
-        assert!(flags.is_empty());
-    }
-
-    #[test]
     fn the_port_already_in_the_flags_is_the_one_in_force() {
         let mut flags = split_flags("remote-debugging-port=9333");
-        assert_eq!(debug_port(&mut flags, Some(9222), true), Some(9333));
+        assert_eq!(debug_port(&mut flags, Some(9222)), Some(9333));
         let mut flags = split_flags("remote-debugging-port");
-        assert_eq!(debug_port(&mut flags, Some(9222), true), None);
+        assert_eq!(debug_port(&mut flags, Some(9222)), None);
         let mut flags = Vec::new();
-        assert_eq!(debug_port(&mut flags, Some(9222), true), Some(9222));
+        assert_eq!(debug_port(&mut flags, Some(9222)), Some(9222));
         assert!(flags.contains(&"remote-debugging-port=9222".to_string()));
         assert!(flags.contains(&"persist-session-cookies".to_string()));
     }

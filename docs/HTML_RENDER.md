@@ -313,20 +313,21 @@ container.
 ## Camera, microphone, and what else a page cannot do
 
 A page is never given the server's own cameras or microphones, which on a
-broadcast server may be capture cards. With Strom's gstcefsrc build it gets a
-camera and a microphone all the same, because some pages will not start
-without them - a video call joined to be watched, for one. They are
-synthetic: the microphone is silent and the camera shows a black frame.
-Strom writes both into the CEF cache directory when it starts.
+broadcast server may be capture cards. It gets a camera and a microphone all
+the same, because some pages will not start without them - a video call
+joined to be watched, for one. They are synthetic: the microphone is silent
+and the camera shows a black frame. Strom writes both into the CEF cache
+directory when it starts. Screen capture is refused.
 
-Nor does a page get anything that would need someone at the server: file
-dialogs are cancelled, downloads refused, `alert`, `confirm` and `prompt`
-answered as dismissed, printing cancelled, the right-click menu empty, and
-drops refused. Left to CEF, a file dialog was built inside Strom and aborted
-it, and `print()` froze the page.
+Nor does a page get anything that would need someone at the server. Strom
+holds a DevTools session on every page for this: file choosers are
+intercepted, downloads refused, `alert`, `confirm` and `prompt` dismissed,
+and `print()` does nothing, in the page and in frames from other sites. Left
+to CEF, a file chooser was built inside Strom and aborted it, `print()` froze
+the page, and a download landed on the server's disk.
 
-A page's console messages go to the `cef_console` GStreamer debug category
-(`GST_DEBUG=cef_console:5`), not to the container log.
+A page's console messages are logged at info, so they stay out of the log at
+the default `GST_CEF_LOG_SEVERITY=warning`. Set it to `info` to see them.
 
 ## Browser profiles
 
@@ -428,10 +429,12 @@ and the rest — is refused.
 
 Remote control needs Strom's own authentication configured, and nothing else
 at instance level: whether a block hands out links is its Remote Control
-switch. With authentication configured, Strom opens Chromium's debug port on a
-free loopback port, which it also uses to guard every page (see
-[Running with upstream gstcefsrc](#running-with-upstream-gstcefsrc)). With
-none, minting a link would take no credentials at all, so the port stays shut.
+switch. Without authentication, minting a link would take no credentials at
+all, so remote control is off. Chromium's debug port is opened either way, on
+a free loopback port, because Strom guards every page through it (see
+[Running with upstream gstcefsrc](#running-with-upstream-gstcefsrc)).
+Authentication does not change who can reach the port: whatever can reach
+loopback can.
 
 Nothing outside Strom connects to the port, so its number does not matter. To
 pin it anyway:
@@ -533,41 +536,24 @@ so the two cannot be combined.
 
 The `strom-full` image ships Strom's own gstcefsrc build: upstream
 [gstcefsrc](https://github.com/centricular/gstcefsrc) at a pinned commit, plus
-four patches. The HTML Input block, raw `cefsrc` elements and remote control
+three patches. The HTML Input block, raw `cefsrc` elements and remote control
 all run on an upstream build too, for instance a native Linux install with a
 gstcefsrc you built yourself. Strom checks which properties the plugin has and
 logs a warning for each one that is missing, rather than failing the flow.
 
-Remote control itself needs nothing from the patches. Its picture, input and
+Remote control needs nothing from the patches. Its picture, input and
 navigation use Chromium's own debug protocol, and the debug port is a plain
-Chromium switch.
+Chromium switch. Neither does what Strom refuses a page (see
+[Camera, microphone, and what else a page cannot do](#camera-microphone-and-what-else-a-page-cannot-do)):
+that is done over the same protocol, whatever the plugin.
 
-With authentication configured, which opens the debug port, Strom also guards
-every page over that protocol, which covers most of what the patches fix:
+What you lose without each patch, measured against CEF 144:
 
-- A file chooser is intercepted, so a click on a file input through remote
-  control opens nothing.
-- Downloads are refused.
-- `print()` does nothing.
-- `alert`, `confirm` and `prompt` are dismissed.
-- An on-air URL change goes to the page directly, so it still works after a
-  popup has closed.
-- A page that outlives its element when its flow stops is closed.
-
-A page always gets the fake camera and microphone, because Strom passes
-Chromium the switch for them whatever the plugin is. A page's console output
-stays out of Strom's log too: Chromium logs every console message at INFO, and
-Strom sets CEF's log severity to warning unless `GST_CEF_LOG_SEVERITY` says
-otherwise.
-
-What you lose without each patch:
-
-| Patch | With it | Without it, with authentication | Without it, no authentication (no debug port) |
-|-------|---------|-----------------------------|---------------------------|
-| Popup close | Closing a popup leaves the page that opened it alone | Strom steers the page and closes it on stop, as above | Once a popup closes, URL changes on air do nothing, and stopping the flow leaves the page running, still logged in and on the network, until Strom exits |
-| Browser context per source | Each source has its own cookies, storage and cache ([Browser profiles](#browser-profiles)) | Every HTML source in the process shares one cookie jar. A login made in one is a login in all of them, and the Browser Profile setting has no effect | Same |
-| Strict network | Chromium refuses a strict page's own requests to this machine and its network | Strom still refuses an internal address as the page's URL, but what the page itself fetches, frames or connects to is not checked. Of the Local Network Access checks Strom switches on, only the navigation check takes effect, or an `enable-features` you set yourself, which wins | Same |
-| Offscreen handlers | File dialogs, downloads, printing, JavaScript dialogs, the context menu and drops are refused in the element | Strom's guard refuses the same, except the context menu and drops, which it cannot reach and which were not measured | `print()` can freeze the page and a download is written to the server's disk without asking. There is no remote control, so nothing can click a file input |
+| Patch | With it | Without it |
+|-------|---------|------------|
+| Popup close | Closing a popup leaves the page that opened it alone | Closing a popup is taken for the source's own browser closing. Strom still loads URL changes into the page itself, but stopping the flow leaves the page running, still logged in and on the network, until Strom restarts; Strom says so in its log. Remote control closes popups when it follows a login, so this happens in normal use. **Isolated contexts without this patch aborted Strom** at the next flow start, so a build with the one must have the other |
+| Browser context per source | Each source has its own cookies, storage and cache ([Browser profiles](#browser-profiles)) | Every HTML source in the process shares one cookie jar. A login made in one is a login in all of them, and the Browser Profile setting has no effect |
+| Strict network | Chromium refuses a strict page's requests to this machine and its network, and lets a loose page make them | Strom still refuses an internal address as the page's URL. A page's own request to a local address is left waiting for an answer that never comes, so it hangs instead of failing, strict or not: a loose source still loads a local page and that page's own resources, but a public page cannot reach local ones. Only one of the three Local Network Access checks Strom switches on takes effect, because upstream keeps one `enable-features`: navigations are checked, WebSocket and WebTransport are not |
 
 An upstream build is reasonable on your own machine, rendering pages you
 trust. It is not an option for a Strom that renders pages for anyone else:

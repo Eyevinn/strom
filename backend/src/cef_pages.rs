@@ -11,18 +11,18 @@
 //! `cefsrc` starts on `about:blank#strom-<token>`, a token nobody else knows.
 //! Once Chromium lists a page with that URL, its target id is recorded
 //! against the source and the element is pointed at its real URL. The blank
-//! start is Chromium's initial empty document, which the first navigation
-//! replaces, so it leaves no entry in the page's history.
+//! start is Chromium's initial empty document; the guard below clears it from
+//! the page's history once the page has moved on.
 //!
 //! This works with any gstcefsrc: it needs nothing from the element but its
 //! `url` property.
 //!
 //! A named page also gets a guard: a DevTools session of Strom's own, held
 //! for the page's life, that refuses what an offscreen browser must never do.
-//! Strom's gstcefsrc build answers these in the element as well; upstream
-//! leaves them to CEF, where a file chooser is built in-process and has
-//! aborted Strom, `print()` never returns, and a download lands on the
-//! server's disk. See [`guard`].
+//! gstcefsrc leaves these to CEF, where a file chooser is built in-process and
+//! has aborted Strom, `print()` never returns, and a download lands on the
+//! server's disk. See [`guard`]. From birth on, Strom also loads a new URL
+//! into the page itself rather than through the element (see [`load_url`]).
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -111,13 +111,13 @@ fn pending() -> &'static Mutex<HashMap<String, String>> {
     PENDING.get_or_init(Default::default)
 }
 
-/// An upstream `cefsrc` whose page is driven over DevTools rather than
-/// through the element.
+/// A `cefsrc` whose page is driven over DevTools rather than through the
+/// element, once the page is named.
 ///
-/// Upstream gstcefsrc forgets its own browser once a popup the page opened
-/// closes, and from then on ignores a new `url`. Strom's build has the fix in
-/// every release that has `isolated-context`, so an element without that
-/// property is upstream, and Strom navigates its page itself.
+/// gstcefsrc forgets its own browser once a popup the page opened closes:
+/// the popup's close arrives in the element's handler and is taken for its
+/// own. From then on a new `url` is ignored. Strom knows the page, so it
+/// navigates it itself and never asks the element again.
 struct Steered {
     element: glib::WeakRef<gst::Element>,
     target_id: String,
@@ -128,12 +128,6 @@ struct Steered {
 fn steered() -> &'static Mutex<Vec<Steered>> {
     static STEERED: OnceLock<Mutex<Vec<Steered>>> = OnceLock::new();
     STEERED.get_or_init(Default::default)
-}
-
-fn is_upstream(cefsrc: &impl IsA<glib::Object>) -> bool {
-    cefsrc
-        .find_property(crate::blocks::builtin::html_input::ISOLATED_CONTEXT_PROPERTY)
-        .is_none()
 }
 
 /// Point a running `cefsrc` at `url`.
@@ -195,8 +189,8 @@ async fn navigate(port: u16, target_id: String, url: String) {
 ///
 /// While its page is being born the element holds the marker, which means
 /// nothing to an operator and would be saved as the block's URL by a client
-/// that reads a property and writes it back. An upstream element Strom
-/// steers keeps its first URL; the page is on the one last loaded.
+/// that reads a property and writes it back. An element Strom steers keeps
+/// its first URL; the page is on the one last loaded.
 pub fn shown_url(cefsrc: &glib::Object, url: String) -> String {
     if url.starts_with(MARKER_PREFIX) {
         let pending = pending().lock().unwrap_or_else(|e| e.into_inner());
@@ -223,7 +217,7 @@ pub fn forget_flow(flow_id: &FlowId) {
 
 /// Load the URL a page being born was waiting for, once and only once.
 ///
-/// With its page named, an upstream element is steered from then on.
+/// With its page named, the element is steered from then on.
 fn finish_birth(cefsrc: &impl IsA<glib::Object>, marker: &str, target_id: Option<&str>) {
     let mut pending = pending().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(url) = pending.remove(marker) {
@@ -231,9 +225,7 @@ fn finish_birth(cefsrc: &impl IsA<glib::Object>, marker: &str, target_id: Option
         let element = cefsrc
             .upcast_ref::<glib::Object>()
             .downcast_ref::<gst::Element>();
-        if let (Some(element), Some(target_id)) =
-            (element, target_id.filter(|_| is_upstream(cefsrc)))
-        {
+        if let (Some(element), Some(target_id)) = (element, target_id) {
             steered()
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -262,15 +254,6 @@ fn record(owner: PageOwner, target_id: String) {
 /// port this does nothing.
 pub fn name_page(cefsrc: &gst::Element, owner: PageOwner) {
     let Some(&port) = DEBUG_PORT.get() else {
-        static WARNED: std::sync::Once = std::sync::Once::new();
-        WARNED.call_once(|| {
-            warn!(
-                "HTML sources are not guarded: Strom guards every page over Chromium's debug \
-                 port, and opens it only with authentication configured. Without it, a page \
-                 can freeze itself with print() and write downloads to this server's disk \
-                 unless the gstcefsrc build refuses them, as Strom's does"
-            )
-        });
         return;
     };
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
@@ -567,13 +550,18 @@ async fn guard(port: u16, target_id: String, who: String) {
     });
 }
 
-/// Close what a stopped flow left open.
+/// Say what a stopped flow left open.
 ///
 /// Stopping a `cefsrc` closes its page. Upstream gstcefsrc loses track of its
 /// own browser once a popup the page opened closes, and then never closes it:
-/// the page keeps running, logged in and on the network. Whatever Chromium
-/// still lists for a stopped flow is such a page.
-pub async fn close_leftover_pages(flow_id: &FlowId) {
+/// the page keeps running, logged in and on the network, until Strom exits.
+/// Strom's build has the fix (popup-close.patch).
+///
+/// The page is not closed from here. Its browser still answers to the freed
+/// element, and closing it runs the element's close handler on freed memory:
+/// measured with isolated-context and without popup-close, the next flow
+/// start aborted Strom with a corrupted heap.
+pub async fn report_leftover_pages(flow_id: &FlowId) {
     let Some(&port) = DEBUG_PORT.get() else {
         return;
     };
@@ -592,18 +580,14 @@ pub async fn close_leftover_pages(flow_id: &FlowId) {
         return;
     };
     for id in leftover {
-        if !listed.iter().any(|t| t.id == id) {
-            continue;
+        if listed.iter().any(|t| t.id == id) {
+            warn!(
+                "Page {} of flow {} outlived its element and is still running, logged in \
+                 and on the network, until Strom restarts. Upstream gstcefsrc does this after \
+                 a popup closes; Strom's build does not",
+                id, flow_id
+            );
         }
-        warn!(
-            "Page {} of flow {} outlived its element, which upstream gstcefsrc does after a \
-             popup closes; closing it",
-            id, flow_id
-        );
-        let _ = client()
-            .put(format!("http://127.0.0.1:{}/json/close/{}", port, id))
-            .send()
-            .await;
     }
 }
 
