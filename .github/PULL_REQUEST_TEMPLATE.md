@@ -1,4 +1,5 @@
 Closes #
+<!-- or "Refs #" if this PR only partly addresses the issue: "Closes" closes it on merge. -->
 
 ## Problem
 
