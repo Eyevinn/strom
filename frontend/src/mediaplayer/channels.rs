@@ -41,8 +41,12 @@ pub const LIVE_CHANNELS: &[LiveChannel] = &[
         url: "https://www.bloomberg.com/media-manifest/streams/us.m3u8",
     },
     LiveChannel {
-        name: "CGTN",
-        url: "https://amg00405-rakutentv-cgtn-rakuten-i9tar.amagi.tv/master.m3u8",
+        name: "Africanews",
+        url: "https://cdn-euronews.akamaized.net/live/eds/africanews-en/25049/index.m3u8",
+    },
+    LiveChannel {
+        name: "India Today",
+        url: "https://d1rc86nwwc9fag.cloudfront.net/vglive-sk-293160/master.m3u8",
     },
     LiveChannel {
         name: "i24NEWS",
