@@ -448,7 +448,7 @@ pub fn try_apply_live_url(
         Ok(url) => url,
         Err(reason) => return Some(Err(reason)),
     };
-    element.set_property(URL_PROPERTY, &url);
+    crate::cef_pages::load_url(element, &url);
     info!("Loaded {} into HTML source {}", url, element_id);
     Some(Ok(()))
 }

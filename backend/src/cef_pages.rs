@@ -29,10 +29,11 @@ use tracing::{debug, warn};
 /// How often Chromium's page list is read while a page is being born.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// How long to wait for a page to appear before giving up on naming it. The
-/// first `cefsrc` in a process initializes CEF, which takes seconds; after
-/// that, a page appears within milliseconds of its element starting.
-const BIRTH_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long after its element has started a page may take to be listed
+/// before Strom gives up naming it. `cefsrc` starts only once its browser
+/// exists, so the page is normally listed at once; this bounds how long a
+/// source shows a blank page when the debug port does not answer.
+const BIRTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The URL a page is born on, and the prefix Strom recognizes it by.
 const MARKER_PREFIX: &str = "about:blank#strom-";
@@ -86,6 +87,37 @@ pub fn record_for_test(owner: PageOwner, target_id: String) {
     record(owner, target_id);
 }
 
+/// The URL each page being born goes to once it is named, by marker. A URL
+/// set on air in the meantime replaces the entry instead of reaching the
+/// element, so it cannot be overwritten by the one the element was built with.
+fn pending() -> &'static Mutex<HashMap<String, String>> {
+    static PENDING: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    PENDING.get_or_init(Default::default)
+}
+
+/// Point a running `cefsrc` at `url`.
+///
+/// A page still being born keeps its marker until it is named, and loads
+/// `url` then. Every live URL write goes through here, so it cannot race the
+/// birth.
+pub fn load_url(cefsrc: &gst::Element, url: &str) {
+    let mut pending = pending().lock().unwrap_or_else(|e| e.into_inner());
+    let current: Option<String> = cefsrc.property(URL_PROPERTY);
+    if let Some(next) = current.and_then(|marker| pending.get_mut(&marker)) {
+        *next = url.to_string();
+        return;
+    }
+    cefsrc.set_property(URL_PROPERTY, url);
+}
+
+/// Load the URL a page being born was waiting for, once and only once.
+fn finish_birth(cefsrc: &gst::Element, marker: &str) {
+    let mut pending = pending().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(url) = pending.remove(marker) {
+        cefsrc.set_property(URL_PROPERTY, &url);
+    }
+}
+
 fn record(owner: PageOwner, target_id: String) {
     if let Ok(mut pages) = pages().lock() {
         // A target id belongs to one source only. A restarted page has a new
@@ -115,22 +147,38 @@ pub fn name_page(cefsrc: &gst::Element, owner: PageOwner) {
         .property::<Option<String>>(URL_PROPERTY)
         .unwrap_or_default();
     let marker = format!("{}{}", MARKER_PREFIX, uuid::Uuid::new_v4().simple());
+    pending()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(marker.clone(), real_url);
     cefsrc.set_property(URL_PROPERTY, &marker);
 
     // The task must not keep the element alive: a flow stopped before its
     // page was born would otherwise never be freed.
     let element = cefsrc.downgrade();
     handle.spawn(async move {
-        let started = Instant::now();
+        // Until the element starts there is no page to look for, and the
+        // flow may be some time getting there; only then does the clock run.
+        let mut started: Option<Instant> = None;
         let target_id = loop {
-            if element.upgrade().is_none() {
+            let Some(cefsrc) = element.upgrade() else {
+                pending()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&marker);
                 return;
+            };
+            if started.is_none() && cefsrc.current_state() >= gst::State::Paused {
+                started = Some(Instant::now());
             }
-            if let Some(id) = find_page(port, &marker).await {
-                break Some(id);
-            }
-            if started.elapsed() > BIRTH_TIMEOUT {
-                break None;
+            drop(cefsrc);
+            if let Some(since) = started {
+                if let Some(id) = find_page(port, &marker).await {
+                    break Some(id);
+                }
+                if since.elapsed() > BIRTH_TIMEOUT {
+                    break None;
+                }
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         };
@@ -140,18 +188,19 @@ pub fn name_page(cefsrc: &gst::Element, owner: PageOwner) {
                 record(owner.clone(), id.clone());
             }
             None => warn!(
-                "{:?}: its page did not appear within {:?}, so remote control cannot find it",
+                "{:?}: Chromium did not list its page within {:?} of starting, so remote \
+                 control cannot find it. Loading its URL anyway",
                 owner, BIRTH_TIMEOUT
             ),
         }
-        let Some(element) = element.upgrade() else {
-            return;
-        };
-        // A URL set on air while the page was being born has already been
-        // loaded, and wins over the one the element was built with.
-        let current: Option<String> = element.property(URL_PROPERTY);
-        if current.as_deref() == Some(marker.as_str()) {
-            element.set_property(URL_PROPERTY, &real_url);
+        match element.upgrade() {
+            Some(cefsrc) => finish_birth(&cefsrc, &marker),
+            None => {
+                pending()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&marker);
+            }
         }
     });
 }
