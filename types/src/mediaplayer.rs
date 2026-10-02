@@ -63,7 +63,7 @@ pub struct SeekRequest {
 }
 
 /// Request to go to a specific file.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct GotoRequest {
     /// File index (0-based)
@@ -108,5 +108,11 @@ mod tests {
             let json = serde_json::to_string(&PlayerControlRequest { action }).unwrap();
             assert_eq!(json, format!(r#"{{"action":"{name}"}}"#));
         }
+    }
+
+    #[test]
+    fn goto_request_wire_format() {
+        let json = serde_json::to_string(&GotoRequest { index: 3 }).unwrap();
+        assert_eq!(json, r#"{"index":3}"#);
     }
 }

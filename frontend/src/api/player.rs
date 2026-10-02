@@ -1,5 +1,5 @@
 use strom_types::mediaplayer::{
-    PlayerAction, PlayerControlRequest, SeekRequest, SetPlaylistRequest,
+    GotoRequest, PlayerAction, PlayerControlRequest, SeekRequest, SetPlaylistRequest,
 };
 use strom_types::FlowId;
 
@@ -95,11 +95,6 @@ impl ApiClient {
             "{}/flows/{}/blocks/{}/player/goto",
             self.base_url, flow_id, block_id
         );
-
-        #[derive(Serialize)]
-        struct GotoRequest {
-            index: usize,
-        }
 
         let response = self
             .with_auth(self.client.post(&url))
