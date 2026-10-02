@@ -394,7 +394,9 @@ pub(super) fn build_gpu_pipeline(
             // pixelate, ...). Sits before the tee so the look follows the
             // source everywhere: PGM, PVW, thumbnails and PiPs.
             let fx_look_id = p.id(&format!("fx_look_{}", i));
-            elems.push((fx_look_id.clone(), elements::make_glshader(&fx_look_id)?));
+            let fx_look = elements::make_glshader(&fx_look_id)?;
+            elements::keep_input_size(&fx_look);
+            elems.push((fx_look_id.clone(), fx_look));
             links.push((
                 ElementPadRef::pad(&cc_id, "src"),
                 ElementPadRef::pad(&fx_look_id, "sink"),
@@ -425,7 +427,9 @@ pub(super) fn build_gpu_pipeline(
             // shader transitions. Dist branch only — multiview thumbnails
             // and PVW stay clean during a wipe.
             let fx_take_id = p.id(&format!("fx_take_{}", i));
-            elems.push((fx_take_id.clone(), elements::make_glshader(&fx_take_id)?));
+            let fx_take = elements::make_glshader(&fx_take_id)?;
+            elements::keep_input_size(&fx_take);
+            elems.push((fx_take_id.clone(), fx_take));
             links.push((
                 ElementPadRef::pad(&q_dist_id, "src"),
                 ElementPadRef::pad(&fx_take_id, "sink"),

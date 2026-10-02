@@ -359,7 +359,7 @@ impl PipelineManager {
                 base,
                 scale: cw as f64 / state.pgm_w.max(1) as f64,
             });
-            pads_for_source(
+            let targets = pads_for_source(
                 &state,
                 state.pgm_pip(),
                 pgm,
@@ -370,12 +370,43 @@ impl PipelineManager {
                 src_aspect,
                 &self.vision_mixer_source_aspects(block_instance_id, state.num_inputs),
                 dist_underlay,
-            )
-            .into_iter()
-            // Restore bordered zone sources' underlay pads along with their
-            // content pads.
-            .flat_map(|t| std::iter::once(t.pad_idx).chain(t.underlay.map(|u| u.pad_idx)))
-            .collect()
+            );
+            // Fit the pads to their sources' current shapes before they fade
+            // back in: a source that changed shape during FTB was not re-fitted.
+            // Content pads (dist pad index = input index) also get their crop
+            // again, which is in pixels of the source's size.
+            let transforms = state.pgm_pip().map(|p| state.pip_transforms(p));
+            for (pad_idx, (x, y, w, h), content) in targets.iter().flat_map(|t| {
+                std::iter::once((t.pad_idx, (t.x, t.y, t.w, t.h), true)).chain(
+                    t.underlay
+                        .as_ref()
+                        .map(|u| (u.pad_idx, (u.x, u.y, u.w, u.h), false)),
+                )
+            }) {
+                if let Some(pad) = find_pad(mixer, &format!("sink_{}", pad_idx)) {
+                    crate::gst::control_bindings::wipe_control_bindings(
+                        pad.upcast_ref(),
+                        &["xpos", "ypos", "width", "height"],
+                    );
+                    pad.set_property("xpos", x);
+                    pad.set_property("ypos", y);
+                    pad.set_property("width", w);
+                    pad.set_property("height", h);
+                    if content {
+                        let crop = transforms
+                            .as_ref()
+                            .and_then(|t| t.get(&pad_idx).copied())
+                            .unwrap_or_default();
+                        set_pad_crop(&pad, &crop);
+                    }
+                }
+            }
+            targets
+                .into_iter()
+                // Restore bordered zone sources' underlay pads along with their
+                // content pads.
+                .flat_map(|t| std::iter::once(t.pad_idx).chain(t.underlay.map(|u| u.pad_idx)))
+                .collect()
         };
 
         // Use mixer position for stream-time (same as transitions).
@@ -451,19 +482,11 @@ impl PipelineManager {
         // Once the fade completes, neutralize the alpha bindings (keyframe
         // wipe) so later direct alpha writes (DSK toggles, takes) stick.
         if !control_sources.is_empty() {
-            let cleanup_mixer = mixer.clone();
-            let cleanup_duration = duration_ms + 100; // small margin
-            gst::glib::timeout_add_once(
-                std::time::Duration::from_millis(cleanup_duration),
-                move || {
-                    for pad in cleanup_mixer.sink_pads() {
-                        crate::gst::control_bindings::wipe_control_binding(
-                            pad.upcast_ref(),
-                            "alpha",
-                        );
-                    }
-                    drop(control_sources);
-                },
+            wipe_ftb_fade_once_played(
+                mixer.downgrade(),
+                end_time,
+                control_sources,
+                std::time::Duration::from_millis(duration_ms + 100),
             );
         }
 
@@ -1020,4 +1043,42 @@ impl PipelineManager {
         );
         Ok(())
     }
+}
+
+/// Wipe an FTB fade's alpha keyframes once the mixer has played past `end`,
+/// so later direct alpha writes (DSK toggles, takes) stick. Keyframes are in
+/// the mixer's stream time, which lags the wall clock whenever the mixer runs
+/// slower than real time, so `wait` is only when to look first. A control
+/// source whose last keyframe is no longer `end` was reprogrammed by a later
+/// FTB or take, and is left alone.
+fn wipe_ftb_fade_once_played(
+    mixer: gst::glib::WeakRef<gst::Element>,
+    end: gst::ClockTime,
+    sources: Vec<gstreamer_controller::InterpolationControlSource>,
+    wait: std::time::Duration,
+) {
+    use gstreamer_controller::prelude::*;
+    gst::glib::timeout_add_once(wait, move || {
+        // Pipeline teardown in progress → nothing to clean up.
+        let Some(m) = mixer.upgrade() else {
+            return;
+        };
+        if let Some(pos) = m.query_position::<gst::ClockTime>() {
+            if pos < end {
+                let behind = std::time::Duration::from_nanos((end - pos).nseconds());
+                wipe_ftb_fade_once_played(
+                    mixer,
+                    end,
+                    sources,
+                    behind + std::time::Duration::from_millis(50),
+                );
+                return;
+            }
+        }
+        for cs in &sources {
+            if cs.list_control_points().last().map(|p| p.timestamp()) == Some(end) {
+                cs.unset_all();
+            }
+        }
+    });
 }
