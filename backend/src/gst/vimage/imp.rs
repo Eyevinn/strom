@@ -17,9 +17,11 @@ use gstreamer_base as gst_base;
 use gstreamer_base::prelude::*;
 use gstreamer_base::subclass::prelude::*;
 use gstreamer_video as gst_video;
+use gstreamer_video::prelude::*;
 use gstreamer_video::subclass::prelude::*;
 use gstreamer_video::{VideoFormat, VideoFormatInfo, VideoFrameRef, VideoInfo};
 
+use super::accelerate as acc;
 use super::convert;
 use super::plan::Plan;
 
@@ -397,7 +399,25 @@ impl VideoFilterImpl for VImageConvert {
 
         match path {
             Path::VImage(plan) => convert::run(plan, inframe, outframe).map_err(|err| {
-                gst::error!(CAT, imp = self, "vImage conversion failed: error {}", err);
+                // Posted, not only logged: a bare FlowError::Error reaches the
+                // operator as "Internal data stream error" and nothing else.
+                let cause = if err == acc::K_PLANE_UNAVAILABLE {
+                    "a frame plane was not mapped".to_string()
+                } else {
+                    format!("vImage error {err}")
+                };
+                gst::element_imp_error!(
+                    self,
+                    gst::StreamError::Failed,
+                    (
+                        "vImage {} from {} to {} failed: {}",
+                        plan.describe(),
+                        inframe.format().to_str(),
+                        outframe.format().to_str(),
+                        cause
+                    ),
+                    ["set STROM_DISABLE_VIMAGE=1 to convert with videoconvert instead"]
+                );
                 gst::FlowError::Error
             })?,
             Path::Fallback(converter) => converter.frame_ref(inframe, outframe),
