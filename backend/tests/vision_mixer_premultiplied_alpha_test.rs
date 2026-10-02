@@ -217,10 +217,16 @@ fn centre_red(sample: &gstreamer::Sample) -> f64 {
     sum as f64 / n as f64
 }
 
+/// A running flow and the glib main loop it needs: the media player starts
+/// its internal pipeline from a bus handler on the default main context when
+/// the flow reaches PLAYING, which only runs while a main loop does. The server
+/// has one.
 struct Running {
     manager: PipelineManager,
     block_id: String,
     sink: gstreamer_app::AppSink,
+    main_loop: gstreamer::glib::MainLoop,
+    main_loop_thread: std::thread::JoinHandle<()>,
 }
 
 impl Running {
@@ -230,6 +236,11 @@ impl Running {
         // GPU capabilities; without this the first lookup panics.
         strom::gpu::detect_gpu_capabilities();
 
+        let main_loop = gstreamer::glib::MainLoop::new(None, false);
+        let main_loop_thread = {
+            let ml = main_loop.clone();
+            std::thread::spawn(move || ml.run())
+        };
         let temp_file = NamedTempFile::new().unwrap();
         let registry = BlockRegistry::new(temp_file.path());
         let flow = build_flow(backend, block_id, alpha_mode, dsk);
@@ -258,6 +269,8 @@ impl Running {
             manager,
             block_id: block_id.to_string(),
             sink,
+            main_loop,
+            main_loop_thread,
         }
     }
 
@@ -296,6 +309,8 @@ impl Running {
 
     fn stop(mut self) {
         self.manager.stop().expect("stop");
+        self.main_loop.quit();
+        self.main_loop_thread.join().expect("main loop thread");
     }
 }
 
