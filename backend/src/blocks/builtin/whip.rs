@@ -16,20 +16,22 @@ use crate::blocks::{
     APPSRC_MAX_BYTES_AUDIO, APPSRC_MAX_BYTES_VIDEO, APPSRC_MAX_TIME,
 };
 use crate::gst::ice_preflight;
-use crate::gst::keyframe_request;
+use crate::gst::keyframe_request::{self, RecoveryStep, VideoDamage};
 use crate::gst::orphan_guard;
+use crate::gst::pipeline_bridge::{self, SessionBridge};
 use crate::gst::rtp_hdrext;
 use crate::whip_session_manager::{
-    ActivityStamp, SessionActivity, SessionCleanupRequest, StallSide, WhipEndpointConfig,
-    DECODE_GRACE,
+    ActivityStamp, SessionActivity, SessionCleanupRequest, SlotDecodebin, StallSide,
+    WhipEndpointConfig, DECODE_GRACE,
 };
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
+use gstreamer_rtp as gst_rtp;
 use gstreamer_video as gst_video;
 use std::collections::HashMap;
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use strom_types::block::StreamMode;
@@ -387,12 +389,17 @@ pub fn build_whipserversrc(
     let mut slot_video_appsrcs: Vec<gst_app::AppSrc> = Vec::new();
     // Per-slot decodebins, locked until a session claims the slot. Weak refs:
     // the pipeline owns them.
-    let mut slot_decodebins: Vec<Vec<gst::glib::WeakRef<gst::Element>>> = Vec::new();
+    let mut slot_decodebins: Vec<Vec<SlotDecodebin>> = Vec::new();
 
     // One flag per slot, set when decodebin exposes that slot's video pad.
     // A session stops asking the publisher for keyframes once its flag flips.
     let video_decoding: Arc<Vec<AtomicBool>> =
         Arc::new((0..max_sessions).map(|_| AtomicBool::new(false)).collect());
+
+    // One per slot, raised by the slot's decode chain when a running session's
+    // video has lost data that only a keyframe can repair.
+    let video_damage: Arc<Vec<VideoDamage>> =
+        Arc::new((0..max_sessions).map(|_| VideoDamage::default()).collect());
 
     // One stamp per slot, written by a probe on that slot's output tees below.
     // This is where a session's media becomes usable to the flow, so this is
@@ -404,7 +411,7 @@ pub fn build_whipserversrc(
         .collect();
 
     for (slot, output_stamp) in slot_output.iter().enumerate() {
-        let mut decodebins_for_slot: Vec<gst::glib::WeakRef<gst::Element>> = Vec::new();
+        let mut decodebins_for_slot: Vec<SlotDecodebin> = Vec::new();
 
         // Audio chain for this slot
         if mode.has_audio() {
@@ -444,7 +451,12 @@ pub fn build_whipserversrc(
                     })?;
 
                 prepare_idle_decodebin(&decodebin);
-                decodebins_for_slot.push(decodebin.downgrade());
+                // Audio keeps its running chain across sessions; only the
+                // video decoder fails on reuse (see `restart_decodebin`).
+                decodebins_for_slot.push(SlotDecodebin {
+                    element: decodebin.downgrade(),
+                    restart_on_reuse: false,
+                });
 
                 let audioconvert = gst::ElementFactory::make("audioconvert")
                     .name(&audioconvert_id)
@@ -568,7 +580,31 @@ pub fn build_whipserversrc(
                     })?;
 
                 prepare_idle_decodebin(&decodebin);
-                decodebins_for_slot.push(decodebin.downgrade());
+                decodebins_for_slot.push(SlotDecodebin {
+                    element: decodebin.downgrade(),
+                    restart_on_reuse: true,
+                });
+
+                // The depayloader decodebin plugs is the one element that sees
+                // a loss the jitterbuffer gave up on.
+                let video_damage_for_depay = video_damage.clone();
+                decodebin
+                    .downcast_ref::<gst::Bin>()
+                    .expect("decodebin is a bin")
+                    .connect_element_added(move |_bin, element| {
+                        // By klass, not by C type: the Rust `*depay2` elements
+                        // are registered too and do not derive from
+                        // RTPBaseDepayload.
+                        let is_depayloader = element
+                            .factory()
+                            .and_then(|f| {
+                                f.metadata(gst::ELEMENT_METADATA_KLASS).map(str::to_owned)
+                            })
+                            .is_some_and(|klass| klass.contains("Depayloader"));
+                        if is_depayloader {
+                            watch_depayloader_for_damage(element, &video_damage_for_depay, slot);
+                        }
+                    });
 
                 let videoconvert = gst::ElementFactory::make("videoconvert")
                     .name(&videoconvert_id)
@@ -586,10 +622,20 @@ pub fn build_whipserversrc(
                 // decodebin has dynamic pads — connect pad-added to link to videoconvert
                 let videoconvert_weak = videoconvert.downgrade();
                 let video_decoding_for_pad = video_decoding.clone();
+                let video_damage_for_pad = video_damage.clone();
                 decodebin.connect_pad_added(move |_dec, src_pad| {
                     if src_pad.direction() != gst::PadDirection::Src {
                         return;
                     }
+                    // Pictures out of the decoder: the other half of the
+                    // slot's silent-decoder check. Per frame, one atomic.
+                    let damage = video_damage_for_pad.clone();
+                    src_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, _info| {
+                        if let Some(damage) = damage.get(slot) {
+                            damage.decoded();
+                        }
+                        gst::PadProbeReturn::Ok
+                    });
                     // Video is decoding: whoever is asking for keyframes on
                     // this slot can stop.
                     if let Some(flag) = video_decoding_for_pad.get(slot) {
@@ -663,6 +709,7 @@ pub fn build_whipserversrc(
             pipeline_weak: gst::glib::WeakRef::new(),
             decode,
             video_decoding,
+            video_damage,
             jitterbuffer_latency_ms,
             do_retransmission,
             drop_on_latency,
@@ -683,6 +730,57 @@ pub fn build_whipserversrc(
         bus_message_handler: None,
         pad_properties: HashMap::new(),
     })
+}
+
+/// Report a mid-session recovery step for `slot`.
+fn log_recovery_step(step: RecoveryStep, slot: usize) {
+    match step {
+        RecoveryStep::Wait => {}
+        RecoveryStep::Request { attempt } => debug!(
+            "WHIP Input: slot {} video damaged (a gap, or the decoder stopped producing), requesting keyframe (PLI) attempt {}",
+            slot, attempt
+        ),
+        RecoveryStep::Recovered { after, requests } => info!(
+            "WHIP Input: slot {} video recovered after {} ms ({} keyframe request(s))",
+            slot,
+            after.as_millis(),
+            requests
+        ),
+        RecoveryStep::GaveUp { requests } => warn!(
+            "WHIP Input: slot {} video still damaged after {} keyframe request(s); not asking again until it recovers",
+            slot, requests
+        ),
+    }
+}
+
+/// Feed every access unit leaving a slot's video depayloader into the slot's
+/// damage flag. A BUFFER probe, so it runs per frame: atomics only.
+fn watch_depayloader_for_damage(depay: &gst::Element, damage: &Arc<Vec<VideoDamage>>, slot: usize) {
+    let Some(src) = depay.static_pad("src") else {
+        return;
+    };
+    let damage = damage.clone();
+    src.add_probe(
+        gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+        move |_pad, info| {
+            let Some(damage) = damage.get(slot) else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let observe = |buffer: &gst::BufferRef| {
+                let flags = buffer.flags();
+                damage.depayloaded(
+                    flags.contains(gst::BufferFlags::DISCONT),
+                    !flags.contains(gst::BufferFlags::DELTA_UNIT),
+                );
+            };
+            match &info.data {
+                Some(gst::PadProbeData::Buffer(buffer)) => observe(buffer),
+                Some(gst::PadProbeData::BufferList(list)) => list.iter().for_each(observe),
+                _ => {}
+            }
+            gst::PadProbeReturn::Ok
+        },
+    );
 }
 
 /// How long a session may go without producing usable media before the watchdog
@@ -751,6 +849,57 @@ fn wait_for_inactivity(
     }
 }
 
+/// Wire one session stream's appsink into its slot's appsrc in the main
+/// pipeline.
+///
+/// A function rather than an inline closure so a test can drive the callback:
+/// the guard that matters is here, not in [`pipeline_bridge`]. A bare
+/// `appsrc.push_sample(&sample)` in this body re-opens the cascade an unstamped
+/// buffer starts and fails nothing in that module's tests.
+#[allow(clippy::too_many_arguments)]
+fn install_slot_bridge(
+    appsink: &gst_app::AppSink,
+    appsrc: gst_app::AppSrc,
+    bridge: Arc<SessionBridge>,
+    main_pipeline_weak: gst::glib::WeakRef<gst::Pipeline>,
+    media_type: &str,
+    slot: usize,
+    activity: Arc<SessionActivity>,
+    session_finished: Arc<AtomicBool>,
+) {
+    // Resolved here, not per buffer: the pad's media type is fixed.
+    let pad_is_audio = media_type == "audio";
+    let video_order = VideoPtsOrder::new();
+
+    appsink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                // Media arriving from the publisher. Half of this session's
+                // liveness; the other half is stamped on the slot's output tee
+                // in the main pipeline.
+                activity.touch_ingress(pad_is_audio);
+
+                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                forward_sample_to_slot(
+                    &sample,
+                    &appsrc,
+                    &session_finished,
+                    &bridge,
+                    &main_pipeline_weak,
+                    if pad_is_audio {
+                        SlotMedia::Audio
+                    } else {
+                        SlotMedia::Video(&video_order)
+                    },
+                    slot,
+                )?;
+
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build(),
+    );
+}
+
 /// A whipserversrc session that has been created and is playing, handed back to
 /// the HTTP handler so it can register the session with the manager.
 pub struct CreatedSession {
@@ -760,6 +909,83 @@ pub struct CreatedSession {
     pub port: u16,
     /// Liveness handle, shared with the appsink callbacks that feed the slot.
     pub activity: Arc<SessionActivity>,
+}
+
+/// Drain one `whipserversrc` pad into the session pipeline: `pad → tee →
+/// fakesink + appsink`, with every element brought up to the pipeline's state.
+///
+/// Returns the appsink the caller installs its bridge callbacks on, or `None`
+/// if the branch could not be built — every failure is logged here.
+///
+/// Both sinks run with `async` off. The pipeline they join is already PLAYING,
+/// and a sink that still wants a preroll answers the state change with ASYNC.
+/// whipserversrc adds its audio and video pads one after the other within a
+/// millisecond, so the second branch lands while the first is still waiting,
+/// and the second is then left below PLAYING: it takes a single buffer and
+/// blocks its streaming thread for good. From the outside that is a publisher
+/// whose audio or video never starts, with nothing in the log to say so —
+/// `sync_state_with_parent` reports the state change as accepted either way.
+pub fn attach_session_branch(
+    session_pipeline: &gst::Pipeline,
+    pad: &gst::Pad,
+    appsink_name: &str,
+) -> Option<gst_app::AppSink> {
+    let tee = match gst::ElementFactory::make("tee")
+        .property("allow-not-linked", true)
+        .build()
+    {
+        Ok(t) => t,
+        Err(e) => {
+            error!("WHIP Input: Failed to create tee in pad-added: {}", e);
+            return None;
+        }
+    };
+    let fakesink = match gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .property("async", false)
+        .build()
+    {
+        Ok(f) => f,
+        Err(e) => {
+            error!("WHIP Input: Failed to create fakesink in pad-added: {}", e);
+            return None;
+        }
+    };
+    let appsink = gst_app::AppSink::builder()
+        .name(appsink_name)
+        .sync(false)
+        .async_(false)
+        .build();
+
+    if let Err(e) = session_pipeline.add_many([&tee, &fakesink, appsink.upcast_ref()]) {
+        error!(
+            "WHIP Input: Failed to add elements to session pipeline: {}",
+            e
+        );
+        return None;
+    }
+    if let Err(e) = pad.link(&tee.static_pad("sink").expect("tee has no sink pad")) {
+        error!("WHIP Input: Failed to link pad to tee: {:?}", e);
+        return None;
+    }
+    if let (Some(tee_src1), Some(tee_src2)) = (
+        tee.request_pad_simple("src_%u"),
+        tee.request_pad_simple("src_%u"),
+    ) {
+        let _ = tee_src1.link(
+            &fakesink
+                .static_pad("sink")
+                .expect("fakesink has no sink pad"),
+        );
+        let _ = tee_src2.link(&appsink.static_pad("sink").expect("appsink has no sink pad"));
+    } else {
+        error!("WHIP Input: Failed to request tee src pads");
+        return None;
+    }
+    let _ = tee.sync_state_with_parent();
+    let _ = fakesink.sync_state_with_parent();
+    let _ = appsink.sync_state_with_parent();
+    Some(appsink)
 }
 
 /// Create a new whipserversrc element for a single WHIP client session.
@@ -982,12 +1208,15 @@ pub fn create_whipserversrc_for_session(
     if let Some(flag) = video_decoding.get(slot) {
         flag.store(false, Ordering::Relaxed);
     }
+    let video_damage = config.video_damage.clone();
+    if let Some(damage) = video_damage.get(slot) {
+        damage.clear();
+    }
+    let decode = config.decode;
 
-    // Shared timestamp offset for A/V sync across audio and video appsrcs.
-    // Computed from the first buffer on either stream:
-    //   offset = main_pipeline_running_time - buffer_pts
-    // i64::MIN means "not yet computed".
-    let shared_ts_offset = Arc::new(AtomicI64::new(i64::MIN));
+    // Shared appsink -> appsrc bridge state for this session: the A/V timestamp
+    // offset both streams rebase onto, and the unstamped-buffer drop count.
+    let session_bridge = Arc::new(SessionBridge::new());
 
     // Liveness for this session, in the shape the session manager reads it: it
     // has to tell a slot that still has a publisher producing media behind it
@@ -1070,54 +1299,13 @@ pub fn create_whipserversrc_for_session(
                 return;
             };
 
-            // Session pipeline: pad → tee → fakesink (drain) + appsink (bridge)
-            let tee = match gst::ElementFactory::make("tee")
-                .property("allow-not-linked", true)
-                .build()
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    error!("WHIP Input: Failed to create tee in pad-added: {}", e);
-                    return;
-                }
+            let Some(appsink) = attach_session_branch(
+                &session_pipeline,
+                pad,
+                &format!("{}:{}_appsink_{}", prefix, pad_name, stream_num),
+            ) else {
+                return;
             };
-            let fakesink = match gst::ElementFactory::make("fakesink")
-                .property("sync", false)
-                .property("async", false)
-                .build()
-            {
-                Ok(f) => f,
-                Err(e) => {
-                    error!("WHIP Input: Failed to create fakesink in pad-added: {}", e);
-                    return;
-                }
-            };
-            let appsink = gst_app::AppSink::builder()
-                .name(format!("{}:{}_appsink_{}", prefix, pad_name, stream_num))
-                .sync(false)
-                .build();
-
-            if let Err(e) = session_pipeline.add_many([&tee, &fakesink, appsink.upcast_ref()]) {
-                error!("WHIP Input: Failed to add elements to session pipeline: {}", e);
-                return;
-            }
-            if let Err(e) = pad.link(&tee.static_pad("sink").expect("tee has no sink pad")) {
-                error!("WHIP Input: Failed to link pad to tee: {:?}", e);
-                return;
-            }
-            if let (Some(tee_src1), Some(tee_src2)) = (
-                tee.request_pad_simple("src_%u"),
-                tee.request_pad_simple("src_%u"),
-            ) {
-                let _ = tee_src1.link(&fakesink.static_pad("sink").expect("fakesink has no sink pad"));
-                let _ = tee_src2.link(&appsink.static_pad("sink").expect("appsink has no sink pad"));
-            } else {
-                error!("WHIP Input: Failed to request tee src pads");
-                return;
-            }
-            let _ = tee.sync_state_with_parent();
-            let _ = fakesink.sync_state_with_parent();
-            let _ = appsink.sync_state_with_parent();
 
             // Determine which slot appsrc to feed based on pad type
             let target_appsrc: Option<gst_app::AppSrc> =
@@ -1198,38 +1386,66 @@ pub fn create_whipserversrc_for_session(
                             slot, e
                         );
                     }
+
+                    // Once decoding, ask again whenever the slot's decode chain
+                    // reports damage only a keyframe repairs. Without decode
+                    // there is no decode chain, and nothing ever reports.
+                    if decode {
+                        let repair_pad = pad.downgrade();
+                        let repair_damage = video_damage.clone();
+                        let repair_stop = cleanup_sent_for_pads.clone();
+                        let repair_slot = slot;
+                        if let Err(e) = std::thread::Builder::new()
+                            .name(format!("whip-repair-{}", repair_slot))
+                            .spawn(move || {
+                                let Some(damage) = repair_damage.get(repair_slot) else {
+                                    return;
+                                };
+                                let epoch = Instant::now();
+                                keyframe_request::recover_while(
+                                    keyframe_request::RecoveryPolicy::default(),
+                                    damage,
+                                    // The session's teardown paths set the
+                                    // flag; a dropped session pipeline also
+                                    // ends it.
+                                    || {
+                                        repair_stop.load(Ordering::SeqCst)
+                                            || repair_pad.upgrade().is_none()
+                                    },
+                                    || epoch.elapsed(),
+                                    std::thread::sleep,
+                                    |step| {
+                                        log_recovery_step(step, repair_slot);
+                                        if let RecoveryStep::Request { .. } = step {
+                                            if let Some(pad) = repair_pad.upgrade() {
+                                                pad.send_event(
+                                                    gst_video::UpstreamForceKeyUnitEvent::builder()
+                                                        .all_headers(true)
+                                                        .build(),
+                                                );
+                                            }
+                                        }
+                                    },
+                                );
+                            })
+                        {
+                            warn!(
+                                "WHIP Input: could not spawn keyframe repairer for slot {}: {}",
+                                slot, e
+                            );
+                        }
+                    }
                 }
 
-                let ts_offset = shared_ts_offset.clone();
-                let main_pipeline_for_ts = main_pipeline_weak.clone();
-                let media_for_log = media_type.to_string();
-                let activity_cb = activity_for_pads.clone();
-                let session_finished = cleanup_sent_for_pads.clone();
-                // Resolved here, not per buffer: the pad's media type is fixed.
-                let pad_is_audio = media_type == "audio";
-
-                appsink.set_callbacks(
-                    gst_app::AppSinkCallbacks::builder()
-                        .new_sample(move |sink| {
-                            // Media arriving from the publisher. Half of this
-                            // session's liveness; the other half is stamped on
-                            // the slot's output tee in the main pipeline.
-                            activity_cb.touch_ingress(pad_is_audio);
-
-                            let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                            forward_sample_to_slot(
-                                &sample,
-                                &appsrc,
-                                &session_finished,
-                                &ts_offset,
-                                &main_pipeline_for_ts,
-                                &media_for_log,
-                                slot,
-                            )?;
-
-                            Ok(gst::FlowSuccess::Ok)
-                        })
-                        .build(),
+                install_slot_bridge(
+                    &appsink,
+                    appsrc,
+                    session_bridge.clone(),
+                    main_pipeline_weak.clone(),
+                    media_type,
+                    slot,
+                    activity_for_pads.clone(),
+                    cleanup_sent_for_pads.clone(),
                 );
             } else {
                 info!(
@@ -1278,11 +1494,103 @@ pub fn create_whipserversrc_for_session(
     })
 }
 
+/// How far behind the previous frame's PTS a new frame's may be and still be
+/// treated as landing on it. A run released on one PTS falls behind by 1 ns
+/// per frame already moved; a frame interval is over 8 ms at up to 120 fps.
+const MAX_PTS_NUDGE_NS: u64 = 1_000_000;
+
+/// Gives each of a session's video frames its own PTS when several arrive on one.
+///
+/// The session's jitterbuffer can release a run of packets from different
+/// frames all on one PTS, as it does when a publisher joins a slot. The
+/// slot's `h264parse` takes a PTS only when it differs from the previous
+/// buffer's, so every later frame of the run leaves it with none; a browser
+/// stream has no framerate to derive one from, and the vision mixer's
+/// compositor fails the whole flow on a frame without a timestamp.
+///
+/// Packets of one frame keep their shared PTS. A new frame whose PTS is at
+/// most [`MAX_PTS_NUDGE_NS`] behind the previous frame's is moved 1 ns past it.
+/// Any other PTS passes through: a larger step back is real timing (a B-frame,
+/// sent before the frame it precedes, or a step in the sender's clock), and
+/// holding later frames behind a PTS far ahead would freeze the seat. Only the
+/// appsink's streaming thread touches it.
+struct VideoPtsOrder {
+    /// RTP timestamp of the last frame, `u64::MAX` before the first.
+    last_rtptime: AtomicU64,
+    last_pts: AtomicU64,
+}
+
+impl VideoPtsOrder {
+    fn new() -> Self {
+        Self {
+            last_rtptime: AtomicU64::new(u64::MAX),
+            last_pts: AtomicU64::new(0),
+        }
+    }
+
+    fn order(&self, rtptime: u32, pts: u64) -> u64 {
+        let last_rtptime = self.last_rtptime.load(Ordering::Relaxed);
+        let last_pts = self.last_pts.load(Ordering::Relaxed);
+        if last_rtptime == u64::from(rtptime) {
+            return last_pts;
+        }
+        let duplicate =
+            last_rtptime != u64::MAX && pts <= last_pts && last_pts - pts <= MAX_PTS_NUDGE_NS;
+        let pts = if duplicate { last_pts + 1 } else { pts };
+        self.last_rtptime
+            .store(u64::from(rtptime), Ordering::Relaxed);
+        self.last_pts.store(pts, Ordering::Relaxed);
+        pts
+    }
+}
+
+/// Which of a slot's streams a sample is bridged into.
+#[derive(Clone, Copy)]
+enum SlotMedia<'a> {
+    Audio,
+    Video(&'a VideoPtsOrder),
+}
+
+impl SlotMedia<'_> {
+    fn name(self) -> &'static str {
+        match self {
+            SlotMedia::Audio => "audio",
+            SlotMedia::Video(_) => "video",
+        }
+    }
+}
+
+/// `sample` with its PTS moved by `order`, or `None` when it stays as it is.
+/// Copies the buffer only when the PTS changes. A buffer with no PTS, or one
+/// that is not RTP, is left for the bridge to judge.
+fn order_video_pts(sample: &gst::Sample, order: &VideoPtsOrder) -> Option<gst::Sample> {
+    let buffer = sample.buffer()?;
+    let pts = buffer.pts()?.nseconds();
+    let rtptime = gst_rtp::RTPBuffer::from_buffer_readable(buffer)
+        .ok()?
+        .timestamp();
+    let ordered = order.order(rtptime, pts);
+    if ordered == pts {
+        return None;
+    }
+    let mut new_buffer = buffer.copy();
+    new_buffer
+        .make_mut()
+        .set_pts(gst::ClockTime::from_nseconds(ordered));
+    let mut builder = gst::Sample::builder().buffer(&new_buffer);
+    let caps = sample.caps_owned();
+    if let Some(caps) = caps.as_ref() {
+        builder = builder.caps(caps);
+    }
+    Some(builder.build())
+}
+
 /// Bridge one sample from a session's appsink into its slot's appsrc, shifting
 /// its PTS by the offset shared across the session's audio and video.
 ///
-/// The offset is computed once, from the first buffer on either stream, then
-/// applied to every buffer on both streams to preserve A/V sync.
+/// The offset and the drop of unstamped buffers are [`SessionBridge`]'s: a
+/// buffer with no PTS never reaches the slot, because a muxer downstream
+/// answers it with `GST_FLOW_ERROR` and takes the whole flow down.
 ///
 /// Nothing is pushed once `session_finished` is set. The slot's appsrc belongs to
 /// whoever holds the slot, and takeover releases the slot while the displaced
@@ -1292,65 +1600,50 @@ fn forward_sample_to_slot(
     sample: &gst::Sample,
     appsrc: &gst_app::AppSrc,
     session_finished: &AtomicBool,
-    ts_offset: &AtomicI64,
+    bridge: &SessionBridge,
     main_pipeline: &gst::glib::WeakRef<gst::Pipeline>,
-    media: &str,
+    media: SlotMedia,
     slot: usize,
 ) -> Result<(), gst::FlowError> {
     if session_finished.load(Ordering::Relaxed) {
         return Ok(());
     }
 
-    let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-    let pts = buffer.pts();
-
-    // Compute offset on the first buffer from either stream
-    let offset_ns = {
-        let current = ts_offset.load(Ordering::Relaxed);
-        if current != i64::MIN {
-            current
-        } else if let (Some(pts_val), Some(main_pipeline)) = (pts, main_pipeline.upgrade()) {
-            let clock = main_pipeline.clock();
-            let base_time = main_pipeline.base_time();
-            if let (Some(clock), Some(base_time)) = (clock, base_time) {
-                let now = clock.time();
-                let running = now.saturating_sub(base_time);
-                let offset = running.nseconds() as i64 - pts_val.nseconds() as i64;
-                ts_offset.store(offset, Ordering::Relaxed);
-                info!(
-                    "WHIP Input: Computed shared ts-offset={}ms from {} stream (slot {})",
-                    offset / 1_000_000,
-                    media,
-                    slot
-                );
-                offset
-            } else {
-                0
-            }
-        } else {
-            0
-        }
+    let ordered = match media {
+        SlotMedia::Video(order) => order_video_pts(sample, order),
+        SlotMedia::Audio => None,
     };
+    let sample = ordered.as_ref().unwrap_or(sample);
 
-    // Apply offset to buffer PTS
-    if offset_ns != 0 {
-        if let Some(pts_val) = pts {
-            let adjusted = (pts_val.nseconds() as i64 + offset_ns).max(0) as u64;
-            let mut new_buffer = buffer.copy();
-            {
-                let buf_ref = new_buffer.get_mut().unwrap();
-                buf_ref.set_pts(gst::ClockTime::from_nseconds(adjusted));
-            }
-            let new_sample = gst::Sample::builder()
-                .buffer(&new_buffer)
-                .caps(&sample.caps().unwrap().to_owned())
-                .build();
-            let _ = appsrc.push_sample(&new_sample);
-        } else {
-            let _ = appsrc.push_sample(sample);
+    let outcome = bridge
+        .forward(sample, appsrc, || {
+            let main_pipeline = main_pipeline.upgrade()?;
+            let clock = main_pipeline.clock()?;
+            let base_time = main_pipeline.base_time()?;
+            Some(clock.time().saturating_sub(base_time))
+        })
+        .ok_or(gst::FlowError::Error)?;
+
+    match outcome {
+        pipeline_bridge::Forwarded::OffsetComputed(offset) => {
+            info!(
+                "WHIP Input: Computed shared ts-offset={}ms from {} stream (slot {})",
+                offset / 1_000_000,
+                media.name(),
+                slot
+            );
         }
-    } else {
-        let _ = appsrc.push_sample(sample);
+        pipeline_bridge::Forwarded::DroppedUnstamped { dropped } => {
+            if pipeline_bridge::should_log_drop(dropped) {
+                warn!(
+                    "WHIP Input: dropped {} buffer(s) with no PTS on the {} stream (slot {}); forwarding one fails the downstream muxer and takes the whole flow with it",
+                    dropped, media.name(), slot
+                );
+            }
+        }
+        pipeline_bridge::Forwarded::Restamped
+        | pipeline_bridge::Forwarded::Unadjusted
+        | pipeline_bridge::Forwarded::PushFailed(_) => {}
     }
 
     Ok(())
@@ -2160,6 +2453,67 @@ fn setup_incoming_rtp_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gst::pipeline_bridge::test_support::{at, Harness, SessionPipeline};
+
+    /// The wiring guard for this block. [`pipeline_bridge`] can only promise
+    /// that [`SessionBridge::forward`] drops an unstamped buffer; it cannot
+    /// promise this block still calls it. So drive the real appsink callback:
+    /// three buffers into a session pipeline, the middle one with no PTS, and
+    /// only the two stamped ones may reach the slot's appsrc.
+    ///
+    /// Forwarding that buffer is what makes `qtmux` answer `Buffer has no PTS`
+    /// with `GST_FLOW_ERROR`, which tears down the whole flow — every seat, not
+    /// just this one.
+    #[test]
+    fn an_unstamped_buffer_never_reaches_the_slot_appsrc() {
+        let slot_pipeline = Harness::new();
+        let session = SessionPipeline::new();
+
+        let appsink = gst_app::AppSink::builder().sync(false).build();
+        session
+            .pipeline
+            .add(appsink.upcast_ref::<gst::Element>())
+            .expect("add appsink");
+        session
+            .src
+            .link(&appsink)
+            .expect("link session appsrc to appsink");
+
+        install_slot_bridge(
+            &appsink,
+            slot_pipeline.src.clone(),
+            Arc::new(SessionBridge::new()),
+            slot_pipeline.pipeline_weak(),
+            "video",
+            0,
+            Arc::new(SessionActivity::new(
+                Instant::now(),
+                Arc::new(ActivityStamp::new(Instant::now())),
+            )),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        session.start();
+        session.push(at(1));
+        session.push(None);
+        session.push(at(3));
+
+        let first = slot_pipeline.next_pts().expect("first buffer crossed");
+        assert!(first.is_some(), "a stamped buffer must keep its stamp");
+        let second = slot_pipeline
+            .next_pts()
+            .expect("the third buffer crossed too");
+        assert!(
+            second.is_some(),
+            "the unstamped buffer must not be here — the third one is next"
+        );
+        assert!(second > first, "and it must follow the first");
+        assert_eq!(
+            slot_pipeline.next_pts(),
+            None,
+            "nothing else should have crossed"
+        );
+    }
 
     fn props(entries: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
         entries
@@ -2623,8 +2977,8 @@ mod tests {
                 .set_pts(gst::ClockTime::from_seconds(seconds));
             gst::Sample::builder().buffer(&buffer).caps(&caps).build()
         };
-        // Offsets already computed, so no main pipeline is needed.
-        let ts_offset = AtomicI64::new(0);
+        // No main pipeline, so the bridge forwards both samples unadjusted.
+        let bridge = SessionBridge::new();
         let no_main_pipeline = gst::glib::WeakRef::new();
 
         let displaced = AtomicBool::new(true);
@@ -2632,9 +2986,9 @@ mod tests {
             &sample_at(1),
             &appsrc,
             &displaced,
-            &ts_offset,
+            &bridge,
             &no_main_pipeline,
-            "audio",
+            SlotMedia::Audio,
             0,
         )
         .unwrap();
@@ -2644,9 +2998,9 @@ mod tests {
             &sample_at(2),
             &appsrc,
             &current,
-            &ts_offset,
+            &bridge,
             &no_main_pipeline,
-            "audio",
+            SlotMedia::Audio,
             0,
         )
         .unwrap();
@@ -2660,6 +3014,128 @@ mod tests {
             first.buffer().unwrap().pts(),
             Some(gst::ClockTime::from_seconds(2)),
             "the first sample in the slot must be the current session's, not the displaced one's"
+        );
+    }
+
+    /// Bridge RTP video packets, given as (RTP timestamp, PTS in ms), through
+    /// one session's `forward_sample_to_slot` and return the PTS each reached
+    /// the slot with, in ns.
+    fn bridge_video_packets(packets: &[(u32, u64)]) -> Vec<u64> {
+        use gst_rtp::prelude::RTPBufferExt;
+        let _ = gst::init();
+
+        let pipeline = gst::Pipeline::new();
+        let appsrc = gst_app::AppSrc::builder().format(gst::Format::Time).build();
+        let appsink = gst_app::AppSink::builder().sync(false).build();
+        pipeline
+            .add_many([appsrc.upcast_ref::<gst::Element>(), appsink.upcast_ref()])
+            .unwrap();
+        appsrc.link(&appsink).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let caps = gst::Caps::builder("application/x-rtp")
+            .field("media", "video")
+            .field("clock-rate", 90000i32)
+            .field("encoding-name", "H264")
+            .build();
+        // No main pipeline, so the bridge forwards every PTS unadjusted and
+        // only the ordering moves it.
+        let bridge = SessionBridge::new();
+        let no_main_pipeline = gst::glib::WeakRef::new();
+        let session_finished = AtomicBool::new(false);
+        let order = VideoPtsOrder::new();
+
+        let mut out = Vec::new();
+        for &(rtptime, pts_ms) in packets {
+            let mut buffer = gst::Buffer::new_rtp_with_sizes(4, 0, 0).unwrap();
+            {
+                let buffer = buffer.get_mut().unwrap();
+                buffer.set_pts(gst::ClockTime::from_mseconds(pts_ms));
+                let mut rtp = gst_rtp::RTPBuffer::from_buffer_writable(buffer).unwrap();
+                rtp.set_timestamp(rtptime);
+            }
+            let sample = gst::Sample::builder().buffer(&buffer).caps(&caps).build();
+            forward_sample_to_slot(
+                &sample,
+                &appsrc,
+                &session_finished,
+                &bridge,
+                &no_main_pipeline,
+                SlotMedia::Video(&order),
+                0,
+            )
+            .unwrap();
+            let pulled = appsink
+                .try_pull_sample(gst::ClockTime::from_seconds(5))
+                .expect("every packet must reach the slot");
+            out.push(pulled.buffer().unwrap().pts().unwrap().nseconds());
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        out
+    }
+
+    /// A session's jitterbuffer can release packets of several frames on one
+    /// PTS. Each frame must still reach the slot with its own, increasing PTS,
+    /// and the packets of one frame with a shared one.
+    #[test]
+    fn video_frames_on_one_pts_reach_the_slot_in_order() {
+        // Two packets of frame A, then frames B and C released on A's PTS,
+        // then frame D on its own later PTS.
+        let out = bridge_video_packets(&[
+            (1000, 1000),
+            (1000, 1000),
+            (4000, 1000),
+            (7000, 1000),
+            (10000, 1100),
+        ]);
+
+        let ms = 1_000_000;
+        assert_eq!(out[0], 1000 * ms);
+        assert_eq!(out[1], out[0], "packets of one frame share a PTS");
+        assert!(out[2] > out[1], "frame B must follow frame A: {:?}", out);
+        assert!(out[3] > out[2], "frame C must follow frame B: {:?}", out);
+        assert_eq!(out[4], 1100 * ms, "a frame already in order keeps its PTS");
+    }
+
+    /// An encoder with B-frames sends a frame after the one it precedes, so
+    /// its PTS is a frame or more behind the previous packet's. It must keep
+    /// that PTS: moving it past the later frame bunches the decoded video.
+    #[test]
+    fn video_b_frames_keep_their_pts() {
+        // Decode order I P B B P, 33 ms per frame: display order I B B P P.
+        let out = bridge_video_packets(&[
+            (0, 1000),
+            (9000, 1100),
+            (3000, 1033),
+            (6000, 1066),
+            (18000, 1200),
+        ]);
+
+        let ms = 1_000_000;
+        assert_eq!(
+            out,
+            vec![1000 * ms, 1100 * ms, 1033 * ms, 1066 * ms, 1200 * ms],
+            "B-frames must reach the slot with their own PTS"
+        );
+    }
+
+    /// One frame with a PTS far ahead of the rest must not hold back the
+    /// frames after it, or the seat freezes until real time catches up.
+    #[test]
+    fn video_frame_far_ahead_does_not_hold_back_later_frames() {
+        let out = bridge_video_packets(&[
+            (0, 1000),
+            (3000, 1033),
+            (6000, 10_000),
+            (9000, 1100),
+            (12000, 1133),
+        ]);
+
+        let ms = 1_000_000;
+        assert_eq!(
+            out,
+            vec![1000 * ms, 1033 * ms, 10_000 * ms, 1100 * ms, 1133 * ms],
+            "frames after an outlier must keep their own PTS"
         );
     }
 }

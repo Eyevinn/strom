@@ -12,6 +12,7 @@ pub mod ice_preflight;
 pub mod keyframe_request;
 pub mod orphan_guard;
 pub mod pipeline;
+pub mod pipeline_bridge;
 pub mod pipeline_monitor;
 pub mod rtp_hdrext;
 pub mod shaders;
