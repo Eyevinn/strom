@@ -12,6 +12,8 @@ mod media;
 mod player;
 mod probes;
 mod stats;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests;
 
 pub use strom_types::api::{AuthStatusResponse, LatencyResponse, SystemClockInfo, SystemInfo};
 
