@@ -209,7 +209,7 @@ pub fn should_log_drop(dropped: u64) -> bool {
 }
 
 /// Rig shared by this module's own tests and by the call-site test in
-/// `whip.rs`. The caller has to keep calling [`SessionBridge::forward`], and
+/// `whip/session.rs`. The caller has to keep calling [`SessionBridge::forward`], and
 /// nothing in this module can enforce that, so it needs a test of its own
 /// driving a real appsink callback.
 #[cfg(test)]

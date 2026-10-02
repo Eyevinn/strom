@@ -18,7 +18,7 @@ const {
     whipReconnectDelay,
 } = require('../whip/whip.js');
 
-// backend/src/blocks/builtin/whip.rs INACTIVITY_TIMEOUT. Mirrored by hand, since
+// backend/src/blocks/builtin/whip/watchdog.rs INACTIVITY_TIMEOUT. Mirrored by hand, since
 // a JS test cannot read a Rust const: keep it in step with the Rust one.
 const SERVER_INACTIVITY_TIMEOUT_MS = 10000;
 
