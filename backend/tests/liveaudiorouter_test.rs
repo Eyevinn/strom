@@ -730,6 +730,16 @@ fn play_then_connect_late_input(
         }
     }
 
+    // Caps on the bus do not mean the pipeline is in PLAYING. With an async
+    // sink downstream, the bin finishes the state change on a thread of its
+    // own and sets every child it holds to PLAYING. A source added before
+    // that would start streaming before it is linked, and stop `not-linked`.
+    let (result, state, _) = h.pipeline.state(gst::ClockTime::from_seconds(5));
+    assert!(
+        result.is_ok() && state == gst::State::Playing,
+        "the pipeline never reached PLAYING with no input connected: {result:?} {state:?}"
+    );
+
     let src = gst::ElementFactory::make("audiotestsrc")
         .property("is-live", true)
         .property("freq", 440.0)
