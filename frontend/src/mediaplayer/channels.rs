@@ -1,7 +1,7 @@
 //! Live channels offered in the playlist editor next to the media folder.
 //!
 //! Publicly reachable news streams in English, one per outlet, plus SVT1,
-//! from the broadcasters' own CDNs. Public does not mean licensed for
+//! from the broadcasters' own CDNs, and the Big Buck Bunny test stream. Public does not mean licensed for
 //! redistribution, and a stream may be geo-blocked or move without notice.
 
 /// A live channel: the name shown in the list and the URL the player opens.
@@ -66,5 +66,9 @@ pub const LIVE_CHANNELS: &[LiveChannel] = &[
     LiveChannel {
         name: "SVT1",
         url: "https://ed16.cdn.svt.se/l4/se/svt1/master-fmp4.m3u8?format=hls-cmaf-live",
+    },
+    LiveChannel {
+        name: "Big Buck Bunny",
+        url: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
     },
 ];
