@@ -1,0 +1,197 @@
+diff --git a/gstcefsrc.cc b/gstcefsrc.cc
+index eba5b28..36f8e9a 100644
+--- a/gstcefsrc.cc
++++ b/gstcefsrc.cc
+@@ -129,6 +129,9 @@ enum
+   PROP_JS_FLAGS,
+   PROP_LOG_SEVERITY,
+   PROP_CEF_CACHE_LOCATION,
++  PROP_ISOLATED_CONTEXT,
++  PROP_CONTEXT_CACHE_PATH,
++  PROP_PERSIST_SESSION_COOKIES,
+ };
+ 
+ #define gst_cef_src_parent_class parent_class
+@@ -394,6 +397,20 @@ private:
+   IMPLEMENT_REFCOUNTING(DisplayHandler);
+ };
+ 
++class BrowserClient;
++
++// Makes the browser once its isolated request context is ready.
++class ContextReadyHandler : public CefRequestContextHandler
++{
++  public:
++    explicit ContextReadyHandler(BrowserClient *client) : client_(client) {}
++    void OnRequestContextInitialized(CefRefPtr<CefRequestContext> request_context) override;
++
++  private:
++    CefRefPtr<BrowserClient> client_;
++    IMPLEMENT_REFCOUNTING(ContextReadyHandler);
++};
++
+ class BrowserClient :
+   public CefClient,
+   public CefLifeSpanHandler,
+@@ -510,6 +527,36 @@ class BrowserClient :
+ 
+     // Custom methods:
+     void MakeBrowser(int)
++    {
++      // Every browser created with a null request context shares the global
++      // one, and with it cookies, local storage and the HTTP cache with every
++      // other cefsrc in the process. An isolated context keeps them apart.
++      // Popups opened by the page inherit it.
++      if (!src->isolated_context) {
++        CreateBrowserIn(nullptr);
++        return;
++      }
++
++      CefRequestContextSettings context_settings;
++      if (src->context_cache_path && *src->context_cache_path) {
++        // Must be a direct child of the root cache path
++        // (GST_CEF_CACHE_LOCATION), or CEF refuses to create the profile.
++        CefString(&context_settings.cache_path).FromASCII(src->context_cache_path);
++        // Chromium's own persist-session-cookies flag reaches only the global
++        // context; an isolated one carries its own setting.
++        context_settings.persist_session_cookies = src->persist_session_cookies;
++      }
++      GST_INFO_OBJECT (src, "Using an isolated request context (%s)",
++          (src->context_cache_path && *src->context_cache_path) ?
++          src->context_cache_path : "in memory");
++
++      // A persisted context initializes asynchronously, and a browser created
++      // in it before then fails. The browser is made once it is ready.
++      CefRequestContext::CreateContext(context_settings,
++          new ContextReadyHandler(this));
++    }
++
++    void CreateBrowserIn(CefRefPtr<CefRequestContext> request_context)
+     {
+       CefWindowInfo window_info;
+       CefRefPtr<CefBrowser> browser;
+@@ -522,9 +569,19 @@ class BrowserClient :
+         std::string(src->url),
+         browser_settings,
+         nullptr,
+-        nullptr
++        request_context
+       );
+ 
++      if (!browser) {
++        GST_ELEMENT_ERROR (src, RESOURCE, FAILED, (NULL),
++            ("CEF could not create a browser"));
++        g_mutex_lock (&src->state_lock);
++        src->state = CEF_SRC_CLOSED;
++        g_cond_signal (&src->state_cond);
++        g_mutex_unlock(&src->state_lock);
++        return;
++      }
++
+       browser->GetHost()->SetAudioMuted(true);
+ 
+       src->browser = browser;
+@@ -888,6 +945,12 @@ gst_cef_src_change_state(GstElement *src, GstStateChange transition)
+   return result;
+ }
+ 
++
++void ContextReadyHandler::OnRequestContextInitialized(CefRefPtr<CefRequestContext> request_context)
++{
++  client_->CreateBrowserIn(request_context);
++}
++
+ static gboolean
+ gst_cef_src_start(GstBaseSrc *base_src)
+ {
+@@ -1178,6 +1241,16 @@ gst_cef_src_set_property (GObject * object, guint prop_id, const GValue * value,
+       src->cef_cache_location = g_value_dup_string (value);
+       break;
+     }
++    case PROP_ISOLATED_CONTEXT:
++      src->isolated_context = g_value_get_boolean (value);
++      break;
++    case PROP_CONTEXT_CACHE_PATH:
++      g_free (src->context_cache_path);
++      src->context_cache_path = g_value_dup_string (value);
++      break;
++    case PROP_PERSIST_SESSION_COOKIES:
++      src->persist_session_cookies = g_value_get_boolean (value);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+@@ -1218,6 +1291,15 @@ gst_cef_src_get_property (GObject * object, guint prop_id, GValue * value,
+     case PROP_CEF_CACHE_LOCATION:
+       g_value_set_string (value, src->cef_cache_location);
+       break;
++    case PROP_ISOLATED_CONTEXT:
++      g_value_set_boolean (value, src->isolated_context);
++      break;
++    case PROP_CONTEXT_CACHE_PATH:
++      g_value_set_string (value, src->context_cache_path);
++      break;
++    case PROP_PERSIST_SESSION_COOKIES:
++      g_value_set_boolean (value, src->persist_session_cookies);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+@@ -1239,6 +1321,7 @@ gst_cef_src_finalize (GObject *object)
+ 
+   g_free (src->js_flags);
+   g_free (src->cef_cache_location);
++  g_free (src->context_cache_path);
+ 
+   g_cond_clear(&src->state_cond);
+   g_mutex_clear(&src->state_lock);
+@@ -1260,6 +1343,9 @@ gst_cef_src_init (GstCefSrc * src)
+   src->js_flags = NULL;
+   src->log_severity = DEFAULT_LOG_SEVERITY;
+   src->cef_cache_location = NULL;
++  src->isolated_context = FALSE;
++  src->context_cache_path = NULL;
++  src->persist_session_cookies = FALSE;
+ 
+   gst_base_src_set_format (base_src, GST_FORMAT_TIME);
+   gst_base_src_set_live (base_src, TRUE);
+@@ -1338,6 +1424,25 @@ gst_cef_src_class_init (GstCefSrcClass * klass)
+           "deprecated: set GST_CEF_CACHE_LOCATION in the environment instead",
+           NULL, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY)));
+ 
++  g_object_class_install_property (gobject_class, PROP_ISOLATED_CONTEXT,
++    g_param_spec_boolean ("isolated-context", "isolated-context",
++          "Give this browser its own request context, so cookies, local storage "
++          "and the HTTP cache are not shared with other cefsrc instances in the "
++          "process. Popups opened by the page share it.",
++          FALSE, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY)));
++
++  g_object_class_install_property (gobject_class, PROP_CONTEXT_CACHE_PATH,
++    g_param_spec_string ("context-cache-path", "context-cache-path",
++          "With isolated-context, persist the context in this directory. It must "
++          "be inside GST_CEF_CACHE_LOCATION. Unset keeps the context in memory.",
++          NULL, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY)));
++
++  g_object_class_install_property (gobject_class, PROP_PERSIST_SESSION_COOKIES,
++    g_param_spec_boolean ("persist-session-cookies", "persist-session-cookies",
++          "With context-cache-path, also persist session cookies, which is what "
++          "most logins are. Otherwise they are gone when the browser closes.",
++          FALSE, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY)));
++
+   gst_element_class_set_static_metadata (gstelement_class,
+       "Chromium Embedded Framework source", "Source/Video",
+       "Creates a video stream from an embedded Chromium browser",
+diff --git a/gstcefsrc.h b/gstcefsrc.h
+index e7c46ee..69d0df7 100644
+--- a/gstcefsrc.h
++++ b/gstcefsrc.h
+@@ -56,6 +56,9 @@ struct _GstCefSrc {
+   gchar *js_flags;
+   cef_log_severity_t log_severity;
+   gchar *cef_cache_location;
++  gboolean isolated_context;
++  gchar *context_cache_path;
++  gboolean persist_session_cookies;
+   gboolean gpu;
+   gboolean sandbox;
+   gboolean listen_for_js_signals;
