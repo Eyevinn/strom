@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strom_types::block::ExposedProperty;
+use strom_types::mixer::DEFAULT_INTERNAL_BUS_LATENCY_MS;
 use strom_types::PropertyValue;
 
 fn init_gst() {
@@ -875,7 +876,7 @@ fn test_monitor_bus_does_not_stack_block_latency() {
     };
     assert!(aux >= latency, "aux waits the block latency: {aux} ms");
     assert!(
-        monitor <= main + 3 * INTERNAL_BUS_LATENCY_MS,
+        monitor <= main + 3 * DEFAULT_INTERNAL_BUS_LATENCY_MS,
         "monitor {monitor} ms stacks latency on main {main} ms"
     );
 }
@@ -900,9 +901,31 @@ fn test_solo_keeps_block_latency_without_aux_or_group() {
         unreachable!()
     };
     assert!(
-        monitor <= main + 3 * INTERNAL_BUS_LATENCY_MS,
+        monitor <= main + 3 * DEFAULT_INTERNAL_BUS_LATENCY_MS,
         "monitor {monitor} ms stacks latency on main {main} ms"
     );
+}
+
+#[test]
+fn test_internal_bus_latency_property_sets_solo_and_monitor() {
+    // The operator's override reaches both internal buses, and is capped at
+    // the block latency so it can never stack more than the block itself.
+    let latency = 100;
+    for (requested, expected) in [(60, 60), (250, latency)] {
+        let props = small_mixer_props(&[
+            ("latency", PropertyValue::UInt(latency)),
+            ("internal_bus_latency", PropertyValue::UInt(requested)),
+        ]);
+        let m = assemble(&props);
+        for bus in ["solo_mixer", "monitor_mixer"] {
+            let got = m.element(bus).property::<u64>("latency");
+            assert_eq!(
+                got,
+                expected * 1_000_000,
+                "{bus} latency with internal_bus_latency={requested}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -921,7 +944,7 @@ fn test_solo_does_not_stack_block_latency_with_aux_buses() {
         unreachable!()
     };
     assert!(
-        monitor <= main.max(aux) + 3 * INTERNAL_BUS_LATENCY_MS,
+        monitor <= main.max(aux) + 3 * DEFAULT_INTERNAL_BUS_LATENCY_MS,
         "monitor {monitor} ms stacks latency on main {main} ms / aux {aux} ms"
     );
 }

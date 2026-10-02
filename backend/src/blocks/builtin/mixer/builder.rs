@@ -9,8 +9,10 @@ use tracing::{debug, info, warn};
 use super::elements::*;
 use super::metering::connect_mixer_meter_handler;
 use super::properties::*;
-use super::{INTERNAL_BUS_LATENCY_MS, METER_INTERVAL_NS, MIN_KNEE_LINEAR};
-use strom_types::mixer::{DEFAULT_LATENCY_MS, DEFAULT_MIN_UPSTREAM_LATENCY_MS};
+use super::{METER_INTERVAL_NS, MIN_KNEE_LINEAR};
+use strom_types::mixer::{
+    DEFAULT_INTERNAL_BUS_LATENCY_MS, DEFAULT_LATENCY_MS, DEFAULT_MIN_UPSTREAM_LATENCY_MS,
+};
 
 /// Mixer block builder.
 pub struct MixerBuilder;
@@ -120,6 +122,25 @@ impl BlockBuilder for MixerBuilder {
             "min_upstream_latency",
             DEFAULT_MIN_UPSTREAM_LATENCY_MS,
         );
+        // Aggregator latency of Solo and Monitor, which only sum other buses of
+        // this block. An aggregator's latency is slack for late inputs, and it
+        // adds to the latency the aggregator reports downstream. The buses they
+        // sum already carry the block's slack, so giving them the block
+        // `latency` again stacks it (channel → aux → solo → monitor would be
+        // three times the block latency), and a pipeline runs every sink at its
+        // largest reported latency.
+        //
+        // It is still the slack for a late buffer from those buses. Once any
+        // channel input stops delivering, Main produces at its own deadline, so
+        // a hiccup on Main's thread longer than this leaves a gap in Monitor.
+        // 30 ms rode out 25 ms hiccups in tests; 10 ms did not survive 15 ms.
+        // Capped at the block latency: more than that would stack again.
+        let internal_bus_latency_ms = get_u64_prop(
+            properties,
+            "internal_bus_latency",
+            DEFAULT_INTERNAL_BUS_LATENCY_MS,
+        )
+        .min(latency_ms);
 
         // ========================================================================
         // Create main audiomixer
@@ -282,7 +303,7 @@ impl BlockBuilder for MixerBuilder {
         // Those taps keep the block's slack as long as an aux or group bus
         // feeds solo too: solo then reports that bus's latency plus its own.
         let solo_latency_ms = if num_aux_buses + num_groups > 0 {
-            latency_ms.min(INTERNAL_BUS_LATENCY_MS)
+            internal_bus_latency_ms
         } else {
             latency_ms
         };
@@ -332,7 +353,7 @@ impl BlockBuilder for MixerBuilder {
         let monitor_mixer = make_audiomixer(
             &monitor_mixer_id,
             force_live,
-            latency_ms.min(INTERNAL_BUS_LATENCY_MS),
+            internal_bus_latency_ms,
             min_upstream_latency_ms,
         )?;
         elements.push((monitor_mixer_id.clone(), monitor_mixer));

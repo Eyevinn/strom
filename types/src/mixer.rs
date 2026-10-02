@@ -53,6 +53,9 @@ pub const MIN_KNEE_LINEAR: f64 = 0.0631;
 // ── Latency / live defaults ─────────────────────────────────────────
 pub const DEFAULT_LATENCY_MS: u64 = 30;
 pub const DEFAULT_MIN_UPSTREAM_LATENCY_MS: u64 = 30;
+/// Default aggregator latency of the Solo and Monitor buses, which only sum
+/// other buses of the same mixer. Capped at the block `latency`.
+pub const DEFAULT_INTERNAL_BUS_LATENCY_MS: u64 = 30;
 
 // ── Volume ramp / anti-zipper defaults ──────────────────────────────
 /// Default ramp duration applied to `volume`-element `volume` updates

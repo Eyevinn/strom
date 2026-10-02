@@ -70,19 +70,6 @@ use strom_types::mixer::{
 };
 /// Level meter interval in nanoseconds (100ms)
 const METER_INTERVAL_NS: u64 = 100_000_000;
-/// Aggregator latency (ms) of a bus that only sums other buses of this block.
-///
-/// An aggregator's latency is slack for late inputs, and it adds to the latency
-/// the aggregator reports downstream. The buses such a bus sums already carry
-/// the block's slack, so giving it the block `latency` again stacks it
-/// (channel → aux → solo → monitor would be three times the block latency),
-/// and a pipeline runs every sink at its largest reported latency.
-///
-/// It is still the slack for a late buffer from those buses. Once any channel
-/// input stops delivering, Main produces at its own deadline, so a hiccup on
-/// Main's thread longer than this leaves a gap in Monitor. 30 ms rode out
-/// 25 ms hiccups in tests; 10 ms did not survive 15 ms.
-const INTERNAL_BUS_LATENCY_MS: u64 = 30;
 /// EQ band type for Peaking/Bell filter (lsp-rs-equalizer enum value)
 const EQ_BAND_TYPE_BELL: i32 = 7;
 
