@@ -105,22 +105,38 @@ impl BlockBuilder for MediaPlayerBuilder {
                 _ => None,
             }));
 
-        let sync = properties
-            .get("sync")
-            .and_then(|v| match v {
-                PropertyValue::Bool(b) => Some(*b),
-                _ => None,
-            })
-            .unwrap_or(true);
+        // A stinger clip source plays unpaced, with no playout delay. Its
+        // first frame is already decoded and a take must put the clip on air
+        // at once: a delay makes the take wait that long, and the parked first
+        // frame blinks out before the rest arrives. Paced, each frame reaches
+        // the mixer exactly when it is due, so the frame carrying the cut
+        // point is often not there when the mixer composites it. Unpaced, the
+        // clip runs ahead and waits in the mixer's input queue.
+        let stinger_source = matches!(
+            properties.get(crate::gst::stinger::STINGER_SOURCE_PROPERTY),
+            Some(PropertyValue::Bool(true))
+        );
+        let sync = !stinger_source
+            && properties
+                .get("sync")
+                .and_then(|v| match v {
+                    PropertyValue::Bool(b) => Some(*b),
+                    _ => None,
+                })
+                .unwrap_or(true);
 
-        let playout_delay_ms = properties
-            .get("playout_delay_ms")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u),
-                PropertyValue::Int(i) => u64::try_from(*i).ok(),
-                _ => None,
-            })
-            .unwrap_or(timing::DEFAULT_PLAYOUT_DELAY_MS);
+        let playout_delay_ms = if stinger_source {
+            0
+        } else {
+            properties
+                .get("playout_delay_ms")
+                .and_then(|v| match v {
+                    PropertyValue::UInt(u) => Some(*u),
+                    PropertyValue::Int(i) => u64::try_from(*i).ok(),
+                    _ => None,
+                })
+                .unwrap_or(timing::DEFAULT_PLAYOUT_DELAY_MS)
+        };
 
         let position_update_interval_ms = properties
             .get("position_update_interval")
