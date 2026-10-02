@@ -43,6 +43,8 @@ pub(crate) fn make_audiomixer(
     // causing the aggregator to pick the absolute monotonic clock time as start
     // time and wait for an impossibly far deadline.
     mixer.set_property_from_str("start-time-selection", "zero");
+    // Selected once, at startup: a late first input must not rewind a running bus.
+    crate::gst::aggregator_start::disarm_start_time_selection(&mixer);
 
     // latency: aggregator timeout in nanoseconds
     let latency_ns = latency_ms * 1_000_000;

@@ -255,6 +255,7 @@ fn build_opengl_compositor(
 
     // Set latency properties
     set_mixer_latency_properties(&mixer, properties);
+    crate::gst::aggregator_start::disarm_start_time_selection(&mixer);
 
     // Request pads and set their properties in NULL state
     info!("Requesting {} GL mixer sink pads in NULL state", num_inputs);
@@ -476,6 +477,7 @@ fn build_software_compositor(
 
     // Set latency properties
     set_mixer_latency_properties(&mixer, properties);
+    crate::gst::aggregator_start::disarm_start_time_selection(&mixer);
 
     // Request pads and set their properties
     info!("Requesting {} CPU mixer sink pads", num_inputs);
@@ -1171,8 +1173,8 @@ fn compositor_definition() -> BlockDefinition {
 
     BlockDefinition {
         id: "builtin.compositor".to_string(),
-        name: "Video Compositor".to_string(),
-        description: "Video compositor supporting both GPU (OpenGL) and CPU backends. Combines multiple video inputs with positioning, scaling, and alpha blending.".to_string(),
+        name: "Video Compositor (deprecated)".to_string(),
+        description: "Deprecated: no longer maintained; use the Vision Mixer. Video compositor supporting both GPU (OpenGL) and CPU backends. Combines multiple video inputs with positioning, scaling, and alpha blending.".to_string(),
         category: "Video".to_string(),
         exposed_properties,
         external_pads: ExternalPads {
