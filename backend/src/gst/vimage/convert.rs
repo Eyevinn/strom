@@ -96,7 +96,7 @@ fn yuv_planes(
 
 /// Run one frame through the planned vImage call.
 ///
-/// Returns the vImage error code on failure so the caller can log it once and
+/// Returns the vImage error code on failure so the caller can post it once and
 /// push an error rather than silently emitting a garbage frame.
 pub(super) fn run(
     plan: &Plan,
