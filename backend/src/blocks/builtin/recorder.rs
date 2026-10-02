@@ -61,6 +61,19 @@ const DEFAULT_MAX_DURATION_MINS: u64 = 0; // 0 = disabled
 const DEFAULT_NUM_VIDEO_TRACKS: usize = 1;
 const DEFAULT_NUM_AUDIO_TRACKS: usize = 1;
 
+/// How often an mp4 recording writes out what it has recorded, in ms.
+///
+/// The file is a fragmented mp4: each fragment carries the index of its own
+/// samples, written ahead of them, so the file plays up to its last complete
+/// fragment however the recording ends. No room is reserved for an index, so a
+/// file costs only what it records.
+///
+/// The file is never rewritten into a single-index mp4 at close: mp4mux does that
+/// only on EOS, and a flow stop sets the pipeline to NULL without one, so a
+/// stopped recording would be left half-converted. A crash or a stop loses about
+/// one fragment and the GOP splitmuxsink holds back.
+const MP4_FRAGMENT_DURATION_MS: u32 = 1000;
+
 /// Element ID suffix for splitmuxsink, used by the API to look it up via PipelineManager.
 pub const SPLITMUXSINK_SUFFIX: &str = "splitmuxsink";
 
@@ -682,21 +695,12 @@ impl BlockBuilder for RecorderBuilder {
                 m
             }
             _ => {
-                // MP4 (default): use robust muxing so the file is playable even if killed.
-                // reserved-max-duration: upper bound on recording duration (12 hours).
-                // reserved-moov-update-period: rewrite moov header every 2 seconds.
+                // MP4 (default): fragmented. See MP4_FRAGMENT_DURATION_MS.
                 let m = gst::ElementFactory::make("mp4mux")
                     .name(&mux_id)
                     .build()
                     .map_err(|e| BlockBuildError::ElementCreation(format!("mp4mux: {}", e)))?;
-                let twelve_hours_ns: u64 = 12 * 3600 * 1_000_000_000;
-                let two_seconds_ns: u64 = 2 * 1_000_000_000;
-                if m.has_property("reserved-max-duration") {
-                    m.set_property("reserved-max-duration", twelve_hours_ns);
-                }
-                if m.has_property("reserved-moov-update-period") {
-                    m.set_property("reserved-moov-update-period", two_seconds_ns);
-                }
+                m.set_property("fragment-duration", MP4_FRAGMENT_DURATION_MS);
                 m
             }
         };
@@ -720,14 +724,6 @@ impl BlockBuilder for RecorderBuilder {
 
         if max_size_bytes > 0 {
             splitmuxsink.set_property("max-size-bytes", max_size_bytes);
-        }
-
-        // Enable robust muxing for MP4: splitmuxsink periodically updates the muxer's
-        // reserved moov header, keeping the file playable if the pipeline is killed.
-        // Not needed for MKV or MPEG-TS (inherently robust).
-        // Note: use-robust-muxing and async-finalize are mutually exclusive.
-        if container == "mp4" && splitmuxsink.has_property("use-robust-muxing") {
-            splitmuxsink.set_property("use-robust-muxing", true);
         }
 
         let mut elements: Vec<(String, gst::Element)> =

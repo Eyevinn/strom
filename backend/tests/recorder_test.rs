@@ -11,6 +11,9 @@
 //! - `stalled_track`: a track that stops delivering must not freeze the rest.
 //! - `splitmux_threading`: one upstream streaming task feeding every track must
 //!   not deadlock `splitmuxsink`.
+//! - `mp4_crash_safety`: an mp4 file plays up to its last second however the
+//!   recording ends, a finished one wastes no reserved space, and an audio-only
+//!   stretch does not fail it.
 
 pub mod common;
 
@@ -31,12 +34,15 @@ const REQUIRED: &[&str] = &[
     "splitmuxsink",
     "multifilesink",
     "mp4mux",
+    "qtdemux",
     "mpegtsmux",
     "tsdemux",
     "x264enc",
     "h264parse",
     "avenc_aac",
     "aacparse",
+    "opusenc",
+    "opusparse",
     "videotestsrc",
     "audiotestsrc",
     "audioconvert",
@@ -1043,7 +1049,11 @@ mod stalled_track {
     }
 
     /// Link `source` into `target` through an `identity` that swallows EOS.
-    fn link_without_eos(pipeline: &gst::Pipeline, source: &gst::Element, target: &gst::Element) {
+    pub(super) fn link_without_eos(
+        pipeline: &gst::Pipeline,
+        source: &gst::Element,
+        target: &gst::Element,
+    ) {
         let gate = gst::ElementFactory::make("identity")
             .build()
             .expect("identity");
@@ -1422,5 +1432,219 @@ mod splitmux_threading {
             files
         );
         assert!(total_bytes(&files) > 0, "recorded fragments were empty");
+    }
+}
+
+/// An mp4 file needs an index of its samples to play. The recorder writes a
+/// fragmented mp4, each fragment carrying its own index ahead of its samples, so
+/// the file plays however the recording ends: a flow stop sets the pipeline to
+/// NULL without EOS, and a crash does not even get that far. Reserving room at
+/// the start for a growing index instead costs tens of MB in every file whatever
+/// its length, and fails the flow when the index outgrows the room.
+///
+/// The tests are a set: one bounds the space a finished file wastes, one checks
+/// a recording that is stopped or cut short plays up to its last second, and one
+/// runs an audio-only stretch past what a reservation sized to a short split
+/// could hold. Writing a plain mp4, with its index only at the end, satisfies
+/// the first and fails the second; so does converting the file to a single
+/// index at EOS, which a stop never sends.
+mod mp4_crash_safety {
+    use super::*;
+
+    /// Top-level boxes of an mp4 file, as `(type, size)` in file order.
+    fn top_level_boxes(path: &Path) -> Vec<(String, u64)> {
+        let data = std::fs::read(path).expect("read recording");
+        let mut boxes = Vec::new();
+        let mut offset = 0usize;
+        while offset + 8 <= data.len() {
+            let mut size = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as u64;
+            let kind = String::from_utf8_lossy(&data[offset + 4..offset + 8]).into_owned();
+            if size == 1 && offset + 16 <= data.len() {
+                size = u64::from_be_bytes(data[offset + 8..offset + 16].try_into().unwrap());
+            } else if size == 0 {
+                size = (data.len() - offset) as u64;
+            }
+            if size < 8 {
+                break;
+            }
+            boxes.push((kind, size));
+            offset += size as usize;
+        }
+        boxes
+    }
+
+    /// Samples `qtdemux` finds in `path` on its `pad` (`video_0`, `audio_0`).
+    fn samples(path: &Path, pad: &str) -> u64 {
+        let pipeline = gst::parse::launch(&format!(
+            "filesrc location=\"{}\" ! qtdemux name=demux demux.{pad} ! fakesink name=sink sync=false",
+            path.display()
+        ))
+        .expect("demux pipeline")
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let c = std::sync::Arc::clone(&count);
+        pipeline
+            .by_name("sink")
+            .unwrap()
+            .static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            });
+
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let _ = pipeline.bus().unwrap().timed_pop_filtered(
+            gst::ClockTime::from_seconds(10),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        );
+        pipeline.set_state(gst::State::Null).unwrap();
+        count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A finished file has no reserved space left in it: no `free` box beyond a
+    /// few bytes of padding, where a reservation leaves two of tens of MB each.
+    #[test]
+    fn a_finished_file_has_no_reserved_space() {
+        if !plugins_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pipeline = gst::Pipeline::new();
+        let rec = add_mp4_recorder(&pipeline, "rec_reserve", tmp.path(), 1, 1);
+        video_source(&pipeline, 90, false)
+            .link(&rec.input("video_input_0"))
+            .expect("link video into recorder");
+        audio_source(&pipeline, 130, false)
+            .link(&rec.input("audio_input_0"))
+            .expect("link audio into recorder");
+        rec.run_setups();
+
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline goes to PLAYING");
+        let reached_eos = wait_for_eos(&pipeline, Duration::from_secs(30));
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert!(reached_eos, "pipeline never reached EOS within 30s");
+
+        let files = recordings(tmp.path(), "rec_reserve");
+        assert_eq!(files.len(), 1, "expected one recording, got {files:?}");
+        let boxes = top_level_boxes(&files[0]);
+        let largest_free = boxes
+            .iter()
+            .filter(|(kind, _)| kind == "free")
+            .map(|(_, size)| *size)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            largest_free < 64 * 1024,
+            "a {largest_free}-byte free box in the finished file: {boxes:?}"
+        );
+        assert_eq!(
+            samples(&files[0], "video_0"),
+            90,
+            "the finished file plays in full"
+        );
+    }
+
+    /// A recording plays up to its last second however it ends. A copy taken
+    /// 6 s in stands in for the file a crash leaves behind; stopping the
+    /// pipeline at 8 s without EOS is how a flow stop ends it. Audio is Opus, as
+    /// from a WHIP seat. Each loses at most the last fragment and the GOP
+    /// splitmuxsink holds back, about 2 s here.
+    #[test]
+    fn a_recording_stopped_or_cut_short_plays_up_to_its_last_second() {
+        if !plugins_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pipeline = gst::Pipeline::new();
+        let rec = add_mp4_recorder(&pipeline, "rec_live", tmp.path(), 1, 1);
+        feed_video(&pipeline, &rec.input("video_input_0"), -1);
+        let src = gst::ElementFactory::make("audiotestsrc")
+            .property("is-live", true)
+            .build()
+            .expect("audiotestsrc");
+        let conv = gst::ElementFactory::make("audioconvert").build().unwrap();
+        let resample = gst::ElementFactory::make("audioresample").build().unwrap();
+        let enc = gst::ElementFactory::make("opusenc")
+            .build()
+            .expect("opusenc");
+        pipeline.add_many([&src, &conv, &resample, &enc]).unwrap();
+        gst::Element::link_many([&src, &conv, &resample, &enc]).unwrap();
+        enc.link(&rec.input("audio_input_0"))
+            .expect("link audio into recorder");
+        rec.run_setups();
+
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline goes to PLAYING");
+        std::thread::sleep(Duration::from_secs(6));
+        let files = recordings(tmp.path(), "rec_live");
+        assert_eq!(files.len(), 1, "expected one recording, got {files:?}");
+        let snapshot = tmp.path().join("snapshot.mp4");
+        std::fs::copy(&files[0], &snapshot).expect("copy the file being recorded");
+        std::thread::sleep(Duration::from_secs(2));
+        pipeline.set_state(gst::State::Null).unwrap();
+
+        // 30 fps video, 50 Opus frames a second.
+        for (file, secs, how) in [(&snapshot, 6, "cut short"), (&files[0], 8, "stopped")] {
+            let (video, audio) = (samples(file, "video_0"), samples(file, "audio_0"));
+            let at_least = (secs - 3) as u64;
+            assert!(
+                video >= at_least * 30 && audio >= at_least * 50,
+                "a recording {how} at {secs} s plays {video} video and {audio} audio frames"
+            );
+        }
+    }
+
+    /// The video of a recorder with a 2 s split stops while its audio goes on.
+    /// splitmuxsink splits on video, so the audio-only file keeps growing; it
+    /// must not fail the flow (issue #932).
+    #[test]
+    fn an_audio_only_stretch_with_a_short_split_does_not_fail_the_flow() {
+        if !plugins_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pipeline = gst::Pipeline::new();
+        let rec = add_recorder(
+            &pipeline,
+            "rec_audio_only",
+            tmp.path(),
+            &[
+                ("container", PropertyValue::String("mp4".into())),
+                ("num_video_tracks", PropertyValue::UInt(1)),
+                ("num_audio_tracks", PropertyValue::UInt(1)),
+                ("max_size_time_secs", PropertyValue::UInt(2)),
+            ],
+        );
+        // Video stops after 3 s without EOS, as a stalled publisher does; the
+        // recorder's watchdog then ends the track.
+        let video = video_source(&pipeline, 90, true);
+        stalled_track::link_without_eos(&pipeline, &video, &rec.input("video_input_0"));
+        audio_source(&pipeline, -1, true)
+            .link(&rec.input("audio_input_0"))
+            .expect("link audio into recorder");
+        rec.run_setups();
+
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline goes to PLAYING");
+        let bus = pipeline.bus().expect("pipeline has a bus");
+        let error =
+            bus.timed_pop_filtered(gst::ClockTime::from_seconds(25), &[gst::MessageType::Error]);
+        pipeline.set_state(gst::State::Null).unwrap();
+
+        if let Some(msg) = error {
+            if let gst::MessageView::Error(err) = msg.view() {
+                panic!(
+                    "the flow failed during the audio-only stretch: {} ({:?})",
+                    err.error(),
+                    err.debug()
+                );
+            }
+        }
     }
 }
