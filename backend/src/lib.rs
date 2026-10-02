@@ -14,7 +14,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tower_sessions::{cookie::time::Duration, Expiry, MemoryStore, SessionManagerLayer};
 use utoipa_swagger_ui::SwaggerUi;
 
 pub mod affinity_manager;
@@ -109,14 +108,11 @@ pub async fn create_app_with_config(
         tracing::warn!("Authentication disabled - all endpoints are public!");
     }
 
-    // Create session store (in-memory, sessions lost on restart)
-    // Cookie name includes the port so multiple instances on the same host don't collide
-    let session_store = MemoryStore::default();
-    let session_layer = SessionManagerLayer::new(session_store)
-        .with_name(format!("strom_session_{}", port))
-        .with_expiry(Expiry::OnInactivity(Duration::hours(24)))
-        .with_secure(false)
-        .with_always_save(true);
+    // The login cookie is signed, not stored, so a login survives a restart
+    let session_cookie = Arc::new(auth::SessionCookie::new(
+        port,
+        auth_config.session_key.clone(),
+    ));
 
     // Build protected API router (requires authentication)
     let protected_api_router = Router::new()
@@ -509,7 +505,7 @@ pub async fn create_app_with_config(
         .nest("/whep", whep_router)
         .nest("/whip", whip_router)
         .nest("/static", static_router)
-        .layer(session_layer)
+        .layer(Extension(session_cookie))
         .layer({
             let cors = CorsLayer::new()
                 .allow_methods([

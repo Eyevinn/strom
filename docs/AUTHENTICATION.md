@@ -32,8 +32,25 @@ cargo run --release
 
 - Navigate to `http://localhost:8080`
 - Login with your configured username and password
-- Session persists for 24 hours of inactivity
+- Session persists for 24 hours of inactivity, and across restarts
 - Click "Logout" button in the top-right to end session
+
+### Keeping logins across restarts
+
+The login cookie is signed with a key. On first start Strom generates one and
+saves it as `session.key` in the data directory, so a login survives a restart
+as long as that directory does (in Docker: mount a volume on `/data`).
+
+To supply the key yourself instead, for example when the data directory is not
+persistent:
+
+```bash
+export STROM_SESSION_SECRET="$(openssl rand -base64 32)"  # at least 32 characters
+```
+
+Keep the key secret: anyone holding it can log in. Changing or deleting it logs
+everyone out. Logout clears the cookie in the browser, but a copy of the cookie
+taken elsewhere stays valid until it expires or the key changes.
 
 ## 2. API Key Authentication (Bearer Token)
 

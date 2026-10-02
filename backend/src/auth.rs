@@ -1,26 +1,216 @@
 use crate::json_rejection::JsonBody;
 use axum::{
     extract::Request,
-    http::{header, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
     Extension, Json,
 };
+use cookie::{Cookie, CookieJar, Key, SameSite};
+use std::path::Path;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 pub use strom_types::api::AuthStatusResponse;
 pub use strom_types::auth::{LoginRequest, LoginResponse};
-use tower_sessions::Session;
-use tracing::warn;
+use tracing::{info, warn};
 
-const SESSION_USER_KEY: &str = "user_authenticated";
+/// A login lapses after this long without a request.
+const SESSION_IDLE_SECS: u64 = 24 * 60 * 60;
+/// A cookie older than this is re-issued, which slides the idle window
+/// forward. Re-issuing on every request would add a `Set-Cookie` to each
+/// API poll for no gain.
+const SESSION_REFRESH_SECS: u64 = 60 * 60;
+/// File in the data directory holding the generated signing key.
+const SESSION_KEY_FILE: &str = "session.key";
+/// Shortest `STROM_SESSION_SECRET` accepted.
+const MIN_SESSION_SECRET_LEN: usize = 32;
 
-/// Whether this cookie session has completed a successful login.
+/// Key that signs the login cookie.
 ///
-/// Route handlers outside the `auth_middleware` chain (the MCP endpoint, which
-/// needs its own error shape) use this to accept the same session cookie the
-/// middleware would have accepted.
-pub async fn session_is_authenticated(session: &Session) -> bool {
-    matches!(session.get::<bool>(SESSION_USER_KEY).await, Ok(Some(true)))
+/// The cookie carries the login itself, so the server keeps no session
+/// state, and a login stays valid across a restart as long as the key does.
+/// Anyone holding the key can mint a login, so it must be secret and must
+/// differ between installations.
+#[derive(Clone)]
+pub struct SessionKey(Key);
+
+impl std::fmt::Debug for SessionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionKey(..)")
+    }
+}
+
+impl SessionKey {
+    /// A key that lives only as long as the process.
+    pub fn random() -> Self {
+        Self(Key::generate())
+    }
+
+    /// Derive the key from an operator-supplied secret.
+    pub fn from_secret(secret: &str) -> anyhow::Result<Self> {
+        if secret.len() < MIN_SESSION_SECRET_LEN {
+            anyhow::bail!(
+                "STROM_SESSION_SECRET must be at least {MIN_SESSION_SECRET_LEN} bytes, got {}. \
+                 Generate one with 'openssl rand -base64 32'.",
+                secret.len()
+            );
+        }
+        Ok(Self(Key::derive_from(secret.as_bytes())))
+    }
+
+    /// The key to sign logins with: `STROM_SESSION_SECRET` when set,
+    /// otherwise a key kept in `data_dir`, created on first start.
+    ///
+    /// If the key file cannot be written the key is kept in memory only, so
+    /// logins work but do not survive a restart.
+    pub fn load(data_dir: &Path) -> anyhow::Result<Self> {
+        if let Some(secret) = strom_types::env::var_opt("STROM_SESSION_SECRET") {
+            info!("Session cookies signed with STROM_SESSION_SECRET");
+            return Self::from_secret(&secret);
+        }
+
+        let path = data_dir.join(SESSION_KEY_FILE);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(text.trim())
+                    .ok()
+                    .and_then(|bytes| Key::try_from(bytes.as_slice()).ok());
+                let Some(key) = bytes else {
+                    anyhow::bail!(
+                        "{} is not a valid session key. Delete it to generate a new one \
+                         (everyone will have to log in again).",
+                        path.display()
+                    );
+                };
+                info!("Session cookies signed with the key in {}", path.display());
+                Ok(Self(key))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let key = Self::random();
+                match write_private(&path, &key.encoded()) {
+                    Ok(()) => info!("Generated session key in {}", path.display()),
+                    Err(e) => warn!(
+                        "Could not write session key to {}: {e}. Logins will not survive a \
+                         restart; set STROM_SESSION_SECRET to keep them.",
+                        path.display()
+                    ),
+                }
+                Ok(key)
+            }
+            Err(e) => Err(anyhow::anyhow!(
+                "Could not read session key {}: {e}",
+                path.display()
+            )),
+        }
+    }
+
+    fn encoded(&self) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(self.0.master())
+    }
+}
+
+/// Write `contents` to a new file only the owner can read.
+fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(contents.as_bytes())
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The signed login cookie.
+///
+/// Its value is the time it was issued, signed with the [`SessionKey`]. A
+/// cookie with a good signature and an issue time within the idle window is a
+/// login. Logout clears the cookie in the browser; it cannot revoke a copy
+/// taken elsewhere. Changing the key revokes every login at once.
+#[derive(Clone)]
+pub struct SessionCookie {
+    name: String,
+    key: Key,
+}
+
+impl SessionCookie {
+    /// The cookie name includes the port so multiple instances on the same
+    /// host don't collide.
+    pub fn new(port: u16, key: SessionKey) -> Self {
+        Self {
+            name: format!("strom_session_{port}"),
+            key: key.0,
+        }
+    }
+
+    /// When the login cookie in `headers` was issued, if it is a valid,
+    /// unexpired login.
+    fn issued_at(&self, headers: &HeaderMap) -> Option<u64> {
+        let now = unix_now();
+        headers
+            .get_all(header::COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(Cookie::split_parse)
+            .filter_map(Result::ok)
+            .filter(|c| c.name() == self.name)
+            .find_map(|c| {
+                let mut jar = CookieJar::new();
+                jar.add_original(c.into_owned());
+                let issued: u64 = jar
+                    .signed(&self.key)
+                    .get(&self.name)?
+                    .value()
+                    .parse()
+                    .ok()?;
+                // A cookie from the future is not trusted to be fresh.
+                (issued <= now && now - issued < SESSION_IDLE_SECS).then_some(issued)
+            })
+    }
+
+    /// Whether `headers` carry a valid login cookie.
+    pub fn is_authenticated(&self, headers: &HeaderMap) -> bool {
+        self.issued_at(headers).is_some()
+    }
+
+    fn build(&self, value: String, max_age: u64) -> Cookie<'static> {
+        Cookie::build((self.name.clone(), value))
+            .path("/")
+            .http_only(true)
+            .same_site(SameSite::Strict)
+            .max_age(cookie::time::Duration::seconds(max_age as i64))
+            .build()
+    }
+
+    /// A `Set-Cookie` value logging the browser in from now.
+    fn login(&self) -> HeaderValue {
+        self.login_issued_at(unix_now())
+    }
+
+    fn login_issued_at(&self, issued: u64) -> HeaderValue {
+        let mut jar = CookieJar::new();
+        jar.signed_mut(&self.key)
+            .add(self.build(issued.to_string(), SESSION_IDLE_SECS));
+        let cookie = jar.get(&self.name).expect("cookie was just added");
+        HeaderValue::from_str(&cookie.to_string()).expect("cookie is a valid header value")
+    }
+
+    /// A `Set-Cookie` value removing the login from the browser.
+    fn logout(&self) -> HeaderValue {
+        HeaderValue::from_str(&self.build(String::new(), 0).to_string())
+            .expect("cookie is a valid header value")
+    }
 }
 
 /// Authentication configuration loaded from environment variables
@@ -36,6 +226,8 @@ pub struct AuthConfig {
     pub native_gui_token: Option<String>,
     /// Whether authentication is enabled
     pub enabled: bool,
+    /// Key that signs the login cookie
+    pub session_key: SessionKey,
 }
 
 impl AuthConfig {
@@ -74,7 +266,20 @@ impl AuthConfig {
             api_key,
             native_gui_token: None,
             enabled,
+            // Replaced by `SessionKey::load` at startup; this one does not
+            // survive a restart.
+            session_key: SessionKey::random(),
         }
+    }
+
+    /// [`Self::from_env`], with the login cookie key from [`SessionKey::load`]
+    /// when login is configured.
+    pub fn load(data_dir: &Path) -> anyhow::Result<Self> {
+        let mut config = Self::from_env();
+        if config.has_session_auth() {
+            config.session_key = SessionKey::load(data_dir)?;
+        }
+        Ok(config)
     }
 
     /// Generate a native GUI token for embedded GUI authentication.
@@ -143,7 +348,7 @@ impl AuthConfig {
 /// Authentication middleware that checks session, API key, native GUI token, and query param
 pub async fn auth_middleware(
     Extension(config): Extension<Arc<AuthConfig>>,
-    session: Session,
+    Extension(session): Extension<Arc<SessionCookie>>,
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
@@ -152,9 +357,15 @@ pub async fn auth_middleware(
         return Ok(next.run(request).await);
     }
 
-    // Check session authentication
-    if session_is_authenticated(&session).await {
-        return Ok(next.run(request).await);
+    // Check the login cookie, and slide its idle window forward
+    if let Some(issued) = session.issued_at(request.headers()) {
+        let mut response = next.run(request).await;
+        if unix_now().saturating_sub(issued) >= SESSION_REFRESH_SECS {
+            response
+                .headers_mut()
+                .append(header::SET_COOKIE, session.login());
+        }
+        return Ok(response);
     }
 
     // Check Bearer token authentication (API key or native GUI token)
@@ -205,37 +416,37 @@ pub async fn auth_middleware(
     tag = "auth",
     request_body = LoginRequest,
     responses(
-        (status = 200, description = "Login attempt result", body = LoginResponse),
-        (status = 500, description = "Internal server error")
+        (status = 200, description = "Login attempt result", body = LoginResponse)
     )
 )]
 pub async fn login_handler(
     Extension(config): Extension<Arc<AuthConfig>>,
-    session: Session,
+    Extension(session): Extension<Arc<SessionCookie>>,
     JsonBody(payload): JsonBody<LoginRequest>,
-) -> Result<Json<LoginResponse>, StatusCode> {
+) -> Response {
     if !config.has_session_auth() {
-        return Ok(Json(LoginResponse {
+        return Json(LoginResponse {
             success: false,
             message: "Session authentication not configured".to_string(),
-        }));
+        })
+        .into_response();
     }
 
     if config.verify_credentials(&payload.username, &payload.password) {
-        session
-            .insert(SESSION_USER_KEY, true)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        Ok(Json(LoginResponse {
-            success: true,
-            message: "Login successful".to_string(),
-        }))
+        (
+            [(header::SET_COOKIE, session.login())],
+            Json(LoginResponse {
+                success: true,
+                message: "Login successful".to_string(),
+            }),
+        )
+            .into_response()
     } else {
-        Ok(Json(LoginResponse {
+        Json(LoginResponse {
             success: false,
             message: "Invalid username or password".to_string(),
-        }))
+        })
+        .into_response()
     }
 }
 
@@ -245,20 +456,18 @@ pub async fn login_handler(
     path = "/api/logout",
     tag = "auth",
     responses(
-        (status = 200, description = "Logout successful", body = LoginResponse),
-        (status = 500, description = "Internal server error")
+        (status = 200, description = "Logout successful", body = LoginResponse)
     )
 )]
-pub async fn logout_handler(session: Session) -> Result<Json<LoginResponse>, StatusCode> {
-    session
-        .delete()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(LoginResponse {
-        success: true,
-        message: "Logged out successfully".to_string(),
-    }))
+pub async fn logout_handler(Extension(session): Extension<Arc<SessionCookie>>) -> Response {
+    (
+        [(header::SET_COOKIE, session.logout())],
+        Json(LoginResponse {
+            success: true,
+            message: "Logged out successfully".to_string(),
+        }),
+    )
+        .into_response()
 }
 
 /// Get authentication status
@@ -272,14 +481,15 @@ pub async fn logout_handler(session: Session) -> Result<Json<LoginResponse>, Sta
 )]
 pub async fn auth_status_handler(
     Extension(config): Extension<Arc<AuthConfig>>,
-    session: Session,
+    Extension(session): Extension<Arc<SessionCookie>>,
+    headers: HeaderMap,
 ) -> Json<AuthStatusResponse> {
     let authenticated = if !config.enabled {
         // If auth is disabled, consider everyone authenticated
         true
     } else {
-        // Check if authenticated via session
-        session_is_authenticated(&session).await
+        // Check if authenticated via the login cookie
+        session.is_authenticated(&headers)
     };
 
     let mut methods = Vec::new();
@@ -328,6 +538,7 @@ mod tests {
             api_key: None,
             native_gui_token: None,
             enabled: false,
+            session_key: SessionKey::random(),
         };
 
         assert!(!config.has_session_auth());
@@ -343,6 +554,7 @@ mod tests {
             api_key: Some("secret-api-key".to_string()),
             native_gui_token: None,
             enabled: true,
+            session_key: SessionKey::random(),
         };
 
         assert!(config.verify_api_key("secret-api-key"));
@@ -356,6 +568,7 @@ mod tests {
             api_key: Some("secret-api-key".to_string()),
             native_gui_token: None,
             enabled: true,
+            session_key: SessionKey::random(),
         };
 
         assert!(!config.verify_api_key("wrong-key"));
@@ -369,6 +582,7 @@ mod tests {
             api_key: None,
             native_gui_token: None,
             enabled: false,
+            session_key: SessionKey::random(),
         };
 
         assert!(!config.verify_api_key("any-key"));
@@ -384,6 +598,7 @@ mod tests {
             api_key: Some(String::new()),
             native_gui_token: None,
             enabled: true,
+            session_key: SessionKey::random(),
         };
 
         assert!(!config.verify_api_key(""));
@@ -434,6 +649,7 @@ mod tests {
             api_key: None,
             native_gui_token: None,
             enabled: true,
+            session_key: SessionKey::random(),
         };
 
         let token = config.generate_native_gui_token();
@@ -449,6 +665,7 @@ mod tests {
             api_key: None,
             native_gui_token: None,
             enabled: true,
+            session_key: SessionKey::random(),
         };
 
         let _token = config.generate_native_gui_token();
@@ -463,6 +680,7 @@ mod tests {
             api_key: None,
             native_gui_token: None,
             enabled: true,
+            session_key: SessionKey::random(),
         };
 
         assert!(!config.verify_native_gui_token("any-token"));
@@ -479,6 +697,7 @@ mod tests {
             api_key: None,
             native_gui_token: None,
             enabled: true,
+            session_key: SessionKey::random(),
         };
 
         assert!(config.verify_credentials("admin", password));
@@ -495,6 +714,7 @@ mod tests {
             api_key: None,
             native_gui_token: None,
             enabled: true,
+            session_key: SessionKey::random(),
         };
 
         assert!(!config.verify_credentials("admin", "wrong_password"));
@@ -511,6 +731,7 @@ mod tests {
             api_key: None,
             native_gui_token: None,
             enabled: true,
+            session_key: SessionKey::random(),
         };
 
         assert!(!config.verify_credentials("wrong_user", password));
@@ -524,6 +745,7 @@ mod tests {
             api_key: None,
             native_gui_token: None,
             enabled: false,
+            session_key: SessionKey::random(),
         };
 
         assert!(!config.verify_credentials("admin", "password"));
@@ -539,6 +761,7 @@ mod tests {
             api_key: None,
             native_gui_token: None,
             enabled: true,
+            session_key: SessionKey::random(),
         };
         assert!(config_with_session.has_session_auth());
 
@@ -548,6 +771,7 @@ mod tests {
             api_key: None,
             native_gui_token: None,
             enabled: true,
+            session_key: SessionKey::random(),
         };
         assert!(!config_without_hash.has_session_auth());
 
@@ -557,6 +781,7 @@ mod tests {
             api_key: None,
             native_gui_token: None,
             enabled: true,
+            session_key: SessionKey::random(),
         };
         assert!(!config_without_user.has_session_auth());
     }
@@ -569,6 +794,7 @@ mod tests {
             api_key: Some("key".to_string()),
             native_gui_token: None,
             enabled: true,
+            session_key: SessionKey::random(),
         };
         assert!(config_with_key.has_api_key_auth());
 
@@ -578,6 +804,7 @@ mod tests {
             api_key: None,
             native_gui_token: None,
             enabled: false,
+            session_key: SessionKey::random(),
         };
         assert!(!config_without_key.has_api_key_auth());
     }
@@ -597,7 +824,6 @@ mod middleware_tests {
         Router,
     };
     use tower::ServiceExt;
-    use tower_sessions::{MemoryStore, SessionManagerLayer};
 
     const API_KEY: &str = "test-api-key";
     const NATIVE_TOKEN: &str = "native-gui-00000000-0000-0000-0000-000000000000";
@@ -613,18 +839,63 @@ mod middleware_tests {
             api_key: Some(API_KEY.to_string()),
             native_gui_token: Some(NATIVE_TOKEN.to_string()),
             enabled: true,
+            session_key: SessionKey::random(),
         }
     }
 
     fn router(config: AuthConfig) -> Router {
+        let session = Arc::new(SessionCookie::new(0, config.session_key.clone()));
         let protected = Router::new()
             .route("/protected", get(|| async { "ok" }))
             .layer(middleware::from_fn(auth_middleware));
         Router::new()
             .route("/login", post(login_handler))
+            .route("/logout", post(logout_handler))
             .merge(protected)
             .layer(Extension(Arc::new(config)))
-            .layer(SessionManagerLayer::new(MemoryStore::default()).with_secure(false))
+            .layer(Extension(session))
+    }
+
+    fn login_req(password: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/login")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "username": ADMIN_USER, "password": password }).to_string(),
+            ))
+            .unwrap()
+    }
+
+    /// The `name=value` part of the response's `Set-Cookie`, if any.
+    fn cookie_of(response: &Response) -> Option<String> {
+        response.headers().get(header::SET_COOKIE).map(|value| {
+            value
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_string()
+        })
+    }
+
+    fn with_cookie(cookie: &str) -> Request<Body> {
+        Request::builder()
+            .uri("/protected")
+            .header(header::COOKIE, cookie)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn login_cookie(app: &Router) -> String {
+        let ok = app
+            .clone()
+            .oneshot(login_req(ADMIN_PASSWORD))
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        cookie_of(&ok).expect("a successful login sets a session cookie")
     }
 
     async fn status(app: &Router, request: Request<Body>) -> StatusCode {
@@ -664,6 +935,7 @@ mod middleware_tests {
             api_key: None,
             native_gui_token: None,
             enabled: false,
+            session_key: SessionKey::random(),
         });
         assert_eq!(status(&app, get_req("/protected")).await, StatusCode::OK);
         assert_eq!(status(&app, bearer("whatever")).await, StatusCode::OK);
@@ -759,55 +1031,116 @@ mod middleware_tests {
     async fn logged_in_session_is_accepted() {
         let app = router(enabled_config());
 
-        let login = |password: &str| {
-            Request::builder()
-                .method("POST")
-                .uri("/login")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::json!({ "username": ADMIN_USER, "password": password }).to_string(),
-                ))
-                .unwrap()
-        };
-        let cookie_of = |response: &Response| {
-            response.headers().get(header::SET_COOKIE).map(|value| {
-                value
-                    .to_str()
-                    .unwrap()
-                    .split(';')
-                    .next()
-                    .unwrap()
-                    .to_string()
-            })
-        };
-        let with_cookie = |cookie: &str| {
-            Request::builder()
-                .uri("/protected")
-                .header(header::COOKIE, cookie)
-                .body(Body::empty())
-                .unwrap()
-        };
+        // A failed login sets no cookie.
+        let failed = app.clone().oneshot(login_req("wrong")).await.unwrap();
+        assert_eq!(cookie_of(&failed), None);
 
-        // A failed login yields no authenticated session. An empty session
-        // is not stored, so there may be no cookie at all.
-        let failed = app.clone().oneshot(login("wrong")).await.unwrap();
-        if let Some(cookie) = cookie_of(&failed) {
-            assert_eq!(
-                status(&app, with_cookie(&cookie)).await,
-                StatusCode::UNAUTHORIZED
-            );
-        }
-
-        let ok = app.clone().oneshot(login(ADMIN_PASSWORD)).await.unwrap();
-        assert_eq!(ok.status(), StatusCode::OK);
-        let cookie = cookie_of(&ok).expect("a successful login sets a session cookie");
+        let cookie = login_cookie(&app).await;
         assert_eq!(status(&app, with_cookie(&cookie)).await, StatusCode::OK);
 
-        // An unknown session id is not authenticated.
+        // A tampered cookie is not authenticated.
         assert_eq!(
-            status(&app, with_cookie(&format!("{cookie}x"))).await,
+            status(&app, with_cookie(&format!("{cookie}0"))).await,
             StatusCode::UNAUTHORIZED
         );
+        // Nor is the bare issue time without its signature.
+        assert_eq!(
+            status(
+                &app,
+                with_cookie(&format!("strom_session_0={}", unix_now()))
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// The point of signing the cookie: a new process with the same key
+    /// accepts a login made before the restart, and one with another key
+    /// does not.
+    #[tokio::test]
+    async fn login_survives_restart_with_same_key() {
+        let config = enabled_config();
+        let cookie = login_cookie(&router(config.clone())).await;
+
+        let restarted = router(config.clone());
+        assert_eq!(
+            status(&restarted, with_cookie(&cookie)).await,
+            StatusCode::OK
+        );
+
+        let other_key = router(AuthConfig {
+            session_key: SessionKey::random(),
+            ..config
+        });
+        assert_eq!(
+            status(&other_key, with_cookie(&cookie)).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_login_expires_and_active_login_is_refreshed() {
+        let config = enabled_config();
+        let session = SessionCookie::new(0, config.session_key.clone());
+        let app = router(config);
+        let cookie_issued = |ago: u64| {
+            let value = session.login_issued_at(unix_now() - ago);
+            value
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_string()
+        };
+
+        let stale = cookie_issued(SESSION_IDLE_SECS + 1);
+        assert_eq!(
+            status(&app, with_cookie(&stale)).await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        // A fresh cookie is accepted without being re-issued.
+        let fresh = app
+            .clone()
+            .oneshot(with_cookie(&cookie_issued(0)))
+            .await
+            .unwrap();
+        assert_eq!(fresh.status(), StatusCode::OK);
+        assert_eq!(cookie_of(&fresh), None);
+
+        // An older one is re-issued, and the new one is a valid login.
+        let old = app
+            .clone()
+            .oneshot(with_cookie(&cookie_issued(SESSION_REFRESH_SECS + 1)))
+            .await
+            .unwrap();
+        assert_eq!(old.status(), StatusCode::OK);
+        let refreshed = cookie_of(&old).expect("an old login is re-issued");
+        assert_eq!(
+            session
+                .issued_at(&{
+                    let mut h = HeaderMap::new();
+                    h.insert(header::COOKIE, refreshed.parse().unwrap());
+                    h
+                })
+                .map(|issued| unix_now() - issued < SESSION_REFRESH_SECS),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_clears_the_cookie() {
+        let app = router(enabled_config());
+        let logout = Request::builder()
+            .method("POST")
+            .uri("/logout")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(logout).await.unwrap();
+        let set_cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(set_cookie.starts_with("strom_session_0=;"), "{set_cookie}");
+        assert!(set_cookie.contains("Max-Age=0"), "{set_cookie}");
     }
 
     /// The middleware has no exempt paths of its own: exemption is where the
@@ -844,5 +1177,96 @@ mod middleware_tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(status(&app, authed).await, StatusCode::OK);
+    }
+}
+
+#[cfg(test)]
+mod session_key_tests {
+    use super::*;
+    use serial_test::serial;
+
+    /// Run `f` with `STROM_SESSION_SECRET` set to `value`, then restore it.
+    fn with_secret<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let saved = std::env::var("STROM_SESSION_SECRET").ok();
+        match value {
+            Some(v) => std::env::set_var("STROM_SESSION_SECRET", v),
+            None => std::env::remove_var("STROM_SESSION_SECRET"),
+        }
+        let result = f();
+        match saved {
+            Some(v) => std::env::set_var("STROM_SESSION_SECRET", v),
+            None => std::env::remove_var("STROM_SESSION_SECRET"),
+        }
+        result
+    }
+
+    /// Whether a login signed with `a` is accepted under `b`.
+    fn same_key(a: &SessionKey, b: &SessionKey) -> bool {
+        let login = SessionCookie::new(0, a.clone()).login();
+        let mut headers = HeaderMap::new();
+        let pair = login.to_str().unwrap().split(';').next().unwrap();
+        headers.insert(header::COOKIE, pair.parse().unwrap());
+        SessionCookie::new(0, b.clone()).is_authenticated(&headers)
+    }
+
+    #[test]
+    #[serial]
+    fn generated_key_is_kept_in_the_data_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (first, second) = with_secret(None, || {
+            (
+                SessionKey::load(dir.path()).unwrap(),
+                SessionKey::load(dir.path()).unwrap(),
+            )
+        });
+        assert!(same_key(&first, &second));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join(SESSION_KEY_FILE))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        // Another data dir gets another key.
+        let other = tempfile::TempDir::new().unwrap();
+        let third = with_secret(None, || SessionKey::load(other.path()).unwrap());
+        assert!(!same_key(&first, &third));
+    }
+
+    #[test]
+    #[serial]
+    fn corrupt_key_file_is_an_error_not_a_silent_replacement() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(SESSION_KEY_FILE);
+        std::fs::write(&path, "not base64 at all").unwrap();
+        assert!(with_secret(None, || SessionKey::load(dir.path())).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not base64 at all");
+    }
+
+    #[test]
+    #[serial]
+    fn secret_from_env_wins_and_is_stable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let secret = "0123456789abcdef0123456789abcdef";
+        let (a, b) = with_secret(Some(secret), || {
+            (
+                SessionKey::load(dir.path()).unwrap(),
+                SessionKey::load(dir.path()).unwrap(),
+            )
+        });
+        assert!(same_key(&a, &b));
+        // No key file is written when the secret comes from the environment.
+        assert!(!dir.path().join(SESSION_KEY_FILE).exists());
+    }
+
+    #[test]
+    #[serial]
+    fn short_secret_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(with_secret(Some("too-short"), || SessionKey::load(dir.path())).is_err());
     }
 }
