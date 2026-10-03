@@ -889,8 +889,14 @@ async fn a_clip_longer_than_the_output_queue_plays_whole() {
         )
         .await
         .expect("stinger must start");
-    wait_for_event(&mut rx, 30_000, |e| {
-        matches!(e, strom_types::StromEvent::StingerCompleted { .. }).then_some(())
+    let mut reported = Vec::new();
+    wait_for_event(&mut rx, 30_000, |e| match e {
+        strom_types::StromEvent::StingerFailed { reason, .. } => {
+            reported.push(reason.clone());
+            None
+        }
+        strom_types::StromEvent::StingerCompleted { .. } => Some(()),
+        _ => None,
     })
     .await
     .expect("the stinger must complete");
@@ -900,11 +906,17 @@ async fn a_clip_longer_than_the_output_queue_plays_whole() {
         newest.load(Ordering::Relaxed),
     );
     let spanned = (newest.saturating_sub(first) + FRAME_DUR_NS / 2) / FRAME_DUR_NS + 1;
+    let at_completion = arrived.load(Ordering::Relaxed);
+    // A frame that reaches the mixer only after the take completed was late,
+    // not lost; say which, on a failure.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(
-        arrived.load(Ordering::Relaxed),
+        at_completion,
         LONG_FRAMES,
         "every clip frame must reach the mixer; the frames that arrived span {spanned} \
-         frame times (a missing first or last frame shortens the span)"
+         frame times (a missing first or last frame shortens the span), {} had arrived \
+         500 ms later, and the take reported {reported:?}",
+        arrived.load(Ordering::Relaxed)
     );
     let _ = std::fs::remove_file(&clip);
 }
