@@ -331,6 +331,7 @@ fn build_media_player(
         timing: Arc::new(Timing::new(playout_delay_ms)),
         main_pipeline: gst::glib::WeakRef::new(),
         bus_watch: std::sync::Mutex::new(None),
+        lifted_limits: Default::default(),
     });
 
     // --- Resolve initial URI ---

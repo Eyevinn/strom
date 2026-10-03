@@ -1012,6 +1012,64 @@ fn a_clip_the_mixer_stops_taking_can_still_be_stopped() {
     });
 }
 
+/// A take re-arms its clip from its own task while an operator may seek or
+/// stop it. Overlapping calls must leave the clip's video queue limits as
+/// built: without them an unpaced clip decodes whole into memory every take.
+#[test]
+fn overlapping_player_calls_keep_the_clip_queue_bounded() {
+    run_abandoning_hung_tasks(async {
+        let clip = clip_path("overlap");
+        gst::init().expect("gstreamer init");
+        write_clip_frames(&clip, clip_frame, 240).expect("write long clip");
+        let running = start_with(
+            "overlap",
+            with_timing(
+                "overlap",
+                build_flow("overlap", &clip, true),
+                4_000,
+                "cut",
+                0,
+            ),
+        )
+        .await;
+        running
+            .state
+            .trigger_stinger(
+                &running.flow_id,
+                &running.mixer,
+                0,
+                1,
+                Some(&running.source),
+            )
+            .await
+            .expect("stinger must start");
+
+        let player = running.player();
+        let limits = |p: &strom::blocks::builtin::mediaplayer::MediaPlayerState| {
+            let src = &p.video_appsrcs[0];
+            (src.max_bytes(), src.max_time())
+        };
+        let built = limits(&player);
+        let (rearm, operator) = (player.clone(), player.clone());
+        let calls = returns_within(60, move || {
+            let rearm = std::thread::spawn(move || (0..20).try_for_each(|_| rearm.arm_stinger()));
+            let operator = std::thread::spawn(move || (0..20).try_for_each(|_| operator.seek(0)));
+            (rearm.join(), operator.join())
+        });
+        assert!(
+            matches!(calls, Some((Ok(Ok(())), Ok(Ok(()))))),
+            "overlapping re-arms and seeks must all return: {calls:?}"
+        );
+        assert_eq!(
+            limits(&player),
+            built,
+            "the clip's video queue limits must be back as built once overlapping calls finish"
+        );
+        assert!(flow_stops(&running), "the flow must stop");
+        let _ = std::fs::remove_file(&clip);
+    });
+}
+
 /// A declared clip whose video is wired to nothing, played from its own
 /// controls (a preview before wiring it), must still seek and stop.
 #[test]

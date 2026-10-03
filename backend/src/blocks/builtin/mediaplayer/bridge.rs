@@ -847,6 +847,7 @@ mod tests {
             timing: Arc::new(super::super::timing::Timing::new(0)),
             main_pipeline: gst::glib::WeakRef::new(),
             bus_watch: Mutex::new(None),
+            lifted_limits: Default::default(),
         })
     }
 

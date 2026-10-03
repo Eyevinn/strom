@@ -91,6 +91,9 @@ pub struct MediaPlayerState {
     /// holding its file descriptors — for the life of the process. Keeping the
     /// id is what lets [`MediaPlayerState::shutdown`] break it.
     pub bus_watch: Mutex<Option<gst::glib::SignalHandlerId>>,
+    /// Control calls currently holding the waiting video appsrcs' limits
+    /// lifted (see [`MediaPlayerState::lift_waiting_limits`]).
+    pub lifted_limits: Mutex<LiftedLimits>,
 }
 
 impl MediaPlayerState {
@@ -145,21 +148,31 @@ impl MediaPlayerState {
     /// Pausing, seeking, switching file and stopping all wait for that
     /// thread, so without this they never return while the clip's consumer
     /// is stalled or its output is wired to nothing.
-    fn lift_waiting_limits(&self) -> LiftedLimits<'_> {
-        let restore = self
-            .video_appsrcs
-            .iter()
-            .filter(|src| src.property::<bool>("block"))
-            .map(|src| {
-                let limits = (src, src.max_bytes(), src.max_time());
-                // Zero is no limit. max-time first: changing max-bytes is
-                // what wakes a push waiting for room.
-                src.set_max_time(gst::ClockTime::ZERO);
-                src.set_max_bytes(0);
-                limits
-            })
-            .collect();
-        LiftedLimits { restore }
+    ///
+    /// Control calls overlap: a take re-arms the clip from its own task while
+    /// an operator pauses or seeks it. The limits are saved by the first call
+    /// in and put back by the last one out, so an overlapping call neither
+    /// saves the lifted values as the real ones nor restores the limits while
+    /// another call still waits on the streaming thread.
+    fn lift_waiting_limits(&self) -> LiftGuard<'_> {
+        let mut lifted = self.lifted_limits.lock().unwrap_or_else(|p| p.into_inner());
+        if lifted.holders == 0 {
+            lifted.saved = self
+                .video_appsrcs
+                .iter()
+                .filter(|src| src.property::<bool>("block"))
+                .map(|src| {
+                    let limits = (src.clone(), src.max_bytes(), src.max_time());
+                    // Zero is no limit. max-time first: changing max-bytes is
+                    // what wakes a push waiting for room.
+                    src.set_max_time(gst::ClockTime::ZERO);
+                    src.set_max_bytes(0);
+                    limits
+                })
+                .collect();
+        }
+        lifted.holders += 1;
+        LiftGuard { state: self }
     }
 
     /// Get the current file URI, if any.
@@ -554,16 +567,32 @@ impl MediaPlayerState {
     }
 }
 
-/// The limits [`MediaPlayerState::lift_waiting_limits`] lifted, put back on drop.
-struct LiftedLimits<'a> {
-    restore: Vec<(&'a gst_app::AppSrc, u64, gst::ClockTime)>,
+/// Waiting video appsrc limits lifted by
+/// [`MediaPlayerState::lift_waiting_limits`], and how many calls hold them.
+#[derive(Default)]
+pub struct LiftedLimits {
+    holders: usize,
+    saved: Vec<(gst_app::AppSrc, u64, gst::ClockTime)>,
 }
 
-impl Drop for LiftedLimits<'_> {
+/// One call's hold on the lifted limits; the last one dropped puts them back.
+struct LiftGuard<'a> {
+    state: &'a MediaPlayerState,
+}
+
+impl Drop for LiftGuard<'_> {
     fn drop(&mut self) {
-        for (src, max_bytes, max_time) in &self.restore {
-            src.set_max_time(*max_time);
-            src.set_max_bytes(*max_bytes);
+        let mut lifted = self
+            .state
+            .lifted_limits
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        lifted.holders -= 1;
+        if lifted.holders == 0 {
+            for (src, max_bytes, max_time) in lifted.saved.drain(..) {
+                src.set_max_time(max_time);
+                src.set_max_bytes(max_bytes);
+            }
         }
     }
 }
