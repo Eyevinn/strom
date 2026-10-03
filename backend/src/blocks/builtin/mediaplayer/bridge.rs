@@ -835,6 +835,7 @@ mod tests {
             }),
             is_paused: AtomicBool::new(false),
             loop_playlist: AtomicBool::new(false),
+            stinger_armed: AtomicBool::new(false),
             block_id: "test".to_string(),
             flow_id: uuid::Uuid::new_v4(),
             switching_file: AtomicBool::new(false),
@@ -846,6 +847,7 @@ mod tests {
             timing: Arc::new(super::super::timing::Timing::new(0)),
             main_pipeline: gst::glib::WeakRef::new(),
             bus_watch: Mutex::new(None),
+            lifted_limits: Default::default(),
         })
     }
 

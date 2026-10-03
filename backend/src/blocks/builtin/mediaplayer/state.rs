@@ -49,6 +49,14 @@ pub struct MediaPlayerState {
     pub is_paused: AtomicBool,
     /// Whether to loop the playlist
     pub loop_playlist: AtomicBool,
+    /// True while the player is parked on its first frame, ready to fire as a
+    /// stinger with no decode latency. Cleared as soon as it plays.
+    ///
+    /// Armed start is ~0.5 ms and independent of resolution, because the frame
+    /// is already decoded and `play()` is only a state change. Firing without
+    /// arming — straight after a clip switch — costs up to a full frame at 4K,
+    /// which is the whole reason this state is tracked rather than assumed.
+    pub stinger_armed: AtomicBool,
     /// Block ID for event broadcasting
     pub block_id: String,
     /// Flow ID for event broadcasting
@@ -83,6 +91,9 @@ pub struct MediaPlayerState {
     /// holding its file descriptors — for the life of the process. Keeping the
     /// id is what lets [`MediaPlayerState::shutdown`] break it.
     pub bus_watch: Mutex<Option<gst::glib::SignalHandlerId>>,
+    /// Control calls currently holding the waiting video appsrcs' limits
+    /// lifted (see [`MediaPlayerState::lift_waiting_limits`]).
+    pub lifted_limits: Mutex<LiftedLimits>,
 }
 
 impl MediaPlayerState {
@@ -126,6 +137,42 @@ impl MediaPlayerState {
                 }
             }
         }
+    }
+
+    /// Lift the limits of every video appsrc that waits for room, until the
+    /// returned guard drops.
+    ///
+    /// A stinger clip's video appsrc waits instead of dropping (see
+    /// `build_media_player`), which parks the internal pipeline's streaming
+    /// thread in `push_sample` for as long as the flow takes nothing from it.
+    /// Pausing, seeking, switching file and stopping all wait for that
+    /// thread, so without this they never return while the clip's consumer
+    /// is stalled or its output is wired to nothing.
+    ///
+    /// Control calls overlap: a take re-arms the clip from its own task while
+    /// an operator pauses or seeks it. The limits are saved by the first call
+    /// in and put back by the last one out, so an overlapping call neither
+    /// saves the lifted values as the real ones nor restores the limits while
+    /// another call still waits on the streaming thread.
+    fn lift_waiting_limits(&self) -> LiftGuard<'_> {
+        let mut lifted = self.lifted_limits.lock().unwrap_or_else(|p| p.into_inner());
+        if lifted.holders == 0 {
+            lifted.saved = self
+                .video_appsrcs
+                .iter()
+                .filter(|src| src.property::<bool>("block"))
+                .map(|src| {
+                    let limits = (src.clone(), src.max_bytes(), src.max_time());
+                    // Zero is no limit. max-time first: changing max-bytes is
+                    // what wakes a push waiting for room.
+                    src.set_max_time(gst::ClockTime::ZERO);
+                    src.set_max_bytes(0);
+                    limits
+                })
+                .collect();
+        }
+        lifted.holders += 1;
+        LiftGuard { state: self }
     }
 
     /// Get the current file URI, if any.
@@ -257,6 +304,7 @@ impl MediaPlayerState {
         let pipeline = pipeline_guard
             .as_ref()
             .ok_or("Internal pipeline not created")?;
+        let _lifted = self.lift_waiting_limits();
 
         // Set internal pipeline to READY to flush the old stream
         pipeline.set_state(gst::State::Ready).map_err(|e| {
@@ -300,6 +348,17 @@ impl MediaPlayerState {
         Ok(())
     }
 
+    /// Main-pipeline running time of this clip's position zero, once the bridge
+    /// has taken its baseline since the last play or seek.
+    ///
+    /// A play or seek starts the clip at running time zero, so clip time C
+    /// reaches the mixer at stream time `offset + C`, which is how a stinger
+    /// works out which output frame carries its cut point. `None` until the
+    /// first buffer sets it.
+    pub fn stream_offset_ns(&self) -> Option<i64> {
+        self.timing.stream_offset()
+    }
+
     /// Play the media.
     pub fn play(&self) -> Result<(), String> {
         let pipeline_guard = self
@@ -318,6 +377,7 @@ impl MediaPlayerState {
             "Failed to resume playback".to_string()
         })?;
         self.is_paused.store(false, Ordering::SeqCst);
+        self.stinger_armed.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -330,6 +390,7 @@ impl MediaPlayerState {
         let pipeline = pipeline_guard
             .as_ref()
             .ok_or("Internal pipeline not created")?;
+        let _lifted = self.lift_waiting_limits();
         pipeline.set_state(gst::State::Paused).map_err(|e| {
             error!("Failed to pause playback: {:?}", e);
             "Failed to pause playback".to_string()
@@ -343,6 +404,24 @@ impl MediaPlayerState {
         self.pause()?;
         self.seek(0)?;
         Ok(())
+    }
+
+    /// Park this player on its first frame so a stinger can fire from it
+    /// without paying decode latency, and stop it looping.
+    ///
+    /// A stinger plays once per trigger, so looping is forced off here rather
+    /// than left to the block's `loop_playlist` property: a stinger clip that
+    /// restarts would put a second copy on air behind the program.
+    pub fn arm_stinger(&self) -> Result<(), String> {
+        self.loop_playlist.store(false, Ordering::SeqCst);
+        self.stop()?;
+        self.stinger_armed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Whether this player is parked on its first frame.
+    pub fn is_stinger_armed(&self) -> bool {
+        self.stinger_armed.load(Ordering::SeqCst)
     }
 
     /// Seek to a position in nanoseconds.
@@ -370,6 +449,7 @@ impl MediaPlayerState {
             self.timing.reset(guard.as_ref(), &self.main_pipeline);
         }
 
+        let _lifted = self.lift_waiting_limits();
         let seek_result = source.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
             gst::ClockTime::from_nseconds(position_ns),
@@ -482,7 +562,38 @@ impl MediaPlayerState {
             "Media Player {}: Stopping internal pipeline on shutdown",
             self.block_id
         );
+        let _lifted = self.lift_waiting_limits();
         let _ = pipeline.set_state(gst::State::Null);
+    }
+}
+
+/// Waiting video appsrc limits lifted by
+/// [`MediaPlayerState::lift_waiting_limits`], and how many calls hold them.
+#[derive(Default)]
+pub struct LiftedLimits {
+    holders: usize,
+    saved: Vec<(gst_app::AppSrc, u64, gst::ClockTime)>,
+}
+
+/// One call's hold on the lifted limits; the last one dropped puts them back.
+struct LiftGuard<'a> {
+    state: &'a MediaPlayerState,
+}
+
+impl Drop for LiftGuard<'_> {
+    fn drop(&mut self) {
+        let mut lifted = self
+            .state
+            .lifted_limits
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        lifted.holders -= 1;
+        if lifted.holders == 0 {
+            for (src, max_bytes, max_time) in lifted.saved.drain(..) {
+                src.set_max_time(max_time);
+                src.set_max_bytes(max_bytes);
+            }
+        }
     }
 }
 
@@ -498,6 +609,7 @@ impl Drop for MediaPlayerState {
                     "Media Player {}: Stopping internal pipeline on drop",
                     self.block_id
                 );
+                let _lifted = self.lift_waiting_limits();
                 let _ = pipeline.set_state(gst::State::Null);
             }
         }

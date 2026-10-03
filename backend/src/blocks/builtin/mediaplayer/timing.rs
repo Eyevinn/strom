@@ -78,6 +78,15 @@ impl Timing {
         Some(self.sync_offset.load(Ordering::Acquire)).filter(|&v| v != UNSET)
     }
 
+    /// What a running time is moved by on its way into the main pipeline:
+    /// the clocksync offset for paced buffers, else the one taken from the
+    /// first unpaced buffer. `None` until a buffer has set one since the last
+    /// reset.
+    pub fn stream_offset(&self) -> Option<i64> {
+        self.sync_offset()
+            .or_else(|| Some(self.map_offset.load(Ordering::Acquire)).filter(|&v| v != UNSET))
+    }
+
     /// Start over from the next buffer: a new file, a seek, a resume.
     /// `internal` gets its clocksyncs ready to take the new baseline.
     pub fn reset(

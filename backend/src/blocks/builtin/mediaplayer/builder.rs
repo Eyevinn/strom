@@ -105,22 +105,38 @@ impl BlockBuilder for MediaPlayerBuilder {
                 _ => None,
             }));
 
-        let sync = properties
-            .get("sync")
-            .and_then(|v| match v {
-                PropertyValue::Bool(b) => Some(*b),
-                _ => None,
-            })
-            .unwrap_or(true);
+        // A stinger clip source plays unpaced, with no playout delay. Its
+        // first frame is already decoded and a take must put the clip on air
+        // at once: a delay makes the take wait that long, and the parked first
+        // frame blinks out before the rest arrives. Paced, each frame reaches
+        // the mixer exactly when it is due, so the frame carrying the cut
+        // point is often not there when the mixer composites it. Unpaced, the
+        // clip runs ahead and waits in the queues on its way to the mixer.
+        let stinger_source = matches!(
+            properties.get(crate::gst::stinger::STINGER_SOURCE_PROPERTY),
+            Some(PropertyValue::Bool(true))
+        );
+        let sync = !stinger_source
+            && properties
+                .get("sync")
+                .and_then(|v| match v {
+                    PropertyValue::Bool(b) => Some(*b),
+                    _ => None,
+                })
+                .unwrap_or(true);
 
-        let playout_delay_ms = properties
-            .get("playout_delay_ms")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u),
-                PropertyValue::Int(i) => u64::try_from(*i).ok(),
-                _ => None,
-            })
-            .unwrap_or(timing::DEFAULT_PLAYOUT_DELAY_MS);
+        let playout_delay_ms = if stinger_source {
+            0
+        } else {
+            properties
+                .get("playout_delay_ms")
+                .and_then(|v| match v {
+                    PropertyValue::UInt(u) => Some(*u),
+                    PropertyValue::Int(i) => u64::try_from(*i).ok(),
+                    _ => None,
+                })
+                .unwrap_or(timing::DEFAULT_PLAYOUT_DELAY_MS)
+        };
 
         let position_update_interval_ms = properties
             .get("position_update_interval")
@@ -189,6 +205,7 @@ impl BlockBuilder for MediaPlayerBuilder {
             decoder,
             sync,
             playout_delay_ms,
+            stinger_source,
             position_update_interval_ms,
             initial_playlist,
             media_path,
@@ -212,6 +229,7 @@ fn build_media_player(
     decoder: bridge::Decoder,
     sync: bool,
     playout_delay_ms: u64,
+    stinger_source: bool,
     position_update_interval_ms: u64,
     initial_playlist: Vec<String>,
     media_path: std::path::PathBuf,
@@ -234,6 +252,12 @@ fn build_media_player(
             let appsrc_id = format!("{}:appsrc_{}{}", instance_id, kind, sfx);
             let queue_id = format!("{}:queue_{}{}", instance_id, kind, sfx);
             let out_id = format!("{}:{}_out{}", instance_id, kind, sfx);
+            // A stinger clip runs ahead of the mixer, so a full video queue is
+            // normal there: the clip waits rather than losing frames. Only video:
+            // a take needs it wired to the mixer, which always consumes, while an
+            // audio output may be left unlinked and would then block the player
+            // for good. Everything else drops new data once nothing consumes it.
+            let wait_when_full = stinger_source && kind == "video";
 
             let appsrc = gst_app::AppSrc::builder()
                 .name(&appsrc_id)
@@ -242,7 +266,12 @@ fn build_media_player(
                 .automatic_eos(false)
                 .max_bytes(max_bytes)
                 .max_time(APPSRC_MAX_TIME)
-                .leaky_type(gst_app::AppLeakyType::Upstream)
+                .leaky_type(if wait_when_full {
+                    gst_app::AppLeakyType::None
+                } else {
+                    gst_app::AppLeakyType::Upstream
+                })
+                .block(wait_when_full)
                 .build();
             let queue = gst::ElementFactory::make("queue")
                 .name(&queue_id)
@@ -288,6 +317,9 @@ fn build_media_player(
         }),
         is_paused: AtomicBool::new(false),
         loop_playlist: AtomicBool::new(loop_playlist),
+        // Armed only once a stinger trigger parks it; a player is not on
+        // frame 0 merely because it was built.
+        stinger_armed: AtomicBool::new(false),
         block_id: block_id.to_string(),
         flow_id,
         switching_file: AtomicBool::new(false),
@@ -299,6 +331,7 @@ fn build_media_player(
         timing: Arc::new(Timing::new(playout_delay_ms)),
         main_pipeline: gst::glib::WeakRef::new(),
         bus_watch: std::sync::Mutex::new(None),
+        lifted_limits: Default::default(),
     });
 
     // --- Resolve initial URI ---

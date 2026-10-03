@@ -113,6 +113,7 @@ mod tests {
             }),
             is_paused: AtomicBool::new(false),
             loop_playlist: AtomicBool::new(true),
+            stinger_armed: AtomicBool::new(false),
             block_id: block_id.to_string(),
             flow_id,
             switching_file: AtomicBool::new(false),
@@ -124,6 +125,7 @@ mod tests {
             timing: Arc::new(super::timing::Timing::new(0)),
             main_pipeline: gst::glib::WeakRef::new(),
             bus_watch: std::sync::Mutex::new(None),
+            lifted_limits: Default::default(),
         }
     }
 
@@ -250,5 +252,25 @@ mod tests {
 
         state.is_paused.store(true, Ordering::SeqCst);
         assert_eq!(state.state(), PlayerState::Paused);
+    }
+
+    /// Stinger use is opt-in: a player wired to a keyed input for a looping
+    /// graphic must not be parked or unlooped.
+    #[test]
+    fn stinger_source_defaults_off() {
+        let def = definition::media_player_definition();
+        let stinger = def
+            .exposed_properties
+            .iter()
+            .find(|p| p.name == "stinger_source")
+            .expect("stinger_source property");
+        assert!(matches!(
+            stinger.property_type,
+            strom_types::block::PropertyType::Bool
+        ));
+        assert!(matches!(
+            stinger.default_value,
+            Some(strom_types::PropertyValue::Bool(false))
+        ));
     }
 }
