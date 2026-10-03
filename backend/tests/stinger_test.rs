@@ -846,13 +846,12 @@ async fn a_clip_longer_than_the_output_queue_plays_whole() {
     )
     .await;
 
-    // Count each clip frame once, as the newest timestamp the keyed pad has
-    // seen moves forward. The first and newest timestamps say, on a failure,
-    // whether the missing frames are at the ends or in between.
-    let first = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let newest = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let arrived = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    {
+    // Count each clip frame once, at the media player's output and at the
+    // keyed pad, as the newest timestamp each has seen moves forward. On a
+    // failure, the two counts and the frame range each saw say whether a
+    // missing frame was never sent, was lost on the way, or passed the
+    // keyed pad before the take.
+    let (sent, reached) = {
         let pipelines = running.state.pipelines_read().await;
         let mixer = pipelines
             .get(&running.flow_id)
@@ -864,19 +863,13 @@ async fn a_clip_longer_than_the_output_queue_plays_whole() {
             .into_iter()
             .find(|p| p.name() == "sink_2")
             .expect("keyed input pad");
-        let (first, newest, arrived) = (first.clone(), newest.clone(), arrived.clone());
-        pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
-            if let Some(pts) = info.buffer().and_then(|b| b.pts()) {
-                let pts = pts.nseconds() + 1;
-                let _ = first.compare_exchange(0, pts, Ordering::Relaxed, Ordering::Relaxed);
-                if newest.fetch_max(pts, Ordering::Relaxed) < pts {
-                    arrived.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            gst::PadProbeReturn::Ok
-        });
-    }
+        let output = running.player().video_appsrcs[0]
+            .static_pad("src")
+            .expect("player video output pad");
+        (FrameCount::on(&output), FrameCount::on(&pad))
+    };
 
+    let before_take = reached.arrived();
     let mut rx = running.state.events().subscribe();
     running
         .state
@@ -901,24 +894,71 @@ async fn a_clip_longer_than_the_output_queue_plays_whole() {
     .await
     .expect("the stinger must complete");
 
-    let (first, newest) = (
-        first.load(Ordering::Relaxed),
-        newest.load(Ordering::Relaxed),
-    );
-    let spanned = (newest.saturating_sub(first) + FRAME_DUR_NS / 2) / FRAME_DUR_NS + 1;
-    let at_completion = arrived.load(Ordering::Relaxed);
+    let at_completion = reached.arrived();
     // A frame that reaches the mixer only after the take completed was late,
     // not lost; say which, on a failure.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let origin = sent.first();
     assert_eq!(
         at_completion,
         LONG_FRAMES,
-        "every clip frame must reach the mixer; the frames that arrived span {spanned} \
-         frame times (a missing first or last frame shortens the span), {} had arrived \
-         500 ms later, and the take reported {reported:?}",
-        arrived.load(Ordering::Relaxed)
+        "every clip frame must reach the mixer; the player sent {} (frames {:?}), the \
+         keyed pad saw {} (frames {:?}, {before_take} of them before the take, {} by \
+         500 ms after it completed), and the take reported {reported:?}",
+        sent.arrived(),
+        sent.frames_from(origin),
+        at_completion,
+        reached.frames_from(origin),
+        reached.arrived(),
     );
     let _ = std::fs::remove_file(&clip);
+}
+
+/// Clip frames seen on a pad, counted once each as the newest timestamp moves
+/// forward.
+#[derive(Default)]
+struct FrameCount {
+    /// PTS + 1 of the first frame and of the newest; 0 is none yet.
+    first: std::sync::atomic::AtomicU64,
+    newest: std::sync::atomic::AtomicU64,
+    arrived: std::sync::atomic::AtomicUsize,
+}
+
+impl FrameCount {
+    fn on(pad: &gst::Pad) -> std::sync::Arc<Self> {
+        let count = std::sync::Arc::new(Self::default());
+        let seen = count.clone();
+        pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            if let Some(pts) = info.buffer().and_then(|b| b.pts()) {
+                let pts = pts.nseconds() + 1;
+                let _ = seen
+                    .first
+                    .compare_exchange(0, pts, Ordering::Relaxed, Ordering::Relaxed);
+                if seen.newest.fetch_max(pts, Ordering::Relaxed) < pts {
+                    seen.arrived.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+        count
+    }
+
+    fn arrived(&self) -> usize {
+        self.arrived.load(Ordering::Relaxed)
+    }
+
+    fn first(&self) -> u64 {
+        self.first.load(Ordering::Relaxed)
+    }
+
+    /// The first and newest frame seen, in frame times after `origin`.
+    fn frames_from(&self, origin: u64) -> (i64, i64) {
+        let at = |pts: u64| {
+            let offset = pts as i64 - origin as i64;
+            (offset + offset.signum() * FRAME_DUR_NS as i64 / 2) / FRAME_DUR_NS as i64
+        };
+        (at(self.first()), at(self.newest.load(Ordering::Relaxed)))
+    }
 }
 
 /// Run `f` on a thread of its own and give up after `secs`. A hang is what
