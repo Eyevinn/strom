@@ -136,6 +136,32 @@ impl MediaPlayerState {
         }
     }
 
+    /// Lift the limits of every video appsrc that waits for room, until the
+    /// returned guard drops.
+    ///
+    /// A stinger clip's video appsrc waits instead of dropping (see
+    /// `build_media_player`), which parks the internal pipeline's streaming
+    /// thread in `push_sample` for as long as the flow takes nothing from it.
+    /// Pausing, seeking, switching file and stopping all wait for that
+    /// thread, so without this they never return while the clip's consumer
+    /// is stalled or its output is wired to nothing.
+    fn lift_waiting_limits(&self) -> LiftedLimits<'_> {
+        let restore = self
+            .video_appsrcs
+            .iter()
+            .filter(|src| src.property::<bool>("block"))
+            .map(|src| {
+                let limits = (src, src.max_bytes(), src.max_time());
+                // Zero is no limit. max-time first: changing max-bytes is
+                // what wakes a push waiting for room.
+                src.set_max_time(gst::ClockTime::ZERO);
+                src.set_max_bytes(0);
+                limits
+            })
+            .collect();
+        LiftedLimits { restore }
+    }
+
     /// Get the current file URI, if any.
     pub fn current_file(&self) -> Option<String> {
         let pl = self.playlist.read().ok()?;
@@ -265,6 +291,7 @@ impl MediaPlayerState {
         let pipeline = pipeline_guard
             .as_ref()
             .ok_or("Internal pipeline not created")?;
+        let _lifted = self.lift_waiting_limits();
 
         // Set internal pipeline to READY to flush the old stream
         pipeline.set_state(gst::State::Ready).map_err(|e| {
@@ -350,6 +377,7 @@ impl MediaPlayerState {
         let pipeline = pipeline_guard
             .as_ref()
             .ok_or("Internal pipeline not created")?;
+        let _lifted = self.lift_waiting_limits();
         pipeline.set_state(gst::State::Paused).map_err(|e| {
             error!("Failed to pause playback: {:?}", e);
             "Failed to pause playback".to_string()
@@ -408,6 +436,7 @@ impl MediaPlayerState {
             self.timing.reset(guard.as_ref(), &self.main_pipeline);
         }
 
+        let _lifted = self.lift_waiting_limits();
         let seek_result = source.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
             gst::ClockTime::from_nseconds(position_ns),
@@ -520,7 +549,22 @@ impl MediaPlayerState {
             "Media Player {}: Stopping internal pipeline on shutdown",
             self.block_id
         );
+        let _lifted = self.lift_waiting_limits();
         let _ = pipeline.set_state(gst::State::Null);
+    }
+}
+
+/// The limits [`MediaPlayerState::lift_waiting_limits`] lifted, put back on drop.
+struct LiftedLimits<'a> {
+    restore: Vec<(&'a gst_app::AppSrc, u64, gst::ClockTime)>,
+}
+
+impl Drop for LiftedLimits<'_> {
+    fn drop(&mut self) {
+        for (src, max_bytes, max_time) in &self.restore {
+            src.set_max_time(*max_time);
+            src.set_max_bytes(*max_bytes);
+        }
     }
 }
 
@@ -536,6 +580,7 @@ impl Drop for MediaPlayerState {
                     "Media Player {}: Stopping internal pipeline on drop",
                     self.block_id
                 );
+                let _lifted = self.lift_waiting_limits();
                 let _ = pipeline.set_state(gst::State::Null);
             }
         }

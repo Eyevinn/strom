@@ -909,6 +909,133 @@ async fn a_clip_longer_than_the_output_queue_plays_whole() {
     let _ = std::fs::remove_file(&clip);
 }
 
+/// Run `f` on a thread of its own and give up after `secs`. A hang is what
+/// the tests below look for, and a call hung on a runtime worker would keep
+/// the test binary from ever exiting.
+fn returns_within<T: Send + 'static>(
+    secs: u64,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(secs)).ok()
+}
+
+/// Run `test` on a runtime that is abandoned, not joined, when it ends: a
+/// stinger's take runs as a task of its own, and if it hangs, waiting for it
+/// would hide the failed assertion behind a test that never finishes.
+fn run_abandoning_hung_tasks(test: impl std::future::Future<Output = ()>) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(test)));
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// Whether the flow stops within 20 s.
+fn flow_stops(running: &Running) -> bool {
+    let (state, flow_id) = (running.state.clone(), running.flow_id);
+    let handle = tokio::runtime::Handle::current();
+    returns_within(20, move || {
+        handle.block_on(async move { state.stop_flow(&flow_id).await.is_ok() })
+    })
+    .unwrap_or(false)
+}
+
+/// A stinger clip's video waits for the mixer to take it. Once the mixer
+/// stops taking it mid-take, stopping the player and stopping the flow must
+/// still return.
+#[test]
+fn a_clip_the_mixer_stops_taking_can_still_be_stopped() {
+    run_abandoning_hung_tasks(async {
+        let clip = clip_path("stalled");
+        gst::init().expect("gstreamer init");
+        write_clip_frames(&clip, clip_frame, 240).expect("write long clip");
+        let running = start_with(
+            "stalled",
+            with_timing(
+                "stalled",
+                build_flow("stalled", &clip, true),
+                4_000,
+                "cut",
+                0,
+            ),
+        )
+        .await;
+        {
+            let pipelines = running.state.pipelines_read().await;
+            let mixer = pipelines
+                .get(&running.flow_id)
+                .and_then(|m| m.pipeline().by_name(&format!("{}:mixer", running.mixer)))
+                .expect("mixer element");
+            // Hold every buffer at the keyed input: a mixer that stopped pulling.
+            mixer
+                .sink_pads()
+                .into_iter()
+                .find(|p| p.name() == "sink_2")
+                .expect("keyed input pad")
+                .add_probe(
+                    gst::PadProbeType::BLOCK | gst::PadProbeType::BUFFER,
+                    |_, _| gst::PadProbeReturn::Ok,
+                );
+        }
+        running
+            .state
+            .trigger_stinger(
+                &running.flow_id,
+                &running.mixer,
+                0,
+                1,
+                Some(&running.source),
+            )
+            .await
+            .expect("stinger must start");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let player = running.player();
+        assert!(
+            matches!(returns_within(10, move || player.stop()), Some(Ok(()))),
+            "stopping the player must return while the mixer takes nothing"
+        );
+        assert!(
+            flow_stops(&running),
+            "stopping the flow must return while the mixer takes nothing"
+        );
+        let _ = std::fs::remove_file(&clip);
+    });
+}
+
+/// A declared clip whose video is wired to nothing, played from its own
+/// controls (a preview before wiring it), must still seek and stop.
+#[test]
+fn an_unwired_stinger_clip_can_still_be_stopped() {
+    run_abandoning_hung_tasks(async {
+        let clip = clip_path("unwired");
+        gst::init().expect("gstreamer init");
+        write_clip_frames(&clip, clip_frame, 240).expect("write long clip");
+        let mut flow = build_flow("unwired", &clip, true);
+        flow.links.clear();
+        let running = start_with("unwired", flow).await;
+
+        let player = running.player();
+        player.play().expect("play");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert!(
+            matches!(returns_within(10, move || player.seek(0)), Some(Ok(()))),
+            "seeking a clip nothing takes must return"
+        );
+        assert!(flow_stops(&running), "stopping the flow must return");
+        let _ = std::fs::remove_file(&clip);
+    });
+}
+
 /// The take never lands after the clip time the cut point names.
 ///
 /// The clip's coverage grows one thirtieth per frame, so on the first program
