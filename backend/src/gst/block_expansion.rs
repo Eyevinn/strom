@@ -3,7 +3,7 @@
 use crate::blocks::builtin;
 use crate::blocks::{
     BlockBuildContext, BusMessageConnectFn, DynamicWebrtcbinStore, ElementSetupFn, PreStopFn,
-    WhepEndpointInfo, WhipEndpointInfo,
+    StopDrainFn, WhepEndpointInfo, WhipEndpointInfo,
 };
 use crate::gst::SessionThreadConfig;
 use crate::whip_registry::WhipRegistry;
@@ -29,6 +29,8 @@ pub struct ExpandedPipeline {
     pub element_setups: Vec<ElementSetupFn>,
     /// Pre-stop hooks from blocks
     pub pre_stops: Vec<PreStopFn>,
+    /// Work blocks run on flow stop, before NULL
+    pub stop_drains: Vec<StopDrainFn>,
     /// Pad properties from blocks (element_id -> pad_name -> property_name -> value)
     pub pad_properties: HashMap<String, HashMap<String, HashMap<String, PropertyValue>>>,
     /// WHEP endpoints registered by blocks
@@ -183,6 +185,7 @@ pub async fn expand_blocks(
     }
 
     let pre_stops = ctx.take_pre_stops();
+    let stop_drains = ctx.take_stop_drains();
 
     // Collect WHEP endpoints from context
     let whep_endpoints = ctx.take_whep_endpoints();
@@ -232,6 +235,7 @@ pub async fn expand_blocks(
         bus_message_handlers,
         element_setups,
         pre_stops,
+        stop_drains,
         pad_properties: all_pad_properties,
         whep_endpoints,
         whip_endpoints,

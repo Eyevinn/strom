@@ -31,6 +31,9 @@
 //! a track so the others keep recording, and starts a new file with it once it carries
 //! data again.
 //!
+//! A flow stop sends EOS into every track before the pipeline goes to NULL, so the
+//! current file is finished rather than cut off (see `drain_recording`).
+//!
 //! Output files are written to: {media_path}/{output_dir}/{filename_prefix}_%05d.{ext}
 
 use super::refusal::{audio_refusal, refuse_input, video_refusal};
@@ -42,7 +45,7 @@ use gstreamer::prelude::*;
 use gstreamer_video as gst_video;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use strom_types::{
     block::{EnumValue, *},
@@ -1657,6 +1660,114 @@ impl StallCheck {
     }
 }
 
+/// A stop drain result for a recorder with nothing to finish.
+fn nothing_to_drain() -> mpsc::Receiver<()> {
+    let (done, finished) = mpsc::sync_channel(1);
+    let _ = done.try_send(());
+    finished
+}
+
+/// Whether every input of the muxer has carried EOS out of splitmuxsink's
+/// internal queues, i.e. the recording is ending rather than splitting.
+///
+/// When splitmuxsink closes a file at a split it sends EOS straight to the
+/// muxer's sink pads, past those queues, so their src pads stay un-EOS'd.
+fn muxer_inputs_ended(mux: &gst::Element) -> bool {
+    mux.sink_pads().iter().all(|pad| {
+        pad.peer()
+            .is_some_and(|queue_src| queue_src.pad_flags().contains(gst::PadFlags::EOS))
+    })
+}
+
+/// Finish the recording's current file on flow stop.
+///
+/// Going to NULL drops whatever has not reached the muxer, and the muxer never
+/// writes its final index: an mp4 is left with an `mdat` of size 0 and a moov
+/// from its last periodic update, seconds short. EOS on every track is what makes
+/// splitmuxsink end the file properly.
+///
+/// The EOS goes into the queue in front of each splitmuxsink pad, behind the
+/// buffers already waiting there, so nothing that reached the recorder is lost.
+/// A pad with no queue linked (a connected track that never carried data) takes
+/// it directly, which is what releases splitmuxsink's wait on that track. Each
+/// send gets its own thread: a serialized event waits for the pad's stream lock,
+/// and the thread holding it can be parked inside splitmuxsink until another
+/// track's EOS has gone in.
+///
+/// Done is EOS leaving the muxer once `muxer_inputs_ended`, so a split still in
+/// progress at stop does not read as the end.
+fn drain_recording(
+    instance_id: &str,
+    splitmuxsink: &gst::Element,
+    mux: &gst::Element,
+) -> mpsc::Receiver<()> {
+    // Still locked: no track ever carried data, so no file was opened.
+    if splitmuxsink.is_locked_state() {
+        return nothing_to_drain();
+    }
+    let Some(mux_src) = mux.static_pad("src") else {
+        return nothing_to_drain();
+    };
+
+    let (done, finished) = mpsc::sync_channel(1);
+    let probe_done = done.clone();
+    let mux_weak = mux.downgrade();
+    let probe_instance_id = instance_id.to_string();
+    mux_src.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+        let Some(gst::PadProbeData::Event(event)) = &info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if event.type_() != gst::EventType::Eos {
+            return gst::PadProbeReturn::Ok;
+        }
+        let Some(mux) = mux_weak.upgrade() else {
+            return gst::PadProbeReturn::Remove;
+        };
+        if !muxer_inputs_ended(&mux) {
+            return gst::PadProbeReturn::Ok;
+        }
+        info!("Recorder {}: file finished on stop", probe_instance_id);
+        let _ = probe_done.try_send(());
+        gst::PadProbeReturn::Remove
+    });
+
+    // The recording may already have ended on its own (finite sources); its EOS
+    // went past before the probe was there.
+    if mux_src.pad_flags().contains(gst::PadFlags::EOS) && muxer_inputs_ended(mux) {
+        let _ = done.try_send(());
+        return finished;
+    }
+
+    for muxer_pad in splitmuxsink.sink_pads() {
+        let target = muxer_pad
+            .peer()
+            .and_then(|queue_src| queue_src.parent_element())
+            .and_then(|queue| queue.static_pad("sink"))
+            .unwrap_or(muxer_pad);
+        let thread_instance_id = instance_id.to_string();
+        let spawned = std::thread::Builder::new()
+            .name("recorder-stop-eos".to_string())
+            .spawn(move || {
+                // Refused when the track already ended (the stall watchdog) or
+                // the pipeline is going down; neither needs anything from us.
+                if !target.send_event(gst::event::Eos::new()) {
+                    debug!(
+                        "Recorder {}: {} refused the stop EOS",
+                        thread_instance_id,
+                        target.name()
+                    );
+                }
+            });
+        if let Err(e) = spawned {
+            error!(
+                "Recorder {}: could not start a thread to end a track on stop: {}",
+                instance_id, e
+            );
+        }
+    }
+    finished
+}
+
 impl BlockBuilder for RecorderBuilder {
     fn get_external_pads(
         &self,
@@ -1951,6 +2062,18 @@ impl BlockBuilder for RecorderBuilder {
         if container == "mp4" && splitmuxsink.has_property("use-robust-muxing") {
             splitmuxsink.set_property("use-robust-muxing", true);
         }
+
+        let drain_splitmuxsink = splitmuxsink.downgrade();
+        let drain_mux = mux.downgrade();
+        let drain_instance_id = instance_id.to_string();
+        ctx.register_stop_drain(Box::new(move || {
+            match (drain_splitmuxsink.upgrade(), drain_mux.upgrade()) {
+                (Some(splitmuxsink), Some(mux)) => {
+                    drain_recording(&drain_instance_id, &splitmuxsink, &mux)
+                }
+                _ => nothing_to_drain(),
+            }
+        }));
 
         let mut elements: Vec<(String, gst::Element)> =
             vec![(sink_id.clone(), splitmuxsink.clone())];

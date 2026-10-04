@@ -187,6 +187,8 @@ pub struct PipelineManager {
     element_setup_fns: Vec<crate::blocks::ElementSetupFn>,
     /// Pre-stop hooks from blocks, run once before the pipeline goes to NULL
     pre_stop_fns: Vec<crate::blocks::PreStopFn>,
+    /// Work blocks run on stop before NULL (see `PipelineManager::stop`)
+    stop_drain_fns: Vec<crate::blocks::StopDrainFn>,
     /// Thread priority state tracker (tracks whether priority was successfully set)
     thread_priority_state: Option<ThreadPriorityState>,
     /// Thread registry for tracking streaming threads (optional, for CPU monitoring)
