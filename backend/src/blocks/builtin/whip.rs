@@ -21,7 +21,7 @@ use crate::gst::orphan_guard;
 use crate::gst::pipeline_bridge::{self, SessionBridge};
 use crate::gst::rtp_hdrext;
 use crate::whip_session_manager::{
-    ActivityStamp, SessionActivity, SessionCleanupRequest, SlotDecodebin, StallSide,
+    ActivityStamp, SessionActivity, SessionCleanupRequest, SlotDecodebin, SlotOutput, StallSide,
     WhipEndpointConfig, DECODE_GRACE,
 };
 use gstreamer as gst;
@@ -401,13 +401,14 @@ pub fn build_whipserversrc(
     let video_damage: Arc<Vec<VideoDamage>> =
         Arc::new((0..max_sessions).map(|_| VideoDamage::default()).collect());
 
-    // One stamp per slot, written by a probe on that slot's output tees below.
-    // This is where a session's media becomes usable to the flow, so this is
-    // where its liveness is measured; see `SessionActivity`. All slots share an
-    // epoch — the stamps are only ever compared against their own readings.
+    // One stamp per slot and medium, written by a probe on that slot's output
+    // tees below. This is where a session's media becomes usable to the flow,
+    // so this is where its liveness is measured; see `SessionActivity`. All
+    // share an epoch — the stamps are only ever compared against their own
+    // readings.
     let output_epoch = Instant::now();
-    let slot_output: Vec<Arc<ActivityStamp>> = (0..max_sessions)
-        .map(|_| Arc::new(ActivityStamp::new(output_epoch)))
+    let slot_output: Vec<Arc<SlotOutput>> = (0..max_sessions)
+        .map(|_| Arc::new(SlotOutput::new(output_epoch)))
         .collect();
 
     for (slot, output_stamp) in slot_output.iter().enumerate() {
@@ -537,7 +538,7 @@ pub fn build_whipserversrc(
                 ));
             }
 
-            stamp_slot_output(&audio_out_tee, output_stamp.clone(), slot, "audio");
+            stamp_slot_output(&audio_out_tee, output_stamp.audio.clone(), slot, "audio");
 
             slot_audio_appsrcs.push(appsrc.clone());
             elements.push((appsrc_id, appsrc.upcast()));
@@ -672,7 +673,7 @@ pub fn build_whipserversrc(
                 ));
             }
 
-            stamp_slot_output(&video_out_tee, output_stamp.clone(), slot, "video");
+            stamp_slot_output(&video_out_tee, output_stamp.video.clone(), slot, "video");
 
             slot_video_appsrcs.push(appsrc.clone());
             elements.push((appsrc_id, appsrc.upcast()));
@@ -1240,7 +1241,7 @@ pub fn create_whipserversrc_for_session(
                 "WHIP Input: no output stamp for slot {}, its liveness cannot be tracked",
                 slot
             );
-            Arc::new(ActivityStamp::new(Instant::now()))
+            Arc::new(SlotOutput::new(Instant::now()))
         }
     };
     let activity = Arc::new(SessionActivity::new(Instant::now(), slot_output));
@@ -2496,7 +2497,7 @@ mod tests {
             0,
             Arc::new(SessionActivity::new(
                 Instant::now(),
-                Arc::new(ActivityStamp::new(Instant::now())),
+                Arc::new(SlotOutput::new(Instant::now())),
             )),
             Arc::new(AtomicBool::new(false)),
         );
@@ -2622,7 +2623,10 @@ mod tests {
         // only the inactivity timeout is under test. Both stamps froze together.
         let stalled =
             || ActivityStamp::backdated(std::time::Duration::from_secs(60), idle_at_start);
-        let activity = Arc::new(SessionActivity::from_stamps(stalled(), Arc::new(stalled())));
+        let activity = Arc::new(SessionActivity::from_stamps(
+            stalled(),
+            Arc::new(SlotOutput::with_audio(stalled())),
+        ));
 
         let started = Instant::now();
         let (idle_ms, side) = wait_for_inactivity(&stop, &activity, timeout)
@@ -2662,7 +2666,7 @@ mod tests {
         // and only the stop flag can end the wait.
         let activity = Arc::new(SessionActivity::new(
             Instant::now(),
-            Arc::new(ActivityStamp::new(Instant::now())),
+            Arc::new(SlotOutput::new(Instant::now())),
         ));
 
         let setter = stop.clone();
@@ -2698,7 +2702,7 @@ mod tests {
                 std::time::Duration::from_secs(60),
                 std::time::Duration::ZERO,
             ),
-            Arc::new(ActivityStamp::new(Instant::now())),
+            Arc::new(SlotOutput::new(Instant::now())),
         ));
 
         let publisher_stop = Arc::new(AtomicBool::new(false));
@@ -2807,7 +2811,7 @@ mod tests {
 
         let configs = ctx.take_whip_endpoint_configs();
         let config = &configs[0].1;
-        let stamp = config.slot_output[0].clone();
+        let stamp = config.slot_output[0].video.clone();
         let appsrc = config.slot_video_appsrcs[0].clone();
         assert_eq!(
             stamp.last(),
@@ -2902,6 +2906,68 @@ mod tests {
         // waits for the callback to return.
         release.store(true, Ordering::Relaxed);
         tee_src.remove_probe(block);
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline to NULL");
+    }
+
+    /// Each medium is judged on its own stamp, so each tee has to write its
+    /// own: audio wired to the video stamp would leave the audio stamp still
+    /// and reap every audio-bearing seat once its grace ran out.
+    #[test]
+    fn audio_out_of_the_slot_stamps_the_audio_stamp_only() {
+        let _ = gst::init();
+
+        let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+        let result = build_whipserversrc(
+            "whip-audio-stamp-test",
+            &props(&[
+                ("mode", PropertyValue::String("audio_video".to_string())),
+                ("decode", PropertyValue::Bool(true)),
+                ("max_sessions", PropertyValue::Int(1)),
+            ]),
+            &ctx,
+        )
+        .expect("build_whipserversrc failed");
+
+        let configs = ctx.take_whip_endpoint_configs();
+        let config = &configs[0].1;
+        let output = config.slot_output[0].clone();
+        let appsrc = config.slot_audio_appsrcs[0].clone();
+        let pipeline = assemble(&result);
+        assert_eq!(config.allocate_slot("test-session"), Some(0));
+
+        appsrc.set_caps(Some(
+            &gst::Caps::builder("audio/x-raw")
+                .field("format", "S16LE")
+                .field("layout", "interleaved")
+                .field("rate", 48000i32)
+                .field("channels", 2i32)
+                .build(),
+        ));
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline to PLAYING");
+
+        // 20 ms of stereo S16 at 48 kHz per buffer.
+        for index in 0..25u64 {
+            let mut buffer = gst::Buffer::with_size(960 * 4).expect("allocate audio");
+            {
+                let buffer = buffer.get_mut().unwrap();
+                buffer.set_pts(gst::ClockTime::from_mseconds(index * 20));
+                buffer.set_duration(gst::ClockTime::from_mseconds(20));
+            }
+            appsrc.push_buffer(buffer).expect("push audio");
+        }
+        wait_for("audio to stamp the slot's audio stamp", || {
+            output.audio.last() != 0
+        });
+        assert_eq!(
+            output.video.last(),
+            0,
+            "audio coming out of the slot must not stamp its video"
+        );
+
         pipeline
             .set_state(gst::State::Null)
             .expect("pipeline to NULL");
