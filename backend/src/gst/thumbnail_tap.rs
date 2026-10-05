@@ -19,9 +19,9 @@
 //! ```
 //!
 //! The tap is a consumer of whatever the tee carries: which path it builds is
-//! decided by [`video_adapt::decide`] from the tee's negotiated caps. Memory it
-//! cannot read is refused before anything is attached, so the main chain never
-//! sees a branch that fails to negotiate.
+//! decided by [`video_adapt::decide`] from the tee's negotiated caps. What it
+//! cannot read (GPU memory nothing here downloads, anything but raw video) is
+//! refused before anything is attached to the tee.
 //!
 //! Frame rate is limited via a pad probe on the queue src pad that drops
 //! buffers arriving sooner than `update_interval`. This is invisible to
@@ -218,9 +218,10 @@ impl ThumbnailTap {
         };
 
         // What the tee carries decides the branch: GL memory is scaled on the
-        // GPU before its download, CUDA memory is downloaded first, and memory
-        // the CPU cannot read is refused here, before a branch that would fail
-        // to negotiate can push not-negotiated back through the tee.
+        // GPU before its download, CUDA memory is downloaded first, and what
+        // the CPU cannot read is refused here, before anything is attached.
+        // A branch that cannot take the tee's caps would only have its link
+        // refused.
         let adapters = match video_adapt::decide(
             &tee_caps,
             Consumer::SystemMemory,
@@ -335,7 +336,10 @@ impl ThumbnailTap {
 
         // Set up appsink callback — pad probe on queue src limits fps,
         // so every frame that arrives here should be encoded.
-        let callback_state = Arc::clone(&self.state);
+        // Weak: the appsink is one of the branch elements the state holds, so
+        // a strong handle here would keep the branch alive after the pipeline
+        // is gone, if it was never detached.
+        let callback_state = Arc::downgrade(&self.state);
         let jpeg_quality = self.config.jpeg_quality;
         let thumb_width = self.config.width;
         let thumb_height = self.config.height;
@@ -377,6 +381,9 @@ impl ThumbnailTap {
                     match encode_rgba_frame_as_jpeg(&frame, thumb_width, thumb_height, jpeg_quality)
                     {
                         Ok(jpeg) => {
+                            let Some(callback_state) = callback_state.upgrade() else {
+                                return Err(gst::FlowError::Flushing);
+                            };
                             let mut state = callback_state.lock().unwrap();
                             state.cached_jpeg = Some((jpeg, Instant::now()));
                         }

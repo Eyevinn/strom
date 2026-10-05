@@ -1,14 +1,15 @@
-//! Regression test: a thumbnail on a tee that carries CUDA memory must not
-//! break the stream through that tee.
+//! Regression test: a thumbnail on a tee that carries CUDA memory must
+//! actually produce a thumbnail.
 //!
 //! The thumbnail tap used to pick its branch from a caps-string check for GL
 //! memory and send everything else to `videoconvertscale`. A tee carrying
 //! `video/x-raw(memory:CUDAMemory)` (a Media Player decoding with nvh264dec,
-//! an SRT input into a GPU Vision Mixer) then got a CPU branch that refuses
-//! those caps; its not-negotiated came back through the tee and stopped the
-//! main chain. The tap now asks `video_adapt::decide` and puts `cudadownload`
-//! in front of the CPU branch, and refuses memory it cannot read without
-//! attaching anything.
+//! an SRT input into a GPU Vision Mixer) then got a CPU branch whose link to
+//! the tee was refused ("Pads do not have common format"). The rollback left
+//! the tee's request pad behind, so every later attempt failed too: such a tee
+//! never got a thumbnail. The main chain kept flowing. The tap now asks
+//! `video_adapt::decide` and puts `cudadownload` in front of the CPU branch,
+//! and refuses what it cannot read without attaching anything.
 //!
 //! These tests drive the real `ThumbnailTap` on a running pipeline. Real CUDA
 //! memory needs an NVIDIA host, so a stand-in registered as `cudadownload`
@@ -331,8 +332,8 @@ fn tap_config() -> ThumbnailTapConfig {
 
 /// The defect: CUDA memory on the tee. With the fix, the branch starts with
 /// `cudadownload`, a thumbnail arrives, and the main chain keeps flowing;
-/// without it, `videoconvertscale` refused CUDA caps and the not-negotiated
-/// came back through the tee.
+/// without it, the tee refused the link to a `videoconvertscale` branch and
+/// no thumbnail ever arrived.
 #[test]
 fn thumbnail_on_a_cuda_memory_tee_downloads_first_and_keeps_the_stream_flowing() {
     gst::init().unwrap();
@@ -433,5 +434,49 @@ fn thumbnail_on_an_unreadable_memory_tee_is_refused_without_attaching() {
     assert!(
         harness.main_keeps_flowing(Duration::from_millis(300)),
         "the main chain stopped"
+    );
+}
+
+/// A branch still attached when its pipeline goes away is freed with it. The
+/// appsink callback used to hold the tap state strongly, and the state holds
+/// the appsink: a cycle that kept the whole branch (and, on CUDA memory, the
+/// `cudadownload` with its CUDA context) alive after every flow restart.
+#[test]
+fn an_attached_branch_is_freed_with_its_pipeline() {
+    gst::init().unwrap();
+    common::require_elements(ELEMENTS);
+
+    let harness = Harness::start(
+        "video/x-raw,format=NV12,width=320,height=240,framerate=25/1,\
+         pixel-aspect-ratio=1/1,interlace-mode=progressive",
+    );
+    harness.wait_until_flowing();
+
+    let tap = ThumbnailTap::new_with_tee(
+        &harness.pipeline,
+        "blk:thumb_0",
+        harness.tee.clone(),
+        tap_config(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while tap.get_thumbnail().is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "no thumbnail arrived from the system-memory tee"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let appsink = harness
+        .pipeline
+        .by_name("blk:thumb_0_thumb_sink")
+        .expect("the thumbnail branch has an appsink")
+        .downgrade();
+
+    drop(harness);
+    drop(tap);
+
+    assert!(
+        appsink.upgrade().is_none(),
+        "the thumbnail branch outlived its pipeline"
     );
 }
