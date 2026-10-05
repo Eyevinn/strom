@@ -21,8 +21,8 @@ use crate::gst::orphan_guard;
 use crate::gst::pipeline_bridge::{self, SessionBridge};
 use crate::gst::rtp_hdrext;
 use crate::whip_session_manager::{
-    ActivityStamp, SessionActivity, SessionCleanupRequest, SlotDecodebin, SlotOutput, StallSide,
-    WhipEndpointConfig, WhipSessionManager, DECODE_GRACE,
+    ActivityStamp, SessionActivity, SessionCleanupRequest, SlotDecodebin, SlotInputs, SlotOutput,
+    StallSide, WhipEndpointConfig, WhipSessionManager, DECODE_GRACE,
 };
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -721,6 +721,7 @@ pub fn build_whipserversrc(
             slot_video_appsrcs,
             slot_decodebins,
             slot_output,
+            slot_input_work: (0..max_sessions).map(|_| SlotInputs::default()).collect(),
             slot_assignments,
         },
     );
