@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use strom_types::block::StreamMode;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// One of a slot's `decodebin` elements, in the main pipeline.
 #[derive(Clone)]
@@ -26,7 +26,9 @@ pub struct SlotDecodebin {
     /// Weak: the pipeline owns the element.
     pub element: gst::glib::WeakRef<gst::Element>,
     /// Give each new session on the slot a fresh decode chain instead of the
-    /// one the previous session left behind. See `restart_decodebin`.
+    /// one the previous session left behind. See `restart_decodebin`. Only
+    /// the video decoder sets it, and it is restarted through the video
+    /// input's `SlotInputWork`.
     pub restart_on_reuse: bool,
 }
 
@@ -106,10 +108,24 @@ const INPUT_RESTART: u8 = 2;
 /// Changes to one of a slot's inputs — its appsrc and the `decodebin` it
 /// feeds — that must wait until no buffer is in flight on the appsrc's src pad.
 ///
-/// They are queued here and run from a single IDLE probe on that pad, so a
-/// release's flush and a claim's decoder restart never run concurrently and
-/// always run in the order they were asked for. `pending` holds the work,
-/// `armed` says a probe is installed that will pick it up.
+/// They are queued here and run behind a single IDLE probe on that pad, so a
+/// release's flush and a claim's decoder restart never run concurrently. Work
+/// that piles up while the pad stays busy (a stalled chain) runs together, the
+/// flush first: a flush still pending when the next session claims the slot
+/// drops what that session queued behind the previous one's backlog too, and
+/// its decoder then waits for a keyframe it asks for. `pending` holds the
+/// work, `armed` says a probe is installed that will pick it up.
+///
+/// The probe only blocks the pad. The work itself runs on a thread of its
+/// own, for two reasons:
+/// - The probe can fire on the appsrc's streaming thread right after an event
+///   push that `basesrc` makes holding its live lock, and the flush-start takes
+///   that lock: flushing there would deadlock the slot's streaming thread.
+/// - Fired from `add_probe` on an idle pad, it runs on the caller, which is a
+///   tokio worker holding the endpoint's slot lock.
+///
+/// If the pad never goes idle (a chain stalled downstream, #906), the work
+/// waits, as before, and nothing else does.
 #[derive(Default)]
 pub struct SlotInputWork {
     pending: AtomicU8,
@@ -147,31 +163,61 @@ impl SlotInputWork {
         // probe would keep it alive forever.
         let appsrc_weak = appsrc.downgrade();
         let work = self.clone();
-        src.add_probe(gst::PadProbeType::IDLE, move |src, _| {
-            let appsrc = appsrc_weak.upgrade();
-            loop {
-                let ops = work.pending.swap(0, Ordering::SeqCst);
-                if ops & INPUT_FLUSH != 0 {
-                    if let Some(appsrc) = &appsrc {
-                        flush_slot_appsrc(appsrc, src, slot);
-                    }
-                }
-                if ops & INPUT_RESTART != 0 {
-                    for decodebin in restart.iter().filter_map(|d| d.upgrade()) {
-                        restart_decodebin(&decodebin, src, slot);
-                    }
-                }
+        src.add_probe(gst::PadProbeType::IDLE, move |src, info| {
+            let Some(id) = info.id.take() else {
                 work.armed.store(false, Ordering::SeqCst);
-                // Work queued while this ran, by a caller that saw the probe
-                // armed, is still ours unless a new probe has been armed for it.
-                if work.pending.load(Ordering::SeqCst) == 0
-                    || work.armed.swap(true, Ordering::SeqCst)
-                {
-                    break;
+                return gst::PadProbeReturn::Remove;
+            };
+            // Returning Ok keeps the probe, so the pad stays blocked until the
+            // worker has done the work and removes it.
+            let src = src.clone();
+            let appsrc_weak = appsrc_weak.clone();
+            let work = work.clone();
+            let restart = restart.clone();
+            let spawned = std::thread::Builder::new()
+                .name(format!("whip-slot{}-input", slot))
+                .spawn(move || {
+                    work.run(appsrc_weak.upgrade().as_ref(), &src, &restart, slot);
+                    src.remove_probe(id);
+                });
+            if let Err(e) = spawned {
+                error!(
+                    "WhipEndpointConfig: Cannot start the input worker for slot {}, its input stays blocked: {}",
+                    slot, e
+                );
+            }
+            gst::PadProbeReturn::Ok
+        });
+    }
+
+    /// Run the queued work, and any queued while it ran, with the input's pad
+    /// blocked by the probe `schedule` installed.
+    fn run(
+        &self,
+        appsrc: Option<&gst_app::AppSrc>,
+        src: &gst::Pad,
+        restart: &[gst::glib::WeakRef<gst::Element>],
+        slot: usize,
+    ) {
+        loop {
+            let ops = self.pending.swap(0, Ordering::SeqCst);
+            if ops & INPUT_FLUSH != 0 {
+                if let Some(appsrc) = appsrc {
+                    flush_slot_appsrc(appsrc, src, slot);
                 }
             }
-            gst::PadProbeReturn::Remove
-        });
+            if ops & INPUT_RESTART != 0 {
+                for decodebin in restart.iter().filter_map(|d| d.upgrade()) {
+                    restart_decodebin(&decodebin, src, slot);
+                }
+            }
+            self.armed.store(false, Ordering::SeqCst);
+            // Work queued while this ran, by a caller that saw the probe
+            // armed, is still ours unless a new probe has been armed for it.
+            if self.pending.load(Ordering::SeqCst) == 0 || self.armed.swap(true, Ordering::SeqCst) {
+                break;
+            }
+        }
     }
 }
 
@@ -182,9 +228,10 @@ impl SlotInputWork {
 /// slot: through the decoder restarted for that session, as its first output,
 /// with the previous session's timestamps.
 ///
-/// Runs from the input's IDLE probe, so no buffer is in flight. A flush-start
-/// first: it wakes the appsrc's streaming thread, which holds the stream lock
-/// while it waits for data and would block the flush-stop. The flush events
+/// Runs behind the input's IDLE probe, so no buffer is in flight, on a thread
+/// of its own; see `SlotInputWork`. A flush-start first: it wakes the appsrc's
+/// streaming thread, which holds the stream lock while it waits for data or
+/// sits at the blocked pad, and would block the flush-stop. The flush events
 /// stop at the appsrc's own pad: past it, they would flush the slot's decoder
 /// and every consumer of the flow downstream of the slot's tee.
 ///
@@ -218,7 +265,7 @@ fn flush_slot_appsrc(appsrc: &gst_app::AppSrc, src: &gst::Pad, slot: usize) {
 /// reorder queue, and its configuration from the first session's caps. On
 /// macOS, VideoToolbox decodes a later Safari session slowly or not at all.
 ///
-/// Runs from the input's IDLE probe on `src`, so no buffer is in flight. NULL
+/// Runs behind the input's IDLE probe on `src`, so no buffer is in flight. NULL
 /// drops the plugged elements and the source pad; the pad-added handler links
 /// the new one. The relink re-sends the sticky events (stream-start, caps,
 /// segment) that the sink pad lost in NULL.
@@ -313,9 +360,8 @@ impl WhipEndpointConfig {
             decodebin.set_locked_state(false);
             // NULL means no session has used the slot since the flow started.
             if slot_decodebin.restart_on_reuse && decodebin.current_state() != gst::State::Null {
-                if let Some(medium) = self.input_feeding(slot, &decodebin) {
-                    self.schedule_input_work(slot, medium, INPUT_RESTART);
-                }
+                // Only the video decoder is restarted; see `SlotDecodebin`.
+                self.schedule_input_work(slot, SlotMedium::Video, INPUT_RESTART);
                 continue;
             }
             if let Err(e) = decodebin.sync_state_with_parent() {
@@ -398,24 +444,6 @@ impl WhipEndpointConfig {
             .map(|d| d.element.clone())
             .collect();
         work.schedule(appsrc, restart, slot, ops);
-    }
-
-    /// Which of the slot's inputs feeds `decodebin`, if either does.
-    fn input_feeding(&self, slot: usize, decodebin: &gst::Element) -> Option<SlotMedium> {
-        let upstream = decodebin.static_pad("sink")?.peer()?;
-        let feeds = |appsrcs: &[gst_app::AppSrc]| {
-            appsrcs
-                .get(slot)
-                .and_then(|appsrc| appsrc.static_pad("src"))
-                .is_some_and(|src| src == upstream)
-        };
-        if feeds(&self.slot_video_appsrcs) {
-            Some(SlotMedium::Video)
-        } else if feeds(&self.slot_audio_appsrcs) {
-            Some(SlotMedium::Audio)
-        } else {
-            None
-        }
     }
 
     /// Move a slot from the temporary id it was claimed under to the session's
@@ -870,8 +898,10 @@ impl SessionActivity {
     /// the displaced session's frames already inside the slot's chain still
     /// cross the tee after `new` reset the stamps, and those must not start the
     /// clock on a newcomer whose own decoder has not produced anything yet.
-    /// What the predecessor left queued in the slot's appsrc never gets that
-    /// far: releasing the slot flushes it.
+    /// What the predecessor left queued in the slot's appsrc does not get that
+    /// far: releasing the slot flushes it. A sample its bridge was already
+    /// pushing when the slot was released can still land after the flush;
+    /// the grace covers that.
     ///
     /// Otherwise it is the stalest of:
     /// - `ingress` against the slot's output as a whole: a session is usable
