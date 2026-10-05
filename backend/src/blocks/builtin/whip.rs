@@ -2594,36 +2594,27 @@ mod tests {
         );
     }
 
-    /// A dead session must be detected one poll interval after the inactivity
-    /// threshold, not one whole extra timeout later.
+    /// A dead session must be detected on the first poll after it crosses the
+    /// inactivity threshold, not at the next whole-timeout boundary.
     ///
-    /// The session's only buffer lands 150 ms in, so the threshold is crossed at
-    /// ~1150 ms — just *after* a once-per-timeout check at 1000 ms would have run,
-    /// and far enough past it that scheduler slop cannot blur the two. Evaluating once
-    /// per `timeout` instead of once per poll fails this test: it detects at ~2000 ms,
-    /// where polling detects at ~1250 ms.
+    /// The session starts with its last buffer `timeout - 50 ms` ago, so it crosses
+    /// the threshold 50 ms into the wait. Polling sees that on its first tick, one
+    /// `WATCHDOG_POLL` in. Evaluating once per `timeout` cannot: its first check runs
+    /// a whole `timeout` in, because the sliced sleep never returns before its
+    /// deadline. So "detected before one timeout had passed" separates the two with
+    /// no dependence on scheduler latency in the failing direction, and the passing
+    /// side has `timeout - WATCHDOG_POLL` of headroom for one late wakeup. There is
+    /// no helper thread whose own wakeup could land late and move the threshold.
     #[test]
     fn watchdog_detects_inactivity_within_one_poll_of_the_timeout() {
-        let timeout = std::time::Duration::from_millis(1000);
+        let timeout = std::time::Duration::from_secs(2);
+        let idle_at_start = timeout - std::time::Duration::from_millis(50);
         let stop = Arc::new(AtomicBool::new(false));
         // Running for a minute already, so the decoder's grace is long spent and
-        // only the inactivity timeout is under test.
-        let running = || {
-            ActivityStamp::backdated(
-                std::time::Duration::from_secs(60),
-                std::time::Duration::ZERO,
-            )
-        };
-        let output = Arc::new(running());
-        let activity = Arc::new(SessionActivity::from_stamps(running(), output.clone()));
-
-        // One more buffer that both arrives and comes out of the slot, then nothing.
-        let publisher = activity.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            publisher.touch_ingress(true);
-            output.touch();
-        });
+        // only the inactivity timeout is under test. Both stamps froze together.
+        let stalled =
+            || ActivityStamp::backdated(std::time::Duration::from_secs(60), idle_at_start);
+        let activity = Arc::new(SessionActivity::from_stamps(stalled(), Arc::new(stalled())));
 
         let started = Instant::now();
         let (idle_ms, side) = wait_for_inactivity(&stop, &activity, timeout)
@@ -2637,18 +2628,18 @@ mod tests {
             "a session whose arrivals stopped must be reported against the publisher"
         );
 
-        // Slack over the expected 1250 ms covers scheduler jitter but stays well
-        // clear of the 2000 ms the once-per-timeout evaluation would take.
         assert!(
-            detection < std::time::Duration::from_millis(1600),
-            "inactivity took {:?} to detect with a {:?} timeout — idle is being \
-             evaluated once per timeout, not once per poll",
+            detection < timeout,
+            "inactivity took {:?} to detect with a {:?} timeout and a {:?} poll, for a \
+             session that crossed the threshold 50 ms in — idle is being evaluated once \
+             per timeout, not once per poll",
             detection,
-            timeout
+            timeout,
+            WATCHDOG_POLL
         );
         assert!(
-            idle_ms < 2 * timeout.as_millis() as u64,
-            "reported idle time was {} ms for a {:?} timeout — the check is too coarse",
+            idle_ms >= timeout.as_millis() as u64,
+            "reported idle time was {} ms, below the {:?} timeout it was reaped for",
             idle_ms,
             timeout
         );
