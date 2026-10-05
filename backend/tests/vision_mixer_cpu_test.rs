@@ -322,11 +322,6 @@ mod keyed_alpha {
 
         manager.start().expect("start CPU pipeline");
 
-        // DSK pads are built hidden (alpha=0) — key the graphic in.
-        manager
-            .set_dsk_enabled(block_id, 0, 2, true)
-            .expect("enable DSK 0");
-
         let sink = |name: &str| {
             manager
                 .pipeline()
@@ -337,6 +332,30 @@ mod keyed_alpha {
         };
         let pgm_sink = sink("pgmsink");
         let mv_sink = sink("mvsink");
+
+        // Wait until the white program input is composited before keying the
+        // graphic in. Otherwise a frame where the graphic arrived before the
+        // background shows black canvas through the transparent half, which
+        // reads exactly like flattened alpha (#903).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "white program input never appeared in PGM within 20s"
+            );
+            let Some(sample) = pgm_sink.try_pull_sample(gstreamer::ClockTime::from_mseconds(500))
+            else {
+                continue;
+            };
+            if band_colors(&sample, 5 * W / 8, 7 * W / 8).1 > 0.8 {
+                break;
+            }
+        }
+
+        // DSK pads are built hidden (alpha=0) — key the graphic in.
+        manager
+            .set_dsk_enabled(block_id, 0, 2, true)
+            .expect("enable DSK 0");
 
         // Pull PGM frames until the keyed graphic is actually on screen (the pad
         // alpha change takes effect a frame or two after set_dsk_enabled), then
@@ -353,8 +372,8 @@ mod keyed_alpha {
             };
             let (left_red, _) = band_colors(&sample, W / 8, 3 * W / 8);
             let (_, right_white) = band_colors(&sample, 5 * W / 8, 7 * W / 8);
-            // Wait for the graphic's opaque half to actually be red: early frames
-            // are still black everywhere, and a keyed-opaque failure is black too.
+            // Wait for the graphic's opaque half to actually be red: the pad alpha
+            // change takes a frame or two, and until then PGM is all white.
             if left_red > 0.8 {
                 break (left_red, right_white);
             }
