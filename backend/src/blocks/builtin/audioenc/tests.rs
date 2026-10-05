@@ -215,3 +215,89 @@ fn test_definition_pads_point_at_real_elements() {
     assert_eq!(output.internal_element_id, "capsfilter");
     assert_eq!(output.media_type, MediaType::Audio);
 }
+
+/// Like the AAC check above, but for one named element: a skip is a failure when CI
+/// sets `STROM_REQUIRE_GST_PLUGINS`, since a test that skips guards nothing.
+fn require_element(element_name: &str) -> bool {
+    if gst::ElementFactory::find(element_name).is_some() {
+        return true;
+    }
+    assert!(
+        strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
+        "STROM_REQUIRE_GST_PLUGINS is set but {} is missing",
+        element_name
+    );
+    eprintln!("skipping: {} not available", element_name);
+    false
+}
+
+fn build_with_bitrate(codec: &str, bitrate: u64) -> Result<BlockBuildResult, BlockBuildError> {
+    let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+    let p = props(&[
+        ("codec", PropertyValue::String(codec.to_string())),
+        ("bitrate", PropertyValue::UInt(bitrate)),
+    ]);
+    AudioEncBuilder.build("test:audioenc", &p, &ctx)
+}
+
+fn assert_refused(result: Result<BlockBuildResult, BlockBuildError>, kbps: u64) {
+    match result {
+        Err(BlockBuildError::InvalidProperty(msg)) => assert!(
+            msg.contains("bitrate") && msg.contains(&format!("{} kbps", kbps)),
+            "error should name the property and the requested kbps, got: {}",
+            msg
+        ),
+        Err(other) => panic!("expected InvalidProperty, got {:?}", other),
+        Ok(_) => panic!("{} kbps should have been refused", kbps),
+    }
+}
+
+/// #769: 1000 kbps is 1_000_000 bits/s, past opusenc's 650_000 maximum. The bare
+/// setter panicked when GLib had to clamp it; the build must refuse it instead.
+#[test]
+fn test_opus_bitrate_past_encoder_range_is_refused() {
+    init_gst();
+    if !require_element("opusenc") {
+        return;
+    }
+    assert_refused(build_with_bitrate("opus", 1000), 1000);
+}
+
+/// #769: kbps * 1000 in `u32` overflowed above 4_294_967 kbps, panicking in a
+/// debug build before any property was set.
+#[test]
+fn test_bitrate_past_u32_bits_per_second_does_not_panic() {
+    init_gst();
+    if !require_element("opusenc") {
+        return;
+    }
+    assert_refused(build_with_bitrate("opus", 5_000_000), 5_000_000);
+}
+
+/// #769: lamemp3enc takes kbps directly, capped at 320.
+#[test]
+fn test_mp3_bitrate_past_encoder_range_is_refused() {
+    init_gst();
+    if !require_element("lamemp3enc") {
+        return;
+    }
+    assert_refused(build_with_bitrate("mp3", 500), 500);
+}
+
+/// The checked setter must still apply an in-range bitrate, in the encoder's units.
+#[test]
+fn test_opus_bitrate_in_range_is_applied_in_bits_per_second() {
+    init_gst();
+    if !require_element("opusenc") {
+        return;
+    }
+    let result = build_with_bitrate("opus", 96).expect("96 kbps Opus should build");
+    let encoder = result
+        .elements
+        .iter()
+        .find(|(id, _)| id == "test:audioenc:encoder")
+        .map(|(_, e)| e)
+        .expect("chain should contain the encoder");
+    let bitrate: i32 = encoder.property("bitrate");
+    assert_eq!(bitrate, 96_000);
+}

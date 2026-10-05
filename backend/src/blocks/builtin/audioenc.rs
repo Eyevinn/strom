@@ -6,6 +6,7 @@
 //! downstream muxers framed data, and the final capsfilter pins the output codec.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+use crate::gst::pipeline::properties::set_property_checked;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -16,7 +17,7 @@ use tracing::{info, warn};
 pub struct AudioEncBuilder;
 
 /// Default target bitrate in kbps.
-const DEFAULT_BITRATE_KBPS: u32 = 128;
+const DEFAULT_BITRATE_KBPS: u64 = 128;
 
 /// Default output sample rate. WebRTC ingest is 48 kHz and Opus accepts only a fixed
 /// set of rates, so 48000 keeps every codec negotiable.
@@ -93,7 +94,7 @@ impl BlockBuilder for AudioEncBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", encoder_name, e)))?;
 
-        set_encoder_bitrate(&encoder, &encoder_name, bitrate_kbps);
+        set_encoder_bitrate(&encoder, &encoder_name, bitrate_kbps)?;
 
         let parser_name = get_parser_name(codec);
         let parser = gst::ElementFactory::make(parser_name)
@@ -207,28 +208,57 @@ fn select_encoder(codec: Codec) -> Result<String, BlockBuildError> {
 
 /// Apply the target bitrate, accounting for each encoder's units.
 ///
-/// Uses `set_property_from_str` throughout so a property whose type differs between
-/// encoders cannot panic the build.
-fn set_encoder_bitrate(encoder: &gst::Element, encoder_name: &str, bitrate_kbps: u32) {
+/// `bitrate` comes from the flow definition, and each encoder has its own range
+/// (opusenc stops at 650 kbps, lamemp3enc at 320). The bare `set_property_from_str`
+/// panics on a value its `GParamSpec` would have to clamp, so the value goes through
+/// the checked setter and an out-of-range bitrate fails the build instead (#769).
+fn set_encoder_bitrate(
+    encoder: &gst::Element,
+    encoder_name: &str,
+    bitrate_kbps: u64,
+) -> Result<(), BlockBuildError> {
     if encoder_name == "lamemp3enc" {
         // lamemp3enc takes kbps, and only honours it when target is "bitrate"
         // (it optimises for quality otherwise).
         if encoder.has_property("target") {
-            encoder.set_property_from_str("target", "bitrate");
+            set_property_checked(encoder, "target", &PropertyValue::String("bitrate".into()))
+                .map_err(|reason| {
+                    BlockBuildError::InvalidProperty(format!("target: {}", reason))
+                })?;
         }
-        encoder.set_property_from_str("bitrate", &bitrate_kbps.to_string());
-        return;
+        return set_bitrate_value(encoder, encoder_name, bitrate_kbps, bitrate_kbps);
     }
 
     // Everything else takes bits per second.
     if encoder.has_property("bitrate") {
-        encoder.set_property_from_str("bitrate", &(bitrate_kbps * 1000).to_string());
+        set_bitrate_value(
+            encoder,
+            encoder_name,
+            bitrate_kbps,
+            bitrate_kbps.saturating_mul(1000),
+        )
     } else {
         warn!(
             "Audio encoder {} has no bitrate property, using its default",
             encoder_name
         );
+        Ok(())
     }
+}
+
+/// Set `bitrate` in the encoder's own units, naming the operator's kbps on refusal.
+fn set_bitrate_value(
+    encoder: &gst::Element,
+    encoder_name: &str,
+    bitrate_kbps: u64,
+    value: u64,
+) -> Result<(), BlockBuildError> {
+    set_property_checked(encoder, "bitrate", &PropertyValue::UInt(value)).map_err(|reason| {
+        BlockBuildError::InvalidProperty(format!(
+            "bitrate: {} kbps is not accepted by {}: {}",
+            bitrate_kbps, encoder_name, reason
+        ))
+    })
 }
 
 /// Parser element for the codec, so downstream muxers get properly framed data.
@@ -277,12 +307,15 @@ fn parse_codec(properties: &HashMap<String, PropertyValue>) -> Result<Codec, Blo
 }
 
 /// Parse target bitrate in kbps.
-fn parse_bitrate(properties: &HashMap<String, PropertyValue>) -> u32 {
+///
+/// Kept as `u64` so a huge value reaches the encoder's range check intact instead of
+/// truncating to some small, valid-looking number.
+fn parse_bitrate(properties: &HashMap<String, PropertyValue>) -> u64 {
     properties
         .get("bitrate")
         .and_then(|v| match v {
-            PropertyValue::UInt(u) => Some(*u as u32),
-            PropertyValue::Int(i) if *i > 0 => Some(*i as u32),
+            PropertyValue::UInt(u) => Some(*u),
+            PropertyValue::Int(i) if *i > 0 => Some(*i as u64),
             _ => None,
         })
         .unwrap_or(DEFAULT_BITRATE_KBPS)
@@ -364,7 +397,7 @@ fn audioenc_definition() -> BlockDefinition {
                 label: "Bitrate (kbps)".to_string(),
                 description: "Target bitrate in kilobits per second. 128 is transparent enough for speech and music at 48 kHz stereo.".to_string(),
                 property_type: PropertyType::UInt,
-                default_value: Some(PropertyValue::UInt(DEFAULT_BITRATE_KBPS as u64)),
+                default_value: Some(PropertyValue::UInt(DEFAULT_BITRATE_KBPS)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "bitrate".to_string(),
