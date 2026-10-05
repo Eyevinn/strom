@@ -12,6 +12,13 @@
 //!
 //! `attach_session_branch` builds both sinks with `async` off, so there is no
 //! ASYNC cycle for the second branch to land in.
+//!
+//! Because the pad is already carrying media, the branch must also be PLAYING
+//! before the pad is linked to it. A buffer pushed into an element still in
+//! NULL comes back as FLUSHING, and the upstream source pauses its streaming
+//! task for good on that: the stream is gone after the first buffer, with the
+//! sinks sitting in PLAYING and nothing in the log. `attach_session_branch`
+//! links the pad last for that reason.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -62,9 +69,9 @@ struct LiveSource {
 }
 
 impl LiveSource {
-    fn new(pipeline: &gst::Pipeline, factory: &str) -> Self {
+    fn new(pipeline: &gst::Pipeline, factory: &str, is_live: bool) -> Self {
         let element = gst::ElementFactory::make(factory)
-            .property("is-live", true)
+            .property("is-live", is_live)
             .build()
             .unwrap_or_else(|_| panic!("{factory} available"));
         let tee = gst::ElementFactory::make("tee")
@@ -98,10 +105,14 @@ fn count_samples(appsink: &gst_app::AppSink) -> Arc<AtomicUsize> {
 /// One session: two pads carrying media, each given a branch on a pipeline that
 /// is already PLAYING. Reports each branch's sample count and the state its
 /// appsink ended in, so a failure can name both.
-fn run_round() -> ((usize, gst::State), (usize, gst::State)) {
+///
+/// A live source paces itself, so whether a buffer lands while a branch is
+/// being linked is down to timing. A source that is not live pushes as fast as
+/// it can and always has a buffer in flight, which makes that moment certain.
+fn run_round(is_live: bool) -> ((usize, gst::State), (usize, gst::State)) {
     let pipeline = gst::Pipeline::new();
-    let video = LiveSource::new(&pipeline, "videotestsrc");
-    let audio = LiveSource::new(&pipeline, "audiotestsrc");
+    let video = LiveSource::new(&pipeline, "videotestsrc", is_live);
+    let audio = LiveSource::new(&pipeline, "audiotestsrc", is_live);
 
     pipeline
         .set_state(gst::State::Playing)
@@ -166,8 +177,31 @@ fn both_session_branches_keep_running_when_attached_in_succession() {
         return;
     }
 
+    assert_rounds_keep_running(true);
+}
+
+/// The branch must be up before the pad that is already carrying media is
+/// linked to it. Link first and the buffer in flight meets a tee still in
+/// NULL, comes back FLUSHING, and the source pauses for good: that branch ends
+/// with 0 samples while its sinks report PLAYING.
+///
+/// Free-running sources keep a buffer in flight at every moment, so the window
+/// between the link and the state change is hit far more often than with live
+/// sources, where it took a loaded host to see it about one run in four.
+#[test]
+fn branch_attached_to_a_pad_already_carrying_media_keeps_its_stream() {
+    gst::init().expect("gstreamer init");
+    if !plugins_available() {
+        eprintln!("skipping: required GStreamer elements missing");
+        return;
+    }
+
+    assert_rounds_keep_running(false);
+}
+
+fn assert_rounds_keep_running(is_live: bool) {
     for round in 0..ROUNDS {
-        let ((video_samples, video_state), (audio_samples, audio_state)) = run_round();
+        let ((video_samples, video_state), (audio_samples, audio_state)) = run_round(is_live);
         assert!(
             video_samples > 5 && audio_samples > 5,
             "round {round}: a branch stopped carrying data — \
