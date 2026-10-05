@@ -1346,8 +1346,18 @@ mod tests {
         );
         internal.set_state(gst::State::Playing).unwrap();
 
+        // The stall: nothing for 800 ms, far longer than the 100 ms delay
+        // and the 250 ms re-sync threshold.
+        const STALL_MS: u64 = 800;
         let start = gst::ClockTime::from_seconds(1000 * 3600);
-        let push = |i: u64| {
+        // Each push waits for its own deadline from the first, so a sleep
+        // that overruns on a busy runner does not push every later buffer
+        // back with it.
+        let t0 = std::time::Instant::now();
+        for i in 0..30u64 {
+            let stall = if i >= 15 { STALL_MS } else { 0 };
+            let deadline = t0 + std::time::Duration::from_millis(i * CHUNK_MS + stall);
+            std::thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
             let mut buf = gst::Buffer::with_size((48 * CHUNK_MS * 4) as usize).unwrap();
             {
                 let b = buf.get_mut().unwrap();
@@ -1355,15 +1365,6 @@ mod tests {
                 b.set_duration(gst::ClockTime::from_mseconds(CHUNK_MS));
             }
             src.push_buffer(buf).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(CHUNK_MS));
-        };
-        for i in 0..15 {
-            push(i);
-        }
-        // The stall: nothing for 400 ms, far longer than the 100 ms delay.
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        for i in 15..30 {
-            push(i);
         }
         std::thread::sleep(std::time::Duration::from_millis(400));
 
@@ -1378,10 +1379,11 @@ mod tests {
         );
         // The one buffer that finds the stall goes out early, by the delay.
         // Every buffer must be on time: stamped no earlier than it arrives,
-        // less some slack for the hop through the main pipeline on a busy CI
-        // runner. Without the re-sync, the buffers after the stall are 350 ms
-        // late.
-        const SLACK_NS: i64 = 150_000_000;
+        // less what the bridge itself lets a buffer run late before it
+        // re-syncs, and a little for the hop through the main pipeline on a
+        // busy CI runner. Without the re-sync, the buffers after the stall
+        // are 700 ms late.
+        const SLACK_NS: i64 = timing::LATE_RESYNC_NS + 50_000_000;
         for (n, (pts, now)) in arrivals.iter().enumerate() {
             assert!(
                 *pts >= now - SLACK_NS,
@@ -1614,7 +1616,10 @@ mod tests {
                 kind
             );
         }
-        const SLACK_NS: i64 = 150_000_000;
+        // What the bridge lets a buffer run late before it re-syncs, and a
+        // little for the hop through the flow on a busy CI runner. The bug
+        // this guards left seconds of silence after the switch.
+        const SLACK_NS: i64 = timing::LATE_RESYNC_NS + 50_000_000;
         for (kind, pts, now) in &arrivals {
             assert!(
                 *pts >= now - SLACK_NS,
