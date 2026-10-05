@@ -470,7 +470,7 @@ fn connect_main_pipeline_handler(
         let (Some(state), Some(internal)) = (state_weak.upgrade(), internal_weak.upgrade()) else {
             return;
         };
-        // A pause the user asked for holds across the flow's restart.
+        // A pause the user asked for holds when the flow starts playing.
         if !state.is_paused.load(std::sync::atomic::Ordering::SeqCst)
             && internal.current_state() != gst::State::Playing
             && internal.pending_state() != gst::State::Playing
