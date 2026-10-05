@@ -69,11 +69,14 @@ else
     export GST_CEF_CHROME_EXTRA_FLAGS="no-sandbox,disable-gpu,disable-gpu-compositing,use-gl=disabled,disable-features=BackgroundTracing,no-periodic-tasks,force-fieldtrials=,disable-field-trial-config,disable-breakpad,disable-crash-reporter,disable-dev-shm-usage,disable-background-networking,disable-component-update,enable-logging=stderr"
 fi
 
-# Set CEF cache location to avoid singleton behavior warning
-# Clean up stale CEF cache/locks from previous runs/crashes
-export GST_CEF_CACHE_LOCATION="/tmp/cef-cache"
-rm -rf /tmp/cef-cache
-mkdir -p /tmp/cef-cache
+# CEF cache directory. It holds the browser profiles HTML sources keep their
+# logins in, so it is kept across a restart of the container; mount a volume
+# here (or point GST_CEF_CACHE_LOCATION at one) to keep it across a
+# replacement too. It is not wiped: Strom removes a Chromium lock left by
+# another hostname and the profiles no flow uses at startup, and Chromium
+# breaks a lock left by a dead process on this host itself.
+export GST_CEF_CACHE_LOCATION="${GST_CEF_CACHE_LOCATION:-/tmp/cef-cache}"
+mkdir -p "$GST_CEF_CACHE_LOCATION"
 
 # CEF's own logging, to stderr. Warnings and errors only: verbose writes
 # everything Chromium does into the container log. Chromium logs a page's
