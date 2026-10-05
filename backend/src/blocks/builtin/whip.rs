@@ -925,6 +925,9 @@ pub struct CreatedSession {
 /// blocks its streaming thread for good. From the outside that is a publisher
 /// whose audio or video never starts, with nothing in the log to say so —
 /// `sync_state_with_parent` reports the state change as accepted either way.
+///
+/// The pad is linked only once the branch is PLAYING, because it is already
+/// carrying media when it appears (see the comment at the link).
 pub fn attach_session_branch(
     session_pipeline: &gst::Pipeline,
     pad: &gst::Pad,
@@ -964,10 +967,6 @@ pub fn attach_session_branch(
         );
         return None;
     }
-    if let Err(e) = pad.link(&tee.static_pad("sink").expect("tee has no sink pad")) {
-        error!("WHIP Input: Failed to link pad to tee: {:?}", e);
-        return None;
-    }
     if let (Some(tee_src1), Some(tee_src2)) = (
         tee.request_pad_simple("src_%u"),
         tee.request_pad_simple("src_%u"),
@@ -982,9 +981,18 @@ pub fn attach_session_branch(
         error!("WHIP Input: Failed to request tee src pads");
         return None;
     }
-    let _ = tee.sync_state_with_parent();
-    let _ = fakesink.sync_state_with_parent();
+    // Downstream first, and the live pad last: until an element has left NULL
+    // its sink pad is flushing, and a buffer pushed into it comes back as
+    // FLUSHING. Upstream reads that as "shutting down" and pauses its streaming
+    // task for good, so a pad linked before the branch is up can lose its
+    // stream on the very first buffer.
     let _ = appsink.sync_state_with_parent();
+    let _ = fakesink.sync_state_with_parent();
+    let _ = tee.sync_state_with_parent();
+    if let Err(e) = pad.link(&tee.static_pad("sink").expect("tee has no sink pad")) {
+        error!("WHIP Input: Failed to link pad to tee: {:?}", e);
+        return None;
+    }
     Some(appsink)
 }
 
