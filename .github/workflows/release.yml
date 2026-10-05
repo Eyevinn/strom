@@ -59,14 +59,14 @@ jobs:
           # NoSuchBucket / unreachable endpoint / denied write -> off.
           probe() {
             timeout 25 aws --endpoint-url "$SCCACHE_ENDPOINT" --region "$SCCACHE_REGION" \
-              --cli-connect-timeout 8 --cli-read-timeout 8 s3api "$@" >/dev/null 2>&1
+              --cli-connect-timeout 8 --cli-read-timeout 8 s3api "$@" >/dev/null 2>probe.err
           }
           echo "preflight $GITHUB_RUN_ID" > probe.txt
           if ! probe list-objects-v2 --bucket "$SCCACHE_BUCKET" --max-keys 1; then
-            echo "::warning::sccache backend unreachable or bucket missing - building WITHOUT compile cache"
+            echo "::warning::sccache backend unreachable or bucket missing - building WITHOUT compile cache: $(tr '\n' ' ' < probe.err)"
             echo "cache_ok=false" >> "$GITHUB_OUTPUT"
           elif ! probe put-object --bucket "$SCCACHE_BUCKET" --key preflight/probe --body probe.txt; then
-            echo "::warning::sccache backend rejects writes - building WITHOUT compile cache"
+            echo "::warning::sccache backend rejects writes - building WITHOUT compile cache: $(tr '\n' ' ' < probe.err)"
             echo "cache_ok=false" >> "$GITHUB_OUTPUT"
           else
             echo "sccache backend reachable and writable - cache enabled"
