@@ -59,16 +59,26 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      # Inputs reach the shell through env, never through ${{ }} in the
+      # script: an expression is pasted into the script before it runs, so a
+      # quote in an input would run as shell.
       - name: Extract CEF short version
         id: cef
+        env:
+          CEF_VERSION: ${{ inputs.cef_version }}
+          BUILD_SUFFIX: ${{ inputs.build_suffix }}
         run: |
           # Extract just the version number (e.g., 138.0.56)
-          CEF_SHORT=$(echo "${{ inputs.cef_version }}" | cut -d'+' -f1)
+          CEF_SHORT=$(echo "$CEF_VERSION" | cut -d'+' -f1)
+          if ! echo "$CEF_SHORT" | grep -Eq '^[0-9]+(\.[0-9]+)*$'; then
+            echo "::error::cef_version must start with a version number such as 144.0.21"
+            exit 1
+          fi
           echo "short_version=$CEF_SHORT" >> $GITHUB_OUTPUT
           echo "CEF short version: $CEF_SHORT"
           # The name strom-full downloads by: the CEF version, plus the suffix
           # that tells one build of Strom's patches from another.
-          SUFFIX="${{ inputs.build_suffix }}"
+          SUFFIX="$BUILD_SUFFIX"
           if [ -n "$SUFFIX" ] && ! echo "$SUFFIX" | grep -Eq '^[A-Za-z0-9._]+$'; then
             echo "::error::build_suffix may hold letters, digits, dots and underscores only"
             exit 1
@@ -76,11 +86,14 @@ jobs:
           echo "build_version=${CEF_SHORT}${SUFFIX:+-$SUFFIX}" >> $GITHUB_OUTPUT
 
       - name: Build gstcefsrc Docker image
+        env:
+          CEF_VERSION: ${{ inputs.cef_version }}
+          GSTCEFSRC_REF: ${{ inputs.gstcefsrc_ref }}
         run: |
           docker build \
             --platform ${{ matrix.docker_platform }} \
-            --build-arg CEF_VERSION="${{ inputs.cef_version }}" \
-            --build-arg GSTCEFSRC_REF="${{ inputs.gstcefsrc_ref }}" \
+            --build-arg CEF_VERSION="$CEF_VERSION" \
+            --build-arg GSTCEFSRC_REF="$GSTCEFSRC_REF" \
             -t gstcefsrc-builder:${{ matrix.arch }} \
             -f docker/gstcefsrc/Dockerfile \
             docker/gstcefsrc/
@@ -138,11 +151,14 @@ jobs:
     if: always()
     steps:
       - name: Summary
+        env:
+          CEF_VERSION: ${{ inputs.cef_version }}
+          GSTCEFSRC_REF: ${{ inputs.gstcefsrc_ref }}
         run: |
           echo "## gstcefsrc Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**CEF Version:** \`${{ inputs.cef_version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**gstcefsrc ref:** \`${{ inputs.gstcefsrc_ref }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**CEF Version:** \`$CEF_VERSION\`" >> $GITHUB_STEP_SUMMARY
+          echo "**gstcefsrc ref:** \`$GSTCEFSRC_REF\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
