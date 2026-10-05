@@ -847,6 +847,16 @@ impl WhipSessionManager {
         endpoints.get(endpoint_id).cloned()
     }
 
+    /// Whether `config` is the one registered for its endpoint right now, as
+    /// opposed to one left over from an earlier run of the flow.
+    fn is_current_config(&self, config: &WhipEndpointConfig) -> bool {
+        self.endpoints
+            .read()
+            .unwrap()
+            .get(&config.endpoint_id)
+            .is_some_and(|current| std::ptr::eq(Arc::as_ptr(current), config))
+    }
+
     /// Register a new session after a whipserversrc has been created.
     ///
     /// If the session's port is in the pending_cleanup_ports set (ICE failed before
@@ -891,13 +901,15 @@ impl WhipSessionManager {
             false
         };
 
-        // Check if this port was marked for cleanup before we could register it
-        {
+        // Check if this port was marked for cleanup before we could register it.
+        // The mark is taken under the lock; the refusal runs after it is dropped.
+        let died_before_registration = {
             let mut pending = self.pending_cleanup_ports.lock().unwrap();
             pending.retain(|_, marked| marked.elapsed() < PENDING_CLEANUP_TTL);
-            if pending.remove(&port).is_some() {
-                return refuse("died before registration");
-            }
+            pending.remove(&port).is_some()
+        };
+        if died_before_registration {
+            return refuse("died before registration");
         }
 
         // Held until the session is in the map, so `unregister_endpoint` either
@@ -979,6 +991,14 @@ impl WhipSessionManager {
         loop {
             if let Some(slot) = config.allocate_slot(resource_id) {
                 return Some(slot);
+            }
+
+            // A POST that fetched its config before the flow stopped must not
+            // judge the sessions of the flow's next run, which share the
+            // endpoint_id: displacing one would cost a live run a session to
+            // seat a POST that `register_session` will refuse anyway.
+            if !self.is_current_config(config) {
+                return None;
             }
 
             // Full. Nothing registered on this endpoint means the slots are held
@@ -2019,7 +2039,38 @@ mod tests {
         );
     }
 
-    /// The same POST, when the flow has stopped and not started again.
+    /// A POST that fetched its config before the flow stopped, and is still in
+    /// the takeover wait when the flow starts again, sees the old config full
+    /// (stopping a flow does not free its slots). It must not displace a
+    /// session of the new run, which shares the endpoint_id.
+    #[tokio::test]
+    async fn a_post_from_an_earlier_run_does_not_displace_a_new_runs_session() {
+        let (manager, new_config, cleanup_sent) = full_endpoint(
+            "new-run-session",
+            40023,
+            dead_publisher(TAKEOVER_IDLE_THRESHOLD * 2),
+        );
+        let old_config = endpoint_config(1);
+        assert_eq!(old_config.allocate_slot("old-run-session"), Some(0));
+
+        let slot = manager
+            .allocate_slot_or_take_over(&old_config, "stale-post")
+            .await;
+
+        assert_eq!(slot, None, "a stale POST gets no slot");
+        assert!(
+            !cleanup_sent.load(Ordering::SeqCst),
+            "the new run's session must not be displaced by a stale POST"
+        );
+        assert!(manager.get_session_port("new-run-session").is_some());
+        assert_eq!(
+            new_config.slot_assignments.read().unwrap()[0].as_deref(),
+            Some("new-run-session")
+        );
+    }
+
+    /// A POST still in flight when its flow stopped, and the flow has not
+    /// started again.
     #[test]
     fn a_session_whose_endpoint_is_gone_is_refused() {
         let manager = WhipSessionManager::new();
