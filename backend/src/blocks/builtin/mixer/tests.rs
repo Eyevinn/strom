@@ -1110,8 +1110,8 @@ fn test_solo_keeps_block_latency_without_aux_or_group() {
 }
 
 #[test]
-fn test_internal_bus_latency_property_sets_solo_and_monitor() {
-    // The operator's override reaches both internal buses, and is capped at
+fn test_internal_bus_latency_property_sets_internal_buses() {
+    // The operator's override reaches every internal bus, and is capped at
     // the block latency so it can never stack more than the block itself.
     let latency = 100;
     for (requested, expected) in [(60, 60), (250, latency)] {
@@ -1161,6 +1161,14 @@ fn test_group_does_not_stack_block_latency_on_main() {
     // on top of it, or adding a group holds main_out, and every sink in the
     // flow, a further block latency.
     let latency = 100;
+    // Without a group Main sums only channels, so it keeps the block latency.
+    let m = assemble(&small_mixer_props(&[
+        ("num_groups", PropertyValue::UInt(0)),
+        ("latency", PropertyValue::UInt(latency)),
+    ]));
+    let main = m.element("audiomixer").property::<u64>("latency");
+    assert_eq!(main, latency * 1_000_000, "main latency without a group");
+    drop(m);
     let [without_group] = reported_latency(
         &small_mixer_props(&[
             ("num_groups", PropertyValue::UInt(0)),
