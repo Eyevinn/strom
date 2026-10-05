@@ -33,6 +33,9 @@
 //!   `Y444`. Converting once here leaves a hardware encoder's converter in
 //!   passthrough. The VP9 and AV1 software encoders do not take NV12, so their
 //!   consumers still convert, but from NV12 to I420 rather than from RGBA.
+//!   Once the sink has negotiated a format it keeps it: `webrtcsink` refuses
+//!   a format change on a running pad, so frames that later arrive in another
+//!   format are converted to the one it started on.
 //!
 //! The probes stay for the life of the pad. They fire per event and per
 //! query, never per buffer. When the adapters already in place suit the new
@@ -94,17 +97,24 @@ const CONVERT_FACTORY: &str = "videoconvert";
 struct Plan {
     /// Downloads, in link order.
     memory: Vec<Adapter>,
-    /// Whether a converter to [`NATIVE_FORMAT`] follows them.
-    convert: bool,
+    /// The format a converter after them produces, if one is needed.
+    convert: Option<String>,
 }
 
 /// Decide what `caps` need in front of the sink.
+///
+/// `pinned` is the pixel format the sink has already negotiated, if any.
+/// `webrtcsink` refuses a format change on a pad it has started on ("Renegotiation
+/// is not supported"), so once it has one, frames in system memory are converted
+/// to that format whenever they arrive in another one, whatever the format.
+/// Before that, [`needs_format_conversion`] picks.
 ///
 /// `sink_accepts` says whether the sink takes `caps` as they are; it is asked
 /// only for raw video in a GPU memory other than GL. `available` says whether
 /// an element factory exists (see [`video_adapt::decide`]).
 fn plan(
     caps: &gst::CapsRef,
+    pinned: Option<&str>,
     sink_accepts: impl FnOnce() -> bool,
     available: impl Fn(&str) -> bool,
 ) -> Result<Plan, Refusal> {
@@ -119,11 +129,17 @@ fn plan(
         return Ok(Plan::default());
     }
     let in_system_memory = matches!(&on_cpu, Ok(adapters) if adapters.is_empty());
+    let input_format = raw_format(caps);
+    let off_pin = matches!((pinned, input_format.as_deref()), (Some(p), Some(f)) if p != f);
 
     let memory = if !gl.is_empty() {
         gl
-    } else if in_system_memory || sink_accepts() {
-        // System memory, or a GPU memory the sink's encoders take directly.
+    } else if in_system_memory {
+        Vec::new()
+    } else if sink_accepts() && !(off_pin && matches!(&on_cpu, Ok(a) if !a.is_empty())) {
+        // A GPU memory the sink's encoders take directly. In another format
+        // than the one the sink started on, it is downloaded and converted
+        // instead, when anything here can download it.
         Vec::new()
     } else {
         // The sink refuses this memory: download it if anything here can.
@@ -132,8 +148,28 @@ fn plan(
 
     // The converter takes system memory only, which is where the frames are
     // after any download.
-    let convert = (in_system_memory || !memory.is_empty()) && needs_format_conversion(caps);
+    let convert = if !(in_system_memory || !memory.is_empty()) {
+        None
+    } else if let Some(pinned) = pinned {
+        off_pin.then(|| pinned.to_string())
+    } else {
+        needs_format_conversion(caps).then(|| NATIVE_FORMAT.to_string())
+    };
     Ok(Plan { memory, convert })
+}
+
+/// The fixed pixel format of raw video `caps`, if they have one.
+fn raw_format(caps: &gst::CapsRef) -> Option<String> {
+    let structure = caps.structure(0)?;
+    if structure.name() != "video/x-raw" {
+        return None;
+    }
+    structure.get::<String>("format").ok()
+}
+
+/// The pixel format the sink behind `target` has negotiated, if any.
+fn sink_format(target: &gst::Pad) -> Option<String> {
+    target.current_caps().and_then(|caps| raw_format(&caps))
 }
 
 /// True when raw video in `caps`' pixel format should be converted to
@@ -213,11 +249,20 @@ pub fn install_video_input_bridge(src_pad: &gst::Pad, name_prefix: &str) {
         let Some(gst::PadProbeData::Query(ref mut query)) = info.data else {
             return gst::PadProbeReturn::Ok;
         };
-        // Released before any query is sent on: the sink's answer must not
-        // wait on a splice in progress on the streaming thread.
-        let (target, spliced) = {
+        if !matches!(
+            query.view(),
+            gst::QueryView::AcceptCaps(_) | gst::QueryView::Caps(_)
+        ) {
+            return gst::PadProbeReturn::Ok;
+        }
+        // The lock is held through a splice, so the sink is read either before
+        // or after one, never half-way. It is released before the sink is
+        // asked. Both queries are answered here, by the sink, even with nothing
+        // spliced in: forwarded instead, one could reach adapters that a
+        // splice on the streaming thread put in after this read.
+        let target = {
             let state = query_state.lock().unwrap_or_else(|p| p.into_inner());
-            (target_of(pad, &state), state.target.is_some())
+            target_of(pad, &state)
         };
         let Some(target) = target else {
             return gst::PadProbeReturn::Ok;
@@ -225,18 +270,16 @@ pub fn install_video_input_bridge(src_pad: &gst::Pad, name_prefix: &str) {
         match query.view_mut() {
             gst::QueryViewMut::AcceptCaps(q) => {
                 let caps = q.caps_owned();
+                let sink_answer = std::cell::OnceCell::new();
+                let sink_accepts = || *sink_answer.get_or_init(|| target.query_accept_caps(&caps));
                 let accepted = match plan(
                     &caps,
-                    || target.query_accept_caps(&caps),
+                    sink_format(&target).as_deref(),
+                    sink_accepts,
                     video_adapt::factory_available,
                 ) {
                     // Nothing to adapt: the sink's own answer.
-                    Ok(wanted) if wanted == Plan::default() => {
-                        if !spliced {
-                            return gst::PadProbeReturn::Ok;
-                        }
-                        target.query_accept_caps(&caps)
-                    }
+                    Ok(wanted) if wanted == Plan::default() => sink_accepts(),
                     // The adapters for these caps go in with the CAPS event.
                     Ok(_) => true,
                     Err(refusal) => {
@@ -251,7 +294,7 @@ pub fn install_video_input_bridge(src_pad: &gst::Pad, name_prefix: &str) {
             }
             // What the sink takes, not what the adapters in front of it take:
             // a producer that offers GL memory must still be able to pick it.
-            gst::QueryViewMut::Caps(q) if spliced => {
+            gst::QueryViewMut::Caps(q) => {
                 let answer = target.query_caps(q.filter_owned().as_ref());
                 q.set_result(&answer);
                 gst::PadProbeReturn::Handled
@@ -292,6 +335,7 @@ fn adapt(pad: &gst::Pad, caps: &gst::CapsRef, name_prefix: &str, state: &mut Spl
 
     let wanted = match plan(
         caps,
+        sink_format(&target).as_deref(),
         || target.query_accept_caps(&caps.to_owned()),
         video_adapt::factory_available,
     ) {
@@ -447,7 +491,7 @@ fn build_adapters(plan: &Plan, name_prefix: &str) -> Result<Vec<gst::Element>, S
 
     // Not a caps adaptation: converting once here saves every viewer's
     // encoding chain its own conversion.
-    if plan.convert {
+    if let Some(format) = &plan.convert {
         let convert = gst::ElementFactory::make(CONVERT_FACTORY)
             .name(format!("{}_videoconvert", name_prefix))
             .build()
@@ -461,9 +505,21 @@ fn build_adapters(plan: &Plan, name_prefix: &str) -> Result<Vec<gst::Element>, S
                 .property(
                     "caps",
                     gst::Caps::builder("video/x-raw")
-                        .field("format", NATIVE_FORMAT)
+                        .field("format", format.as_str())
                         .build(),
                 )
+                .build()
+                .map_err(|e| format!("capsfilter could not be created: {}", e))?,
+        );
+    } else if !adapters.is_empty() {
+        // A download alone does not leave the GPU: `gldownload` passes GL
+        // memory through to a peer that advertises it, and `cudadownload` can
+        // output GL memory, and whepserversink advertises GL memory. Pin the
+        // download's output to system memory.
+        adapters.push(
+            gst::ElementFactory::make("capsfilter")
+                .name(format!("{}_system_memory", name_prefix))
+                .property("caps", gst::Caps::new_empty_simple("video/x-raw"))
                 .build()
                 .map_err(|e| format!("capsfilter could not be created: {}", e))?,
         );
@@ -650,7 +706,7 @@ mod tests {
     }
 
     fn plan_for(c: &str) -> Plan {
-        plan(&caps(c), not_asked, all).expect("plan")
+        plan(&caps(c), None, not_asked, all).expect("plan")
     }
 
     /// 8-bit 4:2:0: NV12 is what the hardware encoders take, I420 what the VP9
@@ -685,7 +741,7 @@ mod tests {
                 )),
                 Plan {
                     memory: vec![],
-                    convert: true
+                    convert: Some(NATIVE_FORMAT.to_string())
                 },
                 "{} should be converted",
                 format
@@ -701,14 +757,14 @@ mod tests {
             plan_for("video/x-raw(memory:GLMemory), format=RGBA, width=1920, height=1080"),
             Plan {
                 memory: vec![Adapter::GlDownload],
-                convert: true
+                convert: Some(NATIVE_FORMAT.to_string())
             }
         );
         assert_eq!(
             plan_for("video/x-raw(memory:GLMemory), format=NV12, width=1920, height=1080"),
             Plan {
                 memory: vec![Adapter::GlDownload],
-                convert: false
+                convert: None
             }
         );
     }
@@ -727,6 +783,7 @@ mod tests {
             assert_eq!(
                 plan(
                     &caps(&format!("video/x-raw({}), format=RGBA", feature)),
+                    None,
                     || true,
                     all
                 ),
@@ -743,17 +800,19 @@ mod tests {
         assert_eq!(
             plan(
                 &caps("video/x-raw(memory:CUDAMemory), format=RGBA"),
+                None,
                 || false,
                 all
             ),
             Ok(Plan {
                 memory: vec![Adapter::CudaDownload],
-                convert: true
+                convert: Some(NATIVE_FORMAT.to_string())
             })
         );
         assert_eq!(
             plan(
                 &caps("video/x-raw(memory:CUDAMemory), format=RGBA"),
+                None,
                 || false,
                 none
             ),
@@ -775,6 +834,7 @@ mod tests {
             assert_eq!(
                 plan(
                     &caps(&format!("video/x-raw({}), format=NV12", feature)),
+                    None,
                     || false,
                     all
                 ),
@@ -835,6 +895,75 @@ mod tests {
             .collect()
     }
 
+    /// Once the sink has a format, frames in system memory keep reaching it in
+    /// that format: webrtcsink refuses a format change. Without the pin, I420
+    /// would pass through after NV12, and RGBA would become NV12 after I420.
+    #[test]
+    fn the_format_the_sink_started_on_is_kept() {
+        let cases = [
+            ("video/x-raw, format=I420", "NV12", Some("NV12")),
+            ("video/x-raw, format=RGBA", "I420", Some("I420")),
+            ("video/x-raw, format=P010_10LE", "NV12", Some("NV12")),
+            ("video/x-raw, format=NV12", "NV12", None),
+            ("video/x-raw, width=320", "NV12", None),
+        ];
+        for (c, pinned, convert) in cases {
+            assert_eq!(
+                plan(&caps(c), Some(pinned), not_asked, all).map(|p| p.convert),
+                Ok(convert.map(str::to_string)),
+                "{} with the sink on {}",
+                c,
+                pinned
+            );
+        }
+        // GL memory is downloaded and then converted to the pinned format.
+        assert_eq!(
+            plan(
+                &caps("video/x-raw(memory:GLMemory), format=NV12"),
+                Some("I420"),
+                not_asked,
+                all
+            ),
+            Ok(Plan {
+                memory: vec![Adapter::GlDownload],
+                convert: Some("I420".to_string())
+            })
+        );
+        // CUDA memory the sink takes, in another format than it started on, is
+        // downloaded so it can be converted.
+        assert_eq!(
+            plan(
+                &caps("video/x-raw(memory:CUDAMemory), format=RGBA"),
+                Some("NV12"),
+                || true,
+                all
+            ),
+            Ok(Plan {
+                memory: vec![Adapter::CudaDownload],
+                convert: Some("NV12".to_string())
+            })
+        );
+    }
+
+    /// A download alone is followed by a system-memory pin: `gldownload`
+    /// passes GL memory through to a peer that advertises it, as
+    /// whepserversink does.
+    #[test]
+    fn a_download_alone_is_pinned_to_system_memory() {
+        let _ = gst::init();
+        let adapters = build_adapters(
+            &Plan {
+                memory: vec![Adapter::GlDownload],
+                convert: None,
+            },
+            "video_queue",
+        )
+        .expect("adapters");
+        assert_eq!(factories(&adapters), ["gldownload", "capsfilter"]);
+        let pin = adapters[1].property::<gst::Caps>("caps");
+        assert_eq!(pin, gst::Caps::new_empty_simple("video/x-raw"));
+    }
+
     /// The download has to come first: the converter takes system memory.
     #[test]
     fn downloads_are_built_before_the_converter() {
@@ -842,7 +971,7 @@ mod tests {
         let adapters = build_adapters(
             &Plan {
                 memory: vec![Adapter::GlDownload],
-                convert: true,
+                convert: Some(NATIVE_FORMAT.to_string()),
             },
             "video_queue",
         )

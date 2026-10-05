@@ -31,6 +31,7 @@ use strom::gst::video_adapt::CUDA_DOWNLOAD_FACTORY;
 use strom::gst::video_input_bridge::install_video_input_bridge;
 
 const SYSTEM_NV12: &str = "video/x-raw,format=NV12,width=320,height=240,framerate=25/1";
+const SYSTEM_I420: &str = "video/x-raw,format=I420,width=320,height=240,framerate=25/1";
 const SYSTEM_RGBA: &str = "video/x-raw,format=RGBA,width=320,height=240,framerate=25/1";
 const CUDA_NV12: &str =
     "video/x-raw(memory:CUDAMemory),format=NV12,width=320,height=240,framerate=25/1";
@@ -151,6 +152,17 @@ impl Harness {
         *self.next_caps.lock().unwrap() = Some(caps.parse().unwrap());
     }
 
+    /// The pixel format the stand-in for the sink has negotiated.
+    fn sink_format(&self) -> Option<String> {
+        self.pipeline
+            .by_name(SYSTEM_ONLY)?
+            .static_pad("sink")?
+            .current_caps()?
+            .structure(0)?
+            .get::<String>("format")
+            .ok()
+    }
+
     fn errors(&self) -> Vec<(String, String, String)> {
         let bus = self.pipeline.bus().unwrap();
         let mut errors = Vec::new();
@@ -226,7 +238,7 @@ fn a_switch_to_cuda_memory_mid_stream_is_downloaded() {
     let errors = harness.errors();
     assert!(errors.is_empty(), "the flow failed: {:?}", errors);
     assert!(flowing, "frames stopped after the switch to CUDA memory");
-    assert_eq!(harness.spliced(), [CUDA_DOWNLOAD_FACTORY]);
+    assert_eq!(harness.spliced(), [CUDA_DOWNLOAD_FACTORY, "capsfilter"]);
 }
 
 /// The adapters follow the caps both ways: a converter put in for RGBA comes
@@ -248,21 +260,24 @@ fn the_adapters_follow_the_caps_both_ways() {
 
     harness.switch_to(CUDA_NV12);
     assert!(harness.frames_arrive(5, Duration::from_secs(5)));
-    assert_eq!(harness.spliced(), [CUDA_DOWNLOAD_FACTORY]);
+    assert_eq!(harness.spliced(), [CUDA_DOWNLOAD_FACTORY, "capsfilter"]);
 
     let errors = harness.errors();
     assert!(errors.is_empty(), "the flow failed: {:?}", errors);
     // Nothing taken out is left behind in the pipeline.
-    let leftovers: Vec<String> = harness
+    let mut leftovers: Vec<String> = harness
         .pipeline
         .children()
         .into_iter()
         .map(|e| e.name().to_string())
         .filter(|n| n.starts_with(QUEUE) && n != QUEUE)
         .collect();
+    leftovers.sort();
     assert!(
-        leftovers.len() == 1 && leftovers[0].ends_with("_cudadownload"),
-        "only the download should be left: {:?}",
+        leftovers.len() == 2
+            && leftovers[0].ends_with("_cudadownload")
+            && leftovers[1].ends_with("_system_memory"),
+        "only the download and its pin should be left: {:?}",
         leftovers
     );
 }
@@ -298,4 +313,48 @@ fn unsupported_memory_fails_the_flow_with_a_message() {
         "the error should say what fixes it: {:?}",
         errors
     );
+}
+
+/// The sink keeps the format it started on. `webrtcsink` refuses a format
+/// change on a running pad ("Renegotiation is not supported"), so taking the
+/// converter out when RGBA turns into I420, or leaving I420 alone after the
+/// sink started on NV12, would stop the video. Each producer format change
+/// here is converted back to the sink's.
+#[test]
+fn the_sink_keeps_the_format_it_started_on() {
+    let harness = Harness::start(SYSTEM_RGBA);
+    assert!(harness.frames_arrive(5, Duration::from_secs(5)));
+    assert_eq!(harness.sink_format().as_deref(), Some("NV12"));
+
+    harness.switch_to(SYSTEM_I420);
+    assert!(harness.frames_arrive(5, Duration::from_secs(5)));
+    assert_eq!(
+        harness.sink_format().as_deref(),
+        Some("NV12"),
+        "the sink's format changed"
+    );
+    assert_eq!(harness.spliced(), ["videoconvert", "capsfilter"]);
+
+    let errors = harness.errors();
+    assert!(errors.is_empty(), "the flow failed: {:?}", errors);
+}
+
+/// The same the other way: a sink that started on I420 is kept on I420 when
+/// RGBA arrives, not moved to NV12.
+#[test]
+fn a_sink_that_started_on_i420_stays_on_i420() {
+    let harness = Harness::start(SYSTEM_I420);
+    assert!(harness.frames_arrive(5, Duration::from_secs(5)));
+    assert!(harness.spliced().is_empty());
+
+    harness.switch_to(SYSTEM_RGBA);
+    assert!(harness.frames_arrive(5, Duration::from_secs(5)));
+    assert_eq!(
+        harness.sink_format().as_deref(),
+        Some("I420"),
+        "the sink's format changed"
+    );
+
+    let errors = harness.errors();
+    assert!(errors.is_empty(), "the flow failed: {:?}", errors);
 }

@@ -29,8 +29,10 @@ use strom::gst::video_input_bridge::install_video_input_bridge;
 /// The GL elements this test needs, and the rest. A missing GL element also
 /// fails under `STROM_REQUIRE_GL`; a missing other one only under
 /// `STROM_REQUIRE_GST_PLUGINS`, so the message names the right install.
-const GL_REQUIRED: &[&str] = &["gltestsrc", "gldownload"];
+const GL_REQUIRED: &[&str] = &["gltestsrc", "glcolorconvert", "gldownload"];
 const REQUIRED: &[&str] = &["videoconvert", "fakesink"];
+/// What the mid-stream switch adds: a system-memory source and the selector.
+const SWITCH_REQUIRED: &[&str] = &["videotestsrc", "input-selector"];
 
 const GL_RGBA: &str =
     "video/x-raw(memory:GLMemory), format=RGBA, width=320, height=240, framerate=30/1";
@@ -43,14 +45,23 @@ struct Outcome {
     spliced: Vec<String>,
 }
 
-fn run() -> Outcome {
+const GL_NV12: &str =
+    "video/x-raw(memory:GLMemory), format=NV12, width=320, height=240, framerate=30/1";
+
+/// `gltestsrc ! glcolorconvert ! capsfilter(caps)`, then the bridge, then
+/// `fakesink`. `fakesink` takes anything, GL memory included, as
+/// whepserversink advertises it does.
+fn run(caps: &str) -> Outcome {
     let pipeline = gst::Pipeline::new();
     let src = gst::ElementFactory::make("gltestsrc")
         .property("num-buffers", 15i32)
         .build()
         .expect("gltestsrc");
+    let colorconvert = gst::ElementFactory::make("glcolorconvert")
+        .build()
+        .expect("glcolorconvert");
     let filter = gst::ElementFactory::make("capsfilter")
-        .property("caps", GL_RGBA.parse::<gst::Caps>().expect("caps"))
+        .property("caps", caps.parse::<gst::Caps>().expect("caps"))
         .build()
         .expect("capsfilter");
     let queue = gst::ElementFactory::make("queue")
@@ -62,9 +73,9 @@ fn run() -> Outcome {
         .build()
         .expect("fakesink");
     pipeline
-        .add_many([&src, &filter, &queue, &sink])
+        .add_many([&src, &colorconvert, &filter, &queue, &sink])
         .expect("add");
-    gst::Element::link_many([&src, &filter, &queue, &sink]).expect("link");
+    gst::Element::link_many([&src, &colorconvert, &filter, &queue, &sink]).expect("link");
 
     install_video_input_bridge(
         &queue.static_pad("src").expect("queue src pad"),
@@ -125,7 +136,7 @@ fn gl_rgba_reaches_the_peer_as_system_memory_nv12() {
         return;
     }
 
-    let outcome = run();
+    let outcome = run(GL_RGBA);
     assert_eq!(
         outcome.spliced,
         ["gldownload", "videoconvert", "capsfilter"],
@@ -133,6 +144,26 @@ fn gl_rgba_reaches_the_peer_as_system_memory_nv12() {
     );
     assert_eq!(outcome.format, "NV12");
     assert!(!outcome.gl_memory, "the peer should receive system memory");
+    assert!(outcome.buffers > 0, "no buffers reached the peer");
+}
+
+/// GL memory already in NV12 needs only the download. `gldownload` alone
+/// passes GL memory through to a peer that advertises it, which
+/// whepserversink does, so the download is pinned to system memory.
+#[test]
+fn gl_nv12_is_downloaded_to_system_memory() {
+    if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
+        return;
+    }
+
+    let outcome = run(GL_NV12);
+    assert_eq!(
+        outcome.spliced,
+        ["gldownload", "capsfilter"],
+        "expected a download and its system-memory pin"
+    );
+    assert_eq!(outcome.format, "NV12");
+    assert!(!outcome.gl_memory, "GL memory reached the peer");
     assert!(outcome.buffers > 0, "no buffers reached the peer");
 }
 
@@ -285,8 +316,10 @@ fn assert_downloaded(switch: &Switch) {
 
 #[test]
 fn a_switch_to_gl_memory_mid_stream_is_downloaded() {
-    init();
-    if !gl_available() || !elements_available(&["input-selector", "videotestsrc"]) {
+    if !common::gl_available(GL_REQUIRED)
+        || !common::plugins_available(REQUIRED)
+        || !common::plugins_available(SWITCH_REQUIRED)
+    {
         return;
     }
     let switch = switch_to_gl("NV12");
@@ -303,26 +336,15 @@ fn a_switch_to_gl_memory_mid_stream_is_downloaded() {
 /// failed not-negotiated.
 #[test]
 fn a_switch_to_gl_memory_behind_a_converter_is_downloaded() {
-    init();
-    if !gl_available() || !elements_available(&["input-selector", "videotestsrc"]) {
+    if !common::gl_available(GL_REQUIRED)
+        || !common::plugins_available(REQUIRED)
+        || !common::plugins_available(SWITCH_REQUIRED)
+    {
         return;
     }
     let switch = switch_to_gl("RGBA");
     assert_eq!(switch.before, ["videoconvert", "capsfilter"]);
     assert_downloaded(&switch);
-}
-
-fn elements_available(required: &[&str]) -> bool {
-    let missing: Vec<&str> = required
-        .iter()
-        .copied()
-        .filter(|e| gst::ElementFactory::find(e).is_none())
-        .collect();
-    missing.is_empty()
-        || !skip(&format!(
-            "these elements are missing: {}",
-            missing.join(", ")
-        ))
 }
 
 /// Factories between `queue` and `sink`, in link order.
