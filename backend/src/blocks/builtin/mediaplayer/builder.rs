@@ -470,7 +470,9 @@ fn connect_main_pipeline_handler(
         let (Some(state), Some(internal)) = (state_weak.upgrade(), internal_weak.upgrade()) else {
             return;
         };
-        if internal.current_state() != gst::State::Playing
+        // A pause the user asked for holds across the flow's restart.
+        if !state.is_paused.load(std::sync::atomic::Ordering::SeqCst)
+            && internal.current_state() != gst::State::Playing
             && internal.pending_state() != gst::State::Playing
             && state.follow_main_clock(&internal)
         {
@@ -551,5 +553,215 @@ mod tests {
             let id = format!("mp:{}", pad.internal_element_id);
             assert!(ids.contains(&id.as_str()), "{} has no element", id);
         }
+    }
+
+    /// A Media Player built by the real builder, its elements in a flow of
+    /// their own (`video_out` into a fakesink), and its flow handler connected
+    /// the way `start_flow` connects it. The handler's signal watches, on the
+    /// flow's bus and on the internal one, are attached to `ctx`, so nothing
+    /// they do happens until the test iterates it.
+    struct Rig {
+        main: gst::Pipeline,
+        player: Arc<MediaPlayerState>,
+        internal: gst::Pipeline,
+        ctx: gst::glib::MainContext,
+        key: MediaPlayerKey,
+    }
+
+    impl Rig {
+        fn new(playlist: &[String]) -> Self {
+            let _ = gst::init();
+            let flow_id = Uuid::new_v4();
+            let props: HashMap<String, PropertyValue> = [
+                (
+                    "playlist".to_string(),
+                    PropertyValue::String(serde_json::to_string(playlist).unwrap()),
+                ),
+                ("decode".to_string(), PropertyValue::Bool(true)),
+                ("loop_playlist".to_string(), PropertyValue::Bool(false)),
+                ("num_audio_tracks".to_string(), PropertyValue::UInt(0)),
+                (
+                    "_flow_id".to_string(),
+                    PropertyValue::String(flow_id.to_string()),
+                ),
+            ]
+            .into();
+            let built = MediaPlayerBuilder
+                .build(
+                    "mp",
+                    &props,
+                    &crate::blocks::BlockBuildContext::new(Vec::new(), "all".to_string()),
+                )
+                .unwrap();
+
+            // A clock the internal pipeline would never pick on its own.
+            let main = gst::Pipeline::new();
+            main.use_clock(Some(
+                &gst::glib::Object::builder::<gst::SystemClock>()
+                    .property("clock-type", gst::ClockType::Realtime)
+                    .build(),
+            ));
+            for (_, element) in &built.elements {
+                main.add(element).unwrap();
+            }
+            let sink = gst::ElementFactory::make("fakesink")
+                .property("async", false)
+                .build()
+                .unwrap();
+            main.add(&sink).unwrap();
+            let by_id = |id: &str| {
+                built
+                    .elements
+                    .iter()
+                    .find(|(i, _)| i == id)
+                    .map(|(_, e)| e.clone())
+                    .unwrap()
+            };
+            gst::Element::link_many([
+                &by_id("mp:appsrc_video"),
+                &by_id("mp:queue_video"),
+                &by_id("mp:video_out"),
+                &sink,
+            ])
+            .unwrap();
+
+            let ctx = gst::glib::MainContext::new();
+            let bus = main.bus().unwrap();
+            let handler = built.bus_message_handler.unwrap();
+            ctx.with_thread_default(|| {
+                bus.add_signal_watch();
+                handler(&bus, flow_id, EventBroadcaster::default());
+            })
+            .unwrap();
+
+            let key = MediaPlayerKey {
+                flow_id,
+                block_id: "mp".to_string(),
+            };
+            let player = MEDIA_PLAYER_REGISTRY.get(&key).unwrap();
+            let internal = player.internal_pipeline.read().unwrap().clone().unwrap();
+            Rig {
+                main,
+                player,
+                internal,
+                ctx,
+                key,
+            }
+        }
+
+        /// Dispatch what is pending on the rig's context until `done`, or fail.
+        fn run_until(&self, what: &str, done: impl Fn() -> bool) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !done() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out: {} (flow {:?}, internal {:?})",
+                    what,
+                    self.main.state(gst::ClockTime::ZERO),
+                    self.internal.state(gst::ClockTime::ZERO)
+                );
+                if !self.ctx.iteration(false) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+
+        /// Start the flow and wait until the player follows it to PLAYING.
+        fn start_flow(&self) {
+            self.main.set_state(gst::State::Playing).unwrap();
+            let _ = self.main.state(gst::ClockTime::from_seconds(5));
+            self.run_until("the internal pipeline plays", || {
+                self.internal.current_state() == gst::State::Playing
+            });
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            MEDIA_PLAYER_REGISTRY.unregister(&self.key);
+            let _ = self.main.set_state(gst::State::Null);
+            if let Some(bus) = self.main.bus() {
+                bus.remove_signal_watch();
+            }
+        }
+    }
+
+    /// `frames` of raw video at 25 fps in Matroska, so no encoder or decoder
+    /// is needed: matroskamux and videotestsrc are in gstreamer1.0-plugins-good
+    /// and -base, installed in CI.
+    fn write_clip(dir: &std::path::Path, name: &str, frames: u32) -> String {
+        let _ = gst::init();
+        let path = dir.join(name);
+        let writer = gst::parse::launch(&format!(
+            "videotestsrc num-buffers={} ! video/x-raw,format=I420,width=64,height=48,framerate=25/1 \
+             ! matroskamux ! filesink name=out",
+            frames
+        ))
+        .unwrap();
+        writer
+            .downcast_ref::<gst::Bin>()
+            .and_then(|bin| bin.by_name("out"))
+            .unwrap()
+            .set_property("location", &path);
+        writer.set_state(gst::State::Playing).unwrap();
+        writer
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(gst::ClockTime::from_seconds(20), &[gst::MessageType::Eos])
+            .expect("writing the clip finishes");
+        writer.set_state(gst::State::Null).unwrap();
+        super::super::file_uri(&path)
+    }
+
+    /// A playlist jump before the flow plays used to start the internal
+    /// pipeline then and there, on its own clock and base time, and the
+    /// flow's PLAYING handler leaves a pipeline that already plays alone. It
+    /// then ran on the wrong clock for good, so the bridge's running times
+    /// meant nothing in the flow.
+    #[test]
+    fn a_jump_before_the_flow_plays_still_runs_on_the_flows_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let clips = [
+            write_clip(dir.path(), "a.mkv", 250),
+            write_clip(dir.path(), "b.mkv", 250),
+        ];
+        let rig = Rig::new(&clips);
+
+        rig.player.goto(1).unwrap();
+        rig.start_flow();
+
+        assert_eq!(
+            rig.internal.clock(),
+            rig.main.clock(),
+            "the internal pipeline does not run on the flow's clock"
+        );
+        assert_eq!(
+            rig.internal.base_time(),
+            rig.main.base_time(),
+            "the internal pipeline does not run on the flow's base time"
+        );
+    }
+
+    /// A pause the user asked for before the flow plays must hold when it
+    /// does: the flow's PLAYING handler used to start the player regardless.
+    #[test]
+    fn a_pause_before_the_flow_plays_holds_when_it_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let clips = [write_clip(dir.path(), "a.mkv", 250)];
+        let rig = Rig::new(&clips);
+
+        rig.player.goto(0).unwrap();
+        rig.player.pause().unwrap();
+        rig.main.set_state(gst::State::Playing).unwrap();
+        let _ = rig.main.state(gst::ClockTime::from_seconds(5));
+        // Deliver the flow's state changes to the player's handler.
+        while rig.ctx.iteration(false) {}
+
+        assert_ne!(
+            rig.internal.current_state(),
+            gst::State::Playing,
+            "the flow starting overrode the user's pause"
+        );
+        assert_ne!(rig.internal.pending_state(), gst::State::Playing);
     }
 }
