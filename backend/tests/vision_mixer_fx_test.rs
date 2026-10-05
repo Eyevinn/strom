@@ -306,13 +306,22 @@ async fn wipe_between_letterboxed_sources_animates() {
             PV::String("video/x-raw,width=1280,height=546,framerate=30/1".into()),
         )],
     ));
+    // Every PGM frame reaches the observer: the appsink holds a few frames
+    // and then pushes back instead of dropping. With `drop=true` the observer
+    // only ever sees the newest frame, and on a slow software-GL runner the
+    // mixer can render the whole mid-wipe stretch while one frame is being
+    // scanned, so a wipe that animated looks like a hard switch. Holding the
+    // mixer back costs nothing here: it is live, but every timestamp in the
+    // wipe (pad keyframes, the shader's latched start, PGM frames) is in
+    // stream time, so a mixer running behind the wall clock still renders the
+    // same frames.
     flow.elements.push(elem(
         "pgmsink",
         "appsink",
         vec![
             ("sync", PV::Bool(false)),
-            ("max-buffers", PV::UInt(1)),
-            ("drop", PV::Bool(true)),
+            ("max-buffers", PV::UInt(4)),
+            ("drop", PV::Bool(false)),
         ],
     ));
     for (from, to) in [
@@ -346,9 +355,6 @@ async fn wipe_between_letterboxed_sources_animates() {
     .expect("GPU vision mixer pipeline builds");
     manager.start().expect("GPU vision mixer pipeline starts");
 
-    // Let caps probes settle so pads get their aspect-fitted rects.
-    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
-
     let appsink = manager
         .pipeline()
         .by_name("pgmsink")
@@ -373,12 +379,9 @@ async fn wipe_between_letterboxed_sources_animates() {
         };
         // Sample every STRIDE-th pixel rather than all of them. These are flat
         // colour fields, so the fractions are unchanged, but the scan runs in a
-        // sixteenth of the time — and this loop runs unoptimised under `cargo
-        // test`, between two pulls from an appsink set to `max-buffers=1
-        // drop=true`. A slow scan there is not merely slow: the wipe being
-        // measured lasts two seconds, and a scan that outlasts it makes the
-        // observer skip from the frame before the wipe to the frame after it and
-        // conclude the wipe never animated.
+        // sixteenth of the time. This loop runs unoptimised under `cargo test`
+        // for every PGM frame, and the appsink holds the mixer back while it
+        // runs (see the appsink above), so a slow scan slows the whole test.
         const STRIDE: usize = 4;
         let mut white = 0u64;
         let mut red = 0u64;
@@ -407,14 +410,20 @@ async fn wipe_between_letterboxed_sources_animates() {
     // frame to exist. A cold software-GL CI runner takes many seconds to reach
     // steady state (GL context creation + llvmpipe shader JIT), and the frames it
     // emits on the way there are black — the compositor is running before the
-    // source pads have delivered anything. The fixed settle sleep above is not a
-    // guarantee, so poll for the picture itself rather than asserting on whichever
-    // frame happens to arrive first.
+    // source pads have delivered anything. The appsink holds the mixer back, so
+    // no wall-clock sleep would let this settle; poll for the picture itself
+    // rather than asserting on whichever frame happens to arrive first. The
+    // take aspect-fits both pads from their stored caps, so also wait until
+    // the mixer knows both sources' sizes.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let (w0, r0) = loop {
         if let Some(s) = appsink.try_pull_sample(gstreamer::ClockTime::from_mseconds(500)) {
             let f = fractions_of(&s);
-            if f.0 > 0.5 {
+            let sizes_known = manager
+                .vision_mixer_input_resolutions(LETTERBOX_BLOCK_ID, 2)
+                .iter()
+                .all(Option::is_some);
+            if f.0 > 0.5 && sizes_known {
                 break f;
             }
             assert!(
@@ -436,18 +445,24 @@ async fn wipe_between_letterboxed_sources_animates() {
     // Watch a wipe to completion: pull every PGM frame, record whether any
     // frame showed a substantial amount of BOTH sources (the wipe animated
     // rather than hard-switching), and stop once the picture settles on the
-    // incoming source. Watching the whole window instead of sampling at
-    // fixed wall-clock offsets keeps the test honest on slow runners, where
-    // a single "mid-wipe" sample can land after the wipe already finished.
-    let observe_wipe = |incoming_is_red: bool| -> (bool, f64, f64) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // incoming source. The appsink does not drop frames (see above), so a
+    // wipe that animated cannot slip between two observed frames, however
+    // slowly the runner renders or scans. A hard-switch regression never
+    // sets `saw_both` and runs out the deadline instead, which then fails the
+    // animation assert below. The trace of observed frames goes into that
+    // failure message.
+    let observe_wipe = |incoming_is_red: bool| -> (bool, f64, f64, Vec<String>) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let mut saw_both = false;
         let mut last = (0.0, 0.0);
+        let mut trace = Vec::new();
         while std::time::Instant::now() < deadline {
             let Some(s) = appsink.try_pull_sample(gstreamer::ClockTime::from_mseconds(500)) else {
                 continue;
             };
             let f = fractions_of(&s);
+            let pts = s.buffer().and_then(|b| b.pts());
+            trace.push(format!("{}: w={:.2} r={:.2}", pts.display(), f.0, f.1));
             if f.0 > 0.10 && f.1 > 0.10 {
                 saw_both = true;
             }
@@ -457,14 +472,17 @@ async fn wipe_between_letterboxed_sources_animates() {
             } else {
                 (f.0, f.1)
             };
-            // Settled on the incoming source after animating — done. (A
-            // hard-switch regression never sets saw_both and runs out the
-            // deadline, failing the animation assert below.)
             if saw_both && incoming > 0.5 && outgoing < 0.05 {
                 break;
             }
+            // A hard switch settles without ever showing both sources; once
+            // the incoming source has held the picture for well over the
+            // wipe's length in stream time, nothing more is coming.
+            if trace.len() > 300 {
+                break;
+            }
         }
-        (saw_both, last.0, last.1)
+        (saw_both, last.0, last.1, trace)
     };
 
     // --- classic orientation: 2.40:1 -> 2.34:1 (outgoing does not cover) ---
@@ -477,7 +495,7 @@ async fn wipe_between_letterboxed_sources_animates() {
     manager
         .update_vision_mixer_after_take(LETTERBOX_BLOCK_ID, Some(1), Some(0), 2)
         .expect("after take 0->1");
-    let (animated, w_end, r_end) = observe_wipe(true);
+    let (animated, w_end, r_end, trace) = observe_wipe(true);
     eprintln!(
         "classic wipe: animated={} end white={:.2} red={:.2}",
         animated, w_end, r_end
@@ -490,7 +508,8 @@ async fn wipe_between_letterboxed_sources_animates() {
     );
     assert!(
         animated,
-        "classic wipe should animate (no frame showed both sources)"
+        "classic wipe should animate (no frame showed both sources), frames: {:?}",
+        trace
     );
 
     // --- inverted orientation: 2.34:1 -> 2.40:1 (outgoing covers) ---
@@ -500,7 +519,7 @@ async fn wipe_between_letterboxed_sources_animates() {
     manager
         .update_vision_mixer_after_take(LETTERBOX_BLOCK_ID, Some(0), Some(1), 2)
         .expect("after take 1->0");
-    let (animated2, w_end2, r_end2) = observe_wipe(false);
+    let (animated2, w_end2, r_end2, trace2) = observe_wipe(false);
     eprintln!(
         "inverted wipe: animated={} end white={:.2} red={:.2}",
         animated2, w_end2, r_end2
@@ -543,7 +562,8 @@ async fn wipe_between_letterboxed_sources_animates() {
     );
     assert!(
         animated2,
-        "inverted wipe should animate (no frame showed both sources)"
+        "inverted wipe should animate (no frame showed both sources), frames: {:?}",
+        trace2
     );
 
     manager.stop().expect("stop");

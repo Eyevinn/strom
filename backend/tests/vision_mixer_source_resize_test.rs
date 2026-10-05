@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use strom::blocks::BlockRegistry;
 use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
-use strom_types::{Flow, PropertyValue as PV};
+use strom_types::{Flow, PropertyValue as PV, StromEvent};
 use tempfile::NamedTempFile;
 
 /// A take index for `trigger_transition`, which takes `usize` on main and
@@ -205,6 +205,24 @@ fn wait_for_pgm_by(
     );
 }
 
+/// The pipeline errors broadcast so far. The bus watch dispatches from the
+/// main loop thread, so give it a moment to deliver an error posted just now.
+fn posted_errors(rx: &mut tokio::sync::broadcast::Receiver<StromEvent>) -> Vec<String> {
+    use tokio::sync::broadcast::error::TryRecvError;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let mut errors = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok(StromEvent::PipelineError { error, source, .. }) => {
+                errors.push(format!("{}: {error}", source.unwrap_or_default()))
+            }
+            Ok(_) | Err(TryRecvError::Lagged(_)) => {}
+            Err(_) => break,
+        }
+    }
+    errors
+}
+
 /// A running GPU vision mixer flow and the glib main loop its geometry
 /// refresh needs: the mixer re-fits a pad's rect from an idle callback on the
 /// default main context, which only runs while a main loop does. The server
@@ -226,7 +244,8 @@ impl Running {
         };
         let registry_file = NamedTempFile::new().unwrap();
         let registry = BlockRegistry::new(registry_file.path());
-        let events = EventBroadcaster::with_capacity(10);
+        let events = EventBroadcaster::with_capacity(64);
+        let mut posted = events.subscribe();
         let mut manager = PipelineManager::new(
             &flow,
             events,
@@ -238,7 +257,16 @@ impl Running {
             std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         )
         .expect("build GPU vision mixer pipeline");
-        manager.start().expect("start GPU vision mixer pipeline");
+        if let Err(e) = manager.start() {
+            // A start that fails (rather than times out) means an element
+            // posted an error during PAUSED -> PLAYING. The bus watch logs it
+            // and broadcasts it as an event, but tests run without a log
+            // subscriber, so name it in the failure.
+            panic!(
+                "start GPU vision mixer pipeline: {e:?}; errors posted: {:?}",
+                posted_errors(&mut posted)
+            );
+        }
         let appsink = manager
             .pipeline()
             .by_name("pgmsink")
