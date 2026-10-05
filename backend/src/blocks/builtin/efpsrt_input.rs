@@ -1176,6 +1176,60 @@ mod tests {
         enum_value.nick().to_string()
     }
 
+    /// An empty or blank `data_stream_ids` means "fill the tracks in arrival
+    /// order", not a list with one unparsable entry. Guards the input block
+    /// building with the property left empty, which it is by default.
+    #[test]
+    fn data_stream_ids_empty_or_blank_leaves_every_track_unpinned() {
+        for value in [None, Some(""), Some("  ")] {
+            assert_eq!(
+                parse_data_stream_ids(value, 2).expect("an empty list must parse"),
+                vec![None, None],
+                "data_stream_ids={:?}",
+                value
+            );
+        }
+        assert_eq!(
+            parse_data_stream_ids(Some(""), 0).expect("an empty list must parse"),
+            Vec::<Option<u8>>::new()
+        );
+    }
+
+    #[test]
+    fn data_stream_ids_pins_one_stream_per_track() {
+        assert_eq!(
+            parse_data_stream_ids(Some("3"), 1).expect("one stream for one track"),
+            vec![Some(3)]
+        );
+        assert_eq!(
+            parse_data_stream_ids(Some(" 5 , 7 "), 2).expect("whitespace around entries"),
+            vec![Some(5), Some(7)]
+        );
+    }
+
+    #[test]
+    fn data_stream_ids_rejects_bad_lists() {
+        for (value, tracks) in [
+            ("1,2", 1),  // more streams than tracks
+            ("1", 2),    // fewer streams than tracks
+            ("0", 1),    // stream 0 is reserved
+            ("4,4", 2),  // listed twice
+            ("x", 1),    // not a number
+            ("256", 1),  // out of range
+            ("1,,2", 3), // an empty entry inside a list
+        ] {
+            assert!(
+                matches!(
+                    parse_data_stream_ids(Some(value), tracks),
+                    Err(BlockBuildError::InvalidProperty(_))
+                ),
+                "data_stream_ids={:?} with {} track(s) must be rejected",
+                value,
+                tracks
+            );
+        }
+    }
+
     #[test]
     fn normalize_segment_is_applied_to_demux() {
         init_gst();

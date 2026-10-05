@@ -30,8 +30,10 @@ use strom::blocks::builtin::efpsrt_input::EfpSrtInputBuilder;
 use strom::blocks::{BlockBuildContext, BlockBuildResult, BlockBuilder};
 use strom_types::PropertyValue;
 
-/// Elements this test needs beyond core GStreamer. All are in
-/// `gstreamer1.0-plugins-base`/`-good`/`-bad`, which CI installs.
+/// Elements this test needs. `efpmux` and `efpdemux` come from the
+/// `gst-plugin-efp` crate, linked into Strom and registered statically by
+/// `init()`, not from a system package. The rest are core GStreamer or in
+/// `gstreamer1.0-plugins-base`/`-bad`, which CI installs.
 const REQUIRED: &[&str] = &[
     "efpmux",
     "efpdemux",
