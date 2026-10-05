@@ -246,12 +246,7 @@ impl ApiClient {
             return Err(ApiError::Http(status, text));
         }
 
-        #[derive(serde::Deserialize)]
-        struct DynamicPadsResponse {
-            pads: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
-        }
-
-        let response: DynamicPadsResponse = response
+        let response: strom_types::api::DynamicPadsResponse = response
             .json()
             .await
             .map_err(|e| ApiError::Decode(e.to_string()))?;

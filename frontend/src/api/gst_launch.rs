@@ -1,5 +1,3 @@
-use serde::Serialize;
-
 use super::*;
 
 impl ApiClient {
@@ -16,12 +14,9 @@ impl ApiClient {
         let url = format!("{}/gst-launch/parse", self.base_url);
         info!("Parsing gst-launch pipeline via API: POST {}", url);
 
-        #[derive(Serialize)]
-        struct ParseRequest<'a> {
-            pipeline: &'a str,
-        }
-
-        let request = ParseRequest { pipeline };
+        let request = strom_types::api::ParseGstLaunchRequest {
+            pipeline: pipeline.to_string(),
+        };
 
         let response = self
             .with_auth(self.client.post(&url).json(&request))
@@ -66,13 +61,10 @@ impl ApiClient {
         let url = format!("{}/gst-launch/export", self.base_url);
         info!("Exporting to gst-launch syntax via API: POST {}", url);
 
-        #[derive(Serialize)]
-        struct ExportRequest<'a> {
-            elements: &'a [strom_types::Element],
-            links: &'a [strom_types::element::Link],
-        }
-
-        let request = ExportRequest { elements, links };
+        let request = strom_types::api::ExportGstLaunchRequest {
+            elements: elements.to_vec(),
+            links: links.to_vec(),
+        };
 
         let response = self
             .with_auth(self.client.post(&url).json(&request))

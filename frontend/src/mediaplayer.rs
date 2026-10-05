@@ -236,7 +236,7 @@ pub fn calculate_compact_height() -> f32 {
 /// Render a compact media player widget (for graph nodes).
 ///
 /// Returns a tuple of (action, seek_position) if user interacted with controls.
-/// Action can be: "play", "pause", "prev", "next", "seek", or "playlist".
+/// Action can be: "play", "pause", "previous", "next", "seek", or "playlist".
 pub fn show_compact(ui: &mut Ui, player_data: &MediaPlayerData) -> Option<(String, Option<u64>)> {
     // Show current file name (if any), truncated with hover for full path
     if let Some(ref file) = player_data.current_file {
