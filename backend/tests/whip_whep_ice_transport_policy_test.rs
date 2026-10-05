@@ -122,8 +122,6 @@ const WEBRTC_ELEMENTS: &[&str] = &["whipsink", "whipclientsink", "whepsrc", "whe
 /// Register the `gst-plugins-rs` elements, then check `required`.
 fn webrtc_elements_available(required: &[&str]) -> bool {
     common::init_webrtc_plugins();
-    // WHEP Output reads the video convert mode at build time.
-    strom::gpu::detect_gpu_capabilities();
     common::plugins_available(required)
 }
 

@@ -1618,13 +1618,6 @@ fn build_whepserversink(
     // the first queue's caps probe drives it — all video inputs must share the
     // same codec.
     if has_video {
-        // Plain `videoconvert`, not the convert mode's pick: the bridge converts
-        // after any `gldownload`, so the frames are in system memory and
-        // `autovideoconvert` has no GPU path to win. Behind `gldownload` it
-        // also crashed or hung in 9 of 20 runs on GStreamer 1.24.2 (Ubuntu
-        // 24.04, surfaceless EGL), where `videoconvert` ran 20 of 20.
-        let convert_factory = "videoconvert";
-
         // Shared latch: only the first input that sees a caps event sets video-caps.
         let video_caps_set = Arc::new(AtomicBool::new(false));
 
@@ -1797,12 +1790,10 @@ fn build_whepserversink(
             // The producer cannot decide either for us (a GL vision mixer
             // feeding a GL consumer must stay on the GPU), and neither can
             // this block at build time, since the upstream decoder is
-            // autoplugged. So both decisions are made from the negotiated caps.
-            video_input_bridge::install_video_input_bridge(
-                &queue_src_pad,
-                &video_queue_id,
-                convert_factory,
-            );
+            // autoplugged. So both decisions are made from the negotiated caps,
+            // again on every caps change: a Media Player moving on to another
+            // file can switch memory type or format mid-stream.
+            video_input_bridge::install_video_input_bridge(&queue_src_pad, &video_queue_id);
 
             // Video link: queue -> whepserversink (video_<slot> request pad)
             internal_links.push((
@@ -2564,8 +2555,6 @@ mod tests {
     fn init_gst() {
         let _ = gst::init();
         let _ = gstrswebrtc::plugin_register_static();
-        // The video path picks its converter from the detected mode.
-        crate::gpu::detect_gpu_capabilities();
     }
 
     /// Build a property map. `legacy_mode` populates the old "mode" enum
