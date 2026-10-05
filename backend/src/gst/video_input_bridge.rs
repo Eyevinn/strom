@@ -113,6 +113,11 @@ fn plan(
     let takes = gst::Caps::new_empty_simple(SINK_TAKES);
     let gl = video_adapt::decide(caps, Consumer::Accepts(&takes), &available)?;
     let on_cpu = video_adapt::decide(caps, Consumer::SystemMemory, &available);
+    if matches!(on_cpu, Err(Refusal::NotRawVideo { .. })) {
+        // Encoded video goes to the sink as it is: there is no memory to
+        // download and no format to convert.
+        return Ok(Plan::default());
+    }
     let in_system_memory = matches!(&on_cpu, Ok(adapters) if adapters.is_empty());
 
     let memory = if !gl.is_empty() {
@@ -370,6 +375,22 @@ fn post_refusal(pad: &gst::Pad, caps: &gst::CapsRef, name_prefix: &str, refusal:
                 "Arrived: {}. WHEP Output takes raw video in system, GL or CUDA memory, \
                  a GPU memory its encoders accept, or encoded video. Feed it from a \
                  source that outputs one of those, or encode with builtin.videoenc first.",
+                caps
+            ]
+        ),
+        // `plan` passes encoded video through, so this is not reached today;
+        // it is answered all the same rather than left to a wildcard.
+        Refusal::NotRawVideo { media } => gst::element_error!(
+            element,
+            gst::CoreError::Negotiation,
+            (
+                "{}: WHEP Output receives {} on its video input",
+                name_prefix,
+                media
+            ),
+            [
+                "Arrived: {}. WHEP Output takes raw or encoded video on this input. \
+                 Connect a video output to it.",
                 caps
             ]
         ),
