@@ -294,6 +294,8 @@ fn build_media_player(
         switch_generation: std::sync::atomic::AtomicU64::new(0),
         source_ready: std::sync::Mutex::new(true),
         source_ready_cv: std::sync::Condvar::new(),
+        starting: std::sync::Mutex::new(None),
+        starting_cv: std::sync::Condvar::new(),
         video_slots: MediaPlayerState::free_slots(num_video_slots),
         audio_slots: MediaPlayerState::free_slots(num_audio_slots),
         decode,
