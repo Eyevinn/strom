@@ -315,7 +315,20 @@ pub struct ActivityStamp {
     epoch: Instant,
     first_ms: AtomicU64,
     last_ms: AtomicU64,
+    /// The first buffer of the current run: one that came after a gap of at
+    /// least `ARRIVAL_PAUSE`, or the very first. Only meaningful on a stamp
+    /// with a single writer; see `since_run_start`.
+    run_ms: AtomicU64,
 }
+
+/// A gap in a stream at least this long ends a run of buffers; see
+/// `ActivityStamp::since_run_start`.
+///
+/// Longer than the gaps a stream that is still flowing leaves: Opus DTX sends
+/// a packet every 400 ms through silence. A stream sparser than this (video
+/// below about 1 fps) starts a new run on every buffer, so it is never judged
+/// on its own; see `medium_stall`.
+pub(crate) const ARRIVAL_PAUSE: Duration = Duration::from_secs(1);
 
 impl ActivityStamp {
     pub fn new(epoch: Instant) -> Self {
@@ -323,13 +336,21 @@ impl ActivityStamp {
             epoch,
             first_ms: AtomicU64::new(0),
             last_ms: AtomicU64::new(0),
+            run_ms: AtomicU64::new(0),
         }
     }
 
     /// Stamp a buffer. Per-buffer hot path; see the type comment.
     pub fn touch(&self) {
         let ms = (self.epoch.elapsed().as_millis() as u64).max(1);
+        // A load and a store, not a swap: no read-modify-write on the hot
+        // path. Two writers can race here and misplace `run_ms`, which only
+        // stamps with a single writer are ever asked about.
+        let previous = self.last_ms.load(Ordering::Relaxed);
         self.last_ms.store(ms, Ordering::Relaxed);
+        if previous == 0 || ms.saturating_sub(previous) >= ARRIVAL_PAUSE.as_millis() as u64 {
+            self.run_ms.store(ms, Ordering::Relaxed);
+        }
         // Only the very first buffer writes `first_ms`; every later one pays a
         // relaxed load and a branch that predicts perfectly.
         if self.first_ms.load(Ordering::Relaxed) == 0 {
@@ -344,6 +365,7 @@ impl ActivityStamp {
     pub fn reset(&self) {
         self.first_ms.store(0, Ordering::Relaxed);
         self.last_ms.store(0, Ordering::Relaxed);
+        self.run_ms.store(0, Ordering::Relaxed);
     }
 
     /// Milliseconds from `epoch` at which the most recent buffer went past,
@@ -364,6 +386,14 @@ impl ActivityStamp {
         self.since(self.first_ms.load(Ordering::Relaxed))
     }
 
+    /// Time since the first buffer of the current run, `None` if none has
+    /// gone past. A stream that pauses for `ARRIVAL_PAUSE` or longer starts a
+    /// new run when it resumes, so this says how long it has been flowing
+    /// without a break.
+    pub fn since_run_start(&self) -> Option<Duration> {
+        self.since(self.run_ms.load(Ordering::Relaxed))
+    }
+
     /// A stamp that already looks as if its first buffer went past
     /// `since_first` ago and its most recent one `since_last` ago, so a test can
     /// stand a session up mid-life without waiting out real seconds.
@@ -377,6 +407,7 @@ impl ActivityStamp {
         // yet", exactly as `touch` does.
         let stamp = Self::new(Instant::now() - since_first - Duration::from_millis(1));
         stamp.first_ms.store(1, Ordering::Relaxed);
+        stamp.run_ms.store(1, Ordering::Relaxed);
         stamp.last_ms.store(
             (since_first - since_last).as_millis() as u64 + 1,
             Ordering::Relaxed,
@@ -459,14 +490,23 @@ pub(crate) const VIDEO_REPAIR_WINDOW: Duration = Duration::from_secs(10);
 ///
 /// `None` when the medium never arrived (the publisher did not negotiate it,
 /// or has not sent it yet) or only started arriving less than `DECODE_GRACE`
-/// ago. Otherwise the time from the last buffer out of the chain to the last
-/// one in, so a medium the publisher stopped sending (a camera turned off, a
-/// screen share of a window nobody touches) stops adding to it.
+/// ago. Otherwise the time from the first buffer in that nothing came out
+/// after to the last one in:
+/// - A medium the publisher stopped sending (a camera turned off, a screen
+///   share of a window nobody touches) stops adding to it.
+/// - A medium that resumes after a pause of `ARRIVAL_PAUSE` or more is judged
+///   from when it resumed, not from the last buffer that came out before the
+///   pause: the pause was the publisher's, not a stall.
+/// - Output stamped before this medium's grace ran out (the previous
+///   occupant's trailing frames) is no older than the grace.
 fn medium_stall(ingress: &ActivityStamp, output: &ActivityStamp) -> Option<Duration> {
     let ingress_idle = ingress.since_last()?;
     let past_grace = ingress.since_first()?.checked_sub(DECODE_GRACE)?;
-    let output_idle = output.since_last().unwrap_or(past_grace);
-    Some(output_idle.saturating_sub(ingress_idle))
+    let run = ingress.since_run_start()?;
+    let output_idle = output
+        .since_last()
+        .map_or(past_grace, |idle| idle.min(past_grace));
+    Some(output_idle.min(run).saturating_sub(ingress_idle))
 }
 
 /// Which of a session's two stamps stopped moving; see `SessionActivity::idle`.
@@ -484,6 +524,10 @@ pub enum StallSide {
     /// The suspect is inside the flow: a decoder that never got its keyframe, or
     /// a consumer downstream of the slot's tee blocking and backing pressure up.
     Output,
+    /// One medium is still arriving, but nothing of it is leaving the slot's
+    /// chain, whatever the other medium does. Named so a reap of a seat whose
+    /// audio still played says it was the video.
+    MediumOutput(&'static str),
 }
 
 impl std::fmt::Display for StallSide {
@@ -493,6 +537,10 @@ impl std::fmt::Display for StallSide {
             StallSide::Output => {
                 f.write_str("still receiving, nothing usable leaving the slot's chain")
             }
+            StallSide::MediumOutput(medium) => write!(
+                f,
+                "still receiving {medium}, none of it leaving the slot's chain"
+            ),
         }
     }
 }
@@ -690,14 +738,24 @@ impl SessionActivity {
         // A medium that keeps arriving while nothing of it comes out is a stall
         // inside the flow, whatever the other medium is doing.
         let media = [
-            (&self.ingress_audio, &self.output.audio, Duration::ZERO),
-            (&self.ingress_video, &self.output.video, VIDEO_REPAIR_WINDOW),
+            (
+                &self.ingress_audio,
+                &self.output.audio,
+                Duration::ZERO,
+                "audio",
+            ),
+            (
+                &self.ingress_video,
+                &self.output.video,
+                VIDEO_REPAIR_WINDOW,
+                "video",
+            ),
         ];
-        for (ingress, output, allowance) in media {
+        for (ingress, output, allowance, medium) in media {
             if let Some(stall) = medium_stall(ingress, output) {
                 let counted = stall.saturating_sub(allowance);
                 if counted > idle.0 {
-                    idle = (counted, StallSide::Output);
+                    idle = (counted, StallSide::MediumOutput(medium));
                 }
             }
         }
@@ -2212,10 +2270,63 @@ mod tests {
         let (idle, side) = activity.idle().expect("past the decode grace");
         stop.store(true, Ordering::SeqCst);
 
-        assert_eq!(side, StallSide::Output, "the publisher is still sending");
+        assert_eq!(
+            side,
+            StallSide::MediumOutput("video"),
+            "the publisher is still sending, and it is the video that stalled"
+        );
         assert!(
             idle >= Duration::from_secs(19) && idle <= Duration::from_secs(21),
             "idle must be the freeze less the repair window: {idle:?}"
+        );
+    }
+
+    /// A camera turned back on after a long pause, or a mic unmuted: the
+    /// medium resumes while the last buffer of it out of the slot is as old as
+    /// the pause. The pause was the publisher's, so it must not count as a
+    /// stall, not even for the moment before the decoder's first new frame.
+    #[test]
+    fn a_medium_that_resumes_after_a_pause_is_not_stalled() {
+        let paused = VIDEO_REPAIR_WINDOW + Duration::from_secs(30);
+        for medium in ["audio", "video"] {
+            let ingress = ActivityStamp::backdated(RUNNING_FOR, paused);
+            ingress.touch();
+            let output = ActivityStamp::backdated(RUNNING_FOR, paused);
+            assert_eq!(
+                medium_stall(&ingress, &output).map(|stall| stall < ARRIVAL_PAUSE),
+                Some(true),
+                "{medium} that just resumed after {paused:?} is not stalled"
+            );
+        }
+    }
+
+    /// A medium that keeps arriving without a break is judged from the last
+    /// buffer out, however long ago that was.
+    #[test]
+    fn a_medium_arriving_without_a_break_is_judged_from_its_last_output() {
+        let ingress = ActivityStamp::backdated(RUNNING_FOR, Duration::ZERO);
+        ingress.touch();
+        let output = ActivityStamp::backdated(RUNNING_FOR, Duration::from_secs(20));
+        let stall = medium_stall(&ingress, &output).expect("past the grace");
+        assert!(
+            stall >= Duration::from_secs(19) && stall <= Duration::from_secs(21),
+            "{stall:?}"
+        );
+    }
+
+    /// Output stamped long before this medium first arrived (the previous
+    /// occupant's trailing frames, or the other half of a session that sent
+    /// audio first) is not this medium's stall. It counts from the end of the
+    /// medium's own decode grace at the most.
+    #[test]
+    fn output_older_than_the_mediums_grace_is_not_held_against_it() {
+        let started = DECODE_GRACE + Duration::from_secs(1);
+        let ingress = ActivityStamp::backdated(started, Duration::ZERO);
+        let output = ActivityStamp::backdated(RUNNING_FOR, RUNNING_FOR / 2);
+        let stall = medium_stall(&ingress, &output).expect("past the grace");
+        assert!(
+            stall <= Duration::from_millis(1100),
+            "a medium {started:?} old cannot have stalled for {stall:?}"
         );
     }
 

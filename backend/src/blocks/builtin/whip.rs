@@ -2911,6 +2911,68 @@ mod tests {
             .expect("pipeline to NULL");
     }
 
+    /// Each medium is judged on its own stamp, so each tee has to write its
+    /// own: audio wired to the video stamp would leave the audio stamp still
+    /// and reap every audio-bearing seat once its grace ran out.
+    #[test]
+    fn audio_out_of_the_slot_stamps_the_audio_stamp_only() {
+        let _ = gst::init();
+
+        let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+        let result = build_whipserversrc(
+            "whip-audio-stamp-test",
+            &props(&[
+                ("mode", PropertyValue::String("audio_video".to_string())),
+                ("decode", PropertyValue::Bool(true)),
+                ("max_sessions", PropertyValue::Int(1)),
+            ]),
+            &ctx,
+        )
+        .expect("build_whipserversrc failed");
+
+        let configs = ctx.take_whip_endpoint_configs();
+        let config = &configs[0].1;
+        let output = config.slot_output[0].clone();
+        let appsrc = config.slot_audio_appsrcs[0].clone();
+        let pipeline = assemble(&result);
+        assert_eq!(config.allocate_slot("test-session"), Some(0));
+
+        appsrc.set_caps(Some(
+            &gst::Caps::builder("audio/x-raw")
+                .field("format", "S16LE")
+                .field("layout", "interleaved")
+                .field("rate", 48000i32)
+                .field("channels", 2i32)
+                .build(),
+        ));
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline to PLAYING");
+
+        // 20 ms of stereo S16 at 48 kHz per buffer.
+        for index in 0..25u64 {
+            let mut buffer = gst::Buffer::with_size(960 * 4).expect("allocate audio");
+            {
+                let buffer = buffer.get_mut().unwrap();
+                buffer.set_pts(gst::ClockTime::from_mseconds(index * 20));
+                buffer.set_duration(gst::ClockTime::from_mseconds(20));
+            }
+            appsrc.push_buffer(buffer).expect("push audio");
+        }
+        wait_for("audio to stamp the slot's audio stamp", || {
+            output.audio.last() != 0
+        });
+        assert_eq!(
+            output.video.last(),
+            0,
+            "audio coming out of the slot must not stamp its video"
+        );
+
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline to NULL");
+    }
+
     /// The block property must reach the `WhipEndpointConfig` handed to the
     /// session manager, which is the value `create_whipserversrc_for_session`
     /// applies to `whipserversrc`.
