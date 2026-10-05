@@ -150,36 +150,40 @@ impl BlockBuilder for MixerBuilder {
         // runs every sink at its largest reported latency.
         //
         // It is still the slack for a late buffer from those buses. Once any
-        // channel input stops delivering, Main produces at its own deadline, so
-        // a hiccup on Main's thread longer than this leaves a gap in Monitor.
-        // 30 ms rode out 25 ms hiccups in tests; 10 ms did not survive 15 ms.
-        // Capped at the block latency: more than that would stack again.
+        // channel input stops delivering, a bus produces at its own deadline,
+        // so a hiccup on Main's thread longer than this leaves a gap in
+        // Monitor, and one on a group's thread a gap in Main. 30 ms rode out
+        // 25 ms hiccups in tests; 10 ms did not survive 15 ms. Capped at the
+        // block latency: more than that would stack again.
         let internal_bus_latency_ms = get_u64_prop(
             properties,
             "internal_bus_latency",
             DEFAULT_INTERNAL_BUS_LATENCY_MS,
         )
         .min(latency_ms);
+        // A bus that also takes channel taps straight from the channels keeps
+        // the block's slack for them as long as another bus feeds it too: it
+        // then reports that bus's latency plus its own. A bus fed only by
+        // channels keeps the block latency.
+        let bus_latency_ms = |sums_buses: bool| {
+            if sums_buses {
+                internal_bus_latency_ms
+            } else {
+                latency_ms
+            }
+        };
 
         // ========================================================================
         // Create main audiomixer
         // ========================================================================
         let mixer_id = format!("{}:audiomixer", instance_id);
-        // Every channel feeds Main and every group bus; each group bus feeds
-        // Main too. The groups are the first to sum the channels, so they keep
-        // the block's slack. Main then reports a group's latency plus its own,
-        // and the channels' direct taps into Main get both as slack, so Main
-        // only needs the internal bus latency, like Solo. Without groups Main
-        // takes only channels and keeps the block latency.
-        let main_latency_ms = if num_groups > 0 {
-            internal_bus_latency_ms
-        } else {
-            latency_ms
-        };
+        // Every channel feeds Main and every group bus, and each group bus
+        // feeds Main too. The groups are the first to sum the channels, so they
+        // keep the block latency.
         let audiomixer = make_audiomixer(
             &mixer_id,
             force_live,
-            main_latency_ms,
+            bus_latency_ms(num_groups > 0),
             min_upstream_latency_ms,
         )?;
         elements.push((mixer_id.clone(), audiomixer.clone()));
@@ -335,18 +339,12 @@ impl BlockBuilder for MixerBuilder {
         // are always the no-solo case — no need to inspect properties here.
         // ========================================================================
         let solo_mixer_id = format!("{}:solo_mixer", instance_id);
-        // Solo also takes each channel's PFL/AFL tap straight from the channel.
-        // Those taps keep the block's slack as long as an aux or group bus
-        // feeds solo too: solo then reports that bus's latency plus its own.
-        let solo_latency_ms = if num_aux_buses + num_groups > 0 {
-            internal_bus_latency_ms
-        } else {
-            latency_ms
-        };
+        // Solo takes each channel's PFL/AFL tap, and the AFL taps of the aux
+        // and group buses.
         let solo_mixer = make_audiomixer(
             &solo_mixer_id,
             force_live,
-            solo_latency_ms,
+            bus_latency_ms(num_aux_buses + num_groups > 0),
             min_upstream_latency_ms,
         )?;
         elements.push((solo_mixer_id.clone(), solo_mixer));

@@ -154,7 +154,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
     exposed_properties.push(ExposedProperty {
         name: "latency".to_string(),
         label: "Latency".to_string(),
-        description: "Mixer aggregator latency in milliseconds. Time to wait for slower inputs before producing output. Construction-time only.".to_string(),
+        description: "Aggregator latency in milliseconds of the buses that sum channel inputs: aux buses, groups, and Main when the mixer has no groups. Time to wait for slower inputs before producing output. Construction-time only.".to_string(),
         property_type: PropertyType::UInt,
         default_value: Some(PropertyValue::UInt(DEFAULT_LATENCY_MS)),
         mapping: PropertyMapping {
