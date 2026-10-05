@@ -1176,6 +1176,48 @@ mod tests {
         enum_value.nick().to_string()
     }
 
+    /// An empty or blank `data_stream_ids` means "fill the tracks in arrival
+    /// order", not a list with one unparsable entry. The build-level guard is
+    /// `input_block_builds_with_an_empty_data_stream_ids_list` in the EFP/SRT
+    /// round-trip test.
+    #[test]
+    fn data_stream_ids_empty_or_blank_leaves_every_track_unpinned() {
+        for value in [None, Some(""), Some("  ")] {
+            assert_eq!(
+                parse_data_stream_ids(value, 2).expect("an empty list must parse"),
+                vec![None, None],
+                "data_stream_ids={:?}",
+                value
+            );
+        }
+        assert_eq!(
+            parse_data_stream_ids(Some(""), 0).expect("an empty list must parse"),
+            Vec::<Option<u8>>::new()
+        );
+    }
+
+    #[test]
+    fn data_stream_ids_pins_one_stream_per_track() {
+        assert_eq!(
+            parse_data_stream_ids(Some("3"), 1).expect("one stream for one track"),
+            vec![Some(3)]
+        );
+        assert_eq!(
+            parse_data_stream_ids(Some(" 5 , 7 "), 2).expect("whitespace around entries"),
+            vec![Some(5), Some(7)]
+        );
+    }
+
+    /// An empty entry inside a list is an error, not skipped. Two tracks, so
+    /// skipping it would leave a list of the right length and build.
+    #[test]
+    fn data_stream_ids_rejects_an_empty_entry() {
+        assert!(matches!(
+            parse_data_stream_ids(Some("1,,2"), 2),
+            Err(BlockBuildError::InvalidProperty(_))
+        ));
+    }
+
     #[test]
     fn normalize_segment_is_applied_to_demux() {
         init_gst();
