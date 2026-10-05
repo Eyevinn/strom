@@ -12,7 +12,12 @@
 //! - a live recording stopped mid-stream is finished, at its full length;
 //! - a recording that cannot finish (its file write never returns) does not hold
 //!   the stop past the drain timeout;
-//! - a recorder that never had data does not delay the stop at all.
+//! - a recorder that never had data does not delay the stop at all, and one
+//!   stopped before its first video frame, or before its first audio track's
+//!   first buffer when it records no video, does not get a file;
+//! - buffers already queued in front of the muxer when the stop comes are in the
+//!   file;
+//! - one track that has stopped carrying data does not hold the others' EOS.
 
 pub mod common;
 
@@ -104,12 +109,15 @@ fn recorder_flow(name: &str, fed: bool) -> strom_types::Flow {
             ),
             // zerolatency: x264's default lookahead holds about a second of
             // video in the encoder, where no recorder EOS can reach it.
+            // ultrafast: a slower preset falls behind real time on a loaded
+            // runner, and the frames it holds then are not in the file either.
             element(
                 "venc",
                 "x264enc",
                 &[
                     ("key-int-max", PropertyValue::UInt(10)),
                     ("tune", PropertyValue::String("zerolatency".into())),
+                    ("speed-preset", PropertyValue::String("ultrafast".into())),
                 ],
             ),
             element(
@@ -143,7 +151,13 @@ fn recorder_flow(name: &str, fed: bool) -> strom_types::Flow {
 }
 
 fn start(flow: &strom_types::Flow, media_root: &Path, registry: &BlockRegistry) -> PipelineManager {
-    let mut manager = PipelineManager::new(
+    let mut manager = build(flow, media_root, registry);
+    manager.start().expect("pipeline starts");
+    manager
+}
+
+fn build(flow: &strom_types::Flow, media_root: &Path, registry: &BlockRegistry) -> PipelineManager {
+    PipelineManager::new(
         flow,
         EventBroadcaster::with_capacity(16),
         registry,
@@ -153,9 +167,7 @@ fn start(flow: &strom_types::Flow, media_root: &Path, registry: &BlockRegistry) 
         media_root.to_path_buf(),
         Arc::new(Mutex::new(HashMap::new())),
     )
-    .expect("PipelineManager builds");
-    manager.start().expect("pipeline starts");
-    manager
+    .expect("PipelineManager builds")
 }
 
 /// Wait up to `timeout` for the first buffer on the recorder's video input, and
@@ -463,4 +475,257 @@ async fn a_split_in_progress_is_not_taken_for_the_end() {
             mdat_size(file)
         );
     }
+}
+
+/// A video track's caps unlock the recording sink before its first frame, and
+/// splitmuxsink holds the audio that arrives meanwhile until that frame comes. A
+/// video encoder with lookahead spends a quarter of a second in that state at the
+/// start of every flow. A stop then must leave no file: EOS before the first
+/// frame makes splitmuxsink open a file only to end it, and an empty mp4 with its
+/// moov reservation does not play.
+///
+/// The video encoder's buffers are dropped, so its caps get through and nothing
+/// else does; audio keeps reaching the recorder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_before_the_first_video_frame_leaves_no_file() {
+    if !common::plugins_available(REQUIRED) {
+        return;
+    }
+    let media_root = tempfile::tempdir().expect("tempdir");
+    let registry_file = tempfile::NamedTempFile::new().expect("registry file");
+    let registry = BlockRegistry::new(registry_file.path());
+
+    let mut manager = build(
+        &recorder_flow("no_video", true),
+        media_root.path(),
+        &registry,
+    );
+    manager
+        .find_gst_element("venc")
+        .and_then(|e| e.static_pad("src"))
+        .expect("video encoder src pad")
+        .add_probe(
+            gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+            |_, _| gst::PadProbeReturn::Drop,
+        );
+    manager.start().expect("pipeline starts");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        !manager
+            .find_gst_element("rec:splitmuxsink")
+            .expect("splitmuxsink in the pipeline")
+            .is_locked_state(),
+        "the caps did not unlock the recording sink, so this test proves nothing"
+    );
+
+    let took = timed_stop(manager);
+    assert!(
+        took < Duration::from_secs(2),
+        "stopping a recorder before its first video frame took {:?}",
+        took
+    );
+    assert!(
+        recordings(media_root.path()).is_empty(),
+        "a recorder stopped before its first video frame left {:?}",
+        recordings(media_root.path())
+    );
+}
+
+/// Without a video track, splitmuxsink opens the file on the first buffer of the
+/// first audio track, and holds the other audio tracks until then. A stop before
+/// that must leave no file, however much the other tracks have carried.
+///
+/// Audio track 0 is connected to a source that never sends data; track 1 runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_before_the_first_audio_track_has_data_leaves_no_file() {
+    if !common::plugins_available(REQUIRED) {
+        return;
+    }
+    let media_root = tempfile::tempdir().expect("tempdir");
+    let registry_file = tempfile::NamedTempFile::new().expect("registry file");
+    let registry = BlockRegistry::new(registry_file.path());
+
+    let mut flow = recorder_flow("audio_only", false);
+    flow.elements.clear();
+    flow.links.clear();
+    let block = &mut flow.blocks[0];
+    block
+        .properties
+        .insert("num_video_tracks".into(), PropertyValue::UInt(0));
+    block
+        .properties
+        .insert("num_audio_tracks".into(), PropertyValue::UInt(2));
+    block.computed_external_pads = RecorderBuilder.get_external_pads(&block.properties);
+    flow.elements.extend([
+        element(
+            "silent",
+            "appsrc",
+            &[
+                ("is-live", PropertyValue::Bool(true)),
+                ("format", PropertyValue::String("time".into())),
+            ],
+        ),
+        element(
+            "asrc",
+            "audiotestsrc",
+            &[("is-live", PropertyValue::Bool(true))],
+        ),
+        element("aenc", "avenc_aac", &[]),
+    ]);
+    flow.links.extend([
+        link("silent:src", "rec:audio_in_0"),
+        link("asrc:src", "aenc:sink"),
+        link("aenc:src", "rec:audio_in_1"),
+    ]);
+
+    let manager = start(&flow, media_root.path(), &registry);
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    manager
+        .find_gst_element("rec:audio_input_1")
+        .and_then(|e| e.static_pad("src"))
+        .expect("recorder audio input 1")
+        .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            let _ = tx.try_send(());
+            gst::PadProbeReturn::Remove
+        });
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("no audio reached the recorder on track 1");
+    std::thread::sleep(Duration::from_secs(1));
+
+    let took = timed_stop(manager);
+    assert!(
+        took < Duration::from_secs(2),
+        "stopping a recorder before its first audio track had data took {:?}",
+        took
+    );
+    assert!(
+        recordings(media_root.path()).is_empty(),
+        "a recorder stopped before its first audio track had data left {:?}",
+        recordings(media_root.path())
+    );
+}
+
+/// Buffers waiting in the queue in front of the muxer when the stop comes are
+/// part of the recording. The stop's EOS goes in behind them; sent straight to
+/// the muxer's pad it would overtake them, and they would be lost.
+///
+/// The video queue is slowed to under the frame rate so it holds about a second
+/// of video at the stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffers_queued_at_the_stop_are_recorded() {
+    if !common::plugins_available(REQUIRED) {
+        return;
+    }
+    let media_root = tempfile::tempdir().expect("tempdir");
+    let registry_file = tempfile::NamedTempFile::new().expect("registry file");
+    let registry = BlockRegistry::new(registry_file.path());
+
+    let manager = start(
+        &recorder_flow("backlog", true),
+        media_root.path(),
+        &registry,
+    );
+    first_video_buffer(&manager, Duration::from_secs(10));
+
+    let splitmuxsink = manager
+        .find_gst_element("rec:splitmuxsink")
+        .expect("splitmuxsink in the pipeline")
+        .clone();
+    let video_queue_src = splitmuxsink
+        .static_pad("video")
+        .and_then(|pad| pad.peer())
+        .expect("the video queue is linked to splitmuxsink");
+    video_queue_src.add_probe(gst::PadProbeType::BUFFER, |_, _| {
+        std::thread::sleep(Duration::from_millis(50));
+        gst::PadProbeReturn::Ok
+    });
+
+    // The last video buffer to reach the recorder, as a PTS.
+    let last_in = Arc::new(Mutex::new(gst::ClockTime::ZERO));
+    let first_in: Arc<Mutex<Option<gst::ClockTime>>> = Arc::new(Mutex::new(None));
+    {
+        let last_in = Arc::clone(&last_in);
+        let first_in = Arc::clone(&first_in);
+        manager
+            .find_gst_element("rec:video_input_0")
+            .and_then(|e| e.static_pad("src"))
+            .expect("recorder video input")
+            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                if let Some(pts) = info.buffer().and_then(|b| b.pts()) {
+                    first_in.lock().unwrap().get_or_insert(pts);
+                    *last_in.lock().unwrap() = pts;
+                }
+                gst::PadProbeReturn::Ok
+            });
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    let queued = video_queue_src
+        .parent_element()
+        .expect("queue")
+        .property::<u32>("current-level-buffers");
+    assert!(
+        queued >= 10,
+        "only {} video buffers were queued at the stop, so this test proves nothing",
+        queued
+    );
+    let took = timed_stop(manager);
+    let reached = *last_in.lock().unwrap()
+        - first_in
+            .lock()
+            .unwrap()
+            .expect("video reached the recorder");
+
+    let files = recordings(media_root.path());
+    assert_eq!(files.len(), 1, "expected one recording, got {:?}", files);
+    let (video, _) = track_ends(&files[0]);
+    assert!(
+        video + Duration::from_millis(300) >= Duration::from_nanos(reached.nseconds()),
+        "{} video buffers were queued at the stop and the file stops at {:?}, \
+         but video reached the recorder up to {:?} past where it was watched from (stop took {:?})",
+        queued,
+        video,
+        reached,
+        took
+    );
+}
+
+/// One track that has stopped carrying data does not hold the stop. splitmuxsink
+/// parks the other track's thread until the quiet one catches up, holding that
+/// pad's stream lock, and a stop EOS sent on the same thread would wait behind
+/// it. Each track's EOS goes in on its own thread.
+///
+/// Audio stops reaching the recorder 2 s in and the stop comes 2 s later, before
+/// the recorder's 5 s stall watchdog would end the quiet track itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_with_one_track_quiet_is_not_held_up() {
+    if !common::plugins_available(REQUIRED) {
+        return;
+    }
+    let media_root = tempfile::tempdir().expect("tempdir");
+    let registry_file = tempfile::NamedTempFile::new().expect("registry file");
+    let registry = BlockRegistry::new(registry_file.path());
+
+    let manager = start(&recorder_flow("quiet", true), media_root.path(), &registry);
+    first_video_buffer(&manager, Duration::from_secs(10));
+    std::thread::sleep(Duration::from_secs(2));
+    manager
+        .find_gst_element("rec:audio_input_0")
+        .and_then(|e| e.static_pad("src"))
+        .expect("recorder audio input")
+        .add_probe(gst::PadProbeType::BUFFER, |_, _| gst::PadProbeReturn::Drop);
+    std::thread::sleep(Duration::from_secs(2));
+
+    let took = timed_stop(manager);
+    assert!(
+        took < Duration::from_secs(2),
+        "stop with one quiet track took {:?}",
+        took
+    );
+    let files = recordings(media_root.path());
+    assert_eq!(files.len(), 1, "expected one recording, got {:?}", files);
+    assert!(
+        mdat_size(&files[0]).is_some_and(|size| size > 0),
+        "the stop did not finish the file: mdat size {:?}",
+        mdat_size(&files[0])
+    );
 }

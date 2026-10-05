@@ -1679,6 +1679,23 @@ fn muxer_inputs_ended(mux: &gst::Element) -> bool {
     })
 }
 
+/// A recorder track as the stop drain sees it: the splitmuxsink pad it was given,
+/// once it has one, and what the muxer has taken from it.
+type DrainTrack = (Arc<OnceLock<String>>, Arc<TrackActivity>);
+
+/// Whether splitmuxsink has a file open. It opens one on the first buffer of its
+/// reference track and holds whatever the other tracks bring until then. The
+/// reference is the first pad requested from it: the primary `video` pad when a
+/// video track is connected, otherwise the first connected audio track. Tracks
+/// here are in request order, video first, and only a requested track has a pad
+/// name.
+fn file_opened(tracks: &[DrainTrack]) -> bool {
+    tracks
+        .iter()
+        .find(|(pad, _)| pad.get().is_some())
+        .is_some_and(|(_, activity)| activity.last_muxed_ms.load(Ordering::Relaxed) != 0)
+}
+
 /// Finish the recording's current file on flow stop.
 ///
 /// Going to NULL drops whatever has not reached the muxer, and the muxer never
@@ -1696,13 +1713,20 @@ fn muxer_inputs_ended(mux: &gst::Element) -> bool {
 ///
 /// Done is EOS leaving the muxer once `muxer_inputs_ended`, so a split still in
 /// progress at stop does not read as the end.
+///
+/// Nothing is sent until splitmuxsink has a file open (`file_opened`). Before
+/// that, EOS would make it open one just to end it: an mp4 with its moov
+/// reservation and nothing in it, which does not play. A track's caps unlock the
+/// sink before its first buffer, so an unlocked sink is not enough: a video
+/// encoder with lookahead spends a quarter of a second there while audio is
+/// already arriving.
 fn drain_recording(
     instance_id: &str,
     splitmuxsink: &gst::Element,
     mux: &gst::Element,
+    tracks: &[DrainTrack],
 ) -> mpsc::Receiver<()> {
-    // Still locked: no track ever carried data, so no file was opened.
-    if splitmuxsink.is_locked_state() {
+    if !file_opened(tracks) {
         return nothing_to_drain();
     }
     let Some(mux_src) = mux.static_pad("src") else {
@@ -2063,18 +2087,6 @@ impl BlockBuilder for RecorderBuilder {
             splitmuxsink.set_property("use-robust-muxing", true);
         }
 
-        let drain_splitmuxsink = splitmuxsink.downgrade();
-        let drain_mux = mux.downgrade();
-        let drain_instance_id = instance_id.to_string();
-        ctx.register_stop_drain(Box::new(move || {
-            match (drain_splitmuxsink.upgrade(), drain_mux.upgrade()) {
-                (Some(splitmuxsink), Some(mux)) => {
-                    drain_recording(&drain_instance_id, &splitmuxsink, &mux)
-                }
-                _ => nothing_to_drain(),
-            }
-        }));
-
         let mut elements: Vec<(String, gst::Element)> =
             vec![(sink_id.clone(), splitmuxsink.clone())];
 
@@ -2414,6 +2426,24 @@ impl BlockBuilder for RecorderBuilder {
             "Recorder {}: built with {} video track(s), {} audio track(s), container: {}",
             instance_id, num_video_tracks, num_audio_tracks, container
         );
+
+        let drain_splitmuxsink = splitmuxsink.downgrade();
+        let drain_mux = mux.downgrade();
+        let drain_instance_id = instance_id.to_string();
+        let drain_tracks: Vec<DrainTrack> = video_pad_cells
+            .iter()
+            .zip(video_activities.iter())
+            .chain(audio_pad_cells.iter().zip(audio_activities.iter()))
+            .map(|(pad, activity)| (Arc::clone(pad), Arc::clone(activity)))
+            .collect();
+        ctx.register_stop_drain(Box::new(move || {
+            match (drain_splitmuxsink.upgrade(), drain_mux.upgrade()) {
+                (Some(splitmuxsink), Some(mux)) => {
+                    drain_recording(&drain_instance_id, &splitmuxsink, &mux, &drain_tracks)
+                }
+                _ => nothing_to_drain(),
+            }
+        }));
 
         // Request the sink pads — see the note above the input chains.
         {
