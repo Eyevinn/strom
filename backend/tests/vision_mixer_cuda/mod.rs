@@ -9,11 +9,8 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use strom::blocks::BlockRegistry;
-use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
 use strom_types::{Flow, PropertyValue as PV};
-use tempfile::NamedTempFile;
 
 /// The GL elements the GPU Vision Mixer is built from. Their absence is a CI
 /// regression, not a reason to skip: a skip would pass green guarding nothing.
@@ -76,23 +73,10 @@ pub fn player_into_mixer(name: &str, mixer_input: &str) -> Flow {
     flow
 }
 
-pub fn build_manager(flow: &Flow) -> (PipelineManager, NamedTempFile) {
+pub fn build_manager(flow: &Flow) -> PipelineManager {
     gst::init().unwrap();
     strom::gpu::detect_gpu_capabilities();
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
-    let manager = PipelineManager::new(
-        flow,
-        EventBroadcaster::with_capacity(10),
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        std::env::temp_dir(),
-        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-    )
-    .expect("GPU vision mixer flow should build");
-    (manager, temp_file)
+    crate::common::manager::build(flow).expect("GPU vision mixer flow should build")
 }
 
 pub fn element(pipeline: &gst::Pipeline, name: &str) -> gst::Element {

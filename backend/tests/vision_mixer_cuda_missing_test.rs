@@ -28,7 +28,7 @@ async fn cuda_memory_without_cudadownload_fails_the_flow_with_a_reason() {
         return;
     }
 
-    let (manager, _registry) = build_manager(&player_into_mixer("cuda_no_adapter", "video_in_0"));
+    let manager = build_manager(&player_into_mixer("cuda_no_adapter", "video_in_0"));
     let pipeline = manager.pipeline();
     let queue = format!("{}:queue_0", MIXER);
     let errors = push_from_player(pipeline, CUDA_CAPS).errors;

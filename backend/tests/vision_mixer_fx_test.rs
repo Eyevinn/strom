@@ -10,12 +10,8 @@
 pub mod common;
 
 use std::collections::HashMap;
-use strom::blocks::BlockRegistry;
-use strom::events::EventBroadcaster;
-use strom::gst::pipeline::PipelineManager;
 use strom_types::effects::{EffectTarget, VideoEffect};
 use strom_types::Flow;
-use tempfile::NamedTempFile;
 
 const BLOCK_ID: &str = "vmfx";
 /// The vision mixer's overlay state is process-global and keyed by block ID,
@@ -59,26 +55,12 @@ async fn vision_mixer_fx_engine_end_to_end() {
         return;
     }
 
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
-    let events = EventBroadcaster::with_capacity(10);
-    let media_path = std::env::temp_dir();
-
     let flow = build_vm_flow();
 
-    let mut manager = PipelineManager::new(
-        &flow,
-        events,
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        media_path,
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-    )
-    // GL was proven to render above, so a build or start failure here is the
-    // GPU mixer breaking, not the environment. It must fail, not skip.
-    .expect("GPU vision mixer pipeline builds");
+    let mut manager = common::manager::build(&flow)
+        // GL was proven to render above, so a build or start failure here is the
+        // GPU mixer breaking, not the environment. It must fail, not skip.
+        .expect("GPU vision mixer pipeline builds");
 
     manager.start().expect("GPU vision mixer pipeline starts");
 
@@ -341,22 +323,9 @@ async fn wipe_between_letterboxed_sources_animates() {
         std::thread::spawn(move || ml.run())
     };
 
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
-    let events = EventBroadcaster::with_capacity(10);
-
-    let mut manager = PipelineManager::new(
-        &flow,
-        events,
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        std::env::temp_dir(),
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-    )
-    // GL was proven to render above: fail, do not skip.
-    .expect("GPU vision mixer pipeline builds");
+    let mut manager = common::manager::build(&flow)
+        // GL was proven to render above: fail, do not skip.
+        .expect("GPU vision mixer pipeline builds");
     manager.start().expect("GPU vision mixer pipeline starts");
 
     // Let caps probes settle so pads get their aspect-fitted rects.
