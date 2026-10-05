@@ -1,0 +1,106 @@
+name: sccache maintenance
+
+# sccache never evicts from an S3 backend, so the bucket grows until the MinIO
+# drive is full. MinIO then keeps serving reads and health checks but rejects
+# every write, and the compile cache silently stops working (2026-08 to
+# 2026-10). This job keeps the bucket bounded with the CI service account, so no
+# MinIO root access is needed:
+#   1. set a lifecycle rule expiring objects after EXPIRE_DAYS, if the account
+#      is allowed to (MinIO then expires objects on its own);
+#   2. delete objects older than EXPIRE_DAYS directly, which works on a full
+#      drive and whether or not step 1 was permitted.
+# An object a build still hits is not refreshed by the hit, so it is deleted at
+# EXPIRE_DAYS and written again by the next miss.
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/sccache-maintenance.yml]
+
+concurrency:
+  group: sccache-maintenance
+  cancel-in-progress: false
+
+env:
+  SCCACHE_BUCKET: sccache
+  SCCACHE_ENDPOINT: https://olivedev-rustcache.minio-minio.auto.prod-se.osaas.io
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+  EXPIRE_DAYS: 14
+
+jobs:
+  prune:
+    name: Prune sccache bucket
+    # Forks and dependabot get no credentials.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Set lifecycle expiry
+        continue-on-error: true
+        run: |
+          cat > lifecycle.json <<EOF
+          {"Rules":[{"ID":"expire-${EXPIRE_DAYS}d","Status":"Enabled","Filter":{"Prefix":""},"Expiration":{"Days":${EXPIRE_DAYS}}}]}
+          EOF
+          if aws --endpoint-url "$SCCACHE_ENDPOINT" s3api put-bucket-lifecycle-configuration \
+               --bucket "$SCCACHE_BUCKET" --lifecycle-configuration file://lifecycle.json; then
+            aws --endpoint-url "$SCCACHE_ENDPOINT" s3api get-bucket-lifecycle-configuration --bucket "$SCCACHE_BUCKET"
+          else
+            echo "::warning::service account may not set a lifecycle rule; relying on the scheduled prune below"
+            exit 1
+          fi
+
+      - name: Delete objects older than EXPIRE_DAYS
+        shell: python
+        run: |
+          import datetime, json, os, subprocess
+
+          endpoint = os.environ["SCCACHE_ENDPOINT"]
+          bucket = os.environ["SCCACHE_BUCKET"]
+          cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+              days=int(os.environ["EXPIRE_DAYS"]))
+
+          def s3api(*args):
+              out = subprocess.run(["aws", "--endpoint-url", endpoint, "s3api", *args],
+                                   check=True, capture_output=True, text=True).stdout
+              return json.loads(out) if out.strip() else {}
+
+          kept = deleted = kept_bytes = deleted_bytes = 0
+          token = None
+          while True:
+              page = s3api("list-objects-v2", "--bucket", bucket, "--max-keys", "1000",
+                           *(["--continuation-token", token] if token else []))
+              old = []
+              for obj in page.get("Contents", []):
+                  modified = datetime.datetime.fromisoformat(obj["LastModified"].replace("Z", "+00:00"))
+                  if modified < cutoff:
+                      old.append({"Key": obj["Key"]})
+                      deleted_bytes += obj["Size"]
+                  else:
+                      kept += 1
+                      kept_bytes += obj["Size"]
+              if old:
+                  result = s3api("delete-objects", "--bucket", bucket, "--delete",
+                                 json.dumps({"Objects": old, "Quiet": True}))
+                  errors = result.get("Errors", [])
+                  if errors:
+                      raise SystemExit(f"delete failed for {len(errors)} objects, first: {errors[0]}")
+                  deleted += len(old)
+              # Deleting does not disturb a continuation token, so keep paging.
+              token = page.get("NextContinuationToken")
+              if not token:
+                  break
+
+          gib = 1024 ** 3
+          print(f"deleted {deleted} objects ({deleted_bytes / gib:.1f} GiB), "
+                f"kept {kept} ({kept_bytes / gib:.1f} GiB), cutoff {cutoff:%Y-%m-%d}")
+
+      - name: Check the bucket accepts writes
+        run: |
+          echo "maintenance $GITHUB_RUN_ID" > probe.txt
+          aws --endpoint-url "$SCCACHE_ENDPOINT" s3api put-object \
+            --bucket "$SCCACHE_BUCKET" --key preflight/probe --body probe.txt
