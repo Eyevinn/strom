@@ -18,6 +18,16 @@ on:
         default: both
         options: [both, macos, windows, none]
 
+# One run per ref. A new push to a pull request cancels the run it replaces.
+# On main a running build is left to finish, and only the newest waiting push
+# is kept: without this a burst of merges stacked up one 45-minute macOS +
+# Windows pair per commit and starved pull requests of runners. A label event
+# gets a group of its own per label, so adding `ci:macos` neither cancels the
+# push run it labels nor is cancelled by an unrelated label added after it.
+concurrency:
+  group: ci-${{ github.ref }}${{ github.event.action == 'labeled' && format('-label-{0}', github.event.label.name) || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -33,6 +43,14 @@ env:
   SCCACHE_ENDPOINT: https://olivedev-rustcache.minio-minio.auto.prod-se.osaas.io
   SCCACHE_REGION: us-east-1
   SCCACHE_S3_USE_SSL: "true"
+  # Pinned: the action installs the latest release when left unset. sccache
+  # 0.18.0 (opendal 0.58) fails every write to this MinIO backend: 0 hits and
+  # one write error per miss in every job, so nothing has been cached since it
+  # shipped and macOS/Windows rebuild the whole tree on each run. 0.17.0 wrote
+  # 1436 of 1437 misses on a cold run.
+  # Check the "Cache write errors" line in the post-sccache stats before
+  # bumping.
+  SCCACHE_RELEASE: v0.17.0
   AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
   # RUSTC_WRAPPER is NOT set globally. sccache treats its configured cache as a
@@ -67,16 +85,25 @@ jobs:
             echo "cache_ok=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # list-objects-v2 needs only s3:ListBucket, which the scoped service
-          # account has. NoSuchBucket / unreachable endpoint -> non-zero -> off.
-          if timeout 25 aws --endpoint-url "$SCCACHE_ENDPOINT" --region "$SCCACHE_REGION" \
-               --cli-connect-timeout 8 --cli-read-timeout 8 \
-               s3api list-objects-v2 --bucket "$SCCACHE_BUCKET" --max-keys 1 >/dev/null 2>&1; then
-            echo "sccache backend reachable - cache enabled"
-            echo "cache_ok=true" >> "$GITHUB_OUTPUT"
-          else
+          # Probe a write, not just a list: a backend that serves reads but
+          # rejects writes looks healthy to list-objects-v2 while sccache
+          # records a write error on every miss and the cache never fills.
+          # A fixed key is overwritten each run, so no delete is needed.
+          # NoSuchBucket / unreachable endpoint / denied write -> off.
+          probe() {
+            timeout 25 aws --endpoint-url "$SCCACHE_ENDPOINT" --region "$SCCACHE_REGION" \
+              --cli-connect-timeout 8 --cli-read-timeout 8 s3api "$@" >/dev/null 2>&1
+          }
+          echo "preflight $GITHUB_RUN_ID" > probe.txt
+          if ! probe list-objects-v2 --bucket "$SCCACHE_BUCKET" --max-keys 1; then
             echo "::warning::sccache backend unreachable or bucket missing - building WITHOUT compile cache"
             echo "cache_ok=false" >> "$GITHUB_OUTPUT"
+          elif ! probe put-object --bucket "$SCCACHE_BUCKET" --key preflight/probe --body probe.txt; then
+            echo "::warning::sccache backend rejects writes - building WITHOUT compile cache"
+            echo "cache_ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "sccache backend reachable and writable - cache enabled"
+            echo "cache_ok=true" >> "$GITHUB_OUTPUT"
           fi
   # Fast checks on Linux: fmt + clippy + test
   check-linux:
@@ -132,6 +159,8 @@ jobs:
       - name: Setup sccache
         if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: ${{ env.SCCACHE_RELEASE }}
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -199,6 +228,8 @@ jobs:
       - name: Setup sccache
         if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: ${{ env.SCCACHE_RELEASE }}
 
       - name: Run Clippy on frontend
         run: cargo clippy --package strom-frontend --target wasm32-unknown-unknown --all-features -- -D warnings
@@ -298,6 +329,8 @@ jobs:
       - name: Setup sccache
         if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: ${{ env.SCCACHE_RELEASE }}
 
       # Must NOT share a key with check-linux: rust-cache saves only once per
       # key and skips saving on a full-match restore. check-linux finishes
@@ -408,6 +441,8 @@ jobs:
       - name: Setup sccache
         if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: ${{ env.SCCACHE_RELEASE }}
 
       # save-if main: see check-linux.
       - name: Cache Rust dependencies
@@ -587,6 +622,8 @@ jobs:
       - name: Setup sccache
         if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: ${{ env.SCCACHE_RELEASE }}
 
       - name: Run Clippy
         run: |
@@ -689,6 +726,8 @@ jobs:
       - name: Setup sccache
         if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: ${{ env.SCCACHE_RELEASE }}
 
       - name: Run Clippy
         run: |
