@@ -23,50 +23,9 @@ fn idx<T: From<usize>>(i: usize) -> T {
     T::from(i)
 }
 
-/// Same probe as `vision_mixer_fx_test`: a trivial GL run must reach EOS.
-/// Having the GL plugins installed is not enough on headless runners.
-fn gl_environment_available() -> bool {
-    let Ok(pipeline) = gstreamer::parse::launch(
-        "gltestsrc num-buffers=3 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,framerate=30/1 ! fakesink sync=false",
-    ) else {
-        return false;
-    };
-    let Ok(pipeline) = pipeline.downcast::<gstreamer::Pipeline>() else {
-        return false;
-    };
-    if pipeline.set_state(gstreamer::State::Playing).is_err() {
-        return false;
-    }
-    let bus = pipeline.bus().expect("pipeline has a bus");
-    let ok = matches!(
-        bus.timed_pop_filtered(
-            gstreamer::ClockTime::from_seconds(20),
-            &[gstreamer::MessageType::Eos, gstreamer::MessageType::Error],
-        ),
-        Some(msg) if matches!(msg.view(), gstreamer::MessageView::Eos(_))
-    );
-    let _ = pipeline.set_state(gstreamer::State::Null);
-    ok
-}
-
-/// Skip unless GL works; `STROM_REQUIRE_GL=1` (set on the macOS CI job)
-/// turns the skip into a failure. Missing GL elements go through
-/// `common::gl_elements_available`, so they are not folded into "no context".
-fn gl_available_or_required() -> bool {
-    if !common::gl_elements_available(&["glvideomixerelement", "glshader", "gltestsrc"]) {
-        return false;
-    }
-    if gl_environment_available() {
-        return true;
-    }
-    assert!(
-        strom_types::env::var_opt("STROM_REQUIRE_GL").is_none(),
-        "STROM_REQUIRE_GL is set but no GL context could be created — this platform \
-         is supposed to render, so a skip here would hide a GL regression"
-    );
-    eprintln!("SKIP: GL environment unavailable (no context could be created)");
-    false
-}
+/// The GL elements a GPU vision mixer needs. `common::gl_available` skips or
+/// fails on a missing one, and on a host that cannot create a GL context.
+const GL_ELEMENTS: &[&str] = &["glvideomixerelement", "glshader", "gltestsrc"];
 
 fn elem(id: &str, ty: &str, props: Vec<(&str, PV)>) -> strom_types::Element {
     strom_types::Element {
@@ -357,8 +316,7 @@ impl Running {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_switched_to_portrait_is_pillarboxed() {
-    gstreamer::init().unwrap();
-    if !gl_available_or_required() {
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
     let running = Running::start(build_flow("vmresize", LANDSCAPE));
@@ -384,8 +342,7 @@ async fn source_switched_to_portrait_is_pillarboxed() {
 /// it must use the configured PGM size, not a default canvas.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_portrait_from_the_start_is_pillarboxed() {
-    gstreamer::init().unwrap();
-    if !gl_available_or_required() {
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
     let running = Running::start(build_flow("vmresize_first", PORTRAIT));
@@ -402,8 +359,7 @@ async fn source_portrait_from_the_start_is_pillarboxed() {
 /// streaming thread held up there must not leave the old shape in place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_switch_fits_when_caps_are_stored_late() {
-    gstreamer::init().unwrap();
-    if !gl_available_or_required() {
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
     let block_id = "vmresize_late";
@@ -439,8 +395,7 @@ async fn source_switch_fits_when_caps_are_stored_late() {
 /// and must be fitted in its new shape once the fade is over.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_resized_during_a_fade_is_fitted_after_it() {
-    gstreamer::init().unwrap();
-    if !gl_available_or_required() {
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
     let block_id = "vmresize_fade";
@@ -509,8 +464,7 @@ async fn source_resized_during_a_fade_is_fitted_after_it() {
 /// A source that changes shape during Fade to Black comes back fitted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_switched_during_ftb_is_pillarboxed_after_it() {
-    gstreamer::init().unwrap();
-    if !gl_available_or_required() {
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
     let block_id = "vmresize_ftb";
@@ -580,8 +534,7 @@ fn slow_down_mixer(running: &Running, block_id: &str) {
 /// time, both fades must still play out in full.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ftb_plays_out_on_a_slow_mixer() {
-    gstreamer::init().unwrap();
-    if !gl_available_or_required() {
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
     let block_id = "vmftb_slow";
@@ -609,8 +562,7 @@ async fn ftb_plays_out_on_a_slow_mixer() {
 /// FTB off pressed while FTB on is still fading out brings PGM fully back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ftb_off_during_the_fade_out_restores_pgm() {
-    gstreamer::init().unwrap();
-    if !gl_available_or_required() {
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
     let block_id = "vmftb_abort";
@@ -641,8 +593,7 @@ async fn ftb_off_during_the_fade_out_restores_pgm() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pip_crop_follows_a_source_resized_during_ftb() {
     use strom_types::vision_mixer::{PipTransforms, SourceCrop, Zone};
-    gstreamer::init().unwrap();
-    if !gl_available_or_required() {
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
     let block_id = "vmftb_pipcrop";

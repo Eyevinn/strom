@@ -6,10 +6,9 @@
 //! peer receives NV12 in system memory, through `gldownload` and a converter,
 //! with `videoconvert`, the converter the WHEP Output uses.
 //!
-//! It needs a GL context. On a Linux host with no display, which is CI, it
-//! asks for a surfaceless EGL context, which Mesa's software rasteriser
-//! provides. It is its own test binary because that choice has to be made in
-//! the environment before GStreamer creates a GL display.
+//! It needs a GL context. On a Linux host with no display, which is CI,
+//! `common::init_gl` asks for a surfaceless EGL context, which Mesa's software
+//! rasteriser provides.
 //!
 //! Not built on Windows. The Windows CI runner has no OpenGL driver that
 //! GStreamer can use ("No GL shader support available"), and there is no
@@ -17,10 +16,12 @@
 
 #![cfg(not(target_os = "windows"))]
 
+pub mod common;
+
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strom::gst::video_input_bridge::install_video_input_bridge;
 
@@ -28,73 +29,6 @@ const REQUIRED: [&str; 4] = ["gltestsrc", "gldownload", "videoconvert", "fakesin
 
 const GL_RGBA: &str =
     "video/x-raw(memory:GLMemory), format=RGBA, width=320, height=240, framerate=30/1";
-
-static INIT: Once = Once::new();
-
-fn init() {
-    INIT.call_once(|| {
-        // Set before any GL display exists. Every test enters through this
-        // `Once`, so no test thread reads the environment while it is written.
-        #[cfg(target_os = "linux")]
-        if std::env::var_os("DISPLAY").is_none()
-            && std::env::var_os("WAYLAND_DISPLAY").is_none()
-            && std::env::var_os("GST_GL_WINDOW").is_none()
-        {
-            std::env::set_var("GST_GL_PLATFORM", "egl");
-            std::env::set_var("GST_GL_WINDOW", "surfaceless");
-        }
-        gst::init().expect("gst init");
-    });
-}
-
-/// Skipping passes green and guards nothing, so CI sets
-/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure.
-fn skip(reason: &str) -> bool {
-    assert!(
-        strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
-        "STROM_REQUIRE_GST_PLUGINS is set but {}",
-        reason
-    );
-    eprintln!("SKIP: {}", reason);
-    true
-}
-
-/// True when the elements exist and a GL context can be created, probed with
-/// a pipeline that does not contain the bridge, so a bridge bug cannot pass
-/// for a missing GL environment.
-fn gl_available() -> bool {
-    let missing: Vec<&str> = REQUIRED
-        .iter()
-        .copied()
-        .filter(|e| gst::ElementFactory::find(e).is_none())
-        .collect();
-    if !missing.is_empty() {
-        return !skip(&format!(
-            "these elements are missing: {}",
-            missing.join(", ")
-        ));
-    }
-
-    let probe = gst::parse::launch(&format!("gltestsrc num-buffers=1 ! {} ! fakesink", GL_RGBA))
-        .expect("probe pipeline");
-    probe.set_state(gst::State::Playing).expect("probe play");
-    let error = probe
-        .bus()
-        .expect("bus")
-        .timed_pop_filtered(
-            gst::ClockTime::from_seconds(10),
-            &[gst::MessageType::Eos, gst::MessageType::Error],
-        )
-        .and_then(|msg| match msg.view() {
-            gst::MessageView::Error(e) => Some(e.error().to_string()),
-            _ => None,
-        });
-    probe.set_state(gst::State::Null).expect("probe null");
-    match error {
-        Some(e) => !skip(&format!("no GL context could be created ({})", e)),
-        None => true,
-    }
-}
 
 struct Outcome {
     format: String,
@@ -197,8 +131,7 @@ fn run(convert_factory: &str) -> Outcome {
 /// conversion every consumer converts RGBA for itself.
 #[test]
 fn gl_rgba_reaches_the_peer_as_system_memory_nv12() {
-    init();
-    if !gl_available() {
+    if !common::gl_available(&REQUIRED) {
         return;
     }
 

@@ -3,9 +3,9 @@
 //! Builds a real vision mixer flow on the GPU (OpenGL) backend, starts it,
 //! and exercises the FX surface: FX slot presence, applying looks (input +
 //! master), shader wipe takes and master-FX takes. Runs on software GL
-//! (llvmpipe) — skips when the environment cannot actually create a GL
-//! context (probed like `shader_validation_test`; merely having the GL
-//! plugins installed is not enough, as headless CI runners show).
+//! (llvmpipe, through a surfaceless EGL context on a headless Linux host) —
+//! skips when the environment cannot actually create a GL context, unless
+//! `STROM_REQUIRE_GL` is set (see `common::gl_available`).
 
 pub mod common;
 
@@ -22,68 +22,9 @@ const BLOCK_ID: &str = "vmfx";
 /// and the tests in this binary run concurrently, so each test needs its own.
 const LETTERBOX_BLOCK_ID: &str = "vmfx-letterbox";
 
-/// Probe whether this environment can actually render through GL: the GL
-/// plugins being installed is not enough — on headless CI runners the
-/// elements exist but no GL context can be created, and a GPU pipeline
-/// builds, starts and then silently never produces a frame. Same probe as
-/// `shader_validation_test`: a trivial shader-free GL run must reach EOS
-/// (no `glshader` in the probe — a shader compile bug must fail the test,
-/// not skip it).
-fn gl_environment_available() -> bool {
-    use gstreamer::prelude::*;
-    let Ok(pipeline) = gstreamer::parse::launch(
-        "gltestsrc num-buffers=3 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,framerate=30/1 ! fakesink sync=false",
-    ) else {
-        return false;
-    };
-    let Ok(pipeline) = pipeline.downcast::<gstreamer::Pipeline>() else {
-        return false;
-    };
-    if pipeline.set_state(gstreamer::State::Playing).is_err() {
-        return false;
-    }
-    let bus = pipeline.bus().expect("pipeline has a bus");
-    // 20 s budget: software GL context creation can be slow on loaded CI.
-    let ok = matches!(
-        bus.timed_pop_filtered(
-            gstreamer::ClockTime::from_seconds(20),
-            &[gstreamer::MessageType::Eos, gstreamer::MessageType::Error],
-        ),
-        Some(msg) if matches!(msg.view(), gstreamer::MessageView::Eos(_))
-    );
-    let _ = pipeline.set_state(gstreamer::State::Null);
-    ok
-}
-
-/// Skip unless GL actually works — but only where skipping is legitimate.
-///
-/// A headless Linux runner has the GL elements installed and still cannot create
-/// a context, so this test can only ever run where one exists. That makes the skip
-/// path the normal path on Linux, and a silent one: a real GL regression on a
-/// platform that *can* render would slip through as a green 0.05 s pass.
-///
-/// `STROM_REQUIRE_GL=1` turns the skip into a failure. CI sets it on the macOS job,
-/// which is the one platform whose runner renders, so that job cannot quietly stop
-/// exercising the FX engine.
-///
-/// Missing GL elements are a different failure: every CI job installs them, so
-/// they fail under `STROM_REQUIRE_GST_PLUGINS` like any other missing element,
-/// rather than being folded into "no GL context" where the Linux jobs skip.
-fn gl_available_or_required() -> bool {
-    if !common::gl_elements_available(&["glvideomixerelement", "glshader", "gltestsrc"]) {
-        return false;
-    }
-    if gl_environment_available() {
-        return true;
-    }
-    assert!(
-        strom_types::env::var_opt("STROM_REQUIRE_GL").is_none(),
-        "STROM_REQUIRE_GL is set but no GL context could be created — this platform \
-         is supposed to render, so a skip here would hide a GL regression"
-    );
-    eprintln!("SKIP: GL environment unavailable (no context could be created)");
-    false
-}
+/// The GL elements a GPU vision mixer needs. `common::gl_available` skips or
+/// fails on a missing one, and on a host that cannot create a GL context.
+const GL_ELEMENTS: &[&str] = &["glvideomixerelement", "glshader", "gltestsrc"];
 
 /// A flow with a single vision mixer block forced onto the GPU backend.
 /// Inputs are left unlinked — force-live compositors output regardless.
@@ -114,9 +55,7 @@ fn build_vm_flow() -> Flow {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn vision_mixer_fx_engine_end_to_end() {
-    gstreamer::init().unwrap();
-
-    if !gl_available_or_required() {
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
 
@@ -284,9 +223,7 @@ async fn vision_mixer_fx_engine_end_to_end() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wipe_between_letterboxed_sources_animates() {
     use gstreamer::prelude::*;
-    gstreamer::init().unwrap();
-
-    if !gl_available_or_required() {
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
 

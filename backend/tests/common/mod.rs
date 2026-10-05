@@ -79,3 +79,88 @@ pub fn init_webrtc_plugins() {
         gstrswebrtc::plugin_register_static().expect("register webrtc plugins");
     });
 }
+
+/// Initialise GStreamer for a GL test. On a Linux host with no display, which
+/// is CI, first ask for a surfaceless EGL context, which Mesa's software
+/// rasteriser provides. Other platforms keep their native GL (CGL on macOS).
+///
+/// The choice has to be in the environment before GStreamer creates a GL
+/// display, so call this before any GL element exists — [`gl_available`] does.
+/// Every GL test enters through this `Once`, so no test thread of the binary
+/// reads the environment while it is written.
+pub fn init_gl() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("DISPLAY").is_none()
+            && std::env::var_os("WAYLAND_DISPLAY").is_none()
+            && std::env::var_os("GST_GL_WINDOW").is_none()
+        {
+            std::env::set_var("GST_GL_PLATFORM", "egl");
+            std::env::set_var("GST_GL_WINDOW", "surfaceless");
+        }
+        gst::init().expect("GStreamer initialises");
+    });
+}
+
+/// Why no GL context can be created here, or `None` when one can. Probed with
+/// a trivial GL run that must reach EOS. It contains no `glshader` and none of
+/// the code under test, so a shader or bridge bug cannot pass for a missing GL
+/// environment.
+pub fn gl_context_error() -> Option<String> {
+    use gst::prelude::*;
+    init_gl();
+    let pipeline = match gst::parse::launch(
+        "gltestsrc num-buffers=3 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,framerate=30/1 ! fakesink sync=false",
+    ) {
+        Ok(p) => p,
+        Err(e) => return Some(format!("probe pipeline does not parse: {}", e)),
+    };
+    if let Err(e) = pipeline.set_state(gst::State::Playing) {
+        let _ = pipeline.set_state(gst::State::Null);
+        return Some(format!("probe pipeline does not start: {}", e));
+    }
+    let bus = pipeline.bus().expect("pipeline has a bus");
+    // 20 s budget: software GL context creation can be slow on loaded CI.
+    let error = match bus.timed_pop_filtered(
+        gst::ClockTime::from_seconds(20),
+        &[gst::MessageType::Eos, gst::MessageType::Error],
+    ) {
+        None => Some("timed out waiting for EOS".to_string()),
+        Some(msg) => match msg.view() {
+            gst::MessageView::Error(e) => {
+                Some(format!("{} ({})", e.error(), e.debug().unwrap_or_default()))
+            }
+            _ => None,
+        },
+    };
+    let _ = pipeline.set_state(gst::State::Null);
+    error
+}
+
+/// True when the GL elements in `required` exist and a GL context can be
+/// created. Otherwise skips, or fails: a missing element under
+/// `STROM_REQUIRE_GST_PLUGINS` or `STROM_REQUIRE_GL` (see
+/// [`gl_elements_available`]), no context under `STROM_REQUIRE_GL`.
+///
+/// CI sets `STROM_REQUIRE_GL` on every job whose runner can render (Linux
+/// through surfaceless EGL, macOS natively), so a GL regression there fails
+/// rather than skipping green.
+pub fn gl_available(required: &[&str]) -> bool {
+    init_gl();
+    if !gl_elements_available(required) {
+        return false;
+    }
+    let Some(error) = gl_context_error() else {
+        return true;
+    };
+    assert!(
+        strom_types::env::var_opt("STROM_REQUIRE_GL").is_none(),
+        "STROM_REQUIRE_GL is set but no GL context could be created ({}) — this \
+         platform is supposed to render, so a skip here would hide a GL regression",
+        error
+    );
+    eprintln!("SKIP: GL environment unavailable ({})", error);
+    false
+}
