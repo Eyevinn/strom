@@ -18,14 +18,15 @@ on:
         default: both
         options: [both, macos, windows, none]
 
-# One run per ref. A new push to a pull request cancels the run it replaces.
-# On main a running build is left to finish, and only the newest waiting push
-# is kept: without this a burst of merges stacked up one 45-minute macOS +
-# Windows pair per commit and starved pull requests of runners. A label event
-# gets a group of its own per label, so adding `ci:macos` neither cancels the
-# push run it labels nor is cancelled by an unrelated label added after it.
+# One run per ref, and the newest event wins on a pull request: a push or a
+# `ci:` label cancels the run in progress and starts a full one, so a PR never
+# builds macOS/Windows twice at once (a label run used to be left running on
+# the old commit next to the push run). On main a running build is left to
+# finish, and only the newest waiting push is kept: without this a burst of
+# merges stacked up one 45-minute macOS + Windows pair per commit. Any other
+# label gets a group of its own, cancels nothing, and its run skips every job.
 concurrency:
-  group: ci-${{ github.ref }}${{ github.event.action == 'labeled' && format('-label-{0}', github.event.label.name) || '' }}
+  group: ci-${{ github.ref }}${{ (github.event.action == 'labeled' && !startsWith(github.event.label.name, 'ci:')) && format('-unrelated-label-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -61,14 +62,10 @@ jobs:
   # build instead of failing CI. Exposes cache_ok consumed by every build job.
   preflight:
     name: sccache preflight
-    # A `labeled` event is only interesting when the label is one of the two
-    # that ask for a platform build. Skipping here takes every job that needs
-    # this one with it, and api-contract excludes `labeled` itself, so adding an
-    # unrelated label to a pull request costs nothing.
-    if: >-
-      github.event.action != 'labeled'
-      || contains(github.event.pull_request.labels.*.name, 'ci:macos')
-      || contains(github.event.pull_request.labels.*.name, 'ci:windows')
+    # Only a `ci:` label starts work: it cancels the run in progress (see
+    # `concurrency`), so its run has to do everything that run would have.
+    # Any other label skips every job and costs nothing.
+    if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
     runs-on: ubuntu-latest
     outputs:
       cache_ok: ${{ steps.probe.outputs.cache_ok }}
@@ -105,10 +102,9 @@ jobs:
   # Fast checks on Linux: fmt + clippy + test
   check-linux:
     name: Check (Linux)
-    # Labelling a PR must not re-run everything that already passed. Only the
-    # platform builds care about the label; `github.event.action` is unset for
-    # push and workflow_dispatch, so this is a no-op there.
-    if: github.event.action != 'labeled'
+    # See preflight for the label condition. `github.event.action` is unset
+    # for push and workflow_dispatch, so it is a no-op there.
+    if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
     needs: preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -243,8 +239,10 @@ jobs:
   api-contract:
     name: API Contract Check
     runs-on: ubuntu-latest
-    # See check-linux for the `labeled` exclusion.
-    if: github.event_name == 'pull_request' && github.event.action != 'labeled'
+    # See preflight for the label condition.
+    if: >-
+      github.event_name == 'pull_request'
+      && (github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:'))
     steps:
       - uses: actions/checkout@v6
         with:
@@ -273,10 +271,9 @@ jobs:
   # by cargo, so nothing else in this workflow would notice a break in them.
   static-js:
     name: Static JS Tests
-    # Same reason as check-linux: a label event must not re-run what already
-    # passed. This job is the one dependabot keeps paying for, since its PRs get
-    # labelled after they open.
-    if: github.event.action != 'labeled'
+    # See preflight. Dependabot's labels are not `ci:` labels, so labelling its
+    # PRs after they open still costs nothing.
+    if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -300,8 +297,8 @@ jobs:
   # Linux x86_64 build
   build-linux-x86_64:
     name: Build (Linux x86_64)
-    # See check-linux for the `labeled` exclusion.
-    if: github.event.action != 'labeled'
+    # See preflight for the label condition.
+    if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
     needs: [check-wasm, preflight]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -410,8 +407,8 @@ jobs:
   # Linux ARM64 build (build only - no native clippy/test)
   build-linux-arm64:
     name: Build (Linux ARM64)
-    # See check-linux for the `labeled` exclusion.
-    if: github.event.action != 'labeled'
+    # See preflight for the label condition.
+    if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
     needs: [check-wasm, preflight]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
