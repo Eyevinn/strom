@@ -351,7 +351,9 @@ adds a browser context per source (`isolated-context`, `context-cache-path` and
   directory, so a login survives a flow restart and a restart of the
   container. In `strom-full` that directory is `/tmp/cef-cache` (or
   `GST_CEF_CACHE_LOCATION`, if set) inside the container, so a login survives
-  replacing the container only when that directory is a volume. Set
+  replacing the container only when that directory is a volume. Give each
+  running container a volume of its own: Chromium allows one browser per cache
+  directory. Set
   **Browser Profile** to the same name on several blocks to let them share
   one — for example, several graphics from one logged-in dashboard.
 - **Every raw `cefsrc` element gets one too**, keyed by its flow and element

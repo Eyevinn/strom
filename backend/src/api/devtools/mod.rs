@@ -2,9 +2,10 @@
 //!
 //! An HTML source renders server-side, so an operator cannot click in it: a
 //! page behind a login stays on the login screen for as long as the flow runs.
-//! Chromium can be driven remotely over the DevTools protocol, and CEF opens
-//! that port when `cef.debug_port` is configured — so the operator logs in to
-//! the very browser that is on air, and no credential is ever transported.
+//! Chromium can be driven remotely over the DevTools protocol, on the debug
+//! port Strom has CEF open (`cef.debug_port`, or a free loopback port) — so the
+//! operator logs in to the very browser that is on air, and no credential is
+//! ever transported.
 //!
 //! The port itself is unauthenticated and is total control of the browser
 //! process, including `file://` reads. Chromium binds it to loopback and it
@@ -551,7 +552,7 @@ fn disabled() -> Response {
         StatusCode::NOT_FOUND,
         "HTML remote control is disabled. It needs Strom's authentication \
          (STROM_ADMIN_USER with STROM_ADMIN_PASSWORD_HASH, or STROM_API_KEY) \
-         and a usable CEF debug port; the startup log says which is missing.",
+         and a usable CEF debug port; see the startup log.",
     )
         .into_response()
 }
