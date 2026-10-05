@@ -72,11 +72,15 @@ fi
 # CEF cache directory. It holds the browser profiles HTML sources keep their
 # logins in, so it is kept across a restart of the container; mount a volume
 # here (or point GST_CEF_CACHE_LOCATION at one) to keep it across a
-# replacement too. It is not wiped: Strom removes a Chromium lock left by
-# another hostname and the profiles no flow uses at startup, and Chromium
-# breaks a lock left by a dead process on this host itself.
+# replacement too. It is not wiped; Strom removes the profiles no flow uses
+# at startup. A restarted container keeps its hostname and often its pids,
+# so a Chromium lock from the previous run can look live. Nothing in this
+# container runs Chromium yet, so drop the lock files here.
 export GST_CEF_CACHE_LOCATION="${GST_CEF_CACHE_LOCATION:-/tmp/cef-cache}"
 mkdir -p "$GST_CEF_CACHE_LOCATION"
+rm -f "$GST_CEF_CACHE_LOCATION/SingletonLock" \
+      "$GST_CEF_CACHE_LOCATION/SingletonSocket" \
+      "$GST_CEF_CACHE_LOCATION/SingletonCookie"
 
 # CEF's own logging, to stderr. Warnings and errors only: verbose writes
 # everything Chromium does into the container log. Chromium logs a page's
