@@ -614,7 +614,7 @@ jobs:
 
       - name: Run Clippy
         run: |
-          cargo clippy --package strom -- -D warnings
+          cargo clippy --package strom --features efp -- -D warnings
 
       - name: Run tests
         run: |
@@ -632,7 +632,7 @@ jobs:
             done
           done < <(echo "$PATH" | tr ':' '\n')
           export PATH="$gst_bin:$PATH"
-          cargo test --package strom
+          cargo test --package strom --features efp
           cargo test --package strom-types
         env:
           # Turn a missing-element skip into a failure — see plugins_available().
@@ -646,7 +646,7 @@ jobs:
       - name: Build
         if: github.event_name != 'pull_request'
         run: |
-          cargo build --release --package strom
+          cargo build --release --package strom --features efp
 
       - name: Upload backend binary
         if: github.event_name != 'pull_request'
