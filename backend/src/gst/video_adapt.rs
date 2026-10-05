@@ -19,8 +19,10 @@
 //! | [`Consumer::SystemMemory`] | raw video in GL memory only | [`Adapter::GlDownload`] |
 //! | [`Consumer::SystemMemory`] | raw video in CUDA memory only | [`Adapter::CudaDownload`], or [`Refusal::MissingFactory`] when `cudadownload` is not installed |
 //! | [`Consumer::SystemMemory`] | raw video in any other memory | [`Refusal::UnsupportedMemory`] |
+//! | [`Consumer::SystemMemory`] | encoded video, audio, anything but raw video | [`Refusal::NotRawVideo`] |
 //!
-//! Encoded video, audio, `ANY` and `EMPTY` need nothing for any consumer. For
+//! Encoded video, audio, `ANY` and `EMPTY` need nothing for the other
+//! consumers, and `ANY` and `EMPTY` need nothing for any consumer. For
 //! [`Consumer::Accepts`], CUDA, NVMM, D3D11, VA and DMABuf memory are never
 //! downloaded: the consumers that advertise those really do take them.
 
@@ -75,6 +77,9 @@ pub enum Refusal {
     /// The producer offers raw video in a memory type nothing here downloads
     /// for this consumer. `feature` is the caps feature it offers.
     UnsupportedMemory { feature: String },
+    /// The producer offers no raw video at all, to a consumer that reads raw
+    /// frames. `media` is the media type it offers.
+    NotRawVideo { media: String },
 }
 
 impl std::fmt::Display for Refusal {
@@ -84,6 +89,7 @@ impl std::fmt::Display for Refusal {
             Refusal::UnsupportedMemory { feature } => {
                 write!(f, "raw video in {} cannot be read on the CPU", feature)
             }
+            Refusal::NotRawVideo { media } => write!(f, "{} is not raw video", media),
         }
     }
 }
@@ -119,6 +125,9 @@ pub fn decide(
             }
             if offers_only_cuda_memory(producer) {
                 return cuda_download(available);
+            }
+            if let Some(media) = offers_no_raw_video(producer) {
+                return Err(Refusal::NotRawVideo { media });
             }
             match unreadable_memory(producer) {
                 Some(feature) => Err(Refusal::UnsupportedMemory { feature }),
@@ -162,6 +171,22 @@ fn unreadable_memory(caps: &gst::CapsRef) -> Option<String> {
         }
     }
     unreadable
+}
+
+/// The media type of the first structure in `caps`, when none of them is raw
+/// video. `None` for `ANY` and `EMPTY`, and whenever raw video is offered.
+fn offers_no_raw_video(caps: &gst::CapsRef) -> Option<String> {
+    if caps.is_any() || caps.is_empty() {
+        return None;
+    }
+    if caps
+        .iter()
+        .any(|structure| structure.name() == "video/x-raw")
+    {
+        return None;
+    }
+    caps.structure(0)
+        .map(|structure| structure.name().to_string())
 }
 
 /// True when `features` put the buffer in system memory: no memory feature, or
@@ -585,9 +610,31 @@ mod tests {
         assert_eq!(decide(&offer, Consumer::SystemMemory, none), Ok(vec![]));
     }
 
+    /// A tap behind an encoder reads raw frames it will never get: refused,
+    /// naming what arrived.
     #[test]
-    fn system_memory_not_raw_video_needs_nothing() {
-        for c in NOT_RAW_VIDEO {
+    fn system_memory_not_raw_video_is_refused() {
+        for (c, media) in [
+            (
+                "video/x-h264, stream-format=avc, alignment=au",
+                "video/x-h264",
+            ),
+            ("video/x-h265", "video/x-h265"),
+            ("audio/x-raw, rate=48000", "audio/x-raw"),
+        ] {
+            assert_eq!(
+                decide(&caps(c), Consumer::SystemMemory, all),
+                Err(Refusal::NotRawVideo {
+                    media: media.to_string()
+                }),
+                "{c}"
+            );
+        }
+    }
+
+    #[test]
+    fn system_memory_any_and_empty_need_nothing() {
+        for c in ["ANY", "EMPTY"] {
             assert_eq!(
                 decide(&caps(c), Consumer::SystemMemory, none),
                 Ok(vec![]),
