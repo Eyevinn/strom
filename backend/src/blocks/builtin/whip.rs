@@ -22,7 +22,7 @@ use crate::gst::pipeline_bridge::{self, SessionBridge};
 use crate::gst::rtp_hdrext;
 use crate::whip_session_manager::{
     ActivityStamp, SessionActivity, SessionCleanupRequest, SlotDecodebin, SlotOutput, StallSide,
-    WhipEndpointConfig, DECODE_GRACE,
+    WhipEndpointConfig, WhipSessionManager, DECODE_GRACE,
 };
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -1475,13 +1475,20 @@ pub fn create_whipserversrc_for_session(
     // Install while it is still NULL so no depayloader is missed.
     rtp_hdrext::install(&session_pipeline);
 
-    // Set session pipeline to PLAYING and wait
-    session_pipeline
-        .set_state(gst::State::Playing)
-        .map_err(|e| format!("Failed to set session pipeline to Playing: {:?}", e))?;
+    // Set session pipeline to PLAYING and wait. On failure, take it back to
+    // NULL before dropping it: a session pipeline dropped above NULL leaves
+    // its whipserversrc's sockets and threads behind.
+    if let Err(e) = session_pipeline.set_state(gst::State::Playing) {
+        WhipSessionManager::teardown_session_pipeline(&session_pipeline);
+        return Err(format!(
+            "Failed to set session pipeline to Playing: {:?}",
+            e
+        ));
+    }
 
     let (result, current, _pending) = session_pipeline.state(gst::ClockTime::from_seconds(5));
     if result == Err(gst::StateChangeError) {
+        WhipSessionManager::teardown_session_pipeline(&session_pipeline);
         return Err(format!(
             "Session pipeline state change to Playing failed (current: {:?})",
             current
