@@ -184,7 +184,9 @@ fn mean_green(sample: &gstreamer::Sample) -> f64 {
     let buffer = sample.buffer().expect("buffer");
     let map = buffer.map_readable().expect("map");
     let (sum, n) = map
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .step_by(4)
         .fold((0u64, 0u64), |(sum, n), px| (sum + px[1] as u64, n + 1));
     sum as f64 / n.max(1) as f64
@@ -206,7 +208,7 @@ fn pixel_fraction(sample: &gstreamer::Sample, matches: impl Fn(&[u8]) -> bool) -
     let mut hits = 0u64;
     let mut total = 0u64;
     // Flat colour fields: every 4th pixel gives the same fraction, faster.
-    for px in map.chunks_exact(4).take(w * h).step_by(4) {
+    for px in map.as_chunks::<4>().0.iter().take(w * h).step_by(4) {
         if matches(px) {
             hits += 1;
         }
