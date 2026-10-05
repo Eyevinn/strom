@@ -397,11 +397,8 @@ fn connect_main_pipeline_handler(
         }
     }
 
-    // The internal pipeline runs on the flow's clock and base time, which the
-    // flow only has once it plays. Start it now if it does, or when it does.
-    state.start_with_flow();
-
-    // Watch internal pipeline bus for EOS, errors, state changes
+    // Watch internal pipeline bus for EOS, errors, state changes. Before the
+    // start below: an error or EOS in it must reach the handlers.
     bridge::watch_internal_bus(
         &internal_pipeline,
         Arc::clone(&state),
@@ -409,6 +406,10 @@ fn connect_main_pipeline_handler(
         block_id.clone(),
         events.clone(),
     );
+
+    // The internal pipeline runs on the flow's clock and base time, which the
+    // flow only has once it plays. Start it now if it does, or when it does.
+    state.start_with_flow();
 
     // Start position polling timer
     let events_for_timer = events;
@@ -777,6 +778,7 @@ mod tests {
 
         // The old file's EOS, still queued for the signal watch when the
         // jumps run.
+        let generation = rig.player.eos_generation().unwrap();
         rig.internal
             .bus()
             .unwrap()
@@ -798,6 +800,13 @@ mod tests {
         }
         while rig.ctx.iteration(false) {}
 
+        // The EOS's own thread may not have run yet; judge an EOS of that
+        // generation here, as that thread does.
+        assert_eq!(
+            rig.player.advance_after_eos(generation),
+            Ok(false),
+            "an EOS from before the jumps would advance the playlist"
+        );
         assert_eq!(
             rig.player.current_index(),
             1,

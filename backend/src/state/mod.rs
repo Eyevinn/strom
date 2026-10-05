@@ -1434,6 +1434,19 @@ impl AppState {
         .await;
     }
 
+    /// Shut the flow's Media Players down off the async runtime: a shutdown
+    /// waits for a control call in progress and for the source to finish
+    /// setting up, which can take seconds.
+    async fn unregister_media_players(id: FlowId) {
+        let unregistered = tokio::task::spawn_blocking(move || {
+            crate::blocks::builtin::mediaplayer::MEDIA_PLAYER_REGISTRY.unregister_flow(&id)
+        })
+        .await;
+        if let Err(e) = unregistered {
+            error!("Media Player shutdown for flow {} failed: {}", id, e);
+        }
+    }
+
     /// Stop a flow (stop and remove its pipeline).
     /// Release everything a flow's pipeline holds. The single way it is done.
     ///
@@ -1475,7 +1488,7 @@ impl AppState {
             // No pipeline was ever built. Blocks constructed before the failing
             // one can still have registered themselves, and the CPU allocation
             // may already be held; deallocate() ignores an id it does not know.
-            crate::blocks::builtin::mediaplayer::MEDIA_PLAYER_REGISTRY.unregister_flow(id);
+            Self::unregister_media_players(*id).await;
             self.inner.affinity_manager.deallocate(id);
             return Ok(PipelineState::Null);
         };
@@ -1522,7 +1535,7 @@ impl AppState {
         // Drop is the only thing that takes the block's *internal* pipeline to
         // NULL. Skip this and a Media Player flow leaves a decoding pipeline
         // and its file descriptors running for the life of the process.
-        crate::blocks::builtin::mediaplayer::MEDIA_PLAYER_REGISTRY.unregister_flow(id);
+        Self::unregister_media_players(*id).await;
 
         // stop() — not just dropping the manager. Drop aborts the thumbnail
         // task, stops probes and sets NULL; stop() is also what removes the bus

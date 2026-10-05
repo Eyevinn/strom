@@ -789,10 +789,10 @@ pub fn watch_internal_bus(
     };
 
     bus.add_signal_watch();
-    watch_for_eos(&bus, &state, flow_id, block_id.clone(), events.clone());
 
     let state_for_bus = Arc::clone(&state);
     let block_id_for_watch = block_id.clone();
+    let (block_id_for_eos, events_for_eos) = (block_id.clone(), events.clone());
 
     let handler = bus.connect_message(None, move |_bus, msg| {
         use gst::MessageView;
@@ -846,6 +846,10 @@ pub fn watch_internal_bus(
         );
         bus.disconnect(previous);
         bus.remove_signal_watch();
+    } else {
+        // The EOS and error handlers hold the state weakly and stay for the
+        // bus's life, so the first watch installs them for good.
+        watch_for_eos(&bus, &state, flow_id, block_id_for_eos, events_for_eos);
     }
 }
 

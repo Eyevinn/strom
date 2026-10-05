@@ -234,7 +234,7 @@ impl MediaPlayerState {
             return;
         }
         let ready = self.source_ready.lock().unwrap_or_else(|p| p.into_inner());
-        let (_ready, waited) = self
+        let (mut ready, waited) = self
             .source_ready_cv
             .wait_timeout_while(ready, SETTLE_TIMEOUT, |ready| !*ready)
             .unwrap_or_else(|p| p.into_inner());
@@ -243,6 +243,10 @@ impl MediaPlayerState {
                 "Media Player {}: source exposed no stream within {:?}, carrying on",
                 self.block_id, SETTLE_TIMEOUT
             );
+            // Wait once per stream, not once per call: a source that sets up
+            // nothing (no stream it can select, a stalled server) would
+            // otherwise cost every later call the full timeout.
+            *ready = true;
         }
     }
 
@@ -304,10 +308,17 @@ impl MediaPlayerState {
 
     /// Advance on an EOS that was posted under `generation`. Returns
     /// `Ok(false)` without touching anything when a file switch has happened
-    /// since: that EOS ended a file that is no longer playing.
+    /// since (that EOS ended a file that is no longer playing), when the user
+    /// has paused or stopped since, or when the player has been shut down.
     pub fn advance_after_eos(&self, generation: u64) -> Result<bool, String> {
         let _control = self.lock_control();
-        if self.switch_generation.load(Ordering::SeqCst) != generation {
+        if self.switch_generation.load(Ordering::SeqCst) != generation
+            || self.is_paused.load(Ordering::SeqCst)
+            || self
+                .internal_pipeline
+                .read()
+                .map_or(true, |guard| guard.is_none())
+        {
             return Ok(false);
         }
         self.next_locked().map(|()| true)
@@ -345,9 +356,16 @@ impl MediaPlayerState {
     /// the clocksync→appsink chain for the new file's pads.
     fn load_current_file(&self) -> Result<(), String> {
         // Odd from here: an EOS posted now is the old file's.
-        self.switch_generation.fetch_add(1, Ordering::SeqCst);
+        let switching = self.switch_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let result = self.load_current_file_inner();
-        self.switch_generation.fetch_add(1, Ordering::SeqCst);
+        // `load_current_file_inner` ends the switch once the old stream is
+        // gone; this ends it on a failure before that.
+        let _ = self.switch_generation.compare_exchange(
+            switching,
+            switching + 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
         result
     }
 
@@ -399,6 +417,11 @@ impl MediaPlayerState {
 
         // Set the new URI on source element
         source_element.set_property("uri", &uri);
+
+        // The old stream went at READY: an EOS posted from here on is the new
+        // file's, a clip so short it ends while starting included, and must
+        // advance the playlist.
+        self.switch_generation.fetch_add(1, Ordering::SeqCst);
 
         self.is_paused.store(false, Ordering::SeqCst);
         self.start(pipeline, "Failed to start playback")
