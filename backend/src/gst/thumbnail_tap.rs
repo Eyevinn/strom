@@ -12,11 +12,16 @@
 //!            → capsfilter(GL,RGBA,WxH) → gldownload
 //!            → capsfilter(RGBA,WxH) → appsink
 //!
-//! Non-GL path:
+//! System-memory path (CUDA memory gets a cudadownload in front):
 //! [tee] ─┬─ (passthrough)
-//!         └─ queue ─[pad probe: rate limit]─→ videoconvertscale
+//!         └─ queue ─[pad probe: rate limit]─→ [cudadownload] → videoconvertscale
 //!            → capsfilter(RGBA,WxH) → appsink
 //! ```
+//!
+//! The tap is a consumer of whatever the tee carries: which path it builds is
+//! decided by [`video_adapt::decide`] from the tee's negotiated caps. Memory it
+//! cannot read is refused before anything is attached, so the main chain never
+//! sees a branch that fails to negotiate.
 //!
 //! Frame rate is limited via a pad probe on the queue src pad that drops
 //! buffers arriving sooner than `update_interval`. This is invisible to
@@ -35,6 +40,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, warn};
 
 use crate::gst::thumbnail::ThumbnailError;
+use crate::gst::video_adapt::{self, Adapter, Consumer};
 
 /// Configuration for a thumbnail tap.
 #[derive(Debug, Clone)]
@@ -80,6 +86,8 @@ struct TapState {
     tee_src_pad: Option<gst::Pad>,
     /// Cached JPEG bytes and the time they were generated.
     cached_jpeg: Option<(Vec<u8>, Instant)>,
+    /// The tee caps last refused, so a polling client logs the refusal once.
+    refused_caps: Option<gst::Caps>,
 }
 
 impl TapState {
@@ -90,6 +98,7 @@ impl TapState {
             branch_elements: Vec::new(),
             tee_src_pad: None,
             cached_jpeg: None,
+            refused_caps: None,
         }
     }
 }
@@ -200,13 +209,41 @@ impl ThumbnailTap {
             return Err(ThumbnailError::PipelineNotRunning);
         }
 
-        if !has_caps {
+        let Some(tee_caps) = tee_caps else {
             debug!(
                 "Skipping activation for {}: no caps on tee sink",
                 self.name_prefix
             );
             return Err(ThumbnailError::PipelineNotRunning);
-        }
+        };
+
+        // What the tee carries decides the branch: GL memory is scaled on the
+        // GPU before its download, CUDA memory is downloaded first, and memory
+        // the CPU cannot read is refused here, before a branch that would fail
+        // to negotiate can push not-negotiated back through the tee.
+        let adapters = match video_adapt::decide(
+            &tee_caps,
+            Consumer::SystemMemory,
+            video_adapt::factory_available,
+        ) {
+            Ok(adapters) => {
+                state.refused_caps = None;
+                adapters
+            }
+            Err(refusal) => {
+                if state.refused_caps.as_ref() != Some(&tee_caps) {
+                    warn!(
+                        "Thumbnail for {} not attached: the tee carries {} ({})",
+                        self.name_prefix, tee_caps, refusal
+                    );
+                    state.refused_caps = Some(tee_caps.clone());
+                }
+                return Err(ThumbnailError::UnsupportedFormat(format!(
+                    "{}: {}",
+                    tee_caps, refusal
+                )));
+            }
+        };
 
         debug!(
             "Activating thumbnail branch for {} ({}x{})",
@@ -227,17 +264,10 @@ impl ThumbnailTap {
             .build()
             .map_err(|e| ThumbnailError::FrameMapping(format!("queue: {}", e)))?;
 
-        // Check if the tee outputs GL memory — if so, scale on GPU before downloading.
-        let is_gl = self
-            .tee
-            .static_pad("sink")
-            .and_then(|p| p.current_caps())
-            .map(|caps| caps.to_string().contains("memory:GLMemory"))
-            .unwrap_or(false);
-
         let mut branch_elements: Vec<gst::Element> = Vec::new();
+        let adapter_prefix = format!("{}_thumb", prefix);
 
-        if is_gl {
+        if adapters == [Adapter::GlDownload] {
             // GL path: scale on GPU, then download the small frame.
             // glcolorscale requires RGBA — the compositor tee already carries RGBA.
             let scale = gst::ElementFactory::make("glcolorscale")
@@ -259,13 +289,17 @@ impl ThumbnailTap {
                 .map_err(|e| ThumbnailError::FrameMapping(format!("gl capsfilter: {}", e)))?;
             branch_elements.push(gl_capsfilter);
 
-            let download = gst::ElementFactory::make("gldownload")
-                .name(format!("{}_thumb_gldownload", prefix))
-                .build()
-                .map_err(|e| ThumbnailError::FrameMapping(format!("gldownload: {}", e)))?;
-            branch_elements.push(download);
+            branch_elements.extend(
+                video_adapt::build_elements(&adapters, &adapter_prefix)
+                    .map_err(ThumbnailError::FrameMapping)?,
+            );
         } else {
-            // Non-GL path: CPU-based format conversion and scaling.
+            // System-memory path: download first where the memory calls for
+            // it, then CPU-based format conversion and scaling.
+            branch_elements.extend(
+                video_adapt::build_elements(&adapters, &adapter_prefix)
+                    .map_err(ThumbnailError::FrameMapping)?,
+            );
             let convert = gst::ElementFactory::make("videoconvertscale")
                 .name(format!("{}_thumb_convert", prefix))
                 .build()
@@ -361,7 +395,7 @@ impl ThumbnailTap {
 
         // Build the full element chain:
         //   GL:     queue [pad probe] → glcolorscale → glcaps → gldownload → capsfilter → appsink
-        //   non-GL: queue [pad probe] → videoconvertscale → capsfilter → appsink
+        //   system: queue [pad probe] → [cudadownload] → videoconvertscale → capsfilter → appsink
         let mut elements: Vec<gst::Element> = vec![queue.clone()];
         elements.extend(branch_elements.iter().cloned());
         elements.push(capsfilter.clone());
@@ -442,7 +476,14 @@ impl ThumbnailTap {
         })();
 
         if let Err(e) = add_result {
-            // Rollback: remove any elements we added
+            // Rollback: release the tee pad, if it was requested, so the next
+            // attempt can request it again, and remove any elements we added.
+            if let Some(tee_pad) = self.tee.static_pad("src_999") {
+                if let Some(peer) = tee_pad.peer() {
+                    let _ = tee_pad.unlink(&peer);
+                }
+                self.tee.release_request_pad(&tee_pad);
+            }
             for elem in &added {
                 let _ = elem.set_state(gst::State::Null);
                 let _ = self.pipeline.remove(elem);

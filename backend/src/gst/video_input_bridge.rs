@@ -191,7 +191,7 @@ fn build_adapters(
         Consumer::Accepts(&takes),
         video_adapt::factory_available,
     )
-    .map_err(|missing| format!("{} is not installed", missing.factory))?;
+    .map_err(|refusal| refusal.to_string())?;
     let mut adapters = video_adapt::build_elements(&downloads, name_prefix)?;
 
     // Not a caps adaptation: converting once here saves every viewer's
