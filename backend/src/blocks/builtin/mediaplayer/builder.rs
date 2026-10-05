@@ -290,7 +290,10 @@ fn build_media_player(
         loop_playlist: AtomicBool::new(loop_playlist),
         block_id: block_id.to_string(),
         flow_id,
-        switching_file: AtomicBool::new(false),
+        control: std::sync::Mutex::new(()),
+        switch_generation: std::sync::atomic::AtomicU64::new(0),
+        source_ready: std::sync::Mutex::new(true),
+        source_ready_cv: std::sync::Condvar::new(),
         video_slots: MediaPlayerState::free_slots(num_video_slots),
         audio_slots: MediaPlayerState::free_slots(num_audio_slots),
         decode,
@@ -396,9 +399,7 @@ fn connect_main_pipeline_handler(
 
     // The internal pipeline runs on the flow's clock and base time, which the
     // flow only has once it plays. Start it now if it does, or when it does.
-    if state.follow_main_clock(&internal_pipeline) {
-        start_internal(&internal_pipeline, &block_id);
-    }
+    state.start_with_flow();
 
     // Watch internal pipeline bus for EOS, errors, state changes
     bridge::watch_internal_bus(
@@ -454,10 +455,11 @@ fn connect_main_pipeline_handler(
         },
     );
 
-    // Start the internal pipeline when the flow reaches PLAYING. Weak refs
-    // only: the main bus outlives neither.
+    // Start the internal pipeline when the flow reaches PLAYING. A weak ref
+    // only: the main bus outlives the state. The start waits for the control
+    // lock and for the internal pipeline to settle, which must not hold up
+    // the main context this is dispatched on, so it runs on a thread.
     let state_weak = Arc::downgrade(&state);
-    let internal_weak = internal_pipeline.downgrade();
     main_bus.connect_message(Some("state-changed"), move |_bus, msg| {
         let gst::MessageView::StateChanged(change) = msg.view() else {
             return;
@@ -467,28 +469,21 @@ fn connect_main_pipeline_handler(
         {
             return;
         }
-        let (Some(state), Some(internal)) = (state_weak.upgrade(), internal_weak.upgrade()) else {
+        let Some(state) = state_weak.upgrade() else {
             return;
         };
         // A pause the user asked for holds when the flow starts playing.
-        if !state.is_paused.load(std::sync::atomic::Ordering::SeqCst)
-            && internal.current_state() != gst::State::Playing
-            && internal.pending_state() != gst::State::Playing
-            && state.follow_main_clock(&internal)
-        {
-            start_internal(&internal, &state.block_id);
+        // `start_with_flow` checks again under the control lock.
+        if state.is_paused.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let spawned = std::thread::Builder::new()
+            .name("media-player-start".to_string())
+            .spawn(move || state.start_with_flow());
+        if let Err(e) = spawned {
+            tracing::error!("Media Player: Failed to spawn start thread: {}", e);
         }
     })
-}
-
-fn start_internal(internal: &gst::Pipeline, block_id: &str) {
-    if let Err(e) = internal.set_state(gst::State::Playing) {
-        tracing::error!(
-            "Media Player {}: Failed to start internal pipeline: {:?}",
-            block_id,
-            e
-        );
-    }
 }
 
 #[cfg(test)]
@@ -763,5 +758,50 @@ mod tests {
             "the flow starting overrode the user's pause"
         );
         assert_ne!(rig.internal.pending_state(), gst::State::Playing);
+    }
+
+    /// An EOS the old file posted just before a jump must not advance past
+    /// the file jumped to. It used to be judged when the signal watch got to
+    /// it, by a flag that the first of two overlapping jumps had already
+    /// cleared, so it advanced the playlist one past the target.
+    #[test]
+    fn an_eos_from_before_concurrent_jumps_does_not_advance_past_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let clips = [
+            write_clip(dir.path(), "a.mkv", 250),
+            write_clip(dir.path(), "b.mkv", 250),
+            write_clip(dir.path(), "c.mkv", 250),
+        ];
+        let rig = Rig::new(&clips);
+        rig.start_flow();
+
+        // The old file's EOS, still queued for the signal watch when the
+        // jumps run.
+        rig.internal
+            .bus()
+            .unwrap()
+            .post(gst::message::Eos::builder().src(&rig.internal).build())
+            .unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let jumps: Vec<_> = (0..2)
+            .map(|_| {
+                let player = Arc::clone(&rig.player);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    player.goto(1)
+                })
+            })
+            .collect();
+        for jump in jumps {
+            jump.join().unwrap().unwrap();
+        }
+        while rig.ctx.iteration(false) {}
+
+        assert_eq!(
+            rig.player.current_index(),
+            1,
+            "a stale EOS advanced the playlist past the file jumped to"
+        );
     }
 }

@@ -115,6 +115,7 @@ pub fn create_decode_pipeline(
 
         let kind = TrackKind::of_pad(pad);
         route_pad(&pipeline, pad, &state, &instance_id_owned, sync, kind, "");
+        state.mark_source_ready();
     });
 
     free_slot_on_pad_removed(&source, state, instance_id);
@@ -226,6 +227,7 @@ pub fn create_passthrough_pipeline(
                 discard_pad(&pipeline, pad, &instance_id_owned, "its type is not known");
             }
         }
+        state.mark_source_ready();
     });
 
     free_slot_on_pad_removed(&source, state, instance_id);
@@ -702,6 +704,71 @@ fn link_pad_through_clocksync(
     Ok(())
 }
 
+/// Advance the playlist when the internal pipeline reaches EOS.
+///
+/// The EOS is seen as it is posted, on the streaming thread that posts it,
+/// so it can be tied to the file switch it belongs to: one queued for the
+/// signal watch is only dispatched later, perhaps after a switch, and would
+/// then advance past the file just switched to. An EOS posted during a
+/// switch is the old file's and is dropped here; one posted before a switch
+/// that has happened since is dropped by `advance_after_eos`.
+///
+/// The advance itself waits for the control lock and changes the pipeline's
+/// state, neither of which a streaming thread may do, so it runs on a thread
+/// of its own. The handler holds the state weakly: the bus belongs to a
+/// pipeline the state owns.
+fn watch_for_eos(
+    bus: &gst::Bus,
+    state: &Arc<MediaPlayerState>,
+    flow_id: FlowId,
+    block_id: String,
+    events: EventBroadcaster,
+) {
+    bus.enable_sync_message_emission();
+    // A source that fails sets nothing more up: let control calls go on.
+    let failed = Arc::downgrade(state);
+    bus.connect_sync_message(Some("error"), move |_bus, _msg| {
+        if let Some(player) = failed.upgrade() {
+            player.mark_source_ready();
+        }
+    });
+    let state = Arc::downgrade(state);
+    bus.connect_sync_message(Some("eos"), move |_bus, _msg| {
+        let Some(player) = state.upgrade() else {
+            return;
+        };
+        player.mark_source_ready();
+        let Some(generation) = player.eos_generation() else {
+            debug!("Media Player {}: Ignoring EOS during file switch", block_id);
+            return;
+        };
+        info!("Media Player {}: Internal pipeline EOS", block_id);
+        let block_id = block_id.clone();
+        let events = events.clone();
+        let spawned = std::thread::Builder::new()
+            .name("media-player-eos".to_string())
+            .spawn(move || match player.advance_after_eos(generation) {
+                Ok(true) => info!("Media Player {}: Advanced to next file", block_id),
+                Ok(false) => debug!(
+                    "Media Player {}: Ignoring EOS of a file switched away from",
+                    block_id
+                ),
+                Err(e) => {
+                    info!("Media Player {}: End of playlist: {}", block_id, e);
+                    events.broadcast(StromEvent::MediaPlayerStateChanged {
+                        flow_id,
+                        block_id,
+                        state: strom_types::mediaplayer::PlayerState::Stopped,
+                        current_file: None,
+                    });
+                }
+            });
+        if let Err(e) = spawned {
+            error!("Media Player: Failed to spawn EOS thread: {}", e);
+        }
+    });
+}
+
 /// Watch the internal pipeline's bus for EOS, errors, and state changes.
 ///
 /// EOS triggers advancing to the next file instead of propagating downstream.
@@ -722,46 +789,15 @@ pub fn watch_internal_bus(
     };
 
     bus.add_signal_watch();
+    watch_for_eos(&bus, &state, flow_id, block_id.clone(), events.clone());
 
     let state_for_bus = Arc::clone(&state);
-    let block_id_for_bus = block_id.clone();
     let block_id_for_watch = block_id.clone();
 
     let handler = bus.connect_message(None, move |_bus, msg| {
         use gst::MessageView;
 
         match msg.view() {
-            MessageView::Eos(_) => {
-                // Ignore EOS during file switch — the Ready→Playing transition
-                // can produce a spurious EOS from the old stream.
-                if state_for_bus
-                    .switching_file
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    debug!(
-                        "Media Player {}: Ignoring EOS during file switch",
-                        block_id_for_bus
-                    );
-                    return;
-                }
-
-                info!("Media Player {}: Internal pipeline EOS", block_id_for_bus);
-
-                match state_for_bus.next() {
-                    Ok(_) => {
-                        info!("Media Player {}: Advanced to next file", block_id_for_bus);
-                    }
-                    Err(e) => {
-                        info!("Media Player {}: End of playlist: {}", block_id_for_bus, e);
-                        events.broadcast(StromEvent::MediaPlayerStateChanged {
-                            flow_id,
-                            block_id: block_id_for_bus.clone(),
-                            state: strom_types::mediaplayer::PlayerState::Stopped,
-                            current_file: None,
-                        });
-                    }
-                }
-            }
             MessageView::StateChanged(state_msg) => {
                 let is_pipeline = msg
                     .src()
@@ -837,7 +873,10 @@ mod tests {
             loop_playlist: AtomicBool::new(false),
             block_id: "test".to_string(),
             flow_id: uuid::Uuid::new_v4(),
-            switching_file: AtomicBool::new(false),
+            control: Mutex::new(()),
+            switch_generation: std::sync::atomic::AtomicU64::new(0),
+            source_ready: std::sync::Mutex::new(true),
+            source_ready_cv: std::sync::Condvar::new(),
             video_slots: MediaPlayerState::free_slots(0),
             audio_slots: MediaPlayerState::free_slots(0),
             decode: true,
