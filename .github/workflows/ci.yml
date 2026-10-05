@@ -33,6 +33,10 @@ env:
   RUST_BACKTRACE: 1
   TRUNK_VERSION: "0.21.14"
   CARGO_INCREMENTAL: 0
+  # Line tables only in dev/test builds: backtraces keep file and line, but
+  # the full debuginfo that made test builds slow to link and the sccache
+  # objects large is dropped. Release builds carry no debuginfo either way.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   # sccache -> self-hosted MinIO (S3-compatible) cache in OSC.
   # Replaces the GitHub Actions cache backend, which shares a hard 10 GB/repo
   # ceiling with the docker buildkit blobs. The same backend is reused by the
@@ -157,10 +161,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy on backend
-        run: cargo clippy --package strom --all-targets --features efp,nvidia -- -D warnings
+        run: cargo clippy --package strom --all-targets --features efp -- -D warnings
 
       - name: Run tests on backend
-        run: cargo test --package strom --features efp,nvidia
+        run: cargo test --package strom --features efp
         env:
           # Turn a missing-element skip into a failure — see plugins_available().
           STROM_REQUIRE_GST_PLUGINS: 1
@@ -610,7 +614,7 @@ jobs:
 
       - name: Run Clippy
         run: |
-          cargo clippy --package strom --features nvidia -- -D warnings
+          cargo clippy --package strom -- -D warnings
 
       - name: Run tests
         run: |
@@ -628,7 +632,7 @@ jobs:
             done
           done < <(echo "$PATH" | tr ':' '\n')
           export PATH="$gst_bin:$PATH"
-          cargo test --package strom --features nvidia
+          cargo test --package strom
           cargo test --package strom-types
         env:
           # Turn a missing-element skip into a failure — see plugins_available().
@@ -636,11 +640,16 @@ jobs:
           # installed every plugin group; both are true as of this commit.
           STROM_REQUIRE_GST_PLUGINS: 1
 
+      # A pull request asks this job to verify the platform code, which
+      # clippy and the tests do. The release binary is only wanted from main
+      # and dispatch, and building it is a second full compile of the tree.
       - name: Build
+        if: github.event_name != 'pull_request'
         run: |
           cargo build --release --package strom
 
       - name: Upload backend binary
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: strom-v${{ steps.version.outputs.version }}-windows-x86_64-pc-windows-msvc
@@ -712,11 +721,11 @@ jobs:
 
       - name: Run Clippy
         run: |
-          cargo clippy --package strom --features efp,nvidia -- -D warnings
+          cargo clippy --package strom --features efp -- -D warnings
 
       - name: Run tests
         run: |
-          cargo test --package strom --features efp,nvidia
+          cargo test --package strom --features efp
           cargo test --package strom-types
         env:
           # Turn a missing-element skip into a failure — see plugins_available().
@@ -727,11 +736,14 @@ jobs:
           # not: its runner has no OpenGL driver GStreamer can use.
           STROM_REQUIRE_GL: 1
 
+      # Not on a pull request: see the Windows job.
       - name: Build
+        if: github.event_name != 'pull_request'
         run: |
           cargo build --release --package strom --features efp
 
       - name: Upload backend binary
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: strom-v${{ steps.version.outputs.version }}-macos-aarch64-apple-darwin

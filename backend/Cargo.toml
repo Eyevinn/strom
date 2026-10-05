@@ -117,7 +117,6 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 
 # System monitoring
 sysinfo = "0.39"
-nvml-wrapper = { version = "0.12", optional = true }
 parking_lot = "0.12"
 
 # Network interface discovery
@@ -146,6 +145,11 @@ eframe = { workspace = true }
 [build-dependencies]
 chrono = "0.4"
 uuid = { version = "1.23", features = ["v4"] }
+
+# NVML does not exist on macOS, so the `nvidia` feature pulls in nothing there
+# and the system monitor skips the NVML probe, which could only fail.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+nvml-wrapper = { version = "0.12", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # App Nap opt-out: see backend/src/macos_app_nap.rs. Already in the tree via
