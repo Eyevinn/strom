@@ -48,6 +48,9 @@ const READY_TIMEOUT: Duration = Duration::from_secs(5);
 struct Watched {
     elements: Vec<glib::WeakRef<gst::Element>>,
     running: bool,
+    /// Which watch is the current one. A watch that has ended must not touch
+    /// the state of one started after it.
+    generation: u64,
 }
 
 fn watched() -> &'static Mutex<Watched> {
@@ -55,10 +58,36 @@ fn watched() -> &'static Mutex<Watched> {
     WATCHED.get_or_init(Default::default)
 }
 
-/// Whether the watch is attached to the browser, so a new page is held.
-fn attached() -> &'static watch::Sender<bool> {
-    static ATTACHED: OnceLock<watch::Sender<bool>> = OnceLock::new();
-    ATTACHED.get_or_init(|| watch::channel(false).0)
+/// Whether new pages are held for the guard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hold {
+    /// Not known yet: the watch is not attached to the browser.
+    Unknown,
+    /// Chromium holds every new page until the watch lets it go.
+    Holding,
+    /// Chromium refused to: a window a page opens is not guarded.
+    Refused,
+}
+
+/// Whether the current watch has new pages held.
+fn attached() -> &'static watch::Sender<Hold> {
+    static ATTACHED: OnceLock<watch::Sender<Hold>> = OnceLock::new();
+    ATTACHED.get_or_init(|| watch::channel(Hold::Unknown).0)
+}
+
+/// Marks a watch as ended however its task ends: on its own, by a panic, or
+/// dropped with the runtime. Without it a watch that died would still count
+/// as running, and no element could start another.
+struct Running(u64);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let mut watched = watched().lock().unwrap_or_else(|e| e.into_inner());
+        if watched.generation == self.0 {
+            watched.running = false;
+            attached().send_replace(Hold::Unknown);
+        }
+    }
 }
 
 /// Guard the windows `cefsrc`'s page opens, for as long as it is alive.
@@ -71,67 +100,93 @@ pub(super) fn watch_for(cefsrc: &gst::Element, port: u16, handle: &tokio::runtim
     watched.elements.push(cefsrc.downgrade());
     if !watched.running {
         watched.running = true;
-        handle.spawn(run(port));
+        watched.generation += 1;
+        handle.spawn(run(port, watched.generation));
     }
 }
 
-/// Wait until a page the browser opens from now on is held for the guard,
-/// for at most [`READY_TIMEOUT`]. Whether it is.
-pub(super) async fn ready() -> bool {
-    let mut attached = attached().subscribe();
-    let ready = matches!(
-        tokio::time::timeout(READY_TIMEOUT, attached.wait_for(|a| *a)).await,
-        Ok(Ok(_))
-    );
-    ready
+/// Whether a page the browser opens from now on is held for the guard.
+///
+/// With `wait`, waits up to [`READY_TIMEOUT`] for the watch to find out.
+/// A page whose birth already failed does not wait: the browser that did not
+/// list it is not likely to answer the watch either.
+pub(super) async fn ready(wait: bool) -> bool {
+    let mut hold = attached().subscribe();
+    if wait {
+        let _ = tokio::time::timeout(READY_TIMEOUT, hold.wait_for(|h| *h != Hold::Unknown)).await;
+    }
+    let holding = *hold.borrow() == Hold::Holding;
+    holding
 }
 
-/// Whether the watch has anything left to do. Ends it if not, in the same
-/// step, so an element added meanwhile starts a new one.
-fn keep_going(guarding: bool) -> bool {
+/// Whether watch `generation` has anything left to do. Ends it if not, in
+/// the same step, so an element added meanwhile starts a new one.
+fn keep_going(generation: u64, guarding: bool) -> bool {
     let mut watched = watched().lock().unwrap_or_else(|e| e.into_inner());
     watched.elements.retain(|e| e.upgrade().is_some());
     if watched.elements.is_empty() && !guarding {
-        watched.running = false;
+        if watched.generation == generation {
+            watched.running = false;
+            attached().send_replace(Hold::Unknown);
+        }
         false
     } else {
         true
     }
 }
 
+/// How a connection to the browser ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Ended {
+    /// Nothing was left to guard.
+    Stopped,
+    /// The browser could not be reached, or dropped the connection; whether
+    /// a page was guarded through it then.
+    Lost { guarding: bool },
+}
+
 /// The watch: attached to the browser for as long as there is anything to
 /// guard, and again whenever Chromium drops it.
-async fn run(port: u16) {
+async fn run(port: u16, generation: u64) {
+    let _running = Running(generation);
+    // A page guarded through a connection that was lost has lost its guard
+    // with it. Reconnecting attaches to it again, so it is worth doing even
+    // when no element is left.
+    let mut guarding = false;
     loop {
-        if !keep_going(false) {
+        if !keep_going(generation, guarding) {
             break;
         }
         // Until the first `cefsrc` has started there is no browser to reach.
-        if let Some(url) = super::browser_endpoint(port).await {
-            if guard_browser(&url, attached(), keep_going).await {
-                break;
+        guarding = match super::browser_endpoint(port).await {
+            Some(url) => {
+                match guard_browser(&url, attached(), |g| keep_going(generation, g)).await {
+                    Ended::Stopped => break,
+                    Ended::Lost { guarding } => guarding,
+                }
             }
-        }
+            None => false,
+        };
         tokio::time::sleep(RETRY).await;
     }
     debug!("Browser-wide page guard ended");
 }
 
 /// Guard every new page over the browser endpoint at `url`, until
-/// `keep_going` says to stop (true) or the connection is lost (false).
+/// `keep_going` says to stop or the connection is lost.
 ///
 /// `keep_going` is told whether a page is still guarded through this
 /// connection: closing it would lift that page's guard.
 async fn guard_browser(
     url: &str,
-    attached: &watch::Sender<bool>,
+    attached: &watch::Sender<Hold>,
     mut keep_going: impl FnMut(bool) -> bool,
-) -> bool {
+) -> Ended {
     let socket = match tokio_tungstenite::connect_async(url).await {
         Ok((socket, _)) => socket,
         Err(e) => {
             debug!("Could not reach the browser to guard its pages: {}", e);
-            return false;
+            return Ended::Lost { guarding: false };
         }
     };
     let (mut tx, mut rx) = socket.split();
@@ -160,8 +215,9 @@ async fn guard_browser(
                         continue;
                     };
                     let sends = guard.on_message(&message);
-                    if guard.attached() {
-                        attached.send_if_modified(|a| !std::mem::replace(a, true));
+                    let hold = guard.hold();
+                    if hold != Hold::Unknown {
+                        attached.send_if_modified(|h| std::mem::replace(h, hold) != hold);
                     }
                     for command in sends {
                         if tx.send(Message::Text(command.to_string().into())).await.is_err() {
@@ -178,9 +234,16 @@ async fn guard_browser(
             }
         }
     }
-    attached.send_replace(false);
     let _ = tx.close().await;
-    stopped
+    if stopped {
+        // Whoever said to stop has said so for the whole watch.
+        Ended::Stopped
+    } else {
+        attached.send_replace(Hold::Unknown);
+        Ended::Lost {
+            guarding: guard.guarding(),
+        }
+    }
 }
 
 /// Whether Strom named page `target_id`, so its own guard already holds it.
@@ -202,7 +265,7 @@ struct PopupGuard {
     next_id: u64,
     /// The command that has Chromium attach us to new pages.
     start_id: Option<u64>,
-    attached: bool,
+    hold: Option<bool>,
     /// Targets held until the answer to the last of their guard's commands:
     /// by command id, the target's session and whether it is a page.
     held: HashMap<u64, (String, bool)>,
@@ -232,14 +295,18 @@ impl PopupGuard {
         vec![command]
     }
 
-    /// Whether Chromium has agreed to attach us to new pages.
-    fn attached(&self) -> bool {
-        self.attached
+    /// Whether Chromium has agreed to hold new pages for us.
+    fn hold(&self) -> Hold {
+        match self.hold {
+            None => Hold::Unknown,
+            Some(true) => Hold::Holding,
+            Some(false) => Hold::Refused,
+        }
     }
 
-    /// Whether a page is guarded through this connection.
+    /// Whether a page is guarded, or a target held, through this connection.
     fn guarding(&self) -> bool {
-        !self.guarded.is_empty()
+        !self.guarded.is_empty() || !self.held.is_empty()
     }
 
     /// Guard `session`'s target with `commands`, and hold it until the last
@@ -280,12 +347,15 @@ impl PopupGuard {
             let error = message.get("error");
             if Some(id) == self.start_id {
                 match error {
-                    Some(error) => warn!(
-                        "Chromium refused to hold new pages for their guard, so a window a \
-                         page opens is not guarded: {}",
-                        error
-                    ),
-                    None => self.attached = true,
+                    Some(error) => {
+                        warn!(
+                            "Chromium refused to hold new pages for their guard, so a window a \
+                             page opens is not guarded: {}",
+                            error
+                        );
+                        self.hold = Some(false);
+                    }
+                    None => self.hold = Some(true),
                 }
             } else if let Some((session, page)) = self.held.remove(&id) {
                 if let Some(error) = error {
@@ -329,6 +399,8 @@ impl PopupGuard {
             Some("Target.detachedFromTarget") => {
                 if let Some(child) = params["sessionId"].as_str() {
                     self.guarded.remove(child);
+                    // A target that went before its guard was answered.
+                    self.held.retain(|_, (session, _)| session != child);
                 }
                 Vec::new()
             }
@@ -385,9 +457,9 @@ mod tests {
         assert_eq!(start[0]["params"]["waitForDebuggerOnStart"], true);
         assert_eq!(start[0]["params"]["flatten"], true);
         assert!(start[0].get("sessionId").is_none(), "on the browser itself");
-        assert!(!guard.attached());
+        assert_eq!(guard.hold(), Hold::Unknown);
         assert!(guard.on_message(&answer(&start[0])).is_empty());
-        assert!(guard.attached());
+        assert_eq!(guard.hold(), Hold::Holding);
         guard
     }
 
@@ -512,6 +584,31 @@ mod tests {
         assert!(!guard.guarding());
     }
 
+    /// A refusal is known at once, so a page being born does not wait for a
+    /// hold that is never coming.
+    #[test]
+    fn a_refused_hold_is_reported() {
+        let mut guard = PopupGuard::default();
+        let start = guard.start();
+        let refused = json!({ "id": start[0]["id"], "error": { "code": -32000, "message": "no" } });
+        assert!(guard.on_message(&refused).is_empty());
+        assert_eq!(guard.hold(), Hold::Refused);
+    }
+
+    /// A popup that closes before its guard is answered is not held on to.
+    #[test]
+    fn a_popup_closed_while_held_is_forgotten() {
+        let mut guard = started();
+        let sends = guard.on_message(&attached_to(None, "S-POP", popup("POP", "MAIN")));
+        guard.on_message(&json!({
+            "method": "Target.detachedFromTarget",
+            "params": { "sessionId": "S-POP", "targetId": "POP" }
+        }));
+        assert!(!guard.guarding());
+        // Its late answer lets nothing go.
+        assert!(guard.on_message(&answer(sends.last().unwrap())).is_empty());
+    }
+
     type Socket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
 
     async fn recv(ws: &mut Socket) -> Option<Value> {
@@ -528,6 +625,37 @@ mod tests {
         ws.send(Message::Text(message.to_string().into()))
             .await
             .unwrap();
+    }
+
+    /// A connection lost while a popup is guarded says so, so the watch
+    /// reconnects for it even with no element left.
+    #[tokio::test]
+    async fn a_lost_connection_says_a_popup_was_guarded() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "ws://{}/devtools/browser/test",
+            listener.local_addr().unwrap()
+        );
+        let chromium = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let start = recv(&mut ws).await.unwrap();
+            send(&mut ws, answer(&start)).await;
+            send(&mut ws, attached_to(None, "S-POP", popup("POP", "MAIN"))).await;
+            // The first guard command shows the popup is being guarded.
+            recv(&mut ws).await.unwrap();
+            // The browser goes away.
+        });
+        let (attached, _seen) = watch::channel(Hold::Unknown);
+        let ended = tokio::time::timeout(
+            Duration::from_secs(5),
+            guard_browser(&url, &attached, |_| true),
+        )
+        .await
+        .expect("the watch did not notice the browser went away");
+        chromium.await.unwrap();
+        assert_eq!(ended, Ended::Lost { guarding: true });
+        assert_eq!(*attached.borrow(), Hold::Unknown);
     }
 
     /// The watch over a real WebSocket, against a stand-in for Chromium's
@@ -589,19 +717,21 @@ mod tests {
             })
         };
 
-        let (attached, mut seen_attached) = watch::channel(false);
+        let (attached, mut seen_attached) = watch::channel(Hold::Unknown);
         let watch = tokio::spawn(async move {
-            let stopped = guard_browser(&url, &attached, |guarding| {
+            guard_browser(&url, &attached, |guarding| {
                 guarding || !done.load(Ordering::SeqCst)
             })
-            .await;
-            (stopped, *attached.borrow())
+            .await
         });
 
-        tokio::time::timeout(Duration::from_secs(5), seen_attached.wait_for(|a| *a))
-            .await
-            .expect("the watch never said it was attached")
-            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            seen_attached.wait_for(|h| *h == Hold::Holding),
+        )
+        .await
+        .expect("the watch never said it was attached")
+        .unwrap();
         let seen = tokio::time::timeout(Duration::from_secs(10), chromium)
             .await
             .expect("the popup was never let go")
@@ -610,11 +740,10 @@ mod tests {
         assert!(seen.contains(&"Page.setDownloadBehavior".to_string()));
         assert_eq!(seen.last().unwrap(), "Runtime.runIfWaitingForDebugger");
 
-        let (stopped, still_attached) = tokio::time::timeout(Duration::from_secs(5), watch)
+        let ended = tokio::time::timeout(Duration::from_secs(5), watch)
             .await
             .expect("the watch did not end once nothing was left to guard")
             .unwrap();
-        assert!(stopped);
-        assert!(!still_attached);
+        assert_eq!(ended, Ended::Stopped);
     }
 }

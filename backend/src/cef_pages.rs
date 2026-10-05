@@ -381,7 +381,7 @@ pub fn name_page(cefsrc: &gst::Element, owner: PageOwner) {
             ),
         }
         // Nor may the page open a window before that window can be guarded.
-        if !popups::ready().await {
+        if !popups::ready(target_id.is_some()).await {
             warn!(
                 "{:?}: the browser-wide guard is not in place, so a window its page opens \
                  is not guarded. Loading its URL anyway",
