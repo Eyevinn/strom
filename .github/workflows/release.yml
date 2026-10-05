@@ -44,16 +44,26 @@ jobs:
             echo "cache_ok=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # list-objects-v2 needs only s3:ListBucket, which the scoped service
-          # account has. NoSuchBucket / unreachable endpoint -> non-zero -> off.
-          if timeout 25 aws --endpoint-url "$SCCACHE_ENDPOINT" --region "$SCCACHE_REGION" \
-               --cli-connect-timeout 8 --cli-read-timeout 8 \
-               s3api list-objects-v2 --bucket "$SCCACHE_BUCKET" --max-keys 1 >/dev/null 2>&1; then
-            echo "sccache backend reachable - cache enabled"
-            echo "cache_ok=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::sccache backend unreachable or bucket missing - building WITHOUT compile cache"
+          # Probe a write, not just a list. When the MinIO drive fills up it
+          # keeps serving reads and health checks but rejects every PUT, so
+          # list-objects-v2 passes while sccache records a write error on every
+          # miss and the cache never fills (2026-08 to 2026-10, unnoticed).
+          # A fixed key is overwritten each run, so no delete is needed.
+          # NoSuchBucket / unreachable endpoint / denied write -> off.
+          probe() {
+            timeout 25 aws --endpoint-url "$SCCACHE_ENDPOINT" --region "$SCCACHE_REGION" \
+              --cli-connect-timeout 8 --cli-read-timeout 8 s3api "$@" >/dev/null 2>probe.err
+          }
+          echo "preflight $GITHUB_RUN_ID" > probe.txt
+          if ! probe list-objects-v2 --bucket "$SCCACHE_BUCKET" --max-keys 1; then
+            echo "::warning::sccache backend unreachable or bucket missing - building WITHOUT compile cache: $(tr '\n' ' ' < probe.err)"
             echo "cache_ok=false" >> "$GITHUB_OUTPUT"
+          elif ! probe put-object --bucket "$SCCACHE_BUCKET" --key preflight/probe --body probe.txt; then
+            echo "::warning::sccache backend rejects writes - building WITHOUT compile cache: $(tr '\n' ' ' < probe.err)"
+            echo "cache_ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "sccache backend reachable and writable - cache enabled"
+            echo "cache_ok=true" >> "$GITHUB_OUTPUT"
           fi
 
   build-frontend:
