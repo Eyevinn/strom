@@ -36,6 +36,10 @@ docker run --network host eyevinntechnology/strom-full:latest
 docker run -p 8080:8080 eyevinntechnology/strom-full:latest
 ```
 
+With host networking, Chromium's debug port, which Strom always opens on
+loopback for HTML sources, is reachable by every process on the host, not just
+by this container.
+
 ## Using cefsrc in Pipelines
 
 The `cefsrc` element renders a URL to video frames. Basic properties:
@@ -137,7 +141,8 @@ The entrypoint script automatically:
 - Starts Xvfb on display `:99`
 - Disables CEF sandbox (required for Docker root user)
 - Uses software rendering for CEF by default (see GPU mode below for opt-in)
-- Configures CEF cache and logging
+- Configures CEF cache and logging (the cache is kept across restarts; mount a
+  volume on it to keep it across container replacement)
 
 No manual configuration is needed - just run the container and use `cefsrc` in your pipelines.
 
@@ -343,11 +348,14 @@ adds a browser context per source (`isolated-context`, `context-cache-path` and
 `persist-session-cookies` on `cefsrc`). When the plugin has it:
 
 - **Every HTML Input block gets a profile of its own**, kept in the CEF cache
-  directory, so a login survives a flow restart. The `strom-full` entrypoint
-  clears that directory when the container starts, so it does not survive a
-  container restart unless the cache is mounted elsewhere. Set **Browser Profile** to the
-  same name on several blocks to let them share one — for example, several
-  graphics from one logged-in dashboard.
+  directory, so a login survives a flow restart and a restart of the
+  container. In `strom-full` that directory is `/tmp/cef-cache` (or
+  `GST_CEF_CACHE_LOCATION`, if set) inside the container, so a login survives
+  replacing the container only when that directory is a volume. Give each
+  running container a volume of its own: Chromium allows one browser per cache
+  directory. Set
+  **Browser Profile** to the same name on several blocks to let them share
+  one — for example, several graphics from one logged-in dashboard.
 - **Every raw `cefsrc` element gets one too**, keyed by its flow and element
   id, unless the flow sets `isolated-context` on it itself.
 - **A popup the page opens shares its opener's profile**, so a "Sign in

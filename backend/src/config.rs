@@ -113,9 +113,10 @@ struct StorageConfig {
 struct CefConfig {
     /// Chromium remote debugging port. Unset means Strom picks a free one.
     ///
-    /// Strom opens the port whenever authentication is configured: it guards
-    /// every page through it, and remote control links go through it. Nothing
-    /// outside Strom connects to it, so this only pins the number.
+    /// Strom opens the port with or without authentication: it guards
+    /// every page through it. Remote control links go through it too, but are
+    /// only handed out when authentication is configured. Nothing outside
+    /// Strom connects to it, so this only pins the number.
     ///
     /// The port carries the Chrome DevTools Protocol, which is full control of
     /// the browser process: arbitrary JavaScript, arbitrary navigation

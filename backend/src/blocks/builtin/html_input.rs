@@ -98,7 +98,8 @@ pub const BROWSER_PROFILE_PROPERTY: &str = "browser_profile";
 /// Each profile is a directory of its own directly under the cache root -
 /// Chromium only accepts a profile there, and silently keeps one in memory
 /// anywhere deeper. It lasts as long as the cache directory does: across flow
-/// restarts, and in the Docker image until the container is replaced. A block with no
+/// and Strom restarts, and in the Docker image across a container restart, but
+/// across a replacement only when the cache directory is a volume. A block with no
 /// profile name gets one derived from its flow and block ids; a named profile
 /// lives under a different prefix, so no name can land on a block's own.
 /// Every byte outside `[A-Za-z0-9_-]` is escaped, so distinct names never map

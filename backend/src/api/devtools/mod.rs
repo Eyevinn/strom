@@ -2,9 +2,10 @@
 //!
 //! An HTML source renders server-side, so an operator cannot click in it: a
 //! page behind a login stays on the login screen for as long as the flow runs.
-//! Chromium can be driven remotely over the DevTools protocol, and CEF opens
-//! that port when `cef.debug_port` is configured — so the operator logs in to
-//! the very browser that is on air, and no credential is ever transported.
+//! Chromium can be driven remotely over the DevTools protocol, on the debug
+//! port Strom has CEF open (`cef.debug_port`, or a free loopback port) — so the
+//! operator logs in to the very browser that is on air, and no credential is
+//! ever transported.
 //!
 //! The port itself is unauthenticated and is total control of the browser
 //! process, including `file://` reads. Chromium binds it to loopback and it
@@ -104,8 +105,9 @@ pub const LINK_TTL: Duration = Duration::from_secs(30 * 60);
 /// Where the DevTools endpoint lives, from this instance's configuration.
 #[derive(Clone, Copy, Debug)]
 pub struct DevToolsConfig {
-    /// Chromium's remote debugging port, or `None` when the operator has not
-    /// enabled remote control. One port serves every `cefsrc` in the instance,
+    /// Chromium's remote debugging port, or `None` when remote control is off:
+    /// no authentication is configured, or the port is not one Strom can
+    /// reach. One port serves every `cefsrc` in the instance,
     /// so two Strom instances on one host need two different ports, the same
     /// way they already need two CEF profile directories.
     pub debug_port: Option<u16>,
@@ -542,12 +544,15 @@ fn safe_asset_path(path: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '@'))
 }
 
-/// Answer for every route here when no debug port is configured.
+/// Answer for every route here when remote control is off: Strom's
+/// authentication is not configured, or the CEF debug port is not one Strom
+/// can reach (see `cef_flags::configure`, which logs which at startup).
 fn disabled() -> Response {
     (
         StatusCode::NOT_FOUND,
-        "HTML remote control is disabled. Set cef.debug_port (or \
-         STROM_CEF_DEBUG_PORT) to enable it.",
+        "HTML remote control is disabled. It needs Strom's authentication \
+         (STROM_ADMIN_USER with STROM_ADMIN_PASSWORD_HASH, or STROM_API_KEY) \
+         and a usable CEF debug port; see the startup log.",
     )
         .into_response()
 }
