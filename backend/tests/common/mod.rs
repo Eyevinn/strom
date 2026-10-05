@@ -104,13 +104,19 @@ pub fn init_gl() {
     });
 }
 
-/// Why no GL context can be created here, or `None` when one can. Probed with
-/// a trivial GL run that must reach EOS. It contains no `glshader` and none of
-/// the code under test, so a shader or bridge bug cannot pass for a missing GL
-/// environment.
-pub fn gl_context_error() -> Option<String> {
+/// Why no GL context can be created here, or `None` when one can. Probed once
+/// per test binary with a trivial GL run that must reach EOS. It contains no
+/// `glshader` and none of the code under test, so a shader or bridge bug cannot
+/// pass for a missing GL environment. Private: a test that skipped on this
+/// directly would bypass the `STROM_REQUIRE_GL` check in [`gl_available`].
+fn gl_context_error() -> Option<String> {
+    use std::sync::OnceLock;
+    static PROBE: OnceLock<Option<String>> = OnceLock::new();
+    PROBE.get_or_init(probe_gl_context).clone()
+}
+
+fn probe_gl_context() -> Option<String> {
     use gst::prelude::*;
-    init_gl();
     let pipeline = match gst::parse::launch(
         "gltestsrc num-buffers=3 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,framerate=30/1 ! fakesink sync=false",
     ) {

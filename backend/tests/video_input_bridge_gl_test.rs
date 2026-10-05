@@ -25,7 +25,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strom::gst::video_input_bridge::install_video_input_bridge;
 
-const REQUIRED: [&str; 4] = ["gltestsrc", "gldownload", "videoconvert", "fakesink"];
+/// The GL elements this test needs, and the rest. A missing GL element also
+/// fails under `STROM_REQUIRE_GL`; a missing other one only under
+/// `STROM_REQUIRE_GST_PLUGINS`, so the message names the right install.
+const GL_REQUIRED: &[&str] = &["gltestsrc", "gldownload"];
+const REQUIRED: &[&str] = &["videoconvert", "fakesink"];
 
 const GL_RGBA: &str =
     "video/x-raw(memory:GLMemory), format=RGBA, width=320, height=240, framerate=30/1";
@@ -131,7 +135,7 @@ fn run(convert_factory: &str) -> Outcome {
 /// conversion every consumer converts RGBA for itself.
 #[test]
 fn gl_rgba_reaches_the_peer_as_system_memory_nv12() {
-    if !common::gl_available(&REQUIRED) {
+    if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
         return;
     }
 
