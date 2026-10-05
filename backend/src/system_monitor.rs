@@ -17,10 +17,12 @@ use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 #[cfg(target_os = "macos")]
 use crate::thread_handle::ThreadHandle;
 use crate::thread_registry::ThreadRegistry;
-use strom_types::{GlRendererInfo, GpuStats, SystemStats, ThreadCpuStats, ThreadStats};
+use strom_types::{GlRendererInfo, SystemStats, ThreadCpuStats, ThreadStats};
 
-#[cfg(feature = "nvidia")]
+#[cfg(all(feature = "nvidia", not(target_os = "macos")))]
 use std::process::Command;
+#[cfg(all(feature = "nvidia", not(target_os = "macos")))]
+use strom_types::GpuStats;
 
 /// System monitor that collects CPU and GPU statistics.
 ///
@@ -77,7 +79,7 @@ impl SystemMonitor {
                 .with_memory(MemoryRefreshKind::everything()),
         );
 
-        #[cfg(feature = "nvidia")]
+        #[cfg(all(feature = "nvidia", not(target_os = "macos")))]
         let (nvml, use_nvidia_smi_fallback) = match nvml_wrapper::Nvml::init() {
             Ok(nvml) => {
                 let count = nvml.device_count().unwrap_or(0);
@@ -104,7 +106,7 @@ impl SystemMonitor {
             }
         };
 
-        #[cfg(not(feature = "nvidia"))]
+        #[cfg(not(all(feature = "nvidia", not(target_os = "macos"))))]
         let (nvml, use_nvidia_smi_fallback): (Option<()>, bool) = (None, false);
 
         // Fetch GL renderer info once (already probed at startup)
@@ -123,7 +125,7 @@ impl SystemMonitor {
             #[allow(unused_mut)]
             let mut gpu_stats = Vec::new();
 
-            #[cfg(feature = "nvidia")]
+            #[cfg(all(feature = "nvidia", not(target_os = "macos")))]
             {
                 if let Some(ref nvml) = nvml {
                     gpu_stats = Self::collect_gpu_stats_nvml(nvml);
@@ -164,7 +166,7 @@ impl SystemMonitor {
     }
 
     /// Collect GPU statistics from NVML.
-    #[cfg(feature = "nvidia")]
+    #[cfg(all(feature = "nvidia", not(target_os = "macos")))]
     fn collect_gpu_stats_nvml(nvml: &nvml_wrapper::Nvml) -> Vec<GpuStats> {
         let mut gpu_stats = Vec::new();
 
@@ -223,7 +225,7 @@ impl SystemMonitor {
         gpu_stats
     }
 
-    #[cfg(feature = "nvidia")]
+    #[cfg(all(feature = "nvidia", not(target_os = "macos")))]
     fn collect_gpu_stats_via_nvidia_smi() -> Vec<GpuStats> {
         let mut gpu_stats = Vec::new();
 
