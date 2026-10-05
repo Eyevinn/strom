@@ -288,15 +288,30 @@ impl MediaPlayerState {
         // Set the new URI on source element
         source_element.set_property("uri", &uri);
 
-        // Start playing again
-        self.follow_main_clock(pipeline);
-        pipeline.set_state(gst::State::Playing).map_err(|e| {
-            error!("Failed to start internal pipeline: {:?}", e);
-            "Failed to start playback".to_string()
-        })?;
-
         self.is_paused.store(false, Ordering::SeqCst);
+        self.start(pipeline, "Failed to start playback")
+    }
 
+    /// Start `pipeline` on the flow's clock and base time. Before the flow
+    /// plays it has neither, so the pipeline only prerolls, and the flow's
+    /// PLAYING handler (`builder.rs`) starts it on the right clock then.
+    /// Going to PLAYING on its own clock instead would keep that clock and
+    /// base time for good: that handler leaves a pipeline that already plays
+    /// alone.
+    fn start(&self, pipeline: &gst::Pipeline, failure: &str) -> Result<(), String> {
+        let target = if self.follow_main_clock(pipeline) {
+            gst::State::Playing
+        } else {
+            debug!(
+                "Media Player {}: flow not playing yet, prerolling until it does",
+                self.block_id
+            );
+            gst::State::Paused
+        };
+        pipeline.set_state(target).map_err(|e| {
+            error!("{}: {:?}", failure, e);
+            failure.to_string()
+        })?;
         Ok(())
     }
 
@@ -312,13 +327,8 @@ impl MediaPlayerState {
         // Reset timestamp offset so the bridge recomputes from the first buffer
         // after resume — prevents accumulated drift from pause duration.
         self.timing.reset(Some(pipeline), &self.main_pipeline);
-        self.follow_main_clock(pipeline);
-        pipeline.set_state(gst::State::Playing).map_err(|e| {
-            error!("Failed to resume playback: {:?}", e);
-            "Failed to resume playback".to_string()
-        })?;
         self.is_paused.store(false, Ordering::SeqCst);
-        Ok(())
+        self.start(pipeline, "Failed to resume playback")
     }
 
     /// Pause the media.
