@@ -45,13 +45,44 @@ pub(crate) mod test_support {
     use gstreamer as gst;
     use gstreamer::prelude::*;
     use gstreamer_app as gst_app;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
 
-    /// Run `aggregator` live with one input that stays empty for `idle`, so it
-    /// outputs on its own timeouts, then push a single `buffer_size`-byte
-    /// buffer stamped at the current running time. Returns the pushed PTS and
-    /// every output PTS, in order.
+    /// How long each wait gives the aggregator before the test gives up.
+    /// Every wait ends as soon as its condition holds, so a healthy run never
+    /// takes this long. The bound only has to separate "slow" from "never":
+    /// a loaded CI runner can stall the streaming threads for hundreds of
+    /// milliseconds, and an aggregator that stopped outputting stays stopped.
+    const DEADLINE: Duration = Duration::from_secs(10);
+
+    /// Output PTS seen by the appsink, and a signal for each new one.
+    type Output = Arc<(Mutex<Vec<gst::ClockTime>>, Condvar)>;
+
+    /// Block until `done` holds for the output so far, or `DEADLINE` passes.
+    /// Returns whether it held.
+    fn wait_for_output(output: &Output, done: impl Fn(&[gst::ClockTime]) -> bool) -> bool {
+        let (lock, cvar) = &**output;
+        let deadline = Instant::now() + DEADLINE;
+        let mut pts = lock.lock().unwrap();
+        while !done(&pts) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            pts = cvar.wait_timeout(pts, left).unwrap().0;
+        }
+        true
+    }
+
+    /// Run `aggregator` live with one input that stays empty for at least
+    /// `idle`, and until it has output on its own timeouts. Then push a single
+    /// `buffer_size`-byte buffer stamped at the current running time, and wait
+    /// until the output reaches that time. Returns the pushed PTS and every
+    /// output PTS, in order.
+    ///
+    /// Both waits are on the output itself, not on wall-clock sleeps, so a
+    /// starved runner only makes the test slower. If a wait times out, the
+    /// output so far is returned and `assert_no_rewind` reports it.
     pub(crate) fn output_pts_around_late_first_input(
         aggregator: &gst::Element,
         caps: &gst::Caps,
@@ -73,14 +104,16 @@ pub(crate) mod test_support {
         appsrc.static_pad("src").unwrap().link(&sink_pad).unwrap();
         aggregator.link(&appsink).unwrap();
 
-        let output = Arc::new(Mutex::new(Vec::new()));
+        let output: Output = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
         let output_cb = output.clone();
         appsink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                     if let Some(pts) = sample.buffer().and_then(|b| b.pts()) {
-                        output_cb.lock().unwrap().push(pts);
+                        let (lock, cvar) = &*output_cb;
+                        lock.lock().unwrap().push(pts);
+                        cvar.notify_all();
                     }
                     Ok(gst::FlowSuccess::Ok)
                 })
@@ -89,6 +122,18 @@ pub(crate) mod test_support {
 
         pipeline.set_state(gst::State::Playing).unwrap();
         std::thread::sleep(idle);
+        // The bug needs the output position to have moved past 0 before the
+        // first input arrives, so the aggregator must have timed out at least
+        // once on its own.
+        wait_for_output(&output, |pts| !pts.is_empty());
+        // Push between two output buffers, while the aggregator waits on the
+        // clock. A push while it is inside `aggregate` can land between the
+        // subclass reading the output position and writing it back, and that
+        // write hides a rewind. So wait for a fresh output buffer, then for
+        // half an input buffer duration (one output period in these tests).
+        let seen = output.0.lock().unwrap().len();
+        wait_for_output(&output, |pts| pts.len() > seen);
+        std::thread::sleep(Duration::from_nanos(buffer_duration.nseconds() / 2));
 
         let now = pipeline
             .current_running_time()
@@ -100,10 +145,12 @@ pub(crate) mod test_support {
             buffer.set_duration(buffer_duration);
         }
         appsrc.push_buffer(buffer).unwrap();
-        std::thread::sleep(Duration::from_millis(300));
+        // A rewound buffer would be the first output after the input arrived,
+        // so it is already recorded by the time the output reaches `now`.
+        wait_for_output(&output, |pts| pts.iter().any(|pts| *pts >= now));
 
         pipeline.set_state(gst::State::Null).unwrap();
-        let pts = output.lock().unwrap().clone();
+        let pts = output.0.lock().unwrap().clone();
         (now, pts)
     }
 
@@ -112,11 +159,11 @@ pub(crate) mod test_support {
     pub(crate) fn assert_no_rewind(pushed: gst::ClockTime, pts: &[gst::ClockTime]) {
         assert!(
             pts.first().is_some_and(|first| *first < pushed),
-            "aggregator produced no output before its first input; output: {pts:?}"
+            "aggregator produced no output before its first input at {pushed}; output: {pts:?}"
         );
         assert!(
-            pts.last().is_some_and(|last| *last >= pushed),
-            "the late input never reached the output; output: {pts:?}"
+            pts.iter().any(|pts| *pts >= pushed),
+            "the late input at {pushed} never reached the output; output: {pts:?}"
         );
         for pair in pts.windows(2) {
             assert!(
