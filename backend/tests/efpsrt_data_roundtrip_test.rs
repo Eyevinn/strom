@@ -685,6 +685,39 @@ mod block_shape {
         );
     }
 
+    /// An empty `data_stream_ids` is what the UI saves when the field is cleared.
+    /// It must build, with every data track filled in arrival order, not fail
+    /// as a list with one unparsable entry.
+    #[test]
+    fn input_block_builds_with_an_empty_data_stream_ids_list() {
+        init();
+        common::require_elements(&["efpdemux", "srtsrc", "identity"]);
+
+        for ids in ["", "  "] {
+            let mut props = properties(&[
+                ("num_video_tracks", 0),
+                ("num_audio_tracks", 0),
+                ("num_data_tracks", 2),
+            ]);
+            props.insert(
+                "data_stream_ids".to_string(),
+                PropertyValue::String(ids.to_string()),
+            );
+            let Ok(input) = EfpSrtInputBuilder.build("blk", &props, &context()) else {
+                panic!("data_stream_ids {:?} should build", ids);
+            };
+            for i in 0..2 {
+                let id = format!("blk:data_output_{}", i);
+                assert!(
+                    input.elements.iter().any(|(e, _)| *e == id),
+                    "data_stream_ids {:?} built no {}",
+                    ids,
+                    id
+                );
+            }
+        }
+    }
+
     /// A misconfigured routing list fails at build rather than quietly leaving a
     /// track fed by whatever arrives first, which is the surprise the property
     /// exists to remove.
@@ -700,6 +733,7 @@ mod block_shape {
             ("1,1", 2, "twice"),
             ("audio", 1, "not an EFP stream ID"),
             ("300", 1, "not an EFP stream ID"),
+            ("1,,2", 2, "not an EFP stream ID"),
         ] {
             let message = data_stream_ids_error(tracks, ids);
             assert!(

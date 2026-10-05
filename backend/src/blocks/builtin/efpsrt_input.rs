@@ -1177,8 +1177,9 @@ mod tests {
     }
 
     /// An empty or blank `data_stream_ids` means "fill the tracks in arrival
-    /// order", not a list with one unparsable entry. Guards the input block
-    /// building with the property left empty, which it is by default.
+    /// order", not a list with one unparsable entry. The build-level guard is
+    /// `input_block_builds_with_an_empty_data_stream_ids_list` in the EFP/SRT
+    /// round-trip test.
     #[test]
     fn data_stream_ids_empty_or_blank_leaves_every_track_unpinned() {
         for value in [None, Some(""), Some("  ")] {
@@ -1207,27 +1208,14 @@ mod tests {
         );
     }
 
+    /// An empty entry inside a list is an error, not skipped. Two tracks, so
+    /// skipping it would leave a list of the right length and build.
     #[test]
-    fn data_stream_ids_rejects_bad_lists() {
-        for (value, tracks) in [
-            ("1,2", 1),  // more streams than tracks
-            ("1", 2),    // fewer streams than tracks
-            ("0", 1),    // stream 0 is reserved
-            ("4,4", 2),  // listed twice
-            ("x", 1),    // not a number
-            ("256", 1),  // out of range
-            ("1,,2", 3), // an empty entry inside a list
-        ] {
-            assert!(
-                matches!(
-                    parse_data_stream_ids(Some(value), tracks),
-                    Err(BlockBuildError::InvalidProperty(_))
-                ),
-                "data_stream_ids={:?} with {} track(s) must be rejected",
-                value,
-                tracks
-            );
-        }
+    fn data_stream_ids_rejects_an_empty_entry() {
+        assert!(matches!(
+            parse_data_stream_ids(Some("1,,2"), 2),
+            Err(BlockBuildError::InvalidProperty(_))
+        ));
     }
 
     #[test]
