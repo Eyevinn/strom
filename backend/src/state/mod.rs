@@ -1409,6 +1409,31 @@ impl AppState {
         Ok(state)
     }
 
+    /// Take removed WHIP session pipelines to NULL, keeping each element alive
+    /// until its pipeline is down. Runs on the blocking pool: that can take
+    /// seconds and this is awaited from an HTTP handler.
+    async fn teardown_whip_sessions(
+        endpoint_id: &str,
+        session_entries: Vec<(gstreamer::Pipeline, gstreamer::Element)>,
+    ) {
+        let count = session_entries.len();
+        if count == 0 {
+            return;
+        }
+        let endpoint_id_log = endpoint_id.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            for (pipeline, element) in session_entries {
+                WhipSessionManager::teardown_session_pipeline(&pipeline);
+                drop(element);
+            }
+            info!(
+                "Torn down {} active WHIP session(s) for endpoint '{}'",
+                count, endpoint_id_log
+            );
+        })
+        .await;
+    }
+
     /// Stop a flow (stop and remove its pipeline).
     /// Release everything a flow's pipeline holds. The single way it is done.
     ///
@@ -1482,26 +1507,14 @@ impl AppState {
                 .inner
                 .whip_session_manager
                 .remove_all_sessions(endpoint_id);
-            let count = session_entries.len();
-            if count > 0 {
-                // Session pipelines go to NULL on the blocking pool: that can
-                // take seconds and this is awaited from an HTTP handler.
-                let endpoint_id_log = endpoint_id.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    for (pipeline, element) in session_entries {
-                        WhipSessionManager::teardown_session_pipeline(&pipeline);
-                        drop(element);
-                    }
-                    info!(
-                        "Torn down {} active WHIP session(s) for endpoint '{}'",
-                        count, endpoint_id_log
-                    );
-                })
-                .await;
-            }
-            self.inner
+            Self::teardown_whip_sessions(endpoint_id, session_entries).await;
+            // A POST still in flight can register a session while the ones
+            // above are torn down; unregistering hands those back too.
+            let late_entries = self
+                .inner
                 .whip_session_manager
                 .unregister_endpoint(endpoint_id);
+            Self::teardown_whip_sessions(endpoint_id, late_entries).await;
             self.inner.whip_registry.unregister(endpoint_id).await;
         }
 

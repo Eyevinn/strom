@@ -177,7 +177,7 @@ pub async fn whip_post(
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             error!("Failed to create whipserversrc for session: {}", e);
-            config.release_slot(slot);
+            config.release_slot(slot, &temp_resource_id);
             // Abandoned session: stop its inactivity watchdog. Every early return
             // below does the same — a watchdog left running outlives its session.
             cleanup_sent.store(true, Ordering::SeqCst);
@@ -189,7 +189,7 @@ pub async fn whip_post(
         }
         Err(e) => {
             error!("spawn_blocking panicked: {}", e);
-            config.release_slot(slot);
+            config.release_slot(slot, &temp_resource_id);
             cleanup_sent.store(true, Ordering::SeqCst);
             return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
         }
@@ -206,7 +206,7 @@ pub async fn whip_post(
         Err(e) => {
             error!("Failed to read request body: {}", e);
             // Teardown the element we just created and release slot
-            config.release_slot(slot);
+            config.release_slot(slot, &temp_resource_id);
             cleanup_sent.store(true, Ordering::SeqCst);
             let session_pipeline_clone = session_pipeline.clone();
             tokio::task::spawn_blocking(move || {
@@ -253,7 +253,7 @@ pub async fn whip_post(
         Ok(c) => c,
         Err(e) => {
             error!("Failed to create HTTP client: {}", e);
-            config.release_slot(slot);
+            config.release_slot(slot, &temp_resource_id);
             cleanup_sent.store(true, Ordering::SeqCst);
             let session_pipeline_clone = session_pipeline.clone();
             tokio::task::spawn_blocking(move || {
@@ -297,7 +297,7 @@ pub async fn whip_post(
                     port
                 );
                 if attempt == max_attempts - 1 {
-                    config.release_slot(slot);
+                    config.release_slot(slot, &temp_resource_id);
                     cleanup_sent.store(true, Ordering::SeqCst);
                     let session_pipeline_clone = session_pipeline.clone();
                     tokio::task::spawn_blocking(move || {
@@ -316,7 +316,7 @@ pub async fn whip_post(
     let (status, resp_headers, resp_body) = match result {
         Some(tuple) => tuple,
         None => {
-            config.release_slot(slot);
+            config.release_slot(slot, &temp_resource_id);
             cleanup_sent.store(true, Ordering::SeqCst);
             let session_pipeline_clone = session_pipeline.clone();
             tokio::task::spawn_blocking(move || {
@@ -335,7 +335,7 @@ pub async fn whip_post(
         // Teardown element and release slot on any error response — the session
         // cannot be used and would otherwise occupy the slot until the inactivity
         // watchdog fires.
-        config.release_slot(slot);
+        config.release_slot(slot, &temp_resource_id);
         cleanup_sent.store(true, Ordering::SeqCst);
         let session_pipeline_clone = session_pipeline.clone();
         tokio::task::spawn_blocking(move || {
@@ -357,11 +357,11 @@ pub async fn whip_post(
             // Location format: /whip/resource/{resource_id}
             if let Some(resource_id) = loc_str.strip_prefix("/whip/resource/") {
                 // Update slot assignment from temp_resource_id to real resource_id
-                {
-                    let mut slots = config.slot_assignments.write().unwrap();
-                    if let Some(entry) = slots.get_mut(slot) {
-                        *entry = Some(resource_id.to_string());
-                    }
+                if !config.rename_slot_holder(slot, &temp_resource_id, resource_id) {
+                    warn!(
+                        "WHIP: Slot {} on endpoint '{}' is no longer held by this POST (session '{}')",
+                        slot, endpoint_id, resource_id
+                    );
                 }
 
                 info!(
@@ -377,12 +377,13 @@ pub async fn whip_post(
                         session_pipeline,
                         endpoint_id: endpoint_id.clone(),
                         slot,
+                        config: config.clone(),
                         cleanup_sent,
                         activity,
                     });
                 if !registered {
                     warn!(
-                        "WHIP: Session '{}' was cleaned up before registration (ICE failed early)",
+                        "WHIP: Session '{}' was cleaned up instead of registered (ICE failed early, or its flow stopped while the POST was in flight)",
                         resource_id
                     );
                 }
@@ -699,7 +700,7 @@ pub async fn whip_resource_delete(
         .whip_session_manager()
         .get_endpoint_config(&session_endpoint_id)
     {
-        config.release_slot(slot);
+        config.release_slot(slot, &resource_id);
         Some((
             config.dynamic_webrtcbin_store.clone(),
             config.instance_id.clone(),

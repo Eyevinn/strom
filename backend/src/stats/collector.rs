@@ -208,7 +208,9 @@ fn whip_endpoint_id(block: &BlockInstance) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::whip_session_manager::{ActivityStamp, NewWhipSession, SessionActivity};
+    use crate::whip_session_manager::{
+        ActivityStamp, NewWhipSession, SessionActivity, WhipEndpointConfig,
+    };
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use std::time::Instant;
@@ -240,7 +242,21 @@ mod tests {
         latency_ms: u32,
         port: u16,
     ) {
+        // Sessions only register against the endpoint config their slot came
+        // from, so give the endpoint one if it has none yet.
+        let config = match mgr.get_endpoint_config(endpoint_id) {
+            Some(config) => config,
+            None => {
+                mgr.register_endpoint(
+                    endpoint_id.to_string(),
+                    WhipEndpointConfig::for_tests(endpoint_id, 2),
+                );
+                mgr.get_endpoint_config(endpoint_id)
+                    .expect("endpoint was just registered")
+            }
+        };
         assert!(mgr.register_session(NewWhipSession {
+            config,
             resource_id: format!("{}-resource-{}", endpoint_id, slot),
             port,
             element: gst::ElementFactory::make("fakesrc").build().unwrap(),
