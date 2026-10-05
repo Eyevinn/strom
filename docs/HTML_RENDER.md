@@ -324,7 +324,8 @@ directory when it starts. Screen capture is refused.
 Nor does a page get anything that would need someone at the server. Strom
 holds a DevTools session on every page for this: file choosers are
 intercepted, downloads refused, `alert`, `confirm` and `prompt` dismissed,
-and `print()` does nothing, in the page and in frames from other sites. Left
+and `print()` does nothing, in the page, in frames from other sites, and in
+any window the page opens (`window.open`, a link to a new window). Left
 to CEF, a file chooser was built inside Strom and aborted it, `print()` froze
 the page, and a download landed on the server's disk.
 

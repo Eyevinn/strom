@@ -23,6 +23,12 @@
 //! has aborted Strom, `print()` never returns, and a download lands on the
 //! server's disk. See [`guard`]. From birth on, Strom also loads a new URL
 //! into the page itself rather than through the element (see [`load_url`]).
+//!
+//! A page Strom did not name - a popup the page opened with `window.open` or
+//! a link to a new window - is guarded the same way, by one watch on the
+//! whole browser. See [`popups`].
+
+mod popups;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -318,6 +324,9 @@ pub fn name_page(cefsrc: &gst::Element, owner: PageOwner) {
         );
         return;
     };
+    // Popups are not this page's targets, so its own guard does not reach
+    // them; the browser-wide watch does.
+    popups::watch_for(cefsrc, port, &handle);
     let real_url: String = cefsrc
         .property::<Option<String>>(URL_PROPERTY)
         .unwrap_or_default();
@@ -371,6 +380,14 @@ pub fn name_page(cefsrc: &gst::Element, owner: PageOwner) {
                 owner, BIRTH_TIMEOUT
             ),
         }
+        // Nor may the page open a window before that window can be guarded.
+        if !popups::ready().await {
+            warn!(
+                "{:?}: the browser-wide guard is not in place, so a window its page opens \
+                 is not guarded. Loading its URL anyway",
+                owner
+            );
+        }
         match element.upgrade() {
             Some(cefsrc) => finish_birth(&cefsrc, &marker, target_id.as_deref()),
             None => {
@@ -401,6 +418,31 @@ const OFFSCREEN_SCRIPT: &str = r#"(() => {
     });
   }
 })();"#;
+
+/// What a page gets: see [`guard`].
+fn page_guard() -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        ("Page.enable", serde_json::json!({})),
+        (
+            "Page.setInterceptFileChooserDialog",
+            serde_json::json!({ "enabled": true }),
+        ),
+        (
+            "Page.setDownloadBehavior",
+            serde_json::json!({ "behavior": "deny" }),
+        ),
+        (
+            "Page.addScriptToEvaluateOnNewDocument",
+            serde_json::json!({ "source": OFFSCREEN_SCRIPT }),
+        ),
+        // A frame from another site is a target of its own, which the page's
+        // own commands do not reach. Each is held until it is guarded too.
+        (
+            "Target.setAutoAttach",
+            serde_json::json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true }),
+        ),
+    ]
+}
 
 /// What a frame from another site gets: the same as its page, as far as a
 /// frame's own session can be told.
@@ -447,27 +489,7 @@ async fn guard(port: u16, target_id: String, who: String) {
             return;
         }
     };
-    let setup = [
-        ("Page.enable", serde_json::json!({})),
-        (
-            "Page.setInterceptFileChooserDialog",
-            serde_json::json!({ "enabled": true }),
-        ),
-        (
-            "Page.setDownloadBehavior",
-            serde_json::json!({ "behavior": "deny" }),
-        ),
-        (
-            "Page.addScriptToEvaluateOnNewDocument",
-            serde_json::json!({ "source": OFFSCREEN_SCRIPT }),
-        ),
-        // A frame from another site is a target of its own, which the page's
-        // own commands do not reach. Each is held until it is guarded too.
-        (
-            "Target.setAutoAttach",
-            serde_json::json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true }),
-        ),
-    ];
+    let setup = page_guard();
     let last = setup.len() as u64;
     for (id, (method, params)) in setup.into_iter().enumerate() {
         let command = serde_json::json!({ "id": id + 1, "method": method, "params": params });
@@ -662,6 +684,22 @@ fn client() -> &'static reqwest::Client {
             .build()
             .unwrap_or_default()
     })
+}
+
+/// The browser-wide DevTools endpoint, which is where targets are announced.
+pub async fn browser_endpoint(port: u16) -> Option<String> {
+    let version: serde_json::Value = client()
+        .get(format!("http://127.0.0.1:{}/json/version", port))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    version
+        .get("webSocketDebuggerUrl")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// The pages Chromium lists, popups included.
