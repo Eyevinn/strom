@@ -213,15 +213,81 @@ impl WhipEndpointConfig {
     }
 
     /// Release a slot when a session disconnects.
-    pub fn release_slot(&self, slot: usize) {
+    ///
+    /// `holder` is the id the slot was claimed under: the temporary id passed
+    /// to `allocate_slot`, or the resource_id after `rename_slot_holder`. The
+    /// slot is only freed if it is still held by `holder`, so a late release
+    /// from a session that no longer owns the slot (one left over from an
+    /// earlier run of the flow, say) cannot free a slot a live publisher holds.
+    /// Returns whether the slot was released.
+    pub fn release_slot(&self, slot: usize, holder: &str) -> bool {
         let mut slots = self.slot_assignments.write().unwrap();
-        if slot < slots.len() {
-            let old = slots[slot].take();
-            info!(
-                "WhipEndpointConfig: Released slot {} (was session '{}')",
-                slot,
-                old.as_deref().unwrap_or("unknown")
-            );
+        match slots.get_mut(slot) {
+            Some(entry) if entry.as_deref() == Some(holder) => {
+                *entry = None;
+                info!(
+                    "WhipEndpointConfig: Released slot {} (was session '{}')",
+                    slot, holder
+                );
+                true
+            }
+            Some(entry) => {
+                warn!(
+                    "WhipEndpointConfig: Not releasing slot {} for session '{}': it is held by '{}'",
+                    slot,
+                    holder,
+                    entry.as_deref().unwrap_or("nobody")
+                );
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Move a slot from the temporary id it was claimed under to the session's
+    /// real resource_id, once the WHIP answer has revealed it. Only renames a
+    /// slot still held by `from`. Returns whether it did.
+    pub fn rename_slot_holder(&self, slot: usize, from: &str, to: &str) -> bool {
+        let mut slots = self.slot_assignments.write().unwrap();
+        match slots.get_mut(slot) {
+            Some(entry) if entry.as_deref() == Some(from) => {
+                *entry = Some(to.to_string());
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// A config with no pipeline behind it, for tests that exercise slot and
+/// session bookkeeping only.
+#[cfg(test)]
+impl WhipEndpointConfig {
+    pub(crate) fn for_tests(endpoint_id: &str, max_sessions: usize) -> Self {
+        WhipEndpointConfig {
+            instance_id: "whip-input".to_string(),
+            endpoint_id: endpoint_id.to_string(),
+            mode: StreamMode::AudioVideo,
+            stun_server: None,
+            turn_server: None,
+            ice_transport_policy: "all".to_string(),
+            pipeline_weak: Default::default(),
+            decode: true,
+            video_decoding: Arc::new((0..max_sessions).map(|_| AtomicBool::new(false)).collect()),
+            video_damage: Arc::new((0..max_sessions).map(|_| VideoDamage::default()).collect()),
+            jitterbuffer_latency_ms: 200,
+            do_retransmission: true,
+            drop_on_latency: true,
+            dynamic_webrtcbin_store: Arc::new(Mutex::new(HashMap::new())),
+            max_video_bitrate_kbps: 4000,
+            max_sessions,
+            slot_audio_appsrcs: Vec::new(),
+            slot_video_appsrcs: Vec::new(),
+            slot_decodebins: vec![Vec::new(); max_sessions],
+            slot_output: (0..max_sessions)
+                .map(|_| Arc::new(ActivityStamp::new(Instant::now())))
+                .collect(),
+            slot_assignments: Arc::new(RwLock::new(vec![None; max_sessions])),
         }
     }
 }
@@ -566,6 +632,11 @@ pub struct NewWhipSession {
     pub endpoint_id: String,
     /// The slot index assigned to this session
     pub slot: usize,
+    /// The endpoint config `slot` was allocated from. `register_session`
+    /// refuses the session unless this is still the config registered for
+    /// `endpoint_id`: a POST still in flight when its flow stopped must not
+    /// join the flow's next run under the same endpoint_id.
+    pub config: Arc<WhipEndpointConfig>,
     /// Shared with the session's own callbacks; see `WhipSession::cleanup_sent`.
     pub cleanup_sent: Arc<AtomicBool>,
     /// Shared with the session's appsink callbacks; see `SessionActivity`.
@@ -717,7 +788,7 @@ impl WhipSessionManager {
                     // Release the slot
                     let webrtcbin_store =
                         if let Some(config) = manager.get_endpoint_config(&endpoint_id) {
-                            config.release_slot(slot);
+                            config.release_slot(slot, &resource_id);
                             Some((
                                 config.dynamic_webrtcbin_store.clone(),
                                 config.instance_id.clone(),
@@ -776,11 +847,28 @@ impl WhipSessionManager {
         endpoints.get(endpoint_id).cloned()
     }
 
+    /// Whether `config` is the one registered for its endpoint right now, as
+    /// opposed to one left over from an earlier run of the flow.
+    fn is_current_config(&self, config: &WhipEndpointConfig) -> bool {
+        self.endpoints
+            .read()
+            .unwrap()
+            .get(&config.endpoint_id)
+            .is_some_and(|current| std::ptr::eq(Arc::as_ptr(current), config))
+    }
+
     /// Register a new session after a whipserversrc has been created.
     ///
     /// If the session's port is in the pending_cleanup_ports set (ICE failed before
     /// registration), the session is immediately torn down instead of being registered.
     /// Returns true if registered, false if immediately cleaned up.
+    ///
+    /// The session is also refused when its endpoint is no longer registered, or
+    /// has been registered again with a different config since the session's
+    /// slot was allocated. That is a POST that was still in flight while its
+    /// flow stopped: its slot belongs to a config nobody uses any more, and
+    /// registering it under the flow's next run would let its watchdog release
+    /// that run's slot of the same index from under a live publisher.
     pub fn register_session(&self, session: NewWhipSession) -> bool {
         let NewWhipSession {
             resource_id,
@@ -789,31 +877,53 @@ impl WhipSessionManager {
             session_pipeline,
             endpoint_id,
             slot,
+            config,
             cleanup_sent,
             activity,
         } = session;
 
-        // Check if this port was marked for cleanup before we could register it
-        {
+        let refuse = |why: &str| {
+            // Nothing will tear this session down later, so stop its watchdog here.
+            cleanup_sent.store(true, Ordering::SeqCst);
+            warn!(
+                "WhipSessionManager: Session '{}' on port {} for endpoint '{}' {}, tearing down immediately",
+                resource_id, port, endpoint_id, why
+            );
+            // Release the slot on the config it was allocated from, never on
+            // whatever is registered under the endpoint_id now.
+            config.release_slot(slot, &resource_id);
+            let pipeline = session_pipeline.clone();
+            let element = element.clone();
+            std::thread::spawn(move || {
+                Self::teardown_session_pipeline(&pipeline);
+                drop(element);
+            });
+            false
+        };
+
+        // Check if this port was marked for cleanup before we could register it.
+        // The mark is taken under the lock; the refusal runs after it is dropped.
+        let died_before_registration = {
             let mut pending = self.pending_cleanup_ports.lock().unwrap();
             pending.retain(|_, marked| marked.elapsed() < PENDING_CLEANUP_TTL);
-            if pending.remove(&port).is_some() {
-                // Nothing will tear this session down later, so stop its watchdog here.
-                cleanup_sent.store(true, Ordering::SeqCst);
-                warn!(
-                    "WhipSessionManager: Session '{}' on port {} died before registration, tearing down immediately",
-                    resource_id, port
-                );
-                // Release slot and tear down
-                if let Some(config) = self.get_endpoint_config(&endpoint_id) {
-                    config.release_slot(slot);
-                }
-                let pipeline = session_pipeline;
-                std::thread::spawn(move || {
-                    Self::teardown_session_pipeline(&pipeline);
-                    drop(element);
-                });
-                return false;
+            pending.remove(&port).is_some()
+        };
+        if died_before_registration {
+            return refuse("died before registration");
+        }
+
+        // Held until the session is in the map, so `unregister_endpoint` either
+        // runs first (and the session is refused here) or after (and sweeps it).
+        let endpoints = self.endpoints.read().unwrap();
+        match endpoints.get(&endpoint_id) {
+            Some(current) if Arc::ptr_eq(current, &config) => {}
+            Some(_) => {
+                drop(endpoints);
+                return refuse("belongs to an earlier run of its endpoint");
+            }
+            None => {
+                drop(endpoints);
+                return refuse("outlived its endpoint");
             }
         }
 
@@ -881,6 +991,14 @@ impl WhipSessionManager {
         loop {
             if let Some(slot) = config.allocate_slot(resource_id) {
                 return Some(slot);
+            }
+
+            // A POST that fetched its config before the flow stopped must not
+            // judge the sessions of the flow's next run, which share the
+            // endpoint_id: displacing one would cost a live run a session to
+            // seat a POST that `register_session` will refuse anyway.
+            if !self.is_current_config(config) {
+                return None;
             }
 
             // Full. Nothing registered on this endpoint means the slots are held
@@ -1061,14 +1179,20 @@ impl WhipSessionManager {
         result
     }
 
-    /// Unregister an endpoint (called during pipeline stop).
-    pub fn unregister_endpoint(&self, endpoint_id: &str) {
+    /// Unregister an endpoint (called during pipeline stop, after
+    /// `remove_all_sessions`).
+    ///
+    /// Returns any session that registered between `remove_all_sessions` and
+    /// this call (a POST that was still in flight), removed and ready for
+    /// teardown the same way. Once this returns, `register_session` refuses
+    /// every session allocated from the endpoint's config.
+    pub fn unregister_endpoint(&self, endpoint_id: &str) -> Vec<(gst::Pipeline, gst::Element)> {
         info!(
             "WhipSessionManager: Unregistering endpoint '{}'",
             endpoint_id
         );
-        let mut endpoints = self.endpoints.write().unwrap();
-        endpoints.remove(endpoint_id);
+        self.endpoints.write().unwrap().remove(endpoint_id);
+        self.remove_all_sessions(endpoint_id)
     }
 
     /// List all registered endpoint IDs.
@@ -1253,31 +1377,7 @@ mod tests {
     }
 
     fn endpoint_config(max_sessions: usize) -> WhipEndpointConfig {
-        WhipEndpointConfig {
-            instance_id: "whip-input".to_string(),
-            endpoint_id: "endpoint".to_string(),
-            mode: StreamMode::AudioVideo,
-            stun_server: None,
-            turn_server: None,
-            ice_transport_policy: "all".to_string(),
-            pipeline_weak: Default::default(),
-            decode: true,
-            video_decoding: Arc::new((0..max_sessions).map(|_| AtomicBool::new(false)).collect()),
-            video_damage: Arc::new((0..max_sessions).map(|_| VideoDamage::default()).collect()),
-            jitterbuffer_latency_ms: 200,
-            do_retransmission: true,
-            drop_on_latency: true,
-            dynamic_webrtcbin_store: Arc::new(Mutex::new(HashMap::new())),
-            max_video_bitrate_kbps: 4000,
-            max_sessions,
-            slot_audio_appsrcs: Vec::new(),
-            slot_video_appsrcs: Vec::new(),
-            slot_decodebins: vec![Vec::new(); max_sessions],
-            slot_output: (0..max_sessions)
-                .map(|_| Arc::new(ActivityStamp::new(Instant::now())))
-                .collect(),
-            slot_assignments: Arc::new(RwLock::new(vec![None; max_sessions])),
-        }
+        WhipEndpointConfig::for_tests("endpoint", max_sessions)
     }
 
     /// A manager with one single-slot endpoint whose only slot is held by a
@@ -1328,6 +1428,18 @@ mod tests {
         register_in_slot(manager, resource_id, port, 0, activity)
     }
 
+    /// The config registered for "endpoint" on `manager`, registering a
+    /// single-slot one first if there is none.
+    fn registered_endpoint(manager: &WhipSessionManager) -> Arc<WhipEndpointConfig> {
+        if let Some(config) = manager.get_endpoint_config("endpoint") {
+            return config;
+        }
+        manager.register_endpoint("endpoint".to_string(), endpoint_config(1));
+        manager
+            .get_endpoint_config("endpoint")
+            .expect("endpoint was just registered")
+    }
+
     fn register_in_slot(
         manager: &WhipSessionManager,
         resource_id: &str,
@@ -1343,6 +1455,7 @@ mod tests {
             session_pipeline: pipeline,
             endpoint_id: "endpoint".to_string(),
             slot,
+            config: registered_endpoint(manager),
             cleanup_sent: cleanup_sent.clone(),
             activity,
         });
@@ -1412,6 +1525,7 @@ mod tests {
             session_pipeline: pipeline,
             endpoint_id: "endpoint".to_string(),
             slot: 0,
+            config: registered_endpoint(&manager),
             cleanup_sent: cleanup_sent.clone(),
             activity: dead_publisher(Duration::ZERO),
         });
@@ -1441,6 +1555,7 @@ mod tests {
             session_pipeline: pipeline,
             endpoint_id: "endpoint".to_string(),
             slot: 0,
+            config: registered_endpoint(&manager),
             cleanup_sent: cleanup_sent.clone(),
             activity: dead_publisher(Duration::ZERO),
         });
@@ -1837,5 +1952,167 @@ mod tests {
             !screenshare_cleanup.load(Ordering::SeqCst),
             "the video-only session must not be torn down"
         );
+    }
+
+    /// The bug this guards: a session left over from an earlier run of the
+    /// flow is reaped by its watchdog and releases "its" slot by index on the
+    /// endpoint's current config, freeing a slot a live publisher holds. The
+    /// next POST then takes it and two sessions push into one appsrc. A release
+    /// must only free a slot still held by the session releasing it.
+    #[test]
+    fn releasing_a_slot_held_by_another_session_leaves_it_held() {
+        let config = endpoint_config(1);
+        assert_eq!(config.allocate_slot("live-publisher"), Some(0));
+
+        assert!(
+            !config.release_slot(0, "orphan"),
+            "a session that does not hold the slot must not release it"
+        );
+        assert_eq!(
+            config.slot_assignments.read().unwrap()[0].as_deref(),
+            Some("live-publisher"),
+            "the live publisher must keep its slot"
+        );
+        assert_eq!(
+            config.allocate_slot("next-client"),
+            None,
+            "the slot must not be handed to a second publisher"
+        );
+
+        assert!(
+            config.release_slot(0, "live-publisher"),
+            "the holder itself can still release the slot"
+        );
+        assert_eq!(config.slot_assignments.read().unwrap()[0], None);
+    }
+
+    /// A POST still in flight when its flow stopped must not register under
+    /// the flow's next run, which re-registers the same endpoint_id with a new
+    /// config. Registered, the orphan's watchdog would later release the new
+    /// run's slot of the same index from under a live publisher.
+    #[test]
+    fn a_session_from_an_earlier_run_of_its_endpoint_is_refused() {
+        let manager = WhipSessionManager::new();
+        manager.register_endpoint("endpoint".to_string(), endpoint_config(1));
+        let old_config = manager.get_endpoint_config("endpoint").unwrap();
+        assert_eq!(old_config.allocate_slot("orphan"), Some(0));
+
+        // The flow stops while the orphan's POST is still in flight...
+        assert!(manager.remove_all_sessions("endpoint").is_empty());
+        assert!(manager.unregister_endpoint("endpoint").is_empty());
+        // ...and starts again, and a live publisher takes slot 0.
+        manager.register_endpoint("endpoint".to_string(), endpoint_config(1));
+        let new_config = manager.get_endpoint_config("endpoint").unwrap();
+        assert_eq!(new_config.allocate_slot("live-publisher"), Some(0));
+
+        let (element, pipeline, cleanup_sent) = dummy_session();
+        let registered = manager.register_session(NewWhipSession {
+            resource_id: "orphan".to_string(),
+            port: 40020,
+            element,
+            session_pipeline: pipeline,
+            endpoint_id: "endpoint".to_string(),
+            slot: 0,
+            config: old_config.clone(),
+            cleanup_sent: cleanup_sent.clone(),
+            activity: dead_publisher(Duration::ZERO),
+        });
+
+        assert!(
+            !registered,
+            "a session allocated from an earlier config must be refused"
+        );
+        assert!(
+            cleanup_sent.load(Ordering::SeqCst),
+            "a refused session's watchdog must be stopped"
+        );
+        assert!(manager.get_session_port("orphan").is_none());
+        assert_eq!(
+            new_config.slot_assignments.read().unwrap()[0].as_deref(),
+            Some("live-publisher"),
+            "the live publisher must keep its slot"
+        );
+        assert_eq!(
+            old_config.slot_assignments.read().unwrap()[0],
+            None,
+            "the orphan's slot is released on the config it came from"
+        );
+    }
+
+    /// A POST that fetched its config before the flow stopped, and is still in
+    /// the takeover wait when the flow starts again, sees the old config full
+    /// (stopping a flow does not free its slots). It must not displace a
+    /// session of the new run, which shares the endpoint_id.
+    #[tokio::test]
+    async fn a_post_from_an_earlier_run_does_not_displace_a_new_runs_session() {
+        let (manager, new_config, cleanup_sent) = full_endpoint(
+            "new-run-session",
+            40023,
+            dead_publisher(TAKEOVER_IDLE_THRESHOLD * 2),
+        );
+        let old_config = endpoint_config(1);
+        assert_eq!(old_config.allocate_slot("old-run-session"), Some(0));
+
+        let slot = manager
+            .allocate_slot_or_take_over(&old_config, "stale-post")
+            .await;
+
+        assert_eq!(slot, None, "a stale POST gets no slot");
+        assert!(
+            !cleanup_sent.load(Ordering::SeqCst),
+            "the new run's session must not be displaced by a stale POST"
+        );
+        assert!(manager.get_session_port("new-run-session").is_some());
+        assert_eq!(
+            new_config.slot_assignments.read().unwrap()[0].as_deref(),
+            Some("new-run-session")
+        );
+    }
+
+    /// A POST still in flight when its flow stopped, and the flow has not
+    /// started again.
+    #[test]
+    fn a_session_whose_endpoint_is_gone_is_refused() {
+        let manager = WhipSessionManager::new();
+        manager.register_endpoint("endpoint".to_string(), endpoint_config(1));
+        let config = manager.get_endpoint_config("endpoint").unwrap();
+        assert_eq!(config.allocate_slot("orphan"), Some(0));
+        assert!(manager.unregister_endpoint("endpoint").is_empty());
+
+        let (element, pipeline, cleanup_sent) = dummy_session();
+        let registered = manager.register_session(NewWhipSession {
+            resource_id: "orphan".to_string(),
+            port: 40021,
+            element,
+            session_pipeline: pipeline,
+            endpoint_id: "endpoint".to_string(),
+            slot: 0,
+            config,
+            cleanup_sent: cleanup_sent.clone(),
+            activity: dead_publisher(Duration::ZERO),
+        });
+
+        assert!(!registered, "a session must not outlive its endpoint");
+        assert!(cleanup_sent.load(Ordering::SeqCst));
+        assert!(manager.get_session_port("orphan").is_none());
+    }
+
+    /// Flow stop removes the endpoint's sessions, tears them down (which takes
+    /// a while), then unregisters the endpoint. A POST that registers in
+    /// between must be handed back by `unregister_endpoint` for teardown, not
+    /// left registered against an endpoint that no longer exists.
+    #[test]
+    fn a_session_registered_during_flow_stop_is_swept_on_unregister() {
+        let manager = WhipSessionManager::new();
+        assert!(manager.remove_all_sessions("endpoint").is_empty());
+        let cleanup_sent = register(&manager, "late-session", 40022);
+
+        assert_eq!(
+            manager.unregister_endpoint("endpoint").len(),
+            1,
+            "the late session must be handed back for teardown"
+        );
+        assert!(cleanup_sent.load(Ordering::SeqCst));
+        assert!(manager.get_session_port("late-session").is_none());
     }
 }

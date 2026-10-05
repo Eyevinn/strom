@@ -265,7 +265,7 @@ fn reused_slot_decodes_through_a_fresh_video_decoder() {
     publisher
         .set_state(gst::State::Null)
         .expect("publisher stops");
-    config.release_slot(slot);
+    assert!(config.release_slot(slot, "first"));
 
     // Second session on the same slot. A new session re-arms the slot's
     // "video is decoding" flag (`create_whipserversrc_for_session` does), and
@@ -329,7 +329,7 @@ fn reused_slot_accepts_a_different_codec() {
     publisher
         .set_state(gst::State::Null)
         .expect("publisher stops");
-    slot.config.release_slot(index);
+    assert!(slot.config.release_slot(index, "h264"));
 
     let before = slot.frames.load(Ordering::Relaxed);
     let index = slot.config.allocate_slot("vp8").expect("a free slot");
