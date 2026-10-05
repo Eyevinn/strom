@@ -21,14 +21,6 @@ env:
   SCCACHE_ENDPOINT: https://olivedev-rustcache.minio-minio.auto.prod-se.osaas.io
   SCCACHE_REGION: us-east-1
   SCCACHE_S3_USE_SSL: "true"
-  # Pinned: the action installs the latest release when left unset. sccache
-  # 0.18.0 (opendal 0.58) fails every write to this MinIO backend: 0 hits and
-  # one write error per miss in every job, so nothing has been cached since it
-  # shipped and macOS/Windows rebuild the whole tree on each run. 0.17.0 wrote
-  # 1436 of 1437 misses on a cold run.
-  # Check the "Cache write errors" line in the post-sccache stats before
-  # bumping.
-  SCCACHE_RELEASE: v0.17.0
   AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
 
@@ -52,9 +44,10 @@ jobs:
             echo "cache_ok=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Probe a write, not just a list: a backend that serves reads but
-          # rejects writes looks healthy to list-objects-v2 while sccache
-          # records a write error on every miss and the cache never fills.
+          # Probe a write, not just a list. When the MinIO drive fills up it
+          # keeps serving reads and health checks but rejects every PUT, so
+          # list-objects-v2 passes while sccache records a write error on every
+          # miss and the cache never fills (2026-08 to 2026-10, unnoticed).
           # A fixed key is overwritten each run, so no delete is needed.
           # NoSuchBucket / unreachable endpoint / denied write -> off.
           probe() {
@@ -100,8 +93,6 @@ jobs:
       - name: Setup sccache
         if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
-        with:
-          version: ${{ env.SCCACHE_RELEASE }}
 
       - name: Build frontend
         run: |
@@ -167,8 +158,6 @@ jobs:
       - name: Setup sccache
         if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
-        with:
-          version: ${{ env.SCCACHE_RELEASE }}
 
       # Linux: Install Zig and cargo-zigbuild for glibc 2.31 compatibility
       - name: Determine Zig/cargo-zigbuild arch (Linux)
