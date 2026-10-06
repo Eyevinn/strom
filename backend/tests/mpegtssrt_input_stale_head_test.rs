@@ -305,7 +305,12 @@ fn tables_between(
     let mut media_pids = std::collections::HashSet::new();
     for (_, buffer) in chunks {
         let map = buffer.map_readable().unwrap();
-        for packet in map.chunks_exact(TS_PACKET).filter(|p| starts_pes(p)) {
+        for packet in map
+            .as_chunks::<TS_PACKET>()
+            .0
+            .iter()
+            .filter(|p| starts_pes(*p))
+        {
             media_pids.insert(ts_pid(packet));
         }
     }
@@ -315,8 +320,10 @@ fn tables_between(
         .filter_map(|(_, buffer)| {
             let map = buffer.map_readable().unwrap();
             let tables: Vec<u8> = map
-                .chunks_exact(TS_PACKET)
-                .filter(|p| !media_pids.contains(&ts_pid(p)))
+                .as_chunks::<TS_PACKET>()
+                .0
+                .iter()
+                .filter(|p| !media_pids.contains(&ts_pid(*p)))
                 .flatten()
                 .copied()
                 .collect();
