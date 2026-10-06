@@ -17,7 +17,7 @@ pub mod common;
 
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strom::blocks::BlockRegistry;
@@ -175,6 +175,10 @@ fn is_red((r, g, b): (u8, u8, u8)) -> bool {
 
 fn is_green((r, g, b): (u8, u8, u8)) -> bool {
     g > 200 && r < 60 && b < 60
+}
+
+fn is_yellow((r, g, b): (u8, u8, u8)) -> bool {
+    r > 200 && g > 200 && b < 60
 }
 
 fn is_black((r, g, b): (u8, u8, u8)) -> bool {
@@ -403,6 +407,79 @@ fn run(block_id: &str, backend: &str) {
         .trigger_transition(block_id, 0, 0, "fade", 300)
         .expect("take the PiP back");
     wait_for_border(&appsink, "the green zone border back", is_green);
+
+    // A colour change must not block its caller while the underlay source
+    // is stuck pushing downstream (here: held by a blocking probe, as it
+    // can be inside the mixer's sink pad). Stopping that source waits for
+    // its streaming thread, so a synchronous restart would hang the API
+    // call until the source is released.
+    let held_pad = manager
+        .pipeline()
+        .by_name(&format!("{block_id}:underlay_dist_0_caps"))
+        .expect("PGM underlay of input 0")
+        .static_pad("src")
+        .unwrap();
+    let held = Arc::new(AtomicBool::new(false));
+    let probe = {
+        let held = Arc::clone(&held);
+        held_pad
+            .add_probe(
+                gstreamer::PadProbeType::BLOCK | gstreamer::PadProbeType::BUFFER,
+                move |_, _| {
+                    held.store(true, Ordering::Relaxed);
+                    gstreamer::PadProbeReturn::Ok
+                },
+            )
+            .expect("blocking probe")
+    };
+    let pip_config = |color: &str| {
+        manager
+            .apply_vision_mixer_pip_config(
+                block_id,
+                0,
+                Some(1),
+                bordered_zone(color),
+                PipTransforms::new(),
+            )
+            .expect("PiP config");
+    };
+    // Blue: the restarted source pushes its frame and is held.
+    pip_config("#0000FF");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !held.load(Ordering::Relaxed) {
+        assert!(
+            Instant::now() < deadline,
+            "the underlay frame was never held"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Two more changes while it is held: both must return at once, and the
+    // last one wins.
+    let returned_in = std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let pip_config = &pip_config;
+        scope.spawn(move || {
+            let t0 = Instant::now();
+            pip_config("#FF00FF");
+            pip_config("#FFFF00");
+            let _ = tx.send(t0.elapsed());
+        });
+        let returned = rx.recv_timeout(Duration::from_secs(3)).ok();
+        // Release the source whatever happened, so a hung call can finish
+        // and the scope can join.
+        held_pad.remove_probe(probe);
+        returned
+    });
+    let returned_in = returned_in.expect("a colour change blocked on a held underlay source");
+    eprintln!(
+        "{backend}: two colour changes with the source held returned in {} ms",
+        returned_in.as_millis()
+    );
+    assert!(
+        returned_in < Duration::from_secs(1),
+        "colour changes took {returned_in:?} with the source held"
+    );
+    wait_for_border(&appsink, "the latest (yellow) zone border", is_yellow);
 
     manager.stop().expect("stop");
     drop(manager);

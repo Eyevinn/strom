@@ -19,6 +19,7 @@
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use std::sync::{Mutex, OnceLock};
 use tracing::warn;
 
 /// Where a region's underlay pads live and how PGM-pixel border widths
@@ -94,29 +95,91 @@ pub(crate) fn make_underlay_src(name: &str) -> Result<gst::Element, gst::glib::B
 /// takes it on the next output frame rather than dropping it as late. The
 /// mixer pad keeps the old frame until the new one is taken, so the border
 /// never blinks out.
+///
+/// Never blocks: the restart runs on GStreamer's async-call pool (see
+/// [`schedule_underlay_restart`]), because stopping a source waits for its
+/// streaming thread, which can sit inside the mixer's sink pad.
 pub(crate) fn set_underlay_color(pad: &gst::Pad, argb: u32) {
     if let Some(src) = upstream_underlay_src(pad) {
         if src.property::<u32>("foreground-color") != argb {
             src.set_property("foreground-color", argb);
-            restart_underlay_src(&src);
+            schedule_underlay_restart(&src);
         }
     }
 }
 
+/// Underlay sources with a restart scheduled that has not stopped them yet.
+/// Weak: a pending restart must not keep a torn-down pipeline's source alive.
+fn pending_restarts() -> &'static Mutex<Vec<gst::glib::WeakRef<gst::Element>>> {
+    static PENDING: OnceLock<Mutex<Vec<gst::glib::WeakRef<gst::Element>>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Take `src` off the pending list (and drop entries whose source is gone).
+/// Returns whether it was on it.
+fn take_pending(src: &gst::Element) -> bool {
+    let mut pending = match pending_restarts().lock() {
+        Ok(p) => p,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let before = pending.len();
+    pending.retain(|w| w.upgrade().is_some_and(|e| &e != src));
+    pending.len() != before
+}
+
+/// Restart `src` on GStreamer's async-call pool so it pushes one frame in
+/// its current color. Coalesces: while a restart is scheduled and has not
+/// stopped the source yet, more color changes only write the property, and
+/// that one restart pushes the latest color. A change after the stop
+/// schedules a new restart.
+fn schedule_underlay_restart(src: &gst::Element) {
+    {
+        let mut pending = match pending_restarts().lock() {
+            Ok(p) => p,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if pending
+            .iter()
+            .any(|w| w.upgrade().is_some_and(|e| &e == src))
+        {
+            return;
+        }
+        pending.push(src.downgrade());
+    }
+    // `call_async` holds a reference to the element only until the call
+    // has run; the closure captures nothing.
+    src.call_async(|src| {
+        restart_underlay_src(src);
+    });
+}
+
 /// Make a started underlay source push one frame in its current color.
+/// Runs on the async-call pool, where waiting for the streaming thread is
+/// harmless.
 fn restart_underlay_src(src: &gst::Element) {
-    // Not started yet: it will push the new color when it starts.
-    if src.current_state() < gst::State::Paused {
+    // Not started yet, or the flow is being torn down (unparented or on its
+    // way to NULL): there is nothing to restart.
+    if src.current_state() < gst::State::Paused || src.parent().is_none() {
+        take_pending(src);
         return;
     }
-    let offset = src.current_running_time().map_or(0, |t| t.nseconds());
-    if src.set_state(gst::State::Ready).is_err() {
+    let stopped = src.set_state(gst::State::Ready).is_ok();
+    // Stopped: any color written from here on needs a new restart.
+    take_pending(src);
+    if !stopped {
         warn!(
             "Underlay source {} did not stop for a color change",
             src.name()
         );
         return;
     }
+    // Now, after any wait for the streaming thread, so the frame is not
+    // late. Read off the parent: a stopped source may have lost its clock.
+    let offset = src
+        .parent()
+        .and_then(|p| p.downcast::<gst::Element>().ok())
+        .and_then(|p| p.current_running_time())
+        .map_or(0, |t| t.nseconds());
     src.set_property("timestamp-offset", offset as i64);
     if src.sync_state_with_parent().is_err() {
         warn!(
