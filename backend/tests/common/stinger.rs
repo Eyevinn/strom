@@ -336,12 +336,22 @@ impl Running {
         {}
     }
 
-    /// PGM frames, timestamp and packed RGBA, for the next `ms`.
+    /// PGM frames, timestamp and packed RGBA, spanning the next `ms` of
+    /// stream time. Bounded by stream time, not wall time: a slow runner's
+    /// debug-build mixer falls behind real time, and a wall-clock window then
+    /// ends before the clip does. The wall deadline only stops a stalled
+    /// pipeline.
     pub async fn collect(&self, ms: u64) -> Vec<(u64, Vec<u8>)> {
         let sink = self.sink().await;
-        let until = std::time::Instant::now() + std::time::Duration::from_millis(ms);
-        let mut frames = Vec::new();
-        while std::time::Instant::now() < until {
+        let span = ms * 1_000_000;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms + 10_000);
+        let mut frames: Vec<(u64, Vec<u8>)> = Vec::new();
+        while std::time::Instant::now() < deadline
+            && frames
+                .first()
+                .zip(frames.last())
+                .is_none_or(|((first, _), (last, _))| last - first < span)
+        {
             let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(50)) else {
                 continue;
             };
