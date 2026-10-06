@@ -26,7 +26,7 @@ use crate::blocks::builtin::mediaplayer::{
 };
 use crate::gst::pipeline::effects::stinger::{StingerTake, StingerWatch};
 use crate::gst::pipeline::PipelineError;
-use crate::stinger::{analysis, examples, plan_clip};
+use crate::stinger::{analysis, examples, plan_clip, ClipPlan, FrameGrid};
 
 /// How long after the clip's end a take waits for the mixer to get past it
 /// before giving up on a stalled mixer.
@@ -256,6 +256,53 @@ impl Context {
             ))),
             _ => Ok(file),
         }
+    }
+}
+
+/// A take programmed into the mixer, for [`AppState::announce_stinger_take`].
+struct Started {
+    token: u64,
+    index: usize,
+    file: String,
+    plan: ClipPlan,
+    take: StingerTake,
+    watch: StingerWatch,
+    ftb_cancelled: bool,
+    take_to_air_ms: f64,
+    cue_ms: Option<u64>,
+    frames_expected: u32,
+    /// The clip's player, to park the clip again afterwards.
+    player: Option<Arc<MediaPlayerState>>,
+}
+
+/// A take on the mixer's frame grid whose source's first frame lands on the
+/// first output frame at or after `earliest` and lasts `length_ns`, one
+/// source frame every `clip_frame_ns`.
+#[allow(clippy::too_many_arguments)]
+fn take_on_grid(
+    grid: &FrameGrid,
+    earliest: u64,
+    length_ns: u64,
+    plan: &ClipPlan,
+    from: usize,
+    to: usize,
+    clip_size: Option<(u32, u32)>,
+    clip_frame_ns: u64,
+    fill_raised: bool,
+) -> StingerTake {
+    let times = crate::stinger::take_times(grid, earliest, length_ns, plan);
+    StingerTake {
+        frame_ns: grid.frame_ns(),
+        from_input: from,
+        to_input: to,
+        start: times.start,
+        end: times.end,
+        cut_at: times.cut_at,
+        mix_ns: times.mix_ns,
+        plan: plan.clone(),
+        clip_size,
+        clip_frame_ns,
+        fill_raised,
     }
 }
 
@@ -989,7 +1036,6 @@ impl AppState {
                     false,
                 )
             })?;
-            let frame_ns = grid.frame_ns();
             let now = manager
                 .running_time_ns()
                 .ok_or_else(|| ("the flow has no running time".to_string(), false))?;
@@ -1002,24 +1048,20 @@ impl AppState {
                         / i.framerate_num as u64
                 })
                 .unwrap_or(plan.duration_ms * 1_000_000);
-            let times =
-                crate::stinger::take_times(&grid, now + ctx.preroll_ms * 1_000_000, clip_ns, &plan);
-            let take = StingerTake {
-                frame_ns,
-                from_input: from,
-                to_input: to,
-                start: times.start,
-                end: times.end,
-                cut_at: times.cut_at,
-                mix_ns: times.mix_ns,
-                plan: plan.clone(),
-                clip_size: info.as_ref().map(|i| (i.width, i.height)),
-                clip_frame_ns: info
-                    .as_ref()
+            let take = take_on_grid(
+                &grid,
+                now + ctx.preroll_ms * 1_000_000,
+                clip_ns,
+                &plan,
+                from,
+                to,
+                info.as_ref().map(|i| (i.width, i.height)),
+                info.as_ref()
                     .filter(|i| i.framerate_num > 0)
                     .map(|i| 1_000_000_000 * i.framerate_den as u64 / i.framerate_num as u64)
-                    .unwrap_or(frame_ns),
-            };
+                    .unwrap_or(grid.frame_ns()),
+                false,
+            );
             // A failure part way through has already put the old source
             // back alone on air; a fade-to-black it ended stays ended.
             let (watch, ftb_cancelled) = match manager.program_stinger(block, &take) {
@@ -1063,6 +1105,53 @@ impl AppState {
 
         let take_to_air_ms =
             (now_at - requested).as_secs_f64() * 1000.0 + (take.start - now) as f64 / 1e6;
+        let frames_expected = info
+            .as_ref()
+            .map(|i| i.frames)
+            .unwrap_or_else(|| (plan.duration_ms * 30 / 1000) as u32);
+        Ok(self
+            .announce_stinger_take(
+                flow_id,
+                block,
+                Started {
+                    token,
+                    index,
+                    file: file.to_string(),
+                    plan,
+                    take,
+                    watch,
+                    ftb_cancelled,
+                    take_to_air_ms,
+                    cue_ms,
+                    frames_expected,
+                    player: Some(Arc::clone(&ctx.player)),
+                },
+            )
+            .await)
+    }
+
+    /// Tell everyone a programmed take is on its way to air, and hand it to
+    /// a task that finishes it once its source has played out.
+    async fn announce_stinger_take(
+        &self,
+        flow_id: &FlowId,
+        block: &str,
+        started: Started,
+    ) -> StingerTakeResponse {
+        let Started {
+            token,
+            index,
+            file,
+            plan,
+            take,
+            watch,
+            ftb_cancelled,
+            take_to_air_ms,
+            cue_ms,
+            frames_expected,
+            player,
+        } = started;
+        let (from, to) = (take.from_input, take.to_input);
         self.after_vision_mixer_take(
             flow_id,
             block,
@@ -1080,7 +1169,7 @@ impl AppState {
             block_id: block.to_string(),
             take_id: token,
             index,
-            file: file.to_string(),
+            file: file.clone(),
             variant: plan.variant,
             downgraded_from: plan.downgraded_from,
             from_input: from,
@@ -1089,14 +1178,10 @@ impl AppState {
             duration_ms: plan.duration_ms,
         });
 
-        let frames_expected = info
-            .as_ref()
-            .map(|i| i.frames)
-            .unwrap_or_else(|| (plan.duration_ms * 30 / 1000) as u32);
         let report = StingerTakeReport {
             take_id: token,
             index,
-            file: file.to_string(),
+            file: file.clone(),
             variant: plan.variant,
             downgraded_from: plan.downgraded_from,
             from_input: from,
@@ -1114,22 +1199,21 @@ impl AppState {
         let state = self.clone();
         let flow = *flow_id;
         let mixer = block.to_string();
-        let player = Arc::clone(&ctx.player);
         tokio::spawn(async move {
             state
                 .finish_stinger_take(flow, mixer, token, take, watch, report, player)
                 .await;
         });
 
-        Ok(StingerTakeResponse {
+        StingerTakeResponse {
             take_id: token,
             index,
-            file: file.to_string(),
+            file,
             variant: plan.variant,
             downgraded_from: plan.downgraded_from,
             take_to_air_ms,
             duration_ms: plan.duration_ms,
-        })
+        }
     }
 
     /// Wait for the mixer to get past the clip, settle the pads, report what
@@ -1143,7 +1227,7 @@ impl AppState {
         take: StingerTake,
         watch: StingerWatch,
         mut report: StingerTakeReport,
-        player: Arc<MediaPlayerState>,
+        player: Option<Arc<MediaPlayerState>>,
     ) {
         // Two output frames past the end, so the last keyframes have run.
         let target = take.end + 2 * take.frame_ns;
@@ -1215,18 +1299,22 @@ impl AppState {
 
         // Park the clip again, so the next take is instant.
         let index = report.index;
-        let cue_player = Arc::clone(&player);
-        let cued = tokio::task::spawn_blocking(move || cue_player.cue(index)).await;
-        let (ready, cue_ms) = match cued {
-            Ok(Ok(took)) => (true, took.as_millis() as u64),
-            Ok(Err(e)) => {
-                warn!(
-                    "Stinger on {}: could not park clip {} again: {}",
-                    mixer, index, e
-                );
-                (false, 0)
+        let parked = match player {
+            Some(player) => {
+                let cued = tokio::task::spawn_blocking(move || player.cue(index)).await;
+                Some(match cued {
+                    Ok(Ok(took)) => (true, took.as_millis() as u64),
+                    Ok(Err(e)) => {
+                        warn!(
+                            "Stinger on {}: could not park clip {} again: {}",
+                            mixer, index, e
+                        );
+                        (false, 0)
+                    }
+                    Err(_) => (false, 0),
+                })
             }
-            Err(_) => (false, 0),
+            None => None,
         };
 
         with_mixer(flow, &mixer, |s| {
@@ -1235,17 +1323,19 @@ impl AppState {
                 s.source = None;
             }
             s.last_take = Some(report.clone());
-            if ready {
+            if let Some((true, cue_ms)) = parked {
                 s.last_cue_ms = Some(cue_ms);
             }
         });
-        self.inner.events.broadcast(StromEvent::StingerCued {
-            flow_id: flow,
-            block_id: mixer.clone(),
-            index,
-            ready,
-            cue_ms,
-        });
+        if let Some((ready, cue_ms)) = parked {
+            self.inner.events.broadcast(StromEvent::StingerCued {
+                flow_id: flow,
+                block_id: mixer.clone(),
+                index,
+                ready,
+                cue_ms,
+            });
+        }
         self.inner.events.broadcast(StromEvent::StingerCompleted {
             flow_id: flow,
             block_id: mixer,
