@@ -21,6 +21,12 @@ use strom_types::vision_mixer::{self, Zone, TIMEZONE_REFRESH_SECS};
 use strom_types::FlowId;
 use tracing::{debug, warn};
 
+/// Shortest time between two overlay redraws caused only by VU meters or the
+/// clock (4 fps). Each redraw renders and uploads the full multiview canvas;
+/// meter changes inside this window are drawn together on the next allowed
+/// tick. Source and tally changes (PGM, PVW, FTB, PiP) are not capped.
+const OVERLAY_MIN_REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// A per-block overlay registry: keyed by block instance ID, each entry tagged
 /// with the flow that registered it so [`unregister_flow`] can sweep by flow.
 type OverlayRegistry<T> = Mutex<HashMap<String, (FlowId, T)>>;
@@ -799,6 +805,9 @@ pub struct OverlayRenderer {
     /// stream was flushed or restarted, or the appsrc stopped, so the mixer
     /// may no longer hold the last frame.
     force_dirty: Arc<AtomicBool>,
+    /// When the overlay was last rendered and pushed, for
+    /// [`OVERLAY_MIN_REDRAW_INTERVAL`].
+    last_redraw: Option<Instant>,
     last_pgm: u64,
     last_pvw: u64,
     last_ftb: bool,
@@ -850,6 +859,7 @@ impl OverlayRenderer {
             frame_duration,
             gaps_queued,
             force_dirty,
+            last_redraw: None,
             last_pgm: u64::MAX,
             last_pvw: u64::MAX,
             last_ftb: false,
@@ -918,16 +928,22 @@ impl OverlayRenderer {
         let pip_compose_hash = hash_pip_compose(&self.state);
         let forced = self.force_dirty.swap(false, Ordering::Relaxed);
 
-        let dirty = forced
+        // Source and tally changes are drawn on the next tick.
+        let sources_changed = forced
             || self.last_pgm != pgm_packed
             || self.last_pvw != pvw_packed
             || self.last_ftb != ftb
             || self.last_pgm_pip != pgm_pip_packed
             || self.last_pvw_pip != pvw_pip_packed
-            || self.last_clock_secs != clock_secs
             || self.last_show_vu != show_vu
-            || (show_vu && self.last_meters_hash != meters_hash)
             || self.last_pip_compose_hash != pip_compose_hash;
+        // Meter and clock changes are capped at OVERLAY_MIN_REDRAW_INTERVAL.
+        let meters_or_clock_changed =
+            self.last_clock_secs != clock_secs || (show_vu && self.last_meters_hash != meters_hash);
+        let too_soon = self
+            .last_redraw
+            .is_some_and(|t| t.elapsed() < OVERLAY_MIN_REDRAW_INTERVAL);
+        let dirty = sources_changed || (meters_or_clock_changed && !too_soon);
 
         if dirty {
             let pgm = (pgm_packed != NO_SOURCE).then_some(pgm_packed as usize);
@@ -949,6 +965,7 @@ impl OverlayRenderer {
                 self.force_dirty.store(true, Ordering::Relaxed);
             }
             if pushed {
+                self.last_redraw = Some(Instant::now());
                 self.last_pgm = pgm_packed;
                 self.last_pvw = pvw_packed;
                 self.last_ftb = ftb;

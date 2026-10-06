@@ -240,8 +240,9 @@ pub const VU_METER_ORANGE_DB: f64 = -9.0;
 /// dBFS threshold above which the VU bar turns red.
 pub const VU_METER_RED_DB: f64 = -6.0;
 
-/// Level meter message interval in nanoseconds (100 ms).
-pub const VU_METER_INTERVAL_NS: u64 = 100_000_000;
+/// Level meter message interval in nanoseconds (250 ms), matching the
+/// overlay's 4 fps redraw cap.
+pub const VU_METER_INTERVAL_NS: u64 = 250_000_000;
 
 /// Quantize an RMS/peak value in dBFS to u8 (0 = silence, 255 = 0 dBFS).
 /// Used for lock-free atomic storage of per-input meter values.
