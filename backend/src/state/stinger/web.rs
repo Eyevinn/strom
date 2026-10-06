@@ -31,6 +31,10 @@ use crate::stinger::FrameGrid;
 /// that paints nothing leaves the output still.
 const SILENT_PAGE_LIMIT: Duration = Duration::from_millis(400);
 
+/// How long past the rest window the check waits for its last frames to
+/// arrive.
+const REST_CHECK_SLACK: Duration = Duration::from_millis(50);
+
 /// A 30 fps grid, to judge a page's settings while its flow is stopped.
 const NOMINAL_GRID: FrameGrid = FrameGrid { num: 30, den: 1 };
 
@@ -280,7 +284,7 @@ impl AppState {
         } else {
             PAGE_FIRST_FRAME_DELAY_PAINTED
         };
-        let Some(anchor) = WebAnchor::watch(&pad, delay) else {
+        let Some(anchor) = WebAnchor::watch(&pad, delay, !fixed_rate) else {
             return Err(abort("could not watch the stinger page's output".to_string()).await);
         };
         // A paint-only gstcefsrc sends nothing while the page rests, so
@@ -288,15 +292,6 @@ impl AppState {
         if fixed_rate {
             anchor.ready(Duration::from_millis(100)).await;
         }
-        if anchor.paints_at_rest() {
-            warn!(
-                "Stinger page {}: the page paints while at rest, so its first frame after the take \
-                 may be a paint of its rest state and the cut may land a frame or two early. A \
-                 stinger page should stop drawing until the take",
-                source
-            );
-        }
-
         // A new fragment is a same-document navigation: the loaded page gets
         // `hashchange` and starts its animation, rather than reloading.
         let shown: Option<String> = cefsrc.property(html_input::URL_PROPERTY);
@@ -326,7 +321,6 @@ impl AppState {
             }
         };
         let first = anchor.first_frame_ns();
-        drop(anchor);
         let after_take = |ns: u64| ns.saturating_sub(taken_rt) / 1_000_000;
         if prompt {
             debug!(
@@ -371,19 +365,49 @@ impl AppState {
         let counted_from = cefsrc
             .current_running_time()
             .map_or(take.start, |t| t.nseconds().max(take.start));
-        let programmed = {
+        let (programmed, mixer_latency_ns) = {
             let pipelines = self.inner.pipelines.read().await;
             match pipelines.get(flow_id) {
-                Some(manager) => manager
-                    .program_stinger(block, &take)
-                    .map_err(|e| e.error.to_string()),
-                None => Err("the flow is not running".to_string()),
+                Some(manager) => (
+                    manager
+                        .program_stinger(block, &take)
+                        .map_err(|e| e.error.to_string()),
+                    manager.mixer_latency_ns(block).unwrap_or(0),
+                ),
+                None => (Err("the flow is not running".to_string()), 0),
             }
         };
         let watch = match programmed {
             Ok((watch, _)) => watch,
             Err(e) => return Err(abort(e).await),
         };
+
+        // A page that paints at rest makes its rest paints look like its
+        // animation's start, which puts the cut early. Past its duration the
+        // page should be at rest, after at most one paint that clears it.
+        // Count what it paints from a page frame past the end until the
+        // earliest the next take could trigger it: the take finishes once the
+        // mixer's output is two frames past the end, which is the mixer's
+        // latency later in running time.
+        let rest_from = take.end + page_frame_ns;
+        let rest_until = take.end + 2 * take.frame_ns + mixer_latency_ns;
+        anchor.expect_rest(rest_from, rest_until);
+        let wait = Duration::from_nanos(rest_until.saturating_sub(taken_rt))
+            .saturating_add(REST_CHECK_SLACK)
+            .saturating_sub(taken_at.elapsed());
+        let source_id = source.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            if anchor.paints_at_rest() {
+                warn!(
+                    "Stinger page {}: the page kept drawing after its stinger duration, so on a \
+                     take its rest paints can look like its animation starting and the cut may land \
+                     a frame or two early. A stinger page should stop drawing at rest, within its \
+                     Stinger Duration",
+                    source_id
+                );
+            }
+        });
 
         let take_to_air_ms =
             (taken_at - requested).as_secs_f64() * 1000.0 + (start as f64 - taken_rt as f64) / 1e6;
