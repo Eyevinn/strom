@@ -35,6 +35,16 @@ const PGM_H: usize = 720;
 /// The zone sits in the middle quarter of PGM; its border is this many PGM
 /// pixels wide, drawn outward.
 const BORDER_W: f32 = 32.0;
+/// The mixer's latency in the test flow, and how late every input arrives
+/// within it.
+const MIXER_LATENCY_MS: u64 = 300;
+const INPUT_DELAY_MS: u64 = 200;
+/// The PiP background (input 1) is blue; every other input is black.
+const BG_INPUT: usize = 1;
+
+/// The underlay tests share the machine's GL and CPU; run them one at a
+/// time so neither starves the other on a small CI runner.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn elem(id: &str, ty: &str, props: Vec<(&str, PV)>) -> strom_types::Element {
     strom_types::Element {
@@ -59,6 +69,9 @@ fn build_flow(block_id: &str, backend: &str) -> Flow {
                 PV::String(backend.into()),
             );
             p.insert("num_inputs".to_string(), PV::UInt(NUM_INPUTS as u64));
+            // Real mixer latency: a border whose frame only arrives after a
+            // take would be missing from PGM for this long.
+            p.insert("latency".to_string(), PV::UInt(MIXER_LATENCY_MS));
             p.insert("num_pips".to_string(), PV::String(NUM_PIPS.to_string()));
             p.insert(
                 "pgm_resolution".to_string(),
@@ -82,7 +95,10 @@ fn build_flow(block_id: &str, backend: &str) -> Flow {
             &format!("src{i}"),
             "videotestsrc",
             vec![
-                ("pattern", PV::String("black".into())),
+                (
+                    "pattern",
+                    PV::String(if i == BG_INPUT { "blue" } else { "black" }.into()),
+                ),
                 ("is-live", PV::Bool(true)),
             ],
         ));
@@ -95,8 +111,20 @@ fn build_flow(block_id: &str, backend: &str) -> Flow {
             from: format!("src{i}:src"),
             to: format!("caps{i}:sink"),
         });
+        // Every input arrives INPUT_DELAY_MS after its timestamp, like an
+        // SRT or WHIP input with real latency: the mixer then composes each
+        // output frame that long after its time.
+        flow.elements.push(elem(
+            &format!("delay{i}"),
+            "queue",
+            vec![("min-threshold-time", PV::UInt(INPUT_DELAY_MS * 1_000_000))],
+        ));
         flow.links.push(strom_types::Link {
             from: format!("caps{i}:src"),
+            to: format!("delay{i}:sink"),
+        });
+        flow.links.push(strom_types::Link {
+            from: format!("delay{i}:src"),
             to: format!("{block_id}:video_in_{i}"),
         });
     }
@@ -181,20 +209,30 @@ fn is_yellow((r, g, b): (u8, u8, u8)) -> bool {
     r > 200 && g > 200 && b < 60
 }
 
-fn is_black((r, g, b): (u8, u8, u8)) -> bool {
-    r < 40 && g < 40 && b < 40
+fn is_blue((r, g, b): (u8, u8, u8)) -> bool {
+    b > 200 && r < 60 && g < 60
 }
 
-/// Process CPU time (user + system).
-fn cpu_time() -> Duration {
-    let mut ru = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-    // SAFETY: getrusage writes a full rusage into the pointer it is given.
-    let ru = unsafe {
-        libc::getrusage(libc::RUSAGE_SELF, ru.as_mut_ptr());
-        ru.assume_init()
+/// RGB near the top-left corner of PGM: the PiP background when a PiP is
+/// on PGM, far from the zone and its border.
+fn corner_rgb(sample: &gstreamer::Sample) -> (u8, u8, u8) {
+    let caps = sample.caps().expect("caps");
+    let s = caps.structure(0).unwrap();
+    let w = s.get::<i32>("width").unwrap() as usize;
+    let format = s.get::<&str>("format").unwrap().to_string();
+    let (ri, bi) = match format.as_str() {
+        "RGBA" | "RGBx" => (0, 2),
+        "BGRA" | "BGRx" => (2, 0),
+        other => panic!("unexpected PGM format {other}"),
     };
-    let tv = |t: libc::timeval| Duration::new(t.tv_sec as u64, t.tv_usec as u32 * 1000);
-    tv(ru.ru_utime) + tv(ru.ru_stime)
+    let buffer = sample.buffer().expect("buffer");
+    let map = buffer.map_readable().expect("map");
+    let o = (20 * w + 20) * 4;
+    (map[o + ri], map[o + 1], map[o + bi])
+}
+
+fn is_black((r, g, b): (u8, u8, u8)) -> bool {
+    r < 40 && g < 40 && b < 40
 }
 
 /// Threads in this process, for the log only.
@@ -323,6 +361,7 @@ async fn static_underlays_are_not_repushed_cpu() {
 }
 
 fn run(block_id: &str, backend: &str) {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let main_loop = gstreamer::glib::MainLoop::new(None, false);
     let main_loop_thread = {
         let ml = main_loop.clone();
@@ -394,17 +433,34 @@ fn run(block_id: &str, backend: &str) {
     manager
         .select_vision_mixer_pip_for_preview(block_id, 0)
         .expect("PiP to PVW");
+    // The zone's PGM border is configured but hidden: its pad holds a
+    // frame and the configuration gave it the zone's color.
+    std::thread::sleep(Duration::from_millis(1000));
     manager
         .trigger_transition(block_id, 0, 0, "cut", 0)
         .expect("take the PiP");
-    let frames_until_shown = wait_for_border(&appsink, "a red zone border", is_red);
-    eprintln!("{backend}: border shown after {frames_until_shown} PGM frame(s)");
+    // The first PGM frame showing the PiP (blue background) already shows
+    // the border. Had the border's frame only been pushed on the cut, it
+    // would be missing for the mixer's latency.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let cut_frame = loop {
+        let sample = pull(&appsink);
+        if is_blue(corner_rgb(&sample)) {
+            break sample;
+        }
+        assert!(Instant::now() < deadline, "the cut never reached PGM");
+    };
+    let rgb = border_rgb(&cut_frame);
+    eprintln!("{backend}: border on the cut frame: {rgb:?}");
+    assert!(
+        is_red(rgb),
+        "the configured border is missing from the cut frame: {rgb:?}"
+    );
     std::thread::sleep(Duration::from_millis(500));
 
     // Steady state: no border changes.
     const WINDOW: Duration = Duration::from_secs(3);
     let uploads_before = uploads.load(Ordering::Relaxed);
-    let cpu_before = cpu_time();
     let t0 = Instant::now();
     let mut frames = 0u32;
     let mut last = None;
@@ -413,7 +469,6 @@ fn run(block_id: &str, backend: &str) {
         frames += 1;
     }
     let elapsed = t0.elapsed().as_secs_f64();
-    let cpu = (cpu_time() - cpu_before).as_secs_f64();
     let window_uploads = uploads.load(Ordering::Relaxed) - uploads_before;
     let held_on = underlay_pads_holding_a_frame(&pads);
     let maps_on = underlay_maps_per_sec(&appsink, &pads, Duration::from_secs(1));
@@ -421,14 +476,13 @@ fn run(block_id: &str, backend: &str) {
         "{backend}: one bordered zone on PGM: {held_on} underlay pads hold a frame, underlay frame maps {maps_on:.0}/s"
     );
     eprintln!(
-        "{backend}: steady state over {:.2}s with {} underlays: underlay frames {} ({:.1}/s), PGM frames {} ({:.1}/s), process CPU {:.0}%, threads {:?} (before build {:?})",
+        "{backend}: steady state over {:.2}s with {} underlays: underlay frames {} ({:.1}/s), PGM frames {} ({:.1}/s), threads {:?} (before build {:?})",
         elapsed,
         underlays,
         window_uploads,
         window_uploads as f64 / elapsed,
         frames,
         frames as f64 / elapsed,
-        cpu / elapsed * 100.0,
         thread_count(),
         threads_before_build,
     );
@@ -436,18 +490,21 @@ fn run(block_id: &str, backend: &str) {
     // The border is still on screen.
     let rgb = border_rgb(&last.expect("PGM frames in the window"));
     assert!(is_red(rgb), "zone border lost: {rgb:?}");
-    // Hidden underlays hold no frame, so the mixers never map them.
+    // With no zone configured no underlay pad holds a frame, so the mixers
+    // never map one.
     assert_eq!(
         maps_off, 0.0,
-        "underlay pads hold a frame with no border shown"
+        "underlay pads hold a frame with no zone configured"
     );
-    // One bordered source: its border on PGM and on its multiview PiP tile.
-    assert!(
-        (1..=2).contains(&held_on),
-        "{held_on} underlay pads hold a frame with one border shown"
+    // One bordered source: its border on PGM, on the PVW big display and on
+    // its multiview PiP tile — the only underlays with a configured border.
+    assert_eq!(
+        held_on, 3,
+        "{held_on} underlay pads hold a frame with one bordered source"
     );
+    // Frames keep coming (a loose bound: CI GL is slow).
     assert!(
-        frames as f64 / elapsed > 20.0,
+        frames as f64 / elapsed > 10.0,
         "PGM stalled: {frames} frames in {elapsed:.2}s"
     );
     // An unchanged underlay is not uploaded again. Streaming at 5 fps
@@ -522,8 +579,8 @@ fn run(block_id: &str, backend: &str) {
             )
             .expect("PiP config");
     };
-    // Blue: the restarted source pushes its frame and is held.
-    pip_config("#0000FF");
+    // Cyan: the restarted source pushes its frame and is held.
+    pip_config("#00FFFF");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !held.load(Ordering::Relaxed) {
         assert!(

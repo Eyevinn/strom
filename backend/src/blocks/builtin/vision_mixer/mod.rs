@@ -29,6 +29,7 @@ pub mod overlay;
 pub(crate) mod properties;
 #[cfg(test)]
 mod tests;
+pub(crate) mod underlays;
 
 // Public API
 pub use builder::VisionMixerBuilder;

@@ -296,11 +296,11 @@ pub(super) fn build_gpu_pipeline(
     // --- Border underlay sources ---
     // Zone borders render as solid-color compositor pads directly beneath
     // their content pads (see `gst::underlay`). One tiny videotestsrc per
-    // (region, input), pushing one frame that the mixer pad holds while the
-    // border is visible; the border color is set at runtime via
-    // `foreground-color` and a restart (`set_underlay_color`). Non-live → contributes no latency. Only built when
-    // PiPs are configured — zones (and thus borders) cannot exist without
-    // them.
+    // (region, input) pushes one frame, which the mixer pad holds while the
+    // border is configured or visible. The border color is set at runtime
+    // via `foreground-color` and a restart (`set_underlay_color`). Non-live,
+    // so it adds no latency. Only built when PiPs are configured: zones (and
+    // thus borders) cannot exist without them.
     if p.num_pips > 0 {
         let underlay_chains: Vec<String> = (0..p.num_inputs)
             .map(|i| format!("underlay_dist_{}", i))
@@ -312,7 +312,7 @@ pub(super) fn build_gpu_pipeline(
             }))
             .collect();
         // Each source pushes a single frame; the mixer pad repeats it
-        // (`repeat-after-eos`) while the border is visible.
+        // (`repeat-after-eos`) while the border is configured or visible.
         let underlay_caps: gst::Caps =
             "video/x-raw,format=RGBA,width=16,height=16,framerate=5/1,pixel-aspect-ratio=1/1"
                 .parse()
@@ -573,6 +573,7 @@ pub(super) fn build_gpu_pipeline(
         let block_id = p.instance_id.to_string();
         let num_inputs = p.num_inputs;
         let num_pips = p.num_pips;
+        let underlay_state = std::sync::Arc::clone(&overlay_state);
         ctx.register_element_setup(Box::new(move |_flow_id, _events| {
             let (Some(mixer), Some(mv_comp)) = (dist_weak.upgrade(), mv_weak.upgrade()) else {
                 return;
@@ -580,9 +581,11 @@ pub(super) fn build_gpu_pipeline(
             super::super::geometry::install_caps_probes(
                 &block_id, &mixer, &mv_comp, num_inputs, num_pips,
             );
-            // Border underlays hold a frame only while visible.
-            crate::gst::underlay::watch_underlay_pads(&mixer);
-            crate::gst::underlay::watch_underlay_pads(&mv_comp);
+            // Border underlays hold a frame only while their border is
+            // configured or still visible.
+            if num_pips > 0 {
+                super::super::underlays::watch(&underlay_state, &mixer, &mv_comp);
+            }
         }));
     }
 
