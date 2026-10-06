@@ -20,7 +20,7 @@ use super::{err, take_on_grid, AppState, PageContext, Started};
 use crate::blocks::builtin::html_input;
 use crate::gst::pipeline::PipelineError;
 use crate::stinger::web::{
-    take_fragment, web_first_output_frame, WebAnchor, WebStart, WebStingerSettings,
+    check_page_url, take_fragment, web_first_output_frame, WebAnchor, WebStart, WebStingerSettings,
     PAGE_FIRST_FRAME_DELAY_FIXED_RATE, PAGE_FIRST_FRAME_DELAY_PAINTED, PAGE_FIRST_FRAME_GRACE,
     VARIABLE_RATE_PROPERTY,
 };
@@ -94,7 +94,8 @@ impl PageContext {
     /// The page as a library entry, for the operator panel.
     fn describe(&self, grid: FrameGrid) -> (StingerClip, Option<String>) {
         let settings = self.settings();
-        let plan = settings.plan(grid.frame_ns());
+        let plan =
+            check_page_url(&self.configured_url()).and_then(|()| settings.plan(grid.frame_ns()));
         let cut = plan.as_ref().ok().and_then(|p| p.cut_point_ms);
         let clip = StingerClip {
             index: 0,
@@ -209,6 +210,7 @@ impl AppState {
                 .ok_or_else(|| (format!("HTML Input {} is not running", source), true))?;
             (cefsrc, grid)
         };
+        check_page_url(&page.configured_url()).map_err(|e| (e, false))?;
         let settings = page.settings();
         let plan = settings.plan(grid.frame_ns()).map_err(|e| (e, false))?;
         let duration_ns = plan.duration_ms * 1_000_000;
@@ -263,7 +265,19 @@ impl AppState {
         let Some(anchor) = WebAnchor::watch(&pad, delay) else {
             return Err(abort("could not watch the stinger page's output".to_string()).await);
         };
-        anchor.ready(Duration::from_millis(100)).await;
+        // A paint-only gstcefsrc sends nothing while the page rests, so
+        // there is nothing to wait for.
+        if fixed_rate {
+            anchor.ready(Duration::from_millis(100)).await;
+        }
+        if anchor.paints_at_rest() {
+            warn!(
+                "Stinger page {}: the page paints while at rest, so its first frame after the take \
+                 may be a paint of its rest state and the cut may land a frame or two early. A \
+                 stinger page should stop drawing until the take",
+                source
+            );
+        }
 
         // A new fragment is a same-document navigation: the loaded page gets
         // `hashchange` and starts its animation, rather than reloading.
