@@ -272,7 +272,11 @@ fn render_blade(cr: &cairo::Context, t: f64) {
     let bx = -slant - 300.0 + (w + 2.0 * slant + 600.0) * p;
     let blade_x = |y: f64| bx + (h / 2.0 - y) * slant / (h / 2.0);
 
-    // Fill: glow, trailing streaks and a white core.
+    // Fill, left half only: anything drawn past it would land in the matte.
+    let _ = cr.save();
+    cr.rectangle(0.0, 0.0, w, h);
+    cr.clip();
+    // Glow, trailing streaks and a white core.
     for (half, alpha) in [(260.0, 0.2), (150.0, 0.4), (80.0, 0.75)] {
         cr.set_source_rgba(0.35, 0.85, 1.0, alpha);
         cr.move_to(blade_x(0.0) - half, 0.0);
@@ -282,9 +286,16 @@ fn render_blade(cr: &cairo::Context, t: f64) {
         cr.close_path();
         let _ = cr.fill();
     }
+    // The streaks are motion trails: as long as the blade is fast, so they
+    // grow from nothing as it sets off and shrink to nothing as it stops,
+    // off the frame at either end.
+    let speed = 4.0 * t * (1.0 - t);
     for i in 0..9 {
         let y = h * (i as f64 + 0.5) / 9.0;
-        let len = 260.0 + 120.0 * ((i * 37 % 11) as f64);
+        let len = (260.0 + 120.0 * ((i * 37 % 11) as f64)) * speed;
+        if len < 1.0 {
+            continue;
+        }
         let x = blade_x(y);
         let grad = cairo::LinearGradient::new(x - len, y, x, y);
         grad.add_color_stop_rgba(0.0, 0.35, 0.85, 1.0, 0.0);
@@ -302,6 +313,7 @@ fn render_blade(cr: &cairo::Context, t: f64) {
     cr.line_to(blade_x(h) - 22.0, h);
     cr.close_path();
     let _ = cr.fill();
+    let _ = cr.restore();
 
     // Matte, right half: opaque grey, white up to the blade with a soft edge
     // under it so no hard line shows past the glow. Sheared so that lines of
@@ -387,6 +399,40 @@ mod tests {
         assert_eq!(f[(row + ahead) * 4 + 3], 255);
         // Fill half: transparent away from the blade.
         assert_eq!(alpha_at(&f, w, W - 20, 20), 0);
+    }
+
+    /// The graphic stays in its half: with the blade at the right edge, its
+    /// glow and trails must not paint over the matte beside it.
+    #[test]
+    fn the_blade_never_paints_into_its_matte() {
+        let ex = &examples()[1];
+        let w = (2 * W) as usize;
+        for i in 0..ex.frames {
+            let t = i as f64 / (ex.frames - 1) as f64;
+            let f = render_frame(ex, t).unwrap();
+            for y in (0..H as usize).step_by(20) {
+                for x in (W as usize..w).step_by(7) {
+                    let px = &f[(y * w + x) * 4..(y * w + x) * 4 + 4];
+                    assert!(
+                        px[0] == px[1] && px[1] == px[2],
+                        "frame {i}: colour in the matte at {x},{y}: {px:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Nothing of the blade is left on screen when the clip ends.
+    #[test]
+    fn the_blade_leaves_the_frame_clean() {
+        let ex = &examples()[1];
+        let last = render_frame(ex, 1.0).unwrap();
+        let w = 2 * W;
+        for y in (0..H).step_by(10) {
+            for x in (0..W).step_by(10) {
+                assert_eq!(alpha_at(&last, w, x, y), 0, "{x},{y}");
+            }
+        }
     }
 
     #[test]
