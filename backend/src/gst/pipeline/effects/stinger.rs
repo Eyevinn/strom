@@ -60,6 +60,10 @@ pub struct StingerTake {
     /// Spacing of the clip's frames, so the take knows which one is due at
     /// the cut point.
     pub clip_frame_ns: u64,
+    /// The graphic pad was raised ahead of the take
+    /// ([`PipelineManager::raise_stinger_fill`]), because the take's start
+    /// is only known once its source has started. It stays up until `end`.
+    pub fill_raised: bool,
 }
 
 /// Flows whose stinger programming fails once all its pad changes are made.
@@ -86,6 +90,27 @@ pub struct StingerProgramError {
     pub error: PipelineError,
     /// It had cancelled a fade-to-black before it failed.
     pub ftb_cancelled: bool,
+}
+
+impl StingerProgramError {
+    /// A failure before the take changed anything.
+    fn unchanged(error: PipelineError) -> Self {
+        Self {
+            error,
+            ftb_cancelled: false,
+        }
+    }
+}
+
+/// The mixer, pads and state one take programs.
+struct StingerTarget<'a> {
+    mixer: &'a gst::Element,
+    pads: StingerPads,
+    /// The outgoing source's pad.
+    a: gst::Pad,
+    /// The incoming source's pad.
+    b: gst::Pad,
+    state: Arc<overlay::VisionMixerOverlayState>,
 }
 
 /// The stinger pads of one mixer.
@@ -287,6 +312,84 @@ impl PipelineManager {
             .map(|t| t.nseconds())
     }
 
+    /// What a take changes on the mixer, checked before it changes any of it.
+    fn stinger_target(
+        &self,
+        block_instance_id: &str,
+        take: &StingerTake,
+    ) -> Result<StingerTarget<'_>, PipelineError> {
+        let mixer = self.dist_mixer(block_instance_id)?;
+        let pads =
+            self.stinger_pads(block_instance_id)
+                .ok_or_else(|| PipelineError::InvalidProperty {
+                    element: block_instance_id.to_string(),
+                    property: strom_types::stinger::ENABLE_STINGER_PROPERTY.to_string(),
+                    reason: "this vision mixer has no stinger input".to_string(),
+                })?;
+        if take.plan.variant.uses_matte() && pads.matte.is_none() {
+            return Err(PipelineError::TransitionError(
+                "a matte stinger needs the GPU mixer".to_string(),
+            ));
+        }
+        let state =
+            overlay::get_overlay_state(&self.flow_id, block_instance_id).ok_or_else(|| {
+                PipelineError::ElementNotFound(format!("overlay state of {}", block_instance_id))
+            })?;
+        let pad = |idx: usize| {
+            mixer
+                .static_pad(&format!("sink_{}", idx))
+                .ok_or_else(|| PipelineError::PadNotFound {
+                    element: format!("{}:mixer", block_instance_id),
+                    pad: format!("sink_{}", idx),
+                })
+        };
+        Ok(StingerTarget {
+            mixer,
+            a: pad(take.from_input)?,
+            b: pad(take.to_input)?,
+            pads,
+            state,
+        })
+    }
+
+    /// Stage a take and raise its graphic pad before its start is known. For
+    /// a source that starts on a trigger and only then says when it started;
+    /// `program_stinger` with `fill_raised` programs the rest from that. The
+    /// source must be transparent until it starts. Returns whether this
+    /// cancelled a fade-to-black.
+    ///
+    /// A failure part way through aborts the take, as `program_stinger` does.
+    pub fn raise_stinger_fill(
+        &self,
+        block_instance_id: &str,
+        take: &StingerTake,
+    ) -> Result<bool, StingerProgramError> {
+        let t = self
+            .stinger_target(block_instance_id, take)
+            .map_err(StingerProgramError::unchanged)?;
+        let ftb_cancelled = t
+            .state
+            .ftb_active
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
+        match self.stage_stinger_pads(block_instance_id, take, &t) {
+            Ok(()) => {
+                crate::gst::control_bindings::wipe_control_bindings(
+                    t.pads.fill.upcast_ref(),
+                    &["alpha"],
+                );
+                t.pads.fill.set_property("alpha", 1.0f64);
+                Ok(ftb_cancelled)
+            }
+            Err(error) => {
+                self.abort_stinger(block_instance_id, take);
+                Err(StingerProgramError {
+                    error,
+                    ftb_cancelled,
+                })
+            }
+        }
+    }
+
     /// Program a whole stinger take, and start counting the clip's frames.
     /// Also returns whether it cancelled a fade-to-black, as any take does.
     ///
@@ -298,47 +401,22 @@ impl PipelineManager {
         block_instance_id: &str,
         take: &StingerTake,
     ) -> Result<(StingerWatch, bool), StingerProgramError> {
-        let unchanged = |error| StingerProgramError {
-            error,
-            ftb_cancelled: false,
+        let t = self
+            .stinger_target(block_instance_id, take)
+            .map_err(StingerProgramError::unchanged)?;
+        // A raised graphic pad was staged by `raise_stinger_fill`, which also
+        // ended any fade-to-black, and the source may already be on it:
+        // staging again would drop it.
+        let ftb_cancelled = !take.fill_raised
+            && t.state
+                .ftb_active
+                .swap(false, std::sync::atomic::Ordering::Relaxed);
+        let staged = if take.fill_raised {
+            Ok(())
+        } else {
+            self.stage_stinger_pads(block_instance_id, take, &t)
         };
-        let mixer = self.dist_mixer(block_instance_id).map_err(unchanged)?;
-        let pads = self
-            .stinger_pads(block_instance_id)
-            .ok_or_else(|| PipelineError::InvalidProperty {
-                element: block_instance_id.to_string(),
-                property: strom_types::stinger::ENABLE_STINGER_PROPERTY.to_string(),
-                reason: "this vision mixer has no stinger input".to_string(),
-            })
-            .map_err(unchanged)?;
-        if take.plan.variant.uses_matte() && pads.matte.is_none() {
-            return Err(unchanged(PipelineError::TransitionError(
-                "a matte stinger needs the GPU mixer".to_string(),
-            )));
-        }
-        let state = overlay::get_overlay_state(&self.flow_id, block_instance_id)
-            .ok_or_else(|| {
-                PipelineError::ElementNotFound(format!("overlay state of {}", block_instance_id))
-            })
-            .map_err(unchanged)?;
-        let pad = |idx: usize| {
-            mixer
-                .static_pad(&format!("sink_{}", idx))
-                .ok_or_else(|| PipelineError::PadNotFound {
-                    element: format!("{}:mixer", block_instance_id),
-                    pad: format!("sink_{}", idx),
-                })
-        };
-        let a = pad(take.from_input).map_err(unchanged)?;
-        let b = pad(take.to_input).map_err(unchanged)?;
-
-        // Start from the resting state of a classic take: A alone on air,
-        // the stinger pads down, no shader take left running. That also
-        // ends a fade-to-black.
-        let ftb_cancelled = state
-            .ftb_active
-            .swap(false, std::sync::atomic::Ordering::Relaxed);
-        match self.program_stinger_pads(block_instance_id, take, mixer, &pads, &a, &b, &state) {
+        match staged.and_then(|()| self.program_stinger_pads(block_instance_id, take, &t)) {
             Ok(watch) => Ok((watch, ftb_cancelled)),
             Err(error) => {
                 self.abort_stinger(block_instance_id, take);
@@ -350,27 +428,29 @@ impl PipelineManager {
         }
     }
 
-    /// The pad changes of [`Self::program_stinger`], from the resting state
-    /// on. Any of them may have run when this fails.
-    #[allow(clippy::too_many_arguments)]
-    fn program_stinger_pads(
+    /// Put the mixer in a take's resting state, A alone on air and the
+    /// stinger pads down, and set the graphic pad up for the take's clip.
+    /// Any of it may have run when this fails.
+    fn stage_stinger_pads(
         &self,
         block_instance_id: &str,
         take: &StingerTake,
-        mixer: &gst::Element,
-        pads: &StingerPads,
-        a: &gst::Pad,
-        b: &gst::Pad,
-        state: &overlay::VisionMixerOverlayState,
-    ) -> Result<StingerWatch, PipelineError> {
-        let variant = take.plan.variant;
+        t: &StingerTarget<'_>,
+    ) -> Result<(), PipelineError> {
+        let StingerTarget {
+            mixer,
+            pads,
+            b,
+            state,
+            ..
+        } = t;
         let gpu = pads.matte.is_some();
         self.reset_take_fx(block_instance_id);
         let (cw, ch) = self.dist_canvas_size(block_instance_id);
         self.reset_classic_take_pads(
             block_instance_id,
             mixer,
-            Some(state),
+            Some(state.as_ref()),
             Some(take.from_input),
             state.num_inputs,
             cw,
@@ -427,6 +507,21 @@ impl PipelineManager {
             }
         }
         pads.fill.set_property("zorder", DIST_STINGER_FILL_ZORDER);
+        Ok(())
+    }
+
+    /// The keyframes of [`Self::program_stinger`], from a staged take on.
+    /// Any of them may have run when this fails.
+    fn program_stinger_pads(
+        &self,
+        block_instance_id: &str,
+        take: &StingerTake,
+        t: &StingerTarget<'_>,
+    ) -> Result<StingerWatch, PipelineError> {
+        let StingerTarget {
+            mixer, pads, a, b, ..
+        } = t;
+        let variant = take.plan.variant;
         // A step key sits half a frame before the output frame it acts on.
         // The mixer stamps its frames from a rounded origin, so a frame's
         // timestamp can be a nanosecond either side of the grid's: a key
@@ -437,6 +532,8 @@ impl PipelineManager {
         let has_graphic = take.plan.layout != StingerLayout::MaskOnly;
         let fill_keys: &[(u64, f64)] = if !has_graphic {
             &[(0, 0.0)]
+        } else if take.fill_raised {
+            &[(0, 1.0), (step(take.end), 0.0)]
         } else {
             &[(0, 0.0), (step(take.start), 1.0), (step(take.end), 0.0)]
         };
