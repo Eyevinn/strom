@@ -473,8 +473,23 @@ fn idle_fx_slots_pass_buffers_through_and_effects_still_apply() {
         |_, w, _| w > 0.9,
     );
     // Once the envelope has run out the slot goes back to passthrough by
-    // itself, without waiting for the next take.
-    std::thread::sleep(Duration::from_millis(500));
+    // itself, without waiting for the next take. It switches when buffer PTS
+    // passes the take's end, and on a loaded runner the pipeline's running
+    // time trails the wall clock, so wait for the slot to stop rendering
+    // instead of sleeping a fixed time. Without the end-of-take switch it
+    // never stops, and this times out.
+    let stop_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let before = h.slot("fx_pgm_take").get().1;
+        std::thread::sleep(Duration::from_millis(300));
+        if h.slot("fx_pgm_take").get().1 == before {
+            break;
+        }
+        assert!(
+            Instant::now() < stop_deadline,
+            "fx_pgm_take kept rendering 10 s after the master-FX take ran out"
+        );
+    }
     h.assert_all_idle("after the master-FX take ran out", window);
 
     assert_eq!(
