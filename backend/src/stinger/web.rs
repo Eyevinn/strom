@@ -199,7 +199,8 @@ pub fn web_first_output_frame(first_frame_ns: u64, page_frame_ns: u64, grid: Fra
     grid.pts(n)
 }
 
-/// Watches a page's output for its first new frame after a take.
+/// Watches a page's output for its first new frame after a take, and for
+/// paints once the take's page has gone back to rest.
 ///
 /// On a fixed-rate gstcefsrc, wait for [`WebAnchor::ready`] before changing
 /// the URL, then call [`WebAnchor::taken`]. Dropping it removes the probe.
@@ -209,14 +210,19 @@ pub struct WebAnchor {
     probe: Option<gst::PadProbeId>,
     /// Buffers seen before the take.
     before_take: Arc<AtomicU32>,
-    /// Fresh paints seen before the take, after the first buffer.
-    idle_paints: Arc<AtomicU32>,
     /// Running time at which the take changed the URL; `u64::MAX` before.
     taken_at_ns: Arc<AtomicU64>,
     /// Newest timestamp seen on the output, repeats included.
     output_pts: Arc<AtomicU64>,
     /// Timestamp of the first frame of new content after the take.
     first_pts: Arc<AtomicU64>,
+    /// From this timestamp the page should be at rest; `u64::MAX` before
+    /// it is known.
+    rest_from: Arc<AtomicU64>,
+    /// The window ends here, before anything the next take paints.
+    rest_until: Arc<AtomicU64>,
+    /// Fresh paints stamped in `[rest_from, rest_until)`.
+    rest_paints: Arc<AtomicU32>,
     /// Assumed take-to-paint delay when the page paints nothing promptly.
     pub delay: Duration,
 }
@@ -224,27 +230,35 @@ pub struct WebAnchor {
 impl WebAnchor {
     /// Watch `pad`, a `cefsrc` src pad. cefsrc stamps its frames with the
     /// running time it makes them at, which every element down to the mixer
-    /// keeps.
-    pub fn watch(pad: &gst::Pad, delay: Duration) -> Option<Self> {
+    /// keeps. `paint_only` is a gstcefsrc that sends a buffer only when the
+    /// page paints.
+    pub fn watch(pad: &gst::Pad, delay: Duration, paint_only: bool) -> Option<Self> {
         let before_take = Arc::new(AtomicU32::new(0));
-        let idle_paints = Arc::new(AtomicU32::new(0));
         let taken_at_ns = Arc::new(AtomicU64::new(u64::MAX));
         let output_pts = Arc::new(AtomicU64::new(u64::MAX));
         let first_pts = Arc::new(AtomicU64::new(u64::MAX));
+        let rest_from = Arc::new(AtomicU64::new(u64::MAX));
+        let rest_until = Arc::new(AtomicU64::new(u64::MAX));
+        let rest_paints = Arc::new(AtomicU32::new(0));
         let last_memory = AtomicUsize::new(0);
-        let (p_before, p_idle, p_taken, p_output, p_first) = (
+        let (p_before, p_taken, p_output, p_first) = (
             Arc::clone(&before_take),
-            Arc::clone(&idle_paints),
             Arc::clone(&taken_at_ns),
             Arc::clone(&output_pts),
             Arc::clone(&first_pts),
         );
-        // A per-buffer probe for one take, removed once the take is planned:
-        // a few atomic loads, stores and compares per buffer. Only new
-        // content counts: a GAP-flagged repeat, or a fixed-rate gstcefsrc
-        // re-sending its current frame, shares the previous buffer's memory;
-        // a fresh paint is a new allocation. With no buffer before it, as
-        // from a gstcefsrc that sends only paints, a buffer is new.
+        let (p_rest_from, p_rest_until, p_rest) = (
+            Arc::clone(&rest_from),
+            Arc::clone(&rest_until),
+            Arc::clone(&rest_paints),
+        );
+        // A per-buffer probe for the length of one take: a few atomic loads,
+        // stores and compares per buffer. Only new content counts: a
+        // GAP-flagged repeat, or a fixed-rate gstcefsrc re-sending its
+        // current frame, shares the previous buffer's memory; a fresh paint
+        // is a new allocation. A fixed-rate gstcefsrc's first buffer is only
+        // the baseline, whenever it comes; a paint-only one sends nothing at
+        // rest, so its first buffer is new.
         let probe = pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
             let Some(buffer) = info.buffer() else {
                 return gst::PadProbeReturn::Ok;
@@ -258,12 +272,12 @@ impl WebAnchor {
             let Some(pts) = buffer.pts().map(|t| t.nseconds()) else {
                 return gst::PadProbeReturn::Ok;
             };
-            let fresh = memory != previous && !buffer.flags().contains(gst::BufferFlags::GAP);
+            let fresh = memory != previous
+                && (previous != 0 || paint_only)
+                && !buffer.flags().contains(gst::BufferFlags::GAP);
             let taken_at = p_taken.load(Ordering::Relaxed);
             if taken_at == u64::MAX {
-                if p_before.fetch_add(1, Ordering::Relaxed) > 0 && fresh {
-                    p_idle.fetch_add(1, Ordering::Relaxed);
-                }
+                p_before.fetch_add(1, Ordering::Relaxed);
                 return gst::PadProbeReturn::Ok;
             }
             p_output.store(pts, Ordering::Relaxed);
@@ -271,35 +285,50 @@ impl WebAnchor {
                 let _ =
                     p_first.compare_exchange(u64::MAX, pts, Ordering::Relaxed, Ordering::Relaxed);
             }
+            if fresh
+                && pts >= p_rest_from.load(Ordering::Relaxed)
+                && pts < p_rest_until.load(Ordering::Relaxed)
+            {
+                p_rest.fetch_add(1, Ordering::Relaxed);
+            }
             gst::PadProbeReturn::Ok
         })?;
         Some(Self {
             pad: pad.downgrade(),
             probe: Some(probe),
             before_take,
-            idle_paints,
             taken_at_ns,
             output_pts,
             first_pts,
+            rest_from,
+            rest_until,
+            rest_paints,
             delay,
         })
     }
 
-    /// Wait, up to `limit`, for two buffers from a fixed-rate gstcefsrc: the
-    /// first, so a repeat of it after the take is not taken for a paint, and
-    /// a second, to tell whether the page paints while at rest.
+    /// Wait, up to `limit`, for a fixed-rate gstcefsrc's first buffer, so a
+    /// repeat of it after the take is not taken for a paint.
     pub async fn ready(&self, limit: Duration) {
         let until = std::time::Instant::now() + limit;
-        while self.before_take.load(Ordering::Relaxed) < 2 && std::time::Instant::now() < until {
+        while self.before_take.load(Ordering::Relaxed) == 0 && std::time::Instant::now() < until {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     }
 
-    /// Whether the page painted new content while at rest, before the take.
-    /// Such a page's first frame after the take may be a paint of its rest
-    /// state rather than of its animation.
+    /// Count paints stamped in `[from_ns, until_ns)`, when the page should
+    /// be at rest again. An empty window counts nothing.
+    pub fn expect_rest(&self, from_ns: u64, until_ns: u64) {
+        self.rest_until.store(until_ns, Ordering::Relaxed);
+        self.rest_from.store(from_ns, Ordering::Relaxed);
+    }
+
+    /// Whether the page kept painting in the [`Self::expect_rest`] window:
+    /// two new frames or more. A page that keeps painting at rest makes its
+    /// own rest paints look like the start of the next take's animation. A
+    /// single paint is a page clearing itself as it ends.
     pub fn paints_at_rest(&self) -> bool {
-        self.idle_paints.load(Ordering::Relaxed) > 0
+        self.rest_paints.load(Ordering::Relaxed) > 1
     }
 
     /// Record that the take changed the page's URL at running time `now_ns`.
@@ -537,11 +566,10 @@ mod tests {
     #[test]
     fn a_repeat_after_the_take_is_not_the_first_frame() {
         let (src, _sink) = pads();
-        let anchor = WebAnchor::watch(&src, PAGE_FIRST_FRAME_DELAY_FIXED_RATE).unwrap();
+        let anchor = WebAnchor::watch(&src, PAGE_FIRST_FRAME_DELAY_FIXED_RATE, false).unwrap();
         let rest = buffer(0);
         let _ = src.push(rest.clone());
         let _ = src.push(repeat(&rest, 33));
-        assert!(!anchor.paints_at_rest());
         anchor.taken(50 * MS);
         let _ = src.push(repeat(&rest, 66));
         assert_eq!(anchor.first_frame_ns(), None);
@@ -552,29 +580,63 @@ mod tests {
     }
 
     #[test]
+    fn a_fixed_rate_page_silent_until_the_take_starts_on_its_first_paint() {
+        // A fixed-rate gstcefsrc that sent nothing before the take resumes
+        // with a repeat of its rest frame: that is the baseline, not a paint.
+        let (src, _sink) = pads();
+        let anchor = WebAnchor::watch(&src, PAGE_FIRST_FRAME_DELAY_FIXED_RATE, false).unwrap();
+        anchor.taken(50 * MS);
+        let rest = buffer(60);
+        let _ = src.push(rest.clone());
+        assert_eq!(anchor.first_frame_ns(), None);
+        let paint = buffer(93);
+        let _ = src.push(paint.clone());
+        assert_eq!(anchor.first_frame_ns(), Some(93 * MS));
+        drop((rest, paint));
+    }
+
+    #[test]
     fn a_paint_only_page_starts_on_its_first_buffer() {
         // A gstcefsrc that sends only paints sends nothing while the page
         // rests, so the first buffer after the take is the page's start.
         let (src, _sink) = pads();
-        let anchor = WebAnchor::watch(&src, PAGE_FIRST_FRAME_DELAY_PAINTED).unwrap();
+        let anchor = WebAnchor::watch(&src, PAGE_FIRST_FRAME_DELAY_PAINTED, true).unwrap();
         anchor.taken(50 * MS);
         let _ = src.push(buffer(70));
         assert_eq!(anchor.first_frame_ns(), Some(70 * MS));
     }
 
     #[test]
-    fn a_page_painting_at_rest_is_noticed() {
-        let (src, _sink) = pads();
-        let anchor = WebAnchor::watch(&src, PAGE_FIRST_FRAME_DELAY_FIXED_RATE).unwrap();
+    fn a_page_painting_after_its_take_is_noticed() {
         // Kept alive, as gstcefsrc keeps its current frame while it makes
         // the next: a freed frame's memory could be handed out again.
-        let first = buffer(0);
-        let _ = src.push(first.clone());
-        assert!(!anchor.paints_at_rest(), "the first buffer cannot tell");
-        let second = buffer(33);
-        let _ = src.push(second.clone());
+        let mut kept = Vec::new();
+        let (src, _sink) = pads();
+        let anchor = WebAnchor::watch(&src, PAGE_FIRST_FRAME_DELAY_FIXED_RATE, false).unwrap();
+        kept.push(buffer(0));
+        let _ = src.push(kept[0].clone());
+        anchor.taken(50 * MS);
+        anchor.expect_rest(1_100 * MS, 1_300 * MS);
+        // Painting during the animation is expected.
+        kept.push(buffer(100));
+        let _ = src.push(kept[1].clone());
+        kept.push(buffer(1_000));
+        let _ = src.push(kept[2].clone());
+        // Back at rest: a closing paint, then repeats.
+        kept.push(buffer(1_133));
+        let _ = src.push(kept[3].clone());
+        let _ = src.push(repeat(&kept[3], 1_166));
+        assert!(
+            !anchor.paints_at_rest(),
+            "one closing paint is not painting at rest"
+        );
+        // The next take's paints are past the window.
+        kept.push(buffer(1_300));
+        let _ = src.push(kept[4].clone());
+        assert!(!anchor.paints_at_rest());
+        kept.push(buffer(1_200));
+        let _ = src.push(kept[5].clone());
         assert!(anchor.paints_at_rest());
-        drop((first, second));
     }
 
     #[test]
