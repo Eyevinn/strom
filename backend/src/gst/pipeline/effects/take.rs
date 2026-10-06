@@ -49,8 +49,10 @@ impl PipelineManager {
 
         // Read authoritative PGM/PVW source from overlay state. `None` means
         // the bus is a PiP — handled by the PiP-aware branch below.
-        let overlay_state =
-            crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id);
+        let overlay_state = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+            &self.flow_id,
+            block_instance_id,
+        );
         let num_video_inputs = overlay_state
             .as_ref()
             .map(|s| s.num_inputs)
@@ -355,6 +357,7 @@ impl PipelineManager {
                 state.set_pgm_input(new_pgm_swap);
                 state.set_pvw_input(new_pvw_swap);
                 crate::blocks::builtin::vision_mixer::overlay::trigger_overlay_update(
+                    &self.flow_id,
                     block_instance_id,
                 );
 

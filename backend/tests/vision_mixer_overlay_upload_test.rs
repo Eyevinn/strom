@@ -213,8 +213,13 @@ enum Tally {
 }
 
 /// Read the tally colour on the top edge of input `i`'s thumbnail slot.
-fn thumbnail_tally(sample: &gstreamer::Sample, block_id: &str, i: usize) -> Tally {
-    let state = overlay::get_overlay_state(block_id).expect("overlay state registered");
+fn thumbnail_tally(
+    sample: &gstreamer::Sample,
+    flow_id: &strom_types::FlowId,
+    block_id: &str,
+    i: usize,
+) -> Tally {
+    let state = overlay::get_overlay_state(flow_id, block_id).expect("overlay state registered");
     let r = state.layout.thumbnail_slot_rects[i];
     let caps = sample.caps().expect("caps");
     let s = caps.structure(0).unwrap();
@@ -367,7 +372,7 @@ impl Running {
     }
 
     fn tally(&self, sample: &gstreamer::Sample, i: usize) -> Tally {
-        thumbnail_tally(sample, self.block_id, i)
+        thumbnail_tally(sample, &self.manager.flow_id(), self.block_id, i)
     }
 
     /// Pull multiview frames for [`WINDOW`] and count what happened.
@@ -538,8 +543,12 @@ async fn meter_redraws_are_capped_but_cuts_are_not() {
 }
 
 /// Whether the multiview's PGM big display shows input 1's blue picture.
-fn pgm_display_is_blue(sample: &gstreamer::Sample, block_id: &str) -> bool {
-    let state = overlay::get_overlay_state(block_id).expect("overlay state registered");
+fn pgm_display_is_blue(
+    sample: &gstreamer::Sample,
+    flow_id: &strom_types::FlowId,
+    block_id: &str,
+) -> bool {
+    let state = overlay::get_overlay_state(flow_id, block_id).expect("overlay state registered");
     let r = state.layout.pgm_rect;
     let caps = sample.caps().expect("caps");
     let s = caps.structure(0).unwrap();
@@ -604,7 +613,9 @@ async fn tally_follows_a_cut_on_the_same_frame_with_late_inputs() {
             .buffer()
             .and_then(|b| b.pts())
             .expect("multiview frame time");
-        if picture_at.is_none() && pgm_display_is_blue(&s, running.block_id) {
+        if picture_at.is_none()
+            && pgm_display_is_blue(&s, &running.manager.flow_id(), running.block_id)
+        {
             picture_at = Some(pts);
         }
         if tally_at.is_none()

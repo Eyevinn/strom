@@ -54,6 +54,11 @@ The block contract (what a block emits and accepts, memory formats, output block
 - Before defining a new struct, enum, constant, or default value — always check if it already exists in `strom-types`. All new API-visible or shared types must be placed in `strom-types`, never directly in the backend. If you find a duplicate, move it to `strom-types`.
 - `strom-types` must not depend on the backend, GStreamer crates, or other internal crates — only pure utility crates such as `serde` and `uuid`.
 
+## Block IDs Are Only Unique Within a Flow
+- A block instance id is unique inside its flow, not across the instance. Flows created through the API keep the block ids the client sends, so two running flows can both have a block called `mixer`. Only the flow id is unique.
+- Never key global or shared state (registries, maps, caches, channel names) on the block id alone. Key on the pair `(flow_id, block_id)`, as `MediaPlayerKey` and the vision mixer overlay registries do.
+- A lookup that has only a block id has a bug: thread the flow id through to it.
+
 ## API Contract
 - Every new endpoint must have a `#[utoipa::path(...)]` annotation AND be registered in `openapi.rs`. Both are required — an annotation without registration does not appear in the schema.
 - After changes to API types or endpoints, run the snapshot test (`cargo test --test openapi_test`). If it fails, update `openapi.json` in the repo root intentionally — do not silently let the schema drift.

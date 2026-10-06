@@ -592,8 +592,11 @@ mod pip_capacity {
             )
             .expect("a zone filled to capacity must be accepted");
 
-        let state = strom::blocks::builtin::vision_mixer::overlay::get_overlay_state(BLOCK_ID)
-            .expect("overlay state for a running mixer");
+        let state = strom::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+            &manager.flow_id(),
+            BLOCK_ID,
+        )
+        .expect("overlay state for a running mixer");
         let accepted = state.pip_zones(0);
         assert_eq!(accepted.len(), 1, "expected one stored zone");
         assert_eq!(
