@@ -57,7 +57,6 @@ async fn gpu_stingers_land_frame_accurately() {
     };
     let frames = r.collect(take.take_to_air_ms as u64 + 1600).await;
     let pads_mid_take = snapshot.await.unwrap();
-    eprintln!("dist mixer pads half way through the matte take:\n{pads_mid_take}");
     let start = frames
         .iter()
         .find(|(_, f)| colour(px(f, 3, 3)) == Colour::Yellow)
@@ -208,15 +207,15 @@ async fn cpu_stingers_play_classic() {
         .find(|(t, f)| *t >= start && colour(px(f, 3 * W / 4, H / 2)) == Colour::Red)
         .map(|(t, _)| frame_index(*t, start))
         .expect("the program never cut");
+    let report = r.wait_for_report(1).await;
     assert!(
         (14..=16).contains(&cut),
-        "cut at frame {cut}, where the matte crosses half way"
+        "cut at frame {cut}, where the matte crosses half way; {report:?}"
     );
     // The matte half of the clip never shows: the graphic is cropped out.
     for (_, f) in &frames {
         assert_ne!(colour(px(f, W - 3, 3)), Colour::Other, "matte half on air");
     }
-    let report = r.wait_for_report(1).await;
     assert_eq!(report.frames_arrived, r.clip_frames(1).await, "{report:?}");
 
     r.state.stop_flow(&r.flow_id).await.unwrap();
