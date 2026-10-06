@@ -154,21 +154,6 @@ pub fn make_level(name: &str) -> Result<gst::Element, BlockBuildError> {
         .map_err(|e| BlockBuildError::ElementCreation(format!("level: {}", e)))
 }
 
-/// Create the element that ends an audio metering branch: an `identity` that
-/// drops every buffer once `level` has measured it.
-///
-/// The branch has no sink, so it never prerolls: the upstream thread runs the
-/// branch inline, and a sink there would hold that thread in PAUSED and keep
-/// the upstream's other branches from prerolling.
-pub fn make_meter_drop(name: &str) -> Result<gst::Element, BlockBuildError> {
-    gst::ElementFactory::make("identity")
-        .name(name)
-        .property("drop-probability", 1.0f32)
-        .property("silent", true)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {}", e)))
-}
-
 /// Create a `glshader` FX slot, pre-loaded with the identity fragment so it
 /// negotiates and renders as a passthrough until an effect is programmed.
 /// The `create-shader` handler enables runtime fragment swaps — without it

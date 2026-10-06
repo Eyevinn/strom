@@ -717,6 +717,33 @@ fn audio_meter_does_not_hold_the_upstream_thread_in_preroll() {
     for id in &chain {
         pipeline.add(&element(id)).unwrap();
     }
+    // No queue (a thread per meter) and no sink (it would preroll) in the
+    // chain, and the chain ends at the level, whose probe drops every buffer.
+    // An identity there drops by `rand()`, and can let a buffer through to
+    // its unlinked src pad.
+    for id in &chain {
+        let e = element(id);
+        let type_name = e.type_().name();
+        assert_ne!(type_name, "GstQueue", "{id} adds a thread per meter");
+        assert!(
+            !e.element_flags().contains(gst::ElementFlags::SINK),
+            "{id} is a sink: it would preroll in the upstream thread"
+        );
+        for pad in e.src_pads() {
+            let linked_inside = built
+                .internal_links
+                .iter()
+                .any(|(from, _)| from.element_id == *id);
+            if !linked_inside {
+                assert_eq!(
+                    type_name,
+                    "GstLevel",
+                    "{id} ({type_name}) ends the meter chain with {} unlinked",
+                    pad.name()
+                );
+            }
+        }
+    }
     for (from, to) in &built.internal_links {
         if chain.contains(&from.element_id) {
             let src = element(&from.element_id);
