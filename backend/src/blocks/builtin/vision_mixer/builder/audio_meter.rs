@@ -1,8 +1,9 @@
 //! Audio metering chains: per-input + a dedicated PGM branch.
 //!
-//! Each chain is `queue_audio_{i} → audioconvert → level_audio_{i} → fakesink_audio_{i}`.
-//! The external pads (`audio_in_{i}` / `pgm_audio_in`) target the queue sinks,
-//! so the chains are self-contained and don't need caps negotiation up-front.
+//! Each chain is `audioconvert_audio_{i} → level_audio_{i} → drop_audio_{i}`.
+//! The external pads (`audio_in_{i}` / `pgm_audio_in`) target the audioconvert
+//! sinks. The chain has no queue and no sink: it runs in the upstream thread,
+//! never blocks it, and never prerolls.
 
 use std::sync::Arc;
 
@@ -25,58 +26,46 @@ pub(super) fn append_audio_meter_chains(
     links: &mut Vec<(ElementPadRef, ElementPadRef)>,
 ) -> Result<(), BlockBuildError> {
     for i in 0..p.num_inputs {
-        let q_id = p.id(&format!("queue_audio_{}", i));
         let conv_id = p.id(&format!("audioconvert_audio_{}", i));
         let level_id = p.id(&format!("level_audio_{}", i));
-        let sink_id = p.id(&format!("fakesink_audio_{}", i));
+        let drop_id = p.id(&format!("drop_audio_{}", i));
 
-        elems.push((q_id.clone(), elements::make_queue(&q_id)?));
         elems.push((
             conv_id.clone(),
             elements::make_element("audioconvert", &conv_id)?,
         ));
         elems.push((level_id.clone(), elements::make_level(&level_id)?));
-        elems.push((sink_id.clone(), elements::make_meter_fakesink(&sink_id)?));
+        elems.push((drop_id.clone(), elements::make_meter_drop(&drop_id)?));
 
-        links.push((
-            ElementPadRef::pad(&q_id, "src"),
-            ElementPadRef::pad(&conv_id, "sink"),
-        ));
         links.push((
             ElementPadRef::pad(&conv_id, "src"),
             ElementPadRef::pad(&level_id, "sink"),
         ));
         links.push((
             ElementPadRef::pad(&level_id, "src"),
-            ElementPadRef::pad(&sink_id, "sink"),
+            ElementPadRef::pad(&drop_id, "sink"),
         ));
     }
 
     // PGM audio branch.
-    let q_id = p.id("queue_audio_pgm");
     let conv_id = p.id("audioconvert_audio_pgm");
     let level_id = p.id("level_audio_pgm");
-    let sink_id = p.id("fakesink_audio_pgm");
+    let drop_id = p.id("drop_audio_pgm");
 
-    elems.push((q_id.clone(), elements::make_queue(&q_id)?));
     elems.push((
         conv_id.clone(),
         elements::make_element("audioconvert", &conv_id)?,
     ));
     elems.push((level_id.clone(), elements::make_level(&level_id)?));
-    elems.push((sink_id.clone(), elements::make_meter_fakesink(&sink_id)?));
+    elems.push((drop_id.clone(), elements::make_meter_drop(&drop_id)?));
 
-    links.push((
-        ElementPadRef::pad(&q_id, "src"),
-        ElementPadRef::pad(&conv_id, "sink"),
-    ));
     links.push((
         ElementPadRef::pad(&conv_id, "src"),
         ElementPadRef::pad(&level_id, "sink"),
     ));
     links.push((
         ElementPadRef::pad(&level_id, "src"),
-        ElementPadRef::pad(&sink_id, "sink"),
+        ElementPadRef::pad(&drop_id, "sink"),
     ));
 
     Ok(())

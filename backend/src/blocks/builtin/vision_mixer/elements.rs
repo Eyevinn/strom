@@ -154,19 +154,19 @@ pub fn make_level(name: &str) -> Result<gst::Element, BlockBuildError> {
         .map_err(|e| BlockBuildError::ElementCreation(format!("level: {}", e)))
 }
 
-/// Create a terminating `fakesink` for an audio metering branch.
+/// Create the element that ends an audio metering branch: an `identity` that
+/// drops every buffer once `level` has measured it.
 ///
-/// `sync=false` and `async=false` so an unconnected audio input doesn't stall
-/// preroll — the level element still posts messages when data flows.
-pub fn make_meter_fakesink(name: &str) -> Result<gst::Element, BlockBuildError> {
-    gst::ElementFactory::make("fakesink")
+/// The branch has no sink, so it never prerolls: the upstream thread runs the
+/// branch inline, and a sink there would hold that thread in PAUSED and keep
+/// the upstream's other branches from prerolling.
+pub fn make_meter_drop(name: &str) -> Result<gst::Element, BlockBuildError> {
+    gst::ElementFactory::make("identity")
         .name(name)
-        .property("sync", false)
-        .property("async", false)
+        .property("drop-probability", 1.0f32)
         .property("silent", true)
-        .property("enable-last-sample", false)
         .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("fakesink: {}", e)))
+        .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {}", e)))
 }
 
 /// Create a `glshader` FX slot, pre-loaded with the identity fragment so it

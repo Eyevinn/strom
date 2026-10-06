@@ -652,3 +652,140 @@ fn dist_compositor_late_first_input_does_not_rewind() {
     );
     assert_no_rewind(pushed, &pts);
 }
+
+/// A flow feeds a vision mixer audio input from a tee whose other branch goes
+/// to a clock-synced sink. With a source that pushes in PAUSED (a file, a
+/// non-live test source), the tee pushes the first buffer into each branch in
+/// turn. The metering branch must take it without holding the thread, or the
+/// other branch never gets a buffer, its sink never prerolls, and the flow
+/// never reaches PLAYING. It must still meter.
+#[test]
+fn audio_meter_does_not_hold_the_upstream_thread_in_preroll() {
+    use crate::blocks::{builtin::get_builder, BlockBuildContext};
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+    use std::collections::{HashSet, VecDeque};
+    use strom_types::MediaType;
+
+    gst::init().unwrap();
+    crate::gpu::detect_gpu_capabilities();
+
+    let mut props = HashMap::new();
+    props.insert(
+        "compositor_preference".to_string(),
+        PropertyValue::String("cpu".to_string()),
+    );
+    props.insert("num_inputs".to_string(), PropertyValue::UInt(2));
+    let builder = get_builder("builtin.vision_mixer").expect("vision mixer has a builder");
+    let pads = builder.get_external_pads(&props).expect("external pads");
+    let ctx = BlockBuildContext::new(vec![], "all".to_string());
+    let built = builder
+        .build("vm", &props, &ctx)
+        .expect("CPU vision mixer builds");
+
+    // Only the metering chains run: everything reachable from the audio
+    // inputs through the block's own links.
+    let audio_inputs: Vec<_> = pads
+        .inputs
+        .iter()
+        .filter(|p| p.media_type == MediaType::Audio)
+        .collect();
+    assert!(audio_inputs.len() >= 2, "per-input audio plus PGM audio");
+    let mut chain: HashSet<String> = HashSet::new();
+    let mut todo: VecDeque<String> = audio_inputs
+        .iter()
+        .map(|p| format!("vm:{}", p.internal_element_id))
+        .collect();
+    while let Some(id) = todo.pop_front() {
+        if chain.insert(id.clone()) {
+            for (from, to) in &built.internal_links {
+                if from.element_id == id {
+                    todo.push_back(to.element_id.clone());
+                }
+            }
+        }
+    }
+    let pipeline = gst::Pipeline::new();
+    let element = |id: &str| {
+        built
+            .elements
+            .iter()
+            .find(|(eid, _)| eid == id)
+            .map(|(_, e)| e.clone())
+            .unwrap_or_else(|| panic!("builder produced no element {id}"))
+    };
+    for id in &chain {
+        pipeline.add(&element(id)).unwrap();
+    }
+    for (from, to) in &built.internal_links {
+        if chain.contains(&from.element_id) {
+            let src = element(&from.element_id);
+            let dst = element(&to.element_id);
+            src.link_pads(from.pad_name.as_deref(), &dst, to.pad_name.as_deref())
+                .unwrap_or_else(|e| panic!("link {from:?} -> {to:?}: {e}"));
+        }
+    }
+
+    for input in &audio_inputs {
+        let src = gst::ElementFactory::make("audiotestsrc")
+            .property("is-live", false)
+            .build()
+            .unwrap();
+        let tee = gst::ElementFactory::make("tee").build().unwrap();
+        let queue = gst::ElementFactory::make("queue").build().unwrap();
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("sync", true)
+            .build()
+            .unwrap();
+        pipeline.add_many([&src, &tee, &queue, &sink]).unwrap();
+        src.link(&tee).unwrap();
+        // The metering branch first, so the tee pushes into it first.
+        tee.request_pad_simple("src_%u")
+            .unwrap()
+            .link(
+                &element(&format!("vm:{}", input.internal_element_id))
+                    .static_pad(&input.internal_pad_name)
+                    .unwrap(),
+            )
+            .expect("audio input links");
+        gst::Element::link_many([&tee, &queue, &sink]).unwrap();
+    }
+
+    let result = pipeline.set_state(gst::State::Playing);
+    let (reached, state, _) = pipeline.state(gst::ClockTime::from_seconds(5));
+    let _ = pipeline.set_state(gst::State::Null);
+    assert!(
+        result.is_ok() && reached.is_ok() && state == gst::State::Playing,
+        "the flow did not reach PLAYING ({reached:?}, {state:?}): the metering \
+         branch held the upstream thread in preroll"
+    );
+
+    // Run again and wait for every meter to report.
+    pipeline.set_state(gst::State::Playing).unwrap();
+    let bus = pipeline.bus().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut metered = HashSet::new();
+    while metered.len() < audio_inputs.len() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "meters reported: {metered:?}"
+        );
+        let Some(msg) = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(50),
+            &[gst::MessageType::Element, gst::MessageType::Error],
+        ) else {
+            continue;
+        };
+        if let gst::MessageView::Error(err) = msg.view() {
+            panic!("pipeline error: {err:?}");
+        }
+        if msg
+            .structure()
+            .map(|s| s.name() == "level")
+            .unwrap_or(false)
+        {
+            metered.insert(msg.src().unwrap().name().to_string());
+        }
+    }
+    pipeline.set_state(gst::State::Null).unwrap();
+}
