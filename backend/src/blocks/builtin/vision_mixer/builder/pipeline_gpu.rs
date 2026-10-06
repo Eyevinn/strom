@@ -213,6 +213,9 @@ pub(super) fn build_gpu_pipeline(
             ),
         );
         elements::keep_input_size(&matte);
+        // Not an FX slot: the matte always renders. In passthrough the clip
+        // reaches the mixer as it is, and its own alpha becomes the matte.
+        crate::gst::shaders::request_passthrough(&matte, false);
 
         elems.push((q_id.clone(), queue));
         // Passes through what glupload takes and converts the rest: clips
