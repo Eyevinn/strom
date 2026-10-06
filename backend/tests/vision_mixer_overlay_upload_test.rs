@@ -632,10 +632,14 @@ async fn tally_follows_a_cut_on_the_same_frame_with_late_inputs() {
     eprintln!(
         "late inputs: picture switched at {picture_at}, tally at {tally_at}: tally lag {lag:.1} frame(s)"
     );
+    // The regression this guards is the tally *trailing* the picture by about
+    // the input delay (5-6 frames here, with do-timestamp). Measured 1-2
+    // locally; the bound is below 3.5 so slow CI and float noise at an exact
+    // frame step cannot fail it. The tally may lead: on a slow runner the
+    // picture switch itself can arrive late (seen: tally 10 frames ahead on
+    // the macOS runner), which is not the bug and must not fail the guard.
     assert!(
-        // Two frames of slack for slow CI; the do-timestamp regression lags
-        // by about the input delay (5-6 frames here).
-        lag.abs() <= 2.0,
+        lag < 3.5,
         "the tally lagged the picture by {lag:.1} multiview frames"
     );
     running.stop();
