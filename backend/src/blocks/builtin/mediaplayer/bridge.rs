@@ -1575,8 +1575,9 @@ mod tests {
             );
             outs.push(out);
         }
+        // No wait for PLAYING: the sinks cannot complete it before the internal
+        // pipeline below feeds them, so it would only ever time out.
         main.set_state(gst::State::Playing).unwrap();
-        let _ = main.state(gst::ClockTime::from_seconds(5));
 
         let mut state = Arc::try_unwrap(test_state()).ok().unwrap();
         state.audio_appsrcs = vec![outs.pop().unwrap()];

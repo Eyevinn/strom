@@ -68,7 +68,7 @@ impl BlockBuilder for VisionMixerBuilder {
                 format!("audio_in_{}", i),
                 format!("A{}", i),
                 MediaType::Audio,
-                format!("queue_audio_{}", i),
+                format!("audioconvert_audio_{}", i),
                 "sink",
             ));
         }
@@ -76,7 +76,7 @@ impl BlockBuilder for VisionMixerBuilder {
             "pgm_audio_in",
             "PGM Audio",
             MediaType::Audio,
-            "queue_audio_pgm",
+            "audioconvert_audio_pgm",
             "sink",
         ));
 
@@ -406,6 +406,9 @@ pub(super) fn setup_overlay_renderer(
     let renderer_for_timer = Arc::clone(&renderer);
     let mv_framerate = p.mv_framerate;
     ctx.register_element_setup(Box::new(move |_flow_id, _events| {
+        if let Ok(r) = renderer_for_timer.lock() {
+            r.track_mixer_pad();
+        }
         overlay::start_overlay_timer(
             block_id_for_timer.clone(),
             renderer_for_timer.clone(),

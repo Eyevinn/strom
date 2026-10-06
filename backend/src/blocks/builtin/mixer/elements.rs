@@ -67,6 +67,48 @@ pub(crate) fn make_audiomixer(
     Ok(mixer)
 }
 
+/// Let a channel input with nothing behind it answer upstream LATENCY queries
+/// itself: not live, no latency of its own.
+///
+/// A channel's sink pad is the block's input. Unlinked, or linked to a
+/// producer that cannot answer yet (a WHIP Input slot with no publisher,
+/// whose decodebin has not exposed a pad), the query fails at this pad, and
+/// with it every bus mixer's query: each one walks every channel chain
+/// upstream. An aggregator with `force-live` caches its upstream latency only
+/// once a query succeeds and otherwise asks again on every aggregate cycle,
+/// thousands of times a second for as long as the channel stays empty.
+///
+/// The answer contributes nothing to the combined latency, the same as
+/// GStreamer's default handling of a pad with no peer one hop further
+/// downstream: only live answers count towards the minimum and the live flag,
+/// so a not-live answer leaves both to the inputs that are fed. Answering
+/// live would make a bus without `force-live` and with non-live inputs claim
+/// to be live. A producer that can answer is asked as usual, and its
+/// answer is passed on unchanged. When it starts delivering, the first buffer
+/// on each aggregator pad makes the aggregator query again.
+///
+/// A QUERY probe: it fires per query, never per buffer.
+pub(super) fn answer_latency_for_unfed_input(element: &gst::Element) {
+    let Some(pad) = element.static_pad("sink") else {
+        return;
+    };
+    pad.add_probe(gst::PadProbeType::QUERY_UPSTREAM, |pad, info| {
+        let Some(query) = info.query_mut() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if !matches!(query.view(), gst::QueryView::Latency(_)) {
+            return gst::PadProbeReturn::Ok;
+        }
+        let answered = pad.peer().is_some_and(|peer| peer.query(query));
+        if !answered {
+            if let gst::QueryViewMut::Latency(latency) = query.view_mut() {
+                latency.set(false, gst::ClockTime::ZERO, gst::ClockTime::NONE);
+            }
+        }
+        gst::PadProbeReturn::Handled
+    });
+}
+
 /// Create the capsfilter that follows a bus mixer and pins it to `rate`.
 /// Only the rate is fixed: format and channels stay with whatever the bus
 /// negotiates.
