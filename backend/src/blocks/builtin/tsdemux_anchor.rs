@@ -15,24 +15,28 @@
 //! so the source is delayed by however long the caller waited to connect.
 //!
 //! `srtsrc` stamps each buffer with its arrival time less the SRT transit
-//! delay, so healthy demuxed output never runs ahead of the latest input by
-//! more than the few frames one SRT message carries. This watcher compares the
-//! two, and when the smallest lead over a window exceeds [`MAX_LEAD`] it shifts
-//! all of the demuxer's source pads back by the window's mean lead with a pad
-//! offset. One correction is shared by every pad, so audio and video stay
-//! aligned.
+//! delay, so healthy demuxed output runs ahead of the latest input only by what
+//! the sender packs together: the frames one SRT message carries, multi-frame
+//! audio PES, and a video burst at connect that can hold the lead at 440 ms.
+//! This watcher compares the two, and when the smallest lead over a window
+//! exceeds [`MAX_LEAD`] it shifts all of the demuxer's source pads back by the
+//! window's mean lead with a pad offset. One correction is shared by every pad,
+//! so audio and video stay aligned.
+//!
+//! A stale head only happens at connect, so a correction may only be made in
+//! the first [`ARM_PERIOD`] of a caller's input, and only once. Shifting back
+//! mid-stream steps running time backwards, which recorders write as
+//! decreasing timestamps; a window of a healthy stream that crosses the
+//! threshold later on must not be able to do that.
 //!
 //! The shift belongs to the caller it was measured on: `srtsrc` keeps listening
 //! after a caller leaves and `tsdemux` takes a fresh reference for the next one,
-//! so the shift is dropped when the caller changes. Output that sits *behind*
-//! arrival is left alone, whatever the shift: a sender that stalls and resumes
-//! looks the same from here, and giving the shift back would throw its stream
-//! forward by that much in one buffer.
+//! so the shift is dropped, and the watcher re-armed, when the caller changes.
 //!
 //! Timing comes only from buffer timestamps, never the clock: the probes are on
 //! the streaming thread for every demuxed frame and every SRT message, so they
 //! use atomics only and do no locking or allocation outside the rare
-//! correction.
+//! correction. Once disarmed, the output probe only keeps the offset applied.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -45,13 +49,27 @@ use tracing::info;
 /// Healthy lead is a sawtooth: every PES completed within one SRT message is
 /// placed from the same reference, while the input time is that of the whole
 /// message. A 1316-byte message of 128 kbit/s AAC spans about 100 ms, and lower
-/// bitrates span more.
-pub const MAX_LEAD: gst::ClockTime = gst::ClockTime::from_mseconds(200);
+/// bitrates span more. ffmpeg's default TS muxing packs about 11 AAC frames per
+/// PES, which leads by 100-230 ms, and the video burst at connect holds video
+/// 290-440 ms ahead; windows of such a stream have reached 205 ms. A stale
+/// head leads by however long the caller waited to connect, seconds in
+/// practice, so one that waited less than this goes uncorrected.
+pub const MAX_LEAD: gst::ClockTime = gst::ClockTime::from_mseconds(500);
+
+/// Input time after a caller's first buffer within which a correction may be
+/// made. The first window closes over the stale head itself, so the correction
+/// lands about two windows in.
+pub const ARM_PERIOD: gst::ClockTime = gst::ClockTime::from_seconds(3);
 
 /// Input time covered by one measurement window.
 pub const WINDOW: gst::ClockTime = gst::ClockTime::from_mseconds(500);
 
 const NONE: u64 = u64::MAX;
+
+/// `arm_deadline` before the caller's first input buffer.
+const ARM_PENDING: u64 = u64::MAX;
+/// `arm_deadline` once the arm period is over or the correction is made.
+const DISARMED: u64 = 0;
 
 struct State {
     instance_id: String,
@@ -66,16 +84,23 @@ struct State {
     window_samples: AtomicI64,
     /// Offset every source pad of the demuxer should carry (ns, never positive).
     correction: AtomicI64,
+    /// Input running time after which no correction is made, or `ARM_PENDING`
+    /// or `DISARMED`.
+    arm_deadline: AtomicU64,
 }
 
 impl State {
-    /// Drop the correction and the window in progress.
+    /// Drop the correction and the window in progress, and re-arm.
     ///
     /// The window counters are re-initialised by the first buffer after this,
     /// which takes the `window_start == NONE` branch of [`on_output_buffer`].
+    /// The arm period starts at the next caller's first input buffer, so the
+    /// input time of the caller that left is forgotten too.
     fn reset(&self) {
         self.correction.store(0, Ordering::Relaxed);
         self.window_start.store(NONE, Ordering::Relaxed);
+        self.last_input.store(NONE, Ordering::Relaxed);
+        self.arm_deadline.store(ARM_PENDING, Ordering::Relaxed);
     }
 }
 
@@ -96,6 +121,7 @@ impl TsDemuxAnchor {
                 window_lead_sum: AtomicI64::new(0),
                 window_samples: AtomicI64::new(0),
                 correction: AtomicI64::new(0),
+                arm_deadline: AtomicU64::new(ARM_PENDING),
             }),
         }
     }
@@ -108,13 +134,13 @@ impl TsDemuxAnchor {
         let state = self.state.clone();
         pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
             if let Some(pts) = info.buffer().and_then(|b| b.pts()) {
-                state.last_input.store(pts.nseconds(), Ordering::Relaxed);
+                on_input_buffer(&state, pts.nseconds());
             }
             gst::PadProbeReturn::Ok
         });
     }
 
-    /// Drop the correction whenever the SRT caller changes.
+    /// Drop the correction and re-arm whenever the SRT caller changes.
     ///
     /// Listener mode only: `srtsrc` emits these while accepting and dropping a
     /// caller, and neither fires in caller mode.
@@ -222,19 +248,36 @@ impl PadSegment {
     }
 }
 
+fn on_input_buffer(state: &State, ts: u64) {
+    state.last_input.store(ts, Ordering::Relaxed);
+    if state.arm_deadline.load(Ordering::Relaxed) == ARM_PENDING {
+        state
+            .arm_deadline
+            .store(ts + ARM_PERIOD.nseconds(), Ordering::Relaxed);
+    }
+}
+
 fn on_output_buffer(state: &State, segment: &PadSegment, pad: &gst::Pad, ts: u64) {
     let correction = state.correction.load(Ordering::Relaxed);
     if segment.applied_offset.load(Ordering::Relaxed) != correction {
         apply(segment, pad, correction);
     }
 
-    let input = state.last_input.load(Ordering::Relaxed);
-    let Some(running_time) = segment.running_time(ts) else {
+    let deadline = state.arm_deadline.load(Ordering::Relaxed);
+    if deadline == DISARMED || deadline == ARM_PENDING {
         return;
-    };
+    }
+    let input = state.last_input.load(Ordering::Relaxed);
     if input == NONE {
         return;
     }
+    if input > deadline {
+        state.arm_deadline.store(DISARMED, Ordering::Relaxed);
+        return;
+    }
+    let Some(running_time) = segment.running_time(ts) else {
+        return;
+    };
     let lead = running_time - input as i64;
 
     let window_start = state.window_start.load(Ordering::Relaxed);
@@ -265,6 +308,7 @@ fn on_output_buffer(state: &State, segment: &PadSegment, pad: &gst::Pad, ts: u64
     let mean_lead = lead_sum / samples;
     let correction = correction - mean_lead;
     state.correction.store(correction, Ordering::Relaxed);
+    state.arm_deadline.store(DISARMED, Ordering::Relaxed);
     apply(segment, pad, correction);
     info!(
         "MPEGTSSRT Input {}: demuxed timestamps ran {} ms ahead of arrival, re-anchoring (total offset {} ms)",
@@ -298,52 +342,102 @@ mod tests {
         (pad, segment)
     }
 
-    /// One full window of buffers whose running time sits `lead` from arrival.
-    fn window(state: &State, segment: &PadSegment, pad: &gst::Pad, lead: i64) {
-        for step in 0..8u64 {
-            let input = step * 100 * gst::ClockTime::MSECOND.nseconds();
-            state.last_input.store(input, Ordering::Relaxed);
+    fn ms(ms: i64) -> i64 {
+        ms * gst::ClockTime::MSECOND.nseconds() as i64
+    }
+
+    /// Eight buffers 100 ms of input apart from `start`, enough to close one
+    /// window, whose running time sits `leads[i % leads.len()]` from arrival.
+    fn window(state: &State, segment: &PadSegment, pad: &gst::Pad, start: i64, leads: &[i64]) {
+        for step in 0..8 {
+            let input = start + ms(step * 100);
+            on_input_buffer(state, input as u64);
+            let lead = leads[step as usize % leads.len()];
             // running_time(ts) is ts plus whatever offset the pad carries, so
             // ask for a timestamp that produces this lead against it.
             let applied = segment.applied_offset.load(Ordering::Relaxed);
-            on_output_buffer(state, segment, pad, (input as i64 + lead - applied) as u64);
+            on_output_buffer(state, segment, pad, (input + lead - applied) as u64);
         }
     }
 
-    /// A sender that stalls and resumes leaves its stream behind arrival with
-    /// the offset still right for it. Giving the offset back here would throw
-    /// the stream forward by that much in a single buffer.
+    /// ffmpeg's multi-frame audio PES and the video burst at connect keep a
+    /// healthy stream ahead of arrival, and the smallest lead in a window has
+    /// reached 205 ms. Re-anchoring it steps running time back mid-stream, and
+    /// recorders write decreasing DTS.
     #[test]
-    fn a_window_spent_behind_arrival_keeps_the_offset() {
+    fn a_healthy_stream_is_never_re_anchored() {
         let anchor = TsDemuxAnchor::new("test");
         let (pad, segment) = pad_and_segment();
-        let two_seconds = 2 * gst::ClockTime::SECOND.nseconds() as i64;
 
-        window(&anchor.state, &segment, &pad, two_seconds);
+        // Through the arm period: video at the top of its range, audio at the
+        // top of its own.
+        for start in (0..4).map(|i| ms(i * 800)) {
+            window(&anchor.state, &segment, &pad, start, &[ms(440), ms(230)]);
+        }
+        assert_eq!(pad.offset(), 0, "the lead at connect is left alone");
+
+        window(
+            &anchor.state,
+            &segment,
+            &pad,
+            ms(10_000),
+            &[ms(440), ms(205)],
+        );
+        assert_eq!(pad.offset(), 0, "a high window mid-stream is left alone");
+    }
+
+    /// A stale head is corrected once, early in the connection.
+    #[test]
+    fn a_stale_head_is_re_anchored_once() {
+        let anchor = TsDemuxAnchor::new("test");
+        let (pad, segment) = pad_and_segment();
+
+        window(&anchor.state, &segment, &pad, 0, &[ms(2000)]);
         assert_eq!(
             pad.offset(),
-            -two_seconds,
+            -ms(2000),
             "a window spent ahead of arrival is re-anchored"
         );
 
-        window(&anchor.state, &segment, &pad, -two_seconds);
-        assert_eq!(pad.offset(), -two_seconds, "the offset is left alone");
+        window(&anchor.state, &segment, &pad, ms(800), &[ms(1000)]);
+        assert_eq!(pad.offset(), -ms(2000), "a second correction is not made");
+    }
+
+    /// Past the arm period even a large lead is left alone: shifting back
+    /// there would step every recording's timestamps backwards.
+    #[test]
+    fn no_correction_after_the_arm_period() {
+        let anchor = TsDemuxAnchor::new("test");
+        let (pad, segment) = pad_and_segment();
+
+        window(&anchor.state, &segment, &pad, 0, &[0]);
+        let late = ms(ARM_PERIOD.mseconds() as i64 + 1000);
+        window(&anchor.state, &segment, &pad, late, &[ms(2000)]);
+        assert_eq!(pad.offset(), 0);
     }
 
     /// The caller the offset was measured on has gone.
     #[test]
-    fn a_caller_change_drops_the_offset() {
+    fn a_caller_change_drops_the_offset_and_re_arms() {
         let anchor = TsDemuxAnchor::new("test");
         let (pad, segment) = pad_and_segment();
-        let two_seconds = 2 * gst::ClockTime::SECOND.nseconds() as i64;
 
-        window(&anchor.state, &segment, &pad, two_seconds);
-        assert_eq!(pad.offset(), -two_seconds);
+        window(&anchor.state, &segment, &pad, 0, &[ms(2000)]);
+        assert_eq!(pad.offset(), -ms(2000));
 
         anchor.state.reset();
         // A pad carries the offset it finds until something is pushed through
-        // it, so the next caller's first buffer is what clears it.
-        window(&anchor.state, &segment, &pad, 0);
+        // it, so the next caller's first buffer is what clears it. The next
+        // caller connects long after the first one's arm period.
+        window(&anchor.state, &segment, &pad, ms(60_000), &[0]);
         assert_eq!(pad.offset(), 0, "the next caller starts unshifted");
+
+        anchor.state.reset();
+        window(&anchor.state, &segment, &pad, ms(120_000), &[ms(1500)]);
+        assert_eq!(
+            pad.offset(),
+            -ms(1500),
+            "a later caller's stale head is corrected"
+        );
     }
 }
