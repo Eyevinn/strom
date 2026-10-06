@@ -14,19 +14,23 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use strom_types::stinger::{
-    StingerClip, StingerClipSettings, StingerExamplesResponse, StingerState, StingerTakeReport,
-    StingerTakeResponse, STINGER_CLIPS_PROPERTY, STINGER_INPUT_PAD, STINGER_MODE_PROPERTY,
+    StingerClip, StingerClipSettings, StingerExamplesResponse, StingerSourceKind, StingerState,
+    StingerTakeReport, StingerTakeResponse, STINGER_CLIPS_PROPERTY, STINGER_INPUT_PAD,
+    STINGER_MODE_PROPERTY,
 };
 use strom_types::{FlowId, PropertyValue, StromEvent};
 use tracing::{debug, error, info, warn};
 
 use super::AppState;
+use crate::blocks::builtin::html_input;
 use crate::blocks::builtin::mediaplayer::{
     normalize_uri, MediaPlayerKey, MediaPlayerState, MEDIA_PLAYER_REGISTRY,
 };
 use crate::gst::pipeline::effects::stinger::{StingerTake, StingerWatch};
 use crate::gst::pipeline::PipelineError;
 use crate::stinger::{analysis, examples, plan_clip, ClipPlan, FrameGrid};
+
+mod web;
 
 /// How long after the clip's end a take waits for the mixer to get past it
 /// before giving up on a stalled mixer.
@@ -38,8 +42,7 @@ struct MixerStinger {
     /// The token of the take on air, or of a classic take or fade-to-black
     /// programming the pads now (see [`claim_for_classic`]).
     running: Option<u64>,
-    /// The clip source of the stinger take on air; `None` for a classic
-    /// claim.
+    /// The stinger source of the take on air; `None` for a classic claim.
     source: Option<String>,
     last_take: Option<StingerTakeReport>,
     last_cue_ms: Option<u64>,
@@ -221,7 +224,42 @@ fn err(reason: impl Into<String>) -> PipelineError {
     PipelineError::TransitionError(reason.into())
 }
 
-/// What a stinger operation needs to know about a mixer and its source.
+/// A mixer's stinger source.
+enum Source {
+    Clips(Context),
+    Page(PageContext),
+}
+
+impl Source {
+    fn block_id(&self) -> &str {
+        match self {
+            Source::Clips(ctx) => &ctx.source_block_id,
+            Source::Page(page) => &page.source_block_id,
+        }
+    }
+}
+
+/// What one take plays.
+enum Plays<'a> {
+    Clip(&'a Context, usize, String),
+    Page(&'a PageContext),
+}
+
+enum SourceSettings {
+    Clips(HashMap<String, StingerClipSettings>),
+    Page(HashMap<String, PropertyValue>),
+}
+
+/// A stinger page: an HTML Input in stinger mode.
+struct PageContext {
+    source_block_id: String,
+    /// The block's properties, which carry the page's stinger settings.
+    properties: HashMap<String, PropertyValue>,
+    preroll_ms: u64,
+    matte_supported: bool,
+}
+
+/// What a stinger operation needs to know about a mixer and its clip source.
 struct Context {
     source_block_id: String,
     player: Arc<MediaPlayerState>,
@@ -307,9 +345,22 @@ fn take_on_grid(
 }
 
 impl AppState {
+    /// Find the mixer's clip source and settings. A page source has no clip
+    /// library, so library operations fail on it.
+    async fn stinger_context(&self, flow_id: &FlowId, block: &str) -> Result<Context, String> {
+        match self.stinger_source(flow_id, block).await? {
+            Source::Clips(ctx) => Ok(ctx),
+            Source::Page(page) => Err(format!(
+                "HTML Input {} is a stinger page and has no clip library; its stinger \
+                 settings are properties of the block",
+                page.source_block_id
+            )),
+        }
+    }
+
     /// Find the mixer's stinger source and settings. Errors say what is
     /// missing in terms an operator can fix.
-    async fn stinger_context(&self, flow_id: &FlowId, block: &str) -> Result<Context, String> {
+    async fn stinger_source(&self, flow_id: &FlowId, block: &str) -> Result<Source, String> {
         let (source_block_id, settings, preroll_ms) = {
             let flows = self.inner.flows.read().await;
             let flow = flows.get(flow_id).ok_or("no such flow")?;
@@ -341,37 +392,46 @@ impl AppState {
                 .find(|l| l.to == to)
                 .and_then(|l| l.from.strip_suffix(":video_out"))
                 .ok_or("nothing is wired to the stinger input")?;
+            const NOT_A_SOURCE: &str =
+                "the stinger input is not fed by a Media Player or an HTML Input";
             let source_block = flow
                 .blocks
                 .iter()
                 .find(|b| b.id == source)
-                .ok_or("the stinger input is not fed by a Media Player")?;
-            if source_block.block_definition_id != "builtin.media_player" {
-                return Err("the stinger input is not fed by a Media Player".into());
-            }
+                .ok_or(NOT_A_SOURCE)?;
+            let kind = match source_block.block_definition_id.as_str() {
+                "builtin.media_player" => StingerSourceKind::Clips,
+                html_input::BLOCK_ID => StingerSourceKind::Page,
+                _ => return Err(NOT_A_SOURCE.into()),
+            };
             if !matches!(
                 source_block.properties.get(STINGER_MODE_PROPERTY),
                 Some(PropertyValue::Bool(true))
             ) {
-                return Err(format!(
-                    "Media Player {} is not a stinger clip source (turn on Stinger Clip Source)",
-                    source
-                ));
+                return Err(match kind {
+                    StingerSourceKind::Clips => format!(
+                        "Media Player {} is not a stinger clip source (turn on Stinger Clip Source)",
+                        source
+                    ),
+                    StingerSourceKind::Page => format!(
+                        "HTML Input {} is not a stinger page (turn on Stinger Page)",
+                        source
+                    ),
+                });
             }
-            let settings = match source_block.properties.get(STINGER_CLIPS_PROPERTY) {
-                Some(PropertyValue::String(json)) => {
-                    strom_types::stinger::parse_clip_settings(json)
-                }
-                _ => HashMap::new(),
+            let settings = match kind {
+                StingerSourceKind::Page => SourceSettings::Page(source_block.properties.clone()),
+                StingerSourceKind::Clips => SourceSettings::Clips(
+                    match source_block.properties.get(STINGER_CLIPS_PROPERTY) {
+                        Some(PropertyValue::String(json)) => {
+                            strom_types::stinger::parse_clip_settings(json)
+                        }
+                        _ => HashMap::new(),
+                    },
+                ),
             };
             (source.to_string(), settings, preroll_ms)
         };
-        let player = MEDIA_PLAYER_REGISTRY
-            .get(&MediaPlayerKey {
-                flow_id: *flow_id,
-                block_id: source_block_id.clone(),
-            })
-            .ok_or("the flow is not running")?;
         let matte_supported = self
             .inner
             .pipelines
@@ -380,13 +440,30 @@ impl AppState {
             .get(flow_id)
             .and_then(|m| m.stinger_pads(block))
             .is_some_and(|p| p.matte.is_some());
-        Ok(Context {
+        let settings = match settings {
+            SourceSettings::Page(properties) => {
+                return Ok(Source::Page(PageContext {
+                    source_block_id,
+                    properties,
+                    preroll_ms,
+                    matte_supported,
+                }));
+            }
+            SourceSettings::Clips(settings) => settings,
+        };
+        let player = MEDIA_PLAYER_REGISTRY
+            .get(&MediaPlayerKey {
+                flow_id: *flow_id,
+                block_id: source_block_id.clone(),
+            })
+            .ok_or("the flow is not running")?;
+        Ok(Source::Clips(Context {
             source_block_id,
             player,
             settings,
             preroll_ms,
             matte_supported,
-        })
+        }))
     }
 
     /// Analyse a clip off the request path, once at a time per clip.
@@ -449,11 +526,17 @@ impl AppState {
         let (last_take, last_cue_ms, running) = with_mixer(*flow_id, block, |s| {
             (s.last_take.clone(), s.last_cue_ms, s.running)
         });
-        let ctx = match self.stinger_context(flow_id, block).await {
-            Ok(ctx) => ctx,
+        let ctx = match self.stinger_source(flow_id, block).await {
+            Ok(Source::Clips(ctx)) => ctx,
+            Ok(Source::Page(page)) => {
+                return Ok(self
+                    .page_stinger_state(flow_id, block, &page, last_take, running.is_some())
+                    .await)
+            }
             Err(problem) => {
                 return Ok(StingerState {
                     source_block_id: None,
+                    source_kind: None,
                     problem: Some(problem),
                     matte_supported: false,
                     preroll_ms: strom_types::stinger::DEFAULT_STINGER_PREROLL_MS,
@@ -480,6 +563,7 @@ impl AppState {
         }
         Ok(StingerState {
             source_block_id: Some(ctx.source_block_id.clone()),
+            source_kind: Some(StingerSourceKind::Clips),
             problem: files
                 .is_empty()
                 .then(|| "the stinger source's playlist is empty".to_string()),
@@ -556,7 +640,10 @@ impl AppState {
         if is_running(flow_id, block) {
             return Err(err("a stinger is on air; cue when it has finished"));
         }
-        let ctx = self.stinger_context(flow_id, block).await.map_err(err)?;
+        let ctx = match self.stinger_source(flow_id, block).await.map_err(err)? {
+            Source::Clips(ctx) => ctx,
+            Source::Page(_) => return self.page_stinger_cue(flow_id, block, index),
+        };
         let file = ctx.clip_at(index, expected_file)?;
         Self::analyse_in_background(ctx.uri(&file));
         let player = Arc::clone(&ctx.player);
@@ -897,7 +984,7 @@ impl AppState {
         expected_file: Option<&str>,
     ) -> Result<StingerTakeResponse, PipelineError> {
         let requested = Instant::now();
-        let ctx = self.stinger_context(flow_id, block).await.map_err(err)?;
+        let source = self.stinger_source(flow_id, block).await.map_err(err)?;
         let state =
             crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(flow_id, block)
                 .ok_or_else(|| err("the vision mixer is not running"))?;
@@ -909,8 +996,17 @@ impl AppState {
         if from == to {
             return Err(err("PGM and PVW are the same input"));
         }
-        let index = index.unwrap_or_else(|| ctx.player.current_index());
-        let file = ctx.clip_at(index, expected_file)?;
+        // What the take plays: a clip from the library, or the page.
+        let plays = match &source {
+            Source::Clips(ctx) => {
+                let index = index.unwrap_or_else(|| ctx.player.current_index());
+                Plays::Clip(ctx, index, ctx.clip_at(index, expected_file)?)
+            }
+            Source::Page(page) => {
+                page.check_take(index, expected_file)?;
+                Plays::Page(page)
+            }
+        };
 
         let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
         let claimed = with_mixer(*flow_id, block, |s| {
@@ -918,7 +1014,7 @@ impl AppState {
                 false
             } else {
                 s.running = Some(token);
-                s.source = Some(ctx.source_block_id.clone());
+                s.source = Some(source.block_id().to_string());
                 true
             }
         });
@@ -926,12 +1022,19 @@ impl AppState {
             return Err(err("a stinger is already on air on this mixer"));
         }
 
-        match self
-            .stinger_take_claimed(
-                flow_id, block, &ctx, token, index, &file, from, to, requested,
-            )
-            .await
-        {
+        let taken = match plays {
+            Plays::Clip(ctx, index, file) => {
+                self.stinger_take_claimed(
+                    flow_id, block, ctx, token, index, &file, from, to, requested,
+                )
+                .await
+            }
+            Plays::Page(page) => {
+                self.page_stinger_take(flow_id, block, page, token, from, to, requested)
+                    .await
+            }
+        };
+        match taken {
             Ok(response) => Ok(response),
             Err((reason, cut_instead)) => {
                 release(*flow_id, block, token);
