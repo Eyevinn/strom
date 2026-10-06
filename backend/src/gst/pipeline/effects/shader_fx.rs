@@ -25,10 +25,13 @@ use crate::gst::transitions::{TransitionController, TransitionType};
 
 /// Program a glshader slot: uniforms first so the new fragment never renders
 /// with stale parameters, then the fragment, then trigger the live recompile.
+/// The slot runs in passthrough while it holds the identity fragment, and
+/// leaves it from the next buffer, which renders with the new fragment.
 fn apply_shader(elem: &gst::Element, fragment: &str, uniforms: &gst::Structure) {
     elem.set_property("uniforms", uniforms);
     elem.set_property("fragment", fragment);
     elem.set_property("update-shader", true);
+    shaders::request_passthrough(elem, fragment == shaders::identity_fragment());
 }
 
 /// How long the incoming pad stays transparent at the start of a classic
@@ -47,7 +50,8 @@ const WIPE_END_GRACE_MS: u64 = 150;
 /// on the GL program, and a leftover inverted wipe at p=1 would otherwise
 /// flip "fully revealed" into "fully transparent" and black out the branch.
 /// On slots holding the identity fragment the uniforms have no matching
-/// locations and are silently ignored.
+/// locations and are silently ignored. Either way the slot is now an
+/// identity pass, so it goes back to passthrough.
 fn neutral_uniforms() -> gst::Structure {
     gst::Structure::builder("uniforms")
         .field("u_start", 0.0f32)
@@ -194,7 +198,8 @@ impl PipelineManager {
 
     /// Reset transition shader state at the start of every take so an
     /// interrupted wipe can't leave a half-masked source behind, and a
-    /// lingering master envelope can't replay. Uniform-only (no recompiles).
+    /// lingering master envelope can't replay. Uniform-only (no recompiles);
+    /// the neutralized slots go back to passthrough.
     /// Only TAKE slots are touched — the look slots (`fx_look_{i}`,
     /// `fx_pgm`) carry persistent effects and are never reset here.
     pub(crate) fn reset_take_fx(&self, block_instance_id: &str) {
@@ -210,6 +215,7 @@ impl PipelineManager {
                 .get(&format!("{}:fx_take_{}", block_instance_id, i))
             {
                 e.set_property("uniforms", neutral_uniforms());
+                shaders::request_passthrough(e, true);
             }
         }
         if let Some(e) = self
@@ -217,6 +223,7 @@ impl PipelineManager {
             .get(&format!("{}:fx_pgm_take", block_instance_id))
         {
             e.set_property("uniforms", neutral_uniforms());
+            shaders::request_passthrough(e, true);
         }
     }
 

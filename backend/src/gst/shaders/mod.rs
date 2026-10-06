@@ -39,6 +39,9 @@ use gstreamer_gl as gst_gl;
 use strom_types::effects::{parse_hex_rgb, VideoEffect};
 use tracing::{debug, error};
 
+mod passthrough;
+pub use passthrough::request_passthrough;
+
 /// Common header: GStreamer's default GL filter vertex shader provides
 /// `v_texcoord`; `glshader` itself sets `tex`, `time`, `width`, `height`.
 const PRELUDE: &str = r#"
