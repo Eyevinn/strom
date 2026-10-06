@@ -232,12 +232,27 @@ pub struct StingerTakeReport {
     pub worst_margin_ms: Option<f64>,
 }
 
+/// What feeds a vision mixer's stinger input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum StingerSourceKind {
+    /// A Media Player whose playlist is the clip library.
+    Clips,
+    /// An HTML Input whose page plays the stinger on a trigger. Its settings
+    /// are properties of the block, and it is the only entry in `clips`.
+    Page,
+}
+
 /// Stinger state of one vision mixer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct StingerState {
-    /// The Media Player wired to the stinger input.
+    /// The block wired to the stinger input.
     pub source_block_id: Option<String>,
+    /// What kind of block that is.
+    #[serde(default)]
+    pub source_kind: Option<StingerSourceKind>,
     /// Why stingers cannot run, when they cannot.
     pub problem: Option<String>,
     /// Whether the matte variants run here (GPU mixer).

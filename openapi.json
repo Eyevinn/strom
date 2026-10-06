@@ -10508,6 +10508,14 @@
           "mask_only"
         ]
       },
+      "StingerSourceKind": {
+        "type": "string",
+        "description": "What feeds a vision mixer's stinger input.",
+        "enum": [
+          "clips",
+          "page"
+        ]
+      },
       "StingerState": {
         "type": "object",
         "description": "Stinger state of one vision mixer.",
@@ -10582,7 +10590,18 @@
               "string",
               "null"
             ],
-            "description": "The Media Player wired to the stinger input."
+            "description": "The block wired to the stinger input."
+          },
+          "source_kind": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StingerSourceKind",
+                "description": "What kind of block that is."
+              }
+            ]
           }
         }
       },
