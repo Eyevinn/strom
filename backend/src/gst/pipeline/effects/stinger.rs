@@ -338,10 +338,15 @@ impl PipelineManager {
             }
         }
         pads.fill.set_property("zorder", DIST_STINGER_FILL_ZORDER);
+        // A step key sits half a frame before the output frame it acts on.
+        // The mixer stamps its frames from a rounded origin, so a frame's
+        // timestamp can be a nanosecond either side of the grid's: a key
+        // placed exactly on it would act on that frame or the next by chance.
+        let step = |t: u64| t.saturating_sub(take.frame_ns / 2);
         let fill_keys: &[(u64, f64)] = if variant == StingerVariant::MaskOnly {
             &[(0, 0.0)]
         } else {
-            &[(0, 0.0), (take.start, 1.0), (take.end, 0.0)]
+            &[(0, 0.0), (step(take.start), 1.0), (step(take.end), 0.0)]
         };
         keyframes(&pads.fill, "alpha", InterpolationMode::None, fill_keys)?;
 
@@ -354,13 +359,13 @@ impl PipelineManager {
                         &a,
                         "alpha",
                         InterpolationMode::None,
-                        &[(0, 1.0), (cut, 0.0)],
+                        &[(0, 1.0), (step(cut), 0.0)],
                     )?;
                     keyframes(
                         &b,
                         "alpha",
                         InterpolationMode::None,
-                        &[(0, 0.0), (cut, 1.0)],
+                        &[(0, 0.0), (step(cut), 1.0)],
                     )?;
                 } else {
                     // The incoming source fades in over the outgoing one.
@@ -376,7 +381,7 @@ impl PipelineManager {
                         &a,
                         "alpha",
                         InterpolationMode::None,
-                        &[(0, 1.0), (done, 0.0)],
+                        &[(0, 1.0), (step(done), 0.0)],
                     )?;
                 }
             }
@@ -393,7 +398,7 @@ impl PipelineManager {
                         ),
                     );
                 }
-                let (start, end) = (take.start, take.end);
+                let (start, end) = (step(take.start), step(take.end));
                 keyframes(
                     matte,
                     "alpha",
