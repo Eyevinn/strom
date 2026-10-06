@@ -629,7 +629,7 @@ jobs:
             done
           done < <(echo "$PATH" | tr ':' '\n')
           export PATH="$gst_bin:$PATH"
-          cargo test --package strom
+          cargo test --no-fail-fast --package strom
           cargo test --package strom-types
         env:
           # Turn a missing-element skip into a failure — see plugins_available().
@@ -722,7 +722,7 @@ jobs:
 
       - name: Run tests
         run: |
-          cargo test --package strom --features efp
+          cargo test --no-fail-fast --package strom --features efp
           cargo test --package strom-types
         env:
           # Turn a missing-element skip into a failure — see plugins_available().
