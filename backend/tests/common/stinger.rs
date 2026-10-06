@@ -26,7 +26,11 @@ pub const GL_ELEMENTS: &[&str] = &[
     "glupload",
     "glcolorconvert",
 ];
-pub const CODEC_ELEMENTS: &[&str] = &["avenc_ffv1", "avdec_ffv1", "matroskamux", "matroskademux"];
+/// PNG frames in QuickTime: lossless, alpha-capable, and decoded by libpng
+/// (`pngdec`) without frame threads, so every frame comes out. FFV1 would be
+/// smaller, but GStreamer 1.24.2's FFV1 decoder (Linux CI) drops a stream's
+/// last frame now and then, which makes frame counts flaky.
+pub const CODEC_ELEMENTS: &[&str] = &["pngenc", "pngdec", "qtmux", "qtdemux"];
 
 /// Where clip frame `i`'s matte edge is: white (new source) left of it.
 pub fn matte_edge(i: usize) -> u32 {
@@ -53,16 +57,29 @@ pub fn write_clip(
         .format(gst::Format::Time)
         .is_live(false)
         .build();
-    let enc = gst::ElementFactory::make("avenc_ffv1").build().unwrap();
-    let mux = gst::ElementFactory::make("matroskamux").build().unwrap();
+    let convert = gst::ElementFactory::make("videoconvert").build().unwrap();
+    let to_codec = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("format", if format == "GRAY8" { "GRAY8" } else { "RGBA" })
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let enc = gst::ElementFactory::make("pngenc")
+        .property("compression-level", 1u32)
+        .build()
+        .unwrap();
+    let mux = gst::ElementFactory::make("qtmux").build().unwrap();
     let sink = gst::ElementFactory::make("filesink")
         .property("location", path.to_string_lossy().to_string())
         .build()
         .unwrap();
     pipeline
-        .add_many([appsrc.upcast_ref(), &enc, &mux, &sink])
+        .add_many([appsrc.upcast_ref(), &convert, &to_codec, &enc, &mux, &sink])
         .unwrap();
-    gst::Element::link_many([appsrc.upcast_ref(), &enc, &mux, &sink]).unwrap();
+    gst::Element::link_many([appsrc.upcast_ref(), &convert, &to_codec, &enc, &mux, &sink]).unwrap();
     pipeline.set_state(gst::State::Playing).unwrap();
     for i in 0..N {
         let mut data = vec![0u8; (width * H) as usize * bpp];
@@ -422,9 +439,9 @@ impl Running {
 pub async fn start(tag: &str, backend: &str) -> Running {
     let dir = tempfile::tempdir().unwrap();
     let clips = vec![
-        dir.path().join("classic.mkv"),
-        dir.path().join("sbs.mkv"),
-        dir.path().join("mask.mkv"),
+        dir.path().join("classic.mov"),
+        dir.path().join("sbs.mov"),
+        dir.path().join("mask.mov"),
     ];
     classic_clip(&clips[0]);
     sbs_clip(&clips[1]);
