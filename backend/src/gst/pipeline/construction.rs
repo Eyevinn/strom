@@ -25,11 +25,19 @@ fn is_sink_element(element: &gst::Element) -> bool {
 /// Used on qos-enabled sink pads to stop the per-buffer upstream QoS event
 /// storm from propagating (and leaking) into the rest of the pipeline. See the
 /// call site in `add_element` for the rationale.
+///
+/// Returns `Handled`, not `Drop`. gstreamer-rs takes the event out of the
+/// probe info and frees it itself either way; after `Drop`, GStreamer before
+/// 1.26 then unrefs the (now NULL) event once more in
+/// `gst_pad_push_event_unchecked` and logs `gst_mini_object_unref: assertion
+/// 'mini_object != NULL' failed` — once per QoS event, i.e. per buffer at
+/// every qos-enabled sink. `Handled` means "consumed by the probe": the core
+/// does not touch the event again, and the push still counts as a success.
 fn drop_upstream_qos_events(pad: &gst::Pad) {
     pad.add_probe(gst::PadProbeType::EVENT_UPSTREAM, |_pad, info| {
         if let Some(gst::PadProbeData::Event(ref event)) = info.data {
             if event.type_() == gst::EventType::Qos {
-                return gst::PadProbeReturn::Drop;
+                return gst::PadProbeReturn::Handled;
             }
         }
         gst::PadProbeReturn::Pass
