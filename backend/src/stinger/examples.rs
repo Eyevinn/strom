@@ -269,11 +269,11 @@ fn render_blade(cr: &cairo::Context, t: f64) {
     let slant = h * 0.25;
     let p = ease_in_out(t);
     // Where the blade crosses the middle row of the frame.
-    let bx = -slant - 120.0 + (w + 2.0 * slant + 240.0) * p;
+    let bx = -slant - 300.0 + (w + 2.0 * slant + 600.0) * p;
     let blade_x = |y: f64| bx + (h / 2.0 - y) * slant / (h / 2.0);
 
     // Fill: glow, trailing streaks and a white core.
-    for (half, alpha) in [(90.0, 0.18), (45.0, 0.35), (20.0, 0.7)] {
+    for (half, alpha) in [(260.0, 0.2), (150.0, 0.4), (80.0, 0.75)] {
         cr.set_source_rgba(0.35, 0.85, 1.0, alpha);
         cr.move_to(blade_x(0.0) - half, 0.0);
         cr.line_to(blade_x(0.0) + half, 0.0);
@@ -284,22 +284,22 @@ fn render_blade(cr: &cairo::Context, t: f64) {
     }
     for i in 0..9 {
         let y = h * (i as f64 + 0.5) / 9.0;
-        let len = 160.0 + 90.0 * ((i * 37 % 11) as f64);
+        let len = 260.0 + 120.0 * ((i * 37 % 11) as f64);
         let x = blade_x(y);
         let grad = cairo::LinearGradient::new(x - len, y, x, y);
         grad.add_color_stop_rgba(0.0, 0.35, 0.85, 1.0, 0.0);
         grad.add_color_stop_rgba(1.0, 0.75, 0.95, 1.0, 0.8);
         let _ = cr.set_source(&grad);
-        cr.set_line_width(4.0);
+        cr.set_line_width(10.0);
         cr.move_to(x - len, y);
         cr.line_to(x, y);
         let _ = cr.stroke();
     }
     cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
-    cr.move_to(blade_x(0.0) - 6.0, 0.0);
-    cr.line_to(blade_x(0.0) + 6.0, 0.0);
-    cr.line_to(blade_x(h) + 6.0, h);
-    cr.line_to(blade_x(h) - 6.0, h);
+    cr.move_to(blade_x(0.0) - 22.0, 0.0);
+    cr.line_to(blade_x(0.0) + 22.0, 0.0);
+    cr.line_to(blade_x(h) + 22.0, h);
+    cr.line_to(blade_x(h) - 22.0, h);
     cr.close_path();
     let _ = cr.fill();
 
@@ -313,7 +313,7 @@ fn render_blade(cr: &cairo::Context, t: f64) {
     let _ = cr.paint();
     let k = slant / (h / 2.0);
     cr.transform(cairo::Matrix::new(1.0, 0.0, -k, 1.0, w + k * h / 2.0, 0.0));
-    let soft = 30.0;
+    let soft = 70.0;
     let grad = cairo::LinearGradient::new(bx - soft, 0.0, bx + soft, 0.0);
     grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 1.0);
     grad.add_color_stop_rgba(1.0, 0.0, 0.0, 0.0, 1.0);
