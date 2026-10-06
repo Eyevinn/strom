@@ -41,7 +41,7 @@ async fn gpu_stingers_land_frame_accurately() {
     r.drain().await;
     let take = r
         .state
-        .stinger_take(&r.flow_id, &r.mixer(), Some(1))
+        .stinger_take(&r.flow_id, &r.mixer(), Some(1), None)
         .await
         .expect("track matte take");
     assert_eq!(take.variant, StingerVariant::TrackMatte);
@@ -93,7 +93,7 @@ async fn gpu_stingers_land_frame_accurately() {
     r.drain().await;
     let take = r
         .state
-        .stinger_take(&r.flow_id, &r.mixer(), Some(2))
+        .stinger_take(&r.flow_id, &r.mixer(), Some(2), None)
         .await
         .expect("mask take");
     assert_eq!(take.variant, StingerVariant::MaskOnly);
@@ -153,7 +153,7 @@ async fn cpu_stingers_play_classic() {
     r.drain().await;
     let take = r
         .state
-        .stinger_take(&r.flow_id, &r.mixer(), Some(1))
+        .stinger_take(&r.flow_id, &r.mixer(), Some(1), None)
         .await
         .expect("downgraded take");
     assert_eq!(take.variant, StingerVariant::Classic);
@@ -201,7 +201,7 @@ async fn stopping_mid_take_releases_the_pipeline() {
         pipelines.get(&r.flow_id).unwrap().pipeline().downgrade()
     };
     r.state
-        .stinger_take(&r.flow_id, &r.mixer(), Some(1))
+        .stinger_take(&r.flow_id, &r.mixer(), Some(1), None)
         .await
         .expect("take");
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -233,7 +233,7 @@ async fn stopping_mid_take_releases_the_pipeline() {
             .running
     );
     r.state
-        .stinger_take(&r.flow_id, &r.mixer(), Some(0))
+        .stinger_take(&r.flow_id, &r.mixer(), Some(0), None)
         .await
         .expect("take after restart");
     let report = r.wait_for_report(0).await;
@@ -261,7 +261,7 @@ async fn a_clip_that_will_not_play_still_changes_the_program() {
 
     let err = r
         .state
-        .stinger_take(&r.flow_id, &r.mixer(), Some(3))
+        .stinger_take(&r.flow_id, &r.mixer(), Some(3), None)
         .await
         .expect_err("a missing clip cannot play");
     assert!(err.to_string().contains("cut instead"), "{err}");

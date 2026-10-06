@@ -1808,7 +1808,7 @@ pub async fn trigger_transition(
     ValidatedJson(req): ValidatedJson<TriggerTransitionRequest>,
 ) -> Result<Json<TransitionResponse>, (StatusCode, Json<ErrorResponse>)> {
     debug!(
-        "Triggering {} transition on block {} in flow {} ({} -> {}, {}ms)",
+        "Triggering {} transition on block {} in flow {} ({:?} -> {:?}, {}ms)",
         req.transition_type, block_id, flow_id, req.from_input, req.to_input, req.duration_ms
     );
 
@@ -1816,17 +1816,11 @@ pub async fn trigger_transition(
     // clip; PGM and PVW decide the inputs as for any take.
     if req.transition_type.eq_ignore_ascii_case("stinger") {
         let take = state
-            .stinger_take(&flow_id, &block_id, req.stinger_clip)
+            .stinger_take(&flow_id, &block_id, req.stinger_clip, None)
             .await
             .map_err(|e| {
                 error!("Failed to take stinger: {}", e);
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse::with_details(
-                        "Failed to trigger transition",
-                        e.to_string(),
-                    )),
-                )
+                crate::api::stinger::error_response("Failed to trigger transition", e)
             })?;
         return Ok(Json(TransitionResponse {
             message: format!(
@@ -1839,12 +1833,21 @@ pub async fn trigger_transition(
         }));
     }
 
+    let (Some(from_input), Some(to_input)) = (req.from_input, req.to_input) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_details(
+                "Failed to trigger transition",
+                "from_input and to_input are required (only a stinger may leave them out)",
+            )),
+        ));
+    };
     let actual_transition_type = state
         .trigger_transition(
             &flow_id,
             &block_id,
-            req.from_input,
-            req.to_input,
+            from_input,
+            to_input,
             &req.transition_type,
             req.duration_ms,
         )
@@ -1863,7 +1866,7 @@ pub async fn trigger_transition(
     Ok(Json(TransitionResponse {
         message: format!(
             "Transition {} started: input {} -> {}",
-            req.transition_type, req.from_input, req.to_input
+            req.transition_type, from_input, to_input
         ),
         transition_type: req.transition_type,
         actual_transition_type,

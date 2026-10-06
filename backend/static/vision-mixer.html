@@ -1357,7 +1357,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.43-stinger | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.44-stinger | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1987,9 +1987,10 @@
             stingerState.cued_index = index;
             stingerState.ready = false;
             renderStingers();
-            apiPost('/stinger/cue', { index })
+            const clip = stingerState.clips.find(c => c.index === index);
+            apiPost('/stinger/cue', { index, file: clip ? clip.file : null })
                 .then(st => { stingerState = st; renderStingers(); })
-                .catch(e => setStatus('Stinger cue error: ' + e.message));
+                .catch(e => { setStatus('Stinger cue error: ' + e.message); fetchStingerState(); });
         }
 
         function placeStingerSettings() {
@@ -2046,7 +2047,9 @@
                 premultiplied: document.getElementById('stPremul').checked,
                 invert_matte: document.getElementById('stInvert').checked,
             };
-            apiPut('/stinger/clips/' + index, settings)
+            const clip = stingerState.clips.find(c => c.index === index);
+            const guard = clip ? '?file=' + encodeURIComponent(clip.file) : '';
+            apiPut('/stinger/clips/' + index + guard, settings)
                 .then(() => { setStatus('Stinger settings saved'); document.activeElement.blur(); fetchStingerState(); })
                 .catch(e => setStatus('Stinger settings error: ' + e.message));
         }

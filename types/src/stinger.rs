@@ -192,6 +192,8 @@ pub struct StingerClip {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct StingerTakeReport {
+    /// The take this reports on, as returned by the take request.
+    pub take_id: u64,
     pub index: usize,
     pub file: String,
     pub variant: StingerVariant,
@@ -246,6 +248,30 @@ pub struct StingerState {
 pub struct StingerCueRequest {
     /// Playlist index on the stinger source.
     pub index: usize,
+    /// When set, the playlist entry at `index` must be this file; a library
+    /// changed by someone else since the client read it fails with 409.
+    #[serde(default)]
+    pub file: Option<String>,
+}
+
+/// Add a clip to the stinger library.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct StingerAddClipRequest {
+    /// Path relative to the media directory (as the media API names files),
+    /// an absolute path, or a URI.
+    pub file: String,
+    /// Settings to store with it. Defaults detect everything.
+    #[serde(default)]
+    pub settings: Option<StingerClipSettings>,
+}
+
+/// Guards a request that names a clip by index: when `file` is given, the
+/// playlist entry at that index must be this file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StingerFileGuard {
+    #[serde(default)]
+    pub file: Option<String>,
 }
 
 /// Take a stinger from PGM to PVW.
@@ -255,13 +281,22 @@ pub struct StingerTakeRequest {
     /// Playlist index to play. Defaults to the cued clip.
     #[serde(default)]
     pub index: Option<usize>,
+    /// When set, the clip played must be this file (the entry at `index`,
+    /// or the cued one); otherwise the take fails with 409.
+    #[serde(default)]
+    pub file: Option<String>,
 }
 
 /// Result of a take request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct StingerTakeResponse {
+    /// Identifies this take in `StingerStarted`, `StingerCompleted` and
+    /// `StingerFailed`.
+    pub take_id: u64,
     pub index: usize,
+    /// The clip played.
+    pub file: String,
     pub variant: StingerVariant,
     pub downgraded_from: Option<StingerVariant>,
     /// Time from the request to the clip's first frame on air.

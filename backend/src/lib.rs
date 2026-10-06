@@ -249,8 +249,12 @@ pub async fn create_app_with_config(
             post(api::stinger::take_stinger),
         )
         .route(
+            "/flows/{flow_id}/blocks/{block_id}/stinger/clips",
+            post(api::stinger::add_stinger_clip),
+        )
+        .route(
             "/flows/{flow_id}/blocks/{block_id}/stinger/clips/{index}",
-            put(api::stinger::set_stinger_clip_settings),
+            put(api::stinger::set_stinger_clip_settings).delete(api::stinger::remove_stinger_clip),
         )
         .route(
             "/flows/{flow_id}/blocks/{block_id}/stinger/examples",

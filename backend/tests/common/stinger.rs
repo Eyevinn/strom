@@ -503,6 +503,7 @@ pub async fn classic_take(r: &Running) {
             &r.flow_id,
             &r.mixer(),
             0,
+            None,
             StingerClipSettings {
                 cut_point_ms: Some(500),
                 ..Default::default()
@@ -513,7 +514,7 @@ pub async fn classic_take(r: &Running) {
     r.drain().await;
     let take = r
         .state
-        .stinger_take(&r.flow_id, &r.mixer(), Some(0))
+        .stinger_take(&r.flow_id, &r.mixer(), Some(0), None)
         .await
         .expect("take");
     assert_eq!(take.variant, StingerVariant::Classic);

@@ -415,6 +415,8 @@ pub enum StromEvent {
         #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
         flow_id: FlowId,
         block_id: String,
+        /// As returned by the take request.
+        take_id: u64,
         index: usize,
         file: String,
         variant: crate::stinger::StingerVariant,
@@ -436,6 +438,8 @@ pub enum StromEvent {
         #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
         flow_id: FlowId,
         block_id: String,
+        /// The failed take, when it got as far as being given an id.
+        take_id: Option<u64>,
         reason: String,
         /// The program still changed, without the clip.
         program_changed: bool,
@@ -963,6 +967,7 @@ impl StromEvent {
                 block_id,
                 reason,
                 program_changed,
+                ..
             } => format!(
                 "Vision mixer {} in flow {}: stinger failed ({}){}",
                 block_id,
@@ -1520,6 +1525,7 @@ mod event_accessor_tests {
             StromEvent::StingerStarted {
                 flow_id: id,
                 block_id: "mix0".to_string(),
+                take_id: 1,
                 index: 0,
                 file: "sting.mkv".to_string(),
                 variant: crate::stinger::StingerVariant::TrackMatte,
@@ -1533,6 +1539,7 @@ mod event_accessor_tests {
                 flow_id: id,
                 block_id: "mix0".to_string(),
                 report: crate::stinger::StingerTakeReport {
+                    take_id: 1,
                     index: 0,
                     file: "sting.mkv".to_string(),
                     variant: crate::stinger::StingerVariant::Classic,
@@ -1552,6 +1559,7 @@ mod event_accessor_tests {
             StromEvent::StingerFailed {
                 flow_id: id,
                 block_id: "mix0".to_string(),
+                take_id: Some(2),
                 reason: "clip missing".to_string(),
                 program_changed: true,
             },

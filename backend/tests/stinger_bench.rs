@@ -304,12 +304,12 @@ async fn stinger_measurements() {
         let s = state.stinger_state(&flow_id, "bench-mixer").await.unwrap();
         for (i, (label, _)) in clips.iter().enumerate() {
             let cue = state
-                .stinger_cue(&flow_id, "bench-mixer", i)
+                .stinger_cue(&flow_id, "bench-mixer", i, None)
                 .await
                 .expect("cue");
             for _ in 0..3 {
                 state
-                    .stinger_take(&flow_id, "bench-mixer", Some(i))
+                    .stinger_take(&flow_id, "bench-mixer", Some(i), None)
                     .await
                     .expect("take");
                 loop {

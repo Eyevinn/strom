@@ -2221,6 +2221,67 @@
         }
       }
     },
+    "/api/flows/{flow_id}/blocks/{block_id}/stinger/clips": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Add a clip to the stinger library (the stinger source's playlist). Adding\na file already in the library returns it unchanged. Upload the file first\nwith the media API when it is not on the server yet.",
+        "operationId": "add_stinger_clip",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StingerAddClipRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The clip, as it plays here",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StingerClip"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request, or no such file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/flows/{flow_id}/blocks/{block_id}/stinger/clips/{index}": {
       "put": {
         "tags": [
@@ -2256,6 +2317,15 @@
               "type": "integer",
               "minimum": 0
             }
+          },
+          {
+            "name": "file",
+            "in": "query",
+            "description": "The file expected at `index`; 409 when the library has changed",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -2281,6 +2351,87 @@
           },
           "400": {
             "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The library changed: `file` is no longer at `index`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Remove a clip from the stinger library, with its settings. The file stays\nin the media directory. Refused while a stinger is on air.",
+        "operationId": "remove_stinger_clip",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "description": "Playlist index on the stinger source",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "file",
+            "in": "query",
+            "description": "The file expected at `index`; 409 when the library has changed",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The library changed: `file` is no longer at `index`",
             "content": {
               "application/json": {
                 "schema": {
@@ -2342,6 +2493,16 @@
           },
           "400": {
             "description": "The clip could not be cued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The library changed: `file` is no longer at `index`",
             "content": {
               "application/json": {
                 "schema": {
@@ -2454,6 +2615,16 @@
           },
           "400": {
             "description": "The take could not start",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The library changed: `file` is not the clip that would play",
             "content": {
               "application/json": {
                 "schema": {
@@ -10046,6 +10217,30 @@
           }
         }
       },
+      "StingerAddClipRequest": {
+        "type": "object",
+        "description": "Add a clip to the stinger library.",
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Path relative to the media directory (as the media API names files),\nan absolute path, or a URI."
+          },
+          "settings": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StingerClipSettings",
+                "description": "Settings to store with it. Defaults detect everything."
+              }
+            ]
+          }
+        }
+      },
       "StingerBeneath": {
         "type": "string",
         "description": "What a classic stinger does to the program at its cut point.",
@@ -10267,6 +10462,13 @@
           "index"
         ],
         "properties": {
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When set, the playlist entry at `index` must be this file; a library\nchanged by someone else since the client read it fails with 409."
+          },
           "index": {
             "type": "integer",
             "description": "Playlist index on the stinger source.",
@@ -10388,6 +10590,7 @@
         "type": "object",
         "description": "A finished take, with what was measured.",
         "required": [
+          "take_id",
           "index",
           "file",
           "variant",
@@ -10463,6 +10666,12 @@
             "type": "integer",
             "minimum": 0
           },
+          "take_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The take this reports on, as returned by the take request.",
+            "minimum": 0
+          },
           "take_to_air_ms": {
             "type": "number",
             "format": "double",
@@ -10489,6 +10698,13 @@
         "type": "object",
         "description": "Take a stinger from PGM to PVW.",
         "properties": {
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When set, the clip played must be this file (the entry at `index`,\nor the cued one); otherwise the take fails with 409."
+          },
           "index": {
             "type": [
               "integer",
@@ -10503,7 +10719,9 @@
         "type": "object",
         "description": "Result of a take request.",
         "required": [
+          "take_id",
           "index",
+          "file",
           "variant",
           "take_to_air_ms",
           "duration_ms"
@@ -10524,8 +10742,18 @@
             "format": "int64",
             "minimum": 0
           },
+          "file": {
+            "type": "string",
+            "description": "The clip played."
+          },
           "index": {
             "type": "integer",
+            "minimum": 0
+          },
+          "take_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Identifies this take in `StingerStarted`, `StingerCompleted` and\n`StingerFailed`.",
             "minimum": 0
           },
           "take_to_air_ms": {
@@ -12485,6 +12713,7 @@
                 "required": [
                   "flow_id",
                   "block_id",
+                  "take_id",
                   "index",
                   "file",
                   "variant",
@@ -12525,6 +12754,12 @@
                   },
                   "index": {
                     "type": "integer",
+                    "minimum": 0
+                  },
+                  "take_id": {
+                    "type": "integer",
+                    "format": "int64",
+                    "description": "As returned by the take request.",
                     "minimum": 0
                   },
                   "take_to_air_ms": {
@@ -12616,6 +12851,15 @@
                   },
                   "reason": {
                     "type": "string"
+                  },
+                  "take_id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64",
+                    "description": "The failed take, when it got as far as being given an id.",
+                    "minimum": 0
                   }
                 }
               },
@@ -13008,10 +13252,6 @@
       "TriggerTransitionRequest": {
         "type": "object",
         "description": "Request to trigger a transition on a compositor block.",
-        "required": [
-          "from_input",
-          "to_input"
-        ],
         "properties": {
           "duration_ms": {
             "type": "integer",
@@ -13020,8 +13260,11 @@
             "minimum": 0
           },
           "from_input": {
-            "type": "integer",
-            "description": "Index of the currently active input (0-based)",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Index of the currently active input (0-based). Required, except for a\n\"stinger\", which always takes the vision mixer's PGM to its PVW.",
             "minimum": 0
           },
           "stinger_clip": {
@@ -13033,8 +13276,11 @@
             "minimum": 0
           },
           "to_input": {
-            "type": "integer",
-            "description": "Index of the input to transition to (0-based)",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Index of the input to transition to (0-based). Required, except for a\n\"stinger\".",
             "minimum": 0
           },
           "transition_type": {
