@@ -10655,7 +10655,7 @@
           "frames_late": {
             "type": "integer",
             "format": "int32",
-            "description": "Clip frames that reached it after their time on air had begun.",
+            "description": "Clip frames, on the graphic or the matte pad, that reached the mixer\nafter their time on air had begun.",
             "minimum": 0
           },
           "from_input": {

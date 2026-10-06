@@ -366,6 +366,23 @@ impl Running {
     }
 
     /// Wait until the take finished and its report is in.
+    /// Frames clip `index` decodes to. GStreamer 1.24.2's FFV1 decoder drops
+    /// the last frame of a stream (fixed in 1.24.4), so this is read from the
+    /// analysis instead of assumed.
+    pub async fn clip_frames(&self, index: usize) -> u32 {
+        let s = self
+            .state
+            .stinger_state(&self.flow_id, &self.mixer())
+            .await
+            .unwrap();
+        let frames = s.clips[index].info.as_ref().expect("analysed").frames;
+        assert!(
+            frames + 1 >= N as u32 && frames <= N as u32,
+            "clip {index} decodes to {frames} frames"
+        );
+        frames
+    }
+
     pub async fn wait_for_report(&self, take: usize) -> strom_types::stinger::StingerTakeReport {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
@@ -518,6 +535,7 @@ pub async fn classic_take(r: &Running) {
         .await
         .expect("take");
     assert_eq!(take.variant, StingerVariant::Classic);
+    let n = r.clip_frames(0).await;
     let frames = r.collect(take.take_to_air_ms as u64 + 1600).await;
 
     let green: Vec<u64> = frames
@@ -529,9 +547,9 @@ pub async fn classic_take(r: &Running) {
     let indices: Vec<i64> = green.iter().map(|t| frame_index(*t, start)).collect();
     assert_eq!(
         indices,
-        (0..N as i64).collect::<Vec<_>>(),
+        (0..n as i64).collect::<Vec<_>>(),
         "the graphic must be on air for exactly its {} frames",
-        N
+        n
     );
     let cut = frames
         .iter()
@@ -548,14 +566,14 @@ pub async fn classic_take(r: &Running) {
         } else {
             assert_eq!(right, Colour::Blue, "frame {k}: new source after the cut");
         }
-        if k >= N as i64 {
+        if k >= n as i64 {
             assert_eq!(colour(px(f, W / 4, H / 2)), Colour::Blue, "frame {k}");
         }
     }
 
     let report = r.wait_for_report(0).await;
-    assert_eq!(report.frames_expected, N as u32);
-    assert_eq!(report.frames_arrived, N as u32, "{report:?}");
+    assert_eq!(report.frames_expected, n);
+    assert_eq!(report.frames_arrived, n, "{report:?}");
     eprintln!(
         "classic: on air {:.0} ms after the take, {} late, worst margin {:?} ms",
         report.take_to_air_ms, report.frames_late, report.worst_margin_ms

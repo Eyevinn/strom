@@ -83,15 +83,14 @@ pub struct StingerStats {
 
 /// A take's measurement probe; dropping it removes the probe.
 pub struct StingerWatch {
-    pad: gst::Pad,
-    probe: Option<gst::PadProbeId>,
+    probes: Vec<(gst::Pad, gst::PadProbeId)>,
     pub stats: Arc<StingerStats>,
 }
 
 impl Drop for StingerWatch {
     fn drop(&mut self) {
-        if let Some(probe) = self.probe.take() {
-            self.pad.remove_probe(probe);
+        for (pad, probe) in self.probes.drain(..) {
+            pad.remove_probe(probe);
         }
     }
 }
@@ -458,12 +457,18 @@ impl PipelineManager {
             late: AtomicU32::new(0),
             worst_margin_ns: AtomicI64::new(i64::MAX),
         });
-        let counted = Arc::clone(&stats);
-        // A per-buffer probe for the length of one take: a timestamp check,
-        // an Instant read and three atomic updates.
-        let probe = pads
-            .fill
-            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        // Per-buffer probes for the length of one take: a timestamp check,
+        // an Instant read and a few atomic updates. The graphic pad counts
+        // the frames; both it and the matte pad (which has a shader pass of
+        // its own ahead of it) count lateness, since a late matte frame
+        // shows as much as a late graphic.
+        let mut probes = Vec::new();
+        let watched: Vec<(gst::Pad, bool)> = std::iter::once((pads.fill.clone(), true))
+            .chain(pads.matte.clone().map(|m| (m, false)))
+            .collect();
+        for (pad, counts_frames) in watched {
+            let counted = Arc::clone(&stats);
+            let probe = pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
                 let Some(pts) = info.buffer().and_then(|b| b.pts()) else {
                     return gst::PadProbeReturn::Ok;
                 };
@@ -473,13 +478,19 @@ impl PipelineManager {
                 }
                 let arrival = counted.epoch_rt + counted.epoch.elapsed().as_nanos() as i64;
                 let margin = pts as i64 + counted.latency_ns - arrival;
-                counted.arrived.fetch_add(1, Ordering::Relaxed);
+                if counts_frames {
+                    counted.arrived.fetch_add(1, Ordering::Relaxed);
+                }
                 if margin < 0 {
                     counted.late.fetch_add(1, Ordering::Relaxed);
                 }
                 counted.worst_margin_ns.fetch_min(margin, Ordering::AcqRel);
                 gst::PadProbeReturn::Ok
             });
+            if let Some(probe) = probe {
+                probes.push((pad, probe));
+            }
+        }
 
         info!(
             "Vision mixer {}: {:?} stinger {} -> {} on air {:.3}s..{:.3}s{}",
@@ -493,14 +504,7 @@ impl PipelineManager {
                 .map(|c| format!(", cut at {:.3}s", c as f64 / 1e9))
                 .unwrap_or_default()
         );
-        Ok((
-            StingerWatch {
-                pad: pads.fill,
-                probe,
-                stats,
-            },
-            ftb_cancelled,
-        ))
+        Ok((StingerWatch { probes, stats }, ftb_cancelled))
     }
 
     /// After the take's last frame: replace its keyframes with the state they

@@ -45,20 +45,32 @@ async fn gpu_stingers_land_frame_accurately() {
         .await
         .expect("track matte take");
     assert_eq!(take.variant, StingerVariant::TrackMatte);
+    let n = r.clip_frames(1).await;
     let frames = r.collect(take.take_to_air_ms as u64 + 1600).await;
     let start = frames
         .iter()
         .find(|(_, f)| colour(px(f, 3, 3)) == Colour::Yellow)
         .map(|(t, _)| *t)
         .expect("the graphic never went on air");
+    // Every program frame's edge, so a failure shows the whole take.
+    let seen: Vec<String> = frames
+        .iter()
+        .map(|(t, f)| format!("{}:{}", frame_index(*t, start), edge(f, Colour::Red)))
+        .collect();
     for (t, f) in &frames {
         let k = frame_index(*t, start);
-        if (0..N as i64).contains(&k) {
+        if (0..n as i64).contains(&k) {
             let measured = edge(f, Colour::Red);
             let expected = matte_edge(k as usize);
             assert!(
                 measured.abs_diff(expected) <= 3,
-                "program frame {k} shows matte edge {measured}, clip frame {k} has {expected}"
+                "program frame {k} shows matte edge {measured}, clip frame {k} has {expected}; \
+                 frame:edge {seen:?}; report {:?}",
+                r.state
+                    .stinger_state(&r.flow_id, &r.mixer())
+                    .await
+                    .unwrap()
+                    .last_take
             );
             assert_eq!(
                 colour(px(f, 3, 3)),
@@ -86,7 +98,7 @@ async fn gpu_stingers_land_frame_accurately() {
     }
     let report = r.wait_for_report(1).await;
     assert!(report.cue_ms.is_some(), "the take had to cue clip 1");
-    assert_eq!(report.frames_arrived, N as u32, "{report:?}");
+    assert_eq!(report.frames_arrived, n, "{report:?}");
     r.wait_until_parked().await;
 
     // Red to blue through the mask only.
@@ -97,6 +109,7 @@ async fn gpu_stingers_land_frame_accurately() {
         .await
         .expect("mask take");
     assert_eq!(take.variant, StingerVariant::MaskOnly);
+    let n = r.clip_frames(2).await;
     let frames = r.collect(take.take_to_air_ms as u64 + 1600).await;
     let edges: Vec<(u64, u32)> = frames
         .iter()
@@ -113,18 +126,22 @@ async fn gpu_stingers_land_frame_accurately() {
         let k = frame_index(*t, start);
         let expected = if k < 0 {
             0
-        } else if k >= N as i64 {
+        } else if k >= n as i64 {
             W
         } else {
             matte_edge(k as usize)
         };
         assert!(
             e.abs_diff(expected) <= 3,
-            "program frame {k} shows edge {e}, expected {expected}"
+            "program frame {k} shows edge {e}, expected {expected}; frame:edge {:?}",
+            edges
+                .iter()
+                .map(|(t, e)| format!("{}:{}", frame_index(*t, start), e))
+                .collect::<Vec<_>>()
         );
     }
     let report = r.wait_for_report(2).await;
-    assert_eq!(report.frames_arrived, N as u32, "{report:?}");
+    assert_eq!(report.frames_arrived, n, "{report:?}");
 
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
@@ -178,7 +195,7 @@ async fn cpu_stingers_play_classic() {
         assert_ne!(colour(px(f, W - 3, 3)), Colour::Other, "matte half on air");
     }
     let report = r.wait_for_report(1).await;
-    assert_eq!(report.frames_arrived, N as u32, "{report:?}");
+    assert_eq!(report.frames_arrived, r.clip_frames(1).await, "{report:?}");
 
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
@@ -237,7 +254,7 @@ async fn stopping_mid_take_releases_the_pipeline() {
         .await
         .expect("take after restart");
     let report = r.wait_for_report(0).await;
-    assert_eq!(report.frames_arrived, N as u32, "{report:?}");
+    assert_eq!(report.frames_arrived, r.clip_frames(0).await, "{report:?}");
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
 
