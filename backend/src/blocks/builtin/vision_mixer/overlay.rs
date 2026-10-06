@@ -791,10 +791,9 @@ pub struct OverlayRenderer {
     has_frame: bool,
     /// One multiview frame: the duration of each keep-last-frame GAP.
     frame_duration: gst::ClockTime,
-    /// GAP events sent and GAP events that left the appsrc, to cap the
-    /// number queued in it (see [`Self::keep_last_frame`]).
-    gaps_sent: u64,
-    gaps_pushed: Arc<AtomicU64>,
+    /// GAP events sent that have not left the appsrc yet, to cap the number
+    /// queued in it (see [`Self::keep_last_frame`]).
+    gaps_queued: Arc<AtomicU64>,
     last_pgm: u64,
     last_pvw: u64,
     last_ftb: bool,
@@ -833,15 +832,28 @@ impl OverlayRenderer {
             .filter(|f| f.numer() > 0 && f.denom() > 0)
             .and_then(|f| gst::ClockTime::SECOND.mul_div_floor(f.denom() as u64, f.numer() as u64))
             .unwrap_or(gst::ClockTime::from_nseconds(1_000_000_000 / 30));
-        // Count the GAP events that leave the appsrc. An event probe: it
-        // fires per event, never per buffer, and only bumps an atomic.
-        let gaps_pushed = Arc::new(AtomicU64::new(0));
+        // Track the GAP events still queued in the appsrc. An event probe:
+        // it fires per event, never per buffer, and only touches an atomic.
+        // A GAP leaving the appsrc is no longer queued. A flush or a new
+        // stream (the appsrc restarted) means the queue was emptied, so
+        // nothing is queued any more and the count can never stay stuck.
+        let gaps_queued = Arc::new(AtomicU64::new(0));
         if let Some(pad) = appsrc.static_pad("src") {
-            let gaps_pushed = Arc::clone(&gaps_pushed);
+            let gaps_queued = Arc::clone(&gaps_queued);
             pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
                 if let Some(gst::PadProbeData::Event(ev)) = &info.data {
-                    if ev.type_() == gst::EventType::Gap {
-                        gaps_pushed.fetch_add(1, Ordering::Relaxed);
+                    match ev.type_() {
+                        gst::EventType::Gap => {
+                            let _ = gaps_queued.fetch_update(
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                                |n| Some(n.saturating_sub(1)),
+                            );
+                        }
+                        gst::EventType::FlushStop | gst::EventType::StreamStart => {
+                            gaps_queued.store(0, Ordering::Relaxed);
+                        }
+                        _ => {}
                     }
                 }
                 gst::PadProbeReturn::Ok
@@ -856,8 +868,7 @@ impl OverlayRenderer {
             surface: None,
             has_frame: false,
             frame_duration,
-            gaps_sent: 0,
-            gaps_pushed,
+            gaps_queued,
             last_pgm: u64::MAX,
             last_pvw: u64::MAX,
             last_ftb: false,
@@ -1037,16 +1048,17 @@ impl OverlayRenderer {
     /// Unlike buffers, events are not bounded by the appsrc's `max-buffers`,
     /// so a stalled pipeline would queue one GAP per tick without end. Skip
     /// the GAP while two are still waiting in the appsrc — the same bound the
-    /// leaky queue puts on buffers.
+    /// leaky queue puts on buffers. A stopped appsrc (READY or below) has
+    /// dropped its queue, so the count starts over.
     fn keep_last_frame(&mut self) -> bool {
         if !self.has_frame {
             return false;
         }
-        if self
-            .gaps_sent
-            .saturating_sub(self.gaps_pushed.load(Ordering::Relaxed))
-            >= 2
-        {
+        if self.appsrc.current_state() < gst::State::Paused {
+            self.gaps_queued.store(0, Ordering::Relaxed);
+            return false;
+        }
+        if self.gaps_queued.load(Ordering::Relaxed) >= 2 {
             return false;
         }
         // The appsrc timestamps buffers with the running time
@@ -1058,10 +1070,16 @@ impl OverlayRenderer {
             .duration(self.frame_duration)
             .gap_flags(gst::GapFlags::DATA)
             .build();
+        // Count it before sending: the probe may see it leave first.
+        self.gaps_queued.fetch_add(1, Ordering::Relaxed);
         if self.appsrc.send_event(gap) {
-            self.gaps_sent += 1;
             true
         } else {
+            let _ = self
+                .gaps_queued
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    Some(n.saturating_sub(1))
+                });
             false
         }
     }
