@@ -346,6 +346,9 @@ async fn wipe_between_letterboxed_sources_animates() {
     .expect("GPU vision mixer pipeline builds");
     manager.start().expect("GPU vision mixer pipeline starts");
 
+    // Let caps probes settle so pads get their aspect-fitted rects.
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
     let appsink = manager
         .pipeline()
         .by_name("pgmsink")
@@ -404,8 +407,9 @@ async fn wipe_between_letterboxed_sources_animates() {
     // frame to exist. A cold software-GL CI runner takes many seconds to reach
     // steady state (GL context creation + llvmpipe shader JIT), and the frames it
     // emits on the way there are black — the compositor is running before the
-    // source pads have delivered anything. Poll for the picture itself rather
-    // than asserting on whichever frame happens to arrive first.
+    // source pads have delivered anything. The fixed settle sleep above is not a
+    // guarantee, so poll for the picture itself rather than asserting on whichever
+    // frame happens to arrive first.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let (w0, r0) = loop {
         if let Some(s) = appsink.try_pull_sample(gstreamer::ClockTime::from_mseconds(500)) {
