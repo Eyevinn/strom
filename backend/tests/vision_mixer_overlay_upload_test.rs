@@ -53,7 +53,28 @@ fn link(flow: &mut Flow, from: String, to: String) {
 /// A GPU vision mixer with `num_inputs` black live video inputs, input 0
 /// on PGM and input 1 on PVW. With `live_audio`, every input and PGM audio
 /// get live ticks, so the VU meters change all the time.
-fn build_flow(block_id: &str, num_inputs: usize, live_audio: bool) -> Flow {
+/// How the inputs of a test flow behave.
+#[derive(Clone, Copy)]
+struct Inputs {
+    /// Video inputs.
+    count: usize,
+    /// Live ticks on every input's audio and PGM audio (VU meters move).
+    live_audio: bool,
+    /// Video arrives this late (like SRT or WHIP inputs), within a mixer
+    /// latency of [`DELAYED_MIXER_LATENCY_MS`]; input 1 is blue so its
+    /// picture can be told apart. 0 = on time, all black.
+    delay_ms: u64,
+}
+
+/// Mixer latency of flows whose inputs arrive late.
+const DELAYED_MIXER_LATENCY_MS: u64 = 300;
+
+fn build_flow(block_id: &str, inputs: Inputs) -> Flow {
+    let Inputs {
+        count: num_inputs,
+        live_audio,
+        delay_ms,
+    } = inputs;
     let mut flow = Flow::new("vm_overlay_upload");
     flow.blocks.push(strom_types::BlockInstance {
         id: block_id.to_string(),
@@ -74,6 +95,9 @@ fn build_flow(block_id: &str, num_inputs: usize, live_audio: bool) -> Flow {
             p.insert("initial_pgm_input".to_string(), PV::UInt(0));
             p.insert("initial_pvw_input".to_string(), PV::UInt(1));
             p.insert("show_vu_meters".to_string(), PV::Bool(true));
+            if delay_ms > 0 {
+                p.insert("latency".to_string(), PV::UInt(DELAYED_MIXER_LATENCY_MS));
+            }
             // Download so the appsinks can map pixels.
             p.insert("gl_download".to_string(), PV::Bool(true));
             p
@@ -88,7 +112,17 @@ fn build_flow(block_id: &str, num_inputs: usize, live_audio: bool) -> Flow {
             &format!("src{i}"),
             "videotestsrc",
             vec![
-                ("pattern", PV::String("black".into())),
+                (
+                    "pattern",
+                    PV::String(
+                        if delay_ms > 0 && i == 1 {
+                            "blue"
+                        } else {
+                            "black"
+                        }
+                        .into(),
+                    ),
+                ),
                 ("is-live", PV::Bool(true)),
             ],
         ));
@@ -98,11 +132,18 @@ fn build_flow(block_id: &str, num_inputs: usize, live_audio: bool) -> Flow {
             vec![("caps", PV::String(caps.into()))],
         ));
         link(&mut flow, format!("src{i}:src"), format!("caps{i}:sink"));
-        link(
-            &mut flow,
-            format!("caps{i}:src"),
-            format!("{block_id}:video_in_{i}"),
-        );
+        let mut tail = format!("caps{i}:src");
+        if delay_ms > 0 {
+            // Hold every buffer delay_ms: it reaches the mixer that late.
+            flow.elements.push(elem(
+                &format!("delay{i}"),
+                "queue",
+                vec![("min-threshold-time", PV::UInt(delay_ms * 1_000_000))],
+            ));
+            link(&mut flow, tail, format!("delay{i}:sink"));
+            tail = format!("delay{i}:src");
+        }
+        link(&mut flow, tail, format!("{block_id}:video_in_{i}"));
     }
     if live_audio {
         let audio_pads = (0..num_inputs)
@@ -143,8 +184,9 @@ fn build_flow(block_id: &str, num_inputs: usize, live_audio: bool) -> Flow {
         "appsink",
         vec![
             ("sync", PV::Bool(false)),
-            ("max-buffers", PV::UInt(1)),
-            ("drop", PV::Bool(true)),
+            // Late-input flows keep every frame, to compare frame times.
+            ("max-buffers", PV::UInt(if delay_ms > 0 { 60 } else { 1 })),
+            ("drop", PV::Bool(delay_ms == 0)),
         ],
     ));
     flow.elements
@@ -234,7 +276,8 @@ struct Window {
 }
 
 impl Running {
-    fn start(block_id: &'static str, num_inputs: usize, live_audio: bool) -> Running {
+    fn start(block_id: &'static str, inputs: Inputs) -> Running {
+        let num_inputs = inputs.count;
         let main_loop = gstreamer::glib::MainLoop::new(None, false);
         let main_loop_thread = {
             let ml = main_loop.clone();
@@ -243,7 +286,7 @@ impl Running {
         let registry_file = NamedTempFile::new().unwrap();
         let registry = BlockRegistry::new(registry_file.path());
         let mut manager = PipelineManager::new(
-            &build_flow(block_id, num_inputs, live_audio),
+            &build_flow(block_id, inputs),
             EventBroadcaster::with_capacity(10),
             &registry,
             vec![],
@@ -429,7 +472,14 @@ async fn unchanged_overlay_is_not_reuploaded_every_frame() {
     }
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     // No audio linked: nothing changes but the clock.
-    let running = Running::start("vmoverlay_static", 2, false);
+    let running = Running::start(
+        "vmoverlay_static",
+        Inputs {
+            count: 2,
+            live_audio: false,
+            delay_ms: 0,
+        },
+    );
     let w = running.measure("static overlay");
 
     // The overlay is still on screen after a stretch with no uploads.
@@ -458,7 +508,14 @@ async fn meter_redraws_are_capped_but_cuts_are_not() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     // Live audio on three inputs and PGM: some meter changes on almost
     // every overlay tick.
-    let running = Running::start("vmoverlay_meters", 3, true);
+    let running = Running::start(
+        "vmoverlay_meters",
+        Inputs {
+            count: 3,
+            live_audio: true,
+            delay_ms: 0,
+        },
+    );
     let w = running.measure("live VU meters");
 
     assert_keeps_running(&w);
@@ -477,5 +534,98 @@ async fn meter_redraws_are_capped_but_cuts_are_not() {
 
     // A cut is a source change: drawn at once, not held back by the cap.
     assert_cut_is_prompt(running.cut_frames());
+    running.stop();
+}
+
+/// Whether the multiview's PGM big display shows input 1's blue picture.
+fn pgm_display_is_blue(sample: &gstreamer::Sample, block_id: &str) -> bool {
+    let state = overlay::get_overlay_state(block_id).expect("overlay state registered");
+    let r = state.layout.pgm_rect;
+    let caps = sample.caps().expect("caps");
+    let s = caps.structure(0).unwrap();
+    let w = s.get::<i32>("width").unwrap() as usize;
+    let format = s.get::<&str>("format").unwrap().to_string();
+    let (ri, bi) = match format.as_str() {
+        "RGBA" | "RGBx" => (0, 2),
+        "BGRA" | "BGRx" => (2, 0),
+        other => panic!("unexpected multiview format {other}"),
+    };
+    let buffer = sample.buffer().expect("buffer");
+    let map = buffer.map_readable().expect("map");
+    let (x, y) = ((r.x + r.w / 2.0) as usize, (r.y + r.h / 2.0) as usize);
+    let o = (y * w + x) * 4;
+    map[o + bi] > 200 && map[o + ri] < 60 && map[o + 1] < 60
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tally_follows_a_cut_on_the_same_frame_with_late_inputs() {
+    if !common::gl_available(GL_ELEMENTS) {
+        return;
+    }
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // Inputs arrive 200 ms late within a 300 ms mixer latency: the mixer
+    // composes each output frame about 200 ms after its time.
+    let running = Running::start(
+        "vmoverlay_tally",
+        Inputs {
+            count: 2,
+            live_audio: false,
+            delay_ms: 200,
+        },
+    );
+    // Drain what queued up while starting.
+    while running
+        .appsink
+        .try_pull_sample(gstreamer::ClockTime::ZERO)
+        .is_some()
+    {}
+
+    // Cut input 1 (blue) to PGM: the PGM big display turns blue and the
+    // thumbnail tallies swap. Both must land on the same output frame (within
+    // two frames, for slow CI).
+    let (_, old_pgm, new_pgm, _) = running
+        .manager
+        .trigger_transition(running.block_id, 0, 1, "cut", 0)
+        .expect("cut");
+    running
+        .manager
+        .update_vision_mixer_after_take(running.block_id, new_pgm, old_pgm, 2)
+        .expect("multiview update after the cut");
+    let mut picture_at = None;
+    let mut tally_at = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while picture_at.is_none() || tally_at.is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the cut never fully reached the multiview: picture at {picture_at:?}, tally at {tally_at:?}"
+        );
+        let s = pull(&running.appsink);
+        let pts = s
+            .buffer()
+            .and_then(|b| b.pts())
+            .expect("multiview frame time");
+        if picture_at.is_none() && pgm_display_is_blue(&s, running.block_id) {
+            picture_at = Some(pts);
+        }
+        if tally_at.is_none()
+            && running.tally(&s, 1) == Tally::Pgm
+            && running.tally(&s, 0) == Tally::Pvw
+        {
+            tally_at = Some(pts);
+        }
+    }
+    let (picture_at, tally_at) = (picture_at.unwrap(), tally_at.unwrap());
+    let frame = gstreamer::ClockTime::SECOND / 30;
+    let lag = (tally_at.nseconds() as i64 - picture_at.nseconds() as i64) as f64
+        / frame.nseconds() as f64;
+    eprintln!(
+        "late inputs: picture switched at {picture_at}, tally at {tally_at}: tally lag {lag:.1} frame(s)"
+    );
+    assert!(
+        // Two frames of slack for slow CI; the do-timestamp regression lags
+        // by about the input delay (5-6 frames here).
+        lag.abs() <= 2.0,
+        "the tally lagged the picture by {lag:.1} multiview frames"
+    );
     running.stop();
 }

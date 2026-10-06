@@ -248,7 +248,9 @@ pub(super) fn build_cpu_pipeline(
         .format(gst::Format::Time)
         .is_live(false)
         .automatic_eos(false)
-        .do_timestamp(true)
+        // The renderer stamps every buffer itself, for the mixer's next
+        // output frame (see `OverlayRenderer::next_output_time`).
+        .do_timestamp(false)
         .max_buffers(2)
         .leaky_type(gst_app::AppLeakyType::Upstream)
         .build();

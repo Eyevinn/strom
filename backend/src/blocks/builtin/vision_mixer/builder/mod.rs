@@ -406,7 +406,7 @@ pub(super) fn setup_overlay_renderer(
     let renderer_for_timer = Arc::clone(&renderer);
     let mv_framerate = p.mv_framerate;
     ctx.register_element_setup(Box::new(move |_flow_id, _events| {
-        if let Ok(r) = renderer_for_timer.lock() {
+        if let Ok(mut r) = renderer_for_timer.lock() {
             r.track_mixer_pad();
         }
         overlay::start_overlay_timer(

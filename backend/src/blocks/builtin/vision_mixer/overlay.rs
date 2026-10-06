@@ -808,6 +808,12 @@ pub struct OverlayRenderer {
     /// When the overlay was last rendered and pushed, for
     /// [`OVERLAY_MIN_REDRAW_INTERVAL`].
     last_redraw: Option<Instant>,
+    /// The multiview mixer, for the output time new overlay data is stamped
+    /// with (see [`Self::next_output_time`]). Weak: the renderer outlives
+    /// nothing it should keep alive.
+    mixer: Option<gst::glib::WeakRef<gst::Element>>,
+    /// The last stamp given out, so stamps never go backwards.
+    last_stamp: Option<gst::ClockTime>,
     last_pgm: u64,
     last_pvw: u64,
     last_ftb: bool,
@@ -860,6 +866,8 @@ impl OverlayRenderer {
             gaps_queued,
             force_dirty,
             last_redraw: None,
+            mixer: None,
+            last_stamp: None,
             last_pgm: u64::MAX,
             last_pvw: u64::MAX,
             last_ftb: false,
@@ -881,11 +889,12 @@ impl OverlayRenderer {
     /// the way (the queue takes events without blocking) still count as
     /// queued. An event probe: it fires per event, never per buffer, and
     /// only touches atomics.
-    pub fn track_mixer_pad(&self) {
+    pub fn track_mixer_pad(&mut self) {
         let Some(pad) = mixer_sink_pad_downstream_of(&self.appsrc) else {
             warn!("Overlay: no multiview mixer found downstream of the appsrc; GAPs not tracked");
             return;
         };
+        self.mixer = pad.parent_element().map(|m| m.downgrade());
         let gaps_queued = Arc::clone(&self.gaps_queued);
         let force_dirty = Arc::clone(&self.force_dirty);
         pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
@@ -927,6 +936,11 @@ impl OverlayRenderer {
         let meters_hash = if show_vu { hash_meters(&self.state) } else { 0 };
         let pip_compose_hash = hash_pip_compose(&self.state);
         let forced = self.force_dirty.swap(false, Ordering::Relaxed);
+        if forced {
+            // Flushed, restarted or stopped: the mixer's timeline may have
+            // started over, so the previous stamps are no floor any more.
+            self.last_stamp = None;
+        }
 
         // Source and tally changes are drawn on the next tick.
         let sources_changed = forced
@@ -1048,14 +1062,15 @@ impl OverlayRenderer {
 
             let t_copy = t0.elapsed();
 
-            // do-timestamp=true on the appsrc sets PTS to the current
-            // pipeline running time automatically. Do NOT set PTS=0 here —
-            // that makes the compositor see the overlay as perpetually stale,
-            // causing it to wait up to its full deadline on every frame.
-
-            // Buffer wraps the Vec (no copy). Buffer refcount is 1 so
-            // BaseSrc can set PTS via do-timestamp without triggering a copy.
-            let buffer = gst::Buffer::from_mut_slice(pixel_data);
+            // Stamped for the mixer's next output frame, not "now": a live
+            // mixer composes running time T only once T plus its latency
+            // has passed, so a frame stamped now would show up that much
+            // after the cut it belongs to. See `next_output_time`.
+            let mut buffer = gst::Buffer::from_mut_slice(pixel_data);
+            buffer
+                .get_mut()
+                .expect("a new buffer is writable")
+                .set_pts(self.next_output_time());
             let sample = gst::Sample::builder()
                 .buffer(&buffer)
                 .caps(&self.caps)
@@ -1081,6 +1096,35 @@ impl OverlayRenderer {
 
         self.surface = Some(surface);
         pushed
+    }
+
+    /// The running time to stamp new overlay data with: the start of the
+    /// multiview mixer's next output frame but one.
+    ///
+    /// The mixer's position is the end of its last output frame, i.e. the
+    /// start of the next one; videoaggregator takes a pad's buffer for the
+    /// output frame its start falls in. One frame of margin keeps the stamp
+    /// ahead of the mixer while the data travels to it (appsrc, queue,
+    /// upload): data stamped before the output frame being composed counts
+    /// as late, and the mixer would wait for the overlay pad until its
+    /// deadline. Without a position yet (no output so far), the mixer's
+    /// timeline starts at 0. Never goes backwards: a GAP ending before the
+    /// pad's last one is dropped.
+    fn next_output_time(&mut self) -> gst::ClockTime {
+        let candidate = match self.mixer.as_ref() {
+            Some(weak) => weak
+                .upgrade()
+                .and_then(|m| mixer_output_position(&m))
+                .map_or(gst::ClockTime::ZERO, |p| p + self.frame_duration),
+            // Not linked to a mixer we know: fall back to now.
+            None => self
+                .appsrc
+                .current_running_time()
+                .unwrap_or(gst::ClockTime::ZERO),
+        };
+        let stamp = self.last_stamp.map_or(candidate, |l| l.max(candidate));
+        self.last_stamp = Some(stamp);
+        stamp
     }
 
     /// Tell the compositor to keep showing the last overlay frame.
@@ -1115,12 +1159,8 @@ impl OverlayRenderer {
         if self.gaps_queued.load(Ordering::Relaxed) >= 2 {
             return false;
         }
-        // The appsrc timestamps buffers with the running time
-        // (do-timestamp); stamp the GAP the same way.
-        let Some(now) = self.appsrc.current_running_time() else {
-            return false;
-        };
-        let gap = gst::event::Gap::builder(now)
+        // Stamped like the frames: the mixer's next output frame.
+        let gap = gst::event::Gap::builder(self.next_output_time())
             .duration(self.frame_duration)
             .gap_flags(gst::GapFlags::DATA)
             .build();
@@ -1137,6 +1177,22 @@ impl OverlayRenderer {
             false
         }
     }
+}
+
+/// The running time at which `mixer` (an aggregator) starts its next output
+/// frame: its position (the end of its last output frame, in stream time)
+/// converted through its output segment. `None` before its first output.
+fn mixer_output_position(mixer: &gst::Element) -> Option<gst::ClockTime> {
+    let stream_time = mixer.query_position::<gst::ClockTime>()?;
+    let running_time = mixer
+        .static_pad("src")
+        .and_then(|pad| pad.sticky_event::<gst::event::Segment>(0))
+        .and_then(|ev| {
+            let segment = ev.segment().downcast_ref::<gst::ClockTime>()?.clone();
+            let position = segment.position_from_stream_time(stream_time)?;
+            segment.to_running_time(position)
+        });
+    Some(running_time.unwrap_or(stream_time))
 }
 
 /// The aggregator sink pad the appsrc's chain ends in: follows the static
