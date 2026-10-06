@@ -10,11 +10,16 @@
 //! covers a lower zone's border like a stacked framed card.
 //!
 //! Each underlay pad is fed by a tiny `videotestsrc pattern=solid-color`
-//! (16×16, non-live so it adds no latency); the border color is changed by
-//! writing the source's `foreground-color` (`0xAARRGGBB`).
+//! (16×16, non-live so it adds no latency) that pushes a single frame and
+//! then EOS; the mixer pad has `repeat-after-eos` set, so it keeps showing
+//! that frame without anything being uploaded again. A live aggregator does
+//! not wait for an EOS pad. The border color is changed by writing the
+//! source's `foreground-color` (`0xAARRGGBB`) and restarting the source, which
+//! pushes one frame in the new color (see [`set_underlay_color`]).
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use tracing::warn;
 
 /// Where a region's underlay pads live and how PGM-pixel border widths
 /// scale into the region.
@@ -66,12 +71,57 @@ fn upstream_underlay_src(pad: &gst::Pad) -> Option<gst::Element> {
     None
 }
 
+/// Create the source feeding one underlay pad: a non-live solid-color
+/// `videotestsrc` that pushes one frame and then EOS. The compositor pad it
+/// feeds must have `repeat-after-eos` set (see the vision mixer pad layout).
+pub(crate) fn make_underlay_src(name: &str) -> Result<gst::Element, gst::glib::BoolError> {
+    let src = gst::ElementFactory::make("videotestsrc")
+        .name(name)
+        .property("is-live", false)
+        .property("num-buffers", 1i32)
+        .build()?;
+    src.set_property_from_str("pattern", "solid-color");
+    Ok(src)
+}
+
 /// Set an underlay pad's border color (`0xAARRGGBB`). Skips the property
 /// write when the color is unchanged.
+///
+/// The source has already pushed its one frame, so a new color also
+/// restarts it: READY and back to the pipeline's state makes it send a new
+/// stream (which clears the pad's EOS), one frame in the new color, and EOS
+/// again. The frame is stamped with the current running time so the mixer
+/// takes it on the next output frame rather than dropping it as late. The
+/// mixer pad keeps the old frame until the new one is taken, so the border
+/// never blinks out.
 pub(crate) fn set_underlay_color(pad: &gst::Pad, argb: u32) {
     if let Some(src) = upstream_underlay_src(pad) {
         if src.property::<u32>("foreground-color") != argb {
             src.set_property("foreground-color", argb);
+            restart_underlay_src(&src);
         }
+    }
+}
+
+/// Make a started underlay source push one frame in its current color.
+fn restart_underlay_src(src: &gst::Element) {
+    // Not started yet: it will push the new color when it starts.
+    if src.current_state() < gst::State::Paused {
+        return;
+    }
+    let offset = src.current_running_time().map_or(0, |t| t.nseconds());
+    if src.set_state(gst::State::Ready).is_err() {
+        warn!(
+            "Underlay source {} did not stop for a color change",
+            src.name()
+        );
+        return;
+    }
+    src.set_property("timestamp-offset", offset as i64);
+    if src.sync_state_with_parent().is_err() {
+        warn!(
+            "Underlay source {} did not restart for a color change",
+            src.name()
+        );
     }
 }

@@ -296,8 +296,9 @@ pub(super) fn build_gpu_pipeline(
     // --- Border underlay sources ---
     // Zone borders render as solid-color compositor pads directly beneath
     // their content pads (see `gst::underlay`). One tiny videotestsrc per
-    // (region, input); the border color is set at runtime via
-    // `foreground-color`. Non-live → contributes no latency. Only built when
+    // (region, input), pushing one frame that the mixer pad repeats; the
+    // border color is set at runtime via `foreground-color` and a restart
+    // (`set_underlay_color`). Non-live → contributes no latency. Only built when
     // PiPs are configured — zones (and thus borders) cannot exist without
     // them.
     if p.num_pips > 0 {
@@ -310,8 +311,8 @@ pub(super) fn build_gpu_pipeline(
                     .collect::<Vec<_>>()
             }))
             .collect();
-        // Low framerate: the color only changes on border edits and the
-        // mixer keeps compositing the latest buffer between pushes.
+        // Each source pushes a single frame; the mixer pad repeats it
+        // (`repeat-after-eos`) until a border edit pushes a new one.
         let underlay_caps: gst::Caps =
             "video/x-raw,format=RGBA,width=16,height=16,framerate=5/1,pixel-aspect-ratio=1/1"
                 .parse()
@@ -320,12 +321,8 @@ pub(super) fn build_gpu_pipeline(
             let src_id = p.id(&format!("{}_src", name));
             let cf_id = p.id(&format!("{}_caps", name));
             let up_id = p.id(&format!("{}_upload", name));
-            let src = gst::ElementFactory::make("videotestsrc")
-                .name(&src_id)
-                .property("is-live", false)
-                .build()
+            let src = crate::gst::underlay::make_underlay_src(&src_id)
                 .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", src_id, e)))?;
-            src.set_property_from_str("pattern", "solid-color");
             let cf = gst::ElementFactory::make("capsfilter")
                 .name(&cf_id)
                 .property("caps", &underlay_caps)

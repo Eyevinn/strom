@@ -61,8 +61,10 @@ fn initial_pad_geom_for_input(
 /// Initial properties for a border underlay pad: hidden, explicit geometry.
 /// Zones (and thus borders) are runtime-only, so every underlay starts
 /// invisible; the layout appliers position and reveal them when a bordered
-/// zone appears.
+/// zone appears. The underlay source pushes one frame and EOS, so the pad
+/// repeats its last frame (see `gst::underlay`).
 fn underlay_initial_props(props: &mut HashMap<String, PropertyValue>, zorder: u32) {
+    props.insert("repeat-after-eos".to_string(), PropertyValue::Bool(true));
     props.insert("xpos".to_string(), PropertyValue::Int(0));
     props.insert("ypos".to_string(), PropertyValue::Int(0));
     props.insert("width".to_string(), PropertyValue::Int(1));
