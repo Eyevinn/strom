@@ -27,11 +27,13 @@ use tracing::{debug, warn};
 /// tick. Source and tally changes (PGM, PVW, FTB, PiP) are not capped.
 const OVERLAY_MIN_REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// A per-block overlay registry: keyed by block instance ID, each entry tagged
-/// with the flow that registered it so [`unregister_flow`] can sweep by flow.
-type OverlayRegistry<T> = Mutex<HashMap<String, (FlowId, T)>>;
+/// A per-block overlay registry, keyed by flow and then by block instance ID.
+/// Block IDs are only unique within a flow: two running flows may both have a
+/// mixer called `mixer`, and each must find its own. Keying by flow first also
+/// lets [`unregister_flow`] drop a flow's registrations in one step.
+type OverlayRegistry<T> = Mutex<HashMap<FlowId, HashMap<String, T>>>;
 
-/// Global registry of vision mixer overlay states, keyed by block instance ID.
+/// Global registry of vision mixer overlay states.
 /// Used by the API layer to access overlay state for preview/PGM updates.
 fn overlay_states() -> &'static OverlayRegistry<Arc<VisionMixerOverlayState>> {
     static INSTANCE: OnceLock<OverlayRegistry<Arc<VisionMixerOverlayState>>> = OnceLock::new();
@@ -45,13 +47,22 @@ pub fn register_overlay_state(
     state: Arc<VisionMixerOverlayState>,
 ) {
     if let Ok(mut map) = overlay_states().lock() {
-        map.insert(block_id.to_string(), (flow_id, state));
+        map.entry(flow_id)
+            .or_default()
+            .insert(block_id.to_string(), state);
     }
 }
 
 /// Get the overlay state for a block instance (if registered).
-pub fn get_overlay_state(block_id: &str) -> Option<Arc<VisionMixerOverlayState>> {
-    Some(overlay_states().lock().ok()?.get(block_id)?.1.clone())
+pub fn get_overlay_state(flow_id: &FlowId, block_id: &str) -> Option<Arc<VisionMixerOverlayState>> {
+    Some(
+        overlay_states()
+            .lock()
+            .ok()?
+            .get(flow_id)?
+            .get(block_id)?
+            .clone(),
+    )
 }
 
 /// Shared state read by the cairooverlay draw callback.
@@ -111,8 +122,12 @@ pub struct VisionMixerOverlayState {
     /// normalized units like zone-border width (set at build, immutable).
     pub pgm_w: u32,
     pub pgm_h: u32,
-    /// Input labels (set at build time, read-only after).
-    pub labels: Vec<String>,
+    /// Input labels. Set at build time and changed live through the
+    /// `input_N_label` block properties.
+    labels: std::sync::Mutex<Vec<String>>,
+    /// Bumped on every label change so the renderer can dirty-check labels
+    /// without comparing strings.
+    labels_generation: AtomicU64,
     /// Monotonic instant captured at construction for wall-clock derivation.
     instant_base: Instant,
     /// UTC seconds at `instant_base` (no timezone offset applied).
@@ -222,7 +237,8 @@ impl VisionMixerOverlayState {
             layout,
             pgm_w,
             pgm_h,
-            labels,
+            labels: std::sync::Mutex::new(labels),
+            labels_generation: AtomicU64::new(0),
             instant_base: now_instant,
             base_utc_secs: utc_secs,
             tz_offset_secs: AtomicI64::new(offset_secs),
@@ -446,6 +462,26 @@ impl VisionMixerOverlayState {
     pub fn set_pvw_input(&self, input: Option<usize>) {
         let v = input.map(|i| i as u64).unwrap_or(NO_SOURCE);
         self.pvw_input.store(v, Ordering::Relaxed);
+    }
+
+    /// Current input labels, one per input.
+    pub fn labels(&self) -> Vec<String> {
+        self.labels.lock().map(|l| l.clone()).unwrap_or_default()
+    }
+
+    /// Change the label of one input. Returns `false` if `input` is out of range.
+    pub fn set_label(&self, input: usize, label: String) -> bool {
+        let Ok(mut labels) = self.labels.lock() else {
+            return false;
+        };
+        let Some(slot) = labels.get_mut(input) else {
+            return false;
+        };
+        if *slot != label {
+            *slot = label;
+            self.labels_generation.fetch_add(1, Ordering::Relaxed);
+        }
+        true
     }
 
     /// Get the multiview overlay alpha (0.0–1.0).
@@ -831,6 +867,8 @@ pub struct OverlayRenderer {
     /// that affect which thumbnails get a via-PiP status ring but no other
     /// tracked atomic changed.
     last_pip_compose_hash: u64,
+    /// Label generation at the last render.
+    last_labels_generation: u64,
 }
 
 // SAFETY: OverlayRenderer is accessed via Mutex from the timer thread and API
@@ -877,6 +915,7 @@ impl OverlayRenderer {
             last_pgm_pip: u64::MAX - 2,
             last_pvw_pip: u64::MAX - 2,
             last_pip_compose_hash: u64::MAX - 3,
+            last_labels_generation: u64::MAX,
         }
     }
 
@@ -935,6 +974,7 @@ impl OverlayRenderer {
         let show_vu = self.state.show_vu_meters();
         let meters_hash = if show_vu { hash_meters(&self.state) } else { 0 };
         let pip_compose_hash = hash_pip_compose(&self.state);
+        let labels_generation = self.state.labels_generation.load(Ordering::Relaxed);
         let forced = self.force_dirty.swap(false, Ordering::Relaxed);
         if forced {
             // Flushed, restarted or stopped: the mixer's timeline may have
@@ -950,7 +990,8 @@ impl OverlayRenderer {
             || self.last_pgm_pip != pgm_pip_packed
             || self.last_pvw_pip != pvw_pip_packed
             || self.last_show_vu != show_vu
-            || self.last_pip_compose_hash != pip_compose_hash;
+            || self.last_pip_compose_hash != pip_compose_hash
+            || self.last_labels_generation != labels_generation;
         // Meter and clock changes are capped at OVERLAY_MIN_REDRAW_INTERVAL.
         let meters_or_clock_changed =
             self.last_clock_secs != clock_secs || (show_vu && self.last_meters_hash != meters_hash);
@@ -989,6 +1030,7 @@ impl OverlayRenderer {
                 self.last_show_vu = show_vu;
                 self.last_meters_hash = meters_hash;
                 self.last_pip_compose_hash = pip_compose_hash;
+                self.last_labels_generation = labels_generation;
             }
             pushed
         } else {
@@ -1222,12 +1264,24 @@ pub fn register_overlay_renderer(
     renderer: Arc<Mutex<OverlayRenderer>>,
 ) {
     if let Ok(mut map) = overlay_renderers().lock() {
-        map.insert(block_id.to_string(), (flow_id, renderer));
+        map.entry(flow_id)
+            .or_default()
+            .insert(block_id.to_string(), renderer);
     }
 }
 
-pub fn get_overlay_renderer(block_id: &str) -> Option<Arc<Mutex<OverlayRenderer>>> {
-    Some(overlay_renderers().lock().ok()?.get(block_id)?.1.clone())
+pub fn get_overlay_renderer(
+    flow_id: &FlowId,
+    block_id: &str,
+) -> Option<Arc<Mutex<OverlayRenderer>>> {
+    Some(
+        overlay_renderers()
+            .lock()
+            .ok()?
+            .get(flow_id)?
+            .get(block_id)?
+            .clone(),
+    )
 }
 
 /// Drop every overlay registration belonging to a flow.
@@ -1243,14 +1297,10 @@ pub fn get_overlay_renderer(block_id: &str) -> Option<Arc<Mutex<OverlayRenderer>
 /// still rendering into an appsrc on its way to NULL.
 pub fn unregister_flow(flow_id: &FlowId) {
     if let Ok(mut map) = overlay_states().lock() {
-        map.retain(|_, (owner, _)| owner != flow_id);
+        map.remove(flow_id);
     }
     let stopped = match overlay_renderers().lock() {
-        Ok(mut map) => {
-            let before = map.len();
-            map.retain(|_, (owner, _)| owner != flow_id);
-            before - map.len()
-        }
+        Ok(mut map) => map.remove(flow_id).map_or(0, |blocks| blocks.len()),
         Err(_) => 0,
     };
     if stopped > 0 {
@@ -1312,8 +1362,8 @@ pub fn reset_overlay_timers_shutdown_for_test() {
 }
 
 /// Trigger an immediate overlay re-render (called from API on state changes).
-pub fn trigger_overlay_update(block_id: &str) {
-    if let Some(renderer) = get_overlay_renderer(block_id) {
+pub fn trigger_overlay_update(flow_id: &FlowId, block_id: &str) {
+    if let Some(renderer) = get_overlay_renderer(flow_id, block_id) {
         if let Ok(mut r) = renderer.lock() {
             let pushed = r.render_if_dirty();
             debug!(
@@ -1343,6 +1393,7 @@ pub fn trigger_overlay_update(block_id: &str) {
 /// the kept handle. As a backstop it also stops once its appsrc has no parent,
 /// so a teardown path that forgets to unregister cannot strand it forever.
 pub fn start_overlay_timer(
+    flow_id: FlowId,
     block_id: String,
     renderer: Arc<Mutex<OverlayRenderer>>,
     mv_framerate: (i32, i32),
@@ -1382,7 +1433,7 @@ pub fn start_overlay_timer(
                 if OVERLAY_TIMERS_SHUTDOWN.load(Ordering::SeqCst) {
                     return false;
                 }
-                get_overlay_renderer(&block_id)
+                get_overlay_renderer(&flow_id, &block_id)
                     .map(|cur| Arc::ptr_eq(&cur, r))
                     .unwrap_or(false)
             };
@@ -1643,9 +1694,10 @@ fn render_overlay(
     cr.set_font_size(layout.label_font_size);
 
     let sc = layout.scale;
+    let labels = state.labels();
     for i in 0..layout.num_inputs.min(layout.label_positions.len()) {
         let pos = &layout.label_positions[i];
-        let label = state.labels.get(i).map_or("", String::as_str);
+        let label = labels.get(i).map_or("", String::as_str);
         draw_label_centered(
             cr,
             label,

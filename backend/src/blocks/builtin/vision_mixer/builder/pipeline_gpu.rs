@@ -573,6 +573,7 @@ pub(super) fn build_gpu_pipeline(
     // setup time (after linking, when the request pads exist).
     {
         let block_id = p.instance_id.to_string();
+        let flow_id = p.flow_id;
         let num_inputs = p.num_inputs;
         let num_pips = p.num_pips;
         let underlay_state = std::sync::Arc::clone(&overlay_state);
@@ -581,7 +582,7 @@ pub(super) fn build_gpu_pipeline(
                 return;
             };
             super::super::geometry::install_caps_probes(
-                &block_id, &mixer, &mv_comp, num_inputs, num_pips,
+                flow_id, &block_id, &mixer, &mv_comp, num_inputs, num_pips,
             );
             // Border underlays hold a frame only while their border is
             // configured or still visible.

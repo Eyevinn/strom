@@ -1926,6 +1926,27 @@ impl AppState {
                 value
             };
 
+            // Vision mixer input labels are drawn by the multiview overlay, which
+            // reads them from its shared state, so they change without a restart.
+            // Handled before the `_block` rejection below.
+            if definition.id == crate::blocks::builtin::vision_mixer::BLOCK_ID
+                && crate::blocks::builtin::vision_mixer::properties::label_property_input(&name)
+                    .is_some()
+            {
+                match crate::blocks::builtin::vision_mixer::apply_live_label(
+                    flow_id,
+                    block_instance_id,
+                    &name,
+                    &value,
+                ) {
+                    Ok(()) => to_persist.push((name, value)),
+                    Err(reason) => {
+                        rejected.insert(name, reason);
+                    }
+                }
+                continue;
+            }
+
             // The `_block` element_id marker is a virtual element for properties that
             // get baked into the block at build time — they have no underlying element
             // to write to live.
@@ -2342,6 +2363,7 @@ impl AppState {
                 // reflected (the local new_pgm/new_pvw are input-centric and
                 // don't carry PiP info).
                 let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+                    flow_id,
                     block_instance_id,
                 );
                 let preview_input = overlay.as_ref().and_then(|s| s.pvw_input());
@@ -2406,8 +2428,10 @@ impl AppState {
 
         // Broadcast state change event. Reads authoritative state from the
         // overlay so PiP visibility is reflected alongside the inputs.
-        let overlay =
-            crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id);
+        let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+            flow_id,
+            block_instance_id,
+        );
         let preview_pip = overlay.as_ref().and_then(|s| s.pvw_pip());
         let program_pip = overlay.as_ref().and_then(|s| s.pgm_pip());
         self.inner

@@ -37,12 +37,13 @@ impl PipelineManager {
             .get(&mv_comp_id)
             .ok_or_else(|| PipelineError::ElementNotFound(mv_comp_id.clone()))?;
 
-        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
-            PipelineError::ElementNotFound(format!(
-                "Vision mixer overlay state not found for {}",
-                block_instance_id
-            ))
-        })?;
+        let state =
+            overlay::get_overlay_state(&self.flow_id, block_instance_id).ok_or_else(|| {
+                PipelineError::ElementNotFound(format!(
+                    "Vision mixer overlay state not found for {}",
+                    block_instance_id
+                ))
+            })?;
 
         // Validate first — don't mutate any state until we know we can complete.
         if input >= num_inputs {
@@ -118,7 +119,7 @@ impl PipelineManager {
         }
 
         state.set_pvw_input(new_pvw);
-        overlay::trigger_overlay_update(block_instance_id);
+        overlay::trigger_overlay_update(&self.flow_id, block_instance_id);
 
         info!(
             "Vision mixer {} preview changed: {:?} -> {:?}",
@@ -147,12 +148,13 @@ impl PipelineManager {
             .get(&mv_comp_id)
             .ok_or_else(|| PipelineError::ElementNotFound(mv_comp_id.clone()))?;
 
-        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
-            PipelineError::ElementNotFound(format!(
-                "Vision mixer overlay state not found for {}",
-                block_instance_id
-            ))
-        })?;
+        let state =
+            overlay::get_overlay_state(&self.flow_id, block_instance_id).ok_or_else(|| {
+                PipelineError::ElementNotFound(format!(
+                    "Vision mixer overlay state not found for {}",
+                    block_instance_id
+                ))
+            })?;
 
         // Skip this entirely when PiP is involved on either bus — the PiP-aware
         // path in trigger_transition has already configured the right pads
@@ -162,7 +164,7 @@ impl PipelineManager {
             // Still persist the input state so cairo overlay stays consistent.
             state.set_pgm_input(new_pgm);
             state.set_pvw_input(new_pvw);
-            overlay::trigger_overlay_update(block_instance_id);
+            overlay::trigger_overlay_update(&self.flow_id, block_instance_id);
             return Ok(());
         }
 
@@ -212,7 +214,7 @@ impl PipelineManager {
         state.set_pgm_input(new_pgm);
         state.set_pvw_input(new_pvw);
 
-        overlay::trigger_overlay_update(block_instance_id);
+        overlay::trigger_overlay_update(&self.flow_id, block_instance_id);
 
         info!(
             "Vision mixer {} take: PGM -> {:?}, PVW -> {:?}",
@@ -242,9 +244,10 @@ impl PipelineManager {
             let alpha = if enabled { 1.0f64 } else { 0.0f64 };
             pad.set_property("alpha", alpha);
             // Update overlay state for DSK tracking
-            if let Some(state) =
-                crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id)
-            {
+            if let Some(state) = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+                &self.flow_id,
+                block_instance_id,
+            ) {
                 if dsk_index < state.dsk_enabled.len() {
                     state.dsk_enabled[dsk_index]
                         .store(enabled, std::sync::atomic::Ordering::Relaxed);
@@ -284,18 +287,21 @@ impl PipelineManager {
         //   sink_N+1..2N     : PVW big candidates
         //   sink_2N+1..2N+P  : PiP-tile candidates (P = num_pips * num_inputs)
         //   sink_2N+1+P      : cairo overlay  ← this one
-        let num_pips =
-            crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id)
-                .as_ref()
-                .map(|s| s.num_pips)
-                .unwrap_or(0);
+        let num_pips = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+            &self.flow_id,
+            block_instance_id,
+        )
+        .as_ref()
+        .map(|s| s.num_pips)
+        .unwrap_or(0);
         let overlay_idx = 2 * num_inputs + 1 + num_pips * num_inputs;
         let pad_name = format!("sink_{}", overlay_idx);
         if let Some(pad) = find_pad(mv_comp, &pad_name) {
             pad.set_property("alpha", alpha);
-            if let Some(state) =
-                crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id)
-            {
+            if let Some(state) = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+                &self.flow_id,
+                block_instance_id,
+            ) {
                 state.set_overlay_alpha(alpha);
             }
             info!(
@@ -330,12 +336,13 @@ impl PipelineManager {
             .get(&mixer_id)
             .ok_or_else(|| PipelineError::ElementNotFound(mixer_id.clone()))?;
 
-        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
-            PipelineError::ElementNotFound(format!(
-                "Vision mixer overlay state not found for {}",
-                block_instance_id
-            ))
-        })?;
+        let state =
+            overlay::get_overlay_state(&self.flow_id, block_instance_id).ok_or_else(|| {
+                PipelineError::ElementNotFound(format!(
+                    "Vision mixer overlay state not found for {}",
+                    block_instance_id
+                ))
+            })?;
 
         let was_active = state.ftb_active.load(std::sync::atomic::Ordering::Relaxed);
         let pgm = state.pgm_input();
@@ -494,7 +501,7 @@ impl PipelineManager {
             .ftb_active
             .store(now_active, std::sync::atomic::Ordering::Relaxed);
 
-        overlay::trigger_overlay_update(block_instance_id);
+        overlay::trigger_overlay_update(&self.flow_id, block_instance_id);
 
         info!(
             "Vision mixer {} FTB {}",
@@ -530,12 +537,13 @@ impl PipelineManager {
 
         const ZONE_MORPH_MS: u64 = 250;
 
-        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
-            PipelineError::ElementNotFound(format!(
-                "Vision mixer overlay state not found for {}",
-                block_instance_id
-            ))
-        })?;
+        let state =
+            overlay::get_overlay_state(&self.flow_id, block_instance_id).ok_or_else(|| {
+                PipelineError::ElementNotFound(format!(
+                    "Vision mixer overlay state not found for {}",
+                    block_instance_id
+                ))
+            })?;
 
         if pip_idx >= state.num_pips {
             return Err(PipelineError::InvalidProperty {
@@ -906,7 +914,7 @@ impl PipelineManager {
             );
         }
 
-        overlay::trigger_overlay_update(block_instance_id);
+        overlay::trigger_overlay_update(&self.flow_id, block_instance_id);
 
         info!(
             "Vision mixer {} PiP {} config updated: bg={:?}, zones={:?}",
@@ -969,12 +977,13 @@ impl PipelineManager {
         use crate::blocks::builtin::vision_mixer::overlay;
         use strom_types::vision_mixer;
 
-        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
-            PipelineError::ElementNotFound(format!(
-                "Vision mixer overlay state not found for {}",
-                block_instance_id
-            ))
-        })?;
+        let state =
+            overlay::get_overlay_state(&self.flow_id, block_instance_id).ok_or_else(|| {
+                PipelineError::ElementNotFound(format!(
+                    "Vision mixer overlay state not found for {}",
+                    block_instance_id
+                ))
+            })?;
 
         if pip_idx >= state.num_pips {
             return Err(PipelineError::InvalidProperty {
@@ -1044,7 +1053,7 @@ impl PipelineManager {
             pvw_underlay,
         );
 
-        overlay::trigger_overlay_update(block_instance_id);
+        overlay::trigger_overlay_update(&self.flow_id, block_instance_id);
 
         info!(
             "Vision mixer {} PVW set to PiP {}: bg={:?}, zones={:?}",
