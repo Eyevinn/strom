@@ -494,6 +494,42 @@ async fn gpu_page_stinger_cuts_on_the_frame_its_cut_point_names() {
     cuts_on_the_frame_its_cut_point_names("gpu", 30).await;
 }
 
+/// A take whose request is dropped while it waits for the page (the client
+/// went away) still finishes and frees the mixer: the next take runs, and so
+/// does an ordinary cut.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_dropped_take_request_still_frees_the_mixer() {
+    if !cefsrc_available() {
+        return;
+    }
+    let r = start("web_stinger_dropped", "cpu", &covering_page(), 1000, 30).await;
+    let mut events = r.state.events().subscribe();
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(20),
+        r.state.stinger_take(&r.flow_id, VM, None, None),
+    )
+    .await;
+    assert!(
+        dropped.is_err(),
+        "the take must still be waiting for the page at 20 ms"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match tokio::time::timeout_at(deadline.into(), events.recv()).await {
+            Ok(Ok(StromEvent::StingerCompleted { .. })) => break,
+            Ok(Ok(StromEvent::StingerFailed { reason, .. })) => panic!("take failed: {reason}"),
+            Ok(_) => continue,
+            Err(_) => panic!("the dropped take never finished"),
+        }
+    }
+    let (frames, _) = take(&r).await;
+    assert!(!frames.is_empty(), "the next take must run");
+    let s = r.state.stinger_state(&r.flow_id, VM).await.unwrap();
+    assert!(!s.running);
+    r.state.stop_flow(&r.flow_id).await.expect("stop_flow");
+}
+
 /// A page whose animation opens without changing a pixel paints its first
 /// frame 300 ms in. Anchored on that frame the cut would land 300 ms late,
 /// so the take is timed from the trigger instead. The page stamps its own
