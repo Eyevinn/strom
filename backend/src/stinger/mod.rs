@@ -16,36 +16,36 @@ use strom_types::stinger::{
     StingerBeneath, StingerClipInfo, StingerClipSettings, StingerLayout, StingerVariant,
 };
 
-/// How a clip shaped like `width`x`height` lays out on a program of
-/// `pgm_aspect`, given whether its frames carry alpha and look grey.
+/// The frame shapes a stinger is made in: 16:9, 4:3 and vertical 9:16.
+const FRAME_SHAPES: [f64; 3] = [16.0 / 9.0, 4.0 / 3.0, 9.0 / 16.0];
+
+/// How a clip of `width`x`height` lays out, from the clip alone, given
+/// whether its frames carry alpha and look grey.
 ///
-/// A clip twice as wide as the program is side by side, twice as tall is
-/// stacked (the two OBS track-matte layouts). Anything else is one picture:
-/// a graphic when it carries alpha, a mask when it is grey and opaque.
-pub fn detect_layout(
-    width: u32,
-    height: u32,
-    has_alpha: bool,
-    looks_grey: bool,
-    pgm_aspect: f64,
-) -> StingerLayout {
-    if width == 0 || height == 0 || pgm_aspect <= 0.0 {
-        return if has_alpha {
+/// A clip made of two standard frames side by side (32:9 for HD) or one
+/// above the other (16:18) is a track-matte clip, the two OBS layouts.
+/// Anything else is one picture: a graphic when it carries alpha or colour,
+/// a mask when it is grey and opaque. The program's format plays no part:
+/// a clip is what it is, whatever the production runs.
+pub fn detect_layout(width: u32, height: u32, has_alpha: bool, looks_grey: bool) -> StingerLayout {
+    let single = || {
+        if has_alpha || !looks_grey {
             StingerLayout::Classic
         } else {
             StingerLayout::MaskOnly
-        };
+        }
+    };
+    if width == 0 || height == 0 {
+        return single();
     }
     let aspect = width as f64 / height as f64;
     let near = |target: f64| (aspect - target).abs() <= target * 0.04;
-    if near(pgm_aspect * 2.0) {
+    if FRAME_SHAPES.iter().any(|s| near(s * 2.0)) {
         StingerLayout::SideBySide
-    } else if near(pgm_aspect / 2.0) {
+    } else if FRAME_SHAPES.iter().any(|s| near(s / 2.0)) {
         StingerLayout::Stacked
-    } else if has_alpha || !looks_grey {
-        StingerLayout::Classic
     } else {
-        StingerLayout::MaskOnly
+        single()
     }
 }
 
@@ -189,8 +189,6 @@ impl FrameGrid {
 mod tests {
     use super::*;
 
-    const HD: f64 = 16.0 / 9.0;
-
     fn info(layout: StingerLayout) -> StingerClipInfo {
         StingerClipInfo {
             width: 1920,
@@ -213,29 +211,48 @@ mod tests {
     #[test]
     fn layout_follows_shape_and_alpha() {
         assert_eq!(
-            detect_layout(3840, 1080, true, false, HD),
+            detect_layout(3840, 1080, true, false),
             StingerLayout::SideBySide
         );
         assert_eq!(
-            detect_layout(1920, 2160, false, false, HD),
+            detect_layout(1920, 2160, false, false),
             StingerLayout::Stacked
         );
         assert_eq!(
-            detect_layout(1920, 1080, true, false, HD),
+            detect_layout(1920, 1080, true, false),
             StingerLayout::Classic
         );
         assert_eq!(
-            detect_layout(1920, 1080, false, true, HD),
+            detect_layout(1920, 1080, false, true),
             StingerLayout::MaskOnly
         );
         // A 4K side-by-side clip on an HD program is still side by side.
         assert_eq!(
-            detect_layout(7680, 2160, true, false, HD),
+            detect_layout(7680, 2160, true, false),
             StingerLayout::SideBySide
         );
         // Opaque colour footage covers the frame: a classic stinger.
         assert_eq!(
-            detect_layout(1280, 720, false, false, HD),
+            detect_layout(1280, 720, false, false),
+            StingerLayout::Classic
+        );
+        // 4:3 and vertical clips, whatever the program runs.
+        assert_eq!(
+            detect_layout(1440, 540, true, false),
+            StingerLayout::SideBySide
+        );
+        assert_eq!(
+            detect_layout(1080, 3840, true, false),
+            StingerLayout::Stacked
+        );
+        assert_eq!(
+            detect_layout(2160, 1920, true, false),
+            StingerLayout::SideBySide,
+            "two 9:16 frames side by side"
+        );
+        // A square graphic is one picture.
+        assert_eq!(
+            detect_layout(1080, 1080, true, false),
             StingerLayout::Classic
         );
     }

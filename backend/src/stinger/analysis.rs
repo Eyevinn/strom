@@ -44,12 +44,12 @@ struct FrameStats {
     chroma: f32,
 }
 
-type CacheKey = (String, u64, u64, i64);
+type CacheKey = (String, u64, u64);
 
 static CACHE: LazyLock<Mutex<HashMap<CacheKey, StingerClipInfo>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn cache_key(uri: &str, pgm_aspect: f64) -> CacheKey {
+fn cache_key(uri: &str) -> CacheKey {
     let (mtime, len) = gst::glib::filename_from_uri(uri)
         .ok()
         .and_then(|(path, _)| std::fs::metadata(path).ok())
@@ -63,35 +63,30 @@ fn cache_key(uri: &str, pgm_aspect: f64) -> CacheKey {
             (mtime, m.len())
         })
         .unwrap_or((0, 0));
-    (
-        uri.to_string(),
-        mtime,
-        len,
-        (pgm_aspect * 1000.0).round() as i64,
-    )
+    (uri.to_string(), mtime, len)
 }
 
-/// The analysis of `uri` for a program of `pgm_aspect`, if it has run and the
+/// The analysis of `uri`, if it has run and the
 /// file has not changed since.
-pub fn cached(uri: &str, pgm_aspect: f64) -> Option<StingerClipInfo> {
-    let key = cache_key(uri, pgm_aspect);
+pub fn cached(uri: &str) -> Option<StingerClipInfo> {
+    let key = cache_key(uri);
     CACHE.lock().ok()?.get(&key).cloned()
 }
 
 /// Analyse `uri`, or return the cached result. Blocks while decoding.
-pub fn analyze_cached(uri: &str, pgm_aspect: f64) -> Result<StingerClipInfo, String> {
-    if let Some(info) = cached(uri, pgm_aspect) {
+pub fn analyze_cached(uri: &str) -> Result<StingerClipInfo, String> {
+    if let Some(info) = cached(uri) {
         return Ok(info);
     }
-    let info = analyze(uri, pgm_aspect)?;
+    let info = analyze(uri)?;
     if let Ok(mut cache) = CACHE.lock() {
-        cache.insert(cache_key(uri, pgm_aspect), info.clone());
+        cache.insert(cache_key(uri), info.clone());
     }
     Ok(info)
 }
 
 /// Decode `uri` and measure it. Blocks while decoding.
-pub fn analyze(uri: &str, pgm_aspect: f64) -> Result<StingerClipInfo, String> {
+pub fn analyze(uri: &str) -> Result<StingerClipInfo, String> {
     let started = Instant::now();
     let pipeline = gst::Pipeline::new();
     let decodebin = gst::ElementFactory::make("uridecodebin3")
@@ -168,15 +163,7 @@ pub fn analyze(uri: &str, pgm_aspect: f64) -> Result<StingerClipInfo, String> {
     drop(pipeline);
     let (frames, width, height, fps) = result?;
     let has_alpha = decoded_alpha.lock().ok().and_then(|a| *a).unwrap_or(false);
-    let info = summarize(
-        &frames,
-        width,
-        height,
-        fps,
-        has_alpha,
-        pgm_aspect,
-        started.elapsed(),
-    )?;
+    let info = summarize(&frames, width, height, fps, has_alpha, started.elapsed())?;
     info!(
         "Stinger clip {}: {}x{}, {} frames, {} ms, alpha={}, layout={:?}, analysed in {} ms",
         uri,
@@ -299,12 +286,11 @@ fn summarize(
     height: u32,
     fps: (i32, i32),
     has_alpha: bool,
-    pgm_aspect: f64,
     took: Duration,
 ) -> Result<StingerClipInfo, String> {
     let first = frames.first().ok_or("the clip has no video frames")?;
     let looks_grey = frames.iter().all(|f| f.chroma < 0.02);
-    let layout = super::detect_layout(width, height, has_alpha, looks_grey, pgm_aspect);
+    let layout = super::detect_layout(width, height, has_alpha, looks_grey);
 
     let t0 = first.pts_ns;
     let at = |i: usize| (frames[i].pts_ns.saturating_sub(t0)) / 1_000_000;
