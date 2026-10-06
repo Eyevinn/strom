@@ -114,6 +114,7 @@ impl ApiClient {
             to_input,
             transition_type: transition_type.to_string(),
             duration_ms,
+            stinger_clip: None,
         };
 
         // The editor swaps its from/to pair optimistically and undoes it if this call

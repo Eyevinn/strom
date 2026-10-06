@@ -160,6 +160,21 @@ pub fn media_player_definition() -> BlockDefinition {
                 live: false,
                 persist: None,
             },
+            ExposedProperty {
+                name: strom_types::stinger::STINGER_MODE_PROPERTY.to_string(),
+                label: "Stinger Clip Source".to_string(),
+                description: "Feed a Vision Mixer's stinger input: the playlist is the stinger library. The player decodes, parks the cued clip on its first frame and plays it once per take; looping, sync and playout delay are overridden. Wire video_out to the mixer's stinger input; audio_out carries the clip's sound."
+                    .to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: strom_types::stinger::STINGER_MODE_PROPERTY.to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
         ],
         external_pads: ExternalPads {
             inputs: vec![],

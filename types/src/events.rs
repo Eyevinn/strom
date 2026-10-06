@@ -397,6 +397,49 @@ pub enum StromEvent {
     /// Progress is throttled per job; the final state (done, failed or
     /// cancelled) is always sent.
     MediaDownloadProgress(crate::media_download::MediaDownloadJob),
+    /// A stinger clip was cued on a vision mixer, or failed to load.
+    StingerCued {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+        flow_id: FlowId,
+        block_id: String,
+        /// Playlist index on the stinger source.
+        index: usize,
+        /// Loaded and parked on its first frame.
+        ready: bool,
+        /// How long loading took.
+        cue_ms: u64,
+    },
+    /// A stinger take started: its first frame goes on air `take_to_air_ms`
+    /// after the request.
+    StingerStarted {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+        flow_id: FlowId,
+        block_id: String,
+        index: usize,
+        file: String,
+        variant: crate::stinger::StingerVariant,
+        downgraded_from: Option<crate::stinger::StingerVariant>,
+        from_input: usize,
+        to_input: usize,
+        take_to_air_ms: f64,
+        duration_ms: u64,
+    },
+    /// A stinger take finished, with what was measured.
+    StingerCompleted {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+        flow_id: FlowId,
+        block_id: String,
+        report: crate::stinger::StingerTakeReport,
+    },
+    /// A stinger take could not play its clip.
+    StingerFailed {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+        flow_id: FlowId,
+        block_id: String,
+        reason: String,
+        /// The program still changed, without the clip.
+        program_changed: bool,
+    },
 }
 
 impl StromEvent {
@@ -875,6 +918,62 @@ impl StromEvent {
                     job.job_id, job.url, job.path, job.state, job.bytes
                 ),
             },
+            StromEvent::StingerCued {
+                flow_id,
+                block_id,
+                index,
+                ready,
+                cue_ms,
+            } => format!(
+                "Vision mixer {} in flow {}: stinger clip {} {} in {} ms",
+                block_id,
+                flow_id,
+                index,
+                if *ready { "cued" } else { "failed to cue" },
+                cue_ms
+            ),
+            StromEvent::StingerStarted {
+                flow_id,
+                block_id,
+                file,
+                variant,
+                from_input,
+                to_input,
+                take_to_air_ms,
+                ..
+            } => format!(
+                "Vision mixer {} in flow {}: {:?} stinger '{}' from input {} to {}, on air in {:.0} ms",
+                block_id, flow_id, variant, file, from_input, to_input, take_to_air_ms
+            ),
+            StromEvent::StingerCompleted {
+                flow_id,
+                block_id,
+                report,
+            } => format!(
+                "Vision mixer {} in flow {}: stinger '{}' done, {}/{} clip frames, {} late",
+                block_id,
+                flow_id,
+                report.file,
+                report.frames_arrived,
+                report.frames_expected,
+                report.frames_late
+            ),
+            StromEvent::StingerFailed {
+                flow_id,
+                block_id,
+                reason,
+                program_changed,
+            } => format!(
+                "Vision mixer {} in flow {}: stinger failed ({}){}",
+                block_id,
+                flow_id,
+                reason,
+                if *program_changed {
+                    ", program changed without it"
+                } else {
+                    ""
+                }
+            ),
         }
     }
 
@@ -931,6 +1030,10 @@ impl StromEvent {
             StromEvent::VisionMixerFtbChanged { .. } => "VisionMixerFtbChanged",
             StromEvent::VisionMixerEffectChanged { .. } => "VisionMixerEffectChanged",
             StromEvent::MediaDownloadProgress(_) => "MediaDownloadProgress",
+            StromEvent::StingerCued { .. } => "StingerCued",
+            StromEvent::StingerStarted { .. } => "StingerStarted",
+            StromEvent::StingerCompleted { .. } => "StingerCompleted",
+            StromEvent::StingerFailed { .. } => "StingerFailed",
         }
     }
 
@@ -975,7 +1078,11 @@ impl StromEvent {
             | StromEvent::VisionMixerDskChanged { flow_id, .. }
             | StromEvent::VisionMixerOverlayAlphaChanged { flow_id, .. }
             | StromEvent::VisionMixerFtbChanged { flow_id, .. }
-            | StromEvent::VisionMixerEffectChanged { flow_id, .. } => Some(*flow_id),
+            | StromEvent::VisionMixerEffectChanged { flow_id, .. }
+            | StromEvent::StingerCued { flow_id, .. }
+            | StromEvent::StingerStarted { flow_id, .. }
+            | StromEvent::StingerCompleted { flow_id, .. }
+            | StromEvent::StingerFailed { flow_id, .. } => Some(*flow_id),
 
             // These only carry a source-side flow id (the flow publishing the output).
             StromEvent::SourceOutputAvailable { source_flow_id, .. }
@@ -1054,7 +1161,11 @@ impl StromEvent {
             | StromEvent::VisionMixerDskChanged { .. }
             | StromEvent::VisionMixerOverlayAlphaChanged { .. }
             | StromEvent::VisionMixerFtbChanged { .. }
-            | StromEvent::VisionMixerEffectChanged { .. } => false,
+            | StromEvent::VisionMixerEffectChanged { .. }
+            | StromEvent::StingerCued { .. }
+            | StromEvent::StingerStarted { .. }
+            | StromEvent::StingerCompleted { .. }
+            | StromEvent::StingerFailed { .. } => false,
         }
     }
 }
@@ -1399,6 +1510,51 @@ mod event_accessor_tests {
                 target: EffectTarget::Master,
                 effect: VideoEffect::None,
             },
+            StromEvent::StingerCued {
+                flow_id: id,
+                block_id: "mix0".to_string(),
+                index: 0,
+                ready: true,
+                cue_ms: 12,
+            },
+            StromEvent::StingerStarted {
+                flow_id: id,
+                block_id: "mix0".to_string(),
+                index: 0,
+                file: "sting.mkv".to_string(),
+                variant: crate::stinger::StingerVariant::TrackMatte,
+                downgraded_from: None,
+                from_input: 0,
+                to_input: 1,
+                take_to_air_ms: 120.0,
+                duration_ms: 1500,
+            },
+            StromEvent::StingerCompleted {
+                flow_id: id,
+                block_id: "mix0".to_string(),
+                report: crate::stinger::StingerTakeReport {
+                    index: 0,
+                    file: "sting.mkv".to_string(),
+                    variant: crate::stinger::StingerVariant::Classic,
+                    downgraded_from: Some(crate::stinger::StingerVariant::TrackMatte),
+                    from_input: 0,
+                    to_input: 1,
+                    take_to_air_ms: 120.0,
+                    cue_ms: None,
+                    duration_ms: 1500,
+                    cut_point_ms: Some(700),
+                    frames_expected: 45,
+                    frames_arrived: 45,
+                    frames_late: 0,
+                    worst_margin_ms: Some(40.0),
+                },
+            },
+            StromEvent::StingerFailed {
+                flow_id: id,
+                block_id: "mix0".to_string(),
+                reason: "clip missing".to_string(),
+                program_changed: true,
+            },
         ]
     }
 
@@ -1406,7 +1562,7 @@ mod event_accessor_tests {
     fn every_variant_event_type_matches_its_serde_wire_tag() {
         let events = one_of_each_variant();
 
-        let variant_count = 44;
+        let variant_count = 48;
         assert_eq!(
             events.len(),
             variant_count,

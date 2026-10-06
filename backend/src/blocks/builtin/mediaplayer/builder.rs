@@ -91,13 +91,23 @@ impl BlockBuilder for MediaPlayerBuilder {
             })
             .unwrap_or(true);
 
-        let decode = properties
-            .get("decode")
-            .and_then(|v| match v {
-                PropertyValue::Bool(b) => Some(*b),
-                _ => None,
-            })
-            .unwrap_or(false);
+        // A stinger clip source feeds a vision mixer's stinger input: raw
+        // frames, paced, one play per take. It overrides what would get in
+        // the way of that.
+        let stinger_mode = matches!(
+            properties.get(strom_types::stinger::STINGER_MODE_PROPERTY),
+            Some(PropertyValue::Bool(true))
+        );
+        let loop_playlist = loop_playlist && !stinger_mode;
+
+        let decode = stinger_mode
+            || properties
+                .get("decode")
+                .and_then(|v| match v {
+                    PropertyValue::Bool(b) => Some(*b),
+                    _ => None,
+                })
+                .unwrap_or(false);
 
         let decoder =
             bridge::Decoder::from_property(properties.get("decoder").and_then(|v| match v {
@@ -105,13 +115,14 @@ impl BlockBuilder for MediaPlayerBuilder {
                 _ => None,
             }));
 
-        let sync = properties
-            .get("sync")
-            .and_then(|v| match v {
-                PropertyValue::Bool(b) => Some(*b),
-                _ => None,
-            })
-            .unwrap_or(true);
+        let sync = stinger_mode
+            || properties
+                .get("sync")
+                .and_then(|v| match v {
+                    PropertyValue::Bool(b) => Some(*b),
+                    _ => None,
+                })
+                .unwrap_or(true);
 
         let playout_delay_ms = properties
             .get("playout_delay_ms")
@@ -180,10 +191,18 @@ impl BlockBuilder for MediaPlayerBuilder {
 
         let (num_video_tracks, num_audio_tracks) = track_counts(properties);
 
+        if stinger_mode {
+            info!(
+                "Media Player {}: stinger clip source (parked, paced, no loop)",
+                instance_id
+            );
+        }
+
         build_media_player(
             instance_id,
             &block_id,
             flow_id,
+            stinger_mode,
             loop_playlist,
             decode,
             decoder,
@@ -207,6 +226,7 @@ fn build_media_player(
     instance_id: &str,
     block_id: &str,
     flow_id: FlowId,
+    stinger_mode: bool,
     loop_playlist: bool,
     decode: bool,
     decoder: bridge::Decoder,
@@ -286,7 +306,8 @@ fn build_media_player(
             files: initial_playlist.clone(),
             current_index: 0,
         }),
-        is_paused: AtomicBool::new(false),
+        // A stinger source starts parked: it plays only when a take says so.
+        is_paused: AtomicBool::new(stinger_mode),
         loop_playlist: AtomicBool::new(loop_playlist),
         block_id: block_id.to_string(),
         flow_id,
@@ -301,9 +322,17 @@ fn build_media_player(
         decode,
         sync,
         media_path: media_path.clone(),
-        timing: Arc::new(Timing::new(playout_delay_ms)),
+        timing: Arc::new(if stinger_mode {
+            Timing::for_stinger(timing::STINGER_RELEASE_AHEAD_MS)
+        } else {
+            Timing::new(playout_delay_ms)
+        }),
         main_pipeline: gst::glib::WeakRef::new(),
         bus_watch: std::sync::Mutex::new(None),
+        stinger: super::state::StingerPlayback {
+            enabled: stinger_mode,
+            ..Default::default()
+        },
     });
 
     // --- Resolve initial URI ---
@@ -412,6 +441,34 @@ fn connect_main_pipeline_handler(
     // The internal pipeline runs on the flow's clock and base time, which the
     // flow only has once it plays. Start it now if it does, or when it does.
     state.start_with_flow();
+
+    // A stinger source parks its first clip on its first frame instead. Off
+    // this thread: the cue waits for the frame to be decoded.
+    if state.stinger.enabled && state.playlist_len() > 0 {
+        let cue_state = Arc::clone(&state);
+        let spawned = std::thread::Builder::new()
+            .name("stinger-cue".to_string())
+            .spawn(move || {
+                let index = cue_state.current_index();
+                match cue_state.cue(index) {
+                    Ok(took) => info!(
+                        "Media Player {}: stinger clip {} parked in {} ms",
+                        cue_state.block_id,
+                        index,
+                        took.as_millis()
+                    ),
+                    Err(e) => tracing::warn!(
+                        "Media Player {}: could not park stinger clip {}: {}",
+                        cue_state.block_id,
+                        index,
+                        e
+                    ),
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::error!("Media Player: Failed to spawn stinger cue thread: {}", e);
+        }
+    }
 
     // Start position polling timer
     let events_for_timer = events;

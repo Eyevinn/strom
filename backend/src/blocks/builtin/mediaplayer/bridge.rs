@@ -527,6 +527,17 @@ fn link_pad_through_clocksync(
         .name(appsink_name)
         .sync(false)
         .build();
+    // A stinger clip's frames in system memory. A hardware decoder left to
+    // choose keeps them in GL memory, and VideoToolbox does that in NV12,
+    // dropping ProRes 4444's alpha; asked for system memory it gives AYUV64,
+    // alpha and all. The mixer's stinger input adapts the pixel format.
+    if state.stinger.enabled && media_type == "video" {
+        appsink.set_caps(Some(
+            &gst::Caps::builder("video/x-raw")
+                .features([gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY])
+                .build(),
+        ));
+    }
 
     let appsink_element = appsink.upcast_ref::<gst::Element>();
 
@@ -556,6 +567,19 @@ fn link_pad_through_clocksync(
 
     if sync {
         timing::arm(&clocksync, &state.timing, &state.main_pipeline);
+    }
+
+    // A stinger clip source tells a cue when the clip's first frame is parked
+    // here. Per buffer, but a single relaxed atomic add; the counter is
+    // shared, so the probe holds no player state.
+    if state.stinger.enabled && media_type == "video" {
+        if let Some(sink) = clocksync.static_pad("sink") {
+            let park = Arc::clone(&state.stinger.park);
+            sink.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                park.on_buffer();
+                gst::PadProbeReturn::Ok
+            });
+        }
     }
 
     // Set up bridge callback: appsink -> appsrc, restamped into the main
@@ -631,7 +655,7 @@ fn link_pad_through_clocksync(
                 if let Some(lateness) = placed.resynced_after {
                     timing::log_resync(&instance, &media_type_owned, lateness, &timing);
                     if let (Some(internal), Some(offset)) =
-                        (internal_pipeline_weak.upgrade(), timing.sync_offset())
+                        (internal_pipeline_weak.upgrade(), timing.clocksync_offset())
                     {
                         timing::apply_sync_offset(&internal, offset);
                     }
@@ -893,6 +917,7 @@ mod tests {
             timing: Arc::new(super::super::timing::Timing::new(0)),
             main_pipeline: gst::glib::WeakRef::new(),
             bus_watch: Mutex::new(None),
+            stinger: Default::default(),
         })
     }
 

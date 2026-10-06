@@ -217,6 +217,70 @@ FTB is independent of the take engine.
 While FTB is engaged, the multiview shows a centered **FTB** badge over
 the PGM big display so the state is impossible to miss.
 
+### 3.6 Stingers
+
+A stinger plays a clip over the program while the source changes beneath
+it, the way an ATEM, vMix or OBS stinger does. Three kinds of clip are
+supported:
+
+| Kind | What the clip holds | How the program changes | Backend |
+|---|---|---|---|
+| **Classic** | A graphic with an alpha channel | Cut (or mix) at the cut point, while the graphic covers the frame | GPU and CPU |
+| **Track matte** | Graphic and matte in one file, side by side or stacked (the OBS layout) | Pixel by pixel, following the matte: black shows the old source, white the new one, grey blends | GPU |
+| **Mask only** | A matte, no graphic: an animated wipe | As track matte | GPU |
+
+On the CPU backend a track-matte or mask-only clip plays as classic: its
+graphic (if any) on top and a cut where the matte crosses half way (a mix
+across the matte's movement for a mask). The panel marks such clips **CPU**.
+
+**Setting up.**
+
+1. Turn on **Stinger Input** on the Vision Mixer block. It gets a
+   `stinger_in` input.
+2. Add a **Media Player**, turn on **Stinger Clip Source**, and wire its
+   `video_out` to `stinger_in`. Its playlist is the stinger library. Its
+   `audio_out` carries the clip's sound, if you want it: wire it into your
+   audio mix.
+3. Put clips in that playlist, or press **EXAMPLES** in the stinger panel
+   to render Strom's three example clips (one of each kind) into the media
+   directory and add them.
+
+**Operating.** Select **STING** as the transition type. The panel lists the
+clips; click one to *cue* it (load it and park it on its first frame; a
+green dot shows it is ready). **AUTO** (or Space) takes the cued clip from
+PGM to PVW. The clip goes on air **Stinger Preroll** after the take
+(default 80 ms) and the take is finished when the clip has played out;
+other takes wait until then. After a take the clip is parked again, so the
+next take is just as quick. Taking a clip that is not cued cues it first,
+which adds the time that takes (usually tens of milliseconds for a local
+file).
+
+**Clip settings** (SETTINGS, for the cued clip):
+
+- **Layout**: detected from the clip. A clip twice as wide as the program
+  is side by side, twice as tall is stacked; one with alpha is classic, a
+  grey one without is a mask.
+- **Cut point** (classic): left empty, it is the frame where the graphic
+  covers most of the picture, found when the clip is analysed.
+- **Beneath** (classic): cut, or mix for a set time from the cut point.
+- **Premultiplied**: for graphics exported with premultiplied alpha
+  (After Effects' "Premultiplied (Matted)"). GPU only; the software mixer
+  composites them as straight, with dark edges.
+- **Invert matte**: swap black and white in the matte.
+
+**Frame accuracy.** A take is planned for the frame its clip lands on before
+the clip starts, so the graphic comes up on that frame, a classic cut
+lands on the cut point's frame, and each matte frame drives the program
+frame it belongs to. Each take reports how many clip frames reached the
+mixer in time and the smallest margin any had; frames arriving late mean
+the machine needs a longer preroll.
+
+**Clip formats.** Anything the Media Player decodes. With alpha: VP9 with
+alpha in WebM (the usual format of stinger packs), ProRes 4444, FFV1 in
+Matroska, QuickTime Animation. H.264 has no alpha, which is fine for a
+mask or for the matte half of a track-matte clip, but not for a classic
+graphic. Stingers do not take PiP buses: PGM and PVW must be inputs.
+
 ---
 
 ## 4. Picture-in-Picture (PiP)
@@ -479,6 +543,10 @@ action.
 | **Configure PiP** | Set a PiP's background, zones (positions, capacities, source lists, borders) and per-source crop transforms. Live, no restart — staying sources morph, crops animate. | `pip_idx`, `bg`, `zones[]`, `transforms{}` |
 | **Get PiP composition** | Export one PiP's current composition (the save half of save/restore — restore by sending it back to Configure PiP). Used by the layout presets and external tooling. | `pip_idx` |
 | **Looks** | Apply or clear a persistent shader look on a source or on the PGM master (GPU backend with Shader FX, §3.4). | Source or master + look parameters |
+| **Cue stinger** | Load a clip from the stinger library and park it on its first frame. | Playlist index |
+| **Take stinger** | Take from PGM to PVW under the cued (or named) stinger clip. Same as Take with type `stinger`. | Optional playlist index |
+| **Stinger clip settings** | Layout, cut point, cut/mix beneath, premultiplied alpha, matte inversion, per clip. Stored with the flow. | Playlist index + settings |
+| **Example stingers** | Render Strom's example clips into the media directory and add them to the library. | — |
 | **Set multiview overlay alpha** | Fade the multiview overlay (borders, labels, clock, VU meters). | `alpha`: 0.0 – 1.0 |
 | **Get state** | Snapshot of current PVW/PGM/DSK/FTB/PiP state. Useful when reconnecting to the mixer mid-show. | — |
 

@@ -40,15 +40,31 @@ pub const DEFAULT_PLAYOUT_DELAY_MS: u64 = 500;
 /// the source's own queues, which keep a few seconds.
 pub const MAX_PLAYOUT_DELAY_MS: u64 = 5_000;
 
+/// How far ahead of its time on air a stinger clip's frame leaves its
+/// clocksync. A frame let go exactly when due still has to cross the bridge,
+/// be uploaded and reach the mixer within the mixer's latency, which a loaded
+/// machine misses now and then; a few frames' head start absorbs that while
+/// keeping the frames held ahead small enough for the bridge's queues at 4K.
+pub const STINGER_RELEASE_AHEAD_MS: u64 = 60;
+
 /// Shared by every stream of one player, so audio and video stay together.
 pub struct Timing {
     /// For unpaced buffers (sync off): what a buffer is stamped with is its
     /// running time plus this, taken from the first one's arrival.
     map_offset: AtomicI64,
-    /// The `ts-offset` every clocksync paces with.
+    /// The offset from a buffer's running time to its time in the main
+    /// pipeline. The clocksyncs pace with it, less `release_ahead`.
     sync_offset: AtomicI64,
     /// Playout delay in ns.
     delay: i64,
+    /// When set, the next baseline puts the first buffer at this main-pipeline
+    /// running time instead of a playout delay from now. A stinger take knows
+    /// when its clip goes on air before the clip starts, so the mixer can be
+    /// programmed for that frame up front.
+    start_at: AtomicI64,
+    /// How far ahead of its time each buffer leaves the clocksync (ns). Zero
+    /// for an ordinary player.
+    release_ahead: i64,
 }
 
 /// Where a buffer goes in the main pipeline.
@@ -67,7 +83,35 @@ impl Timing {
             map_offset: AtomicI64::new(UNSET),
             sync_offset: AtomicI64::new(UNSET),
             delay: (playout_delay_ms.min(MAX_PLAYOUT_DELAY_MS) * 1_000_000) as i64,
+            start_at: AtomicI64::new(UNSET),
+            release_ahead: 0,
         }
+    }
+
+    /// Timing for a stinger clip source: frames leave their clocksync
+    /// `release_ahead_ms` before they are due, and a take pins where the
+    /// first one goes ([`Self::pin_start`]).
+    pub fn for_stinger(release_ahead_ms: u64) -> Self {
+        Self {
+            release_ahead: (release_ahead_ms * 1_000_000) as i64,
+            ..Self::new(0)
+        }
+    }
+
+    /// Put the first buffer after the next baseline at main-pipeline running
+    /// time `running_time`. Call after [`Self::reset`].
+    pub fn pin_start(&self, running_time: i64) {
+        self.start_at.store(running_time, Ordering::Release);
+    }
+
+    /// The `ts-offset` the clocksyncs pace with, once a baseline is set.
+    pub fn clocksync_offset(&self) -> Option<i64> {
+        self.sync_offset().map(|offset| offset - self.release_ahead)
+    }
+
+    /// How far ahead of its time a buffer leaves its clocksync, in ns.
+    pub fn release_ahead(&self) -> i64 {
+        self.release_ahead
     }
 
     pub fn delay_ms(&self) -> i64 {
@@ -87,6 +131,7 @@ impl Timing {
     ) {
         self.map_offset.store(UNSET, Ordering::Release);
         self.sync_offset.store(UNSET, Ordering::Release);
+        self.start_at.store(UNSET, Ordering::Release);
         if let Some(pipeline) = internal {
             for clocksync in clocksyncs(pipeline) {
                 arm(&clocksync, self, main);
@@ -98,14 +143,22 @@ impl Timing {
     /// `rt` when the flow is at `now`: it leaves `delay` from now.
     /// Whichever stream gets here first sets it for all of them.
     fn take_sync_offset(&self, rt: i64, now: i64) -> i64 {
-        let proposed = now - rt + self.delay;
+        let pinned = self.start_at.load(Ordering::Acquire);
+        let proposed = if pinned != UNSET {
+            pinned - rt
+        } else {
+            now - rt + self.delay
+        };
         match self.sync_offset.compare_exchange(
             UNSET,
             proposed,
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            Ok(_) => proposed,
+            Ok(_) => {
+                self.start_at.store(UNSET, Ordering::Release);
+                proposed
+            }
             Err(current) => current,
         }
     }
@@ -121,7 +174,14 @@ impl Timing {
     /// Unpaced buffers - sync off - keep the spacing of their running times
     /// from the first one's arrival.
     pub fn place(&self, rt: i64, now: i64, paced: bool) -> Placement {
-        let sync = self.sync_offset.load(Ordering::Acquire);
+        let mut sync = self.sync_offset.load(Ordering::Acquire);
+        // A pinned start takes its baseline from the first buffer to get
+        // here. That is the stinger clip's parked first frame: it was already
+        // waiting inside its clocksync when the take armed them, so no
+        // clocksync probe sees it.
+        if paced && sync == UNSET && self.start_at.load(Ordering::Acquire) != UNSET {
+            sync = self.take_sync_offset(rt, now);
+        }
         if !paced || sync == UNSET {
             let map = match self.map_offset.compare_exchange(
                 UNSET,
@@ -175,7 +235,8 @@ pub fn clocksyncs(pipeline: &gst::Pipeline) -> Vec<gst::Element> {
         .collect()
 }
 
-/// Set the shared clocksync offset on every clocksync of `pipeline`.
+/// Set the shared clocksync offset on every clocksync of `pipeline`: the
+/// timing's offset less its release-ahead ([`Timing::clocksync_offset`]).
 pub fn apply_sync_offset(pipeline: &gst::Pipeline, offset: i64) {
     for clocksync in clocksyncs(pipeline) {
         clocksync.set_property("ts-offset", offset);
@@ -227,12 +288,13 @@ pub fn arm(
             return gst::PadProbeReturn::Drop;
         };
         let offset = timing.take_sync_offset(rt.nseconds() as i64, now);
-        clocksync.set_property("ts-offset", offset);
+        let ts_offset = offset - timing.release_ahead;
+        clocksync.set_property("ts-offset", ts_offset);
         debug!(
             "Media Player: {} paces from running time {} with ts-offset {}",
             clocksync.name(),
             rt,
-            offset
+            ts_offset
         );
         gst::PadProbeReturn::Remove
     });
@@ -388,6 +450,33 @@ mod tests {
 
         let _ = internal.set_state(gst::State::Null);
         let _ = main.set_state(gst::State::Null);
+    }
+
+    /// A stinger take programs the mixer for the frame its clip lands on
+    /// before the clip starts, so the first buffer has to land exactly there,
+    /// whenever it happens to arrive.
+    #[test]
+    fn a_pinned_start_puts_the_first_buffer_where_the_take_said() {
+        let t = Arc::new(Timing::for_stinger(60));
+        t.pin_start(5_000 * MS);
+        // The parked first frame reaches the bridge early, unpaced.
+        let first = t.place(0, 4_870 * MS, true);
+        assert_eq!(first.running_time, 5_000 * MS);
+        assert_eq!(first.resynced_after, None);
+        // The next frames keep their spacing from it.
+        assert_eq!(t.place(40 * MS, 4_985 * MS, true).running_time, 5_040 * MS);
+        // The clocksyncs let each one go 60 ms early.
+        assert_eq!(t.clocksync_offset(), Some(5_000 * MS - 60 * MS));
+        // The pin is used up: the next baseline is the ordinary one.
+        t.reset(None, &gst::glib::WeakRef::new());
+        assert_eq!(t.place(0, 9_000 * MS, true).running_time, 9_000 * MS);
+    }
+
+    #[test]
+    fn an_ordinary_player_paces_with_its_offset() {
+        let t = Timing::new(500);
+        t.take_sync_offset(0, 1_000 * MS);
+        assert_eq!(t.clocksync_offset(), t.sync_offset());
     }
 
     #[test]

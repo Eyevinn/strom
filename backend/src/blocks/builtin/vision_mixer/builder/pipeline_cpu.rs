@@ -73,7 +73,7 @@ pub(super) fn build_cpu_pipeline(
     // output_format cannot hold alpha, blend in the alpha-carrying
     // counterpart and convert to output_format after the mixer — pinning
     // output_format on the mixer itself would flatten the key.
-    let dist_keyed = p.num_dsk_inputs > 0 || p.num_pips > 0;
+    let dist_keyed = p.num_dsk_inputs > 0 || p.num_pips > 0 || p.enable_stinger;
     let dist_blend_format = if dist_keyed {
         p.alpha_blend_format()
     } else {
@@ -173,6 +173,31 @@ pub(super) fn build_cpu_pipeline(
         // over the program. Video inputs need the pin because their tee feeds
         // two independently negotiating compositors; a DSK links straight to
         // one compositor pad, so its convert pad handles the conversion.
+    }
+
+    // --- Stinger input: graphic only. The software mixer has no blend
+    // functions to composite a matte with, so matte stingers play as classic
+    // here. videocrop picks the graphic out of a side-by-side or stacked clip.
+    if p.enable_stinger {
+        let q_id = p.id("queue_stinger");
+        let vc_id = p.id("videoconvert_stinger");
+        let crop_id = p.id("videocrop_stinger");
+        let videoconvert = elements::make_element(vc_factory, &vc_id)?;
+        gpu::configure_video_convert(&videoconvert);
+        elems.push((q_id.clone(), elements::make_queue(&q_id)?));
+        elems.push((vc_id.clone(), videoconvert));
+        elems.push((
+            crop_id.clone(),
+            elements::make_element("videocrop", &crop_id)?,
+        ));
+        links.push((
+            ElementPadRef::pad(&q_id, "src"),
+            ElementPadRef::pad(&vc_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&vc_id, "src"),
+            ElementPadRef::pad(&crop_id, "sink"),
+        ));
     }
 
     // --- Multiview output chain (no gldownload needed for CPU) ---
@@ -451,6 +476,14 @@ pub(super) fn build_cpu_pipeline(
                 ),
             ));
         }
+    }
+
+    // Stinger graphic pad — after the underlays.
+    if p.enable_stinger {
+        links.push((
+            ElementPadRef::pad(p.id("videocrop_stinger"), "src"),
+            ElementPadRef::pad(&mixer_id, format!("sink_{}", p.stinger_pad_base())),
+        ));
     }
 
     // Multiview compositor thumbnails: tee_i.src_1 → queue → mv_comp

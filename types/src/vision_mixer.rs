@@ -164,6 +164,25 @@ pub const DIST_PGM_ZORDER: u32 = 1;
 /// Base z-order for DSK pads on the distribution compositor (+ dsk index).
 pub const DIST_DSK_BASE_ZORDER: u32 = 100;
 
+/// Z-order of the stinger's matte pad on the distribution compositor. Above
+/// the program and its transitions, below the incoming source during a
+/// track-matte take and below every DSK.
+pub const DIST_STINGER_MATTE_ZORDER: u32 = 90;
+
+/// Z-order the incoming source is lifted to during a track-matte take, just
+/// above the matte it reads.
+pub const DIST_STINGER_INCOMING_ZORDER: u32 = 91;
+
+/// Z-order of the stinger graphic: over the program, under the DSKs.
+pub const DIST_STINGER_FILL_ZORDER: u32 = 92;
+
+/// Index of the stinger graphic's sink pad on the distribution compositor;
+/// the matte's (GPU only) is the next one. Stinger pads come after the
+/// inputs, the DSKs and the border underlays (present with PiPs).
+pub fn dist_stinger_pad_base(num_inputs: usize, num_dsk_inputs: usize, num_pips: usize) -> usize {
+    num_inputs + num_dsk_inputs + if num_pips > 0 { num_inputs } else { 0 }
+}
+
 /// Z-order for PiP overlay pads on the distribution compositor when PGM is a PiP source.
 /// Must be above [`DIST_PGM_ZORDER`] (which the bg uses) and below DSK.
 pub const DIST_PIP_OVERLAY_ZORDER: u32 = 2;
