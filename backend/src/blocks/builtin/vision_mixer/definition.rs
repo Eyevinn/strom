@@ -374,7 +374,10 @@ fn vision_mixer_definition() -> BlockDefinition {
         exposed_properties.push(ExposedProperty {
             name: format!("input_{}_label", i),
             label: format!("Input {} Label", i + 1),
-            description: format!("Label for input {} shown on multiview", i + 1),
+            description: format!(
+                "Label for input {} shown on multiview. Can be changed while the flow runs.",
+                i + 1
+            ),
             property_type: PropertyType::String,
             default_value: Some(PropertyValue::String(format!("In {}", i + 1))),
             mapping: PropertyMapping {
@@ -382,7 +385,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 property_name: format!("input_{}_label", i),
                 transform: None,
             },
-            live: false,
+            live: true,
             persist: None,
         });
     }
@@ -423,7 +426,7 @@ fn vision_mixer_definition() -> BlockDefinition {
     // the operator picks its bg and overlays from the dedicated PiP panel.
 
     BlockDefinition {
-        id: "builtin.vision_mixer".to_string(),
+        id: super::BLOCK_ID.to_string(),
         name: "Vision Mixer".to_string(),
         description:
             "TV broadcast vision mixer with PVW/PGM workflow, transitions, and multiview output"

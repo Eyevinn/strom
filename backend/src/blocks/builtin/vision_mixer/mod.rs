@@ -31,7 +31,11 @@ pub(crate) mod properties;
 mod tests;
 pub(crate) mod underlays;
 
+/// Block definition id.
+pub const BLOCK_ID: &str = "builtin.vision_mixer";
+
 // Public API
 pub use builder::VisionMixerBuilder;
 pub use definition::get_blocks;
 pub use overlay::VisionMixerOverlayState;
+pub use properties::apply_live_label;

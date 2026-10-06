@@ -172,16 +172,48 @@ pub fn parse_input_labels(
     num_inputs: usize,
 ) -> Vec<String> {
     (0..num_inputs)
-        .map(|i| {
-            properties
-                .get(&format!("input_{}_label", i))
-                .and_then(|v| match v {
-                    PropertyValue::String(s) if !s.is_empty() => Some(s.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| format!("In {}", i + 1))
-        })
+        .map(|i| input_label_text(i, properties.get(&format!("input_{}_label", i))))
         .collect()
+}
+
+/// The text shown for input `i`: the label value, or "In N" when it is unset,
+/// empty or not a string.
+fn input_label_text(i: usize, value: Option<&PropertyValue>) -> String {
+    match value {
+        Some(PropertyValue::String(s)) if !s.is_empty() => s.clone(),
+        _ => format!("In {}", i + 1),
+    }
+}
+
+/// The input index an `input_N_label` property name refers to.
+pub fn label_property_input(name: &str) -> Option<usize> {
+    name.strip_prefix("input_")?
+        .strip_suffix("_label")?
+        .parse()
+        .ok()
+}
+
+/// Apply an `input_N_label` change to a running vision mixer, so the
+/// multiview redraws the new label on its next tick.
+pub fn apply_live_label(
+    block_instance_id: &str,
+    name: &str,
+    value: &PropertyValue,
+) -> Result<(), String> {
+    let input = label_property_input(name).ok_or("not an input label property")?;
+    if !matches!(value, PropertyValue::String(_)) {
+        return Err("value must be a string".to_string());
+    }
+    let state = super::overlay::get_overlay_state(block_instance_id)
+        .ok_or("vision mixer is not running")?;
+    if !state.set_label(input, input_label_text(input, Some(value))) {
+        return Err(format!(
+            "input {} is beyond the configured {} inputs",
+            input + 1,
+            state.num_inputs
+        ));
+    }
+    Ok(())
 }
 
 /// Parse a resolution string property, returning (width, height).
