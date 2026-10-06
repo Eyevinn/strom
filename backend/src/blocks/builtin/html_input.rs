@@ -900,8 +900,9 @@ fn html_input_definition() -> BlockDefinition {
                 label: "Stinger Page".to_string(),
                 description: "Play this page as a Vision Mixer stinger: wire video_out to the mixer's stinger \
                               input, and a take triggers the page by setting its URL fragment to \
-                              #strom-take-<n> (listen for hashchange). The page must be \
-                              transparent at rest and change something visible on the first \
+                              #strom-take-<n> (listen for hashchange), so its URL cannot \
+                              have a fragment of its own. The page must be transparent and \
+                              stop drawing at rest, and change something visible on the first \
                               frame of its animation; the cut is timed from that frame. Plays as \
                               a classic stinger with premultiplied alpha."
                     .to_string(),
