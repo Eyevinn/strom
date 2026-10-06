@@ -629,22 +629,39 @@ pub async fn mixer_pads_of(
         .sink_pads()
         .iter()
         .map(|pad| {
-            let peer = pad
-                .peer()
-                .and_then(|p| p.parent_element())
+            let peer_element = pad.peer().and_then(|p| p.parent_element());
+            let peer = peer_element
+                .as_ref()
                 .map(|e| e.name().to_string())
                 .unwrap_or_default();
+            // A glshader peer's uniforms, to see what it is drawing with.
+            let uniforms = peer_element
+                .as_ref()
+                .filter(|e| e.find_property("uniforms").is_some())
+                .and_then(|e| e.property::<Option<gst::Structure>>("uniforms"))
+                .map(|s| format!(" uniforms={s}"))
+                .unwrap_or_default();
+            let caps = pad
+                .current_caps()
+                .and_then(|c| c.structure(0).map(|s| s.to_string()))
+                .unwrap_or_else(|| "none".into());
             format!(
-                "{} <- {} z={} a={:.2} src={} dst={} eqa={} srca={} dsta={}",
+                "{} <- {} z={} a={:.2} pos={},{} size={}x{} src={} dst={} eqa={} srca={} dsta={}{} caps={}",
                 pad.name(),
                 peer,
                 pad.property::<u32>("zorder"),
                 pad.property::<f64>("alpha"),
+                pad.property::<i32>("xpos"),
+                pad.property::<i32>("ypos"),
+                pad.property::<i32>("width"),
+                pad.property::<i32>("height"),
                 enum_nick(pad, "blend-function-src-rgb"),
                 enum_nick(pad, "blend-function-dst-rgb"),
                 enum_nick(pad, "blend-equation-alpha"),
                 enum_nick(pad, "blend-function-src-alpha"),
                 enum_nick(pad, "blend-function-dst-alpha"),
+                uniforms,
+                caps,
             )
         })
         .collect::<Vec<_>>()
