@@ -547,14 +547,14 @@ mod tests {
             inputs.push(ExternalPad::new(
                 format!("audio_in_{}", i),
                 MediaType::Audio,
-                format!("queue_audio_{}", i),
+                format!("audioconvert_audio_{}", i),
                 "sink",
             ));
         }
         inputs.push(ExternalPad::new(
             "pgm_audio_in",
             MediaType::Audio,
-            "queue_audio_pgm",
+            "audioconvert_audio_pgm",
             "sink",
         ));
 

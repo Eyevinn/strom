@@ -1,8 +1,10 @@
 //! Audio metering chains: per-input + a dedicated PGM branch.
 //!
-//! Each chain is `queue_audio_{i} → audioconvert → level_audio_{i} → fakesink_audio_{i}`.
-//! The external pads (`audio_in_{i}` / `pgm_audio_in`) target the queue sinks,
-//! so the chains are self-contained and don't need caps negotiation up-front.
+//! Each chain is `audioconvert_audio_{i} → level_audio_{i}`, and the level's
+//! src pad stays unlinked: a probe drops every buffer there once it is
+//! measured. The external pads (`audio_in_{i}` / `pgm_audio_in`) target the
+//! audioconvert sinks. The chain has no queue and no sink: it runs in the
+//! upstream thread, never blocks it, and never prerolls.
 
 use std::sync::Arc;
 
@@ -25,61 +27,58 @@ pub(super) fn append_audio_meter_chains(
     links: &mut Vec<(ElementPadRef, ElementPadRef)>,
 ) -> Result<(), BlockBuildError> {
     for i in 0..p.num_inputs {
-        let q_id = p.id(&format!("queue_audio_{}", i));
         let conv_id = p.id(&format!("audioconvert_audio_{}", i));
         let level_id = p.id(&format!("level_audio_{}", i));
-        let sink_id = p.id(&format!("fakesink_audio_{}", i));
 
-        elems.push((q_id.clone(), elements::make_queue(&q_id)?));
         elems.push((
             conv_id.clone(),
             elements::make_element("audioconvert", &conv_id)?,
         ));
-        elems.push((level_id.clone(), elements::make_level(&level_id)?));
-        elems.push((sink_id.clone(), elements::make_meter_fakesink(&sink_id)?));
+        elems.push((level_id.clone(), make_meter_level(&level_id)?));
 
-        links.push((
-            ElementPadRef::pad(&q_id, "src"),
-            ElementPadRef::pad(&conv_id, "sink"),
-        ));
         links.push((
             ElementPadRef::pad(&conv_id, "src"),
             ElementPadRef::pad(&level_id, "sink"),
         ));
-        links.push((
-            ElementPadRef::pad(&level_id, "src"),
-            ElementPadRef::pad(&sink_id, "sink"),
-        ));
     }
 
     // PGM audio branch.
-    let q_id = p.id("queue_audio_pgm");
     let conv_id = p.id("audioconvert_audio_pgm");
     let level_id = p.id("level_audio_pgm");
-    let sink_id = p.id("fakesink_audio_pgm");
 
-    elems.push((q_id.clone(), elements::make_queue(&q_id)?));
     elems.push((
         conv_id.clone(),
         elements::make_element("audioconvert", &conv_id)?,
     ));
-    elems.push((level_id.clone(), elements::make_level(&level_id)?));
-    elems.push((sink_id.clone(), elements::make_meter_fakesink(&sink_id)?));
+    elems.push((level_id.clone(), make_meter_level(&level_id)?));
 
-    links.push((
-        ElementPadRef::pad(&q_id, "src"),
-        ElementPadRef::pad(&conv_id, "sink"),
-    ));
     links.push((
         ElementPadRef::pad(&conv_id, "src"),
         ElementPadRef::pad(&level_id, "sink"),
     ));
-    links.push((
-        ElementPadRef::pad(&level_id, "src"),
-        ElementPadRef::pad(&sink_id, "sink"),
-    ));
 
     Ok(())
+}
+
+/// The `level` that ends a metering chain. Its src pad is left unlinked and a
+/// probe drops every buffer there; pad probes run before the not-linked check,
+/// so the push returns OK.
+///
+/// This is a BUFFER probe, so it fires per buffer: it is a bare constant
+/// return, with no captures, locks or allocations. It replaces a sink, which
+/// would hold the upstream thread in preroll, and an `identity` with
+/// `drop-probability=1.0`, which lets a buffer through now and then (it
+/// compares `rand()/RAND_MAX < 1.0`) and so returns NOT_LINKED upstream.
+fn make_meter_level(name: &str) -> Result<gst::Element, BlockBuildError> {
+    let level = elements::make_level(name)?;
+    level
+        .static_pad("src")
+        .ok_or_else(|| BlockBuildError::ElementCreation(format!("{name} has no src pad")))?
+        .add_probe(
+            gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+            |_, _| gst::PadProbeReturn::Drop,
+        );
+    Ok(level)
 }
 
 /// Build the bus message handler that forwards `level` element messages into
