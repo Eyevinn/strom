@@ -32,43 +32,25 @@ If any of these three links is broken, synchronization fails.
 The pipeline clock determines what "now" means in a running-time domain. Pick
 one *globally meaningful* clock when you care about cross-source alignment:
 
-| Clock | When to use | `normalize_segment=never` works? |
+| `clock_type` | When to use | `normalize_segment=never` works? |
 |---|---|---|
-| `GstSystemClock` — realtime | Single machine, all peers share the same OS wallclock (NTP-synced OS). | Yes |
-| `GstSystemClock` — TAI | Same as realtime, leap-seconds-free. | Yes |
-| `GstNetClientClock` | Receiver slaves to a sender's clock over UDP. | Yes |
-| `GstNtpClock` | NTP-synced clock without OS-level NTP required. | Yes |
-| `GstPtpClock` | Broadcast-grade sub-microsecond sync via PTP (IEEE 1588). | Yes |
-| `GstSystemClock` — monotonic (default) | Playout / transcode where only frame cadence matters. | **No — config error** |
+| Realtime | All peers share the same OS wallclock (NTP-synced OS). | Yes |
+| TAI | Same as Realtime, leap-second-free. | Yes |
+| NTP | NTP-synced clock without OS-level NTP required. | Yes |
+| PTP | Broadcast-grade sub-microsecond sync via PTP (IEEE 1588). | Yes |
+| Monotonic (default) | Playout / transcode where only frame cadence matters. | **No — config error** |
 
-Monotonic clock is the default; GStreamer picks it silently if you don't
-override. It cannot be used for cross-source sync, because its zero is
-"receiver boot time" — incommensurable with any sender's timeline.
+Monotonic is the default. It cannot be used for cross-source sync, because
+its zero is "receiver boot time" — incommensurable with any sender's
+timeline.
 
 ### Setting a non-default clock
 
 The flow's `clock_type` property controls which clock is installed before the
 pipeline transitions to PLAYING. Pick it from the Flow Properties dialog in
-the UI (Monotonic / Realtime / TAI / PTP / NTP). The wiring lives in
-`backend/src/gst/pipeline/construction.rs::configure_clock` — that function
-is the canonical reference for what each value does, including the
-`direct_media_timing` interaction (forces `base_time=0, start_time=NONE`,
-required for AES67 and useful for EFP cross-source PTS alignment).
-
-If you'd rather set the clock from code (e.g. for a test harness), the
-underlying calls are:
-
-```rust
-use gstreamer::prelude::*;
-
-let clock: gst::SystemClock = glib::Object::builder()
-    .property("clock-type", gst::ClockType::Realtime)
-    .build();
-pipeline.use_clock(Some(&clock));
-```
-
-For PTP, replace with `gst::PtpClock::new(Some("eth0"), 0)`. For NTP, use
-`gst::NtpClock::new(None, "ntp.server.example", 123, gst::ClockTime::ZERO)`.
+the UI (Monotonic / Realtime / TAI / PTP / NTP). The flow's
+`direct_media_timing` property is required for AES67 and useful for EFP
+cross-source PTS alignment.
 
 ## `normalize_segment` on EFP inputs
 
@@ -119,14 +101,3 @@ the sender's pipeline clock as realtime/NTP/PTP.
 5. Compare running-times on the receiving side using a mixer latency probe
    or `gst_debug_bin_to_dot_file` to confirm the two streams align within
    expected jitter.
-
-## Reference: tests
-
-- `gst-plugin-efp/tests/pipeline.rs`:
-  `pts_preservation_roundtrip_with_normalize_never` — end-to-end proof that
-  absolute PTS survives `efpmux → efpdemux` when `normalize-segment=never`.
-- `gst-plugin-efp/tests/pipeline.rs`:
-  `normalize_segment_auto_{monotonic,realtime}_clock_*` — auto-mode clock
-  detection.
-- `backend/src/blocks/builtin/efpsrt_input.rs::tests::normalize_segment_*` —
-  strom block wiring tests.

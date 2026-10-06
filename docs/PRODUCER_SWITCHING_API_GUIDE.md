@@ -40,11 +40,11 @@ Four calls do all the work:
 and swaps whatever is currently on PGM and PVW. The block's own bus state is authoritative,
 because an index you computed before the call can be stale by the time it arrives. Send `0`
 for both. What matters is `transition_type` and `duration_ms`. The same endpoint on a plain
-compositor block, which has no PGM/PVW state, does use the two indices.
+compositor block (deprecated), which has no PGM/PVW state, does use the two indices.
 
 ```bash
 FLOW=945fa329-...   BLOCK=vmix
-API=http://127.0.0.1:8123/api/flows/$FLOW/blocks/$BLOCK
+API=http://localhost:8080/api/flows/$FLOW/blocks/$BLOCK
 
 curl -X POST -H 'content-type: application/json' \
   -d '{"from_input":0,"to_input":0,"transition_type":"cut","duration_ms":0}' \
@@ -175,8 +175,10 @@ So the choice between editing on air and preview-then-take is editorial, not tec
 
 ## 4. What each take actually looks like
 
-`transition_type` accepts `cut`, `fade`, `slide_left`, `slide_right`, `slide_up`,
-`slide_down`. What you get depends on whether a PiP is involved.
+`transition_type` accepts `cut`, `fade`, `dip_to_black`, `slide_*`, `push_*` and, on the
+GPU backend with Shader FX, the shader transitions (see the
+[Vision Mixer Operator Guide](VISION_MIXER_OPERATOR_GUIDE.md) §3.1). What you get depends
+on whether a PiP is involved.
 
 | From → To | `transition_type` | What the audience sees |
 |---|---|---|
@@ -184,7 +186,7 @@ So the choice between editing on air and preview-then-take is editorial, not tec
 | input → input | `fade` | A true dissolve. Frames mid-transition show both pictures blended. |
 | PiP → PiP, **no shared sources** | `fade` | A true dissolve between the two compositions. |
 | PiP → anything, **sharing a source** | `fade` | **Not a dissolve.** The shared source animates from its old box to its new one — going from a four-box to that source full frame reads as a zoom-in, with the other tiles covered as the box grows. |
-| either bus is a PiP | `slide_*` | Silently downgraded to `fade`. The server logs the downgrade; the HTTP response reports the transition that actually ran in `actual_transition_type`. |
+| either bus is a PiP | any animated type other than `fade` | Downgraded to `fade`. The server logs the downgrade; the HTTP response reports the transition that actually ran in `actual_transition_type`. Master-FX takes keep their full-frame effect on top of the fade. |
 
 The engine animates pads, not pictures: a source present in both the outgoing and
 incoming composition is treated as *moving*, and only sources exclusive to one side
@@ -230,14 +232,14 @@ a live edit and animates as described in §3.
 
 ### A zone holds more sources than its capacity
 
-**Silently truncated, oldest first, and the API lies to you about it.** A zone with
-`"capacity": 2` and `"sources": [0,1,2]` renders inputs 1 and 2 only — input 0 is dropped
-because it is the oldest entry. No error, no warning. `GET .../pip/{idx}` reads back all
-three sources, so state and picture disagree: the state is the intent, the picture is the
-newest `capacity` entries.
+**Rejected with HTTP 400.** A zone with `"capacity": 2` and `"sources": [0,1,2]` returns
+`Zone 0 holds 3 sources but its capacity is 2 (evict oldest first)`, and nothing changes on
+air. Evicting is the caller's job: drop the oldest entry from the list before you send it.
+The built-in editor does this for you.
 
-Capacity is a feature, not a guard — capacity 1 is "swap mode", where pushing a new source
-cross-fades it over the old one. If you do not want eviction, leave `capacity` unset.
+Capacity 1 is "swap mode": send the zone with the new source in place of the old one, and
+the new source cross-fades over the old. If you do not want a limit, leave `capacity`
+unset.
 
 ### Things that *are* rejected
 
@@ -245,6 +247,7 @@ These all return HTTP 400 with a readable reason, before anything reaches the pi
 
 | Request | Response |
 |---|---|
+| More sources in a zone than its `capacity` | `Zone 0 holds 3 sources but its capacity is 2 (evict oldest first)` |
 | Zone source index ≥ number of inputs | `Zone source 5 out of range (num_inputs=5)` |
 | A zone source that is also the background | `Zone source 1 duplicates bg` |
 | The same source in two zones of one PiP | `Zone source 1 appears in more than one zone` |
@@ -284,7 +287,7 @@ you care about lands in the next file.
 ## 7. Quick reference
 
 ```bash
-API=http://127.0.0.1:8123/api/flows/$FLOW/blocks/$BLOCK
+API=http://localhost:8080/api/flows/$FLOW/blocks/$BLOCK
 
 # Read everything: both buses, every PiP composition
 curl -s $API/state

@@ -23,7 +23,8 @@ After cloning, install the Git hooks so formatting and linting run automatically
 
 ## Code quality standards
 
-All changes must pass these before being merged (the pre-commit hook and CI enforce them):
+All changes must pass these before being merged. CI enforces all three; the pre-commit hook runs
+formatting and clippy, but not the tests:
 
 ```bash
 cargo fmt --all                                       # formatting

@@ -219,8 +219,9 @@ curl -s localhost:8080/api/flows/<flow-id>/debug-graph \
 nvidia-smi dmon -s u
 ```
 
-The startup log states every choice made: `Found available encoder: …`,
-`Using software fallback encoder: …`, `CUDA-GL interop works …`, and the compositor backend.
+The startup log reports `CUDA-GL interop works …` (or why it failed). Encoder choices are
+logged when a flow with a Video Encoder block starts: `Found available encoder: …` or
+`Using software fallback encoder: …`.
 
 ## Field reports
 

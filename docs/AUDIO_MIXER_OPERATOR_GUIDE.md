@@ -55,6 +55,10 @@ flowchart LR
 | Main output | 1 | Stereo. |
 | Monitor output | 1 | Stereo. Follows Main, switches to Solo bus on PFL/AFL. |
 
+The mixer runs at one sample rate, set by the **Sample Rate** property (default 48 kHz,
+construction-time). Every input is resampled to it, so inputs at different rates can be
+mixed, and every output (main, monitor, aux, group) runs at it.
+
 ---
 
 ## 2. Channel strip
@@ -151,8 +155,10 @@ Every channel can be independently routed to **Main**, to any of the
 - **Aux Sends** have an **individual send level per channel × per bus**
   (0.0 = no send, 2.0 = +6 dB send). Each aux send can independently
   be set to pre-fader or post-fader.
-- **All aux buses default to *post-fader***. Flip a bus to pre-fader
-  when using it for stage monitors or IEMs.
+- **All aux sends default to *post-fader***. Set the sends into a bus to
+  pre-fader when using it for stage monitors or IEMs. Pre/post is a
+  construction-time setting: changing it rebuilds the mixer when the
+  flow restarts, it does not switch live.
 
 ### Quick routing matrix view
 
@@ -223,6 +229,8 @@ headphone monitoring.
      ┌─ from EVERY channel ────────────────────────────────┐
      │   PFL tap (pre-fader)  ─► PFL switch ──┐            │
      │   AFL tap (post-fader) ─► AFL switch ──┤            │
+     ├─ from EVERY aux and group master ──────┤            │
+     │   AFL tap (post-master) ─► AFL switch ─┤            │
      │                                        ▼            │
      │                                   SOLO MIX          │
      └────────────────────────────────────────┬────────────┘
@@ -234,22 +242,23 @@ headphone monitoring.
 
 **Behaviour:**
 
-- When **no channel** has PFL or AFL active, the Monitor bus is fed by
+- When **nothing** has PFL or AFL active, the Monitor bus is fed by
   the **Main output** — you hear what FOH hears.
-- As soon as **any channel** has PFL or AFL engaged, the Monitor bus
-  **automatically switches** to the **Solo bus** — you hear only the
-  soloed channels.
+- As soon as **any channel** has PFL or AFL engaged, or any aux or group
+  bus has AFL engaged, the Monitor bus **automatically switches** to the
+  **Solo bus** — you hear only what is soloed.
 - Release all PFL/AFL buttons → Monitor returns to Main.
 
 The switchover is fully automatic. The operator only presses **PFL** or
-**AFL** on individual channels; the monitor source follows.
+**AFL** on individual channels or buses; the monitor source follows.
 
 | Button | Listens to | Affected by channel fader? |
 |---|---|---|
 | **PFL** | Channel pre-fader tap | **No** — independent of fader/mute. |
 | **AFL** | Channel post-fader tap | **Yes** — tracks fader and mute. |
+| **Aux / Group AFL** | Bus post-master tap | **Yes** — tracks the bus master fader and mute. |
 
-Multiple PFL/AFL channels can be active simultaneously — they sum into
+Multiple PFL/AFL taps can be active simultaneously — they sum into
 the Solo bus.
 
 ---
@@ -319,6 +328,7 @@ All meters update at **100 ms** and report RMS, Peak and Decay.
 | Number of channels | 8 |
 | Number of aux buses | 0 |
 | Number of groups | 0 |
+| Sample rate | 48 kHz |
 | Main fader | 1.0 (unity) |
 | Main mute | Off |
 | Main Compressor | disabled |
@@ -349,10 +359,17 @@ discontinuity click of a hard step.
 | Groups | 0 | 32 |
 | EQ bands per strip | — | 4 (Low / Low-Mid / Hi-Mid / High) |
 
-Channel count, aux-bus count and group count are **construction-time
-properties** — they define how the mixer is built and require restarting
-the flow to change. Everything else (faders, mutes, sends, processing
-parameters, routing switches, PFL/AFL) is live-editable.
+These are **construction-time properties** — they define how the mixer is
+built and require restarting the flow to change:
+
+- channel, aux-bus and group counts
+- aux send pre/post-fader
+- sample rate
+- DSP backend (Rust or LV2)
+- Force Live, Latency, Internal Bus Latency and Min Upstream Latency
+
+Everything else (faders, mutes, send levels, processing parameters,
+routing switches, PFL/AFL) is live-editable.
 
 ---
 
@@ -364,8 +381,8 @@ parameters, routing switches, PFL/AFL) is live-editable.
 | **Post-fader** | Tapped *after* the channel fader and mute — tracks them. |
 | **PFL** | Pre-Fader Listen. Solo-style listen tap from before the fader. |
 | **AFL** | After-Fader Listen. Solo-style listen tap from after the fader. |
-| **Solo bus** | Internal mix that sums all active PFL + AFL sends. |
-| **Monitor bus** | The bus driving the operator's control-room / headphone output. Automatically fed by Main, or by Solo when any PFL/AFL is engaged. |
+| **Solo bus** | Internal mix that sums all active PFL + AFL taps, from channels and from aux/group masters. |
+| **Monitor bus** | The bus driving the operator's control-room / headphone output. Automatically fed by Main, or by Solo when any PFL/AFL (channel, aux or group) is engaged. |
 | **Group / Subgroup** | A stereo sub-master that channels can be routed into. Has its own output **and** feeds Main. |
 | **Aux bus** | A stereo send bus, independent of Main. Used for FX, monitors, IEMs, recorders. Each channel has its own send level into each aux. |
 | **Route to Main / Group** | A simple on/off routing switch. The destination bus's master fader sets the final level. |

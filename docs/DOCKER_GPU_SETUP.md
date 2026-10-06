@@ -1,5 +1,7 @@
 # Docker GPU Setup (NVIDIA)
 
+> Code is the source of truth — this may have drifted; read the code for the current implementation.
+
 This guide covers setting up NVIDIA GPU support for Strom in Docker, enabling hardware-accelerated video encoding (NVENC), decoding (NVDEC), and GPU-accelerated video processing with CUDA-GL interop.
 
 ## Prerequisites

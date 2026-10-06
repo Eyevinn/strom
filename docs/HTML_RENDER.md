@@ -111,7 +111,7 @@ Import this flow via the UI (Import → JSON) to render a live wind map with WHE
       "id": "whep_0",
       "block_definition_id": "builtin.whep_output",
       "properties": {
-        "mode": "video",
+        "num_audio_tracks": 0,
         "endpoint_id": "html render"
       },
       "position": {"x": 400.0, "y": 200.0}

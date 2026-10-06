@@ -21,6 +21,7 @@ Common questions are answered in the [FAQ](FAQ.md).
 - [AUDIO_MIXER_OPERATOR_GUIDE.md](AUDIO_MIXER_OPERATOR_GUIDE.md) — audio mixing console signal flow and operation.
 - [HTML_RENDER.md](HTML_RENDER.md) — render web pages as video sources (CEF / `strom-full`).
 - [STREAM_SYNCHRONIZATION.md](STREAM_SYNCHRONIZATION.md) — aligning multiple inputs with PTP/NTP clocks.
+- [DSK_TEST_URLS.md](DSK_TEST_URLS.md) — ready-made HTML graphics for testing DSK overlays.
 
 The full set of built-in blocks and their properties is best browsed in the app's element
 palette and inspector — the code is the source of truth. Older block design writeups live in

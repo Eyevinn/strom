@@ -52,7 +52,7 @@ Yes — PostgreSQL is supported for production. See [POSTGRESQL.md](POSTGRESQL.m
 
 ### How do I serve over HTTPS?
 Built-in TLS (`STROM_TLS_CERT` / `STROM_TLS_KEY`) with hot-reload, or terminate TLS at a
-reverse proxy. See the [root README](../README.md) HTTPS/TLS section.
+reverse proxy. See [DOCKER.md](DOCKER.md#reverse-proxy).
 
 ## Features
 
@@ -61,9 +61,9 @@ Use the **Vision Mixer** block — broadcast-style preview/program switching wit
 DSK, fade-to-black, PiP, and multiview. See [VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md).
 
 ### What's the difference between the Compositor and the Vision Mixer?
-The Compositor is Strom's first-generation video compositor (WIP, known limitations). The
-**Vision Mixer** is the more developed switcher and the recommended path — it's what Open
-Live uses. See [VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md) (the old
+The Compositor is Strom's first-generation video compositor. It is deprecated and no longer
+maintained; the block is listed as "Video Compositor (deprecated)". Use the **Vision Mixer**
+— it's what Open Live uses. See [VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md) (the old
 compositor's writeup is in [archive/COMPOSITOR_EDITOR.md](archive/COMPOSITOR_EDITOR.md)).
 
 ### Can I render web pages / HTML graphics as a video source?

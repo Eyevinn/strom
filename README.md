@@ -89,7 +89,7 @@ Quick links: [Open Live setup](docs/OPEN_LIVE_SETUP.md) · [Docker](docs/DOCKER.
 │  - Element palette              │
 │  - Property inspector           │
 └────────────┬────────────────────┘
-             │ REST + WebSocket/SSE
+             │ REST + WebSocket    
 ┌────────────▼────────────────────┐
 │  Backend (Rust + Axum)          │
 │  - Flow manager                 │
@@ -106,7 +106,7 @@ Quick links: [Open Live setup](docs/OPEN_LIVE_SETUP.md) · [Docker](docs/DOCKER.
 
 ## Configuration
 
-Configure via config file, CLI arguments, or environment variables (in priority order):
+Configure via CLI arguments, environment variables, or a config file (highest priority first):
 
 ```bash
 --port 8080                      # or STROM_PORT=8080
@@ -114,12 +114,12 @@ Configure via config file, CLI arguments, or environment variables (in priority 
 --database-url postgresql://...   # or STROM_DATABASE_URL=... (production)
 ```
 
-Copy `.strom.toml.example` to `.strom.toml` for all options. Key topics have dedicated guides: [storage](docs/POSTGRESQL.md), [authentication](docs/AUTHENTICATION.md), and HTTPS/TLS (built-in `--tls-cert`/`--tls-key` with hot-reload, or a reverse proxy). See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full option list.
+Copy `.strom.toml.example` to `.strom.toml` for all options. Key topics have dedicated guides: [storage](docs/POSTGRESQL.md), [authentication](docs/AUTHENTICATION.md), and HTTPS/TLS (built-in `--tls-cert`/`--tls-key` with hot-reload, or a reverse proxy). `strom --help` lists every CLI option; [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) covers the common ones.
 
 ## API & MCP
 
-- REST + WebSocket/SSE API, with interactive OpenAPI docs at `/swagger-ui`.
-- `WS /api/ws` and `GET /api/events` for real-time state and pipeline events.
+- REST + WebSocket API, with interactive OpenAPI docs at `/swagger-ui`.
+- `WS /api/ws` for real-time state and pipeline events.
 - gst-launch import/export via `POST /api/gst-launch/parse` and `/export`.
 - Model Context Protocol over HTTP at `/api/mcp` — see [docs/MCP.md](docs/MCP.md).
 

@@ -1,5 +1,7 @@
 # Integration Options
 
+> Code is the source of truth — this may have drifted; read the code for the current implementation.
+
 How to integrate with Strom from the outside: the REST/OpenAPI API and the MCP endpoint.
 
 ## MCP (Model Context Protocol)

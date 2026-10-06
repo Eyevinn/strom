@@ -2,6 +2,74 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.7.0-alpha2] - 2026-10-05
+
+### Fixed
+- WHIP Input: link a session pad only after its branch is PLAYING (#976)
+- WHIP Input: release only a slot the releasing session still holds (#972)
+- WHIP Input: judge a seat's audio and video separately (#983)
+- WHEP Output: re-adapt the video input when its caps change (#985)
+- Media Player: start the internal pipeline on the flow's clock (#984)
+- Media Player: stop a burst of jumps and pauses deadlocking the player (#986)
+- Mixer: stop group buses stacking the block latency on main (#971)
+- Audio Encoder: refuse an out-of-range bitrate instead of panicking (#982)
+- Thumbnail: adapt the thumbnail tap to CUDA memory on its tee (#973)
+- Docker: keep the CEF cache across a strom-full restart (#979)
+
+### Changed
+- Frontend: use the shared `strom-types` API types instead of local copies (#915)
+- Build: Rust 1.98.1 and cargo-zigbuild 0.23.4 (#941)
+
+### CI
+- Stop compiling the tree three times on macOS/Windows PRs; drop NVML on macOS (#990)
+- sccache: probe a write in the preflight, add a concurrency group (#989)
+- Pass gstcefsrc build inputs to the shell through env (#980)
+- Tests: run the GPU vision mixer GL tests on Linux CI, guard an empty EFP `data_stream_ids`, and stabilise the WHIP watchdog, mixer rewind, DSK and media player bridge tests (#975, #977, #978, #981, #988, #991)
+
+---
+
+## [0.7.0-alpha1] - 2026-10-02
+
+### Added
+- HTML Input: a block that renders a web page as a video (and audio) source, with remote control of the page over DevTools (#879)
+- Media Player: play live streams, extra tracks and URLs (#945)
+- Auth: sign the login cookie so logins survive a restart (#947)
+
+### Changed
+- Audio Mixer and Live Audio Router: resample every input to one configurable sample rate, 48 kHz by default (#946)
+- GStreamer: decide video input adapters in one place, and write down the block contract (#951)
+
+### Fixed
+- WHIP Input: consolidate the fixes from #759, #893, #787, #901 and #943 (#957)
+- WHIP Input: judge a session by the media it produces, not what arrives (#756)
+- WHIP Input: null a session bin `whipserversrc` removes mid-teardown (#763)
+- WHEP Output: unhide player audio controls; expose `Location` cross-origin (#811)
+- Vision Mixer: accept CUDA-memory inputs on the GPU backend (#948)
+- Vision Mixer: keep an Auto-format input on formats `videocrop` takes (#925)
+- Vision Mixer: keep a source's new shape when it changes size (#894)
+- GStreamer: keep NVDEC frames on the GPU into a GL input (#952)
+- Mixers: stop a late first input rewinding a live aggregator (#895)
+- Mixer: stop the monitor bus stacking the block latency (#920)
+- Mixer: clamp negative counts and live knee writes (#904)
+- Media Player: build file URIs that work on Windows (#959)
+- Media Player: drop a buffer with no PTS at the bridge (#961)
+- Auth: accept a percent-encoded `?auth_token=` (#908)
+- Frontend: fix two request-pad bugs in the graph (#911)
+
+### Performance
+- WHEP Output: convert a video input once, not once per viewer (#949)
+
+### Tests
+- Make backend unit tests guard real code, replace demonstration tests with guards on the real blocks, and consolidate the integration tests (#905, #907, #909, #910, #912)
+- GL: fail instead of skipping when the GPU mixer breaks (#917, #954)
+- Stabilise the AES67, live audio router and vision mixer tests, and run the two SRT integration tests on Windows again (#923, #929, #950, #958)
+
+### Documentation
+- Make the PR template ask for claims and their evidence (#853)
+- Use `--locked` when installing trunk (#940)
+
+---
+
 ## [0.6.11] - 2026-09-29
 
 ### Added

@@ -1,5 +1,7 @@
 # PostgreSQL Storage
 
+> Code is the source of truth — this may have drifted; read the code for the current implementation.
+
 Strom supports PostgreSQL as an alternative to JSON file storage for persisting flows.
 
 ## Setup
@@ -110,6 +112,7 @@ Strom uses sqlx with a connection pool (max 5 connections per instance). This pr
 
 ## Fallback to JSON
 
-If `STROM_DATABASE_URL` is not set, Strom falls back to JSON file storage using the configured flows path (default: `~/.local/share/strom/flows.json`).
+If `STROM_DATABASE_URL` is not set, Strom falls back to JSON file storage using the configured flows path (default: `flows.json` in the data directory; see
+[DEVELOPMENT.md](DEVELOPMENT.md#backend-server) for the per-platform location).
 
 Setting it to an empty or whitespace-only value counts as not set, so an orchestrator that forwards a blank for an unconfigured field gets the JSON fallback rather than a failed connection. This holds for every `STROM_*` variable.
