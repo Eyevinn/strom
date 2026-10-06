@@ -8,7 +8,7 @@
 //! plans the take from there ([`WebAnchor`], [`web_stinger_start`]).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,11 +28,9 @@ pub const PAGE_FIRST_FRAME_GRACE: Duration = Duration::from_millis(100);
 
 /// Delay from a take to the timestamp a page's first animation frame would
 /// carry, used when the page paints nothing prompt to time from. Measured on
-/// cefsrc's own output: a page that opens on unchanged pixels cut 91-93 ms
-/// late by its own clock with 120 ms on the fixed-rate production gstcefsrc
-/// (Linux, software CEF), so its animation starts about 28 ms after the
-/// take. A gstcefsrc that emits frames as Chromium paints was measured at
-/// about 20 ms on the earlier web stinger branch.
+/// cefsrc's own output: about 28 ms on the fixed-rate production gstcefsrc
+/// (Linux, software CEF). About 20 ms on one that emits frames as Chromium
+/// paints, not measured on this probe.
 pub const PAGE_FIRST_FRAME_DELAY_PAINTED: Duration = Duration::from_millis(20);
 pub const PAGE_FIRST_FRAME_DELAY_FIXED_RATE: Duration = Duration::from_millis(30);
 
@@ -43,6 +41,19 @@ pub const VARIABLE_RATE_PROPERTY: &str = "max-video-framerate";
 /// The URL fragment a take sets to trigger a page.
 pub fn take_fragment(token: u64) -> String {
     format!("strom-take-{token}")
+}
+
+/// A stinger page's URL cannot carry a fragment of its own: a take replaces
+/// it, which would move a page that routes by its fragment off its route.
+pub fn check_page_url(url: &str) -> Result<(), String> {
+    match url.split_once('#') {
+        Some((_, fragment)) if !fragment.is_empty() => Err(format!(
+            "a stinger page's URL cannot have a #fragment ('#{}'): a take sets the fragment \
+             to trigger the page",
+            fragment
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// A page stinger's settings, from its HTML Input block.
@@ -190,14 +201,16 @@ pub fn web_first_output_frame(first_frame_ns: u64, page_frame_ns: u64, grid: Fra
 
 /// Watches a page's output for its first new frame after a take.
 ///
-/// Wait for [`WebAnchor::ready`] before changing the URL, then call
-/// [`WebAnchor::taken`]. Dropping it removes the probe.
+/// On a fixed-rate gstcefsrc, wait for [`WebAnchor::ready`] before changing
+/// the URL, then call [`WebAnchor::taken`]. Dropping it removes the probe.
 pub struct WebAnchor {
     /// Weak, so a take in flight never keeps a stopped flow's pipeline alive.
     pad: gst::glib::WeakRef<gst::Pad>,
     probe: Option<gst::PadProbeId>,
-    /// Whether a baseline buffer has passed, so the next can be judged new.
-    baseline: Arc<AtomicBool>,
+    /// Buffers seen before the take.
+    before_take: Arc<AtomicU32>,
+    /// Fresh paints seen before the take, after the first buffer.
+    idle_paints: Arc<AtomicU32>,
     /// Running time at which the take changed the URL; `u64::MAX` before.
     taken_at_ns: Arc<AtomicU64>,
     /// Newest timestamp seen on the output, repeats included.
@@ -213,23 +226,25 @@ impl WebAnchor {
     /// running time it makes them at, which every element down to the mixer
     /// keeps.
     pub fn watch(pad: &gst::Pad, delay: Duration) -> Option<Self> {
-        let baseline = Arc::new(AtomicBool::new(false));
+        let before_take = Arc::new(AtomicU32::new(0));
+        let idle_paints = Arc::new(AtomicU32::new(0));
         let taken_at_ns = Arc::new(AtomicU64::new(u64::MAX));
         let output_pts = Arc::new(AtomicU64::new(u64::MAX));
         let first_pts = Arc::new(AtomicU64::new(u64::MAX));
         let last_memory = AtomicUsize::new(0);
-        let (p_baseline, p_taken, p_output, p_first) = (
-            Arc::clone(&baseline),
+        let (p_before, p_idle, p_taken, p_output, p_first) = (
+            Arc::clone(&before_take),
+            Arc::clone(&idle_paints),
             Arc::clone(&taken_at_ns),
             Arc::clone(&output_pts),
             Arc::clone(&first_pts),
         );
         // A per-buffer probe for one take, removed once the take is planned:
-        // a few atomic loads, stores and compares per buffer. The first
-        // buffer only sets the baseline. After the take only new content
-        // counts: a GAP-flagged repeat, or a fixed-rate gstcefsrc re-sending
-        // its current frame, shares that frame's memory; a fresh paint is a
-        // new allocation.
+        // a few atomic loads, stores and compares per buffer. Only new
+        // content counts: a GAP-flagged repeat, or a fixed-rate gstcefsrc
+        // re-sending its current frame, shares the previous buffer's memory;
+        // a fresh paint is a new allocation. With no buffer before it, as
+        // from a gstcefsrc that sends only paints, a buffer is new.
         let probe = pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
             let Some(buffer) = info.buffer() else {
                 return gst::PadProbeReturn::Ok;
@@ -243,18 +258,16 @@ impl WebAnchor {
             let Some(pts) = buffer.pts().map(|t| t.nseconds()) else {
                 return gst::PadProbeReturn::Ok;
             };
-            if !p_baseline.swap(true, Ordering::Relaxed) {
-                return gst::PadProbeReturn::Ok;
-            }
+            let fresh = memory != previous && !buffer.flags().contains(gst::BufferFlags::GAP);
             let taken_at = p_taken.load(Ordering::Relaxed);
             if taken_at == u64::MAX {
+                if p_before.fetch_add(1, Ordering::Relaxed) > 0 && fresh {
+                    p_idle.fetch_add(1, Ordering::Relaxed);
+                }
                 return gst::PadProbeReturn::Ok;
             }
             p_output.store(pts, Ordering::Relaxed);
-            if pts >= taken_at
-                && memory != previous
-                && !buffer.flags().contains(gst::BufferFlags::GAP)
-            {
+            if pts >= taken_at && fresh {
                 let _ =
                     p_first.compare_exchange(u64::MAX, pts, Ordering::Relaxed, Ordering::Relaxed);
             }
@@ -263,7 +276,8 @@ impl WebAnchor {
         Some(Self {
             pad: pad.downgrade(),
             probe: Some(probe),
-            baseline,
+            before_take,
+            idle_paints,
             taken_at_ns,
             output_pts,
             first_pts,
@@ -271,13 +285,21 @@ impl WebAnchor {
         })
     }
 
-    /// Wait, up to `limit`, for the baseline buffer, so a page frame painted
-    /// just after the take is never mistaken for it.
+    /// Wait, up to `limit`, for two buffers from a fixed-rate gstcefsrc: the
+    /// first, so a repeat of it after the take is not taken for a paint, and
+    /// a second, to tell whether the page paints while at rest.
     pub async fn ready(&self, limit: Duration) {
         let until = std::time::Instant::now() + limit;
-        while !self.baseline.load(Ordering::Relaxed) && std::time::Instant::now() < until {
+        while self.before_take.load(Ordering::Relaxed) < 2 && std::time::Instant::now() < until {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
+    }
+
+    /// Whether the page painted new content while at rest, before the take.
+    /// Such a page's first frame after the take may be a paint of its rest
+    /// state rather than of its animation.
+    pub fn paints_at_rest(&self) -> bool {
+        self.idle_paints.load(Ordering::Relaxed) > 0
     }
 
     /// Record that the take changed the page's URL at running time `now_ns`.
@@ -480,6 +502,87 @@ mod tests {
         // A mix runs out with the page, not past it.
         let plan = settings(1_000, 700, 500).plan(FRAME_30).unwrap();
         assert_eq!(plan.mix_ms, 300);
+    }
+
+    /// A src pad linked to a sink that takes anything, to drive the probe.
+    fn pads() -> (gst::Pad, gst::Pad) {
+        gst::init().unwrap();
+        let src = gst::Pad::builder(gst::PadDirection::Src).build();
+        let sink = gst::Pad::builder(gst::PadDirection::Sink)
+            .chain_function(|_, _, _| Ok(gst::FlowSuccess::Ok))
+            .build();
+        src.link(&sink).unwrap();
+        sink.set_active(true).unwrap();
+        src.set_active(true).unwrap();
+        (src, sink)
+    }
+
+    fn buffer(pts_ms: u64) -> gst::Buffer {
+        let mut b = gst::Buffer::with_size(16).unwrap();
+        b.get_mut()
+            .unwrap()
+            .set_pts(gst::ClockTime::from_mseconds(pts_ms));
+        b
+    }
+
+    /// The same frame again, as a fixed-rate gstcefsrc re-sends it.
+    fn repeat(of: &gst::Buffer, pts_ms: u64) -> gst::Buffer {
+        let mut b = of.copy();
+        b.get_mut()
+            .unwrap()
+            .set_pts(gst::ClockTime::from_mseconds(pts_ms));
+        b
+    }
+
+    #[test]
+    fn a_repeat_after_the_take_is_not_the_first_frame() {
+        let (src, _sink) = pads();
+        let anchor = WebAnchor::watch(&src, PAGE_FIRST_FRAME_DELAY_FIXED_RATE).unwrap();
+        let rest = buffer(0);
+        let _ = src.push(rest.clone());
+        let _ = src.push(repeat(&rest, 33));
+        assert!(!anchor.paints_at_rest());
+        anchor.taken(50 * MS);
+        let _ = src.push(repeat(&rest, 66));
+        assert_eq!(anchor.first_frame_ns(), None);
+        let paint = buffer(100);
+        let _ = src.push(paint.clone());
+        assert_eq!(anchor.first_frame_ns(), Some(100 * MS));
+        drop((rest, paint));
+    }
+
+    #[test]
+    fn a_paint_only_page_starts_on_its_first_buffer() {
+        // A gstcefsrc that sends only paints sends nothing while the page
+        // rests, so the first buffer after the take is the page's start.
+        let (src, _sink) = pads();
+        let anchor = WebAnchor::watch(&src, PAGE_FIRST_FRAME_DELAY_PAINTED).unwrap();
+        anchor.taken(50 * MS);
+        let _ = src.push(buffer(70));
+        assert_eq!(anchor.first_frame_ns(), Some(70 * MS));
+    }
+
+    #[test]
+    fn a_page_painting_at_rest_is_noticed() {
+        let (src, _sink) = pads();
+        let anchor = WebAnchor::watch(&src, PAGE_FIRST_FRAME_DELAY_FIXED_RATE).unwrap();
+        // Kept alive, as gstcefsrc keeps its current frame while it makes
+        // the next: a freed frame's memory could be handed out again.
+        let first = buffer(0);
+        let _ = src.push(first.clone());
+        assert!(!anchor.paints_at_rest(), "the first buffer cannot tell");
+        let second = buffer(33);
+        let _ = src.push(second.clone());
+        assert!(anchor.paints_at_rest());
+        drop((first, second));
+    }
+
+    #[test]
+    fn a_page_url_with_a_fragment_is_refused() {
+        let err = check_page_url("https://example.com/graphics/#/stinger").unwrap_err();
+        assert!(err.contains("#/stinger"), "{err}");
+        assert!(check_page_url("https://example.com/graphics/").is_ok());
+        assert!(check_page_url("https://example.com/graphics/#").is_ok());
     }
 
     #[test]
