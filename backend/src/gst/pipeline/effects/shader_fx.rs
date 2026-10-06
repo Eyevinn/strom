@@ -27,11 +27,52 @@ use crate::gst::transitions::{TransitionController, TransitionType};
 /// with stale parameters, then the fragment, then trigger the live recompile.
 /// The slot runs in passthrough while it holds the identity fragment, and
 /// leaves it from the next buffer, which renders with the new fragment.
-fn apply_shader(elem: &gst::Element, fragment: &str, uniforms: &gst::Structure) {
+fn apply_shader(
+    elem: &gst::Element,
+    fragment: &str,
+    uniforms: &gst::Structure,
+) -> shaders::PassthroughTicket {
     elem.set_property("uniforms", uniforms);
     elem.set_property("fragment", fragment);
     elem.set_property("update-shader", true);
-    shaders::request_passthrough(elem, fragment == shaders::identity_fragment());
+    shaders::request_passthrough(elem, fragment == shaders::identity_fragment())
+}
+
+/// Margin past a transition's end before its slot goes back to passthrough:
+/// covers float32 rounding of the shader's `time` uniform, so the program
+/// has evaluated to its identity end state on every frame before it.
+const TRANSITION_END_MARGIN: gst::ClockTime = gst::ClockTime::from_mseconds(50);
+
+/// Put a transition slot back in passthrough once its program has reached
+/// its identity end state: the first buffer whose PTS (the shader's own
+/// `time`) is at least `end`. Stands down if the slot is reprogrammed or
+/// reset first (the ticket is then stale).
+///
+/// Probe hygiene: this is a BUFFER probe that runs for the length of one
+/// transition only, then removes itself. Per buffer it does one atomic load
+/// and one PTS compare — no locks, no allocation. It captures a weak element
+/// ref (pads own their probes — a strong ref would leak the pipeline).
+fn passthrough_at_end(fx: &gst::Element, ticket: shaders::PassthroughTicket, end: gst::ClockTime) {
+    let Some(pad) = fx.static_pad("sink") else {
+        return;
+    };
+    let weak = fx.downgrade();
+    let end = end + TRANSITION_END_MARGIN;
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+        if !ticket.is_current() {
+            return gst::PadProbeReturn::Remove;
+        }
+        let Some(pts) = info.buffer().and_then(|b| b.pts()) else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if pts < end {
+            return gst::PadProbeReturn::Ok;
+        }
+        if let Some(fx) = weak.upgrade() {
+            ticket.enter_passthrough_if_current(&fx);
+        }
+        gst::PadProbeReturn::Remove
+    });
 }
 
 /// How long the incoming pad stays transparent at the start of a classic
@@ -72,6 +113,11 @@ fn neutral_uniforms() -> gst::Structure {
 /// self-removing one-shot pad probe samples the first buffer's PTS and
 /// programs the real `u_start` in the branch's own timebase.
 ///
+/// An upright wipe ends fully revealed — an identity pass — so once it has
+/// run its course the slot goes back to passthrough. An inverted wipe ends
+/// fully transparent, which is not an identity pass, so its slot keeps
+/// rendering until the next take resets it.
+///
 /// Probe hygiene: fires once and removes itself (not a hot-path probe);
 /// captures only a weak element ref (pads own their probes — a strong ref
 /// would leak the pipeline).
@@ -81,7 +127,7 @@ fn program_wipe_at_first_buffer(
     duration_s: f64,
     inverted: bool,
 ) {
-    apply_shader(fx, &kind.fragment(), &kind.parked_uniforms(inverted));
+    let ticket = apply_shader(fx, &kind.fragment(), &kind.parked_uniforms(inverted));
     let Some(pad) = fx.static_pad("sink") else {
         return;
     };
@@ -110,6 +156,10 @@ fn program_wipe_at_first_buffer(
             kind.name(),
             start_s
         );
+        if !inverted {
+            let end = pts + gst::ClockTime::from_nseconds((duration_s * 1e9) as u64);
+            passthrough_at_end(&fx, ticket.clone(), end);
+        }
         gst::PadProbeReturn::Remove
     });
 }
@@ -366,7 +416,14 @@ impl PipelineManager {
         let fx = self.fx_element(&format!("{}:fx_pgm_take", block_instance_id))?;
         let start_s = start.nseconds() as f64 / 1e9;
         let dur_s = duration_ms as f64 / 1000.0;
-        apply_shader(fx, &kind.fragment(), &kind.run_uniforms(start_s, dur_s));
+        let ticket = apply_shader(fx, &kind.fragment(), &kind.run_uniforms(start_s, dur_s));
+        // The envelope is back to zero (identity) once the shader's `time`
+        // (buffer PTS, the timebase `start` is given in) passes the end.
+        passthrough_at_end(
+            fx,
+            ticket,
+            start + gst::ClockTime::from_mseconds(duration_ms),
+        );
         Ok(())
     }
 

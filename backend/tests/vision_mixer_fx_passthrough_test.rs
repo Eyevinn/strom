@@ -38,12 +38,15 @@ struct SlotCounter {
     last_in: AtomicUsize,
     passed: AtomicU64,
     rendered: AtomicU64,
+    /// Buffers passed through after the slot had rendered one.
+    passed_after_render: AtomicU64,
 }
 
 impl SlotCounter {
     fn reset(&self) {
         self.passed.store(0, Ordering::SeqCst);
         self.rendered.store(0, Ordering::SeqCst);
+        self.passed_after_render.store(0, Ordering::SeqCst);
     }
     fn get(&self) -> (u64, u64) {
         (
@@ -73,6 +76,9 @@ fn attach_counter(elem: &gst::Element) -> Arc<SlotCounter> {
             if let Some(b) = info.buffer() {
                 if b.as_ptr() as usize == c.last_in.load(Ordering::SeqCst) {
                     c.passed.fetch_add(1, Ordering::SeqCst);
+                    if c.rendered.load(Ordering::SeqCst) > 0 {
+                        c.passed_after_render.fetch_add(1, Ordering::SeqCst);
+                    }
                 } else {
                     c.rendered.fetch_add(1, Ordering::SeqCst);
                 }
@@ -351,7 +357,8 @@ fn idle_fx_slots_pass_buffers_through_and_effects_still_apply() {
     }
     let h = Harness::start("vmfxpt", 2, 640, 360);
     let settle = Duration::from_secs(30);
-    let window = Duration::from_millis(700);
+    // Long enough for frames to reach every slot on software GL in CI.
+    let window = Duration::from_secs(2);
 
     h.wait_for_pgm("the red input 0", settle, |r, _, _| r > 0.9);
     h.assert_all_idle("after start", window);
@@ -364,14 +371,15 @@ fn idle_fx_slots_pass_buffers_through_and_effects_still_apply() {
     h.wait_for_pgm("the input 0 look", Duration::from_secs(5), |r, _, g| {
         r < 0.05 && g > 0.9
     });
-    let (passed, rendered) = h.slot("fx_look_0").get();
-    assert!(rendered > 0, "fx_look_0 never rendered its look");
-    // At most the buffer already inside the slot when the look was set may
-    // pass through untouched; every later one is rendered.
-    assert!(
-        passed <= 1,
-        "fx_look_0 passed {} buffers through after the look was set",
-        passed
+    let look = h.slot("fx_look_0");
+    assert!(look.get().1 > 0, "fx_look_0 never rendered its look");
+    // Buffers that reached the slot before the look was set may pass through
+    // untouched; once it has rendered one, it renders every later one.
+    let passed_after = look.passed_after_render.load(Ordering::SeqCst);
+    assert_eq!(
+        passed_after, 0,
+        "fx_look_0 passed {} buffers through after it started rendering the look",
+        passed_after
     );
     h.manager
         .set_vision_mixer_effect(h.block_id, EffectTarget::Input(0), &VideoEffect::None)
@@ -464,6 +472,10 @@ fn idle_fx_slots_pass_buffers_through_and_effects_still_apply() {
         Duration::from_secs(5),
         |_, w, _| w > 0.9,
     );
+    // Once the envelope has run out the slot goes back to passthrough by
+    // itself, without waiting for the next take.
+    std::thread::sleep(Duration::from_millis(500));
+    h.assert_all_idle("after the master-FX take ran out", window);
 
     assert_eq!(
         h.manager.pipeline().current_state(),
