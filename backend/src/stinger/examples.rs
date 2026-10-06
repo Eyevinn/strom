@@ -407,7 +407,10 @@ mod tests {
     fn the_blade_never_paints_into_its_matte() {
         let ex = &examples()[1];
         let w = (2 * W) as usize;
-        for i in 0..ex.frames {
+        // The frames where the blade nears and passes the right edge, where
+        // its glow and trails could cross into the matte. Every frame at
+        // full size costs seconds in a debug build, next to timing tests.
+        for i in (ex.frames / 2..ex.frames).step_by(3).chain([ex.frames - 1]) {
             let t = i as f64 / (ex.frames - 1) as f64;
             let f = render_frame(ex, t).unwrap();
             for y in (0..H as usize).step_by(20) {
