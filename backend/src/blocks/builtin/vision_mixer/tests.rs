@@ -816,3 +816,192 @@ fn audio_meter_does_not_hold_the_upstream_thread_in_preroll() {
     }
     pipeline.set_state(gst::State::Null).unwrap();
 }
+
+/// Overlay state with four inputs labelled A-D, for the live label tests.
+fn four_input_overlay_state() -> std::sync::Arc<super::overlay::VisionMixerOverlayState> {
+    let lo = layout::compute_layout(1280, 720, 4, 0, ASPECT_16_9, false);
+    std::sync::Arc::new(super::overlay::VisionMixerOverlayState::new(
+        4,
+        0,
+        0,
+        1,
+        vec!["A".into(), "B".into(), "C".into(), "D".into()],
+        lo,
+        1920,
+        1080,
+        false,
+        super::overlay::PipInitialState::default(),
+    ))
+}
+
+/// A label changed on a running mixer has to reach the multiview on the next
+/// tick, not wait for something else (a take, the clock) to redraw it. The
+/// renderer only redraws on a state change, so the label has to count as one.
+#[test]
+fn live_label_change_redraws_the_multiview() {
+    use super::overlay::OverlayRenderer;
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+    use gstreamer_app as gst_app;
+    use std::time::{Duration, SystemTime};
+
+    gst::init().unwrap();
+
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", "BGRA")
+        .field("width", 1280i32)
+        .field("height", 720i32)
+        .field("framerate", gst::Fraction::new(50, 1))
+        .build();
+    let now_secs = || {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+
+    // The overlay clock also redraws once a second. A run that crosses a
+    // second boundary cannot tell the two apart, so it is retried.
+    for _attempt in 0..3 {
+        let state = four_input_overlay_state();
+        let appsrc = gst_app::AppSrc::builder()
+            .caps(&caps)
+            .format(gst::Format::Time)
+            .do_timestamp(true)
+            .max_buffers(2)
+            .build();
+        let appsink = gst_app::AppSink::builder().sync(false).build();
+        let pipeline = gst::Pipeline::new();
+        pipeline
+            .add_many([appsrc.upcast_ref::<gst::Element>(), appsink.upcast_ref()])
+            .unwrap();
+        appsrc.link(&appsink).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let mut renderer =
+            OverlayRenderer::new(appsrc.clone(), caps.clone(), state.clone(), 1280, 720);
+        let pull = || appsink.try_pull_sample(gst::ClockTime::from_mseconds(500));
+
+        let started = now_secs();
+        assert!(renderer.render_if_dirty(), "first render should push");
+        let first = pull().expect("first frame");
+
+        // Nothing changed: no new frame.
+        renderer.render_if_dirty();
+        let idle = appsink.try_pull_sample(gst::ClockTime::from_mseconds(100));
+
+        let flow_id = strom_types::FlowId::new_v4();
+        let block_id = "test-vm-live-label-redraw-block-id";
+        super::overlay::register_overlay_state(flow_id, block_id, state.clone());
+        let applied = super::apply_live_label(
+            block_id,
+            "input_2_label",
+            &PropertyValue::String("Guest".into()),
+        );
+        super::overlay::unregister_flow(&flow_id);
+        applied.expect("label should apply to the registered mixer");
+        renderer.render_if_dirty();
+        let relabelled = pull();
+        let crossed_second = now_secs() != started;
+
+        pipeline.set_state(gst::State::Null).unwrap();
+        if crossed_second {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+
+        assert!(idle.is_none(), "an unchanged overlay must not redraw");
+        let relabelled = relabelled.expect("a label change must redraw the multiview");
+        let bytes = |s: &gst::Sample| s.buffer().unwrap().map_readable().unwrap().to_vec();
+        assert_ne!(
+            bytes(&first),
+            bytes(&relabelled),
+            "the redrawn frame should show the new label"
+        );
+        return;
+    }
+    panic!("every attempt crossed a second boundary");
+}
+
+/// `input_N_label` maps to `_block`, which the live property path otherwise
+/// refuses as having no element to write. A label change on a running mixer
+/// has to be accepted, reach the overlay, and be stored with the flow so it
+/// survives a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_label_update_reaches_the_overlay_and_is_stored() {
+    use super::overlay::{register_overlay_state, unregister_flow};
+    use crate::state::AppState;
+    use strom_types::block::{BlockInstance, Position};
+
+    gstreamer::init().unwrap();
+    let storage_file = tempfile::NamedTempFile::new().unwrap();
+    let blocks_file = tempfile::NamedTempFile::new().unwrap();
+    let app = AppState::new(
+        crate::storage::JsonFileStorage::new(storage_file.path()),
+        blocks_file.path(),
+        std::env::temp_dir(),
+        vec![],
+        "all".to_string(),
+        vec![],
+        false,
+        false,
+    );
+
+    let block_id = "test-vm-live-label-block-id";
+    let mut flow = strom_types::Flow::new("vision-mixer-live-label-test");
+    flow.blocks.push(BlockInstance {
+        id: block_id.to_string(),
+        block_definition_id: super::BLOCK_ID.to_string(),
+        name: None,
+        properties: HashMap::from([("num_inputs".to_string(), PropertyValue::UInt(4))]),
+        position: Position { x: 0.0, y: 0.0 },
+        runtime_data: None,
+        computed_external_pads: None,
+    });
+    let flow_id = flow.id;
+    app.upsert_flow(flow).await.expect("upsert_flow");
+
+    // Stands in for the running mixer's build, which registers its overlay.
+    let state = four_input_overlay_state();
+    register_overlay_state(flow_id, block_id, state.clone());
+
+    let (_, rejected) = app
+        .update_block_properties(
+            &flow_id,
+            block_id,
+            HashMap::from([
+                (
+                    "input_1_label".to_string(),
+                    PropertyValue::String("Guest: Alex".to_string()),
+                ),
+                (
+                    "input_3_label".to_string(),
+                    PropertyValue::String(String::new()),
+                ),
+                (
+                    "input_7_label".to_string(),
+                    PropertyValue::String("Beyond".to_string()),
+                ),
+            ]),
+            None,
+            None,
+        )
+        .await
+        .expect("update_block_properties");
+    unregister_flow(&flow_id);
+
+    assert_eq!(
+        rejected.keys().collect::<Vec<_>>(),
+        vec!["input_7_label"],
+        "only the label beyond num_inputs should be refused: {rejected:?}"
+    );
+    assert_eq!(state.labels(), vec!["A", "Guest: Alex", "C", "In 4"]);
+
+    let stored = app.get_flow(&flow_id).await.expect("flow");
+    let block = stored.blocks.iter().find(|b| b.id == block_id).unwrap();
+    assert!(matches!(
+        block.properties.get("input_1_label"),
+        Some(PropertyValue::String(s)) if s == "Guest: Alex"
+    ));
+    assert!(!block.properties.contains_key("input_7_label"));
+}

@@ -1926,6 +1926,26 @@ impl AppState {
                 value
             };
 
+            // Vision mixer input labels are drawn by the multiview overlay, which
+            // reads them from its shared state, so they change without a restart.
+            // Handled before the `_block` rejection below.
+            if definition.id == crate::blocks::builtin::vision_mixer::BLOCK_ID
+                && crate::blocks::builtin::vision_mixer::properties::label_property_input(&name)
+                    .is_some()
+            {
+                match crate::blocks::builtin::vision_mixer::apply_live_label(
+                    block_instance_id,
+                    &name,
+                    &value,
+                ) {
+                    Ok(()) => to_persist.push((name, value)),
+                    Err(reason) => {
+                        rejected.insert(name, reason);
+                    }
+                }
+                continue;
+            }
+
             // The `_block` element_id marker is a virtual element for properties that
             // get baked into the block at build time — they have no underlying element
             // to write to live.
