@@ -56,8 +56,8 @@ The block contract (what a block emits and accepts, memory formats, output block
 
 ## Block IDs Are Only Unique Within a Flow
 - A block instance id is unique inside its flow, not across the instance. Flows created through the API keep the block ids the client sends, so two running flows can both have a block called `mixer`. Only the flow id is unique.
-- Never key global or shared state (registries, maps, caches, channel names) on the block id alone. Key on the pair `(flow_id, block_id)`, as `MediaPlayerKey` and the vision mixer overlay registries do.
-- A lookup that has only a block id has a bug: thread the flow id through to it.
+- Never add a new key on the block id alone for anything global or shared across flows (registries, maps, caches, channel names). Key on the pair `(flow_id, block_id)`, as `MediaPlayerKey` and the vision mixer overlay registries do. State that lives inside one flow (a `PipelineManager`'s own maps) may use the block id.
+- If you find existing code keyed on the block id alone, check whether that state is global (shared across flows). If it is, propose a fix or an issue for it, with the failure: what a second flow with the same block id breaks.
 
 ## API Contract
 - Every new endpoint must have a `#[utoipa::path(...)]` annotation AND be registered in `openapi.rs`. Both are required — an annotation without registration does not appear in the schema.
