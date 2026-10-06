@@ -26,6 +26,7 @@ use crate::gst::pipeline::effects::{
     apply_input_group_to_region, apply_pip_layout_to_region, find_pad,
 };
 use crate::gst::underlay::UnderlayCtx;
+use strom_types::FlowId;
 
 /// Watch the caps of every input video sink pad of the dist and multiview
 /// compositors. Each caps arrival/change triggers a full geometry refresh
@@ -35,6 +36,7 @@ use crate::gst::underlay::UnderlayCtx;
 /// `WeakRef`s in the handlers — pads own their handlers, and a strong
 /// element reference would create a cycle that leaks the pipeline.
 pub fn install_caps_probes(
+    flow_id: FlowId,
     block_id: &str,
     mixer: &gst::Element,
     mv_comp: &gst::Element,
@@ -81,7 +83,7 @@ pub fn install_caps_probes(
                 let (Some(mixer), Some(mv_comp)) = (mixer_weak.upgrade(), mv_weak.upgrade()) else {
                     return;
                 };
-                refresh_geometry(&block_id, &mixer, &mv_comp);
+                refresh_geometry(flow_id, &block_id, &mixer, &mv_comp);
             });
         });
     }
@@ -101,8 +103,8 @@ fn pad_caps_dims(element: &gst::Element, pad_name: &str) -> Option<(i32, i32)> {
 /// Re-apply aspect-correct geometry (and crop pixel values) for every input
 /// video pad from the current overlay state. Idempotent — safe to run on
 /// every caps event.
-fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element) {
-    let Some(state) = overlay::get_overlay_state(block_id) else {
+fn refresh_geometry(flow_id: FlowId, block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element) {
+    let Some(state) = overlay::get_overlay_state(&flow_id, block_id) else {
         return;
     };
     let n = state.num_inputs;
@@ -142,7 +144,7 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
         .store(dist_busy || mv_busy, Ordering::Relaxed);
     let retry = [dist_animation, mv_animation].into_iter().flatten().max();
     if let Some(wait) = retry {
-        refit_after(block_id, mixer, mv_comp, wait + REFIT_MARGIN);
+        refit_after(flow_id, block_id, mixer, mv_comp, wait + REFIT_MARGIN);
     }
 
     let mut aspects = SourceAspects::new();
@@ -321,7 +323,13 @@ fn last_keyframe(pad: &gst::Pad, prop: &str) -> Option<gst::ClockTime> {
 }
 
 /// Run a geometry refresh after `wait`, on the main loop.
-fn refit_after(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element, wait: Duration) {
+fn refit_after(
+    flow_id: FlowId,
+    block_id: &str,
+    mixer: &gst::Element,
+    mv_comp: &gst::Element,
+    wait: Duration,
+) {
     let block_id = block_id.to_string();
     let mixer_weak = mixer.downgrade();
     let mv_weak = mv_comp.downgrade();
@@ -330,7 +338,7 @@ fn refit_after(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element, wai
         let (Some(mixer), Some(mv_comp)) = (mixer_weak.upgrade(), mv_weak.upgrade()) else {
             return;
         };
-        refresh_geometry(&block_id, &mixer, &mv_comp);
+        refresh_geometry(flow_id, &block_id, &mixer, &mv_comp);
     });
 }
 

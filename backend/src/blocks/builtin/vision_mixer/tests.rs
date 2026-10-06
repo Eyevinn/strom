@@ -350,27 +350,27 @@ fn overlay_registries_round_trip() {
     register_overlay_renderer(other_flow_id, other_block_id, Arc::clone(&renderer));
 
     assert!(
-        get_overlay_state(block_id).is_some(),
+        get_overlay_state(&flow_id, block_id).is_some(),
         "state should be registered"
     );
     assert!(
-        get_overlay_renderer(block_id).is_some(),
+        get_overlay_renderer(&flow_id, block_id).is_some(),
         "renderer should be registered"
     );
 
     unregister_flow(&flow_id);
 
     assert!(
-        get_overlay_state(block_id).is_none(),
+        get_overlay_state(&flow_id, block_id).is_none(),
         "state must be cleaned (otherwise API still sees stale block)"
     );
     assert!(
-        get_overlay_renderer(block_id).is_none(),
+        get_overlay_renderer(&flow_id, block_id).is_none(),
         "renderer must be cleaned (otherwise overlay-timer-* thread leaks)"
     );
     assert!(
-        get_overlay_state(other_block_id).is_some()
-            && get_overlay_renderer(other_block_id).is_some(),
+        get_overlay_state(&other_flow_id, other_block_id).is_some()
+            && get_overlay_renderer(&other_flow_id, other_block_id).is_some(),
         "tearing down one flow must not clear another flow's overlay"
     );
 
@@ -451,7 +451,12 @@ fn shutdown_overlay_timers_joins_running_timer() {
     register_overlay_renderer(flow_id, block_id, Arc::clone(&renderer));
 
     let before = overlay_timers_running();
-    start_overlay_timer(block_id.to_string(), Arc::clone(&renderer), (50, 1));
+    start_overlay_timer(
+        flow_id,
+        block_id.to_string(),
+        Arc::clone(&renderer),
+        (50, 1),
+    );
 
     // Wait for a real render, so shutdown interrupts a thread inside cairo
     // rather than one waiting for PLAYING.
@@ -549,7 +554,12 @@ fn overlay_timer_exits_when_its_appsrc_is_orphaned() {
     register_overlay_renderer(flow_id, block_id, Arc::clone(&renderer));
 
     let before = overlay_timers_running();
-    start_overlay_timer(block_id.to_string(), Arc::clone(&renderer), (50, 1));
+    start_overlay_timer(
+        flow_id,
+        block_id.to_string(),
+        Arc::clone(&renderer),
+        (50, 1),
+    );
 
     // Let it reach the push loop first, so the exit is the backstop firing and
     // not the thread still waiting for PLAYING.
@@ -894,6 +904,7 @@ fn live_label_change_redraws_the_multiview() {
         let block_id = "test-vm-live-label-redraw-block-id";
         super::overlay::register_overlay_state(flow_id, block_id, state.clone());
         let applied = super::apply_live_label(
+            &flow_id,
             block_id,
             "input_2_label",
             &PropertyValue::String("Guest".into()),
@@ -1004,4 +1015,73 @@ async fn live_label_update_reaches_the_overlay_and_is_stored() {
         Some(PropertyValue::String(s)) if s == "Guest: Alex"
     ));
     assert!(!block.properties.contains_key("input_7_label"));
+}
+
+/// Block ids are only unique within a flow. Flows built through the API can
+/// give their mixers the same id (`mixer`), and two such flows can run at
+/// once. Each must find its own overlay: otherwise a take, a PiP change or a
+/// label meant for one flow lands on the other, and the second registration
+/// stops the first flow's overlay timer (its ownership check no longer finds
+/// its own renderer), freezing that multiview.
+#[test]
+fn flows_sharing_a_block_id_keep_their_own_overlay() {
+    use super::overlay::{
+        get_overlay_renderer, get_overlay_state, register_overlay_renderer, register_overlay_state,
+        unregister_flow, OverlayRenderer,
+    };
+    use gstreamer as gst;
+    use gstreamer_app as gst_app;
+    use std::sync::{Arc, Mutex};
+
+    gst::init().unwrap();
+
+    let block_id = "mixer";
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", "BGRA")
+        .field("width", 1280i32)
+        .field("height", 720i32)
+        .field("framerate", gst::Fraction::new(50, 1))
+        .build();
+    let register = |flow_id| {
+        let state = four_input_overlay_state();
+        let appsrc = gst_app::AppSrc::builder().caps(&caps).build();
+        let renderer = Arc::new(Mutex::new(OverlayRenderer::new(
+            appsrc,
+            caps.clone(),
+            Arc::clone(&state),
+            1280,
+            720,
+        )));
+        register_overlay_state(flow_id, block_id, Arc::clone(&state));
+        register_overlay_renderer(flow_id, block_id, Arc::clone(&renderer));
+        (state, renderer)
+    };
+
+    let flow_a = strom_types::FlowId::new_v4();
+    let flow_b = strom_types::FlowId::new_v4();
+    let (state_a, renderer_a) = register(flow_a);
+    let (state_b, renderer_b) = register(flow_b);
+
+    let found = |flow_id| {
+        (
+            get_overlay_state(&flow_id, block_id).expect("state registered"),
+            get_overlay_renderer(&flow_id, block_id).expect("renderer registered"),
+        )
+    };
+    let (found_state, found_renderer) = found(flow_a);
+    assert!(
+        Arc::ptr_eq(&found_state, &state_a) && Arc::ptr_eq(&found_renderer, &renderer_a),
+        "flow A must still find its own overlay after flow B registered the same block id"
+    );
+    let (found_state, found_renderer) = found(flow_b);
+    assert!(Arc::ptr_eq(&found_state, &state_b) && Arc::ptr_eq(&found_renderer, &renderer_b));
+
+    unregister_flow(&flow_a);
+    assert!(get_overlay_state(&flow_a, block_id).is_none());
+    let (found_state, _) = found(flow_b);
+    assert!(
+        Arc::ptr_eq(&found_state, &state_b),
+        "tearing down flow A must leave flow B's overlay registered"
+    );
+    unregister_flow(&flow_b);
 }

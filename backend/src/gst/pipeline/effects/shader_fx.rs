@@ -202,7 +202,7 @@ impl PipelineManager {
         let elem = self.fx_element(&elem_id)?;
         // Param-only change (same effect kind): swap uniforms without a
         // shader recompile — keeps UI sliders cheap.
-        let same_kind = overlay::get_overlay_state(block_instance_id)
+        let same_kind = overlay::get_overlay_state(&self.flow_id, block_instance_id)
             .map(|state| {
                 let stored = match target {
                     EffectTarget::Input(i) => state
@@ -221,7 +221,7 @@ impl PipelineManager {
             apply_shader(elem, &fragment, &uniforms);
         }
 
-        if let Some(state) = overlay::get_overlay_state(block_instance_id) {
+        if let Some(state) = overlay::get_overlay_state(&self.flow_id, block_instance_id) {
             match target {
                 EffectTarget::Input(i) => {
                     if let Some(m) = state.input_effects.get(i) {
@@ -253,7 +253,7 @@ impl PipelineManager {
     /// Only TAKE slots are touched — the look slots (`fx_look_{i}`,
     /// `fx_pgm`) carry persistent effects and are never reset here.
     pub(crate) fn reset_take_fx(&self, block_instance_id: &str) {
-        let Some(state) = overlay::get_overlay_state(block_instance_id) else {
+        let Some(state) = overlay::get_overlay_state(&self.flow_id, block_instance_id) else {
             return;
         };
         if !self.vision_mixer_fx_available(block_instance_id) {

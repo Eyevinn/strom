@@ -27,11 +27,13 @@ use tracing::{debug, warn};
 /// tick. Source and tally changes (PGM, PVW, FTB, PiP) are not capped.
 const OVERLAY_MIN_REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// A per-block overlay registry: keyed by block instance ID, each entry tagged
-/// with the flow that registered it so [`unregister_flow`] can sweep by flow.
-type OverlayRegistry<T> = Mutex<HashMap<String, (FlowId, T)>>;
+/// A per-block overlay registry, keyed by flow and then by block instance ID.
+/// Block IDs are only unique within a flow: two running flows may both have a
+/// mixer called `mixer`, and each must find its own. Keying by flow first also
+/// lets [`unregister_flow`] drop a flow's registrations in one step.
+type OverlayRegistry<T> = Mutex<HashMap<FlowId, HashMap<String, T>>>;
 
-/// Global registry of vision mixer overlay states, keyed by block instance ID.
+/// Global registry of vision mixer overlay states.
 /// Used by the API layer to access overlay state for preview/PGM updates.
 fn overlay_states() -> &'static OverlayRegistry<Arc<VisionMixerOverlayState>> {
     static INSTANCE: OnceLock<OverlayRegistry<Arc<VisionMixerOverlayState>>> = OnceLock::new();
@@ -45,13 +47,22 @@ pub fn register_overlay_state(
     state: Arc<VisionMixerOverlayState>,
 ) {
     if let Ok(mut map) = overlay_states().lock() {
-        map.insert(block_id.to_string(), (flow_id, state));
+        map.entry(flow_id)
+            .or_default()
+            .insert(block_id.to_string(), state);
     }
 }
 
 /// Get the overlay state for a block instance (if registered).
-pub fn get_overlay_state(block_id: &str) -> Option<Arc<VisionMixerOverlayState>> {
-    Some(overlay_states().lock().ok()?.get(block_id)?.1.clone())
+pub fn get_overlay_state(flow_id: &FlowId, block_id: &str) -> Option<Arc<VisionMixerOverlayState>> {
+    Some(
+        overlay_states()
+            .lock()
+            .ok()?
+            .get(flow_id)?
+            .get(block_id)?
+            .clone(),
+    )
 }
 
 /// Shared state read by the cairooverlay draw callback.
@@ -1253,12 +1264,24 @@ pub fn register_overlay_renderer(
     renderer: Arc<Mutex<OverlayRenderer>>,
 ) {
     if let Ok(mut map) = overlay_renderers().lock() {
-        map.insert(block_id.to_string(), (flow_id, renderer));
+        map.entry(flow_id)
+            .or_default()
+            .insert(block_id.to_string(), renderer);
     }
 }
 
-pub fn get_overlay_renderer(block_id: &str) -> Option<Arc<Mutex<OverlayRenderer>>> {
-    Some(overlay_renderers().lock().ok()?.get(block_id)?.1.clone())
+pub fn get_overlay_renderer(
+    flow_id: &FlowId,
+    block_id: &str,
+) -> Option<Arc<Mutex<OverlayRenderer>>> {
+    Some(
+        overlay_renderers()
+            .lock()
+            .ok()?
+            .get(flow_id)?
+            .get(block_id)?
+            .clone(),
+    )
 }
 
 /// Drop every overlay registration belonging to a flow.
@@ -1274,14 +1297,10 @@ pub fn get_overlay_renderer(block_id: &str) -> Option<Arc<Mutex<OverlayRenderer>
 /// still rendering into an appsrc on its way to NULL.
 pub fn unregister_flow(flow_id: &FlowId) {
     if let Ok(mut map) = overlay_states().lock() {
-        map.retain(|_, (owner, _)| owner != flow_id);
+        map.remove(flow_id);
     }
     let stopped = match overlay_renderers().lock() {
-        Ok(mut map) => {
-            let before = map.len();
-            map.retain(|_, (owner, _)| owner != flow_id);
-            before - map.len()
-        }
+        Ok(mut map) => map.remove(flow_id).map_or(0, |blocks| blocks.len()),
         Err(_) => 0,
     };
     if stopped > 0 {
@@ -1343,8 +1362,8 @@ pub fn reset_overlay_timers_shutdown_for_test() {
 }
 
 /// Trigger an immediate overlay re-render (called from API on state changes).
-pub fn trigger_overlay_update(block_id: &str) {
-    if let Some(renderer) = get_overlay_renderer(block_id) {
+pub fn trigger_overlay_update(flow_id: &FlowId, block_id: &str) {
+    if let Some(renderer) = get_overlay_renderer(flow_id, block_id) {
         if let Ok(mut r) = renderer.lock() {
             let pushed = r.render_if_dirty();
             debug!(
@@ -1374,6 +1393,7 @@ pub fn trigger_overlay_update(block_id: &str) {
 /// the kept handle. As a backstop it also stops once its appsrc has no parent,
 /// so a teardown path that forgets to unregister cannot strand it forever.
 pub fn start_overlay_timer(
+    flow_id: FlowId,
     block_id: String,
     renderer: Arc<Mutex<OverlayRenderer>>,
     mv_framerate: (i32, i32),
@@ -1413,7 +1433,7 @@ pub fn start_overlay_timer(
                 if OVERLAY_TIMERS_SHUTDOWN.load(Ordering::SeqCst) {
                     return false;
                 }
-                get_overlay_renderer(&block_id)
+                get_overlay_renderer(&flow_id, &block_id)
                     .map(|cur| Arc::ptr_eq(&cur, r))
                     .unwrap_or(false)
             };

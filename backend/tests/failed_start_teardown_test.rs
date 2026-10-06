@@ -334,12 +334,12 @@ mod vision_mixer_overlay {
         );
 
         assert!(
-            overlay::get_overlay_state(BLOCK_ID).is_none(),
+            overlay::get_overlay_state(&flow_id, BLOCK_ID).is_none(),
             "overlay state survived a failed start — the API still sees a block \
              whose pipeline is gone"
         );
         assert!(
-            overlay::get_overlay_renderer(BLOCK_ID).is_none(),
+            overlay::get_overlay_renderer(&flow_id, BLOCK_ID).is_none(),
             "overlay renderer survived a failed start — this is what leaves the \
              overlay-timer-* thread with no exit condition"
         );

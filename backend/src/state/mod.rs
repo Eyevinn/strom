@@ -1934,6 +1934,7 @@ impl AppState {
                     .is_some()
             {
                 match crate::blocks::builtin::vision_mixer::apply_live_label(
+                    flow_id,
                     block_instance_id,
                     &name,
                     &value,
@@ -2362,6 +2363,7 @@ impl AppState {
                 // reflected (the local new_pgm/new_pvw are input-centric and
                 // don't carry PiP info).
                 let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+                    flow_id,
                     block_instance_id,
                 );
                 let preview_input = overlay.as_ref().and_then(|s| s.pvw_input());
@@ -2426,8 +2428,10 @@ impl AppState {
 
         // Broadcast state change event. Reads authoritative state from the
         // overlay so PiP visibility is reflected alongside the inputs.
-        let overlay =
-            crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id);
+        let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+            flow_id,
+            block_instance_id,
+        );
         let preview_pip = overlay.as_ref().and_then(|s| s.pvw_pip());
         let program_pip = overlay.as_ref().and_then(|s| s.pgm_pip());
         self.inner

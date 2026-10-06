@@ -196,6 +196,7 @@ pub fn label_property_input(name: &str) -> Option<usize> {
 /// Apply an `input_N_label` change to a running vision mixer, so the
 /// multiview redraws the new label on its next tick.
 pub fn apply_live_label(
+    flow_id: &FlowId,
     block_instance_id: &str,
     name: &str,
     value: &PropertyValue,
@@ -204,7 +205,7 @@ pub fn apply_live_label(
     if !matches!(value, PropertyValue::String(_)) {
         return Err("value must be a string".to_string());
     }
-    let state = super::overlay::get_overlay_state(block_instance_id)
+    let state = super::overlay::get_overlay_state(flow_id, block_instance_id)
         .ok_or("vision mixer is not running")?;
     if !state.set_label(input, input_label_text(input, Some(value))) {
         return Err(format!(
