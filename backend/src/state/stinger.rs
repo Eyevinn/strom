@@ -116,6 +116,25 @@ impl Context {
     fn settings_for(&self, file: &str) -> StingerClipSettings {
         self.settings.get(file).cloned().unwrap_or_default()
     }
+
+    /// The playlist entry at `index`, checked against `expected` when the
+    /// client names the file it means. A library edited by someone else
+    /// since the client read it is a conflict, not a different clip.
+    fn clip_at(&self, index: usize, expected: Option<&str>) -> Result<String, PipelineError> {
+        let file = self
+            .player
+            .playlist_files()
+            .get(index)
+            .cloned()
+            .ok_or_else(|| err(format!("no clip {} in the stinger library", index)))?;
+        match expected {
+            Some(want) if want != file => Err(PipelineError::Conflict(format!(
+                "stinger clip {} is now '{}', not '{}': the library has changed",
+                index, file, want
+            ))),
+            _ => Ok(file),
+        }
+    }
 }
 
 impl AppState {
@@ -309,14 +328,14 @@ impl AppState {
         flow_id: &FlowId,
         block: &str,
         index: usize,
+        expected_file: Option<&str>,
     ) -> Result<u64, PipelineError> {
         if is_running(flow_id, block) {
             return Err(err("a stinger is on air; cue when it has finished"));
         }
         let ctx = self.stinger_context(flow_id, block).await.map_err(err)?;
-        if let Some(file) = ctx.player.playlist_files().get(index) {
-            Self::analyse_in_background(ctx.uri(file), ctx.pgm_aspect);
-        }
+        let file = ctx.clip_at(index, expected_file)?;
+        Self::analyse_in_background(ctx.uri(&file), ctx.pgm_aspect);
         let player = Arc::clone(&ctx.player);
         let result = tokio::task::spawn_blocking(move || player.cue(index))
             .await
@@ -344,15 +363,11 @@ impl AppState {
         flow_id: &FlowId,
         block: &str,
         index: usize,
+        expected_file: Option<&str>,
         settings: StingerClipSettings,
     ) -> Result<StingerClip, PipelineError> {
         let ctx = self.stinger_context(flow_id, block).await.map_err(err)?;
-        let file = ctx
-            .player
-            .playlist_files()
-            .get(index)
-            .cloned()
-            .ok_or_else(|| err(format!("no clip {} in the stinger playlist", index)))?;
+        let file = ctx.clip_at(index, expected_file)?;
         {
             let mut flows = self.inner.flows.write().await;
             let source = flows
@@ -400,6 +415,23 @@ impl AppState {
                 playlist.push(f.clone());
             }
         }
+        let was_empty = ctx.player.playlist_len() == 0;
+        self.set_stinger_library(flow_id, &ctx, playlist).await;
+        for f in &files {
+            Self::analyse_in_background(ctx.uri(f), ctx.pgm_aspect);
+        }
+        if was_empty {
+            let _ = self.stinger_cue(flow_id, block, 0, None).await;
+        }
+        Ok(StingerExamplesResponse {
+            files,
+            added_to_playlist: true,
+        })
+    }
+
+    /// Store the stinger source's playlist on its block and give it to the
+    /// running player.
+    async fn set_stinger_library(&self, flow_id: &FlowId, ctx: &Context, playlist: Vec<String>) {
         {
             let mut flows = self.inner.flows.write().await;
             if let Some(source) = flows
@@ -415,18 +447,110 @@ impl AppState {
             }
         }
         self.mark_flow_dirty(*flow_id).await;
-        let was_empty = ctx.player.playlist_len() == 0;
         ctx.player.set_playlist(playlist);
-        for f in &files {
-            Self::analyse_in_background(ctx.uri(f), ctx.pgm_aspect);
+    }
+
+    /// Add a clip to the stinger library, or return it when it is already
+    /// there: adding the same file twice is not an error, so a client can
+    /// retry. A local file must exist.
+    pub async fn stinger_add_clip(
+        &self,
+        flow_id: &FlowId,
+        block: &str,
+        file: &str,
+        settings: Option<StingerClipSettings>,
+    ) -> Result<StingerClip, PipelineError> {
+        let file = file.trim();
+        if file.is_empty() {
+            return Err(err("no file named"));
         }
-        if was_empty {
-            let _ = self.stinger_cue(flow_id, block, 0).await;
+        let ctx = self.stinger_context(flow_id, block).await.map_err(err)?;
+        let uri = ctx.uri(file);
+        if let Ok((path, _)) = gstreamer::glib::filename_from_uri(&uri) {
+            if !path.is_file() {
+                return Err(err(format!("no such file: {}", file)));
+            }
         }
-        Ok(StingerExamplesResponse {
-            files,
-            added_to_playlist: true,
-        })
+        let mut playlist = ctx.player.playlist_files();
+        let index = match playlist.iter().position(|f| f == file) {
+            Some(index) => index,
+            None => {
+                playlist.push(file.to_string());
+                let was_empty = playlist.len() == 1;
+                self.set_stinger_library(flow_id, &ctx, playlist.clone())
+                    .await;
+                if was_empty {
+                    let _ = self.stinger_cue(flow_id, block, 0, None).await;
+                }
+                playlist.len() - 1
+            }
+        };
+        Self::analyse_in_background(uri, ctx.pgm_aspect);
+        match settings {
+            Some(settings) => {
+                self.stinger_set_clip_settings(flow_id, block, index, Some(file), settings)
+                    .await
+            }
+            None => {
+                let ctx = self.stinger_context(flow_id, block).await.map_err(err)?;
+                Ok(Self::describe_clip(&ctx, index, file))
+            }
+        }
+    }
+
+    /// Take a clip out of the stinger library, with its settings. The file
+    /// stays in the media directory. Refused while a stinger is on air.
+    pub async fn stinger_remove_clip(
+        &self,
+        flow_id: &FlowId,
+        block: &str,
+        index: usize,
+        expected_file: Option<&str>,
+    ) -> Result<(), PipelineError> {
+        if is_running(flow_id, block) {
+            return Err(err(
+                "a stinger is on air; edit the library when it has finished",
+            ));
+        }
+        let ctx = self.stinger_context(flow_id, block).await.map_err(err)?;
+        let file = ctx.clip_at(index, expected_file)?;
+        let cued = ctx.player.current_index();
+        let mut playlist = ctx.player.playlist_files();
+        playlist.remove(index);
+        let still_listed = playlist.contains(&file);
+        self.set_stinger_library(flow_id, &ctx, playlist.clone())
+            .await;
+        if !still_listed {
+            let mut flows = self.inner.flows.write().await;
+            if let Some(source) = flows
+                .get_mut(flow_id)
+                .and_then(|f| f.blocks.iter_mut().find(|b| b.id == ctx.source_block_id))
+            {
+                if let Some(PropertyValue::String(json)) =
+                    source.properties.get(STINGER_CLIPS_PROPERTY)
+                {
+                    let mut map = strom_types::stinger::parse_clip_settings(json);
+                    if map.remove(&file).is_some() {
+                        let json = serde_json::to_string(&map).unwrap_or_else(|_| "{}".into());
+                        source.properties.insert(
+                            STINGER_CLIPS_PROPERTY.to_string(),
+                            PropertyValue::String(json),
+                        );
+                    }
+                }
+            }
+        }
+        // Keep the same clip cued, or the one that took the removed one's
+        // place.
+        if !playlist.is_empty() {
+            let target = match index.cmp(&cued) {
+                std::cmp::Ordering::Less => cued - 1,
+                std::cmp::Ordering::Equal => cued.min(playlist.len() - 1),
+                std::cmp::Ordering::Greater => cued,
+            };
+            let _ = self.stinger_cue(flow_id, block, target, None).await;
+        }
+        Ok(())
     }
 
     /// Take a stinger from PGM to PVW, playing clip `index` or the cued one.
@@ -435,6 +559,7 @@ impl AppState {
         flow_id: &FlowId,
         block: &str,
         index: Option<usize>,
+        expected_file: Option<&str>,
     ) -> Result<StingerTakeResponse, PipelineError> {
         let requested = Instant::now();
         let ctx = self.stinger_context(flow_id, block).await.map_err(err)?;
@@ -448,12 +573,8 @@ impl AppState {
         if from == to {
             return Err(err("PGM and PVW are the same input"));
         }
-        let files = ctx.player.playlist_files();
         let index = index.unwrap_or_else(|| ctx.player.current_index());
-        let file = files
-            .get(index)
-            .cloned()
-            .ok_or_else(|| err(format!("no clip {} in the stinger playlist", index)))?;
+        let file = ctx.clip_at(index, expected_file)?;
 
         let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
         let claimed = with_mixer(*flow_id, block, |s| {
@@ -491,6 +612,7 @@ impl AppState {
                 self.inner.events.broadcast(StromEvent::StingerFailed {
                     flow_id: *flow_id,
                     block_id: block.to_string(),
+                    take_id: Some(token),
                     reason: reason.clone(),
                     program_changed,
                 });
@@ -641,6 +763,7 @@ impl AppState {
         self.inner.events.broadcast(StromEvent::StingerStarted {
             flow_id: *flow_id,
             block_id: block.to_string(),
+            take_id: token,
             index,
             file: file.to_string(),
             variant: plan.variant,
@@ -656,6 +779,7 @@ impl AppState {
             .map(|i| i.frames)
             .unwrap_or_else(|| (plan.duration_ms * 30 / 1000) as u32);
         let report = StingerTakeReport {
+            take_id: token,
             index,
             file: file.to_string(),
             variant: plan.variant,
@@ -682,7 +806,9 @@ impl AppState {
         });
 
         Ok(StingerTakeResponse {
+            take_id: token,
             index,
+            file: file.to_string(),
             variant: plan.variant,
             downgraded_from: plan.downgraded_from,
             take_to_air_ms,
