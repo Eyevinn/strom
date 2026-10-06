@@ -21,6 +21,7 @@ const BLOCK_ID: &str = "vmfx";
 /// The vision mixer's overlay state is process-global and keyed by block ID,
 /// and the tests in this binary run concurrently, so each test needs its own.
 const LETTERBOX_BLOCK_ID: &str = "vmfx-letterbox";
+const SLOW_ALLOCATION_BLOCK_ID: &str = "vmfx-letterbox-slowalloc";
 
 /// The GL elements a GPU vision mixer needs. `common::gl_available` skips or
 /// fails on a missing one, and on a host that cannot create a GL context.
@@ -222,6 +223,27 @@ async fn vision_mixer_fx_engine_end_to_end() {
 /// (i.e. the wipe actually animates instead of switching).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wipe_between_letterboxed_sources_animates() {
+    letterbox_wipes_animate(LETTERBOX_BLOCK_ID, None).await;
+}
+
+/// The same wipes on a host where a downstream ALLOCATION query from a TAKE
+/// slot is slow — as on the virtualized-GL macOS CI runner, where a slot
+/// leaving passthrough renegotiated on the wipe's first buffer and stalled
+/// its branch past the end of the wipe, turning the wipe into a cut. Taking
+/// a slot out of passthrough must not query allocation on the take path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wipe_animates_when_take_slot_allocation_is_slow() {
+    letterbox_wipes_animate(
+        SLOW_ALLOCATION_BLOCK_ID,
+        Some(std::time::Duration::from_millis(2500)),
+    )
+    .await;
+}
+
+async fn letterbox_wipes_animate(
+    block_id: &'static str,
+    slow_take_allocation: Option<std::time::Duration>,
+) {
     use gstreamer::prelude::*;
     if !common::gl_available(GL_ELEMENTS) {
         return;
@@ -229,7 +251,7 @@ async fn wipe_between_letterboxed_sources_animates() {
 
     let mut flow = Flow::new("vm_letterbox_wipe");
     flow.blocks.push(strom_types::BlockInstance {
-        id: LETTERBOX_BLOCK_ID.to_string(),
+        id: block_id.to_string(),
         block_definition_id: "builtin.vision_mixer".to_string(),
         name: None,
         properties: {
@@ -316,16 +338,13 @@ async fn wipe_between_letterboxed_sources_animates() {
         ],
     ));
     for (from, to) in [
-        ("src0:src", "caps0:sink"),
-        ("caps0:src", "vmfx-letterbox:video_in_0"),
-        ("src1:src", "caps1:sink"),
-        ("caps1:src", "vmfx-letterbox:video_in_1"),
-        ("vmfx-letterbox:pgm_out", "pgmsink:sink"),
+        ("src0:src".to_string(), "caps0:sink".to_string()),
+        ("caps0:src".to_string(), format!("{}:video_in_0", block_id)),
+        ("src1:src".to_string(), "caps1:sink".to_string()),
+        ("caps1:src".to_string(), format!("{}:video_in_1", block_id)),
+        (format!("{}:pgm_out", block_id), "pgmsink:sink".to_string()),
     ] {
-        flow.links.push(strom_types::Link {
-            from: from.to_string(),
-            to: to.to_string(),
-        });
+        flow.links.push(strom_types::Link { from, to });
     }
 
     let temp_file = NamedTempFile::new().unwrap();
@@ -397,8 +416,11 @@ async fn wipe_between_letterboxed_sources_animates() {
     };
 
     // Debug aid: verify the source branches are actually linked.
-    for name in ["vmfx-letterbox:queue_0", "vmfx-letterbox:queue_1"] {
-        let q = manager.pipeline().by_name(name).expect(name);
+    for name in [
+        format!("{}:queue_0", block_id),
+        format!("{}:queue_1", block_id),
+    ] {
+        let q = manager.pipeline().by_name(&name).expect(&name);
         let linked = q.static_pad("sink").map(|p| p.is_linked()).unwrap_or(false);
         eprintln!("{} sink linked: {}", name, linked);
     }
@@ -432,6 +454,29 @@ async fn wipe_between_letterboxed_sources_animates() {
     };
     assert!(w0 > 0.5, "PGM should start mostly white, got {}", w0);
     assert!(r0 < 0.05, "no red expected before take, got {}", r0);
+
+    // Slow every ALLOCATION query a TAKE slot sends downstream from here on
+    // (the opening negotiation is done). Test-only probe: queries, not
+    // buffers.
+    if let Some(delay) = slow_take_allocation {
+        for i in 0..2 {
+            let fx = manager
+                .pipeline()
+                .by_name(&format!("{}:fx_take_{}", block_id, i))
+                .expect("fx_take slot");
+            fx.static_pad("src").unwrap().add_probe(
+                gstreamer::PadProbeType::QUERY_DOWNSTREAM,
+                move |_pad, info| {
+                    if let Some(gstreamer::QueryView::Allocation(_)) =
+                        info.query().map(|q| q.view())
+                    {
+                        std::thread::sleep(delay);
+                    }
+                    gstreamer::PadProbeReturn::Ok
+                },
+            );
+        }
+    }
 
     // Watch a wipe to completion: pull every PGM frame, record whether any
     // frame showed a substantial amount of BOTH sources (the wipe animated
@@ -469,13 +514,13 @@ async fn wipe_between_letterboxed_sources_animates() {
 
     // --- classic orientation: 2.40:1 -> 2.34:1 (outgoing does not cover) ---
     manager
-        .trigger_transition(LETTERBOX_BLOCK_ID, 0, 1, "wipe_left", 2000)
+        .trigger_transition(block_id, 0, 1, "wipe_left", 2000)
         .expect("wipe 0->1");
     // Mirror the API handler: persist the PGM/PVW swap after the take —
     // trigger_transition reads the authoritative bus state from overlay
     // state, so without this the next take would re-run the same pair.
     manager
-        .update_vision_mixer_after_take(LETTERBOX_BLOCK_ID, Some(1), Some(0), 2)
+        .update_vision_mixer_after_take(block_id, Some(1), Some(0), 2)
         .expect("after take 0->1");
     let (animated, w_end, r_end) = observe_wipe(true);
     eprintln!(
@@ -495,10 +540,10 @@ async fn wipe_between_letterboxed_sources_animates() {
 
     // --- inverted orientation: 2.34:1 -> 2.40:1 (outgoing covers) ---
     manager
-        .trigger_transition(LETTERBOX_BLOCK_ID, 1, 0, "wipe_left", 2000)
+        .trigger_transition(block_id, 1, 0, "wipe_left", 2000)
         .expect("wipe 1->0");
     manager
-        .update_vision_mixer_after_take(LETTERBOX_BLOCK_ID, Some(0), Some(1), 2)
+        .update_vision_mixer_after_take(block_id, Some(0), Some(1), 2)
         .expect("after take 1->0");
     let (animated2, w_end2, r_end2) = observe_wipe(false);
     eprintln!(
@@ -508,7 +553,7 @@ async fn wipe_between_letterboxed_sources_animates() {
     // Debug: pad + fx state at the broken end state.
     let mixer = manager
         .pipeline()
-        .by_name("vmfx-letterbox:mixer")
+        .by_name(&format!("{}:mixer", block_id))
         .expect("mixer");
     for i in 0..2 {
         let pad = mixer.static_pad(&format!("sink_{}", i)).unwrap();
@@ -526,7 +571,7 @@ async fn wipe_between_letterboxed_sources_animates() {
     for i in 0..2 {
         let fx = manager
             .pipeline()
-            .by_name(&format!("vmfx-letterbox:fx_take_{}", i))
+            .by_name(&format!("{}:fx_take_{}", block_id, i))
             .unwrap();
         let u = fx.property::<Option<gstreamer::Structure>>("uniforms");
         eprintln!("fx_take_{} uniforms: {:?}", i, u.map(|s| s.to_string()));

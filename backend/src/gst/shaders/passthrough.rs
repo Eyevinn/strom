@@ -13,10 +13,19 @@
 //! whether to render into it, so flipping it from another thread mid-buffer
 //! can push an unrendered pool buffer, or render a frame into its own input.
 //! The flip therefore runs in a probe on the sink pad, which fires under the
-//! pad's stream lock before the next buffer reaches the element. It also
-//! marks the src pad for reconfigure, so that same buffer first renegotiates:
-//! leaving passthrough runs the allocation that sets up the GL output pool,
-//! and the buffer is rendered with the newly programmed shader.
+//! pad's stream lock before the next buffer reaches the element, and that
+//! buffer is rendered with the newly programmed shader.
+//!
+//! Entering passthrough keeps the slot's GL output pool: it does not
+//! renegotiate, so the pool set up when the slot first negotiated stays
+//! allocated, and leaving passthrough renders into it straight away. Leaving
+//! must not renegotiate: that sends an ALLOCATION query downstream, and a
+//! serialized query into the mixer can block the branch's streaming thread
+//! for as long as the mixer takes to drain its pad. On a slow GL host that
+//! outlasted a whole wipe: the mixer kept compositing the last unmasked frame
+//! with the pad already made visible, and the masked frames arrived too late
+//! to be shown — the wipe became a cut. Only a slot whose pool is gone (its
+//! caps changed while in passthrough) renegotiates on the way out.
 //!
 //! Each slot keeps its requested state in one atomic word (a generation
 //! counter plus the wanted flag) and has at most one flip probe pending, so
@@ -95,7 +104,11 @@ fn apply(transform: &gst_base::BaseTransform, passthrough: bool) {
         }
     }
     transform.set_passthrough(passthrough);
-    transform.reconfigure_src();
+    // No renegotiation on entering: it would release the output pool, and
+    // leaving would then have to query a new one on the take's critical path.
+    if !passthrough && transform.buffer_pool().is_none() {
+        transform.reconfigure_src();
+    }
     debug!("{}: FX slot passthrough={}", transform.name(), passthrough);
 }
 
