@@ -279,9 +279,9 @@ pub(super) fn build_cpu_pipeline(
     // --- Border underlay sources ---
     // Zone borders render as solid-color compositor pads directly beneath
     // their content pads (see `gst::underlay`). One tiny videotestsrc per
-    // (region, input), pushing one frame that the mixer pad repeats; the
-    // border color is set at runtime via `foreground-color` and a restart
-    // (`set_underlay_color`). Non-live → contributes no latency. Only built when
+    // (region, input), pushing one frame that the mixer pad holds while the
+    // border is visible; the border color is set at runtime via
+    // `foreground-color` and a restart (`set_underlay_color`). Non-live → contributes no latency. Only built when
     // PiPs are configured — zones (and thus borders) cannot exist without
     // them.
     if p.num_pips > 0 {
@@ -298,7 +298,7 @@ pub(super) fn build_cpu_pipeline(
         // conversion, and an alpha-less forced output_format (I420/NV12)
         // would silently drop the alpha of #RRGGBBAA border colors. Each
         // source pushes a single frame; the compositor pad repeats it
-        // (`repeat-after-eos`) until a border edit pushes a new one.
+        // (`repeat-after-eos`) while the border is visible.
         let underlay_caps: gst::Caps =
             "video/x-raw,format=RGBA,width=16,height=16,framerate=5/1,pixel-aspect-ratio=1/1"
                 .parse()
@@ -575,6 +575,9 @@ pub(super) fn build_cpu_pipeline(
             super::super::geometry::install_caps_probes(
                 &block_id, &mixer, &mv_comp, num_inputs, num_pips,
             );
+            // Border underlays hold a frame only while visible.
+            crate::gst::underlay::watch_underlay_pads(&mixer);
+            crate::gst::underlay::watch_underlay_pads(&mv_comp);
         }));
     }
     let bus_message_handler = Some(audio_meter::build_meter_bus_handler(

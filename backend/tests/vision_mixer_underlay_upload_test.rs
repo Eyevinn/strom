@@ -222,6 +222,61 @@ fn thread_count() -> Option<usize> {
     }
 }
 
+/// The two mixers' sink pads fed by an underlay source.
+fn underlay_pads(manager: &PipelineManager, block_id: &str) -> Vec<gstreamer::Pad> {
+    let prefix = format!("{block_id}:underlay_");
+    ["mixer", "mv_comp"]
+        .iter()
+        .flat_map(|name| {
+            manager
+                .pipeline()
+                .by_name(&format!("{block_id}:{name}"))
+                .unwrap_or_else(|| panic!("{name} in pipeline"))
+                .sink_pads()
+        })
+        .filter(|pad| {
+            pad.peer()
+                .and_then(|p| p.parent_element())
+                .is_some_and(|e| e.name().starts_with(&prefix))
+        })
+        .collect()
+}
+
+/// Underlay pads holding a frame. The mixers prepare (map) every pad that
+/// holds one on every output frame — `glmixer` maps it for GL even when the
+/// pad is fully transparent — and skip a pad that holds none.
+fn underlay_pads_holding_a_frame(pads: &[gstreamer::Pad]) -> usize {
+    pads.iter()
+        .filter(|pad| {
+            // SAFETY: every pad here is a sink pad of a videoaggregator
+            // (glvideomixerelement or compositor), so a
+            // GstVideoAggregatorPad; the call only reads it under its lock.
+            unsafe {
+                gstreamer_video::ffi::gst_video_aggregator_pad_has_current_buffer(
+                    pad.as_ptr() as *mut gstreamer_video::ffi::GstVideoAggregatorPad
+                ) != 0
+            }
+        })
+        .count()
+}
+
+/// Pull PGM frames for `window` and return the underlay pads holding a frame
+/// per second, summed over the PGM frames seen: the underlay frame maps per
+/// second on the PGM mixer, and on the multiview mixer at the same rate.
+fn underlay_maps_per_sec(
+    appsink: &gstreamer_app::AppSink,
+    pads: &[gstreamer::Pad],
+    window: Duration,
+) -> f64 {
+    let t0 = Instant::now();
+    let mut held = 0usize;
+    while t0.elapsed() < window {
+        pull(appsink);
+        held += underlay_pads_holding_a_frame(pads);
+    }
+    held as f64 / t0.elapsed().as_secs_f64()
+}
+
 fn pull(appsink: &gstreamer_app::AppSink) -> gstreamer::Sample {
     appsink
         .try_pull_sample(gstreamer::ClockTime::from_seconds(5))
@@ -318,6 +373,13 @@ fn run(block_id: &str, backend: &str) {
         .downcast::<gstreamer_app::AppSink>()
         .unwrap();
     pull(&appsink);
+    let pads = underlay_pads(&manager, block_id);
+    assert_eq!(pads.len(), expected, "mixer pads fed by underlays");
+
+    // No border anywhere: no underlay pad should hold a frame.
+    std::thread::sleep(Duration::from_millis(500));
+    let maps_off = underlay_maps_per_sec(&appsink, &pads, Duration::from_secs(1));
+    eprintln!("{backend}: borders off: underlay frame maps {maps_off:.0}/s");
 
     // Bordered zone on PGM.
     manager
@@ -335,7 +397,8 @@ fn run(block_id: &str, backend: &str) {
     manager
         .trigger_transition(block_id, 0, 0, "cut", 0)
         .expect("take the PiP");
-    wait_for_border(&appsink, "a red zone border", is_red);
+    let frames_until_shown = wait_for_border(&appsink, "a red zone border", is_red);
+    eprintln!("{backend}: border shown after {frames_until_shown} PGM frame(s)");
     std::thread::sleep(Duration::from_millis(500));
 
     // Steady state: no border changes.
@@ -352,6 +415,11 @@ fn run(block_id: &str, backend: &str) {
     let elapsed = t0.elapsed().as_secs_f64();
     let cpu = (cpu_time() - cpu_before).as_secs_f64();
     let window_uploads = uploads.load(Ordering::Relaxed) - uploads_before;
+    let held_on = underlay_pads_holding_a_frame(&pads);
+    let maps_on = underlay_maps_per_sec(&appsink, &pads, Duration::from_secs(1));
+    eprintln!(
+        "{backend}: one bordered zone on PGM: {held_on} underlay pads hold a frame, underlay frame maps {maps_on:.0}/s"
+    );
     eprintln!(
         "{backend}: steady state over {:.2}s with {} underlays: underlay frames {} ({:.1}/s), PGM frames {} ({:.1}/s), process CPU {:.0}%, threads {:?} (before build {:?})",
         elapsed,
@@ -368,6 +436,16 @@ fn run(block_id: &str, backend: &str) {
     // The border is still on screen.
     let rgb = border_rgb(&last.expect("PGM frames in the window"));
     assert!(is_red(rgb), "zone border lost: {rgb:?}");
+    // Hidden underlays hold no frame, so the mixers never map them.
+    assert_eq!(
+        maps_off, 0.0,
+        "underlay pads hold a frame with no border shown"
+    );
+    // One bordered source: its border on PGM and on its multiview PiP tile.
+    assert!(
+        (1..=2).contains(&held_on),
+        "{held_on} underlay pads hold a frame with one border shown"
+    );
     assert!(
         frames as f64 / elapsed > 20.0,
         "PGM stalled: {frames} frames in {elapsed:.2}s"
@@ -406,7 +484,8 @@ fn run(block_id: &str, backend: &str) {
     manager
         .trigger_transition(block_id, 0, 0, "fade", 300)
         .expect("take the PiP back");
-    wait_for_border(&appsink, "the green zone border back", is_green);
+    let frames_until_back = wait_for_border(&appsink, "the green zone border back", is_green);
+    eprintln!("{backend}: border back after a 300 ms fade: {frames_until_back} PGM frame(s)");
 
     // A colour change must not block its caller while the underlay source
     // is stuck pushing downstream (here: held by a blocking probe, as it

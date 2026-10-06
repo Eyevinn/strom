@@ -11,11 +11,21 @@
 //!
 //! Each underlay pad is fed by a tiny `videotestsrc pattern=solid-color`
 //! (16×16, non-live so it adds no latency) that pushes a single frame and
-//! then EOS; the mixer pad has `repeat-after-eos` set, so it keeps showing
-//! that frame without anything being uploaded again. A live aggregator does
-//! not wait for an EOS pad. The border color is changed by writing the
-//! source's `foreground-color` (`0xAARRGGBB`) and restarting the source, which
-//! pushes one frame in the new color (see [`set_underlay_color`]).
+//! then EOS. A live aggregator does not wait for an EOS pad.
+//!
+//! A visible underlay (pad alpha above 0) holds that frame: its pad has
+//! `repeat-after-eos` set, so the mixer keeps showing it without anything
+//! being uploaded again. A hidden underlay (alpha 0) holds no frame at all:
+//! with `repeat-after-eos` off, videoaggregator drops an EOS pad's expired
+//! frame, and a pad without a frame is never prepared — the GL mixer would
+//! otherwise map every underlay's texture on every output frame, visible or
+//! not. [`watch_underlay_pads`] keeps the two in step with the pad's alpha,
+//! whoever sets it (layout code or an animation), and restarts the source
+//! for a fresh frame when the underlay becomes visible.
+//!
+//! The border color is changed by writing the source's `foreground-color`
+//! (`0xAARRGGBB`) and, when the underlay is visible, restarting the source,
+//! which pushes one frame in the new color (see [`set_underlay_color`]).
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -103,6 +113,54 @@ pub(crate) fn set_underlay_color(pad: &gst::Pad, argb: u32) {
     if let Some(src) = upstream_underlay_src(pad) {
         if src.property::<u32>("foreground-color") != argb {
             src.set_property("foreground-color", argb);
+            // A hidden underlay holds no frame; it gets one in the then
+            // current color when it becomes visible.
+            if holds_frame(pad) {
+                schedule_underlay_restart(&src);
+            }
+        }
+    }
+}
+
+/// The pad property that makes an underlay pad keep its frame.
+const REPEAT_AFTER_EOS: &str = "repeat-after-eos";
+
+/// Whether an underlay pad is set to hold its frame (it is visible).
+fn holds_frame(pad: &gst::Pad) -> bool {
+    pad.find_property(REPEAT_AFTER_EOS).is_none() || pad.property::<bool>(REPEAT_AFTER_EOS)
+}
+
+/// Keep every underlay pad of `compositor` holding a frame exactly while it
+/// is visible (alpha above 0). Call once the pads are linked.
+///
+/// Listens to `notify::alpha`, so layout snaps and control-binding
+/// animations alike are seen. The handler gets the pad as its argument and
+/// captures nothing.
+pub(crate) fn watch_underlay_pads(compositor: &gst::Element) {
+    for pad in compositor.sink_pads() {
+        if !pad.has_property(REPEAT_AFTER_EOS) || upstream_underlay_src(&pad).is_none() {
+            continue;
+        }
+        pad.connect_notify(Some("alpha"), |pad, _| sync_underlay_frame(pad));
+        sync_underlay_frame(&pad);
+    }
+}
+
+/// Make an underlay pad hold a frame if and only if it is visible.
+///
+/// Becoming visible: hold frames again and restart the source for a fresh
+/// one (asynchronously; it lands on the next output frame or so). Becoming
+/// hidden: stop holding, and the mixer drops the frame on its next output
+/// frame. Runs on the mixer's streaming thread during animations: it only
+/// reads and writes pad properties and schedules the restart.
+fn sync_underlay_frame(pad: &gst::Pad) {
+    let visible = pad.property::<f64>("alpha") > 0.0;
+    if visible == pad.property::<bool>(REPEAT_AFTER_EOS) {
+        return;
+    }
+    pad.set_property(REPEAT_AFTER_EOS, visible);
+    if visible {
+        if let Some(src) = upstream_underlay_src(pad) {
             schedule_underlay_restart(&src);
         }
     }
