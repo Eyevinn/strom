@@ -652,7 +652,50 @@ impl MediaPlayerState {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         self.stinger.park.parked.store(true, Ordering::Release);
+        self.warm_up_consumer();
         Ok(started.elapsed())
+    }
+
+    /// Send the consumer one blank frame in the cued clip's format, so that
+    /// whatever it sets up for a new format (a GL upload, a shader compiled
+    /// for the new size) happens now and not on the take's first frames. A
+    /// vision mixer keeps its stinger pads hidden between takes, so the frame
+    /// never shows. Skipped while the flow is not playing.
+    fn warm_up_consumer(&self) {
+        let Some(appsrc) = self.video_appsrcs.first() else {
+            return;
+        };
+        let caps = self.internal_pipeline.read().ok().and_then(|guard| {
+            let pipeline = guard.as_ref()?;
+            super::timing::clocksyncs(pipeline)
+                .into_iter()
+                .filter_map(|c| c.static_pad("sink")?.current_caps())
+                .find(|c| c.structure(0).is_some_and(|s| s.name() == "video/x-raw"))
+        });
+        let Some(caps) = caps else {
+            return;
+        };
+        let Ok(info) = gstreamer_video::VideoInfo::from_caps(&caps) else {
+            return;
+        };
+        let Some(now) = self
+            .main_pipeline
+            .upgrade()
+            .and_then(|p| p.current_running_time())
+        else {
+            return;
+        };
+        let mut buffer = gst::Buffer::from_mut_slice(vec![0u8; info.size()]);
+        if let Some(b) = buffer.get_mut() {
+            b.set_pts(now);
+        }
+        let sample = gst::Sample::builder().buffer(&buffer).caps(&caps).build();
+        if let Err(e) = appsrc.push_sample(&sample) {
+            debug!(
+                "Media Player {}: stinger warm-up frame not taken: {:?}",
+                self.block_id, e
+            );
+        }
     }
 
     /// Whether playlist entry `index` is loaded and parked on its first frame.

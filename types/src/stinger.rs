@@ -212,7 +212,8 @@ pub struct StingerTakeReport {
     pub frames_expected: u32,
     /// Clip frames that did reach it.
     pub frames_arrived: u32,
-    /// Clip frames that reached it after their time on air had begun.
+    /// Clip frames, on the graphic or the matte pad, that reached the mixer
+    /// after their time on air had begun.
     pub frames_late: u32,
     /// Smallest lead a clip frame had on its time on air; negative is late.
     pub worst_margin_ms: Option<f64>,
