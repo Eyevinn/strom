@@ -975,6 +975,12 @@ impl BlockBuilder for MixerBuilder {
             // ----------------------------------------------------------------
             // Solo bus sends: PFL taps pre-fader, AFL taps post-fader.
             // Each is an independent volume-gate that sums into solo_mixer.
+            //
+            // Every send from a channel to a bus (solo, aux, main, group) has
+            // its own queue. Each bus is paced by its own consumer, and an
+            // aggregator pad holds only about its latency: without the queue,
+            // a bus held by a clock-synced consumer blocks the channel's
+            // thread and the other buses time the channel out.
             // ----------------------------------------------------------------
             let pfl_enabled = get_bool_prop(properties, &format!("ch{}_pfl", ch_num), false);
             let afl_enabled = get_bool_prop(properties, &format!("ch{}_afl", ch_num), false);
