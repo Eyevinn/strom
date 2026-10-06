@@ -1374,3 +1374,147 @@ fn test_unfed_channel_does_not_change_reported_latency() {
         );
     }
 }
+
+/// One channel feeds several buses, and each bus is paced by its own
+/// consumer. A consumer that syncs to the clock holds its bus for the flow's
+/// latency, which can be far above the mixer's own (a video branch, an
+/// encoder). The channel must keep feeding the other buses on time while one
+/// bus waits; otherwise they time the channel out and play silence.
+///
+/// `synced` is the output whose consumer syncs to the clock, `free` the one
+/// whose consumer does not; `flow_latency_ms` is the flow's latency.
+fn assert_free_bus_keeps_input(
+    extra: &[(&str, PropertyValue)],
+    synced: &str,
+    free: &str,
+    flow_latency_ms: u64,
+    run: Duration,
+) {
+    let mut properties = small_mixer_props(&[
+        ("ch1_aux1_level", PropertyValue::Float(1.0)),
+        // Only channel 1 carries the tone: a timed-out channel then leaves
+        // silence on the free bus, not just a quieter mix.
+        ("ch2_to_main", PropertyValue::Bool(false)),
+    ]);
+    properties.extend(props(extra));
+    let m = assemble(&properties);
+    // The state layer switches Monitor to the solo bus once a PFL or AFL is
+    // on; every case does it, so Monitor never listens to Main here.
+    m.element("solo_to_mon").set_property("volume", 1.0f64);
+    m.element("main_to_mon").set_property("volume", 0.0f64);
+
+    for ch in 0..2 {
+        let src = gst::ElementFactory::make("audiotestsrc")
+            .property("is-live", true)
+            .property("volume", if ch == 0 { 0.5f64 } else { 0.0 })
+            .build()
+            .unwrap();
+        m.pipeline.add(&src).unwrap();
+        src.link_pads(None, m.element(&format!("convert_{ch}")), Some("sink"))
+            .unwrap();
+    }
+    let synced_sink = gst::ElementFactory::make("fakesink")
+        .property("sync", true)
+        .property("async", false)
+        .build()
+        .unwrap();
+    m.pipeline.add(&synced_sink).unwrap();
+    m.element(synced)
+        .link_pads(Some("src_%u"), &synced_sink, None)
+        .unwrap();
+    tap(&m, free, "audio/x-raw", "tap_free");
+    m.pipeline
+        .set_latency(gst::ClockTime::from_mseconds(flow_latency_ms));
+
+    m.pipeline.set_state(gst::State::Playing).unwrap();
+    let bus = m.pipeline.bus().unwrap();
+    let start = Instant::now();
+    // Past startup and the first fill of the synced bus.
+    let settled = start + Duration::from_millis(1000);
+    let mut checked = 0;
+    let mut quiet = 0;
+    while start.elapsed() < run {
+        let Some(msg) = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(50),
+            &[gst::MessageType::Error, gst::MessageType::Element],
+        ) else {
+            continue;
+        };
+        if let gst::MessageView::Error(err) = msg.view() {
+            panic!("pipeline error: {err:?}");
+        }
+        let (Some(from), Some(structure)) = (msg.src(), msg.structure()) else {
+            continue;
+        };
+        if structure.name() != "level" || from.name() != "tap_free" || Instant::now() < settled {
+            continue;
+        }
+        let peak = extract_level_values(structure, "peak")
+            .into_iter()
+            .fold(f64::NEG_INFINITY, f64::max);
+        if peak <= -30.0 {
+            quiet += 1;
+        }
+        checked += 1;
+    }
+    assert!(checked >= 10, "only {checked} level messages from {free}");
+    // A blocked channel silences nearly every interval; allow a few quiet
+    // ones for a scheduling stall on a busy machine.
+    assert!(
+        quiet * 5 < checked,
+        "{free} lost its input in {quiet} of {checked} intervals while {synced} \
+         waited {flow_latency_ms} ms for a clock-synced consumer"
+    );
+}
+
+#[test]
+fn test_channel_keeps_feeding_aux_while_main_waits_for_its_consumer() {
+    assert_free_bus_keeps_input(
+        &[("ch1_pfl", PropertyValue::Bool(true))],
+        "main_out_tee",
+        "aux0_out_tee",
+        600,
+        Duration::from_millis(2500),
+    );
+}
+
+#[test]
+fn test_channel_keeps_feeding_main_while_aux_waits_for_its_consumer() {
+    assert_free_bus_keeps_input(
+        &[("ch1_pfl", PropertyValue::Bool(true))],
+        "aux0_out_tee",
+        "main_out_tee",
+        600,
+        Duration::from_millis(2500),
+    );
+}
+
+#[test]
+fn test_channel_keeps_feeding_aux_while_group_waits_for_its_consumer() {
+    assert_free_bus_keeps_input(
+        &[
+            ("ch1_pfl", PropertyValue::Bool(true)),
+            ("ch1_to_grp1", PropertyValue::Bool(true)),
+        ],
+        "group0_out_tee",
+        "aux0_out_tee",
+        600,
+        Duration::from_millis(2500),
+    );
+}
+
+#[test]
+fn test_channel_keeps_feeding_aux_while_monitor_waits_for_its_consumer() {
+    // Monitor listens to the solo bus, which takes the channel's PFL and AFL
+    // taps. Both taps carry audio whether or not they are switched on (the
+    // switch is a volume gate), so this covers the PFL and the AFL send.
+    // 1.5 s of flow latency holds the solo bus behind Monitor for longer than
+    // the queue between them holds (1 s), so the solo bus itself falls behind.
+    assert_free_bus_keeps_input(
+        &[("ch1_pfl", PropertyValue::Bool(true))],
+        "monitor_out_tee",
+        "aux0_out_tee",
+        1500,
+        Duration::from_millis(2500),
+    );
+}
