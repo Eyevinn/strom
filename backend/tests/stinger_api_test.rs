@@ -56,7 +56,7 @@ async fn the_library_is_edited_on_the_mixer_and_guarded_by_file() {
     assert_eq!(files.len(), 3);
 
     // Add: a fourth clip (a copy of the mask), and adding it again is a no-op.
-    let extra = std::path::Path::new(&files[2]).with_file_name("extra.mkv");
+    let extra = std::path::Path::new(&files[2]).with_file_name("extra.mov");
     std::fs::copy(&files[2], &extra).unwrap();
     let extra = extra.to_string_lossy().to_string();
     let (status, clip) = call(
@@ -186,7 +186,7 @@ async fn a_take_is_followed_by_its_id() {
     assert_eq!(status, StatusCode::OK, "{take}");
     let id = take["take_id"].as_u64().unwrap();
     assert_ne!(id, first);
-    assert!(take["file"].as_str().unwrap().ends_with("classic.mkv"));
+    assert!(take["file"].as_str().unwrap().ends_with("classic.mov"));
     let (mut started, mut completed) = (None, None);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while completed.is_none() && std::time::Instant::now() < deadline {
