@@ -68,7 +68,7 @@ pub(crate) fn make_audiomixer(
 }
 
 /// Let a channel input with nothing behind it answer upstream LATENCY queries
-/// itself, as live with no latency of its own.
+/// itself: not live, no latency of its own.
 ///
 /// A channel's sink pad is the block's input. Unlinked, or linked to a
 /// producer that cannot answer yet (a WHIP Input slot with no publisher,
@@ -78,9 +78,12 @@ pub(crate) fn make_audiomixer(
 /// once a query succeeds and otherwise asks again on every aggregate cycle,
 /// thousands of times a second for as long as the channel stays empty.
 ///
-/// The answer contributes nothing to the combined latency (min 0, no max),
-/// the same as GStreamer's default handling of a pad with no peer one hop
-/// further downstream. A producer that can answer is asked as usual, and its
+/// The answer contributes nothing to the combined latency, the same as
+/// GStreamer's default handling of a pad with no peer one hop further
+/// downstream: only live answers count towards the minimum and the live flag,
+/// so a not-live answer leaves both to the inputs that are fed. Answering
+/// live would make a bus without `force-live` and with non-live inputs claim
+/// to be live. A producer that can answer is asked as usual, and its
 /// answer is passed on unchanged. When it starts delivering, the first buffer
 /// on each aggregator pad makes the aggregator query again.
 ///
@@ -99,7 +102,7 @@ pub(super) fn answer_latency_for_unfed_input(element: &gst::Element) {
         let answered = pad.peer().is_some_and(|peer| peer.query(query));
         if !answered {
             if let gst::QueryViewMut::Latency(latency) = query.view_mut() {
-                latency.set(true, gst::ClockTime::ZERO, gst::ClockTime::NONE);
+                latency.set(false, gst::ClockTime::ZERO, gst::ClockTime::NONE);
             }
         }
         gst::PadProbeReturn::Handled

@@ -1031,55 +1031,66 @@ fn test_sample_rate_property_parsing() {
     );
 }
 
+/// Link an `audiotestsrc` into `channel`.
+fn feed(m: &Assembled, channel: usize, live: bool) {
+    let src = gst::ElementFactory::make("audiotestsrc")
+        .property("is-live", live)
+        .build()
+        .unwrap();
+    m.pipeline.add(&src).unwrap();
+    src.link_pads(None, m.element(&format!("convert_{channel}")), Some("sink"))
+        .unwrap();
+}
+
 /// Minimum latency reported upstream of each named output tee, with live audio
 /// playing into both channels.
 fn reported_latency(properties: &HashMap<String, PropertyValue>, tees: &[&str]) -> Vec<u64> {
-    reported_latency_fed(properties, tees, &[0, 1])
+    reported_latency_with(properties, tees, &[0, 1], &[], true)
+        .into_iter()
+        .zip(tees)
+        .map(|((live, min), tee)| {
+            assert!(live, "{tee} is live");
+            min
+        })
+        .collect()
 }
 
-/// Minimum latency reported upstream of each named output tee, with live
-/// audio playing into the `fed` channels and the others left unlinked.
-fn reported_latency_fed(
-    properties: &HashMap<String, PropertyValue>,
-    tees: &[&str],
-    fed: &[usize],
-) -> Vec<u64> {
-    reported_latency_with(properties, tees, fed, &[])
-}
-
-/// As `reported_latency_fed`, with a producer that cannot answer on the
-/// `silent` channels.
+/// The (live, minimum latency) reported upstream of each named output tee,
+/// with an `audiotestsrc` (live or not, per `live`) on the `fed` channels, a
+/// producer that cannot answer on the `silent` channels, and the others left
+/// unlinked.
 fn reported_latency_with(
     properties: &HashMap<String, PropertyValue>,
     tees: &[&str],
     fed: &[usize],
     silent: &[usize],
-) -> Vec<u64> {
+    live: bool,
+) -> Vec<(bool, u64)> {
     let m = assemble(properties);
     for &ch in silent {
         link_silent_producer(&m, ch);
     }
     for &ch in fed {
-        let src = gst::ElementFactory::make("audiotestsrc")
-            .property("is-live", true)
-            .build()
-            .unwrap();
-        m.pipeline.add(&src).unwrap();
-        src.link_pads(None, m.element(&format!("convert_{ch}")), Some("sink"))
-            .unwrap();
+        feed(&m, ch, live);
     }
     m.pipeline.set_state(gst::State::Playing).unwrap();
-    // The query fails until every element upstream has reached PLAYING.
+    // The query fails until every element upstream has reached PLAYING, and
+    // the first answers after that can still change while the sources start:
+    // take an answer once two in a row agree.
     let deadline = Instant::now() + Duration::from_secs(10);
     tees.iter()
         .map(|tee| {
             let pad = m.element(tee).static_pad("sink").unwrap();
+            let mut last = None;
             loop {
                 let mut q = gst::query::Latency::new();
                 if pad.peer_query(&mut q) {
                     let (live, min, _) = q.result();
-                    assert!(live, "{tee} is live");
-                    break min.mseconds();
+                    let answer = (live, min.mseconds());
+                    if last == Some(answer) {
+                        break answer;
+                    }
+                    last = Some(answer);
                 }
                 assert!(Instant::now() < deadline, "latency query upstream of {tee}");
                 std::thread::sleep(Duration::from_millis(20));
@@ -1247,20 +1258,6 @@ fn test_make_audiomixer_late_first_input_does_not_rewind() {
     assert_no_rewind(pushed, &pts);
 }
 
-/// Process CPU time (user + system) so far.
-fn process_cpu_time() -> Duration {
-    // SAFETY: getrusage only writes into the struct we hand it.
-    let usage = unsafe {
-        let mut usage: libc::rusage = std::mem::zeroed();
-        libc::getrusage(libc::RUSAGE_SELF, &mut usage);
-        usage
-    };
-    let tv = |t: libc::timeval| {
-        Duration::from_secs(t.tv_sec as u64) + Duration::from_micros(t.tv_usec as u64)
-    };
-    tv(usage.ru_utime) + tv(usage.ru_stime)
-}
-
 /// Link a producer that cannot answer a LATENCY query yet into `channel`: an
 /// `audioconvert` with nothing on its input, the shape of a WHIP Input slot
 /// with no publisher, whose decodebin has not exposed a pad.
@@ -1274,23 +1271,17 @@ fn link_silent_producer(m: &Assembled, channel: usize) {
 
 /// Run the built mixer with live audio on the `fed` channels, a producer that
 /// cannot answer on the `silent` channels, and every other channel unlinked.
-/// Returns the LATENCY queries the bus mixers send upstream per second, and
-/// the process CPU per second of wall time, over `window` after a warm-up.
+/// Returns the LATENCY queries the bus mixers send upstream per second over
+/// `window`, after a warm-up.
 fn latency_query_rate(
     properties: &HashMap<String, PropertyValue>,
     fed: &[usize],
     silent: &[usize],
     window: Duration,
-) -> (f64, f64) {
+) -> f64 {
     let m = assemble(properties);
-    for ch in fed {
-        let src = gst::ElementFactory::make("audiotestsrc")
-            .property("is-live", true)
-            .build()
-            .unwrap();
-        m.pipeline.add(&src).unwrap();
-        src.link_pads(None, m.element(&format!("convert_{ch}")), Some("sink"))
-            .unwrap();
+    for &ch in fed {
+        feed(&m, ch, true);
     }
     for &ch in silent {
         link_silent_producer(&m, ch);
@@ -1303,7 +1294,9 @@ fn latency_query_rate(
         }
         for pad in element.sink_pads() {
             let counter = queries.clone();
-            pad.add_probe(gst::PadProbeType::QUERY_UPSTREAM, move |_, info| {
+            // PUSH only: each query passes once on the way up.
+            let probe = gst::PadProbeType::QUERY_UPSTREAM | gst::PadProbeType::PUSH;
+            pad.add_probe(probe, move |_, info| {
                 if let Some(gst::QueryView::Latency(_)) = info.query().map(|q| q.view()) {
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
@@ -1325,11 +1318,9 @@ fn latency_query_rate(
     };
     pump(Instant::now() + Duration::from_millis(500));
     queries.store(0, Ordering::Relaxed);
-    let (start, cpu_start) = (Instant::now(), process_cpu_time());
+    let start = Instant::now();
     pump(start + window);
-    let wall = start.elapsed().as_secs_f64();
-    let cpu = (process_cpu_time() - cpu_start).as_secs_f64();
-    (queries.load(Ordering::Relaxed) as f64 / wall, cpu / wall)
+    queries.load(Ordering::Relaxed) as f64 / start.elapsed().as_secs_f64()
 }
 
 /// Three channels: one live, one unlinked, one behind a producer that cannot
@@ -1346,15 +1337,11 @@ fn partly_fed_mixer_props() -> HashMap<String, PropertyValue> {
 /// second for as long as the channel stayed empty.
 #[test]
 fn test_unfed_channel_does_not_requery_latency() {
-    let (rate, cpu) = latency_query_rate(
+    let rate = latency_query_rate(
         &partly_fed_mixer_props(),
         &[0],
         &[2],
         Duration::from_secs(1),
-    );
-    eprintln!(
-        "LATENCY queries/s with unfed channels: {rate:.0}, process CPU {:.1}%",
-        cpu * 100.0
     );
     // A cached latency is re-queried only on events (the first buffer on a
     // pad, a pipeline latency recalculation): a handful per second at most.
@@ -1365,8 +1352,9 @@ fn test_unfed_channel_does_not_requery_latency() {
 }
 
 /// An unfed channel contributes nothing to the latency the buses report: they
-/// report what they report with every channel fed live, and the query no
-/// longer fails.
+/// report what they report with every channel fed, live flag included, and
+/// the query no longer fails. Without `force_live` and with non-live sources
+/// an unfed channel must not make a bus claim to be live.
 #[test]
 fn test_unfed_channel_does_not_change_reported_latency() {
     let tees = [
@@ -1375,8 +1363,14 @@ fn test_unfed_channel_does_not_change_reported_latency() {
         "group0_out_tee",
         "monitor_out_tee",
     ];
-    let props = partly_fed_mixer_props();
-    let all_fed = reported_latency_fed(&props, &tees, &[0, 1, 2]);
-    let partly_fed = reported_latency_with(&props, &tees, &[0], &[2]);
-    assert_eq!(partly_fed, all_fed, "latency upstream of {tees:?}");
+    for (force_live, live_sources) in [(true, true), (false, false)] {
+        let mut props = partly_fed_mixer_props();
+        props.insert("force_live".to_string(), PropertyValue::Bool(force_live));
+        let all_fed = reported_latency_with(&props, &tees, &[0, 1, 2], &[], live_sources);
+        let partly_fed = reported_latency_with(&props, &tees, &[0], &[2], live_sources);
+        assert_eq!(
+            partly_fed, all_fed,
+            "(live, min ms) upstream of {tees:?}, force_live={force_live}"
+        );
+    }
 }
