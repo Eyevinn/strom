@@ -791,9 +791,14 @@ pub struct OverlayRenderer {
     has_frame: bool,
     /// One multiview frame: the duration of each keep-last-frame GAP.
     frame_duration: gst::ClockTime,
-    /// GAP events sent that have not left the appsrc yet, to cap the number
-    /// queued in it (see [`Self::keep_last_frame`]).
+    /// GAP events sent that have not reached the multiview mixer yet, to cap
+    /// the number queued on the way (see [`Self::keep_last_frame`] and
+    /// [`Self::track_mixer_pad`]).
     gaps_queued: Arc<AtomicU64>,
+    /// Render and push a frame on the next tick even if nothing changed: the
+    /// stream was flushed or restarted, or the appsrc stopped, so the mixer
+    /// may no longer hold the last frame.
+    force_dirty: Arc<AtomicBool>,
     last_pgm: u64,
     last_pvw: u64,
     last_ftb: bool,
@@ -832,33 +837,8 @@ impl OverlayRenderer {
             .filter(|f| f.numer() > 0 && f.denom() > 0)
             .and_then(|f| gst::ClockTime::SECOND.mul_div_floor(f.denom() as u64, f.numer() as u64))
             .unwrap_or(gst::ClockTime::from_nseconds(1_000_000_000 / 30));
-        // Track the GAP events still queued in the appsrc. An event probe:
-        // it fires per event, never per buffer, and only touches an atomic.
-        // A GAP leaving the appsrc is no longer queued. A flush or a new
-        // stream (the appsrc restarted) means the queue was emptied, so
-        // nothing is queued any more and the count can never stay stuck.
         let gaps_queued = Arc::new(AtomicU64::new(0));
-        if let Some(pad) = appsrc.static_pad("src") {
-            let gaps_queued = Arc::clone(&gaps_queued);
-            pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
-                if let Some(gst::PadProbeData::Event(ev)) = &info.data {
-                    match ev.type_() {
-                        gst::EventType::Gap => {
-                            let _ = gaps_queued.fetch_update(
-                                Ordering::Relaxed,
-                                Ordering::Relaxed,
-                                |n| Some(n.saturating_sub(1)),
-                            );
-                        }
-                        gst::EventType::FlushStop | gst::EventType::StreamStart => {
-                            gaps_queued.store(0, Ordering::Relaxed);
-                        }
-                        _ => {}
-                    }
-                }
-                gst::PadProbeReturn::Ok
-            });
-        }
+        let force_dirty = Arc::new(AtomicBool::new(false));
         Self {
             appsrc,
             caps,
@@ -869,6 +849,7 @@ impl OverlayRenderer {
             has_frame: false,
             frame_duration,
             gaps_queued,
+            force_dirty,
             last_pgm: u64::MAX,
             last_pvw: u64::MAX,
             last_ftb: false,
@@ -879,6 +860,44 @@ impl OverlayRenderer {
             last_pvw_pip: u64::MAX - 2,
             last_pip_compose_hash: u64::MAX - 3,
         }
+    }
+
+    /// Count the overlay's GAP events where they reach the multiview mixer,
+    /// and notice a flush or new stream there. Call once the pipeline is
+    /// linked (element setup), before the timer starts.
+    ///
+    /// The probe sits on the mixer's overlay sink pad, the end of the
+    /// appsrc → queue → upload/convert chain, so GAPs waiting anywhere on
+    /// the way (the queue takes events without blocking) still count as
+    /// queued. An event probe: it fires per event, never per buffer, and
+    /// only touches atomics.
+    pub fn track_mixer_pad(&self) {
+        let Some(pad) = mixer_sink_pad_downstream_of(&self.appsrc) else {
+            warn!("Overlay: no multiview mixer found downstream of the appsrc; GAPs not tracked");
+            return;
+        };
+        let gaps_queued = Arc::clone(&self.gaps_queued);
+        let force_dirty = Arc::clone(&self.force_dirty);
+        pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+            if let Some(gst::PadProbeData::Event(ev)) = &info.data {
+                match ev.type_() {
+                    gst::EventType::Gap => {
+                        let _ =
+                            gaps_queued.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                                Some(n.saturating_sub(1))
+                            });
+                    }
+                    // Everything queued on the way was dropped, and the mixer
+                    // may have lost the frame it held.
+                    gst::EventType::FlushStop | gst::EventType::StreamStart => {
+                        gaps_queued.store(0, Ordering::Relaxed);
+                        force_dirty.store(true, Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
     }
 
     /// Render overlay if state changed, then push to appsrc.
@@ -897,8 +916,10 @@ impl OverlayRenderer {
         let show_vu = self.state.show_vu_meters();
         let meters_hash = if show_vu { hash_meters(&self.state) } else { 0 };
         let pip_compose_hash = hash_pip_compose(&self.state);
+        let forced = self.force_dirty.swap(false, Ordering::Relaxed);
 
-        let dirty = self.last_pgm != pgm_packed
+        let dirty = forced
+            || self.last_pgm != pgm_packed
             || self.last_pvw != pvw_packed
             || self.last_ftb != ftb
             || self.last_pgm_pip != pgm_pip_packed
@@ -924,6 +945,9 @@ impl OverlayRenderer {
                 pushed
             );
 
+            if !pushed && forced {
+                self.force_dirty.store(true, Ordering::Relaxed);
+            }
             if pushed {
                 self.last_pgm = pgm_packed;
                 self.last_pvw = pvw_packed;
@@ -952,6 +976,12 @@ impl OverlayRenderer {
         m: u32,
         s: u32,
     ) -> bool {
+        // The appsrc is leaky: a frame pushed into a full queue would be
+        // dropped silently and never re-sent. Report "not pushed" instead,
+        // so the frame stays dirty and goes out on a later tick.
+        if self.appsrc.current_level_buffers() >= self.appsrc.max_buffers() {
+            return false;
+        }
         let t0 = Instant::now();
 
         // Reuse or create cairo surface
@@ -1045,17 +1075,24 @@ impl OverlayRenderer {
     /// Re-pushing the pixels instead would upload an identical full-canvas
     /// frame to the GPU on every tick.
     ///
-    /// Unlike buffers, events are not bounded by the appsrc's `max-buffers`,
-    /// so a stalled pipeline would queue one GAP per tick without end. Skip
-    /// the GAP while two are still waiting in the appsrc — the same bound the
-    /// leaky queue puts on buffers. A stopped appsrc (READY or below) has
-    /// dropped its queue, so the count starts over.
+    /// Unlike buffers, events are not bounded by the appsrc's `max-buffers`
+    /// or by the queue after it, so a mixer that stopped consuming would
+    /// collect one GAP per tick without end. Skip the GAP while two have not
+    /// reached the mixer yet — the same bound the leaky appsrc puts on
+    /// buffers — and send none unless PLAYING (a paused live mixer consumes
+    /// nothing). A stopped appsrc (READY or below) has dropped its queue: the
+    /// count starts over and the next tick re-sends a frame.
     fn keep_last_frame(&mut self) -> bool {
         if !self.has_frame {
             return false;
         }
-        if self.appsrc.current_state() < gst::State::Paused {
+        let appsrc_state = self.appsrc.current_state();
+        if appsrc_state < gst::State::Paused {
             self.gaps_queued.store(0, Ordering::Relaxed);
+            self.force_dirty.store(true, Ordering::Relaxed);
+            return false;
+        }
+        if appsrc_state != gst::State::Playing {
             return false;
         }
         if self.gaps_queued.load(Ordering::Relaxed) >= 2 {
@@ -1083,6 +1120,21 @@ impl OverlayRenderer {
             false
         }
     }
+}
+
+/// The aggregator sink pad the appsrc's chain ends in: follows the static
+/// `src` pads downstream until the peer belongs to an aggregator.
+fn mixer_sink_pad_downstream_of(appsrc: &gst_app::AppSrc) -> Option<gst::Pad> {
+    let mut src = appsrc.static_pad("src")?;
+    for _ in 0..8 {
+        let peer = src.peer()?;
+        let el = peer.parent_element()?;
+        if el.is::<gstreamer_base::Aggregator>() {
+            return Some(peer);
+        }
+        src = el.static_pad("src")?;
+    }
+    None
 }
 
 /// Global registry of overlay renderers, keyed by block instance ID.
