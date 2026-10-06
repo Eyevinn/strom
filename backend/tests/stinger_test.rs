@@ -46,7 +46,18 @@ async fn gpu_stingers_land_frame_accurately() {
         .expect("track matte take");
     assert_eq!(take.variant, StingerVariant::TrackMatte);
     let n = r.clip_frames(1).await;
+    // Pad state half way through the clip, for a failure message.
+    let snapshot = {
+        let (state, flow, mixer) = (r.state.clone(), r.flow_id, r.mixer());
+        let wait = take.take_to_air_ms as u64 + 500;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+            mixer_pads_of(&state, flow, &mixer).await
+        })
+    };
     let frames = r.collect(take.take_to_air_ms as u64 + 1600).await;
+    let pads_mid_take = snapshot.await.unwrap();
+    eprintln!("dist mixer pads half way through the matte take:\n{pads_mid_take}");
     let start = frames
         .iter()
         .find(|(_, f)| colour(px(f, 3, 3)) == Colour::Yellow)
@@ -65,7 +76,7 @@ async fn gpu_stingers_land_frame_accurately() {
             assert!(
                 measured.abs_diff(expected) <= 3,
                 "program frame {k} shows matte edge {measured}, clip frame {k} has {expected}; \
-                 frame:edge {seen:?}; report {:?}",
+                 frame:edge {seen:?}; pads mid take:\n{pads_mid_take}\nreport {:?}",
                 r.state
                     .stinger_state(&r.flow_id, &r.mixer())
                     .await

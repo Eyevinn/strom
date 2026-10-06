@@ -383,6 +383,12 @@ impl Running {
     }
 
     /// Wait until the take finished and its report is in.
+    /// Every dist mixer sink pad: what feeds it, and its z-order, alpha and
+    /// blend settings. For failure messages.
+    pub async fn mixer_pads(&self) -> String {
+        mixer_pads_of(&self.state, self.flow_id, &self.mixer()).await
+    }
+
     /// Frames clip `index` decodes to. GStreamer 1.24.2's FFV1 decoder drops
     /// the last frame of a stream (fixed in 1.24.4), so this is read from the
     /// analysis instead of assumed.
@@ -595,4 +601,52 @@ pub async fn classic_take(r: &Running) {
         "classic: on air {:.0} ms after the take, {} late, worst margin {:?} ms",
         report.take_to_air_ms, report.frames_late, report.worst_margin_ms
     );
+}
+
+/// [`Running::mixer_pads`] for a flow, callable from a task of its own.
+pub async fn mixer_pads_of(
+    state: &AppState,
+    flow_id: strom_types::FlowId,
+    mixer_block: &str,
+) -> String {
+    let pipelines = state.pipelines_read().await;
+    let Some(mixer) = pipelines
+        .get(&flow_id)
+        .and_then(|m| m.pipeline().by_name(&format!("{}:mixer", mixer_block)))
+    else {
+        return "no mixer".into();
+    };
+    let enum_nick = |pad: &gst::Pad, prop: &str| -> String {
+        if pad.find_property(prop).is_none() {
+            return "-".into();
+        }
+        let v = pad.property_value(prop);
+        gst::glib::EnumValue::from_value(&v)
+            .map(|(_, e)| e.nick().to_string())
+            .unwrap_or_else(|| "?".into())
+    };
+    mixer
+        .sink_pads()
+        .iter()
+        .map(|pad| {
+            let peer = pad
+                .peer()
+                .and_then(|p| p.parent_element())
+                .map(|e| e.name().to_string())
+                .unwrap_or_default();
+            format!(
+                "{} <- {} z={} a={:.2} src={} dst={} eqa={} srca={} dsta={}",
+                pad.name(),
+                peer,
+                pad.property::<u32>("zorder"),
+                pad.property::<f64>("alpha"),
+                enum_nick(pad, "blend-function-src-rgb"),
+                enum_nick(pad, "blend-function-dst-rgb"),
+                enum_nick(pad, "blend-equation-alpha"),
+                enum_nick(pad, "blend-function-src-alpha"),
+                enum_nick(pad, "blend-function-dst-alpha"),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
