@@ -2,10 +2,11 @@
 //!
 //! The overlay is rendered to a BGRA buffer and pushed via appsrc into the
 //! multiview compositor as a separate input pad. The compositor composites it
-//! in GPU/software as a texture at high zorder. Buffers are pushed at the
-//! multiview framerate to keep the compositor fed; re-rendering only happens
-//! when state changes (PGM/PVW switches, clock tick). Non-dirty frames
-//! re-push the last pixel data in a zero-copy buffer (Arc refcount bump).
+//! in GPU/software as a texture at high zorder. The renderer ticks at the
+//! multiview framerate to keep the compositor fed; a frame is only rendered
+//! and pushed when state changes (PGM/PVW switches, clock tick). A tick with
+//! no change sends a GAP event instead, which tells the compositor to keep
+//! the frame it already has: nothing is re-uploaded to the GPU.
 
 use super::layout::OverlayLayout;
 use gstreamer as gst;
@@ -19,6 +20,12 @@ use std::time::{Instant, SystemTime};
 use strom_types::vision_mixer::{self, Zone, TIMEZONE_REFRESH_SECS};
 use strom_types::FlowId;
 use tracing::{debug, warn};
+
+/// Shortest time between two overlay redraws caused only by VU meters or the
+/// clock (4 fps). Each redraw renders and uploads the full multiview canvas;
+/// meter changes inside this window are drawn together on the next allowed
+/// tick. Source and tally changes (PGM, PVW, FTB, PiP) are not capped.
+const OVERLAY_MIN_REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// A per-block overlay registry: keyed by block instance ID, each entry tagged
 /// with the flow that registered it so [`unregister_flow`] can sweep by flow.
@@ -775,9 +782,10 @@ fn draw_label_centered(
 
 /// Renders the multiview overlay to BGRA buffers and pushes them via appsrc.
 ///
-/// Pushes at the multiview framerate so the compositor always has a current
-/// buffer on the overlay pad. Only re-renders when state actually changes;
-/// otherwise re-pushes the last pixel data in a new zero-copy buffer.
+/// Ticks at the multiview framerate so the compositor always has data queued
+/// on the overlay pad. Only re-renders and pushes a frame when state actually
+/// changes; otherwise sends a GAP event so the compositor keeps the frame it
+/// has (see [`Self::keep_last_frame`]).
 pub struct OverlayRenderer {
     pub appsrc: gst_app::AppSrc,
     caps: gst::Caps,
@@ -785,9 +793,21 @@ pub struct OverlayRenderer {
     width: i32,
     height: i32,
     surface: Option<cairo::ImageSurface>,
-    /// Last rendered pixel data, shared via Arc so repush can wrap it in a
-    /// new GstBuffer without copying the pixel bytes (only Arc refcount bump).
-    last_overlay_data: Option<Arc<[u8]>>,
+    /// Whether a frame has been pushed, so the compositor has one to keep.
+    has_frame: bool,
+    /// One multiview frame: the duration of each keep-last-frame GAP.
+    frame_duration: gst::ClockTime,
+    /// GAP events sent that have not reached the multiview mixer yet, to cap
+    /// the number queued on the way (see [`Self::keep_last_frame`] and
+    /// [`Self::track_mixer_pad`]).
+    gaps_queued: Arc<AtomicU64>,
+    /// Render and push a frame on the next tick even if nothing changed: the
+    /// stream was flushed or restarted, or the appsrc stopped, so the mixer
+    /// may no longer hold the last frame.
+    force_dirty: Arc<AtomicBool>,
+    /// When the overlay was last rendered and pushed, for
+    /// [`OVERLAY_MIN_REDRAW_INTERVAL`].
+    last_redraw: Option<Instant>,
     last_pgm: u64,
     last_pvw: u64,
     last_ftb: bool,
@@ -820,6 +840,14 @@ impl OverlayRenderer {
         width: i32,
         height: i32,
     ) -> Self {
+        let frame_duration = caps
+            .structure(0)
+            .and_then(|s| s.get::<gst::Fraction>("framerate").ok())
+            .filter(|f| f.numer() > 0 && f.denom() > 0)
+            .and_then(|f| gst::ClockTime::SECOND.mul_div_floor(f.denom() as u64, f.numer() as u64))
+            .unwrap_or(gst::ClockTime::from_nseconds(1_000_000_000 / 30));
+        let gaps_queued = Arc::new(AtomicU64::new(0));
+        let force_dirty = Arc::new(AtomicBool::new(false));
         Self {
             appsrc,
             caps,
@@ -827,7 +855,11 @@ impl OverlayRenderer {
             width,
             height,
             surface: None,
-            last_overlay_data: None,
+            has_frame: false,
+            frame_duration,
+            gaps_queued,
+            force_dirty,
+            last_redraw: None,
             last_pgm: u64::MAX,
             last_pvw: u64::MAX,
             last_ftb: false,
@@ -840,11 +872,49 @@ impl OverlayRenderer {
         }
     }
 
+    /// Count the overlay's GAP events where they reach the multiview mixer,
+    /// and notice a flush or new stream there. Call once the pipeline is
+    /// linked (element setup), before the timer starts.
+    ///
+    /// The probe sits on the mixer's overlay sink pad, the end of the
+    /// appsrc → queue → upload/convert chain, so GAPs waiting anywhere on
+    /// the way (the queue takes events without blocking) still count as
+    /// queued. An event probe: it fires per event, never per buffer, and
+    /// only touches atomics.
+    pub fn track_mixer_pad(&self) {
+        let Some(pad) = mixer_sink_pad_downstream_of(&self.appsrc) else {
+            warn!("Overlay: no multiview mixer found downstream of the appsrc; GAPs not tracked");
+            return;
+        };
+        let gaps_queued = Arc::clone(&self.gaps_queued);
+        let force_dirty = Arc::clone(&self.force_dirty);
+        pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+            if let Some(gst::PadProbeData::Event(ev)) = &info.data {
+                match ev.type_() {
+                    gst::EventType::Gap => {
+                        let _ =
+                            gaps_queued.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                                Some(n.saturating_sub(1))
+                            });
+                    }
+                    // Everything queued on the way was dropped, and the mixer
+                    // may have lost the frame it held.
+                    gst::EventType::FlushStop | gst::EventType::StreamStart => {
+                        gaps_queued.store(0, Ordering::Relaxed);
+                        force_dirty.store(true, Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+    }
+
     /// Render overlay if state changed, then push to appsrc.
     ///
-    /// Always pushes a frame (re-pushing the last sample if nothing changed)
-    /// so the multiview compositor has a steady stream of overlay buffers and
-    /// does not stall waiting for the overlay pad.
+    /// Always sends something — the new frame, or a GAP that keeps the last
+    /// one — so the live multiview compositor has data on the overlay pad and
+    /// does not wait for it until its deadline every frame.
     pub fn render_if_dirty(&mut self) -> bool {
         let pgm_packed = self.state.pgm_input_packed();
         let pvw_packed = self.state.pvw_input_packed();
@@ -856,16 +926,24 @@ impl OverlayRenderer {
         let show_vu = self.state.show_vu_meters();
         let meters_hash = if show_vu { hash_meters(&self.state) } else { 0 };
         let pip_compose_hash = hash_pip_compose(&self.state);
+        let forced = self.force_dirty.swap(false, Ordering::Relaxed);
 
-        let dirty = self.last_pgm != pgm_packed
+        // Source and tally changes are drawn on the next tick.
+        let sources_changed = forced
+            || self.last_pgm != pgm_packed
             || self.last_pvw != pvw_packed
             || self.last_ftb != ftb
             || self.last_pgm_pip != pgm_pip_packed
             || self.last_pvw_pip != pvw_pip_packed
-            || self.last_clock_secs != clock_secs
             || self.last_show_vu != show_vu
-            || (show_vu && self.last_meters_hash != meters_hash)
             || self.last_pip_compose_hash != pip_compose_hash;
+        // Meter and clock changes are capped at OVERLAY_MIN_REDRAW_INTERVAL.
+        let meters_or_clock_changed =
+            self.last_clock_secs != clock_secs || (show_vu && self.last_meters_hash != meters_hash);
+        let too_soon = self
+            .last_redraw
+            .is_some_and(|t| t.elapsed() < OVERLAY_MIN_REDRAW_INTERVAL);
+        let dirty = sources_changed || (meters_or_clock_changed && !too_soon);
 
         if dirty {
             let pgm = (pgm_packed != NO_SOURCE).then_some(pgm_packed as usize);
@@ -883,7 +961,11 @@ impl OverlayRenderer {
                 pushed
             );
 
+            if !pushed && forced {
+                self.force_dirty.store(true, Ordering::Relaxed);
+            }
             if pushed {
+                self.last_redraw = Some(Instant::now());
                 self.last_pgm = pgm_packed;
                 self.last_pvw = pvw_packed;
                 self.last_ftb = ftb;
@@ -896,8 +978,8 @@ impl OverlayRenderer {
             }
             pushed
         } else {
-            // Not dirty — re-push the last sample to keep the compositor fed
-            self.repush_last_sample()
+            // Not dirty — keep the compositor fed without re-uploading.
+            self.keep_last_frame()
         }
     }
 
@@ -911,6 +993,12 @@ impl OverlayRenderer {
         m: u32,
         s: u32,
     ) -> bool {
+        // The appsrc is leaky: a frame pushed into a full queue would be
+        // dropped silently and never re-sent. Report "not pushed" instead,
+        // so the frame stays dirty and goes out on a later tick.
+        if self.appsrc.current_level_buffers() >= self.appsrc.max_buffers() {
+            return false;
+        }
         let t0 = Instant::now();
 
         // Reuse or create cairo surface
@@ -943,8 +1031,7 @@ impl OverlayRenderer {
 
         let pushed = (|| -> Option<()> {
             let data = surface.data().ok()?;
-            // Copy cairo pixel data into a Vec, then share via Arc<[u8]> so
-            // repush_last_sample can wrap it in a new buffer without copying.
+            // Copy cairo pixel data into a Vec owned by the buffer.
             let mut pixel_data = vec![0u8; buf_size];
             // No R↔B swap needed — render_overlay uses swapped colors so that
             // cairo's BGRA memory layout produces correct RGBA output directly.
@@ -959,9 +1046,6 @@ impl OverlayRenderer {
                 }
             }
 
-            let shared_data: Arc<[u8]> = pixel_data.into();
-            self.last_overlay_data = Some(shared_data.clone());
-
             let t_copy = t0.elapsed();
 
             // do-timestamp=true on the appsrc sets PTS to the current
@@ -969,14 +1053,15 @@ impl OverlayRenderer {
             // that makes the compositor see the overlay as perpetually stale,
             // causing it to wait up to its full deadline on every frame.
 
-            // Buffer wraps the Arc'd data (no copy). Buffer refcount is 1 so
+            // Buffer wraps the Vec (no copy). Buffer refcount is 1 so
             // BaseSrc can set PTS via do-timestamp without triggering a copy.
-            let buffer = gst::Buffer::from_slice(shared_data);
+            let buffer = gst::Buffer::from_mut_slice(pixel_data);
             let sample = gst::Sample::builder()
                 .buffer(&buffer)
                 .caps(&self.caps)
                 .build();
             self.appsrc.push_sample(&sample).ok()?;
+            self.has_frame = true;
 
             let t_push = t0.elapsed();
 
@@ -998,23 +1083,75 @@ impl OverlayRenderer {
         pushed
     }
 
-    /// Re-push the last overlay frame without re-rendering.
+    /// Tell the compositor to keep showing the last overlay frame.
     ///
-    /// Creates a new GstBuffer wrapping the shared pixel data (Arc refcount
-    /// bump only — no pixel copy). The new buffer has refcount=1, so BaseSrc's
-    /// do-timestamp can set PTS without triggering make_writable copies.
-    fn repush_last_sample(&self) -> bool {
-        if let Some(ref data) = self.last_overlay_data {
-            let buffer = gst::Buffer::from_slice(data.clone());
-            let sample = gst::Sample::builder()
-                .buffer(&buffer)
-                .caps(&self.caps)
-                .build();
-            self.appsrc.push_sample(&sample).is_ok()
+    /// Sends a GAP event flagged `MISSING_DATA` covering the next frame. The
+    /// aggregator turns it into an empty gap buffer, so the live compositor
+    /// has data queued on the overlay pad and composes on time, and
+    /// videoaggregator keeps the pad's current frame for a missing-data gap.
+    /// Re-pushing the pixels instead would upload an identical full-canvas
+    /// frame to the GPU on every tick.
+    ///
+    /// Unlike buffers, events are not bounded by the appsrc's `max-buffers`
+    /// or by the queue after it, so a mixer that stopped consuming would
+    /// collect one GAP per tick without end. Skip the GAP while two have not
+    /// reached the mixer yet — the same bound the leaky appsrc puts on
+    /// buffers — and send none unless PLAYING (a paused live mixer consumes
+    /// nothing). A stopped appsrc (READY or below) has dropped its queue: the
+    /// count starts over and the next tick re-sends a frame.
+    fn keep_last_frame(&mut self) -> bool {
+        if !self.has_frame {
+            return false;
+        }
+        let appsrc_state = self.appsrc.current_state();
+        if appsrc_state < gst::State::Paused {
+            self.gaps_queued.store(0, Ordering::Relaxed);
+            self.force_dirty.store(true, Ordering::Relaxed);
+            return false;
+        }
+        if appsrc_state != gst::State::Playing {
+            return false;
+        }
+        if self.gaps_queued.load(Ordering::Relaxed) >= 2 {
+            return false;
+        }
+        // The appsrc timestamps buffers with the running time
+        // (do-timestamp); stamp the GAP the same way.
+        let Some(now) = self.appsrc.current_running_time() else {
+            return false;
+        };
+        let gap = gst::event::Gap::builder(now)
+            .duration(self.frame_duration)
+            .gap_flags(gst::GapFlags::DATA)
+            .build();
+        // Count it before sending: the probe may see it leave first.
+        self.gaps_queued.fetch_add(1, Ordering::Relaxed);
+        if self.appsrc.send_event(gap) {
+            true
         } else {
+            let _ = self
+                .gaps_queued
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    Some(n.saturating_sub(1))
+                });
             false
         }
     }
+}
+
+/// The aggregator sink pad the appsrc's chain ends in: follows the static
+/// `src` pads downstream until the peer belongs to an aggregator.
+fn mixer_sink_pad_downstream_of(appsrc: &gst_app::AppSrc) -> Option<gst::Pad> {
+    let mut src = appsrc.static_pad("src")?;
+    for _ in 0..8 {
+        let peer = src.peer()?;
+        let el = peer.parent_element()?;
+        if el.is::<gstreamer_base::Aggregator>() {
+            return Some(peer);
+        }
+        src = el.static_pad("src")?;
+    }
+    None
 }
 
 /// Global registry of overlay renderers, keyed by block instance ID.
@@ -1141,9 +1278,9 @@ pub fn trigger_overlay_update(block_id: &str) {
 
 /// Start the overlay push timer.
 ///
-/// Pushes at the multiview framerate so the compositor always has a current
-/// buffer on the overlay pad. Only re-renders when state actually changes
-/// (PGM/PVW switch, clock tick); otherwise re-pushes the last sample.
+/// Ticks at the multiview framerate so the compositor always has data on the
+/// overlay pad. Only re-renders and pushes a frame when state actually changes
+/// (PGM/PVW switch, clock tick); otherwise sends a GAP that keeps the last one.
 ///
 /// Stops when the renderer is unregistered ([`unregister_flow`], on every flow
 /// teardown path) or on [`shutdown_overlay_timers`] (process exit), which joins

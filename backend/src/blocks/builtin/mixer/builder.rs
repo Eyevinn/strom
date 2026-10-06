@@ -754,6 +754,7 @@ impl BlockBuilder for MixerBuilder {
                 .map_err(|e| {
                     BlockBuildError::ElementCreation(format!("audioconvert ch{}: {}", ch_num, e))
                 })?;
+            answer_latency_for_unfed_input(&convert);
             elements.push((convert_id.clone(), convert));
 
             // audioresample: the buses run at `sample_rate`, so a source at

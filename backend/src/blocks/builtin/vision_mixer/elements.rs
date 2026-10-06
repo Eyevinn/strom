@@ -154,21 +154,6 @@ pub fn make_level(name: &str) -> Result<gst::Element, BlockBuildError> {
         .map_err(|e| BlockBuildError::ElementCreation(format!("level: {}", e)))
 }
 
-/// Create a terminating `fakesink` for an audio metering branch.
-///
-/// `sync=false` and `async=false` so an unconnected audio input doesn't stall
-/// preroll — the level element still posts messages when data flows.
-pub fn make_meter_fakesink(name: &str) -> Result<gst::Element, BlockBuildError> {
-    gst::ElementFactory::make("fakesink")
-        .name(name)
-        .property("sync", false)
-        .property("async", false)
-        .property("silent", true)
-        .property("enable-last-sample", false)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("fakesink: {}", e)))
-}
-
 /// Create a `glshader` FX slot, pre-loaded with the identity fragment so it
 /// negotiates and renders as a passthrough until an effect is programmed.
 /// The `create-shader` handler enables runtime fragment swaps — without it
