@@ -18,6 +18,9 @@
 //! - buffers already queued in front of the muxer when the stop comes are in the
 //!   file;
 //! - one track that has stopped carrying data does not hold the others' EOS.
+//!
+//! On Windows the recorder never opens its file (#835), so the tests that need
+//! a recording are ignored there rather than cfg'd out, to stay visible.
 
 pub mod common;
 
@@ -298,6 +301,10 @@ fn timed_stop(mut manager: PipelineManager) -> Duration {
 /// Without the drain the `mdat` size is 0 and both tracks end at the last
 /// periodic moov update, 2 s into a recording of 3.5 s.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "no recording file is written on Windows, see #835"
+)]
 async fn a_stopped_recording_is_finished_at_its_full_length() {
     if !common::plugins_available(REQUIRED) {
         return;
@@ -423,6 +430,10 @@ async fn a_recorder_that_never_had_data_does_not_delay_the_stop() {
 /// The split's EOS is held at the muxer input until the stop has started, so it
 /// reaches the muxer output while the stop is waiting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "no recording file is written on Windows, see #835"
+)]
 async fn a_split_in_progress_is_not_taken_for_the_end() {
     if !common::plugins_available(REQUIRED) {
         return;
@@ -612,6 +623,10 @@ async fn a_stop_before_the_first_audio_track_has_data_leaves_no_file() {
 /// The video queue is slowed to under the frame rate so it holds about a second
 /// of video at the stop.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "no recording file is written on Windows, see #835"
+)]
 async fn buffers_queued_at_the_stop_are_recorded() {
     if !common::plugins_available(REQUIRED) {
         return;
@@ -697,6 +712,10 @@ async fn buffers_queued_at_the_stop_are_recorded() {
 /// Audio stops reaching the recorder 2 s in and the stop comes 2 s later, before
 /// the recorder's 5 s stall watchdog would end the quiet track itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "no recording file is written on Windows, see #835"
+)]
 async fn a_stop_with_one_track_quiet_is_not_held_up() {
     if !common::plugins_available(REQUIRED) {
         return;
