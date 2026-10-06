@@ -49,6 +49,16 @@ impl BlockBuilder for VisionMixerBuilder {
             })
             .collect();
 
+        if properties::parse_bool(props, strom_types::stinger::ENABLE_STINGER_PROPERTY, false) {
+            inputs.push(ExternalPad::with_label(
+                strom_types::stinger::STINGER_INPUT_PAD,
+                "Stinger",
+                MediaType::Video,
+                "queue_stinger",
+                "sink",
+            ));
+        }
+
         // DSK input pads
         for i in 0..num_dsk {
             inputs.push(ExternalPad::with_label(
@@ -151,6 +161,8 @@ impl BlockBuilder for VisionMixerBuilder {
         let enable_fx = properties::parse_bool(props, "enable_fx", vision_mixer::DEFAULT_ENABLE_FX);
         let swap_pvw_pgm =
             properties::parse_bool(props, "swap_pvw_pgm", vision_mixer::DEFAULT_SWAP_PVW_PGM);
+        let enable_stinger =
+            properties::parse_bool(props, strom_types::stinger::ENABLE_STINGER_PROPERTY, false);
 
         let pref = props
             .get("compositor_preference")
@@ -195,6 +207,7 @@ impl BlockBuilder for VisionMixerBuilder {
             show_vu_meters,
             enable_fx,
             swap_pvw_pgm,
+            enable_stinger,
         };
 
         match backend {
@@ -236,6 +249,15 @@ pub(super) struct PipelineParams<'a> {
     pub(super) enable_fx: bool,
     /// Mirror the multiview layout (PGM left, PVW right).
     pub(super) swap_pvw_pgm: bool,
+    /// Build the stinger input: a graphic pad, and on the GPU a matte pad.
+    pub(super) enable_stinger: bool,
+}
+
+impl PipelineParams<'_> {
+    /// Sink index of the stinger graphic on the dist mixer (matte: + 1).
+    pub(super) fn stinger_pad_base(&self) -> usize {
+        vision_mixer::dist_stinger_pad_base(self.num_inputs, self.num_dsk_inputs, self.num_pips)
+    }
 }
 
 impl<'a> PipelineParams<'a> {

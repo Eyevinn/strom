@@ -28,6 +28,7 @@ pub mod ports;
 pub mod routing;
 pub mod state;
 pub mod stats;
+pub mod stinger;
 pub mod system_monitor;
 pub mod tams;
 pub mod thread_stats;

@@ -1812,6 +1812,33 @@ pub async fn trigger_transition(
         req.transition_type, block_id, flow_id, req.from_input, req.to_input, req.duration_ms
     );
 
+    // A stinger runs from the clip on the mixer's stinger input, timed by the
+    // clip; PGM and PVW decide the inputs as for any take.
+    if req.transition_type.eq_ignore_ascii_case("stinger") {
+        let take = state
+            .stinger_take(&flow_id, &block_id, req.stinger_clip)
+            .await
+            .map_err(|e| {
+                error!("Failed to take stinger: {}", e);
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::with_details(
+                        "Failed to trigger transition",
+                        e.to_string(),
+                    )),
+                )
+            })?;
+        return Ok(Json(TransitionResponse {
+            message: format!(
+                "Stinger clip {} ({:?}) on air in {:.0} ms",
+                take.index, take.variant, take.take_to_air_ms
+            ),
+            transition_type: req.transition_type,
+            actual_transition_type: "stinger".to_string(),
+            duration_ms: take.duration_ms,
+        }));
+    }
+
     let actual_transition_type = state
         .trigger_transition(
             &flow_id,

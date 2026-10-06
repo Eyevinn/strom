@@ -115,6 +115,12 @@ pub struct TriggerTransitionRequest {
     #[serde(default = "default_transition_duration")]
     #[cfg_attr(feature = "validation", garde(range(max = 60000)))]
     pub duration_ms: u64,
+    /// Stinger only (`transition_type` "stinger"): playlist index of the clip
+    /// to play on the stinger source. Defaults to the cued clip. A stinger's
+    /// length is the clip's, so `duration_ms` is ignored for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "validation", garde(skip))]
+    pub stinger_clip: Option<usize>,
 }
 
 fn default_transition_type() -> String {

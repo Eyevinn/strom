@@ -15,6 +15,7 @@ pub mod osc;
 pub mod ports;
 pub mod probes;
 pub mod sdp_transform;
+pub mod stinger;
 pub mod system_clock;
 pub mod version;
 pub mod vision_mixer_page;

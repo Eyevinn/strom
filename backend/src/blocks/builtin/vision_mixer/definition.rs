@@ -311,6 +311,35 @@ fn vision_mixer_definition() -> BlockDefinition {
             live: false,
             persist: None,
         },
+        // Stinger input
+        ExposedProperty {
+            name: strom_types::stinger::ENABLE_STINGER_PROPERTY.to_string(),
+            label: "Stinger Input".to_string(),
+            description: "Add a stinger input: wire a Media Player with Stinger Clip Source turned on into it, and take stingers from the vision mixer panel. Classic stingers run on both backends; track-matte and mask-only stingers need the GPU backend and play as classic on the CPU one.".to_string(),
+            property_type: PropertyType::Bool,
+            default_value: Some(PropertyValue::Bool(false)),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: strom_types::stinger::ENABLE_STINGER_PROPERTY.to_string(),
+                transform: None,
+            },
+            live: false,
+            persist: None,
+        },
+        ExposedProperty {
+            name: strom_types::stinger::STINGER_PREROLL_PROPERTY.to_string(),
+            label: "Stinger Preroll (ms)".to_string(),
+            description: "Delay from a stinger take to its first frame on air. Every take is programmed for that frame before the clip starts, so it lands frame-accurately; too short a delay for the machine and the clip's first frames arrive late (the take report says so).".to_string(),
+            property_type: PropertyType::UInt,
+            default_value: Some(PropertyValue::UInt(strom_types::stinger::DEFAULT_STINGER_PREROLL_MS)),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: strom_types::stinger::STINGER_PREROLL_PROPERTY.to_string(),
+                transform: None,
+            },
+            live: false,
+            persist: None,
+        },
         // Show VU meters in multiview overlay
         ExposedProperty {
             name: "show_vu_meters".to_string(),

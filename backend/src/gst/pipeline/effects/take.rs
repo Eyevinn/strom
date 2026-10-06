@@ -378,71 +378,15 @@ impl PipelineManager {
         // Reset all video pads to a clean state before the transition:
         // clear control bindings, restore alpha/position/size for the current
         // PGM input. Single-input PGM only (multi-source compositions are PiPs).
-        let active_pgm_input = old_pgm;
-        let classic_aspects = self.vision_mixer_source_aspects(
+        self.reset_classic_take_pads(
             block_instance_id,
-            if num_video_inputs == usize::MAX {
-                0
-            } else {
-                num_video_inputs
-            },
+            mixer,
+            overlay_state.as_deref(),
+            old_pgm,
+            num_video_inputs,
+            canvas_width,
+            canvas_height,
         );
-        let canvas_aspect = if canvas_height > 0 {
-            canvas_width as f64 / canvas_height as f64
-        } else {
-            16.0 / 9.0
-        };
-
-        for pad in mixer.sink_pads() {
-            let name = pad.name();
-            if name.starts_with("sink_") {
-                if let Ok(idx) = name.trim_start_matches("sink_").parse::<usize>() {
-                    // Neutralize lingering animation bindings (keyframe wipe
-                    // — never removed, see crate::gst::control_bindings).
-                    crate::gst::control_bindings::wipe_control_bindings(
-                        pad.upcast_ref(),
-                        &["alpha", "xpos", "ypos", "width", "height"],
-                    );
-                    if idx < num_video_inputs {
-                        // Classic takes are input↔input — wipe any crop left
-                        // behind by an earlier PiP render on these pads.
-                        set_pad_crop(&pad, &Default::default());
-                        // Explicit geometry: aspect-fit the source into the
-                        // canvas (pads run sizing-policy=none).
-                        let aspect = classic_aspects.get(&idx).copied().unwrap_or(canvas_aspect);
-                        let (x, y, w, h) = strom_types::vision_mixer::aspect_fit_rect(
-                            0,
-                            0,
-                            canvas_width,
-                            canvas_height,
-                            aspect,
-                        );
-                        pad.set_property("xpos", x);
-                        pad.set_property("ypos", y);
-                        pad.set_property("width", w);
-                        pad.set_property("height", h);
-                        if Some(idx) == active_pgm_input {
-                            pad.set_property("alpha", 1.0f64);
-                            pad.set_property("zorder", strom_types::vision_mixer::DIST_PGM_ZORDER);
-                        } else {
-                            pad.set_property("alpha", 0.0f64);
-                        }
-                    } else if let Some(state) = overlay_state.as_ref() {
-                        let dsk_idx = idx - num_video_inputs;
-                        if dsk_idx < state.dsk_enabled.len() {
-                            let enabled = state.dsk_enabled[dsk_idx]
-                                .load(std::sync::atomic::Ordering::Relaxed);
-                            let alpha = if enabled { 1.0f64 } else { 0.0f64 };
-                            pad.set_property("alpha", alpha);
-                        } else {
-                            // Border underlay pads: classic takes are
-                            // input↔input — no zones on PGM, no borders.
-                            pad.set_property("alpha", 0.0f64);
-                        }
-                    }
-                }
-            }
-        }
 
         // Parse transition type
         let trans_type = transition_type.parse::<TransitionType>().map_err(|_| {
@@ -494,5 +438,88 @@ impl PipelineManager {
             trans_type.to_string()
         };
         Ok((was_ftb, old_pgm, new_pgm, actual_kind))
+    }
+    /// Put every dist mixer pad in its resting state for an input-to-input
+    /// take: animation bindings neutralised, inputs aspect-fit to the canvas
+    /// with only `active_pgm_input` visible, DSKs as switched, everything
+    /// else (border underlays, stinger pads) hidden.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn reset_classic_take_pads(
+        &self,
+        block_instance_id: &str,
+        mixer: &gstreamer::Element,
+        overlay_state: Option<
+            &crate::blocks::builtin::vision_mixer::overlay::VisionMixerOverlayState,
+        >,
+        active_pgm_input: Option<usize>,
+        num_video_inputs: usize,
+        canvas_width: i32,
+        canvas_height: i32,
+    ) {
+        let classic_aspects = self.vision_mixer_source_aspects(
+            block_instance_id,
+            if num_video_inputs == usize::MAX {
+                0
+            } else {
+                num_video_inputs
+            },
+        );
+        let canvas_aspect = if canvas_height > 0 {
+            canvas_width as f64 / canvas_height as f64
+        } else {
+            16.0 / 9.0
+        };
+
+        for pad in mixer.sink_pads() {
+            let name = pad.name();
+            if name.starts_with("sink_") {
+                if let Ok(idx) = name.trim_start_matches("sink_").parse::<usize>() {
+                    // Neutralize lingering animation bindings (keyframe wipe
+                    // — never removed, see crate::gst::control_bindings).
+                    crate::gst::control_bindings::wipe_control_bindings(
+                        pad.upcast_ref(),
+                        &["alpha", "xpos", "ypos", "width", "height"],
+                    );
+                    if idx < num_video_inputs {
+                        // Classic takes are input↔input — wipe any crop left
+                        // behind by an earlier PiP render on these pads.
+                        set_pad_crop(&pad, &Default::default());
+                        // Explicit geometry: aspect-fit the source into the
+                        // canvas (pads run sizing-policy=none).
+                        let aspect = classic_aspects.get(&idx).copied().unwrap_or(canvas_aspect);
+                        let (x, y, w, h) = strom_types::vision_mixer::aspect_fit_rect(
+                            0,
+                            0,
+                            canvas_width,
+                            canvas_height,
+                            aspect,
+                        );
+                        pad.set_property("xpos", x);
+                        pad.set_property("ypos", y);
+                        pad.set_property("width", w);
+                        pad.set_property("height", h);
+                        if Some(idx) == active_pgm_input {
+                            pad.set_property("alpha", 1.0f64);
+                            pad.set_property("zorder", strom_types::vision_mixer::DIST_PGM_ZORDER);
+                        } else {
+                            pad.set_property("alpha", 0.0f64);
+                        }
+                    } else if let Some(state) = overlay_state {
+                        let dsk_idx = idx - num_video_inputs;
+                        if dsk_idx < state.dsk_enabled.len() {
+                            let enabled = state.dsk_enabled[dsk_idx]
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            let alpha = if enabled { 1.0f64 } else { 0.0f64 };
+                            pad.set_property("alpha", alpha);
+                        } else {
+                            // Border underlay and stinger pads: classic takes
+                            // are input↔input — no zones on PGM, no borders,
+                            // no stinger on air.
+                            pad.set_property("alpha", 0.0f64);
+                        }
+                    }
+                }
+            }
+        }
     }
 }

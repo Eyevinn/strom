@@ -102,7 +102,42 @@ pub struct MediaPlayerState {
     /// holding its file descriptors — for the life of the process. Keeping the
     /// id is what lets [`MediaPlayerState::shutdown`] break it.
     pub bus_watch: Mutex<Option<gst::glib::SignalHandlerId>>,
+    /// Stinger clip source behaviour; off for an ordinary player.
+    pub stinger: StingerPlayback,
 }
+
+/// How a stinger clip source differs from an ordinary player: it starts
+/// parked on its first frame, never loops or moves on at the end of a clip,
+/// and a take says when its first frame goes on air.
+#[derive(Default)]
+pub struct StingerPlayback {
+    /// Declared a stinger clip source.
+    pub enabled: bool,
+    /// Set when the cued clip's first frame waits in its clocksync.
+    pub park: Arc<ParkFlags>,
+}
+
+/// Counts the buffers reaching a stinger clip's video clocksync, so a cue
+/// can tell when the clip's first frame is there. Shared with the probe that
+/// counts, so the probe holds no player state.
+#[derive(Default)]
+pub struct ParkFlags {
+    /// Buffers seen so far.
+    pub seen: AtomicU64,
+    /// The cued clip's first frame waits in the clocksync.
+    pub parked: AtomicBool,
+}
+
+impl ParkFlags {
+    /// Called for every buffer entering the video clocksync of a stinger
+    /// source: one relaxed atomic add.
+    pub fn on_buffer(&self) {
+        self.seen.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// How long a cue waits for the clip's first frame.
+pub const CUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl MediaPlayerState {
     /// `n` free slots.
@@ -311,6 +346,10 @@ impl MediaPlayerState {
     /// since (that EOS ended a file that is no longer playing), when the user
     /// has paused or stopped since, or when the player has been shut down.
     pub fn advance_after_eos(&self, generation: u64) -> Result<bool, String> {
+        // A stinger clip plays once per take; the take re-cues it.
+        if self.stinger.enabled {
+            return Ok(false);
+        }
         let _control = self.lock_control();
         if self.switch_generation.load(Ordering::SeqCst) != generation
             || self.is_paused.load(Ordering::SeqCst)
@@ -355,9 +394,15 @@ impl MediaPlayerState {
     /// file, then sets the new URI and restarts. The pad-added callback will recreate
     /// the clocksync→appsink chain for the new file's pads.
     fn load_current_file(&self) -> Result<(), String> {
+        self.load_current_file_and(true)
+    }
+
+    /// Load the current file, then play it, or with `play` false only bring
+    /// it up to its first frame (paused).
+    fn load_current_file_and(&self, play: bool) -> Result<(), String> {
         // Odd from here: an EOS posted now is the old file's.
         let switching = self.switch_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let result = self.load_current_file_inner();
+        let result = self.load_current_file_inner(play);
         // `load_current_file_inner` ends the switch once the old stream is
         // gone; this ends it on a failure before that.
         let _ = self.switch_generation.compare_exchange(
@@ -369,7 +414,7 @@ impl MediaPlayerState {
         result
     }
 
-    fn load_current_file_inner(&self) -> Result<(), String> {
+    fn load_current_file_inner(&self, play: bool) -> Result<(), String> {
         let file_path = self.current_file().ok_or("No file to load")?;
         let source_element = self
             .source_element
@@ -423,6 +468,16 @@ impl MediaPlayerState {
         // advance the playlist.
         self.switch_generation.fetch_add(1, Ordering::SeqCst);
 
+        if !play {
+            self.is_paused.store(true, Ordering::SeqCst);
+            self.expect_source();
+            pipeline.set_state(gst::State::Paused).map_err(|e| {
+                self.mark_source_ready();
+                error!("Failed to pause new file: {:?}", e);
+                "Failed to load file paused".to_string()
+            })?;
+            return Ok(());
+        }
         self.is_paused.store(false, Ordering::SeqCst);
         self.start(pipeline, "Failed to start playback")
     }
@@ -534,6 +589,106 @@ impl MediaPlayerState {
         self.pause_locked()?;
         self.seek_locked(0)?;
         Ok(())
+    }
+
+    /// Load playlist entry `index` and park it on its first frame, ready for
+    /// a stinger take. Returns how long that took, or right away when it is
+    /// already parked there.
+    ///
+    /// Parked means the first decoded frame waits inside its clocksync, with
+    /// the internal pipeline paused: a take then only lets it go.
+    pub fn cue(&self, index: usize) -> Result<std::time::Duration, String> {
+        let started = std::time::Instant::now();
+        let before: u64;
+        {
+            let _control = self.lock_control();
+            if self.is_parked_on(index) {
+                return Ok(std::time::Duration::ZERO);
+            }
+            let switch_file = {
+                let mut pl = self
+                    .playlist
+                    .write()
+                    .map_err(|e| format!("Lock error: {}", e))?;
+                if index >= pl.files.len() {
+                    return Err(format!(
+                        "Index {} out of range (playlist has {} files)",
+                        index,
+                        pl.files.len()
+                    ));
+                }
+                let switch = pl.current_index != index;
+                pl.current_index = index;
+                switch
+            };
+            // A cue only runs while no clip plays (a take refuses to cue
+            // over itself), so the next buffer after this count is the
+            // loaded or rewound clip's first frame.
+            let park = &self.stinger.park;
+            park.parked.store(false, Ordering::Release);
+            before = park.seen.load(Ordering::Acquire);
+            let stopped = self
+                .internal_pipeline
+                .read()
+                .ok()
+                .and_then(|g| g.as_ref().map(is_stopped))
+                .unwrap_or(true);
+            let result = if switch_file || stopped {
+                self.load_current_file_and(false)
+            } else {
+                self.pause_locked().and_then(|()| self.seek_locked(0))
+            };
+            result?;
+        }
+        // Outside the control lock: a take or a stop may come in meanwhile,
+        // and the frame arrives on the internal pipeline's own thread.
+        while self.stinger.park.seen.load(Ordering::Acquire) == before {
+            if started.elapsed() > CUE_TIMEOUT {
+                return Err(format!(
+                    "clip {} decoded no frame within {:?}",
+                    index, CUE_TIMEOUT
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        self.stinger.park.parked.store(true, Ordering::Release);
+        Ok(started.elapsed())
+    }
+
+    /// Whether playlist entry `index` is loaded and parked on its first frame.
+    pub fn is_parked_on(&self, index: usize) -> bool {
+        self.stinger.park.parked.load(Ordering::Acquire)
+            && self.is_paused.load(Ordering::SeqCst)
+            && self.current_index() == index
+    }
+
+    /// Play the parked clip so that its first frame lands at main-pipeline
+    /// running time `start_at`, and each later one its own spacing after it.
+    ///
+    /// The parked frame is let go at once and stamped `start_at`; the rest
+    /// leave their clocksync [`super::timing::STINGER_RELEASE_AHEAD_MS`]
+    /// before they are due.
+    pub fn play_at(&self, start_at: i64) -> Result<(), String> {
+        let _control = self.lock_control();
+        let pipeline_guard = self
+            .internal_pipeline
+            .read()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        let pipeline = pipeline_guard
+            .as_ref()
+            .ok_or("Internal pipeline not created")?;
+        self.settle();
+        self.timing.reset(Some(pipeline), &self.main_pipeline);
+        self.timing.pin_start(start_at);
+        // The parked frame waits inside its clocksync and is synced against
+        // whatever offset the clocksync holds when it is let go; an hour back
+        // makes it due already. The first frame after it takes the real one.
+        for clocksync in super::timing::clocksyncs(pipeline) {
+            clocksync.set_property("ts-offset", -3_600_000_000_000i64);
+        }
+        self.stinger.park.parked.store(false, Ordering::Release);
+        self.is_paused.store(false, Ordering::SeqCst);
+        self.start(pipeline, "Failed to start stinger clip")
     }
 
     /// Seek to a position in nanoseconds.

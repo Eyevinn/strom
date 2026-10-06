@@ -127,6 +127,7 @@ mod tests {
             timing: Arc::new(super::timing::Timing::new(0)),
             main_pipeline: gst::glib::WeakRef::new(),
             bus_watch: std::sync::Mutex::new(None),
+            stinger: Default::default(),
         }
     }
 

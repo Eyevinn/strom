@@ -135,8 +135,14 @@ pub async fn set_playlist(
         let was_stopped = player.state() == strom_types::mediaplayer::PlayerState::Stopped;
         player.set_playlist(req.files);
 
-        // Only auto-start from the beginning if the player was stopped
-        if was_stopped && player.playlist_len() > 0 {
+        // Only auto-start from the beginning if the player was stopped. A
+        // stinger clip source parks its first clip instead of playing it.
+        if player.stinger.enabled {
+            if player.playlist_len() > 0 && !player.is_parked_on(player.current_index()) {
+                let index = player.current_index();
+                let _ = control(move || player.cue(index).map(|_| ())).await;
+            }
+        } else if was_stopped && player.playlist_len() > 0 {
             let _ = control(move || player.goto(0)).await;
         }
     }

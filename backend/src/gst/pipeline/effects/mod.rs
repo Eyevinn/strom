@@ -9,6 +9,8 @@
 //!     engine, the mixer ops and the reactive geometry probe.
 //!   - [`shader_fx`] — shader FX engine ops: per-source looks, master
 //!     effects, wipe takes and master envelopes (GPU backend only).
+//!   - [`stinger`] — stinger takes: graphic, matte and the switch beneath,
+//!     programmed as keyframes on the clip's timestamps.
 //!   - [`misc`] — block-generic effects (input animation, loudness reset,
 //!     recorder split, thumbnail capture).
 
@@ -20,6 +22,7 @@ mod misc;
 mod mixer_layout;
 mod mixer_ops;
 mod shader_fx;
+pub mod stinger;
 mod take;
 
 pub(crate) use mixer_layout::{apply_input_group_to_region, apply_pip_layout_to_region, find_pad};
