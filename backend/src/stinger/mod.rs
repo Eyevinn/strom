@@ -11,6 +11,7 @@
 
 pub mod analysis;
 pub mod examples;
+pub mod web;
 
 use strom_types::stinger::{
     StingerBeneath, StingerClipInfo, StingerClipSettings, StingerLayout, StingerVariant,

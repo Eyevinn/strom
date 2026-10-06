@@ -18,8 +18,21 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
 
-/// Block property on a Media Player that makes it a stinger clip source.
+/// Block property on a Media Player that makes it a stinger clip source,
+/// and on an HTML Input that makes its page a stinger.
 pub const STINGER_MODE_PROPERTY: &str = "stinger_mode";
+
+/// HTML Input property: how long a stinger page covers the program, from
+/// the trigger. Required for a page stinger.
+pub const WEB_STINGER_DURATION_PROPERTY: &str = "stinger_duration_ms";
+
+/// HTML Input property: how far into a stinger page the program changes.
+/// 0 takes the middle of the duration.
+pub const WEB_STINGER_CUT_POINT_PROPERTY: &str = "stinger_cut_point_ms";
+
+/// HTML Input property: how long the program mixes at the cut point
+/// (0 = cut).
+pub const WEB_STINGER_MIX_PROPERTY: &str = "stinger_mix_ms";
 
 /// Block property on a Media Player holding per-clip stinger settings, as a
 /// JSON object keyed by playlist entry. Managed through the stinger API.
