@@ -68,6 +68,17 @@ async fn gpu_stingers_land_frame_accurately() {
         .iter()
         .map(|(t, f)| format!("{}:{}", frame_index(*t, start), edge(f, Colour::Red)))
         .collect();
+    // Middle-row pixels of the frame half way through, for a failure message.
+    let mid_row = frames
+        .iter()
+        .find(|(t, _)| frame_index(*t, start) == n as i64 / 2)
+        .map(|(_, f)| {
+            (0..8)
+                .map(|i| format!("{:?}", px(f, i * W / 8, H / 2)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
     for (t, f) in &frames {
         let k = frame_index(*t, start);
         if (0..n as i64).contains(&k) {
@@ -76,7 +87,7 @@ async fn gpu_stingers_land_frame_accurately() {
             assert!(
                 measured.abs_diff(expected) <= 3,
                 "program frame {k} shows matte edge {measured}, clip frame {k} has {expected}; \
-                 frame:edge {seen:?}; pads mid take:\n{pads_mid_take}\nreport {:?}",
+                 frame:edge {seen:?}; middle row half way: {mid_row}; pads mid take:\n{pads_mid_take}\nreport {:?}",
                 r.state
                     .stinger_state(&r.flow_id, &r.mixer())
                     .await
