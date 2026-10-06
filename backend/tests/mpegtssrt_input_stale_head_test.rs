@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use strom::blocks::builtin::mpegtssrt_input::MpegTsSrtInputBuilder;
-use strom::blocks::builtin::tsdemux_anchor::{MAX_LEAD, WINDOW};
+use strom::blocks::builtin::tsdemux_anchor::WINDOW;
 use strom::blocks::{BlockBuildContext, BlockBuilder};
 use strom_types::PropertyValue;
 
@@ -68,6 +68,10 @@ fn srt_port() -> u16 {
         .map(|a| a.port())
         .expect("no free UDP port for the SRT listener")
 }
+
+/// Largest lead from arrival a buffer may have and still count as on time:
+/// the sawtooth of 128 kbit/s AAC in 1316-byte SRT messages, with margin.
+const ON_TIME: gst::ClockTime = gst::ClockTime::from_mseconds(200);
 
 /// Where the live part of the replayed stream starts.
 const GAP: gst::ClockTime = gst::ClockTime::from_seconds(2);
@@ -379,7 +383,7 @@ fn assert_on_time(decode: bool) {
         return;
     };
     assert!(
-        max_lead < MAX_LEAD.nseconds() as i64,
+        max_lead < ON_TIME.nseconds() as i64,
         "decode={}: live audio left the block {} ms ahead of its SRT arrival \
          ({} buffers). tsdemux took its time reference from the stale head, so \
          every sink downstream holds this source back by the caller's wait.",
@@ -452,7 +456,7 @@ fn assert_second_caller_on_time(second_from: gst::ClockTime) {
         .max_by_key(|lead| lead.abs())
         .unwrap();
     assert!(
-        worst.abs() < MAX_LEAD.nseconds() as i64,
+        worst.abs() < ON_TIME.nseconds() as i64,
         "the second caller's audio left the block {} ms off its own arrival          ({} buffers). The correction made for the caller that has gone is          still on the pads, so every consumer that waits for running time          drops this caller as late.",
         worst / 1_000_000,
         settled.len()
