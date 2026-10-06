@@ -980,7 +980,9 @@ impl BlockBuilder for MixerBuilder {
             // its own queue. Each bus is paced by its own consumer, and an
             // aggregator pad holds only about its latency: without the queue,
             // a bus held by a clock-synced consumer blocks the channel's
-            // thread and the other buses time the channel out.
+            // thread and the other buses time the channel out. The
+            // `test_channel_keeps_feeding_*` tests cover these channel sends,
+            // not the bus-to-bus queues.
             // ----------------------------------------------------------------
             let pfl_enabled = get_bool_prop(properties, &format!("ch{}_pfl", ch_num), false);
             let afl_enabled = get_bool_prop(properties, &format!("ch{}_afl", ch_num), false);
