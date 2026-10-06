@@ -257,9 +257,11 @@ file).
 
 **Clip settings** (SETTINGS, for the cued clip):
 
-- **Layout**: detected from the clip. A clip twice as wide as the program
-  is side by side, twice as tall is stacked; one with alpha is classic, a
-  grey one without is a mask.
+- **Layout**: detected from the clip alone. Two standard frames (16:9, 4:3
+  or 9:16) next to each other, such as 32:9, are side by side; one above
+  the other, such as 16:18, stacked. A single picture with alpha is
+  classic, a grey one without is a mask. The program's format plays no
+  part.
 - **Cut point** (classic): left empty, it is the frame where the graphic
   covers most of the picture, found when the clip is analysed.
 - **Beneath** (classic): cut, or mix for a set time from the cut point.

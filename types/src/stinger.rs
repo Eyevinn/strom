@@ -51,8 +51,8 @@ pub const STINGER_INPUT_PAD: &str = "stinger_in";
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum StingerLayout {
-    /// Detect from the clip: its shape against the program's, and whether it
-    /// carries alpha.
+    /// Detect from the clip: its shape (two standard frames side by side or
+    /// stacked) and whether it carries alpha.
     #[default]
     Auto,
     /// The whole frame is the graphic, keyed by its alpha channel.

@@ -5,8 +5,6 @@
 use strom::stinger::{analysis, examples};
 use strom_types::stinger::StingerLayout;
 
-const HD: f64 = 16.0 / 9.0;
-
 fn require(elements: &[&str]) {
     gstreamer::init().expect("gstreamer init");
     for name in elements {
@@ -30,7 +28,7 @@ fn examples_encode_and_analyse_as_their_own_variants() {
             .to_string()
     };
 
-    let sweep = analysis::analyze(&uri(&files[0]), HD).expect("analyse sweep");
+    let sweep = analysis::analyze(&uri(&files[0])).expect("analyse sweep");
     assert_eq!(sweep.detected_layout, StingerLayout::Classic);
     assert!(sweep.has_alpha);
     assert_eq!((sweep.width, sweep.height), (1920, 1080));
@@ -43,7 +41,7 @@ fn examples_encode_and_analyse_as_their_own_variants() {
         "the sweep holds full cover in its middle, cut found at {peak} ms"
     );
 
-    let blade = analysis::analyze(&uri(&files[1]), HD).expect("analyse blade");
+    let blade = analysis::analyze(&uri(&files[1])).expect("analyse blade");
     assert_eq!(blade.detected_layout, StingerLayout::SideBySide);
     assert_eq!((blade.width, blade.height), (3840, 1080));
     let mid = blade.matte_midpoint_ms.expect("matte midpoint");
@@ -53,7 +51,7 @@ fn examples_encode_and_analyse_as_their_own_variants() {
     );
     assert!(blade.matte_start_ms < blade.matte_end_ms);
 
-    let shards = analysis::analyze(&uri(&files[2]), HD).expect("analyse shards");
+    let shards = analysis::analyze(&uri(&files[2])).expect("analyse shards");
     assert_eq!(shards.detected_layout, StingerLayout::MaskOnly);
     assert!(!shards.has_alpha);
     assert!(shards.matte_midpoint_ms.is_some());
@@ -71,17 +69,15 @@ fn analysis_is_cached_until_the_file_changes() {
         .unwrap()
         .to_string();
 
-    assert!(analysis::cached(&uri, HD).is_none());
-    let first = analysis::analyze_cached(&uri, HD).unwrap();
-    assert_eq!(analysis::cached(&uri, HD), Some(first.clone()));
-    // Another program shape is another layout question.
-    assert!(analysis::cached(&uri, 4.0 / 3.0).is_none());
+    assert!(analysis::cached(&uri).is_none());
+    let first = analysis::analyze_cached(&uri).unwrap();
+    assert_eq!(analysis::cached(&uri), Some(first.clone()));
 }
 
 #[test]
 fn a_missing_clip_is_an_error_not_a_hang() {
     gstreamer::init().unwrap();
-    let err = analysis::analyze("file:///nonexistent/strom-stinger.mkv", HD).unwrap_err();
+    let err = analysis::analyze("file:///nonexistent/strom-stinger.mkv").unwrap_err();
     assert!(!err.is_empty());
 }
 

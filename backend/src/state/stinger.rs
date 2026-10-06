@@ -104,7 +104,6 @@ struct Context {
     player: Arc<MediaPlayerState>,
     settings: HashMap<String, StingerClipSettings>,
     preroll_ms: u64,
-    pgm_aspect: f64,
     matte_supported: bool,
 }
 
@@ -141,7 +140,7 @@ impl AppState {
     /// Find the mixer's stinger source and settings. Errors say what is
     /// missing in terms an operator can fix.
     async fn stinger_context(&self, flow_id: &FlowId, block: &str) -> Result<Context, String> {
-        let (source_block_id, settings, preroll_ms, pgm_aspect) = {
+        let (source_block_id, settings, preroll_ms) = {
             let flows = self.inner.flows.read().await;
             let flow = flows.get(flow_id).ok_or("no such flow")?;
             let mixer = flow
@@ -165,16 +164,6 @@ impl AppState {
                 strom_types::stinger::MIN_STINGER_PREROLL_MS,
                 strom_types::stinger::MAX_STINGER_PREROLL_MS,
             );
-            let (w, h) = crate::blocks::builtin::vision_mixer::properties::parse_resolution(
-                props,
-                "pgm_resolution",
-                strom_types::vision_mixer::DEFAULT_PGM_RESOLUTION,
-            );
-            let pgm_aspect = if h > 0 {
-                w as f64 / h as f64
-            } else {
-                16.0 / 9.0
-            };
             let to = format!("{}:{}", block, STINGER_INPUT_PAD);
             let source = flow
                 .links
@@ -205,7 +194,7 @@ impl AppState {
                 }
                 _ => HashMap::new(),
             };
-            (source.to_string(), settings, preroll_ms, pgm_aspect)
+            (source.to_string(), settings, preroll_ms)
         };
         let player = MEDIA_PLAYER_REGISTRY
             .get(&MediaPlayerKey {
@@ -226,14 +215,13 @@ impl AppState {
             player,
             settings,
             preroll_ms,
-            pgm_aspect,
             matte_supported,
         })
     }
 
     /// Analyse a clip off the request path, once at a time per clip.
-    fn analyse_in_background(uri: String, pgm_aspect: f64) {
-        if analysis::cached(&uri, pgm_aspect).is_some() {
+    fn analyse_in_background(uri: String) {
+        if analysis::cached(&uri).is_some() {
             return;
         }
         {
@@ -243,7 +231,7 @@ impl AppState {
             }
         }
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = analysis::analyze_cached(&uri, pgm_aspect) {
+            if let Err(e) = analysis::analyze_cached(&uri) {
                 warn!("Stinger clip {} could not be analysed: {}", uri, e);
             }
             ANALYSING
@@ -256,9 +244,9 @@ impl AppState {
     fn describe_clip(ctx: &Context, index: usize, file: &str) -> StingerClip {
         let settings = ctx.settings_for(file);
         let uri = ctx.uri(file);
-        let info = analysis::cached(&uri, ctx.pgm_aspect);
+        let info = analysis::cached(&uri);
         if info.is_none() {
-            Self::analyse_in_background(uri, ctx.pgm_aspect);
+            Self::analyse_in_background(uri);
         }
         let plan = plan_clip(&settings, info.as_ref(), ctx.matte_supported, None).ok();
         StingerClip {
@@ -335,7 +323,7 @@ impl AppState {
         }
         let ctx = self.stinger_context(flow_id, block).await.map_err(err)?;
         let file = ctx.clip_at(index, expected_file)?;
-        Self::analyse_in_background(ctx.uri(&file), ctx.pgm_aspect);
+        Self::analyse_in_background(ctx.uri(&file));
         let player = Arc::clone(&ctx.player);
         let result = tokio::task::spawn_blocking(move || player.cue(index))
             .await
@@ -418,7 +406,7 @@ impl AppState {
         let was_empty = ctx.player.playlist_len() == 0;
         self.set_stinger_library(flow_id, &ctx, playlist).await;
         for f in &files {
-            Self::analyse_in_background(ctx.uri(f), ctx.pgm_aspect);
+            Self::analyse_in_background(ctx.uri(f));
         }
         if was_empty {
             let _ = self.stinger_cue(flow_id, block, 0, None).await;
@@ -485,7 +473,7 @@ impl AppState {
                 playlist.len() - 1
             }
         };
-        Self::analyse_in_background(uri, ctx.pgm_aspect);
+        Self::analyse_in_background(uri);
         match settings {
             Some(settings) => {
                 self.stinger_set_clip_settings(flow_id, block, index, Some(file), settings)
@@ -657,18 +645,15 @@ impl AppState {
         // planned blind would show its matte. A cue starts the analysis, so
         // this waits only for a clip taken straight after it was added.
         let uri = ctx.uri(file);
-        let info = match analysis::cached(&uri, ctx.pgm_aspect) {
+        let info = match analysis::cached(&uri) {
             Some(info) => Some(info),
-            None => {
-                let aspect = ctx.pgm_aspect;
-                tokio::task::spawn_blocking(move || analysis::analyze_cached(&uri, aspect))
-                    .await
-                    .ok()
-                    .and_then(|r| {
-                        r.map_err(|e| warn!("Stinger clip could not be analysed: {}", e))
-                            .ok()
-                    })
-            }
+            None => tokio::task::spawn_blocking(move || analysis::analyze_cached(&uri))
+                .await
+                .ok()
+                .and_then(|r| {
+                    r.map_err(|e| warn!("Stinger clip could not be analysed: {}", e))
+                        .ok()
+                }),
         };
         let settings = ctx.settings_for(file);
         let plan = plan_clip(
