@@ -788,6 +788,10 @@ impl PipelineManager {
         if on_pvw {
             state.set_pvw_input(bg);
         }
+        // Border underlays follow the configured zones (held frames, colors).
+        if let Some(mixer) = mixer {
+            crate::blocks::builtin::vision_mixer::underlays::refresh(&state, mixer, mv_comp);
+        }
 
         // ---- 3) Compute NEW pad targets (after mutation).
         let new_tile = pip_tile_rect.map(|reg| {
@@ -1007,6 +1011,11 @@ impl PipelineManager {
         let bg = state.pip_bg_input(pip_idx);
         let zones = state.pip_zones(pip_idx);
         state.set_pvw_input(bg);
+        // The PiP now on PVW is the one a take brings to PGM: give the
+        // hidden PGM border underlays its colors.
+        if let Some(mixer) = self.elements.get(&format!("{}:mixer", block_instance_id)) {
+            crate::blocks::builtin::vision_mixer::underlays::refresh(&state, mixer, mv_comp);
+        }
 
         // Render PiP layout into the PVW big rectangle.
         let r = &state.layout.pvw_rect;

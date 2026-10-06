@@ -279,10 +279,11 @@ pub(super) fn build_cpu_pipeline(
     // --- Border underlay sources ---
     // Zone borders render as solid-color compositor pads directly beneath
     // their content pads (see `gst::underlay`). One tiny videotestsrc per
-    // (region, input); the border color is set at runtime via
-    // `foreground-color`. Non-live → contributes no latency. Only built when
-    // PiPs are configured — zones (and thus borders) cannot exist without
-    // them.
+    // (region, input) pushes one frame, which the mixer pad holds while the
+    // border is configured or visible. The border color is set at runtime
+    // via `foreground-color` and a restart (`set_underlay_color`). Non-live,
+    // so it adds no latency. Only built when PiPs are configured: zones (and
+    // thus borders) cannot exist without them.
     if p.num_pips > 0 {
         let underlay_chains: Vec<String> = (0..p.num_inputs)
             .map(|i| format!("underlay_dist_{}", i))
@@ -295,9 +296,9 @@ pub(super) fn build_cpu_pipeline(
             .collect();
         // Always RGBA — the compositor's convert pads handle per-pad format
         // conversion, and an alpha-less forced output_format (I420/NV12)
-        // would silently drop the alpha of #RRGGBBAA border colors. Low
-        // framerate: the color only changes on border edits and the
-        // compositor keeps compositing the latest buffer between pushes.
+        // would silently drop the alpha of #RRGGBBAA border colors. Each
+        // source pushes a single frame; the compositor pad repeats it
+        // (`repeat-after-eos`) while the border is configured or visible.
         let underlay_caps: gst::Caps =
             "video/x-raw,format=RGBA,width=16,height=16,framerate=5/1,pixel-aspect-ratio=1/1"
                 .parse()
@@ -305,12 +306,8 @@ pub(super) fn build_cpu_pipeline(
         for name in &underlay_chains {
             let src_id = p.id(&format!("{}_src", name));
             let cf_id = p.id(&format!("{}_caps", name));
-            let src = gst::ElementFactory::make("videotestsrc")
-                .name(&src_id)
-                .property("is-live", false)
-                .build()
+            let src = crate::gst::underlay::make_underlay_src(&src_id)
                 .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", src_id, e)))?;
-            src.set_property_from_str("pattern", "solid-color");
             let cf = gst::ElementFactory::make("capsfilter")
                 .name(&cf_id)
                 .property("caps", &underlay_caps)
@@ -571,6 +568,7 @@ pub(super) fn build_cpu_pipeline(
         let block_id = p.instance_id.to_string();
         let num_inputs = p.num_inputs;
         let num_pips = p.num_pips;
+        let underlay_state = std::sync::Arc::clone(&overlay_state);
         ctx.register_element_setup(Box::new(move |_flow_id, _events| {
             let (Some(mixer), Some(mv_comp)) = (dist_weak.upgrade(), mv_weak.upgrade()) else {
                 return;
@@ -578,6 +576,11 @@ pub(super) fn build_cpu_pipeline(
             super::super::geometry::install_caps_probes(
                 &block_id, &mixer, &mv_comp, num_inputs, num_pips,
             );
+            // Border underlays hold a frame only while their border is
+            // configured or still visible.
+            if num_pips > 0 {
+                super::super::underlays::watch(&underlay_state, &mixer, &mv_comp);
+            }
         }));
     }
     let bus_message_handler = Some(audio_meter::build_meter_bus_handler(
