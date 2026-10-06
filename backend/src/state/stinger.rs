@@ -976,7 +976,30 @@ impl AppState {
     }
 
     /// Take a stinger from PGM to PVW, playing clip `index` or the cued one.
+    ///
+    /// The take runs in a task of its own: once it has claimed the mixer it
+    /// must run to the end that releases the claim, even if the caller stops
+    /// waiting (a request whose client went away).
     pub async fn stinger_take(
+        &self,
+        flow_id: &FlowId,
+        block: &str,
+        index: Option<usize>,
+        expected_file: Option<&str>,
+    ) -> Result<StingerTakeResponse, PipelineError> {
+        let state = self.clone();
+        let (flow_id, block) = (*flow_id, block.to_string());
+        let expected_file = expected_file.map(str::to_string);
+        tokio::spawn(async move {
+            state
+                .stinger_take_now(&flow_id, &block, index, expected_file.as_deref())
+                .await
+        })
+        .await
+        .map_err(|e| err(format!("the take did not finish: {e}")))?
+    }
+
+    async fn stinger_take_now(
         &self,
         flow_id: &FlowId,
         block: &str,
