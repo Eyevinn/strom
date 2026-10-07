@@ -58,7 +58,9 @@ fn first_stalled_pad(element: &gst::Element) -> Option<StalledPad> {
 /// its task on the way out for *every* reason including end of stream, and the
 /// element stays `PLAYING` afterwards, so a finite source that has played out
 /// would otherwise be reported as failed forever. The stall this looks for
-/// pushes no EOS.
+/// pushes no EOS. A parser reading a file in pull mode runs its task on its
+/// sink pad, which never carries the EOS flag because the EOS leaves through
+/// the source pad; there the EOS returned by its last pull marks it finished.
 ///
 /// An unlinked pad has no branch to report on. A `queue` feeding a block output
 /// that the flow leaves unconnected gets `not-linked` from its loop and parks
@@ -95,6 +97,7 @@ fn stalled_pad_on(element: &gst::Element) -> Option<StalledPad> {
         .find(|pad| {
             pad.task_state() == gst::TaskState::Paused
                 && !pad.pad_flags().contains(gst::PadFlags::EOS)
+                && pad.last_flow_result() != Err(gst::FlowError::Eos)
                 && pad.peer().is_some()
                 && !(never_fed && pad.last_flow_result().is_ok())
         })
@@ -504,6 +507,36 @@ mod tests {
         flow
     }
 
+    /// filesrc -> rawaudioparse -> fakesink, reading a short raw audio file.
+    ///
+    /// rawaudioparse pulls from filesrc, so its pad task runs on its sink pad.
+    fn pull_mode_clip_flow(path: &std::path::Path) -> Flow {
+        let mut flow = Flow::new("pull mode eos health test");
+        flow.elements = vec![
+            element(
+                "src",
+                "filesrc",
+                &[(
+                    "location",
+                    PropertyValue::String(path.to_string_lossy().to_string()),
+                )],
+            ),
+            element("parse", "rawaudioparse", &[]),
+            element("sink", "fakesink", &[("sync", PropertyValue::Bool(false))]),
+        ];
+        flow.links = vec![
+            Link {
+                from: "src".to_string(),
+                to: "parse".to_string(),
+            },
+            Link {
+                from: "parse".to_string(),
+                to: "sink".to_string(),
+            },
+        ];
+        flow
+    }
+
     /// Live source -> identity -> fakesink.
     ///
     /// Unfed, the source is an appsrc that never pushes and stands in for an
@@ -687,6 +720,76 @@ mod tests {
         );
 
         manager.stop().expect("pipeline should stop");
+    }
+
+    /// A parser reading a file in pull mode pauses its sink pad task at the end
+    /// of the file. The EOS goes out through its source pad, so the paused pad
+    /// never carries the EOS flag; what marks it finished is the EOS its last
+    /// pull returned. A clip played to the end must not read as a failure.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pull_mode_parser_at_end_of_file_is_not_reported_as_failed() {
+        gst::init().unwrap();
+
+        let path = std::env::temp_dir().join(format!(
+            "strom-health-pull-mode-{}.raw",
+            uuid::Uuid::new_v4()
+        ));
+        // A fifth of a second of rawaudioparse's default S16LE 44.1 kHz stereo.
+        std::fs::write(&path, vec![0u8; 44_100 * 4 / 5]).unwrap();
+
+        let mut manager = PipelineManager::new(
+            &pull_mode_clip_flow(&path),
+            EventBroadcaster::default(),
+            &BlockRegistry::new("test_blocks.json"),
+            vec!["stun:stun.l.google.com:19302".to_string()],
+            "all".to_string(),
+            None,
+            std::path::PathBuf::from("./media"),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        )
+        .expect("pipeline should build");
+
+        manager.start().expect("pipeline should start");
+        assert!(
+            wait_for(
+                || manager.elements["sink"]
+                    .static_pad("sink")
+                    .unwrap()
+                    .pad_flags()
+                    .contains(gst::PadFlags::EOS),
+                Duration::from_secs(15)
+            ),
+            "clip never reached EOS"
+        );
+        // The premise: the paused task sits on a pad with no EOS flag.
+        let parse_sink = manager.elements["parse"].static_pad("sink").unwrap();
+        assert!(
+            wait_for(
+                || parse_sink.task_state() == gst::TaskState::Paused,
+                Duration::from_secs(5)
+            ),
+            "rawaudioparse did not run its sink pad task in pull mode"
+        );
+        assert!(!parse_sink.pad_flags().contains(gst::PadFlags::EOS));
+
+        let went_failed = wait_for(
+            || {
+                manager
+                    .get_block_health()
+                    .iter()
+                    .any(|h| h.status == BlockHealthStatus::Failed)
+            },
+            HEALTH_POLL_INTERVAL * (CONFIRMATIONS_BEFORE_FAILED + 3),
+        );
+        let health = manager.get_block_health();
+        manager.stop().expect("pipeline should stop");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            !went_failed,
+            "a clip played to the end must not read as failed: {:?}",
+            health
+        );
+        assert!(!health.is_empty(), "health scan never produced a snapshot");
     }
 
     /// `vtenc` parks its output task as soon as it reaches `PLAYING` and only
