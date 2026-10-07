@@ -11,6 +11,7 @@ use gstreamer_base as gst_base;
 use gstreamer_base::prelude::BaseTransformExt;
 use gstreamer_base::subclass::base_transform::BaseTransformMode;
 use gstreamer_base::subclass::prelude::*;
+use strom_types::mixer::VOICE_ISOLATION_NO_LIMIT_DB;
 
 use super::engine::{Engine, HOP, MODEL_DELAY, SAMPLE_RATE};
 
@@ -27,7 +28,7 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
 pub(super) const CONTENT_DELAY: usize = MODEL_DELAY + HOP;
 /// Crossfade between dry and wet when the switch flips.
 const FADE: usize = HOP;
-const DEFAULT_ATTENUATION_LIMIT: f64 = 100.0;
+const NO_LIMIT_DB: f64 = VOICE_ISOLATION_NO_LIMIT_DB as f64;
 
 #[derive(Clone, Copy)]
 struct Settings {
@@ -39,7 +40,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             enabled: false,
-            attenuation_limit: DEFAULT_ATTENUATION_LIMIT,
+            attenuation_limit: NO_LIMIT_DB,
         }
     }
 }
@@ -89,8 +90,8 @@ impl ObjectImpl for VoiceIsolation {
                     .nick("Attenuation limit")
                     .blurb("Most the model may reduce any frequency, in dB; 100 means no limit")
                     .minimum(0.0)
-                    .maximum(100.0)
-                    .default_value(DEFAULT_ATTENUATION_LIMIT)
+                    .maximum(NO_LIMIT_DB)
+                    .default_value(NO_LIMIT_DB)
                     .mutable_playing()
                     .build(),
             ]

@@ -4,7 +4,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 
-use super::{register, ELEMENT_NAME, SAMPLE_RATE};
+use super::{register, CONTENT_DELAY_SAMPLES, ELEMENT_NAME, SAMPLE_RATE};
 
 const CHANNELS: usize = 2;
 const BUF: usize = 480;
@@ -106,15 +106,21 @@ fn energy(samples: &[f32]) -> f64 {
     samples.iter().map(|s| (*s as f64) * (*s as f64)).sum()
 }
 
+/// Off, the element must leave audio alone for as long as it runs, not only
+/// until a model would have finished loading.
 #[test]
 fn disabled_passes_audio_through_unchanged() {
     let mut h = Harness::new(false);
     let mut rng = 1;
-    for i in 0..50 {
+    let until = Instant::now() + Duration::from_secs(3);
+    let mut i = 0;
+    while Instant::now() < until {
         let input = noise(&mut rng, BUF);
         let (output, pts) = h.process(&input);
         assert_eq!(output, input, "buffer {i} changed while disabled");
         assert_eq!(pts, Some(gst::ClockTime::from_mseconds(10 * i)));
+        i += 1;
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -170,29 +176,53 @@ fn enabled_suppresses_noise_and_switches_back_cleanly() {
     }
 }
 
-/// A buffer size that is not a whole hop must still come back the same size,
-/// so the element never runs short of wet samples.
+/// Buffers that are not whole hops must still be answered in full: with no
+/// limit on the blend (0 dB) the wet signal is the input itself, so once the
+/// crossfade is over every output sample is the input exactly
+/// CONTENT_DELAY_SAMPLES earlier. Running short of wet samples would put
+/// zeros in, and shift everything after them.
 #[test]
-fn odd_buffer_sizes_keep_their_length() {
+fn odd_buffer_sizes_come_back_whole_and_60_ms_late() {
     let mut h = Harness::new(true);
+    h.element.set_property("attenuation-limit", 0.0f64);
     let mut rng = 3;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut processed = false;
-    while !processed {
-        for frames in [441, 960, 17, 1024, 480] {
+    let (mut dry, mut wet) = (Vec::new(), Vec::new());
+    // Keep channel 0 of everything in and out, to compare sample by sample.
+    let mut round = |h: &mut Harness, dry: &mut Vec<f32>, wet: &mut Vec<f32>| {
+        for frames in [441, 960, 17, 1024, 480, 1, 479, 481] {
             let input = noise(&mut rng, frames);
             let (output, _) = h.process(&input);
             assert_eq!(output.len(), input.len());
-            // Wet output differs from the dry input; that shows the model ran.
-            processed |= output != input;
+            dry.extend(input.iter().step_by(CHANNELS));
+            wet.extend(output.iter().step_by(CHANNELS));
         }
-        assert!(Instant::now() < deadline, "the model never ran");
+    };
+    let late_from = |dry: &[f32], wet: &[f32], from: usize| {
+        (from.max(CONTENT_DELAY_SAMPLES)..wet.len())
+            .find(|&n| (wet[n] - dry[n - CONTENT_DELAY_SAMPLES]).abs() >= 1e-4)
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let from = wet.len();
+        round(&mut h, &mut dry, &mut wet);
+        if late_from(&dry, &wet, from).is_none() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "output never became the delayed input"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
-    for frames in [441, 960, 17, 1024, 480, 1, 479, 481] {
-        let input = noise(&mut rng, frames);
-        assert_eq!(h.process(&input).0.len(), input.len());
+    let from = wet.len();
+    for _ in 0..20 {
+        round(&mut h, &mut dry, &mut wet);
     }
+    assert_eq!(
+        late_from(&dry, &wet, from),
+        None,
+        "output is not the input {CONTENT_DELAY_SAMPLES} samples late"
+    );
 }
 
 /// With the model loaded and running, dropping the pipeline must finalize the
