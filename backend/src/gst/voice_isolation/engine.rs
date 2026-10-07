@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use realfft::num_complex::Complex32;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
+use strom_types::mixer::VOICE_ISOLATION_NO_LIMIT_DB;
 use tract_onnx::prelude::*;
 
 pub(super) const SAMPLE_RATE: i32 = 48_000;
@@ -115,9 +116,10 @@ impl Engine {
         }
     }
 
-    /// Cap how far the model may pull any bin down; 100 dB or more means no cap.
+    /// Cap how far the model may pull any bin down; VOICE_ISOLATION_NO_LIMIT_DB
+    /// or more means no cap.
     pub(super) fn set_attenuation_limit(&mut self, db: f64) {
-        self.alpha = if db >= 100.0 {
+        self.alpha = if db >= VOICE_ISOLATION_NO_LIMIT_DB as f64 {
             0.0
         } else {
             10f64.powf(-db / 20.0) as f32
