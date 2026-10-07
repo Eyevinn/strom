@@ -10,7 +10,9 @@ use crate::api::sdp_transform::{
 use crate::blocks::builtin::whip::{create_whipserversrc_for_session, CreatedSession};
 use crate::json_rejection::JsonBody;
 use crate::state::AppState;
-use crate::whip_session_manager::{NewWhipSession, WhipSessionManager};
+use crate::whip_session_manager::{
+    NewWhipSession, SessionActivity, WhipEndpointConfig, WhipSessionManager,
+};
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -159,21 +161,35 @@ pub async fn whip_post(
     let cleanup_tx = state.whip_session_manager().cleanup_sender();
     let cleanup_sent = Arc::new(AtomicBool::new(false));
     let cleanup_sent_for_session = cleanup_sent.clone();
-    let CreatedSession {
-        element,
-        session_pipeline,
-        port,
-        activity,
-    } = match tokio::task::spawn_blocking(move || {
-        create_whipserversrc_for_session(
+    let temp_id_for_session = temp_resource_id.clone();
+    // Handed over through a channel rather than as the blocking task's result:
+    // if this POST is cancelled (the client went away) while the session is
+    // built, the task still runs to the end, and the session it built must be
+    // given back by it, since nobody is left to receive it.
+    let (created_tx, created_rx) = tokio::sync::oneshot::channel();
+    tokio::task::spawn_blocking(move || {
+        let created = create_whipserversrc_for_session(
             &config_for_session,
             slot,
             cleanup_tx,
-            cleanup_sent_for_session,
-        )
-    })
-    .await
-    {
+            cleanup_sent_for_session.clone(),
+        );
+        match created_tx.send(created) {
+            Ok(()) => {}
+            Err(Ok(created)) => drop(PendingSession::new(
+                config_for_session,
+                slot,
+                temp_id_for_session,
+                created,
+                cleanup_sent_for_session,
+            )),
+            Err(Err(_)) => {
+                config_for_session.release_slot(slot, &temp_id_for_session);
+                cleanup_sent_for_session.store(true, Ordering::SeqCst);
+            }
+        }
+    });
+    let created = match created_rx.await {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             error!("Failed to create whipserversrc for session: {}", e);
@@ -187,17 +203,27 @@ pub async fn whip_post(
             )
                 .into_response();
         }
-        Err(e) => {
-            error!("spawn_blocking panicked: {}", e);
+        Err(_) => {
+            error!("Creating the whipserversrc for a WHIP session panicked");
             config.release_slot(slot, &temp_resource_id);
             cleanup_sent.store(true, Ordering::SeqCst);
             return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
         }
     };
 
+    let port = created.port;
     info!(
         "WHIP POST for endpoint '{}': created whipserversrc on port {} (slot {})",
         endpoint_id, port, slot
+    );
+    // From here on every way out of this handler gives the session back,
+    // including the handler being dropped mid-await: see `PendingSession`.
+    let pending = PendingSession::new(
+        config.clone(),
+        slot,
+        temp_resource_id,
+        created,
+        cleanup_sent,
     );
 
     // Read the request body
@@ -205,13 +231,7 @@ pub async fn whip_post(
         Ok(b) => b,
         Err(e) => {
             error!("Failed to read request body: {}", e);
-            // Teardown the element we just created and release slot
-            config.release_slot(slot, &temp_resource_id);
-            cleanup_sent.store(true, Ordering::SeqCst);
-            let session_pipeline_clone = session_pipeline.clone();
-            tokio::task::spawn_blocking(move || {
-                WhipSessionManager::teardown_session_pipeline(&session_pipeline_clone);
-            });
+            pending.abandon();
             return (StatusCode::BAD_REQUEST, "Failed to read body").into_response();
         }
     };
@@ -253,12 +273,7 @@ pub async fn whip_post(
         Ok(c) => c,
         Err(e) => {
             error!("Failed to create HTTP client: {}", e);
-            config.release_slot(slot, &temp_resource_id);
-            cleanup_sent.store(true, Ordering::SeqCst);
-            let session_pipeline_clone = session_pipeline.clone();
-            tokio::task::spawn_blocking(move || {
-                WhipSessionManager::teardown_session_pipeline(&session_pipeline_clone);
-            });
+            pending.abandon();
             return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
         }
     };
@@ -297,12 +312,7 @@ pub async fn whip_post(
                     port
                 );
                 if attempt == max_attempts - 1 {
-                    config.release_slot(slot, &temp_resource_id);
-                    cleanup_sent.store(true, Ordering::SeqCst);
-                    let session_pipeline_clone = session_pipeline.clone();
-                    tokio::task::spawn_blocking(move || {
-                        WhipSessionManager::teardown_session_pipeline(&session_pipeline_clone);
-                    });
+                    pending.abandon();
                     warn!(
                         "WHIP: All {} proxy attempts failed for endpoint '{}'",
                         max_attempts, endpoint_id
@@ -316,12 +326,7 @@ pub async fn whip_post(
     let (status, resp_headers, resp_body) = match result {
         Some(tuple) => tuple,
         None => {
-            config.release_slot(slot, &temp_resource_id);
-            cleanup_sent.store(true, Ordering::SeqCst);
-            let session_pipeline_clone = session_pipeline.clone();
-            tokio::task::spawn_blocking(move || {
-                WhipSessionManager::teardown_session_pipeline(&session_pipeline_clone);
-            });
+            pending.abandon();
             return (StatusCode::SERVICE_UNAVAILABLE, "WHIP element not ready").into_response();
         }
     };
@@ -335,12 +340,7 @@ pub async fn whip_post(
         // Teardown element and release slot on any error response — the session
         // cannot be used and would otherwise occupy the slot until the inactivity
         // watchdog fires.
-        config.release_slot(slot, &temp_resource_id);
-        cleanup_sent.store(true, Ordering::SeqCst);
-        let session_pipeline_clone = session_pipeline.clone();
-        tokio::task::spawn_blocking(move || {
-            WhipSessionManager::teardown_session_pipeline(&session_pipeline_clone);
-        });
+        pending.abandon();
         return build_whip_post_response(
             &endpoint_id,
             status,
@@ -351,53 +351,22 @@ pub async fn whip_post(
         .into_response();
     }
 
-    // Extract resource_id from Location header to register the session
-    if let Some(location) = resp_headers.get(header::LOCATION) {
-        if let Ok(loc_str) = location.to_str() {
-            // Location format: /whip/resource/{resource_id}
-            if let Some(resource_id) = loc_str.strip_prefix("/whip/resource/") {
-                // Update slot assignment from temp_resource_id to real resource_id
-                if !config.rename_slot_holder(slot, &temp_resource_id, resource_id) {
-                    warn!(
-                        "WHIP: Slot {} on endpoint '{}' is no longer held by this POST (session '{}')",
-                        slot, endpoint_id, resource_id
-                    );
-                }
-
-                info!(
-                    "WHIP: Registering session resource_id='{}' on port {} for endpoint '{}' (slot {})",
-                    resource_id, port, endpoint_id, slot
-                );
-                let registered = state
-                    .whip_session_manager()
-                    .register_session(NewWhipSession {
-                        resource_id: resource_id.to_string(),
-                        port,
-                        element,
-                        session_pipeline,
-                        endpoint_id: endpoint_id.clone(),
-                        slot,
-                        config: config.clone(),
-                        cleanup_sent,
-                        activity,
-                    });
-                if !registered {
-                    warn!(
-                        "WHIP: Session '{}' was cleaned up instead of registered (ICE failed early, or its flow stopped while the POST was in flight)",
-                        resource_id
-                    );
-                }
-            } else {
-                cleanup_sent.store(true, Ordering::SeqCst);
-                warn!(
-                    "WHIP: Unexpected Location header format: '{}', session not registered",
-                    loc_str
-                );
-            }
-        }
-    } else if status.is_success() {
-        cleanup_sent.store(true, Ordering::SeqCst);
-        warn!("WHIP: No Location header in successful POST response, session not registered");
+    // Register the session under the resource_id the Location header names.
+    if let Err(why) = register_from_location(
+        state.whip_session_manager(),
+        pending,
+        &endpoint_id,
+        &resp_headers,
+    ) {
+        warn!(
+            "WHIP: Internal server answered {} for endpoint '{}' with {}, session not registered",
+            status, endpoint_id, why
+        );
+        return (
+            StatusCode::BAD_GATEWAY,
+            "Internal WHIP server did not name the session",
+        )
+            .into_response();
     }
 
     build_whip_post_response(
@@ -408,6 +377,175 @@ pub async fn whip_post(
         Some(config.max_video_bitrate_kbps),
     )
     .into_response()
+}
+
+/// A session created for a POST and not registered yet: everything the POST
+/// has to give back if it does not end in a registered session.
+///
+/// Dropping it gives the session back, so every way out of `whip_post` does,
+/// including the handler future being dropped while it awaits (the client
+/// disconnected during the proxy's retries, say). Only `into_parts`, for
+/// registration, takes the session out without giving it back.
+struct PendingSession(Option<PendingParts>);
+
+struct PendingParts {
+    config: Arc<WhipEndpointConfig>,
+    slot: usize,
+    /// The id the slot was claimed under until the answer names the session.
+    temp_resource_id: String,
+    element: gstreamer::Element,
+    session_pipeline: gstreamer::Pipeline,
+    port: u16,
+    cleanup_sent: Arc<AtomicBool>,
+    activity: Arc<SessionActivity>,
+}
+
+impl PendingSession {
+    fn new(
+        config: Arc<WhipEndpointConfig>,
+        slot: usize,
+        temp_resource_id: String,
+        created: CreatedSession,
+        cleanup_sent: Arc<AtomicBool>,
+    ) -> Self {
+        let CreatedSession {
+            element,
+            session_pipeline,
+            port,
+            activity,
+        } = created;
+        Self(Some(PendingParts {
+            config,
+            slot,
+            temp_resource_id,
+            element,
+            session_pipeline,
+            port,
+            cleanup_sent,
+            activity,
+        }))
+    }
+
+    /// Give the session up: release its slot, stop its watchdog, and take its
+    /// pipeline to NULL. Dropping a session pipeline that is still PLAYING
+    /// leaves its whipserversrc's sockets and threads behind, and a slot
+    /// left held under the temporary id is never released by anyone.
+    fn abandon(self) {
+        drop(self);
+    }
+
+    /// Take the session out for registration; it is no longer given back.
+    fn into_parts(mut self) -> PendingParts {
+        self.0
+            .take()
+            .expect("a PendingSession is consumed only once")
+    }
+}
+
+impl Drop for PendingSession {
+    fn drop(&mut self) {
+        let Some(PendingParts {
+            config,
+            slot,
+            temp_resource_id,
+            element,
+            session_pipeline,
+            cleanup_sent,
+            ..
+        }) = self.0.take()
+        else {
+            return;
+        };
+        config.release_slot(slot, &temp_resource_id);
+        cleanup_sent.store(true, Ordering::SeqCst);
+        let store = config.dynamic_webrtcbin_store.clone();
+        let block_id = config.instance_id.clone();
+        let teardown = move || {
+            WhipSessionManager::teardown_session_pipeline(&session_pipeline);
+            // Kept alive until its pipeline has reached NULL.
+            drop(element);
+            // Drop the abandoned session's webrtcbin from the stats store.
+            WhipSessionManager::cleanup_dynamic_webrtcbin_store(&store, &block_id);
+        };
+        // A NULL transition blocks, so it runs off the async runtime. The
+        // blocking pool needs a runtime; a drop outside one (a blocking
+        // thread, a runtime shutting down) gets a thread of its own.
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn_blocking(teardown);
+            }
+            Err(_) => {
+                std::thread::spawn(teardown);
+            }
+        }
+    }
+}
+
+/// Register `pending` under the resource_id in the internal server's Location
+/// header (`/whip/resource/{resource_id}`). Returns the resource_id, or, when
+/// the header is missing or unusable, abandons the session and says why.
+fn register_from_location(
+    manager: &WhipSessionManager,
+    pending: PendingSession,
+    endpoint_id: &str,
+    headers: &reqwest::header::HeaderMap,
+) -> Result<String, String> {
+    let resource_id = match headers.get(header::LOCATION).map(|l| l.to_str()) {
+        None => Err("no Location header".to_string()),
+        Some(Err(_)) => Err("a Location header that is not valid UTF-8".to_string()),
+        Some(Ok(location)) => location
+            .strip_prefix("/whip/resource/")
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| format!("an unexpected Location '{}'", location)),
+    };
+    let resource_id = match resource_id {
+        Ok(id) => id,
+        Err(why) => {
+            pending.abandon();
+            return Err(why);
+        }
+    };
+
+    let PendingParts {
+        config,
+        slot,
+        temp_resource_id,
+        element,
+        session_pipeline,
+        port,
+        cleanup_sent,
+        activity,
+    } = pending.into_parts();
+    // Update slot assignment from temp_resource_id to real resource_id
+    if !config.rename_slot_holder(slot, &temp_resource_id, &resource_id) {
+        warn!(
+            "WHIP: Slot {} on endpoint '{}' is no longer held by this POST (session '{}')",
+            slot, endpoint_id, resource_id
+        );
+    }
+    info!(
+        "WHIP: Registering session resource_id='{}' on port {} for endpoint '{}' (slot {})",
+        resource_id, port, endpoint_id, slot
+    );
+    let registered = manager.register_session(NewWhipSession {
+        resource_id: resource_id.clone(),
+        port,
+        element,
+        session_pipeline,
+        endpoint_id: endpoint_id.to_string(),
+        slot,
+        config,
+        cleanup_sent,
+        activity,
+    });
+    if !registered {
+        warn!(
+            "WHIP: Session '{}' was cleaned up instead of registered (ICE failed early, or its flow stopped while the POST was in flight)",
+            resource_id
+        );
+    }
+    Ok(resource_id)
 }
 
 /// Forward a WHIP POST request to the internal whipserversrc.
@@ -788,4 +926,179 @@ pub async fn whip_options() -> impl IntoResponse {
 )]
 pub async fn whip_resource_options() -> impl IntoResponse {
     whip_options().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::whip_session_manager::SlotOutput;
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+    use std::time::{Duration, Instant};
+
+    /// A manager with one single-slot endpoint, its slot claimed under a
+    /// temporary id by a POST whose session pipeline is PLAYING.
+    fn pending_post() -> (WhipSessionManager, PendingSession, gst::Pipeline) {
+        gst::init().expect("gstreamer init");
+        let manager = WhipSessionManager::new();
+        manager.register_endpoint(
+            "endpoint".to_string(),
+            WhipEndpointConfig::for_tests("endpoint", 1),
+        );
+        let config = manager.get_endpoint_config("endpoint").unwrap();
+        assert_eq!(config.allocate_slot("temp-id"), Some(0));
+
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("fakesrc")
+            .property("is-live", true)
+            .build()
+            .expect("fakesrc is part of gstreamer core");
+        let sink = gst::ElementFactory::make("fakesink")
+            .build()
+            .expect("fakesink is part of gstreamer core");
+        pipeline.add_many([&src, &sink]).unwrap();
+        src.link(&sink).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let pending = PendingSession(Some(PendingParts {
+            config,
+            slot: 0,
+            temp_resource_id: "temp-id".to_string(),
+            element: src,
+            session_pipeline: pipeline.clone(),
+            port: 40100,
+            cleanup_sent: Arc::new(AtomicBool::new(false)),
+            activity: Arc::new(SessionActivity::new(
+                Instant::now(),
+                Arc::new(SlotOutput::new(Instant::now())),
+            )),
+        }));
+        (manager, pending, pipeline)
+    }
+
+    /// The bug this guards: an answer the session cannot be registered from
+    /// dropped the session pipeline while PLAYING and left its slot held
+    /// under the temporary id, which nothing ever releases.
+    async fn assert_abandoned(headers: reqwest::header::HeaderMap) {
+        let (manager, pending, pipeline) = pending_post();
+        let (config, cleanup_sent) = parts_of(&pending);
+
+        let result = register_from_location(&manager, pending, "endpoint", &headers);
+
+        assert!(result.is_err(), "nothing to register from: {:?}", result);
+        assert_given_back(&config, &cleanup_sent, &pipeline).await;
+    }
+
+    fn parts_of(pending: &PendingSession) -> (Arc<WhipEndpointConfig>, Arc<AtomicBool>) {
+        let parts = pending.0.as_ref().expect("not consumed yet");
+        (parts.config.clone(), parts.cleanup_sent.clone())
+    }
+
+    async fn assert_given_back(
+        config: &WhipEndpointConfig,
+        cleanup_sent: &AtomicBool,
+        pipeline: &gst::Pipeline,
+    ) {
+        assert_eq!(
+            config.slot_assignments.read().unwrap()[0],
+            None,
+            "the slot must be released"
+        );
+        assert!(
+            cleanup_sent.load(Ordering::SeqCst),
+            "the session's watchdog must be stopped"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pipeline.current_state() != gst::State::Null && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            pipeline.current_state(),
+            gst::State::Null,
+            "the session pipeline must be taken down to NULL"
+        );
+    }
+
+    /// A POST whose client goes away mid-await (during the proxy's retries,
+    /// say) has its handler future dropped, and with it the pending session.
+    /// No error path runs, so the drop itself must give the session back.
+    #[tokio::test]
+    async fn a_dropped_pending_session_gives_the_session_up() {
+        let (_manager, pending, pipeline) = pending_post();
+        let (config, cleanup_sent) = parts_of(&pending);
+
+        drop(pending);
+
+        assert_given_back(&config, &cleanup_sent, &pipeline).await;
+    }
+
+    /// Dropped outside any tokio runtime (a blocking thread, a runtime
+    /// shutting down), it still gives the session back.
+    #[test]
+    fn a_pending_session_dropped_outside_a_runtime_gives_the_session_up() {
+        let (_manager, pending, pipeline) = pending_post();
+        let (config, cleanup_sent) = parts_of(&pending);
+
+        drop(pending);
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(assert_given_back(&config, &cleanup_sent, &pipeline));
+    }
+
+    #[tokio::test]
+    async fn an_answer_without_a_location_gives_the_session_up() {
+        assert_abandoned(reqwest::header::HeaderMap::new()).await;
+    }
+
+    #[tokio::test]
+    async fn an_answer_with_an_unexpected_location_gives_the_session_up() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(header::LOCATION, "/somewhere/else".parse().unwrap());
+        assert_abandoned(headers).await;
+    }
+
+    #[tokio::test]
+    async fn an_answer_with_a_non_utf8_location_gives_the_session_up() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            header::LOCATION,
+            reqwest::header::HeaderValue::from_bytes(b"/whip/resource/\xff").unwrap(),
+        );
+        assert_abandoned(headers).await;
+    }
+
+    /// The counterpart: a usable Location registers the session and moves
+    /// the slot to its resource_id.
+    #[tokio::test]
+    async fn an_answer_with_a_location_registers_the_session() {
+        let (manager, pending, pipeline) = pending_post();
+        let (config, cleanup_sent) = parts_of(&pending);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(header::LOCATION, "/whip/resource/abc".parse().unwrap());
+
+        let result = register_from_location(&manager, pending, "endpoint", &headers);
+
+        assert_eq!(result.as_deref(), Ok("abc"));
+        assert_eq!(manager.get_session_port("abc"), Some(40100));
+        assert_eq!(
+            config.slot_assignments.read().unwrap()[0].as_deref(),
+            Some("abc")
+        );
+        assert!(
+            !cleanup_sent.load(Ordering::SeqCst),
+            "a registered session keeps its watchdog"
+        );
+        // The fixture's live pipeline may still be completing its async
+        // change to PLAYING; wait for it rather than read where it is.
+        let (result, state, _) = pipeline.state(gst::ClockTime::from_seconds(5));
+        assert_eq!(
+            (result, state),
+            (Ok(gst::StateChangeSuccess::Success), gst::State::Playing),
+            "a registered session's pipeline is not torn down"
+        );
+        let _ = pipeline.set_state(gst::State::Null);
+    }
 }
