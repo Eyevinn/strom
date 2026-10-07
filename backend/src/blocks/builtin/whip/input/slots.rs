@@ -7,7 +7,8 @@ use crate::blocks::{
 };
 use crate::gst::keyframe_request::VideoDamage;
 use crate::whip_session_manager::{
-    ActivityStamp, SlotDecodebin, SlotInputs, SlotOutput, WhipEndpointConfig,
+    new_slot_activity, ActivityStamp, SlotDecodebin, SlotInputs, SlotOutput, WhipEndpointConfig,
+    WhipSlotLiveness,
 };
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -566,6 +567,20 @@ pub fn build_whipserversrc(
     ctx.register_whip_endpoint(instance_id, &endpoint_id, 0, mode);
 
     let slot_assignments = Arc::new(RwLock::new(vec![None; max_sessions]));
+    let slot_activity = new_slot_activity(max_sessions);
+
+    // A seat medium that stops carrying anything stalls nothing — its appsrc is
+    // simply never pushed to — so the flow's stalled-pad-task scan cannot see
+    // it. Hand the scan the seats' stamps instead; see `WhipSlotLiveness`.
+    ctx.register_block_liveness(
+        instance_id,
+        Arc::new(WhipSlotLiveness::new(
+            endpoint_id.clone(),
+            mode,
+            slot_activity.clone(),
+            slot_assignments.clone(),
+        )),
+    );
 
     // Store endpoint config for the session manager (will be wired up in start_flow)
     ctx.register_whip_endpoint_config(
@@ -592,6 +607,7 @@ pub fn build_whipserversrc(
             slot_decodebins,
             slot_output,
             slot_input_work: (0..max_sessions).map(|_| SlotInputs::default()).collect(),
+            slot_activity,
             slot_assignments,
         },
     );
@@ -953,5 +969,171 @@ mod tests {
             assert_eq!(configs.len(), 1, "expected exactly one endpoint config");
             assert_eq!(configs[0].1.drop_on_latency, expected);
         }
+    }
+
+    fn s16_audio_chunk(index: u64) -> gst::Buffer {
+        // 20 ms of stereo 48 kHz S16LE, the shape an Opus decoder produces.
+        let mut buffer = gst::Buffer::with_size(960 * 2 * 2).expect("allocate audio chunk");
+        {
+            let buffer = buffer.get_mut().unwrap();
+            buffer.set_pts(gst::ClockTime::from_mseconds(index * 20));
+            buffer.set_duration(gst::ClockTime::from_mseconds(20));
+        }
+        buffer
+    }
+
+    /// The 2026-10-06 show, end to end through the real block: a guest whose
+    /// browser stops sending audio while its camera keeps going has to reach
+    /// the flow's health scan as exactly that. Nothing else reports it: the
+    /// unfed audio chain stalls no pad task, and the reaper leaves a seat
+    /// alone for a medium its publisher stopped sending.
+    ///
+    /// A stand-in publisher does what the session's bridge does per buffer:
+    /// stamps the session's arrival, and pushes into the slot's appsrc, so the
+    /// real output-tee probes stamp what comes out. The last step reads the
+    /// reporter the block registered, with its production budgets.
+    #[test]
+    fn a_seat_reports_audio_its_publisher_stopped_sending_while_video_flows() {
+        use crate::whip_session_manager::MediumBudgets;
+        use strom_types::flow::{BlockHealthCause, HealthMedium, MediumFault};
+
+        let _ = gst::init();
+        let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+        let result = build_whipserversrc(
+            "guest",
+            &props(&[
+                ("mode", PropertyValue::String("audio_video".to_string())),
+                // RTP passthrough: appsrc straight to the slot's output tee, so
+                // the test drives the tee probes without standing up a decoder.
+                ("decode", PropertyValue::Bool(false)),
+                ("max_sessions", PropertyValue::Int(1)),
+            ]),
+            &ctx,
+        )
+        .expect("build_whipserversrc failed");
+
+        let reporters = ctx.take_block_liveness();
+        assert_eq!(
+            reporters
+                .iter()
+                .map(|(block_id, _)| block_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["guest"],
+            "the block must register itself with the block health scan"
+        );
+        let reporter = reporters[0].1.clone();
+        assert!(
+            reporter.failure().is_none(),
+            "no session, nothing to report"
+        );
+
+        let configs = ctx.take_whip_endpoint_configs();
+        let config = &configs[0].1;
+        let audio_src = config.slot_audio_appsrcs[0].clone();
+        let video_src = config.slot_video_appsrcs[0].clone();
+        audio_src.set_caps(Some(
+            &gst::Caps::builder("audio/x-raw")
+                .field("format", "S16LE")
+                .field("rate", 48000i32)
+                .field("channels", 2i32)
+                .field("layout", "interleaved")
+                .build(),
+        ));
+        video_src.set_caps(Some(
+            &gst::Caps::builder("video/x-raw")
+                .field("format", "I420")
+                .field("width", 64i32)
+                .field("height", 64i32)
+                .field("framerate", gst::Fraction::new(30, 1))
+                .build(),
+        ));
+        let pipeline = assemble(&result);
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline to PLAYING");
+
+        assert_eq!(config.allocate_slot("guest-session"), Some(0));
+        let activity = config.start_session_activity(0);
+
+        let send_audio = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let publisher = {
+            let (activity, send_audio, stop) = (activity.clone(), send_audio.clone(), stop.clone());
+            let (audio_src, video_src) = (audio_src.clone(), video_src.clone());
+            std::thread::spawn(move || {
+                let mut index = 0u64;
+                while !stop.load(Ordering::SeqCst) {
+                    activity.touch_ingress(false);
+                    let _ = video_src.push_buffer(i420_frame(index));
+                    if send_audio.load(Ordering::SeqCst) {
+                        activity.touch_ingress(true);
+                        let _ = audio_src.push_buffer(s16_audio_chunk(index));
+                    }
+                    index += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            })
+        };
+
+        // Video only so far, judged on short budgets: audio never sent.
+        let liveness = WhipSlotLiveness::new(
+            "guest".to_string(),
+            StreamMode::AudioVideo,
+            config.slot_activity.clone(),
+            config.slot_assignments.clone(),
+        );
+        let short = MediumBudgets {
+            audio: std::time::Duration::from_millis(300),
+            video: std::time::Duration::from_millis(300),
+            absent: std::time::Duration::from_millis(300),
+        };
+        wait_for("audio to be reported as never sent", || {
+            liveness
+                .stalls(short)
+                .iter()
+                .any(|stall| stall.missing.fault == MediumFault::NeverSent)
+        });
+
+        // Audio starts: both media flow, and nothing is reported.
+        send_audio.store(true, Ordering::SeqCst);
+        wait_for("audio to come out of the slot", || {
+            config.slot_output[0]
+                .audio
+                .since_last()
+                .is_some_and(|idle| idle < std::time::Duration::from_millis(100))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(
+            liveness.stalls(short).is_empty(),
+            "a whole seat reports nothing: {:?}",
+            liveness.stalls(short)
+        );
+
+        // The microphone track ends; the camera carries on.
+        send_audio.store(false, Ordering::SeqCst);
+        wait_for("the registered reporter to name the stopped audio", || {
+            reporter.failure().is_some()
+        });
+        let failure = reporter.failure().expect("still failed");
+        stop.store(true, Ordering::SeqCst);
+        publisher.join().expect("publisher thread");
+
+        assert_eq!(
+            failure.causes,
+            vec![BlockHealthCause::WhipMedium {
+                slot: 0,
+                medium: HealthMedium::Audio,
+                fault: MediumFault::PublisherStopped,
+            }]
+        );
+        assert!(
+            failure.detail.contains("stopped sending audio"),
+            "an operator reading the log has to see what happened: {}",
+            failure.detail
+        );
+
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline to NULL");
     }
 }
