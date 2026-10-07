@@ -299,14 +299,6 @@ impl PipelineManager {
         crate::stinger::FrameGrid::new(fps.numer(), fps.denom())
     }
 
-    /// How far behind running time the mixer's output runs: what a latency
-    /// query on its output answers.
-    pub fn mixer_latency_ns(&self, block_instance_id: &str) -> Option<u64> {
-        let mut query = gst::query::Latency::new();
-        let pad = self.dist_mixer(block_instance_id).ok()?.static_pad("src")?;
-        pad.query(&mut query).then(|| query.result().1.nseconds())
-    }
-
     /// The flow's running time now.
     pub fn running_time_ns(&self) -> Option<u64> {
         self.pipeline.current_running_time().map(|t| t.nseconds())
