@@ -74,6 +74,11 @@ pub struct MediaPlayerState {
     pub source_ready: Mutex<bool>,
     /// Signalled when `source_ready` turns true.
     pub source_ready_cv: Condvar,
+    /// The thread taking the internal pipeline up from READY, while it does.
+    /// See [`MediaPlayerState::hold_typefind_while_starting`].
+    pub starting: Mutex<Option<std::thread::ThreadId>>,
+    /// Signalled when `starting` turns `None`.
+    pub starting_cv: Condvar,
     /// Which source pad holds each video slot, by pad name; `None` is free.
     /// A slot is freed when its pad goes away - an HLS variant switch replaces
     /// every stream pad - so the next pad of that kind takes over the same
@@ -248,6 +253,80 @@ impl MediaPlayerState {
             // otherwise cost every later call the full timeout.
             *ready = true;
         }
+    }
+
+    /// Hold back every typefind in `source` that finds a type while a state
+    /// change takes the internal pipeline up from READY, until that change has
+    /// returned (see [`Self::up_from_ready`]).
+    ///
+    /// Going from READY to PAUSED, urisourcebin creates its source and a
+    /// typefind and starts the typefind straight away, inside that one state
+    /// change. Typefind can find the type before the change is through. It
+    /// then adds a parsebin on its own thread and brings it to its state,
+    /// while the state change, which picks up the new parsebin as it walks
+    /// urisourcebin's children, does the same from the other side: each waits
+    /// for a lock the other holds, and the pipeline deadlocks (issue #963).
+    /// [`Self::settle`] cannot cover this, as the race is with the state change
+    /// that started the source. A pad probe cannot hold typefind back either:
+    /// in pull mode it calls its source's getrange function directly.
+    ///
+    /// This handler is connected to `have-type` as each typefind is added,
+    /// before urisourcebin connects its own, so it runs first.
+    pub fn hold_typefind_while_starting(source: &gst::Element, state: &Arc<Self>) {
+        let state = Arc::downgrade(state);
+        source.connect("deep-element-added", false, move |args| {
+            let element = args.get(2)?.get::<gst::Element>().ok()?;
+            if element.factory().is_none_or(|f| f.name() != "typefind") {
+                return None;
+            }
+            let state = state.clone();
+            element.connect("have-type", false, move |_| {
+                if let Some(player) = state.upgrade() {
+                    player.wait_until_started();
+                }
+                None
+            });
+            None
+        });
+    }
+
+    /// Wait until no state change is taking the internal pipeline up from
+    /// READY, unless that change is running on this thread.
+    ///
+    /// Bounded: should that state change ever wait for the typefind thread
+    /// (a source that fails and is torn down on the spot), waiting here for
+    /// good would deadlock it.
+    fn wait_until_started(&self) {
+        let me = std::thread::current().id();
+        let starting = self.starting.lock().unwrap_or_else(|p| p.into_inner());
+        let (_starting, waited) = self
+            .starting_cv
+            .wait_timeout_while(starting, SETTLE_TIMEOUT, |thread| {
+                thread.is_some_and(|thread| thread != me)
+            })
+            .unwrap_or_else(|p| p.into_inner());
+        if waited.timed_out() {
+            warn!(
+                "Media Player {}: state change still under way after {:?}, typefind carries on",
+                self.block_id, SETTLE_TIMEOUT
+            );
+        }
+    }
+
+    /// Change `pipeline`, at READY or below, to `target`, holding back the
+    /// source's typefinding until the change has returned (see
+    /// [`Self::hold_typefind_while_starting`]).
+    fn up_from_ready(
+        &self,
+        pipeline: &gst::Pipeline,
+        target: gst::State,
+    ) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
+        *self.starting.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(std::thread::current().id());
+        let result = pipeline.set_state(target);
+        *self.starting.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        self.starting_cv.notify_all();
+        result
     }
 
     /// Go to a specific file index.
@@ -447,7 +526,8 @@ impl MediaPlayerState {
         };
         if is_stopped(pipeline) {
             self.expect_source();
-            pipeline.set_state(gst::State::Paused).map_err(fail)?;
+            self.up_from_ready(pipeline, gst::State::Paused)
+                .map_err(fail)?;
             self.settle();
         }
         if !self.follow_main_clock(pipeline) {
@@ -515,11 +595,14 @@ impl MediaPlayerState {
             .as_ref()
             .ok_or("Internal pipeline not created")?;
         self.settle();
-        if is_stopped(pipeline) {
+        let result = if is_stopped(pipeline) {
             // Pausing a pipeline that never started starts its source.
             self.expect_source();
-        }
-        pipeline.set_state(gst::State::Paused).map_err(|e| {
+            self.up_from_ready(pipeline, gst::State::Paused)
+        } else {
+            pipeline.set_state(gst::State::Paused)
+        };
+        result.map_err(|e| {
             self.mark_source_ready();
             error!("Failed to pause playback: {:?}", e);
             "Failed to pause playback".to_string()

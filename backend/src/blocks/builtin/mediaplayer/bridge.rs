@@ -89,6 +89,7 @@ pub fn create_decode_pipeline(
 
     // Store weak ref to source element in state
     state.source_element.set(Some(&source));
+    MediaPlayerState::hold_typefind_while_starting(&source, state);
 
     pipeline
         .add(&source)
@@ -151,6 +152,7 @@ pub fn create_passthrough_pipeline(
 
     // Store weak ref to source element in state
     state.source_element.set(Some(&source));
+    MediaPlayerState::hold_typefind_while_starting(&source, state);
 
     pipeline
         .add(&source)
@@ -881,6 +883,8 @@ mod tests {
             switch_generation: std::sync::atomic::AtomicU64::new(0),
             source_ready: std::sync::Mutex::new(true),
             source_ready_cv: std::sync::Condvar::new(),
+            starting: std::sync::Mutex::new(None),
+            starting_cv: std::sync::Condvar::new(),
             video_slots: MediaPlayerState::free_slots(0),
             audio_slots: MediaPlayerState::free_slots(0),
             decode: true,
@@ -1225,6 +1229,64 @@ mod tests {
                 pipeline.by_name("test_appsink_audio_2").is_none(),
                 "there is no third audio track"
             );
+        }
+    }
+
+    /// Whether urisourcebin has set up a parsebin anywhere in `pipeline`.
+    fn has_parsebin(pipeline: &gst::Pipeline) -> bool {
+        pipeline
+            .iterate_recurse()
+            .into_iter()
+            .flatten()
+            .any(|e| e.factory().is_some_and(|f| f.name() == "parsebin"))
+    }
+
+    /// Issue #963: urisourcebin's typefind can find the type while the state
+    /// change from READY that started it is still walking urisourcebin's
+    /// children, and adding a parsebin then deadlocks against that change.
+    /// Typefind has to wait until the change has returned. The change is
+    /// stood in for here by marking one as under way on another thread, so
+    /// the test does not depend on winning a race.
+    #[test]
+    fn the_source_waits_for_a_state_change_from_ready_to_return() {
+        let _ = gst::init();
+        let dir = tempfile::tempdir().unwrap();
+        let uri = write_two_audio_track_file(dir.path());
+
+        for passthrough in [false, true] {
+            let state = state_with_slots(1, 2);
+            let pipeline = if passthrough {
+                create_passthrough_pipeline("test", &state, Some(&uri))
+            } else {
+                create_decode_pipeline("test", &state, Some(&uri), Decoder::Decodebin3)
+            }
+            .unwrap();
+            let other = std::thread::spawn(|| std::thread::current().id())
+                .join()
+                .unwrap();
+            *state.starting.lock().unwrap() = Some(other);
+
+            pipeline.set_state(gst::State::Paused).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            assert!(
+                !has_parsebin(&pipeline),
+                "passthrough={}: typefind set up a parsebin while a state change \
+                 from READY was still under way",
+                passthrough
+            );
+
+            *state.starting.lock().unwrap() = None;
+            state.starting_cv.notify_all();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !has_parsebin(&pipeline) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(
+                has_parsebin(&pipeline),
+                "passthrough={}: typefind did not carry on once the state change returned",
+                passthrough
+            );
+            pipeline.set_state(gst::State::Null).unwrap();
         }
     }
 

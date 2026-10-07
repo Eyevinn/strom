@@ -119,6 +119,8 @@ mod tests {
             switch_generation: std::sync::atomic::AtomicU64::new(0),
             source_ready: std::sync::Mutex::new(true),
             source_ready_cv: std::sync::Condvar::new(),
+            starting: std::sync::Mutex::new(None),
+            starting_cv: std::sync::Condvar::new(),
             video_slots: MediaPlayerState::free_slots(0),
             audio_slots: MediaPlayerState::free_slots(0),
             decode: false,
