@@ -21,13 +21,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use strom::blocks::BlockRegistry;
-use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
 use strom_types::effects::{EffectTarget, VideoEffect};
 use strom_types::Flow;
 use strom_types::PropertyValue as PV;
-use tempfile::NamedTempFile;
 
 const GL_ELEMENTS: &[&str] = &["glvideomixerelement", "glshader", "videotestsrc"];
 
@@ -177,7 +174,6 @@ struct Harness {
     block_id: &'static str,
     appsink: gstreamer_app::AppSink,
     slots: Vec<(String, Arc<SlotCounter>)>,
-    _temp: NamedTempFile,
     // The pipeline spawns tokio tasks; the test body itself stays blocking.
     _rt_guard: tokio::runtime::EnterGuard<'static>,
 }
@@ -188,21 +184,10 @@ impl Harness {
             tokio::runtime::Runtime::new().expect("tokio runtime"),
         ));
         let rt_guard = rt.enter();
-        let temp = NamedTempFile::new().unwrap();
-        let registry = BlockRegistry::new(temp.path());
         let flow = build_flow(block_id, num_inputs, width, height);
-        let mut manager = PipelineManager::new(
-            &flow,
-            EventBroadcaster::with_capacity(10),
-            &registry,
-            vec![],
-            "all".to_string(),
-            None,
-            std::env::temp_dir(),
-            Arc::new(std::sync::Mutex::new(HashMap::new())),
-        )
-        // GL was proven to render: fail, do not skip.
-        .expect("GPU vision mixer pipeline builds");
+        let mut manager = common::manager::build(&flow)
+            // GL was proven to render: fail, do not skip.
+            .expect("GPU vision mixer pipeline builds");
 
         let mut names: Vec<String> = Vec::new();
         for i in 0..num_inputs {
@@ -235,7 +220,6 @@ impl Harness {
             block_id,
             appsink,
             slots,
-            _temp: temp,
             _rt_guard: rt_guard,
         }
     }
