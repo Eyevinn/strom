@@ -140,6 +140,12 @@ pub enum AppMessage {
     MediaError(String),
     /// Request media page refresh
     MediaRefresh,
+    /// A URL download was accepted by the server
+    MediaDownloadStarted(strom_types::media_download::MediaDownloadJob),
+    /// A URL download could not start
+    MediaDownloadFailed(String),
+    /// Active URL downloads listed by the server (catch-up after a reload)
+    MediaDownloadsLoaded(Vec<strom_types::media_download::MediaDownloadJob>),
 
     /// Log level loaded from API
     LogLevelLoaded { current: String, default: String },

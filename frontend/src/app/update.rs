@@ -906,6 +906,15 @@ impl eframe::App for StromApp {
                         StromEvent::BufferAgeProbeDeactivated { probe_id, .. } => {
                             self.buffer_age_data.probe_deactivated(&probe_id);
                         }
+                        StromEvent::MediaDownloadProgress(job) => {
+                            if self.media_page.apply_download(job) {
+                                self.media_page.refresh(
+                                    &self.api,
+                                    ui.ctx(),
+                                    &self.channels.sender(),
+                                );
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1340,6 +1349,17 @@ impl eframe::App for StromApp {
                     tracing::debug!("Media refresh requested");
                     self.media_page
                         .refresh(&self.api, ui.ctx(), &self.channels.sender());
+                }
+                AppMessage::MediaDownloadStarted(job) => {
+                    self.media_page.download_started(job);
+                }
+                AppMessage::MediaDownloadFailed(message) => {
+                    self.media_page.download_failed(message);
+                }
+                AppMessage::MediaDownloadsLoaded(jobs) => {
+                    for job in jobs.into_iter().filter(|j| !j.state.is_finished()) {
+                        self.media_page.apply_download(job);
+                    }
                 }
             }
         }

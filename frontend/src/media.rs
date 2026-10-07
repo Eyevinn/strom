@@ -2,6 +2,7 @@
 
 use egui::{Color32, Context, RichText, Ui};
 use strom_types::api::{ListMediaResponse, MediaFileEntry};
+use strom_types::media_download::{MediaDownloadJob, MediaDownloadState};
 
 use crate::list_navigator::{list_navigator, ListItem};
 
@@ -43,6 +44,16 @@ pub struct MediaPage {
     last_click_path: Option<String>,
     /// Time of last click (for double-click detection)
     last_click_time: instant::Instant,
+    /// URL typed into "Download from URL"
+    download_url: String,
+    /// Replace a file of the same name when downloading
+    download_overwrite: bool,
+    /// A download request is waiting for the server's answer
+    download_pending: bool,
+    /// Why the last download request was refused
+    download_error: Option<String>,
+    /// URL downloads seen in this session, oldest first
+    downloads: Vec<MediaDownloadJob>,
 }
 
 impl MediaPage {
@@ -66,7 +77,47 @@ impl MediaPage {
             initial_fetch_done: false,
             last_click_path: None,
             last_click_time: instant::Instant::now(),
+            download_url: String::new(),
+            download_overwrite: false,
+            download_pending: false,
+            download_error: None,
+            downloads: Vec::new(),
         }
+    }
+
+    /// Apply a download's latest state (from the WebSocket or the server's
+    /// list). Returns true when a download just finished into the folder
+    /// being shown, so the listing should be refreshed.
+    pub fn apply_download(&mut self, job: MediaDownloadJob) -> bool {
+        let finished_here =
+            job.state == MediaDownloadState::Done && job.directory == self.current_path;
+        match self.downloads.iter_mut().find(|j| j.job_id == job.job_id) {
+            Some(existing) => {
+                // A late progress tick must not undo a final state.
+                if !existing.state.is_finished() {
+                    *existing = job;
+                }
+            }
+            None => self.downloads.push(job),
+        }
+        finished_here
+    }
+
+    /// The server accepted a download request.
+    pub fn download_started(&mut self, job: MediaDownloadJob) {
+        self.download_pending = false;
+        self.download_error = None;
+        self.download_url.clear();
+        // Events may already have reported a later state; keep that.
+        if !self.downloads.iter().any(|j| j.job_id == job.job_id) {
+            self.downloads.push(job);
+        }
+    }
+
+    /// The server refused a download request.
+    pub fn download_failed(&mut self, message: String) {
+        self.download_pending = false;
+        self.download_error = Some(message);
     }
 
     /// Request focus on the search box.
@@ -94,6 +145,7 @@ impl MediaPage {
         if !self.initial_fetch_done && !self.loading {
             self.initial_fetch_done = true;
             self.refresh(api, ctx, tx);
+            self.fetch_downloads(api, ctx, tx);
         }
 
         // Auto-refresh every 3 seconds
@@ -120,6 +172,8 @@ impl MediaPage {
             .resizable(true)
             .show_inside(ui, |ui| {
                 self.render_toolbar(ui, api, ctx, tx);
+                ui.separator();
+                self.render_download_bar(ui, api, ctx, tx);
                 ui.separator();
                 self.render_file_list(ui, api, ctx, tx);
             });
@@ -238,6 +292,129 @@ impl MediaPage {
                 self.search_filter.clear();
             }
         });
+    }
+
+    /// "Download from URL": a URL field that saves into the current folder,
+    /// and one row per download with its progress or outcome.
+    fn render_download_bar(
+        &mut self,
+        ui: &mut Ui,
+        api: &crate::api::ApiClient,
+        ctx: &Context,
+        tx: &std::sync::mpsc::Sender<crate::state::AppMessage>,
+    ) {
+        let folder = format!("media/{}", self.current_path);
+        ui.horizontal(|ui| {
+            let can_start = !self.download_pending && !self.download_url.trim().is_empty();
+            let field_width = (ui.available_width() - 150.0).max(80.0);
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.download_url)
+                    .hint_text("Download from URL: https://...")
+                    .desired_width(field_width),
+            );
+            let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let clicked = ui
+                .add_enabled(
+                    can_start,
+                    egui::Button::new(format!(
+                        "{} Download",
+                        egui_phosphor::regular::DOWNLOAD_SIMPLE
+                    )),
+                )
+                .on_hover_text(format!("Save the file into {}", folder))
+                .clicked();
+            ui.checkbox(&mut self.download_overwrite, "Replace")
+                .on_hover_text("Replace a file with the same name in this folder");
+            if self.download_pending {
+                ui.spinner();
+            }
+            if can_start && (clicked || enter) {
+                self.start_download(api, ctx, tx);
+            }
+        });
+
+        if let Some(error) = self.download_error.clone() {
+            ui.horizontal(|ui| {
+                ui.colored_label(Color32::RED, error);
+                if ui
+                    .small_button(egui_phosphor::regular::X)
+                    .on_hover_text("Dismiss")
+                    .clicked()
+                {
+                    self.download_error = None;
+                }
+            });
+        }
+
+        let mut cancel: Option<String> = None;
+        let mut dismiss: Option<String> = None;
+        for job in &self.downloads {
+            ui.horizontal(|ui| {
+                match job.state {
+                    MediaDownloadState::Downloading => {
+                        let (fraction, text) = match job.total {
+                            Some(total) if total > 0 => {
+                                let fraction = job.bytes as f32 / total as f32;
+                                (
+                                    fraction,
+                                    format!(
+                                        "{}  {} / {} ({:.0}%)",
+                                        job.filename,
+                                        format_size(job.bytes),
+                                        format_size(total),
+                                        fraction * 100.0
+                                    ),
+                                )
+                            }
+                            _ => (0.0, format!("{}  {}", job.filename, format_size(job.bytes))),
+                        };
+                        ui.add(
+                            egui::ProgressBar::new(fraction)
+                                .text(text)
+                                .animate(job.total.is_none())
+                                .desired_width((ui.available_width() - 30.0).max(80.0)),
+                        )
+                        .on_hover_text(&job.url);
+                        if ui
+                            .small_button(egui_phosphor::regular::X)
+                            .on_hover_text("Cancel download")
+                            .clicked()
+                        {
+                            cancel = Some(job.job_id.clone());
+                        }
+                    }
+                    MediaDownloadState::Done => {
+                        ui.colored_label(Color32::GREEN, egui_phosphor::regular::CHECK_CIRCLE);
+                        ui.label(format!("{} ({})", job.path, format_size(job.bytes)))
+                            .on_hover_text(&job.url);
+                    }
+                    MediaDownloadState::Failed => {
+                        ui.colored_label(Color32::RED, egui_phosphor::regular::WARNING);
+                        let error = job.error.as_deref().unwrap_or("failed");
+                        ui.colored_label(Color32::RED, format!("{}: {}", job.filename, error))
+                            .on_hover_text(&job.url);
+                    }
+                    MediaDownloadState::Cancelled => {
+                        ui.colored_label(Color32::GRAY, egui_phosphor::regular::PROHIBIT);
+                        ui.colored_label(Color32::GRAY, format!("{}: cancelled", job.filename));
+                    }
+                }
+                if job.state.is_finished()
+                    && ui
+                        .small_button(egui_phosphor::regular::X)
+                        .on_hover_text("Dismiss")
+                        .clicked()
+                {
+                    dismiss = Some(job.job_id.clone());
+                }
+            });
+        }
+        if let Some(job_id) = cancel {
+            self.cancel_download(&job_id, api, ctx, tx);
+        }
+        if let Some(job_id) = dismiss {
+            self.downloads.retain(|j| j.job_id != job_id);
+        }
     }
 
     fn render_file_list(
@@ -667,6 +844,81 @@ impl MediaPage {
                     let _ = tx.send(crate::state::AppMessage::MediaError(e.to_string()));
                     ctx.request_repaint();
                 }
+            }
+        });
+    }
+
+    /// Ask the server to download the typed URL into the current folder.
+    fn start_download(
+        &mut self,
+        api: &crate::api::ApiClient,
+        ctx: &Context,
+        tx: &std::sync::mpsc::Sender<crate::state::AppMessage>,
+    ) {
+        self.download_pending = true;
+        self.download_error = None;
+
+        let api = api.clone();
+        let ctx = ctx.clone();
+        let tx = tx.clone();
+        let url = self.download_url.trim().to_string();
+        let path = self.current_path.clone();
+        let overwrite = self.download_overwrite;
+
+        crate::app::spawn_task(async move {
+            let message = match api.download_media_url(&url, &path, overwrite).await {
+                Ok(job) => crate::state::AppMessage::MediaDownloadStarted(job),
+                Err(crate::api::ApiError::Http(_, message)) => {
+                    crate::state::AppMessage::MediaDownloadFailed(message)
+                }
+                Err(e) => crate::state::AppMessage::MediaDownloadFailed(e.to_string()),
+            };
+            let _ = tx.send(message);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Ask the server to stop a running download.
+    fn cancel_download(
+        &self,
+        job_id: &str,
+        api: &crate::api::ApiClient,
+        ctx: &Context,
+        tx: &std::sync::mpsc::Sender<crate::state::AppMessage>,
+    ) {
+        let api = api.clone();
+        let ctx = ctx.clone();
+        let tx = tx.clone();
+        let job_id = job_id.to_string();
+
+        crate::app::spawn_task(async move {
+            if let Err(e) = api.cancel_media_download(&job_id).await {
+                let _ = tx.send(crate::state::AppMessage::MediaDownloadFailed(e.to_string()));
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Pick up downloads that are still running (after a page reload).
+    fn fetch_downloads(
+        &self,
+        api: &crate::api::ApiClient,
+        ctx: &Context,
+        tx: &std::sync::mpsc::Sender<crate::state::AppMessage>,
+    ) {
+        let api = api.clone();
+        let ctx = ctx.clone();
+        let tx = tx.clone();
+
+        crate::app::spawn_task(async move {
+            match api.list_media_downloads().await {
+                Ok(list) => {
+                    let _ = tx.send(crate::state::AppMessage::MediaDownloadsLoaded(
+                        list.downloads,
+                    ));
+                    ctx.request_repaint();
+                }
+                Err(e) => tracing::debug!("Could not list media downloads: {}", e),
             }
         });
     }
