@@ -6462,7 +6462,7 @@
             }
           }
         ],
-        "description": "One structured reason a block reported failed.\n\nA block can carry several at once: a WHIP Input block has one seat per\nslot, and each can lose a medium on its own. Clients should ignore a\n`kind` they do not know; this type reads one as [`BlockHealthCause::Unknown`]."
+        "description": "One structured reason a block reported failed.\n\nA block can carry several at once: a WHIP Input block has one seat per\nslot, and each can lose a medium on its own. Clients should ignore a\n`kind` they do not know; this type reads one as [`BlockHealthCause::Unknown`].\nAn older client cannot read a known `kind` that lacks a field or carries a\nmedium or fault value it does not know, so those changes ship as a new\n`kind` instead."
       },
       "BlockHealthStatus": {
         "type": "string",
