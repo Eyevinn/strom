@@ -104,16 +104,19 @@ pub type ElementSetupFn = Box<dyn FnOnce(FlowId, EventBroadcaster) + Send + Sync
 /// Function type for a block's pre-stop hook.
 ///
 /// Called once when the flow stops, before the pipeline is set to NULL, so a
-/// block can finish or call off work of its own that holds the pipeline.
+/// block can finish or call off work of its own that holds the pipeline. A
+/// `stop()` runs it after the stop drains have finished or timed out; dropping a
+/// pipeline that was never stopped runs it with no drain before it.
 pub type PreStopFn = Box<dyn FnOnce() + Send + Sync>;
 
 /// Function type for a block's work on flow stop, before the pipeline goes to NULL.
 ///
-/// Called once per stop, after the bus watch is gone and while data still flows.
-/// It starts the work and returns at once with a receiver that gets `()` when the
-/// work is done. The caller waits on it for a bounded time and then takes the
-/// pipeline to NULL whether or not it arrived, so a drain that never finishes
-/// costs a slower stop and nothing else.
+/// Called once per stop, after the bus watch is gone and while data still flows,
+/// before any pre-stop hook. It starts the work and returns with a receiver that
+/// gets `()` when the work is done. It may first wait, for a bounded time, for
+/// work of the block's own that the drain must not overlap. The caller waits on
+/// it for a bounded time and then takes the pipeline to NULL whether or not it
+/// arrived, so a drain that never finishes costs a slower stop and nothing else.
 pub type StopDrainFn = Box<dyn Fn() -> std::sync::mpsc::Receiver<()> + Send + Sync>;
 
 /// WHIP endpoint registration info (for WHIP Input blocks).

@@ -10,6 +10,8 @@ mod srt;
 mod state;
 mod webrtc;
 
+pub use lifecycle::run_stop_drains;
+
 use crate::events::EventBroadcaster;
 use crate::gst::thread_priority::ThreadPriorityState;
 use gstreamer as gst;

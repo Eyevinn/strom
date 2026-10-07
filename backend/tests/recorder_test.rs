@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use strom::blocks::builtin::recorder::RecorderBuilder;
-use strom::blocks::{BlockBuilder, PreStopFn};
+use strom::blocks::{BlockBuilder, PreStopFn, StopDrainFn};
 use strom::events::EventBroadcaster;
 use strom_types::PropertyValue;
 
@@ -1075,6 +1075,28 @@ mod track_resume {
         u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as u64
     }
 
+    /// Whether mp4mux finished the file. Until it does, the top-level `mdat`
+    /// declares size 0, "to end of file"; `summarize` cannot tell, because robust
+    /// muxing keeps a readable `moov` in the file all along.
+    fn mdat_finished(path: &Path) -> bool {
+        let data = std::fs::read(path).expect("read recording");
+        let mut pos = 0usize;
+        while pos + 16 <= data.len() {
+            let size = match be32(&data, pos) {
+                1 => u64::from_be_bytes(data[pos + 8..pos + 16].try_into().unwrap()),
+                n => n,
+            };
+            if &data[pos + 4..pos + 8] == b"mdat" {
+                return size != 0;
+            }
+            if size < 8 {
+                return false;
+            }
+            pos += size as usize;
+        }
+        false
+    }
+
     /// Read each track's sample count and duration from a recorded mp4's `moov`.
     ///
     /// qtdemux is no use here: it drops any track shorter than a fifth of the file
@@ -1350,6 +1372,7 @@ mod track_resume {
         video_gate: gst::Element,
         video_stalled: Arc<AtomicBool>,
         audio_stalled: Arc<AtomicBool>,
+        stop_drains: Vec<StopDrainFn>,
         pre_stops: Vec<PreStopFn>,
     }
 
@@ -1388,6 +1411,7 @@ mod track_resume {
             feed_video(&pipeline, &video_in, &video_gate, -1, key_int_max);
             feed_audio(&pipeline, &audio_in, &audio_gate);
             recorder.run_setups();
+            let stop_drains = recorder.take_stop_drains();
             let pre_stops = recorder.take_pre_stops();
             pipeline
                 .set_state(gst::State::Playing)
@@ -1401,13 +1425,15 @@ mod track_resume {
                 video_gate,
                 video_stalled,
                 audio_stalled,
+                stop_drains,
                 pre_stops,
             }
         }
 
         /// Set the pipeline to NULL as the pipeline manager stops a flow: the
-        /// blocks' pre-stop hooks first.
+        /// blocks' stop drains, then their pre-stop hooks.
         fn set_null(&mut self) {
+            strom::gst::pipeline::run_stop_drains("rig", &self.stop_drains);
             for hook in self.pre_stops.drain(..) {
                 hook();
             }
@@ -2086,7 +2112,7 @@ mod track_resume {
 
     /// The same for a stop that lands while the switch relinks, with the muxer
     /// in NULL and the pipeline held to build the new chains. The stop waits for
-    /// the relink to finish, and still reaches NULL.
+    /// the relink to finish, finishes both files, and still reaches NULL.
     #[test]
     fn a_flow_stopped_while_the_switch_relinks_leaves_nothing_holding_its_pipeline() {
         if !plugins_available() {
@@ -2122,18 +2148,39 @@ mod track_resume {
         // The stop lands just as the new file opens, which can leave a
         // splitmuxsink queue waiting for good with NULL blocked behind it.
         let weak = rig.pipeline.downgrade();
-        let (stopped_tx, stopped) = std::sync::mpsc::channel::<()>();
+        let (stopped_tx, stopped) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             rig.set_null();
+            // Read before the drop: it takes the media directory with it.
+            let files: Vec<(PathBuf, bool)> = recordings(&rig.media_root, "")
+                .into_iter()
+                .map(|p| {
+                    let finished = mdat_finished(&p);
+                    (p, finished)
+                })
+                .collect();
             drop(rig);
-            let _ = stopped_tx.send(());
+            let _ = stopped_tx.send(files);
         });
-        stopped
+        let files = stopped
             .recv_timeout(Duration::from_secs(30))
             .expect("the pipeline did not reach NULL within 30s");
         assert!(
             weak.upgrade().is_none(),
             "the pipeline was still held right after it was dropped"
+        );
+        // The stop drain waits for the relink before it sends EOS. Without that
+        // wait the EOS lands in the relink and the new file is left unfinished.
+        let unfinished: Vec<&PathBuf> = files
+            .iter()
+            .filter(|(_, finished)| !finished)
+            .map(|(p, _)| p)
+            .collect();
+        assert!(
+            files.len() == 2 && unfinished.is_empty(),
+            "the stop should finish the old file and the new one: {:?} unfinished of {:?}",
+            unfinished,
+            files
         );
     }
 }

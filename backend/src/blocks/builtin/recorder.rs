@@ -975,8 +975,8 @@ impl Drop for CommittedStashes {
 /// elements to it and brings the muxer back. A stop that lands in it finds the
 /// pipeline still held right after dropping it, which reads as a leak, and the
 /// new elements take their state from a pipeline already on its way to NULL. The
-/// recorder's pre-stop hook closes the gate and waits for a relink under way; no
-/// relink starts once the gate is closed.
+/// recorder's stop drain and pre-stop hook close the gate and wait for a relink
+/// under way; no relink starts once the gate is closed.
 ///
 /// Each side sets its own flag before it reads the other's, so at least one of
 /// them sees the other.
@@ -998,9 +998,12 @@ impl RelinkGate {
     }
 
     /// Let no relink start, and wait up to `timeout` for one under way. Returns
-    /// whether none is still running.
+    /// whether none is still running. Only the first call waits: a stop closes
+    /// the gate twice, and a relink that outlasted the first wait gets no second.
     fn close(&self, timeout: Duration) -> bool {
-        self.closed.store(true, Ordering::SeqCst);
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return !self.relinking.load(Ordering::SeqCst);
+        }
         let started = Instant::now();
         while self.relinking.load(Ordering::SeqCst) {
             if started.elapsed() >= timeout {
@@ -2427,28 +2430,38 @@ impl BlockBuilder for RecorderBuilder {
             instance_id, num_video_tracks, num_audio_tracks, container
         );
 
-        let drain_splitmuxsink = splitmuxsink.downgrade();
-        let drain_mux = mux.downgrade();
-        let drain_instance_id = instance_id.to_string();
-        let drain_tracks: Vec<DrainTrack> = video_pad_cells
-            .iter()
-            .zip(video_activities.iter())
-            .chain(audio_pad_cells.iter().zip(audio_activities.iter()))
-            .map(|(pad, activity)| (Arc::clone(pad), Arc::clone(activity)))
-            .collect();
-        ctx.register_stop_drain(Box::new(move || {
-            match (drain_splitmuxsink.upgrade(), drain_mux.upgrade()) {
-                (Some(splitmuxsink), Some(mux)) => {
-                    drain_recording(&drain_instance_id, &splitmuxsink, &mux, &drain_tracks)
-                }
-                _ => nothing_to_drain(),
-            }
-        }));
-
         // Request the sink pads — see the note above the input chains.
         {
             let next_file_index_for_watchdog = Arc::clone(&next_file_index);
             let relink_gate = Arc::new(RelinkGate::default());
+            // A flow stop runs the drain and then the pre-stop hook; a pipeline
+            // dropped without a stop runs only the hook. Both close the gate
+            // first, so no file switch is under way or starts behind them.
+            {
+                let gate = Arc::clone(&relink_gate);
+                let drain_splitmuxsink = splitmuxsink.downgrade();
+                let drain_mux = mux.downgrade();
+                let drain_instance_id = instance_id.to_string();
+                let drain_tracks: Vec<DrainTrack> = video_pad_cells
+                    .iter()
+                    .zip(video_activities.iter())
+                    .chain(audio_pad_cells.iter().zip(audio_activities.iter()))
+                    .map(|(pad, activity)| (Arc::clone(pad), Arc::clone(activity)))
+                    .collect();
+                ctx.register_stop_drain(Box::new(move || {
+                    // A switch still relinking has the muxer in NULL; EOS cannot
+                    // finish a file there. The pre-stop hook reports it.
+                    if !gate.close(RELINK_STOP_TIMEOUT) {
+                        return nothing_to_drain();
+                    }
+                    match (drain_splitmuxsink.upgrade(), drain_mux.upgrade()) {
+                        (Some(splitmuxsink), Some(mux)) => {
+                            drain_recording(&drain_instance_id, &splitmuxsink, &mux, &drain_tracks)
+                        }
+                        _ => nothing_to_drain(),
+                    }
+                }));
+            }
             {
                 let gate = Arc::clone(&relink_gate);
                 let splitmuxsink_weak = splitmuxsink.downgrade();
@@ -2465,7 +2478,9 @@ impl BlockBuilder for RecorderBuilder {
                     // same point. Going to NULL is meant to release it, but opening
                     // a file writes over the stop it sets, and the queue then waits
                     // for good, holding the stream lock that NULL has to take. A
-                    // flush releases it whatever that state says.
+                    // flush releases it whatever that state says. It comes after
+                    // the stop drain, finished or timed out: a flushing pad
+                    // refuses the drain's EOS, and the file is left unfinished.
                     if let Some(splitmuxsink) = splitmuxsink_weak.upgrade() {
                         for pad in splitmuxsink.sink_pads() {
                             pad.send_event(gst::event::FlushStart::new());
@@ -3165,6 +3180,24 @@ mod tests {
         let gate = RelinkGate::default();
         let _relinking = gate.enter().unwrap();
         assert!(!gate.close(Duration::from_millis(50)));
+    }
+
+    /// A stop closes the gate twice, in its drain and then its pre-stop hook.
+    /// A relink that outlasted the first wait must not cost a second one.
+    #[test]
+    fn only_the_first_close_waits_for_a_relink() {
+        let gate = RelinkGate::default();
+        let relinking = gate.enter().unwrap();
+        assert!(!gate.close(Duration::from_millis(50)));
+        let started = Instant::now();
+        assert!(!gate.close(Duration::from_secs(5)));
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the second close waited {:?}",
+            started.elapsed()
+        );
+        drop(relinking);
+        assert!(gate.close(Duration::from_secs(5)));
     }
 
     #[test]

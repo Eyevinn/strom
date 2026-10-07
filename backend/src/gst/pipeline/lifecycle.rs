@@ -1,4 +1,5 @@
 use super::{PipelineError, PipelineManager};
+use crate::blocks::StopDrainFn;
 use crate::gst::{rtp_hdrext, thread_priority};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -14,6 +15,45 @@ pub(super) const NULL_STATE_TIMEOUT: Duration = Duration::from_secs(30);
 /// before it takes the pipeline to NULL anyway. A healthy recorder finishes its
 /// file in milliseconds; this is for one whose muxer or disk is stuck.
 pub(super) const STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Run every block's stop drain and wait for them, together, at most
+/// `STOP_DRAIN_TIMEOUT`. A drain that does not finish in time is left behind;
+/// going to NULL next ends it.
+///
+/// Public so tests that build a pipeline without `PipelineManager` can stop
+/// their blocks as `stop()` does.
+pub fn run_stop_drains(flow_name: &str, drains: &[StopDrainFn]) {
+    if drains.is_empty() {
+        return;
+    }
+    let deadline = Instant::now() + STOP_DRAIN_TIMEOUT;
+    let started = Instant::now();
+    let pending: Vec<_> = drains.iter().map(|drain| drain()).collect();
+    let total = pending.len();
+    let unfinished = pending
+        .into_iter()
+        .filter(|done| {
+            done.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .is_err()
+        })
+        .count();
+    if unfinished > 0 {
+        warn!(
+            "Pipeline '{}': {} of {} stop drain(s) did not finish within {}s, stopping anyway",
+            flow_name,
+            unfinished,
+            total,
+            STOP_DRAIN_TIMEOUT.as_secs()
+        );
+    } else {
+        info!(
+            "Pipeline '{}': {} stop drain(s) finished in {:?}",
+            flow_name,
+            total,
+            started.elapsed()
+        );
+    }
+}
 
 /// Why [`run_with_deadline`] returned without a result.
 #[derive(Debug, PartialEq, Eq)]
@@ -276,11 +316,12 @@ impl PipelineManager {
         // owned by the elements and released when the pipeline goes to NULL.
         self.volume_ramps.clear();
 
-        self.run_pre_stop_hooks();
-
         // After the bus watch is gone: the EOS a drain sends can end the whole
         // pipeline, and that must not reach clients as the flow ending on its own.
         self.run_stop_drains();
+        // After the drains, finished or not: a pre-stop hook may flush the very
+        // pads a drain's EOS has to pass through.
+        self.run_pre_stop_hooks();
 
         // Run set_state on a dedicated OS thread to avoid "Cannot start a runtime
         // from within a runtime" panics. Some GStreamer elements (e.g. whipserversrc)
@@ -329,40 +370,8 @@ impl PipelineManager {
         Ok(PipelineState::Null)
     }
 
-    /// Run every block's stop drain and wait for them, together, at most
-    /// `STOP_DRAIN_TIMEOUT`. A drain that does not finish in time is left
-    /// behind; going to NULL next ends it.
     fn run_stop_drains(&self) {
-        if self.stop_drain_fns.is_empty() {
-            return;
-        }
-        let deadline = Instant::now() + STOP_DRAIN_TIMEOUT;
-        let started = Instant::now();
-        let pending: Vec<_> = self.stop_drain_fns.iter().map(|drain| drain()).collect();
-        let total = pending.len();
-        let unfinished = pending
-            .into_iter()
-            .filter(|done| {
-                done.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                    .is_err()
-            })
-            .count();
-        if unfinished > 0 {
-            warn!(
-                "Pipeline '{}': {} of {} stop drain(s) did not finish within {}s, stopping anyway",
-                self.flow_name,
-                unfinished,
-                total,
-                STOP_DRAIN_TIMEOUT.as_secs()
-            );
-        } else {
-            info!(
-                "Pipeline '{}': {} stop drain(s) finished in {:?}",
-                self.flow_name,
-                total,
-                started.elapsed()
-            );
-        }
+        run_stop_drains(&self.flow_name, &self.stop_drain_fns);
     }
 
     /// Pause the pipeline.

@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use strom::blocks::builtin::recorder::RecorderBuilder;
-use strom::blocks::{BlockBuildContext, BlockBuilder, PreStopFn};
+use strom::blocks::{BlockBuildContext, BlockBuilder, PreStopFn, StopDrainFn};
 use strom::events::EventBroadcaster;
 use strom_types::PropertyValue;
 
@@ -70,6 +70,11 @@ impl Recorder {
     }
 
     /// The hooks the pipeline manager runs before it sets the pipeline to NULL.
+    /// The drains the pipeline manager runs on stop, before the pre-stop hooks.
+    pub fn take_stop_drains(&self) -> Vec<StopDrainFn> {
+        self.ctx.take_stop_drains()
+    }
+
     pub fn take_pre_stops(&self) -> Vec<PreStopFn> {
         self.ctx.take_pre_stops()
     }
