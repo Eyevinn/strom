@@ -23,6 +23,24 @@ struct ConfigFile {
     ports: PortsConfig,
     #[serde(default)]
     cef: CefConfig,
+    #[serde(default)]
+    media: MediaConfig,
+}
+
+/// `[media]` section: downloading files from URLs into the media library.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct MediaConfig {
+    /// Let URL downloads connect to loopback, private (RFC 1918, ULA),
+    /// link-local and carrier-grade NAT addresses. For local and lab use: on
+    /// a shared Strom it lets anyone who can call the API make the server
+    /// fetch from its own network. Cloud metadata and unroutable addresses
+    /// stay refused either way.
+    #[serde(default)]
+    download_allow_private_addresses: bool,
+    /// Largest file a URL download may write, in bytes. Default 2 GiB.
+    download_max_bytes: Option<u64>,
+    /// Time allowed for one whole URL download, in seconds. Default 7200.
+    download_timeout_seconds: Option<u64>,
 }
 
 /// `[ports]` section: the port numbers Strom administers and hands out.
@@ -292,6 +310,12 @@ pub struct Config {
     pub port_lease_ttl_seconds: u64,
     /// Whether to bind-probe a candidate port before handing it out.
     pub probe_before_handout: bool,
+    /// Let URL downloads into the media library reach private and local addresses.
+    pub media_download_allow_private_addresses: bool,
+    /// Largest file a URL download may write, in bytes.
+    pub media_download_max_bytes: u64,
+    /// Time allowed for one whole URL download, in seconds.
+    pub media_download_timeout_seconds: u64,
 }
 
 /// Expand the `[ports] ports` entries into the pool.
@@ -315,6 +339,15 @@ fn pool_ports(entries: &[PortConfigEntry]) -> anyhow::Result<std::collections::B
         ports.extend(expanded);
     }
     Ok(ports)
+}
+
+/// A configured value that must be above zero, or the default when unset.
+fn positive(key: &str, configured: Option<u64>, default: u64) -> anyhow::Result<u64> {
+    match configured {
+        Some(0) => anyhow::bail!("{key} must be greater than 0"),
+        Some(value) => Ok(value),
+        None => Ok(default),
+    }
 }
 
 fn port_lease_ttl(configured: Option<u64>) -> anyhow::Result<u64> {
@@ -396,6 +429,7 @@ impl Config {
             discovery: DiscoveryConfig::default(),
             ports: PortsConfig::default(),
             cef: CefConfig::default(),
+            media: MediaConfig::default(),
         }));
 
         // 2. Merge user config file if it exists
@@ -499,6 +533,35 @@ impl Config {
             figment = figment.merge(Serialized::default("ports.probe_before_handout", probe));
         }
 
+        // 4f. URL download settings, each named explicitly for the same reason.
+        if let Some(value) =
+            strom_types::env::var_opt("STROM_MEDIA_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES")
+        {
+            let allow = match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                _ => anyhow::bail!(
+                    "STROM_MEDIA_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES must be true or false, got {value}"
+                ),
+            };
+            figment = figment.merge(Serialized::default(
+                "media.download_allow_private_addresses",
+                allow,
+            ));
+        }
+        if let Some(value) = strom_types::env::var_opt("STROM_MEDIA_DOWNLOAD_MAX_BYTES") {
+            let max: u64 = value.trim().parse().map_err(|_| {
+                anyhow::anyhow!("STROM_MEDIA_DOWNLOAD_MAX_BYTES is not a number: {value}")
+            })?;
+            figment = figment.merge(Serialized::default("media.download_max_bytes", max));
+        }
+        if let Some(value) = strom_types::env::var_opt("STROM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS") {
+            let secs: u64 = value.trim().parse().map_err(|_| {
+                anyhow::anyhow!("STROM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS is not a number: {value}")
+            })?;
+            figment = figment.merge(Serialized::default("media.download_timeout_seconds", secs));
+        }
+
         // 5. Merge CLI arguments (highest priority)
         if let Some(ref cert) = tls_cert {
             figment = figment.merge(Serialized::default("server.tls_cert", cert));
@@ -565,7 +628,30 @@ impl Config {
             pool_ports: pool_ports(&config_file.ports.ports)?,
             port_lease_ttl_seconds: port_lease_ttl(config_file.ports.lease_ttl_seconds)?,
             probe_before_handout: config_file.ports.probe_before_handout.unwrap_or(true),
+            media_download_allow_private_addresses: config_file
+                .media
+                .download_allow_private_addresses,
+            media_download_max_bytes: positive(
+                "media.download_max_bytes",
+                config_file.media.download_max_bytes,
+                strom_types::media_download::DEFAULT_MEDIA_DOWNLOAD_MAX_BYTES,
+            )?,
+            media_download_timeout_seconds: positive(
+                "media.download_timeout_seconds",
+                config_file.media.download_timeout_seconds,
+                crate::media_download::DEFAULT_TOTAL_TIMEOUT_SECS,
+            )?,
         })
+    }
+
+    /// The URL download settings this configuration asks for.
+    pub fn media_download_settings(&self) -> crate::media_download::MediaDownloadSettings {
+        crate::media_download::MediaDownloadSettings {
+            allow_private_addresses: self.media_download_allow_private_addresses,
+            max_bytes: self.media_download_max_bytes,
+            total_timeout: std::time::Duration::from_secs(self.media_download_timeout_seconds),
+            ..Default::default()
+        }
     }
 
     /// Returns TLS config paths if both cert and key are provided.
@@ -624,6 +710,9 @@ impl Config {
             pool_ports: std::collections::BTreeSet::new(),
             port_lease_ttl_seconds: strom_types::ports::DEFAULT_PORT_LEASE_TTL_SECS,
             probe_before_handout: true,
+            media_download_allow_private_addresses: false,
+            media_download_max_bytes: strom_types::media_download::DEFAULT_MEDIA_DOWNLOAD_MAX_BYTES,
+            media_download_timeout_seconds: crate::media_download::DEFAULT_TOTAL_TIMEOUT_SECS,
         })
     }
 
@@ -682,6 +771,10 @@ impl Default for Config {
                 pool_ports: std::collections::BTreeSet::new(),
                 port_lease_ttl_seconds: strom_types::ports::DEFAULT_PORT_LEASE_TTL_SECS,
                 probe_before_handout: true,
+                media_download_allow_private_addresses: false,
+                media_download_max_bytes:
+                    strom_types::media_download::DEFAULT_MEDIA_DOWNLOAD_MAX_BYTES,
+                media_download_timeout_seconds: crate::media_download::DEFAULT_TOTAL_TIMEOUT_SECS,
             }
         })
     }
@@ -1292,6 +1385,54 @@ lease_ttl_seconds = 600
         let config =
             Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap();
         assert!(!config.probe_before_handout);
+    }
+
+    #[test]
+    #[serial]
+    fn media_download_settings_default_to_safe_values() {
+        let _allow = EnvGuard::remove("STROM_MEDIA_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES");
+        let _max = EnvGuard::remove("STROM_MEDIA_DOWNLOAD_MAX_BYTES");
+        let _timeout = EnvGuard::remove("STROM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS");
+        let settings = config_from_env().media_download_settings();
+        assert!(!settings.allow_private_addresses);
+        assert_eq!(
+            settings.max_bytes,
+            strom_types::media_download::DEFAULT_MEDIA_DOWNLOAD_MAX_BYTES
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn media_download_settings_from_env_and_file() {
+        let _allow = EnvGuard::set("STROM_MEDIA_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES", "true");
+        let _max = EnvGuard::set("STROM_MEDIA_DOWNLOAD_MAX_BYTES", "1000");
+        let _timeout = EnvGuard::remove("STROM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS");
+        let settings = config_from_env().media_download_settings();
+        assert!(settings.allow_private_addresses);
+        assert_eq!(settings.max_bytes, 1000);
+
+        let _allow = EnvGuard::set("STROM_MEDIA_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES", "perhaps");
+        let err =
+            Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("STROM_MEDIA_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES"));
+
+        let _allow = EnvGuard::remove("STROM_MEDIA_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES");
+        let _max = EnvGuard::remove("STROM_MEDIA_DOWNLOAD_MAX_BYTES");
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(
+            temp_dir.path().join(".strom.toml"),
+            "[media]\ndownload_allow_private_addresses = true\ndownload_timeout_seconds = 60\n",
+        )
+        .unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+        let result = Config::from_figment(None, None, None, None, None, None, None, None, None);
+        let _ = std::env::set_current_dir(original_dir);
+        let settings = result.unwrap().media_download_settings();
+        assert!(settings.allow_private_addresses);
+        assert_eq!(settings.total_timeout, std::time::Duration::from_secs(60));
     }
 
     #[test]

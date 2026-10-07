@@ -37,6 +37,7 @@ pub mod json_rejection;
 pub mod layout;
 pub mod macos_app_nap;
 pub mod mcp;
+pub mod media_download;
 pub mod network;
 pub mod openapi;
 pub mod osc;
@@ -327,6 +328,12 @@ pub async fn create_app_with_config(
         .route(
             "/media/upload",
             post(api::media::upload_files).layer(DefaultBodyLimit::max(500 * 1024 * 1024)), // 500MB limit
+        )
+        .route("/media/download", post(api::media::download_url))
+        .route("/media/downloads", get(api::media::list_downloads))
+        .route(
+            "/media/downloads/{job_id}",
+            delete(api::media::cancel_download),
         )
         .route("/media/rename", post(api::media::rename_media))
         .route("/media/file/{*path}", delete(api::media::delete_file))
