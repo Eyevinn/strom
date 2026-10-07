@@ -103,9 +103,18 @@ pub fn plan_clip(
         (None, 0)
     } else if downgraded_from == Some(StingerVariant::MaskOnly) {
         // No graphic to hide a cut behind: mix across the span where the
-        // matte moves, or across the middle third without an analysis.
+        // matte moves, or across the middle third without an analysis. A
+        // cut point the operator set is a classic cut point: it cuts or
+        // mixes as `beneath` says, and the mix ends with the clip.
         match settings.cut_point_ms {
-            Some(cut) => (Some(cut.min(last_ms)), settings.mix_ms),
+            Some(cut) => {
+                let cut = cut.min(last_ms);
+                let mix = match settings.beneath {
+                    StingerBeneath::Cut => 0,
+                    StingerBeneath::Mix => settings.mix_ms.min(duration_ms - cut),
+                };
+                (Some(cut), mix)
+            }
             None => {
                 let span = info.and_then(|i| Some((i.matte_start_ms?, i.matte_end_ms?)));
                 match span {
@@ -311,6 +320,35 @@ mod tests {
         assert_eq!(plan.downgraded_from, Some(StingerVariant::MaskOnly));
         assert_eq!(plan.cut_point_ms, Some(300));
         assert_eq!(plan.mix_ms, 800);
+    }
+
+    #[test]
+    fn a_downgraded_mask_with_a_cut_point_honours_cut() {
+        let settings = StingerClipSettings {
+            cut_point_ms: Some(1000),
+            beneath: StingerBeneath::Cut,
+            mix_ms: 1000,
+            ..Default::default()
+        };
+        let plan = plan_clip(&settings, Some(&info(StingerLayout::MaskOnly)), false, None).unwrap();
+        assert_eq!(plan.downgraded_from, Some(StingerVariant::MaskOnly));
+        assert_eq!(plan.cut_point_ms, Some(1000));
+        assert_eq!(plan.mix_ms, 0, "beneath = cut switches without a mix");
+    }
+
+    #[test]
+    fn a_downgraded_mask_mix_ends_with_the_clip() {
+        let settings = StingerClipSettings {
+            cut_point_ms: Some(1000),
+            beneath: StingerBeneath::Mix,
+            mix_ms: 1000,
+            ..Default::default()
+        };
+        // The analysed clip is 1500 ms long.
+        let plan = plan_clip(&settings, Some(&info(StingerLayout::MaskOnly)), false, None).unwrap();
+        assert_eq!(plan.downgraded_from, Some(StingerVariant::MaskOnly));
+        assert_eq!(plan.cut_point_ms, Some(1000));
+        assert_eq!(plan.mix_ms, 500, "the mix may not outlast the clip");
     }
 
     #[test]
