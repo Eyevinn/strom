@@ -14,9 +14,10 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 use strom_types::block::StreamMode;
+use strom_types::flow::{BlockHealthCause, HealthMedium, MediumFault};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -88,6 +89,10 @@ pub struct WhipEndpointConfig {
     pub slot_output: Vec<Arc<SlotOutput>>,
     /// Per-slot work queued on the slot's inputs; see `SlotInputWork`.
     pub slot_input_work: Vec<SlotInputs>,
+    /// Per-slot liveness of the session that last claimed the slot, for
+    /// `WhipSlotLiveness`. Weak: the session owns it. Set by
+    /// `start_session_activity`.
+    pub slot_activity: Arc<Vec<Mutex<Weak<SessionActivity>>>>,
     /// Slot assignments: slot index → Option<resource_id>
     /// Protected by RwLock for concurrent access from HTTP handlers.
     pub slot_assignments: Arc<RwLock<Vec<Option<String>>>>,
@@ -476,6 +481,35 @@ impl WhipEndpointConfig {
             _ => false,
         }
     }
+
+    /// Liveness for a new session in `slot`: borrows the slot's output stamps
+    /// (resetting them, see `SessionActivity::new`) and becomes what
+    /// `WhipSlotLiveness` reads for that slot.
+    pub fn start_session_activity(&self, slot: usize) -> Arc<SessionActivity> {
+        let slot_output = match self.slot_output.get(slot) {
+            Some(stamp) => stamp.clone(),
+            None => {
+                // Unreachable: one stamp is built per slot. The orphan below is
+                // never written, so this session would be reaped once its decode
+                // grace ran out; this line is what makes that diagnosable.
+                warn!(
+                    "WHIP Input: no output stamp for slot {}, its liveness cannot be tracked",
+                    slot
+                );
+                Arc::new(SlotOutput::new(Instant::now()))
+            }
+        };
+        let activity = Arc::new(SessionActivity::new(Instant::now(), slot_output));
+        if let Some(cell) = self.slot_activity.get(slot) {
+            *cell.lock().unwrap() = Arc::downgrade(&activity);
+        }
+        activity
+    }
+}
+
+/// One empty `WhipEndpointConfig::slot_activity` cell per slot.
+pub fn new_slot_activity(max_sessions: usize) -> Arc<Vec<Mutex<Weak<SessionActivity>>>> {
+    Arc::new((0..max_sessions).map(|_| Mutex::new(Weak::new())).collect())
 }
 
 /// A config with no pipeline behind it, for tests that exercise slot and
@@ -507,6 +541,7 @@ impl WhipEndpointConfig {
                 .map(|_| Arc::new(SlotOutput::new(Instant::now())))
                 .collect(),
             slot_input_work: (0..max_sessions).map(|_| SlotInputs::default()).collect(),
+            slot_activity: new_slot_activity(max_sessions),
             slot_assignments: Arc::new(RwLock::new(vec![None; max_sessions])),
         }
     }
@@ -980,6 +1015,275 @@ impl SessionActivity {
             }
         }
         Some(idle)
+    }
+
+    /// Each medium of `mode` that is not reaching the flow while the publisher
+    /// is still connected, with where it stops. For reporting only; nothing
+    /// here feeds `idle`, so it never reaps or displaces a session.
+    ///
+    /// Arrival and output are read per medium, so the three cases come apart:
+    /// - `PublisherStopped`: the medium arrived and then stopped arriving,
+    ///   while the other medium still arrives. Requires the medium to have been
+    ///   silent for its own budget *longer* than the other one, or a transport
+    ///   that drops both at once reads as a lost microphone for the difference
+    ///   between their budgets.
+    /// - `NeverSent`: none of the medium has arrived, while the other one has
+    ///   been arriving for `absent`. The chains start apart (`decodebin`
+    ///   autoplugs each, video waits for a keyframe), hence the margin.
+    /// - `NotProduced`: the medium still arrives but none of it comes out, as
+    ///   measured by `medium_stall`. `idle` reaps this one in time.
+    ///
+    /// The first two need a counterpart, so only `StreamMode::AudioVideo` can
+    /// report them; a single-medium seat that stops sending has stopped
+    /// altogether, which is the watchdog's to judge.
+    pub fn missing_media(&self, mode: StreamMode, budgets: MediumBudgets) -> Vec<MissingMedium> {
+        let both = mode.has_audio() && mode.has_video();
+        let mut missing = Vec::new();
+        for medium in [HealthMedium::Audio, HealthMedium::Video] {
+            let carried = match medium {
+                HealthMedium::Audio => mode.has_audio(),
+                HealthMedium::Video => mode.has_video(),
+            };
+            if !carried {
+                continue;
+            }
+            let other = other_medium(medium);
+            let ingress = self.ingress_of(medium);
+            let other_ingress = self.ingress_of(other);
+
+            if both {
+                // The publisher still sending the other medium is what makes
+                // this a missing medium rather than a publisher that left.
+                if let Some(other_idle) = other_ingress
+                    .since_last()
+                    .filter(|idle| *idle < budgets.of(other))
+                {
+                    match ingress.since_last() {
+                        Some(silent) if silent >= other_idle + budgets.of(medium) => {
+                            missing.push(MissingMedium {
+                                medium,
+                                fault: MediumFault::PublisherStopped,
+                                for_: silent,
+                            });
+                            continue;
+                        }
+                        None => {
+                            if let Some(running) = other_ingress
+                                .since_first()
+                                .filter(|running| *running >= budgets.absent)
+                            {
+                                missing.push(MissingMedium {
+                                    medium,
+                                    fault: MediumFault::NeverSent,
+                                    for_: running,
+                                });
+                            }
+                            continue;
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+
+            if let Some(stall) = medium_stall(ingress, self.output_of(medium))
+                .filter(|stall| *stall >= budgets.of(medium))
+            {
+                missing.push(MissingMedium {
+                    medium,
+                    fault: MediumFault::NotProduced,
+                    for_: stall,
+                });
+            }
+        }
+        missing
+    }
+
+    fn ingress_of(&self, medium: HealthMedium) -> &ActivityStamp {
+        match medium {
+            HealthMedium::Audio => &self.ingress_audio,
+            HealthMedium::Video => &self.ingress_video,
+        }
+    }
+
+    fn output_of(&self, medium: HealthMedium) -> &ActivityStamp {
+        match medium {
+            HealthMedium::Audio => &self.output.audio,
+            HealthMedium::Video => &self.output.video,
+        }
+    }
+}
+
+fn other_medium(medium: HealthMedium) -> HealthMedium {
+    match medium {
+        HealthMedium::Audio => HealthMedium::Video,
+        HealthMedium::Video => HealthMedium::Audio,
+    }
+}
+
+/// How long a medium may be missing before `SessionActivity::missing_media`
+/// reports it.
+///
+/// The media get different budgets because their cadences differ. A
+/// connected publisher sends audio at least every 400 ms even through silence
+/// (Opus DTX), so a couple of seconds of nothing is already a fault. Video has
+/// no such floor: a screen share of a window nobody touches can go seconds
+/// between frames. Video's budget is also `VIDEO_REPAIR_WINDOW`, so a frozen
+/// decoder is not reported while keyframe repair still has a chance.
+#[derive(Debug, Clone, Copy)]
+pub struct MediumBudgets {
+    pub audio: Duration,
+    pub video: Duration,
+    /// A medium that has never arrived, measured from the other medium's first
+    /// arrival.
+    pub absent: Duration,
+}
+
+impl Default for MediumBudgets {
+    fn default() -> Self {
+        Self {
+            audio: Duration::from_secs(2),
+            video: VIDEO_REPAIR_WINDOW,
+            absent: Duration::from_secs(10),
+        }
+    }
+}
+
+impl MediumBudgets {
+    fn of(&self, medium: HealthMedium) -> Duration {
+        match medium {
+            HealthMedium::Audio => self.audio,
+            HealthMedium::Video => self.video,
+        }
+    }
+}
+
+/// One medium of a session that is not reaching the flow; see
+/// `SessionActivity::missing_media`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingMedium {
+    pub medium: HealthMedium,
+    pub fault: MediumFault,
+    /// How long it has been missing: since it stopped arriving
+    /// (`PublisherStopped`), since the other medium started (`NeverSent`), or
+    /// how long it has arrived with none of it coming out (`NotProduced`).
+    pub for_: Duration,
+}
+
+/// Per-medium liveness of one WHIP Input block's seats, for the flow's block
+/// health scan.
+///
+/// A seat medium that carries nothing does not stall anything: its appsrc is
+/// simply never pushed to, every element downstream sits idle and `PLAYING`,
+/// and the pad-task scan has nothing to find. The session's stamps are the
+/// only evidence, so this reads them for each occupied slot.
+///
+/// It only reports. Whether a seat is reaped or displaced is
+/// `SessionActivity::idle`'s call, and a publisher that stopped sending a
+/// medium is deliberately not held against its seat there.
+pub struct WhipSlotLiveness {
+    endpoint_id: String,
+    mode: StreamMode,
+    slot_activity: Arc<Vec<Mutex<Weak<SessionActivity>>>>,
+    /// An unoccupied slot is never reported, whatever its last session left.
+    assignments: Arc<RwLock<Vec<Option<String>>>>,
+}
+
+/// One missing medium of one occupied slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotMediumStall {
+    pub slot: usize,
+    pub missing: MissingMedium,
+}
+
+impl std::fmt::Display for SlotMediumStall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let medium = self.missing.medium.as_str();
+        let other = other_medium(self.missing.medium).as_str();
+        let secs = self.missing.for_.as_secs_f32();
+        match self.missing.fault {
+            MediumFault::PublisherStopped => write!(
+                f,
+                "slot {}: the publisher stopped sending {} {:.1} s ago and still sends {}",
+                self.slot, medium, secs, other
+            ),
+            MediumFault::NeverSent => write!(
+                f,
+                "slot {}: the publisher has sent no {} in {:.1} s of sending {}",
+                self.slot, medium, secs, other
+            ),
+            MediumFault::NotProduced => write!(
+                f,
+                "slot {}: {} still arrives, but none has come out of the slot's chain for {:.1} s",
+                self.slot, medium, secs
+            ),
+        }
+    }
+}
+
+impl WhipSlotLiveness {
+    pub fn new(
+        endpoint_id: String,
+        mode: StreamMode,
+        slot_activity: Arc<Vec<Mutex<Weak<SessionActivity>>>>,
+        assignments: Arc<RwLock<Vec<Option<String>>>>,
+    ) -> Self {
+        Self {
+            endpoint_id,
+            mode,
+            slot_activity,
+            assignments,
+        }
+    }
+
+    /// Every missing medium of every occupied slot. `budgets` is a parameter
+    /// so a test can drive the real decision without waiting out the
+    /// production ones.
+    pub fn stalls(&self, budgets: MediumBudgets) -> Vec<SlotMediumStall> {
+        let occupied = self.assignments.read().unwrap();
+        let mut stalls = Vec::new();
+        for (slot, cell) in self.slot_activity.iter().enumerate() {
+            if !occupied.get(slot).is_some_and(|holder| holder.is_some()) {
+                continue;
+            }
+            let Some(activity) = cell.lock().unwrap().upgrade() else {
+                continue;
+            };
+            stalls.extend(
+                activity
+                    .missing_media(self.mode, budgets)
+                    .into_iter()
+                    .map(|missing| SlotMediumStall { slot, missing }),
+            );
+        }
+        stalls
+    }
+}
+
+impl crate::blocks::BlockLiveness for WhipSlotLiveness {
+    fn failure(&self) -> Option<crate::blocks::LivenessFailure> {
+        let stalls = self.stalls(MediumBudgets::default());
+        if stalls.is_empty() {
+            return None;
+        }
+        Some(crate::blocks::LivenessFailure {
+            detail: format!(
+                "WHIP endpoint '{}': {}",
+                self.endpoint_id,
+                stalls
+                    .iter()
+                    .map(|stall| stall.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+            causes: stalls
+                .iter()
+                .map(|stall| BlockHealthCause::WhipMedium {
+                    slot: stall.slot as u32,
+                    medium: stall.missing.medium,
+                    fault: stall.missing.fault,
+                })
+                .collect(),
+        })
     }
 }
 
@@ -2750,5 +3054,215 @@ mod tests {
         );
         assert!(cleanup_sent.load(Ordering::SeqCst));
         assert!(manager.get_session_port("late-session").is_none());
+    }
+
+    /// A seat positioned in time per medium: how long ago each medium last
+    /// arrived and last came out (`None`: never), after `RUNNING_FOR` of
+    /// session.
+    fn seat(
+        audio_in: Option<Duration>,
+        audio_out: Option<Duration>,
+        video_in: Option<Duration>,
+        video_out: Option<Duration>,
+    ) -> SessionActivity {
+        let stamp = |idle: Option<Duration>| match idle {
+            Some(idle) => ActivityStamp::backdated(RUNNING_FOR, idle),
+            None => ActivityStamp::new(Instant::now()),
+        };
+        let newest = [audio_in, video_in].into_iter().flatten().min();
+        SessionActivity::from_media_stamps(
+            stamp(newest),
+            stamp(audio_in),
+            stamp(video_in),
+            Arc::new(SlotOutput {
+                audio: Arc::new(stamp(audio_out)),
+                video: Arc::new(stamp(video_out)),
+            }),
+        )
+    }
+
+    fn faults(activity: &SessionActivity) -> Vec<(HealthMedium, MediumFault)> {
+        activity
+            .missing_media(StreamMode::AudioVideo, MediumBudgets::default())
+            .into_iter()
+            .map(|missing| (missing.medium, missing.fault))
+            .collect()
+    }
+
+    const NOW: Option<Duration> = Some(Duration::ZERO);
+
+    /// The 2026-10-06 show: a guest's browser stopped sending audio (its
+    /// microphone track ended) while its camera kept sending. `idle` rightly
+    /// does not hold that against the seat, so this report is the only
+    /// signal an operator gets.
+    #[test]
+    fn a_publisher_that_stopped_sending_audio_is_reported_as_such() {
+        let silent = Some(Duration::from_secs(6));
+        let activity = seat(silent, silent, NOW, NOW);
+
+        assert_eq!(
+            faults(&activity),
+            vec![(HealthMedium::Audio, MediumFault::PublisherStopped)]
+        );
+        assert!(
+            activity
+                .idle()
+                .is_some_and(|(idle, _)| idle < TAKEOVER_IDLE_THRESHOLD),
+            "the seat is not idle to the reaper, so it is not displaced: {:?}",
+            activity.idle()
+        );
+    }
+
+    /// The same seat with the video gone instead: a camera unplugged while the
+    /// microphone carries on. Video's budget is longer, so it is reported
+    /// later.
+    #[test]
+    fn a_publisher_that_stopped_sending_video_is_reported_after_its_budget() {
+        let early = Some(Duration::from_secs(5));
+        assert!(faults(&seat(NOW, NOW, early, early)).is_empty());
+
+        let late = Some(VIDEO_REPAIR_WINDOW + Duration::from_secs(1));
+        assert_eq!(
+            faults(&seat(NOW, NOW, late, late)),
+            vec![(HealthMedium::Video, MediumFault::PublisherStopped)]
+        );
+    }
+
+    /// A transport that goes away stops both media within a frame of each
+    /// other. Audio is past its 2 s budget long before video reaches its 10 s,
+    /// and that window must not read as a lost microphone: the seat is gone,
+    /// and the watchdog owns it.
+    #[test]
+    fn a_seat_that_lost_its_transport_is_not_reported() {
+        for audio_idle in [3, 6, 9, 12, 20] {
+            let audio = Some(Duration::from_secs(audio_idle));
+            let video = Some(Duration::from_secs(audio_idle) - Duration::from_millis(30));
+            assert!(
+                faults(&seat(audio, audio, video, video)).is_empty(),
+                "both media stopped together {audio_idle} s ago"
+            );
+        }
+    }
+
+    /// A publisher that sends video only on an `audio_video` endpoint: to an
+    /// operator, the same silent guest as one whose microphone died.
+    #[test]
+    fn a_publisher_that_never_sent_audio_is_reported_once_video_has_run_a_while() {
+        let activity = seat(None, None, NOW, NOW);
+        assert_eq!(
+            faults(&activity),
+            vec![(HealthMedium::Audio, MediumFault::NeverSent)]
+        );
+
+        // Video that started a moment ago: audio may simply not have arrived
+        // yet.
+        let starting = SessionActivity::from_media_stamps(
+            ActivityStamp::backdated(Duration::from_secs(3), Duration::ZERO),
+            ActivityStamp::new(Instant::now()),
+            ActivityStamp::backdated(Duration::from_secs(3), Duration::ZERO),
+            Arc::new(SlotOutput::new(Instant::now())),
+        );
+        assert!(faults(&starting).is_empty());
+    }
+
+    /// Audio that still arrives with none of it coming out is a fault inside
+    /// the flow, not the publisher's. `idle` reaps it in time; the report
+    /// says which it is until then.
+    #[test]
+    fn audio_arriving_with_none_coming_out_is_reported_as_not_produced() {
+        let stuck = Some(Duration::from_secs(5));
+        assert_eq!(
+            faults(&seat(NOW, stuck, NOW, NOW)),
+            vec![(HealthMedium::Audio, MediumFault::NotProduced)]
+        );
+    }
+
+    /// A frozen picture is not reported while keyframe repair still has a
+    /// chance, and is once it has given up.
+    #[test]
+    fn frozen_video_is_reported_only_past_the_repair_window() {
+        let repairing = Some(VIDEO_REPAIR_WINDOW - Duration::from_secs(3));
+        assert!(faults(&seat(NOW, NOW, NOW, repairing)).is_empty());
+
+        let wedged = Some(VIDEO_REPAIR_WINDOW + Duration::from_secs(3));
+        assert_eq!(
+            faults(&seat(NOW, NOW, NOW, wedged)),
+            vec![(HealthMedium::Video, MediumFault::NotProduced)]
+        );
+    }
+
+    #[test]
+    fn a_healthy_seat_or_a_single_medium_endpoint_reports_nothing() {
+        assert!(faults(&seat(NOW, NOW, NOW, NOW)).is_empty());
+
+        let video_only = seat(None, None, NOW, NOW);
+        assert!(video_only
+            .missing_media(StreamMode::Video, MediumBudgets::default())
+            .is_empty());
+    }
+
+    /// The block's reporter reads whichever session last claimed each slot,
+    /// and only while someone holds the slot.
+    #[test]
+    fn slot_liveness_reads_the_session_holding_each_slot() {
+        let config = endpoint_config(2);
+        let liveness = WhipSlotLiveness::new(
+            "guests".to_string(),
+            StreamMode::AudioVideo,
+            config.slot_activity.clone(),
+            config.slot_assignments.clone(),
+        );
+        let budgets = MediumBudgets {
+            audio: Duration::from_millis(50),
+            video: Duration::from_millis(50),
+            absent: Duration::from_millis(50),
+        };
+
+        assert_eq!(config.allocate_slot("guest-a"), Some(0));
+        assert_eq!(config.allocate_slot("guest-b"), Some(1));
+        let a = config.start_session_activity(0);
+        let b = config.start_session_activity(1);
+        a.touch_ingress(false);
+        b.touch_ingress(true);
+        b.touch_ingress(false);
+        std::thread::sleep(Duration::from_millis(80));
+        b.touch_ingress(true);
+        b.touch_ingress(false);
+        a.touch_ingress(false);
+
+        let stalls = liveness.stalls(budgets);
+        assert_eq!(
+            stalls
+                .iter()
+                .map(|stall| (stall.slot, stall.missing.medium, stall.missing.fault))
+                .collect::<Vec<_>>(),
+            vec![(0, HealthMedium::Audio, MediumFault::NeverSent)],
+            "only slot 0's publisher sends no audio: {stalls:?}"
+        );
+        let failure = crate::blocks::BlockLiveness::failure(&liveness);
+        assert!(failure.is_none(), "production budgets are not spent yet");
+
+        drop(a);
+        assert!(
+            liveness.stalls(budgets).is_empty(),
+            "a slot whose session is gone has nothing to report"
+        );
+
+        let a = config.start_session_activity(0);
+        a.touch_ingress(false);
+        std::thread::sleep(Duration::from_millis(80));
+        a.touch_ingress(false);
+        b.touch_ingress(true);
+        b.touch_ingress(false);
+        assert_eq!(
+            liveness.stalls(budgets).len(),
+            1,
+            "slot 0's new session sends no audio either"
+        );
+        assert!(config.release_slot(0, "guest-a"));
+        assert!(
+            liveness.stalls(budgets).is_empty(),
+            "a released slot is not reported, whatever its last session left"
+        );
     }
 }
