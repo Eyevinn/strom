@@ -1429,11 +1429,16 @@ fn assert_free_bus_keeps_input(
     m.pipeline.set_state(gst::State::Playing).unwrap();
     let bus = m.pipeline.bus().unwrap();
     let start = Instant::now();
-    // Past startup and the first fill of the synced bus.
-    let settled = start + Duration::from_millis(1000);
+    // Count from the free bus's first audible interval, and for `run` past
+    // it: how long startup takes depends on the machine (a busy runner, the
+    // whole suite in parallel), and its silence is not the channel blocking.
+    // A channel that is blocked from the start never gets that far.
+    let onset_deadline = start + Duration::from_secs(10);
+    let mut onset: Option<Instant> = None;
     let mut checked = 0;
     let mut quiet = 0;
-    while start.elapsed() < run {
+    let mut quiet_at = Vec::new();
+    while onset.map_or(Instant::now() < onset_deadline, |t| t.elapsed() < run) {
         let Some(msg) = bus.timed_pop_filtered(
             gst::ClockTime::from_mseconds(50),
             &[gst::MessageType::Error, gst::MessageType::Element],
@@ -1446,24 +1451,37 @@ fn assert_free_bus_keeps_input(
         let (Some(from), Some(structure)) = (msg.src(), msg.structure()) else {
             continue;
         };
-        if structure.name() != "level" || from.name() != "tap_free" || Instant::now() < settled {
+        if structure.name() != "level" || from.name() != "tap_free" {
             continue;
         }
         let peak = extract_level_values(structure, "peak")
             .into_iter()
             .fold(f64::NEG_INFINITY, f64::max);
-        if peak <= -30.0 {
+        let audible = peak > -30.0;
+        if onset.is_none() {
+            if !audible {
+                continue;
+            }
+            onset = Some(Instant::now());
+        }
+        if !audible {
             quiet += 1;
+            quiet_at.push(checked);
         }
         checked += 1;
     }
+    assert!(
+        onset.is_some(),
+        "{free} never carried the channel's tone while {synced} waited {flow_latency_ms} ms \
+         for a clock-synced consumer"
+    );
     assert!(checked >= 10, "only {checked} level messages from {free}");
     // A blocked channel silences nearly every interval; allow a few quiet
     // ones for a scheduling stall on a busy machine.
     assert!(
         quiet * 5 < checked,
-        "{free} lost its input in {quiet} of {checked} intervals while {synced} \
-         waited {flow_latency_ms} ms for a clock-synced consumer"
+        "{free} lost its input in {quiet} of {checked} intervals (at {quiet_at:?}) while \
+         {synced} waited {flow_latency_ms} ms for a clock-synced consumer"
     );
 }
 
