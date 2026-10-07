@@ -2656,8 +2656,7 @@ dependencies = [
 [[package]]
 name = "gst-plugin-isobmff"
 version = "0.15.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f98fa6f5cc98e9274196e825005468244a682fe9b2ce7a0569476daeb290034b"
+source = "git+https://github.com/srperens/gst-plugin-isobmff?tag=v0.15.4-strom1#67c55391bf432d62a9214191d4b3d3d7a62228e4"
 dependencies = [
  "anyhow",
  "bitstream-io",

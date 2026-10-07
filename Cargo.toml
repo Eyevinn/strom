@@ -63,3 +63,9 @@ egui_extras = { version = "0.34", features = ["image"] }
 egui_plot = "0.35"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 gloo-net = { version = "0.7", features = ["websocket"] }
+
+# gst-plugin-isobmff needs GStreamer 1.26 to build for a single function; this
+# fork does that one function in Rust so Strom still builds and runs on 1.24
+# (Ubuntu 24.04 LTS). Drop it once upstream no longer requires 1.26.
+[patch.crates-io]
+gst-plugin-isobmff = { git = "https://github.com/srperens/gst-plugin-isobmff", tag = "v0.15.4-strom1" }
