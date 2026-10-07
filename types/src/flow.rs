@@ -591,7 +591,7 @@ pub struct BlockHealth {
 ///
 /// A block can carry several at once: a WHIP Input block has one seat per
 /// slot, and each can lose a medium on its own. Clients should ignore a
-/// `kind` they do not know.
+/// `kind` they do not know; this type reads one as [`BlockHealthCause::Unknown`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -605,6 +605,11 @@ pub enum BlockHealthCause {
         /// Where the medium stops.
         fault: MediumFault,
     },
+    /// A `kind` this build does not know, from a newer server. Never sent.
+    // Without it, a client built from these types could not read any flow or
+    // event that carries a newer cause.
+    #[serde(other)]
+    Unknown,
 }
 
 /// A medium named in a [`BlockHealthCause`].
@@ -649,6 +654,31 @@ mod tests {
     use super::*;
     use crate::block::{ExternalPad, ExternalPads, Position};
     use crate::MediaType;
+
+    #[test]
+    fn a_flow_with_a_cause_kind_this_build_does_not_know_still_reads() {
+        let mut flow = serde_json::to_value(Flow::new("f")).unwrap();
+        flow["block_health"] = serde_json::json!([{
+            "block_id": "whip",
+            "status": "failed",
+            "causes": [
+                {"kind": "a_later_kind", "slot": 0},
+                {"kind": "whip_medium", "slot": 1, "medium": "audio", "fault": "never_sent"}
+            ]
+        }]);
+        let flow: Flow = serde_json::from_value(flow).expect("flow should read");
+        assert_eq!(
+            flow.block_health[0].causes,
+            vec![
+                BlockHealthCause::Unknown,
+                BlockHealthCause::WhipMedium {
+                    slot: 1,
+                    medium: HealthMedium::Audio,
+                    fault: MediumFault::NeverSent,
+                },
+            ]
+        );
+    }
 
     /// A vision mixer as `get_external_pads` declares it: one video input and
     /// one audio input per declared input, plus a dedicated PGM audio input.
