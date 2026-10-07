@@ -206,8 +206,7 @@ pub fn web_first_output_frame(first_frame_ns: u64, page_frame_ns: u64, grid: Fra
     grid.pts(n)
 }
 
-/// Watches a page's output for its first new frame after a take, and for
-/// paints once the take's page has gone back to rest.
+/// Watches a page's output for its first new frame after a take.
 ///
 /// On a fixed-rate gstcefsrc, wait for [`WebAnchor::ready`] before changing
 /// the URL, then call [`WebAnchor::taken`]. Dropping it removes the probe.
@@ -223,13 +222,6 @@ pub struct WebAnchor {
     output_pts: Arc<AtomicU64>,
     /// Timestamp of the first frame of new content after the take.
     first_pts: Arc<AtomicU64>,
-    /// From this timestamp the page should be at rest; `u64::MAX` before
-    /// it is known.
-    rest_from: Arc<AtomicU64>,
-    /// The window ends here, before anything the next take paints.
-    rest_until: Arc<AtomicU64>,
-    /// Fresh paints stamped in `[rest_from, rest_until)`.
-    rest_paints: Arc<AtomicU32>,
     /// Assumed take-to-paint delay when the page paints nothing promptly.
     pub delay: Duration,
 }
@@ -244,9 +236,6 @@ impl WebAnchor {
         let taken_at_ns = Arc::new(AtomicU64::new(u64::MAX));
         let output_pts = Arc::new(AtomicU64::new(u64::MAX));
         let first_pts = Arc::new(AtomicU64::new(u64::MAX));
-        let rest_from = Arc::new(AtomicU64::new(u64::MAX));
-        let rest_until = Arc::new(AtomicU64::new(u64::MAX));
-        let rest_paints = Arc::new(AtomicU32::new(0));
         let last_memory = AtomicUsize::new(0);
         let (p_before, p_taken, p_output, p_first) = (
             Arc::clone(&before_take),
@@ -254,12 +243,7 @@ impl WebAnchor {
             Arc::clone(&output_pts),
             Arc::clone(&first_pts),
         );
-        let (p_rest_from, p_rest_until, p_rest) = (
-            Arc::clone(&rest_from),
-            Arc::clone(&rest_until),
-            Arc::clone(&rest_paints),
-        );
-        // A per-buffer probe for the length of one take: a few atomic loads,
+        // A per-buffer probe for one take, removed once the take is planned: a few atomic loads,
         // stores and compares per buffer. Only new content counts: a
         // GAP-flagged repeat, or a fixed-rate gstcefsrc re-sending its
         // current frame, shares the previous buffer's memory; a fresh paint
@@ -292,12 +276,6 @@ impl WebAnchor {
                 let _ =
                     p_first.compare_exchange(u64::MAX, pts, Ordering::Relaxed, Ordering::Relaxed);
             }
-            if fresh
-                && pts >= p_rest_from.load(Ordering::Relaxed)
-                && pts < p_rest_until.load(Ordering::Relaxed)
-            {
-                p_rest.fetch_add(1, Ordering::Relaxed);
-            }
             gst::PadProbeReturn::Ok
         })?;
         Some(Self {
@@ -307,9 +285,6 @@ impl WebAnchor {
             taken_at_ns,
             output_pts,
             first_pts,
-            rest_from,
-            rest_until,
-            rest_paints,
             delay,
         })
     }
@@ -321,21 +296,6 @@ impl WebAnchor {
         while self.before_take.load(Ordering::Relaxed) == 0 && std::time::Instant::now() < until {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
-    }
-
-    /// Count paints stamped in `[from_ns, until_ns)`, when the page should
-    /// be at rest again. An empty window counts nothing.
-    pub fn expect_rest(&self, from_ns: u64, until_ns: u64) {
-        self.rest_until.store(until_ns, Ordering::Relaxed);
-        self.rest_from.store(from_ns, Ordering::Relaxed);
-    }
-
-    /// Whether the page kept painting in the [`Self::expect_rest`] window:
-    /// two new frames or more. A page that keeps painting at rest makes its
-    /// own rest paints look like the start of the next take's animation. A
-    /// single paint is a page clearing itself as it ends.
-    pub fn paints_at_rest(&self) -> bool {
-        self.rest_paints.load(Ordering::Relaxed) > 1
     }
 
     /// Record that the take changed the page's URL at running time `now_ns`.
@@ -611,39 +571,6 @@ mod tests {
         anchor.taken(50 * MS);
         let _ = src.push(buffer(70));
         assert_eq!(anchor.first_frame_ns(), Some(70 * MS));
-    }
-
-    #[test]
-    fn a_page_painting_after_its_take_is_noticed() {
-        // Kept alive, as gstcefsrc keeps its current frame while it makes
-        // the next: a freed frame's memory could be handed out again.
-        let mut kept = Vec::new();
-        let (src, _sink) = pads();
-        let anchor = WebAnchor::watch(&src, PAGE_FIRST_FRAME_DELAY_FIXED_RATE, false).unwrap();
-        kept.push(buffer(0));
-        let _ = src.push(kept[0].clone());
-        anchor.taken(50 * MS);
-        anchor.expect_rest(1_100 * MS, 1_300 * MS);
-        // Painting during the animation is expected.
-        kept.push(buffer(100));
-        let _ = src.push(kept[1].clone());
-        kept.push(buffer(1_000));
-        let _ = src.push(kept[2].clone());
-        // Back at rest: a closing paint, then repeats.
-        kept.push(buffer(1_133));
-        let _ = src.push(kept[3].clone());
-        let _ = src.push(repeat(&kept[3], 1_166));
-        assert!(
-            !anchor.paints_at_rest(),
-            "one closing paint is not painting at rest"
-        );
-        // The next take's paints are past the window.
-        kept.push(buffer(1_300));
-        let _ = src.push(kept[4].clone());
-        assert!(!anchor.paints_at_rest());
-        kept.push(buffer(1_200));
-        let _ = src.push(kept[5].clone());
-        assert!(anchor.paints_at_rest());
     }
 
     #[test]
