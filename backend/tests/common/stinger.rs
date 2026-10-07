@@ -607,6 +607,7 @@ pub async fn classic_take(r: &Running) {
     let report = r.wait_for_report(0).await;
     assert_eq!(report.frames_expected, n);
     assert_eq!(report.frames_arrived, n, "{report:?}");
+    assert_eq!(report.warning, None, "{report:?}");
     eprintln!(
         "classic: on air {:.0} ms after the take, {} late, worst margin {:?} ms",
         report.take_to_air_ms, report.frames_late, report.worst_margin_ms

@@ -341,6 +341,81 @@ async fn a_take_outlived_by_a_restart_leaves_the_new_run_alone() {
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
 
+/// A classic clip whose frame at the cut point reaches the mixer late leaves
+/// the cut uncovered on air. The take still runs (its plan is fixed before
+/// the clip plays), but its report says so, and counts only the frames that
+/// arrived in time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_late_cut_frame_is_reported() {
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let r = start("late", "cpu").await;
+    r.state
+        .stinger_set_clip_settings(
+            &r.flow_id,
+            &r.mixer(),
+            0,
+            None,
+            strom_types::stinger::StingerClipSettings {
+                cut_point_ms: Some(500),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Hold the take's first clip frame for a second on its way into the
+    // mixer's graphic pad: every frame up to well past the cut point
+    // arrives late.
+    let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (probe_pad, probe) = {
+        let pipelines = r.state.pipelines_read().await;
+        let mixer = pipelines
+            .get(&r.flow_id)
+            .and_then(|m| m.pipeline().by_name(&format!("{}:mixer", r.mixer())))
+            .expect("mixer");
+        let feeder = mixer
+            .sink_pads()
+            .into_iter()
+            .filter_map(|p| p.peer())
+            .find(|peer| {
+                peer.parent_element().is_some_and(|e| {
+                    let name = e.name();
+                    name.ends_with(":queue_stinger_fill") || name.ends_with(":videocrop_stinger")
+                })
+            })
+            .expect("graphic pad feeder");
+        let hold = std::sync::Arc::clone(&armed);
+        let probe = feeder
+            .add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+                if hold.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                }
+                gstreamer::PadProbeReturn::Ok
+            })
+            .unwrap();
+        (feeder, probe)
+    };
+    armed.store(true, std::sync::atomic::Ordering::Release);
+    r.state
+        .stinger_take(&r.flow_id, &r.mixer(), Some(0), None)
+        .await
+        .expect("take");
+    let report = r.wait_for_report(0).await;
+    probe_pad.remove_probe(probe);
+    let n = r.clip_frames(0).await;
+    assert!(
+        report.warning.is_some(),
+        "a late cut frame must not report a clean take: {report:?}"
+    );
+    assert!(
+        report.frames_arrived < n,
+        "late frames counted as arrived: {report:?}"
+    );
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}
+
 /// A clip that will not load costs the graphic, not the change: the take
 /// fails, says so, and the program cuts to PVW anyway.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

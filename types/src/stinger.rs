@@ -210,13 +210,20 @@ pub struct StingerTakeReport {
     pub cut_point_ms: Option<u64>,
     /// Clip frames that should have reached the mixer.
     pub frames_expected: u32,
-    /// Clip frames that did reach it.
+    /// Clip frames that reached it in time to go on air. A frame that
+    /// arrives after its output frame is not counted: the mixer has already
+    /// composited that frame without it.
     pub frames_arrived: u32,
     /// Clip frames, on the graphic or the matte pad, that reached the mixer
     /// after their time on air had begun.
     pub frames_late: u32,
     /// Smallest lead a clip frame had on its time on air; negative is late.
     pub worst_margin_ms: Option<f64>,
+    /// Set when the take ran but did not go as planned, such as a classic
+    /// clip whose frame at the cut point arrived late, so the program changed
+    /// with no graphic over it. `None` is a clean take.
+    #[serde(default)]
+    pub warning: Option<String>,
 }
 
 /// Stinger state of one vision mixer.

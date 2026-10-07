@@ -10643,7 +10643,7 @@
           "frames_arrived": {
             "type": "integer",
             "format": "int32",
-            "description": "Clip frames that did reach it.",
+            "description": "Clip frames that reached it in time to go on air. A frame that\narrives after its output frame is not counted: the mixer has already\ncomposited that frame without it.",
             "minimum": 0
           },
           "frames_expected": {
@@ -10683,6 +10683,13 @@
           },
           "variant": {
             "$ref": "#/components/schemas/StingerVariant"
+          },
+          "warning": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when the take ran but did not go as planned, such as a classic\nclip whose frame at the cut point arrived late, so the program changed\nwith no graphic over it. `None` is a clean take."
           },
           "worst_margin_ms": {
             "type": [

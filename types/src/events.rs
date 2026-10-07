@@ -954,13 +954,18 @@ impl StromEvent {
                 block_id,
                 report,
             } => format!(
-                "Vision mixer {} in flow {}: stinger '{}' done, {}/{} clip frames, {} late",
+                "Vision mixer {} in flow {}: stinger '{}' done, {}/{} clip frames, {} late{}",
                 block_id,
                 flow_id,
                 report.file,
                 report.frames_arrived,
                 report.frames_expected,
-                report.frames_late
+                report.frames_late,
+                report
+                    .warning
+                    .as_ref()
+                    .map(|w| format!(": {}", w))
+                    .unwrap_or_default()
             ),
             StromEvent::StingerFailed {
                 flow_id,
@@ -1554,6 +1559,7 @@ mod event_accessor_tests {
                     frames_arrived: 45,
                     frames_late: 0,
                     worst_margin_ms: Some(40.0),
+                    warning: None,
                 },
             },
             StromEvent::StingerFailed {

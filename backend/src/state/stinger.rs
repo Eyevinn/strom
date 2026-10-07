@@ -785,6 +785,11 @@ impl AppState {
                 mix_ns: plan.mix_ms * 1_000_000,
                 plan: plan.clone(),
                 clip_size: info.as_ref().map(|i| (i.width, i.height)),
+                clip_frame_ns: info
+                    .as_ref()
+                    .filter(|i| i.framerate_num > 0)
+                    .map(|i| 1_000_000_000 * i.framerate_den as u64 / i.framerate_num as u64)
+                    .unwrap_or(frame_ns),
             };
             let (watch, ftb_cancelled) = manager
                 .program_stinger(block, &take)
@@ -863,6 +868,7 @@ impl AppState {
             frames_arrived: 0,
             frames_late: 0,
             worst_margin_ms: None,
+            warning: None,
         };
         let state = self.clone();
         let flow = *flow_id;
@@ -944,6 +950,12 @@ impl AppState {
         report.frames_arrived = watch.stats.arrived.load(Ordering::Acquire);
         report.frames_late = watch.stats.late.load(Ordering::Acquire);
         report.worst_margin_ms = watch.worst_margin_ms();
+        if watch.cut_covered() == Some(false) {
+            report.warning = Some(
+                "the clip frame due at the cut point reached the mixer late: the program changed with no graphic over it"
+                    .to_string(),
+            );
+        }
         drop(watch);
         info!(
             "Stinger on {}: {:?} '{}' done: on air {:.0} ms after the take, {}/{} clip frames, {} late, worst margin {:?} ms",
@@ -956,6 +968,9 @@ impl AppState {
             report.frames_late,
             report.worst_margin_ms.map(|m| m.round())
         );
+        if let Some(warning) = &report.warning {
+            warn!("Stinger on {}: '{}': {}", mixer, report.file, warning);
+        }
 
         // Park the clip again, so the next take is instant.
         let index = report.index;

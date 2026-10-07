@@ -18,7 +18,7 @@
 //! graphic goes on top. A matte frame that does not arrive leaves `dst.a` at
 //! 1, so a late clip shows the old source, never a premature new one.
 
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -55,6 +55,9 @@ pub struct StingerTake {
     pub plan: ClipPlan,
     /// The clip's frame size, to pick the graphic out of it.
     pub clip_size: Option<(u32, u32)>,
+    /// Spacing of the clip's frames, so the take knows which one is due at
+    /// the cut point.
+    pub clip_frame_ns: u64,
 }
 
 /// The stinger pads of one mixer.
@@ -75,11 +78,25 @@ pub struct StingerStats {
     /// `Instant` instead of reading the clock.
     epoch: Instant,
     epoch_rt: i64,
+    /// Classic: the clip timestamps `[lo, hi)` of the frame on air when the
+    /// program changes beneath the graphic. `hi == 0` when nothing changes
+    /// beneath it (the matte variants).
+    cut_frame_lo: u64,
+    cut_frame_hi: u64,
+    /// Graphic frames that arrived in time to go on air.
     pub arrived: AtomicU32,
     pub late: AtomicU32,
     /// Smallest lead a frame had on its deadline (ns); `i64::MAX` = none.
     pub worst_margin_ns: AtomicI64,
+    /// How the frame due at the cut point arrived: [`CUT_FRAME_ON_TIME`]
+    /// and [`CUT_FRAME_LATE`] bits, 0 while none has.
+    pub cut_frame: AtomicU8,
 }
+
+/// A graphic frame due at the cut point arrived in time.
+pub const CUT_FRAME_ON_TIME: u8 = 1;
+/// A graphic frame due at the cut point arrived late.
+pub const CUT_FRAME_LATE: u8 = 2;
 
 /// A take's measurement probe; dropping it removes the probe.
 pub struct StingerWatch {
@@ -100,6 +117,14 @@ impl StingerWatch {
     pub fn worst_margin_ms(&self) -> Option<f64> {
         let v = self.stats.worst_margin_ns.load(Ordering::Acquire);
         (v != i64::MAX).then_some(v as f64 / 1e6)
+    }
+
+    /// Classic: whether the graphic frame due at the cut point arrived in
+    /// time, so the program changed under the graphic. `None` when nothing
+    /// changes beneath the graphic.
+    pub fn cut_covered(&self) -> Option<bool> {
+        (self.stats.cut_frame_hi != 0)
+            .then(|| self.stats.cut_frame.load(Ordering::Acquire) & CUT_FRAME_ON_TIME != 0)
     }
 }
 
@@ -453,15 +478,26 @@ impl PipelineManager {
             .find_property("latency")
             .map(|_| mixer.property::<u64>("latency") as i64)
             .unwrap_or(0);
+        // The clip frame on air at the cut's output frame is the newest that
+        // starts before that output frame ends.
+        let (cut_frame_lo, cut_frame_hi) = if variant == StingerVariant::Classic {
+            let hi = take.cut_at.unwrap_or(take.start) + take.frame_ns;
+            (hi.saturating_sub(take.clip_frame_ns.max(1)), hi)
+        } else {
+            (0, 0)
+        };
         let stats = Arc::new(StingerStats {
             start: take.start,
             end: take.end,
             latency_ns,
             epoch: Instant::now(),
             epoch_rt: self.running_time_ns().unwrap_or(0) as i64,
+            cut_frame_lo,
+            cut_frame_hi,
             arrived: AtomicU32::new(0),
             late: AtomicU32::new(0),
             worst_margin_ns: AtomicI64::new(i64::MAX),
+            cut_frame: AtomicU8::new(0),
         });
         // Per-buffer probes for the length of one take: a timestamp check,
         // an Instant read and a few atomic updates. The graphic pad counts
@@ -484,10 +520,23 @@ impl PipelineManager {
                 }
                 let arrival = counted.epoch_rt + counted.epoch.elapsed().as_nanos() as i64;
                 let margin = pts as i64 + counted.latency_ns - arrival;
+                let on_time = margin >= 0;
                 if counts_frames {
-                    counted.arrived.fetch_add(1, Ordering::Relaxed);
+                    if on_time {
+                        counted.arrived.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if pts >= counted.cut_frame_lo && pts < counted.cut_frame_hi {
+                        counted.cut_frame.fetch_or(
+                            if on_time {
+                                CUT_FRAME_ON_TIME
+                            } else {
+                                CUT_FRAME_LATE
+                            },
+                            Ordering::AcqRel,
+                        );
+                    }
                 }
-                if margin < 0 {
+                if !on_time {
                     counted.late.fetch_add(1, Ordering::Relaxed);
                 }
                 counted.worst_margin_ns.fetch_min(margin, Ordering::AcqRel);
