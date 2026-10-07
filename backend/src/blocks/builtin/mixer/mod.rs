@@ -72,6 +72,9 @@ mod metering;
 mod properties;
 #[cfg(test)]
 mod tests;
+mod voice_isolation;
+#[cfg(all(test, feature = "voice-isolation"))]
+mod voice_isolation_tests;
 
 use strom_types::mixer::{
     DEFAULT_CHANNELS, MAX_AUX_BUSES, MAX_CHANNELS, MAX_GROUPS, MIN_KNEE_LINEAR,

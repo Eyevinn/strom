@@ -11,6 +11,10 @@ fn main() {
     // Set version and build information
     set_version_info();
 
+    if std::env::var_os("CARGO_FEATURE_VOICE_ISOLATION").is_some() {
+        fetch_voice_isolation_model();
+    }
+
     // Embed Windows resources (icon, version info)
     #[cfg(windows)]
     embed_windows_resources();
@@ -381,4 +385,45 @@ fn embed_windows_resources() {
     if let Err(e) = res.compile() {
         eprintln!("cargo:warning=Failed to compile Windows resources: {}", e);
     }
+}
+
+/// DPDFNet 48 kHz model (Apache-2.0, Ceva), as re-hosted by sherpa-onnx.
+const VOICE_MODEL_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/dpdfnet2_48khz_hr.onnx";
+const VOICE_MODEL_SHA256: &str = "0b399f8a58dc4d70d8cd97541f5c39869406145193b957d00a03b66070944928";
+
+/// Put the voice isolation model in OUT_DIR for `include_bytes!`. Downloads it
+/// with curl unless STROM_VOICE_ISOLATION_MODEL names a local copy (offline
+/// builds). Either way the file must match the pinned hash.
+fn fetch_voice_isolation_model() {
+    use sha2::{Digest, Sha256};
+
+    println!("cargo:rerun-if-env-changed=STROM_VOICE_ISOLATION_MODEL");
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("dpdfnet2_48khz_hr.onnx");
+    let matches = |p: &Path| {
+        fs::read(p)
+            .map(|b| format!("{:x}", Sha256::digest(&b)) == VOICE_MODEL_SHA256)
+            .unwrap_or(false)
+    };
+    if matches(&out) {
+        return;
+    }
+    if let Some(local) = std::env::var_os("STROM_VOICE_ISOLATION_MODEL") {
+        fs::copy(&local, &out).expect("copy STROM_VOICE_ISOLATION_MODEL");
+    } else {
+        let status = Command::new("curl")
+            .args(["-fsSL", "--retry", "3", "-o"])
+            .arg(&out)
+            .arg(VOICE_MODEL_URL)
+            .status()
+            .expect("run curl to download the voice isolation model");
+        assert!(
+            status.success(),
+            "downloading {VOICE_MODEL_URL} failed: {status}"
+        );
+    }
+    assert!(
+        matches(&out),
+        "voice isolation model does not match sha256 {VOICE_MODEL_SHA256}"
+    );
 }

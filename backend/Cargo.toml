@@ -7,8 +7,11 @@ authors.workspace = true
 default-run = "strom"
 
 [features]
-default = ["nvidia"]
+default = ["nvidia", "voice-isolation"]
 no-gui = []
+# DPDFNet speech enhancement on mixer channels. Links a prebuilt static
+# ONNX Runtime and embeds the model, both downloaded at build time.
+voice-isolation = ["dep:ort", "dep:realfft", "dep:byte-slice-cast"]
 nvidia = ["dep:nvml-wrapper"]
 efp = ["dep:gst-plugin-efp"]
 
@@ -71,6 +74,11 @@ gst-plugin-rtp.workspace = true
 gst-plugin-isobmff.workspace = true
 gst-plugins-lsp = { git = "https://github.com/srperens/lsp-plugins-rs", tag = "v1.3.1", package = "gst-plugins-lsp" }
 gst-plugin-efp = { git = "https://github.com/Eyevinn/efp", tag = "v0.4.0", package = "gst-plugin-efp", optional = true }
+
+# Voice isolation (DPDFNet model inference)
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "download-binaries", "tls-rustls"], optional = true }
+realfft = { version = "3.5", optional = true }
+byte-slice-cast = { version = "1.2", optional = true }
 
 # Encoding
 base64 = "0.22"
@@ -148,6 +156,7 @@ eframe = { workspace = true }
 
 [build-dependencies]
 chrono = "0.4"
+sha2 = "0.10"
 uuid = { version = "1.23", features = ["v4"] }
 
 # NVML does not exist on macOS, so the `nvidia` feature pulls in nothing there
