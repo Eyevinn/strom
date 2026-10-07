@@ -273,6 +273,9 @@ impl PipelineManager {
         // Past the deadline the thread is left behind with its pipeline, which
         // leaks — but a wedged pipeline leaks either way, and the caller gets an
         // answer instead of an HTTP handler that never returns.
+        // No underlay restart may be holding a source's state lock while the
+        // sinks go to PAUSED (see quiesce_underlay_restarts).
+        crate::gst::underlay::quiesce_underlay_restarts(self.pipeline.upcast_ref());
         let pipeline = self.pipeline.clone();
         match run_with_deadline(
             move || pipeline.set_state(gst::State::Null),

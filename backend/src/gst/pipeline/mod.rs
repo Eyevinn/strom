@@ -260,6 +260,7 @@ impl Drop for PipelineManager {
         if self.null_state_wedged {
             return;
         }
+        crate::gst::underlay::quiesce_underlay_restarts(self.pipeline.upcast_ref());
         let pipeline = self.pipeline.clone();
         if let Err(lifecycle::DeadlineError::TimedOut) = lifecycle::run_with_deadline(
             move || pipeline.set_state(gst::State::Null),

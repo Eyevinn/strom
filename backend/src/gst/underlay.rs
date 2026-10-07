@@ -281,6 +281,65 @@ fn run_underlay_restarts(src: &gst::Element) {
     }
 }
 
+/// Pipelines that are being stopped: their underlay sources are not
+/// restarted any more. Weak, so a stopped pipeline is not kept alive.
+fn stopping() -> MutexGuard<'static, Vec<gst::glib::WeakRef<gst::Element>>> {
+    static STOPPING: OnceLock<Mutex<Vec<gst::glib::WeakRef<gst::Element>>>> = OnceLock::new();
+    match STOPPING.get_or_init(|| Mutex::new(Vec::new())).lock() {
+        Ok(s) => s,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn is_stopping(pipeline: &gst::Element) -> bool {
+    stopping()
+        .iter()
+        .any(|w| w.upgrade().is_some_and(|p| &p == pipeline))
+}
+
+/// How long [`quiesce_underlay_restarts`] waits for restarts already running.
+/// A restart takes milliseconds while the pipeline is still PLAYING.
+const QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Stop restarting underlay sources in `pipeline`, and wait for restarts
+/// already under way to finish. Call before taking the pipeline out of
+/// PLAYING.
+///
+/// A restart sets its source to READY, which waits for the source's
+/// streaming thread, and that thread can be waiting for the compositor to
+/// take its frame or its ALLOCATION query. Once a stop has moved the sinks to
+/// PAUSED, they hold their prerolled frame, the compositor's output backs up
+/// behind them and it stops taking anything. The restart then holds the
+/// source's state lock for good, and the stop, which needs that lock to move
+/// the source on, never reaches READY, which is what would release the sinks.
+pub(crate) fn quiesce_underlay_restarts(pipeline: &gst::Element) {
+    {
+        let mut stopping = stopping();
+        stopping.retain(|w| w.upgrade().is_some());
+        stopping.push(pipeline.downgrade());
+    }
+    let deadline = std::time::Instant::now() + QUIESCE_TIMEOUT;
+    loop {
+        let busy = restarts().iter().any(|(w, _)| {
+            w.upgrade()
+                .and_then(|src| src.parent())
+                .is_some_and(|parent| parent == *pipeline.upcast_ref::<gst::Object>())
+        });
+        if !busy {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            warn!(
+                "Underlay restarts in {} still running {}s into a stop",
+                pipeline.name(),
+                QUIESCE_TIMEOUT.as_secs()
+            );
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// Make a started underlay source push one frame in its current color.
 /// Returns false when there is nothing to restart: the pipeline has not
 /// started, or the flow is being torn down.
@@ -290,6 +349,9 @@ fn restart_underlay_src(src: &gst::Element) -> bool {
     let Some(parent) = src.parent().and_then(|p| p.downcast::<gst::Element>().ok()) else {
         return false;
     };
+    if is_stopping(&parent) {
+        return false;
+    }
     let (_, current, pending) = parent.state(gst::ClockTime::ZERO);
     if current < gst::State::Paused || pending == gst::State::Ready || pending == gst::State::Null {
         return false;
@@ -312,4 +374,135 @@ fn restart_underlay_src(src: &gst::Element) -> bool {
         );
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// A playing pipeline with one underlay-named source streaming into a
+    /// fakesink, and a counter of the streams it starts (one per restart).
+    fn playing_underlay(name: &str) -> (gst::Pipeline, gst::Element, Arc<AtomicUsize>) {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("videotestsrc")
+            .name(format!("{name}:underlay_test_0_src"))
+            .build()
+            .unwrap();
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            .unwrap();
+        pipeline.add_many([&src, &sink]).unwrap();
+        src.link(&sink).unwrap();
+        let streams = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&streams);
+        src.static_pad("src").unwrap().add_probe(
+            gst::PadProbeType::EVENT_DOWNSTREAM,
+            move |_, info| {
+                if let Some(gst::PadProbeData::Event(e)) = &info.data {
+                    if e.type_() == gst::EventType::StreamStart {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+        (pipeline, src, streams)
+    }
+
+    fn wait_until(what: &str, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn no_restart_once_the_pipeline_is_stopping() {
+        let (pipeline, src, streams) = playing_underlay("quiesce_new");
+        wait_until("the source started", || streams.load(Ordering::SeqCst) == 1);
+        // A restart still runs on a playing pipeline.
+        schedule_underlay_restart(&src);
+        wait_until("a restart started a new stream", || {
+            streams.load(Ordering::SeqCst) == 2
+        });
+
+        quiesce_underlay_restarts(pipeline.upcast_ref());
+        schedule_underlay_restart(&src);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            streams.load(Ordering::SeqCst),
+            2,
+            "a source was restarted after its pipeline started stopping"
+        );
+        pipeline.set_state(gst::State::Null).unwrap();
+    }
+
+    #[test]
+    fn quiescing_waits_for_a_restart_under_way() {
+        let (pipeline, src, streams) = playing_underlay("quiesce_wait");
+        wait_until("the source started", || streams.load(Ordering::SeqCst) == 1);
+
+        // Park the streaming thread in a gate, as a source stuck pushing into a
+        // busy compositor is: the restart's READY waits for it. Not a BLOCK
+        // probe, which the restart's flush would release.
+        let gate = Arc::new((std::sync::Mutex::new(true), std::sync::Condvar::new()));
+        let parked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = {
+            let (gate, parked) = (Arc::clone(&gate), Arc::clone(&parked));
+            src.static_pad("src")
+                .unwrap()
+                .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                    let (closed, cvar) = &*gate;
+                    let mut closed = closed.lock().unwrap();
+                    while *closed {
+                        parked.store(true, Ordering::SeqCst);
+                        closed = cvar.wait(closed).unwrap();
+                    }
+                    gst::PadProbeReturn::Ok
+                })
+                .unwrap()
+        };
+        wait_until("the streaming thread parked", || {
+            parked.load(Ordering::SeqCst)
+        });
+        schedule_underlay_restart(&src);
+        wait_until("the restart started", || {
+            let (_, current, pending) = src.state(gst::ClockTime::ZERO);
+            current != gst::State::Playing || pending != gst::State::VoidPending
+        });
+
+        let quiesced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let quiescing = {
+            let quiesced = Arc::clone(&quiesced);
+            let pipeline = pipeline.clone();
+            std::thread::spawn(move || {
+                quiesce_underlay_restarts(pipeline.upcast_ref());
+                quiesced.store(true, Ordering::SeqCst);
+            })
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !quiesced.load(Ordering::SeqCst),
+            "quiescing returned while a restart still held the source"
+        );
+        src.static_pad("src").unwrap().remove_probe(probe);
+        {
+            let (closed, cvar) = &*gate;
+            *closed.lock().unwrap() = false;
+            cvar.notify_all();
+        }
+        quiescing.join().unwrap();
+        wait_until("the restart under way finished", || {
+            streams.load(Ordering::SeqCst) == 2
+        });
+        pipeline.set_state(gst::State::Null).unwrap();
+    }
 }
