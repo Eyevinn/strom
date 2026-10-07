@@ -453,6 +453,7 @@ impl eframe::App for StromApp {
                             block_id,
                             status,
                             detail,
+                            ..
                         } => {
                             // block_health rides on the Flow payload, so the
                             // indicator only updates if the flow is refetched.

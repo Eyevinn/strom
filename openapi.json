@@ -6392,6 +6392,13 @@
             "type": "string",
             "description": "Block instance ID this health report belongs to."
           },
+          "causes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BlockHealthCause"
+            },
+            "description": "What failed, for a client that acts on the failure instead of showing\n`detail`. Empty when the block is healthy, and when the scan that\nfound the failure has no structured cause to give."
+          },
           "detail": {
             "type": [
               "string",
@@ -6404,6 +6411,43 @@
             "description": "Whether the block's element chain is running or has stopped."
           }
         }
+      },
+      "BlockHealthCause": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "One medium of an occupied WHIP Input seat is not reaching the flow.",
+            "required": [
+              "slot",
+              "medium",
+              "fault",
+              "kind"
+            ],
+            "properties": {
+              "fault": {
+                "$ref": "#/components/schemas/MediumFault",
+                "description": "Where the medium stops."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "whip_medium"
+                ]
+              },
+              "medium": {
+                "$ref": "#/components/schemas/HealthMedium",
+                "description": "The medium that is missing."
+              },
+              "slot": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The seat's slot index within the block.",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "One structured reason a block reported failed.\n\nA block can carry several at once: a WHIP Input block has one seat per\nslot, and each can lose a medium on its own. Clients should ignore a\n`kind` they do not know."
       },
       "BlockHealthStatus": {
         "type": "string",
@@ -8174,6 +8218,14 @@
           }
         }
       },
+      "HealthMedium": {
+        "type": "string",
+        "description": "A medium named in a [`BlockHealthCause`].",
+        "enum": [
+          "audio",
+          "video"
+        ]
+      },
       "IceCandidateStats": {
         "type": "object",
         "description": "ICE candidate statistics.",
@@ -8701,6 +8753,15 @@
           "Generic",
           "Audio",
           "Video"
+        ]
+      },
+      "MediumFault": {
+        "type": "string",
+        "description": "Where a missing medium stops.",
+        "enum": [
+          "publisher_stopped",
+          "never_sent",
+          "not_produced"
         ]
       },
       "MultiviewEndpointResponse": {
@@ -12142,7 +12203,7 @@
           },
           {
             "type": "object",
-            "description": "A block's element chain stopped passing data, or resumed.\n\nEmitted only on a change of status, not on every health poll.",
+            "description": "A block's element chain stopped passing data, or resumed.\n\nEmitted on a change of status, and on a change of `causes` while the\nblock stays failed; not on every health poll.",
             "required": [
               "data",
               "type"
@@ -12150,7 +12211,7 @@
             "properties": {
               "data": {
                 "type": "object",
-                "description": "A block's element chain stopped passing data, or resumed.\n\nEmitted only on a change of status, not on every health poll.",
+                "description": "A block's element chain stopped passing data, or resumed.\n\nEmitted on a change of status, and on a change of `causes` while the\nblock stays failed; not on every health poll.",
                 "required": [
                   "flow_id",
                   "block_id",
@@ -12160,6 +12221,13 @@
                   "block_id": {
                     "type": "string",
                     "description": "Block instance ID, or element ID for a standalone element"
+                  },
+                  "causes": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/BlockHealthCause"
+                    },
+                    "description": "Structured reasons for the failure; empty when the block recovered\nor the failure has none. See `BlockHealth::causes`."
                   },
                   "detail": {
                     "type": [

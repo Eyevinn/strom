@@ -55,7 +55,8 @@ pub use block::{
 pub use element::{Element, ElementId, Link, MediaType, PropertyValue};
 pub use events::StromEvent;
 pub use flow::{
-    BlockHealth, BlockHealthStatus, CpuAffinity, Flow, FlowId, ThreadPriority, ThreadPriorityStatus,
+    BlockHealth, BlockHealthCause, BlockHealthStatus, CpuAffinity, Flow, FlowId, HealthMedium,
+    MediumFault, ThreadPriority, ThreadPriorityStatus,
 };
 pub use network::{
     Ipv4AddressInfo, Ipv6AddressInfo, NetworkInterfaceInfo, NetworkInterfacesResponse,

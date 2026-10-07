@@ -27,7 +27,7 @@
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::{BTreeMap, HashMap};
-use strom_types::flow::{BlockHealth, BlockHealthStatus};
+use strom_types::flow::{BlockHealth, BlockHealthCause, BlockHealthStatus};
 
 /// A pad whose task has been paused while the pipeline is playing.
 struct StalledPad {
@@ -126,6 +126,7 @@ pub(crate) fn scan_block_health(elements: &HashMap<String, gst::Element>) -> Vec
             block_id: block_id.to_string(),
             status: BlockHealthStatus::Ok,
             detail: None,
+            causes: Vec::new(),
         });
 
         // A block is failed if any of its elements has a stalled pad; the first
@@ -143,6 +144,32 @@ pub(crate) fn scan_block_health(elements: &HashMap<String, gst::Element>) -> Vec
     }
 
     by_block.into_values().collect()
+}
+
+/// A change in one block's health worth announcing.
+#[derive(Debug, PartialEq, Eq)]
+enum Transition {
+    /// The block failed.
+    Failed,
+    /// The block is still failed, for different reasons. `detail` is not
+    /// compared: it may carry a duration that changes on every scan.
+    CausesChanged,
+    /// The block is healthy again.
+    Recovered,
+}
+
+/// What to announce for `health`, given the causes it was last announced as
+/// failed with (`None` if it was not).
+fn transition(
+    health: &BlockHealth,
+    announced: Option<&Vec<BlockHealthCause>>,
+) -> Option<Transition> {
+    match (health.status.is_failed(), announced) {
+        (true, None) => Some(Transition::Failed),
+        (true, Some(causes)) if *causes != health.causes => Some(Transition::CausesChanged),
+        (false, Some(_)) => Some(Transition::Recovered),
+        _ => None,
+    }
 }
 
 /// How often the running pipeline is scanned for stalled pad tasks.
@@ -181,7 +208,9 @@ impl super::PipelineManager {
 
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(HEALTH_POLL_INTERVAL);
-            let mut failed: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // Blocks announced as failed, with the causes they were announced
+            // with.
+            let mut failed: HashMap<String, Vec<BlockHealthCause>> = HashMap::new();
             let mut strikes: HashMap<String, u32> = HashMap::new();
 
             loop {
@@ -216,6 +245,7 @@ impl super::PipelineManager {
                         if *count < CONFIRMATIONS_BEFORE_FAILED {
                             health.status = BlockHealthStatus::Ok;
                             health.detail = None;
+                            health.causes.clear();
                         }
                     } else {
                         strikes.remove(&health.block_id);
@@ -225,14 +255,13 @@ impl super::PipelineManager {
                 // Blocks whose elements have gone away drop out of the scan
                 // entirely; forget them rather than leaving a stale entry that
                 // no later iteration can clear.
-                failed.retain(|block_id| snapshot.iter().any(|h| &h.block_id == block_id));
+                failed.retain(|block_id, _| snapshot.iter().any(|h| &h.block_id == block_id));
                 strikes.retain(|block_id, _| snapshot.iter().any(|h| &h.block_id == block_id));
 
                 for health in &snapshot {
-                    let was_failed = failed.contains(&health.block_id);
-                    match (health.status.is_failed(), was_failed) {
-                        (true, false) => {
-                            failed.insert(health.block_id.clone());
+                    match transition(health, failed.get(&health.block_id)) {
+                        Some(Transition::Failed) => {
+                            failed.insert(health.block_id.clone(), health.causes.clone());
                             tracing::error!(
                                 "Block '{}' in flow '{}' has stopped: {}. The pipeline still reports Playing",
                                 health.block_id,
@@ -244,9 +273,26 @@ impl super::PipelineManager {
                                 block_id: health.block_id.clone(),
                                 status: health.status,
                                 detail: health.detail.clone(),
+                                causes: health.causes.clone(),
                             });
                         }
-                        (false, true) => {
+                        Some(Transition::CausesChanged) => {
+                            failed.insert(health.block_id.clone(), health.causes.clone());
+                            tracing::error!(
+                                "Block '{}' in flow '{}' is still stopped: {}",
+                                health.block_id,
+                                flow_name,
+                                health.detail.as_deref().unwrap_or("no detail")
+                            );
+                            events.broadcast(strom_types::StromEvent::BlockHealthChanged {
+                                flow_id,
+                                block_id: health.block_id.clone(),
+                                status: health.status,
+                                detail: health.detail.clone(),
+                                causes: health.causes.clone(),
+                            });
+                        }
+                        Some(Transition::Recovered) => {
                             failed.remove(&health.block_id);
                             tracing::info!(
                                 "Block '{}' in flow '{}' resumed passing data",
@@ -258,9 +304,10 @@ impl super::PipelineManager {
                                 block_id: health.block_id.clone(),
                                 status: health.status,
                                 detail: None,
+                                causes: Vec::new(),
                             });
                         }
-                        _ => {}
+                        None => {}
                     }
                 }
 
@@ -288,6 +335,66 @@ mod tests {
     use crate::gst::pipeline::PipelineManager;
     use std::time::{Duration, Instant};
     use strom_types::{Element, Flow, Link, PropertyValue};
+
+    #[test]
+    fn a_failed_block_is_announced_again_when_its_causes_change() {
+        use strom_types::flow::{HealthMedium, MediumFault};
+        let cause = |slot| BlockHealthCause::WhipMedium {
+            slot,
+            medium: HealthMedium::Audio,
+            fault: MediumFault::PublisherStopped,
+        };
+        let health = |status, detail: &str, causes| BlockHealth {
+            block_id: "whip".to_string(),
+            status,
+            detail: Some(detail.to_string()),
+            causes,
+        };
+        let one_seat = vec![cause(0)];
+        let failed_one = health(
+            BlockHealthStatus::Failed,
+            "slot 0 for 2.0 s",
+            one_seat.clone(),
+        );
+
+        assert_eq!(transition(&failed_one, None), Some(Transition::Failed));
+        assert_eq!(
+            transition(
+                &health(
+                    BlockHealthStatus::Failed,
+                    "slot 0 for 4.0 s",
+                    one_seat.clone()
+                ),
+                Some(&one_seat)
+            ),
+            None,
+            "the same causes with a newer duration in the detail are not news"
+        );
+        assert_eq!(
+            transition(
+                &health(
+                    BlockHealthStatus::Failed,
+                    "slots 0 and 1",
+                    vec![cause(0), cause(1)]
+                ),
+                Some(&one_seat)
+            ),
+            Some(Transition::CausesChanged),
+            "a second seat losing its audio has to reach a client"
+        );
+        assert_eq!(
+            transition(
+                &BlockHealth {
+                    block_id: "whip".to_string(),
+                    status: BlockHealthStatus::Ok,
+                    detail: None,
+                    causes: Vec::new(),
+                },
+                Some(&one_seat)
+            ),
+            Some(Transition::Recovered)
+        );
+    }
 
     #[test]
     fn block_elements_are_attributed_to_their_block() {
