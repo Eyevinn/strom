@@ -440,14 +440,23 @@ fn answer_caps_query(front: &Front, q: &mut gst::query::Caps) {
     let cuda_in = front.cuda_in.load(Ordering::Acquire);
     if front.convert_in.load(Ordering::Acquire) {
         // What only the converter takes goes last.
-        if let (Some(direct), Some(answer)) = (front.behind_convert(), q.result_owned()) {
+        if let (Some(direct), Some(mut answer)) = (front.behind_convert(), q.result_owned()) {
             let adapter_sink = if cuda_in {
                 None
             } else {
                 adapter_cuda_sink_caps()
             };
+            // The converter takes any raw video in system memory. Its own
+            // answer says so only when what follows it lists system memory,
+            // which `glupload` before GStreamer 1.24.13 does not for an unfiltered
+            // query (see `takes_directly`).
+            if filter.is_none() {
+                if let Some(sink) = convert_sink_caps() {
+                    answer.merge(sink.clone());
+                }
+            }
             let ordered = direct_paths_first(
-                &direct.query_caps(None),
+                &takes_directly(&direct),
                 &answer,
                 adapter_sink.map(|c| c.as_ref()),
                 filter.as_deref(),
@@ -492,6 +501,24 @@ fn answer_caps_query(front: &Front, q: &mut gst::query::Caps) {
     if changed {
         q.set_result(&answer);
     }
+}
+
+/// What `pad`, the element behind the input's converter, takes without it.
+///
+/// Before GStreamer 1.24.13 (1.24.2 on Ubuntu 24.04, among others),
+/// `glupload` answers a CAPS query with only the caps of
+/// the upload method it is using, whenever those meet the query's filter. With
+/// the converter in, the converter writes into `glupload`'s own buffer pool,
+/// the method is the GL memory one, and an unfiltered query gets GL memory
+/// only: no system-memory formats, so no CUDA alternative either. A query
+/// filtered by system memory misses that method, and `glupload` then lists
+/// what every method takes. 1.24.13 and later list every method in either case.
+fn takes_directly(pad: &gst::Pad) -> gst::Caps {
+    let mut caps = pad.query_caps(None);
+    if let Some(system) = convert_sink_caps() {
+        caps.merge(pad.query_caps(Some(system)));
+    }
+    caps
 }
 
 /// What `videoconvert` takes in system memory: its sink template's raw video

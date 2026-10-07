@@ -202,8 +202,10 @@ async fn gpu_converter_answers_with_direct_formats_first() {
         .static_pad("sink")
         .unwrap()
         .query_caps(None);
+    // GL memory goes into `glupload` as it is, and CUDA memory through
+    // `cudadownload` (on a host with nvcodec): neither needs the converter.
     let direct = |s: &gst::StructureRef, f: &gst::CapsFeaturesRef| {
-        if f.contains("memory:GLMemory") {
+        if f.contains("memory:GLMemory") || f.contains("memory:CUDAMemory") {
             return true;
         }
         if !s.has_field("format") {
@@ -216,11 +218,15 @@ async fn gpu_converter_answers_with_direct_formats_first() {
     let first_converted = answer
         .iter_with_features()
         .position(|(s, f)| !direct(s, f))
-        .expect("the converter adds formats glupload does not take");
+        .unwrap_or_else(|| panic!("the answer lists nothing only the converter takes: {answer}"));
     let first_system_direct = answer
         .iter_with_features()
-        .position(|(s, f)| !f.contains("memory:GLMemory") && direct(s, f))
-        .expect("the answer lists system-memory formats glupload uploads");
+        .position(|(s, f)| {
+            !f.contains("memory:GLMemory") && !f.contains("memory:CUDAMemory") && direct(s, f)
+        })
+        .unwrap_or_else(|| {
+            panic!("the answer lists no system-memory format glupload uploads: {answer}")
+        });
     assert!(
         first_system_direct < first_converted,
         "the answer lists what only the converter takes (entry {first_converted}) ahead \

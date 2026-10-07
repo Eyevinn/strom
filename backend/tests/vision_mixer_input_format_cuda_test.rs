@@ -331,7 +331,7 @@ async fn cuda_after_a_converted_format_bypasses_the_converter() {
             one.make_mut().append_structure(s.to_owned());
             !s.has_field("format") || !one.is_subset(&uploads)
         })
-        .expect("the converter adds formats glupload does not take");
+        .unwrap_or_else(|| panic!("the answer lists nothing only the converter takes: {answer}"));
     assert!(
         first_cuda < first_converted,
         "the input offers what only the converter takes (entry {first_converted}) ahead of \
@@ -368,12 +368,48 @@ async fn cuda_after_a_converted_format_bypasses_the_converter() {
     running.stop();
 }
 
+/// The NVENC H.264 encoders, preferred first. The legacy `nvh264enc` fails
+/// with "Selected preset not supported" on some drivers and GPUs, where the
+/// CUDA-mode `nvcudah264enc` works.
+const NVENC_H264: &[&str] = &["nvcudah264enc", "nvautogpuh264enc", "nvh264enc"];
+
+/// The first of [`NVENC_H264`] that is installed and encodes a few frames.
+/// The encoder only makes the H.264 stream that NVDEC decodes; it is not what
+/// the test is about.
+fn working_nvenc_h264() -> &'static str {
+    gst::init().expect("GStreamer initialises");
+    let mut tried = Vec::new();
+    for &factory in NVENC_H264 {
+        if gst::ElementFactory::find(factory).is_none() {
+            tried.push(format!("{factory}: not installed"));
+            continue;
+        }
+        let pipeline = gst::parse::launch(&format!(
+            "videotestsrc num-buffers=5 ! video/x-raw,format=NV12,width={W},height={H} \
+             ! {factory} ! fakesink"
+        ))
+        .expect("the encoder probe pipeline parses");
+        let _ = pipeline.set_state(gst::State::Playing);
+        let outcome = pipeline.bus().unwrap().timed_pop_filtered(
+            gst::ClockTime::from_seconds(10),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        );
+        let _ = pipeline.set_state(gst::State::Null);
+        match outcome.as_ref().map(|m| m.view()) {
+            Some(gst::MessageView::Eos(_)) => return factory,
+            Some(gst::MessageView::Error(e)) => tried.push(format!("{factory}: {}", e.error())),
+            _ => tried.push(format!("{factory}: no EOS within 10 s")),
+        }
+    }
+    panic!("no NVENC H.264 encoder works here: {}", tried.join("; "));
+}
+
 /// NVDEC into a GPU input that had a converter in: the decoder must pick GPU
 /// memory, and its frames must reach `glupload` with no converter and no CPU
 /// round trip.
 ///
-/// Needs an NVIDIA GPU and the GStreamer nvcodec plugin (`nvh264enc`,
-/// `nvh264dec`, `cudadownload`), so CI cannot run it. Run it on an NVIDIA
+/// Needs an NVIDIA GPU and the GStreamer nvcodec plugin (an NVENC H.264
+/// encoder, `nvh264dec`, `cudadownload`), so CI cannot run it. Run it on an NVIDIA
 /// host with:
 ///
 /// ```text
@@ -385,13 +421,14 @@ async fn cuda_after_a_converted_format_bypasses_the_converter() {
 #[ignore = "needs an NVIDIA GPU with the GStreamer nvcodec plugin"]
 async fn nvdec_cuda_after_a_converted_format_stays_on_the_gpu() {
     common::require_elements(&[
-        "nvh264enc",
         "nvh264dec",
         "h264parse",
         "input-selector",
         CUDA_ADAPTER_FACTORY,
     ]);
     assert!(common::gl_available(GPU_ELEMENTS), "no GL context");
+    let encoder = working_nvenc_h264();
+    eprintln!("encoding with {encoder}");
 
     let block_id = "vmfmt_nvdec";
     let mut flow = Flow::new(format!("vm_input_format_{block_id}"));
@@ -418,7 +455,7 @@ async fn nvdec_cuda_after_a_converted_format_stays_on_the_gpu() {
         "capsfilter",
         vec![("caps", PV::String(format_caps("NV12")))],
     ));
-    flow.elements.push(elem("enc", "nvh264enc", vec![]));
+    flow.elements.push(elem("enc", encoder, vec![]));
     flow.elements.push(elem("parse", "h264parse", vec![]));
     flow.elements.push(elem("dec", "nvh264dec", vec![]));
     flow.elements.push(elem("sel", "input-selector", vec![]));
@@ -476,6 +513,10 @@ async fn nvdec_cuda_after_a_converted_format_stays_on_the_gpu() {
         .static_pad("sink")
         .unwrap()
         .current_caps();
+    eprintln!(
+        "nvh264dec src: {decoded:?}\nglupload sink: {uploaded:?}\nadapters: {:?}",
+        running.gpu_input_adapters()
+    );
     assert!(
         has_feature(uploaded.clone(), "memory:GLMemory")
             || has_feature(uploaded.clone(), "memory:CUDAMemory"),
