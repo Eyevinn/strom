@@ -38,20 +38,27 @@ pub const PAGE_FIRST_FRAME_DELAY_FIXED_RATE: Duration = Duration::from_millis(30
 /// paints, rather than at a fixed rate.
 pub const VARIABLE_RATE_PROPERTY: &str = "max-video-framerate";
 
+const TAKE_FRAGMENT_PREFIX: &str = "strom-take-";
+
 /// The URL fragment a take sets to trigger a page.
 pub fn take_fragment(token: u64) -> String {
-    format!("strom-take-{token}")
+    format!("{TAKE_FRAGMENT_PREFIX}{token}")
 }
 
 /// A stinger page's URL cannot carry a fragment of its own: a take replaces
 /// it, which would move a page that routes by its fragment off its route.
+/// The fragment an earlier take set is the take's own, not the page's.
 pub fn check_page_url(url: &str) -> Result<(), String> {
-    match url.split_once('#') {
-        Some((_, fragment)) if !fragment.is_empty() => Err(format!(
-            "a stinger page's URL cannot have a #fragment ('#{}'): a take sets the fragment \
-             to trigger the page",
-            fragment
-        )),
+    match url.trim().split_once('#') {
+        Some((_, fragment))
+            if !fragment.is_empty() && !fragment.starts_with(TAKE_FRAGMENT_PREFIX) =>
+        {
+            Err(format!(
+                "a stinger page's URL cannot have a #fragment ('#{}'): a take sets the \
+                 fragment to trigger the page",
+                fragment
+            ))
+        }
         _ => Ok(()),
     }
 }
@@ -645,6 +652,11 @@ mod tests {
         assert!(err.contains("#/stinger"), "{err}");
         assert!(check_page_url("https://example.com/graphics/").is_ok());
         assert!(check_page_url("https://example.com/graphics/#").is_ok());
+        // Trailing space is trimmed before the page loads, so it is not a
+        // fragment.
+        assert!(check_page_url("  https://example.com/#  ").is_ok());
+        // A page an earlier take triggered shows the take's fragment.
+        assert!(check_page_url(&format!("https://example.com/#{}", take_fragment(7))).is_ok());
     }
 
     #[test]
