@@ -1,5 +1,7 @@
 # Docker Deployment Guide
 
+> Code is the source of truth — this may have drifted; read the code for the current implementation.
+
 This is the generic Docker reference for Strom. For a guided, opinionated deployment
 (Docker run, GPU, ICE servers, authentication, verification) see
 [OPEN_LIVE_SETUP.md](OPEN_LIVE_SETUP.md) — it is the recommended starting point and ships a
@@ -14,7 +16,7 @@ docker pull eyevinntechnology/strom:latest        # base image
 docker pull eyevinntechnology/strom-full:latest   # + CEF/Chromium for HTML rendering
 ```
 
-Pin a specific version with a tag, e.g. `eyevinntechnology/strom:0.6.0`.
+Pin a specific version with a tag, e.g. `eyevinntechnology/strom:0.6.11`.
 
 ## Quick start
 
@@ -36,8 +38,8 @@ For GPU acceleration add `--gpus all` and `-e NVIDIA_DRIVER_CAPABILITIES=all` �
 
 ## Configuration
 
-Strom is configured via environment variables (see [DEVELOPMENT.md](DEVELOPMENT.md) for the
-full list and the CLI equivalents):
+Strom is configured via environment variables. `strom --help` lists every option with its
+environment variable; the common ones:
 
 | Variable | Purpose |
 |----------|---------|
@@ -107,7 +109,8 @@ server {
 }
 ```
 
-Alternatively, terminate TLS in Strom itself with `STROM_TLS_CERT` / `STROM_TLS_KEY`.
+Alternatively, terminate TLS in Strom itself with `STROM_TLS_CERT` / `STROM_TLS_KEY`. Strom
+reloads the certificate when the files change.
 
 ### Logging and restart
 

@@ -1,5 +1,7 @@
 # Debugging Segfaults in Strom
 
+> Code is the source of truth — this may have drifted; read the code for the current implementation.
+
 This document describes how to debug segfaults in the Strom application, particularly when running under WSL2.
 
 ## Quick Reference
@@ -82,7 +84,7 @@ The crashing thread will show:
 - **Frame 1-3**: GStreamer or system library calls
 - **Frame 4+**: Your Rust code
 
-Example crash at `pipeline.rs:1090`:
+Example crash while linking pads:
 
 ```
 #0  __strcmp_avx2 () at ../sysdeps/x86_64/multiarch/strcmp-avx2.S:283
@@ -90,7 +92,7 @@ Example crash at `pipeline.rs:1090`:
 #2  gst_element_request_pad_simple ()
 #3  gst_element_link_pads_full ()
 #4  gstreamer::element::ElementExtManual::link_pads
-#5  strom::gst::pipeline::PipelineManager::try_link_elements at backend/src/gst/pipeline.rs:1090
+#5  strom::gst::pipeline::PipelineManager::try_link_elements
 ```
 
 **Key indicators**:
@@ -181,8 +183,8 @@ Edit `.strom.toml`:
 
 ```toml
 [logging]
-file = "strom.log"
-level = "debug"  # or "trace" for verbose output
+log_file = "strom.log"
+log_level = "debug"  # or "trace" for verbose output
 ```
 
 ### Enable core dumps (alternative to WSL handler)
@@ -212,19 +214,8 @@ echo "core.%e.%p" | sudo tee /proc/sys/kernel/core_pattern
 
 ## Reference: Past Segfault Fixes
 
-### Video Compositor NULL Pointer in link_pads (Dec 2025)
-
-**Symptom**:
-```
-segfault at 25 in libc.so.6
-__strcmp_avx2 -> gst_element_class_get_pad_template
-```
-
-**Root cause**: Removed pipeline READY state transition before linking, causing pad templates to be uninitialized when `link_pads()` was called.
-
-**Fix**: Restore pipeline READY state transition before element linking for aggregator elements like `glvideomixerelement`.
-
-**Commit**: See commit 54e5b14 for working state.
+Write-ups of earlier crashes live in [archive/](archive/), for example
+[PAD_TEMPLATE_CRASH_FIX.md](archive/PAD_TEMPLATE_CRASH_FIX.md).
 
 ---
 

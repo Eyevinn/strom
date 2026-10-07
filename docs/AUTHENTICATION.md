@@ -1,5 +1,7 @@
 # Authentication
 
+> Code is the source of truth — this may have drifted; read the code for the current implementation.
+
 Strom supports two authentication methods to protect your installation.
 
 ## 1. Session-Based Authentication (Web Login)
@@ -12,7 +14,7 @@ Perfect for web UI access with username/password login.
 # Generate a password hash
 cargo run -- hash-password
 # Or with Docker:
-docker run eyevinntechnology/strom:latest hash-password
+docker run --rm -it eyevinntechnology/strom:latest /app/strom hash-password
 
 # Enter your desired password when prompted
 # Copy the generated hash
@@ -79,6 +81,10 @@ curl -H "Authorization: Bearer your-secret-api-key-here" \
   http://localhost:8080/api/flows
 ```
 
+Where a header cannot be set (a WebSocket from a browser), pass the key as an
+`?auth_token=` query parameter instead. The MCP endpoint (`/api/mcp`) also accepts
+it as an `X-API-Key` header; the rest of the API does not.
+
 ## Using Both Methods
 
 You can enable both authentication methods simultaneously:
@@ -120,10 +126,17 @@ cargo run --release
 
 ## Protected Endpoints
 
-When authentication is enabled, all API endpoints except the following require authentication:
+When authentication is enabled, all API endpoints require authentication except:
 
 - `GET /health` - Health check
-- `POST /api/login` - Login endpoint
-- `POST /api/logout` - Logout endpoint
-- `GET /api/auth/status` - Check auth status
+- `POST /api/login`, `POST /api/logout`, `GET /api/auth/status` - Login flow
+- `GET /api/whep-streams`, `GET /api/whip-endpoints`, `GET /api/ice-servers`,
+  `POST /api/client-log` - Used by the browser player and ingest pages
+- `/player/*` - Player, ingest and vision mixer pages
+- `/whep/*`, `/whip/*` - WebRTC signalling endpoints
+- `/devtools/{key}/*` - Remote control of an HTML source; the key in the path is the
+  credential (see [HTML_RENDER.md](HTML_RENDER.md))
 - Static assets (frontend files)
+
+`/api/mcp` is routed outside the authentication middleware but checks credentials
+itself (API key as `X-API-Key` or Bearer, or the login cookie). See [MCP.md](MCP.md).

@@ -100,7 +100,7 @@ Response:
   "result": {
     "protocolVersion": "2025-03-26",
     "capabilities": { "tools": {} },
-    "serverInfo": { "name": "strom", "version": "0.6.8" }
+    "serverInfo": { "name": "strom", "version": "<strom version>" }
   }
 }
 ```
@@ -186,8 +186,8 @@ curl -X DELETE http://localhost:8080/api/mcp \
 ## Security
 
 - **Authentication**: when authentication is enabled on the server, the endpoint accepts the
-  same credentials as the rest of the API — `X-API-Key: <key>` (recommended for MCP clients),
-  `Authorization: Bearer <key>`, or the browser's login session cookie. See
+  API key as `X-API-Key: <key>` (recommended for MCP clients; only this endpoint accepts that
+  header) or `Authorization: Bearer <key>`, or the browser's login session cookie. See
   [AUTHENTICATION.md](AUTHENTICATION.md).
 - **Origin validation**: requests carrying a browser `Origin` that is neither this host nor
   localhost are rejected (DNS rebinding protection). Non-browser clients send no `Origin` and

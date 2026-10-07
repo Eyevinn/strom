@@ -1,5 +1,7 @@
 # Setting Up a Local Strom Instance for Open Live
 
+> Code is the source of truth — this may have drifted; read the code for the current implementation.
+
 This section walks through deploying a local [Strom](https://github.com/Eyevinn/strom) instance that Open Live can connect to.
 
 [Open Live](https://github.com/Eyevinn/open-live) is an open-source live production platform, with [Open Live Studio](https://github.com/Eyevinn/open-live-studio) as its web-based production interface. Strom is a standalone GStreamer flow engine that handles the actual media pipelines — it is not tied to Open Live, but Open Live uses it as a backend, driving it over its REST and WebSocket APIs. This guide covers running your own Strom instance for Open Live to connect to.
@@ -165,7 +167,7 @@ services:
     restart: unless-stopped
     environment:
       - TZ=Europe/Stockholm
-      # Authentication (see section 7)
+      # Authentication (see section 8)
       - STROM_ADMIN_USER=admin
       - STROM_ADMIN_PASSWORD_HASH=$$2b$$12$$REPLACE_WITH_YOUR_OWN_BCRYPT_HASH
       - STROM_API_KEY=REPLACE_WITH_A_LONG_RANDOM_KEY
@@ -195,7 +197,7 @@ Notes:
 - `network_mode: host` is recommended when running WHEP/WHIP, AES67, NDI, or SRT — these protocols are easier to operate without Docker NAT.
 - The `$$` in `STROM_ADMIN_PASSWORD_HASH` is required in `docker compose` to escape the literal `$` characters in the bcrypt hash. If you set the variable directly via `docker run -e`, use a single `$`.
 - Add the DeckLink volume mounts from section 4 if applicable.
-- To terminate TLS in Strom itself, mount your certificates and set `STROM_TLS_CERT` / `STROM_TLS_KEY`. See [README — HTTPS/TLS](https://github.com/Eyevinn/strom#httpstls).
+- To terminate TLS in Strom itself, mount your certificates and set `STROM_TLS_CERT` / `STROM_TLS_KEY`. See [DOCKER.md — Reverse proxy](DOCKER.md#reverse-proxy).
 
 Bring it up:
 
@@ -212,7 +214,7 @@ Strom exposes a single HTTP/WebSocket endpoint:
 
 | Port    | Protocol  | Purpose                                                     |
 |---------|-----------|-------------------------------------------------------------|
-| `8080`  | HTTP(S)   | Web UI, REST API (`/api/...`), WebSocket (`/api/ws`), SSE (`/api/events`), MCP (`/api/mcp`), OpenAPI (`/swagger-ui`) |
+| `8080`  | HTTP(S)   | Web UI, REST API (`/api/...`), WebSocket (`/api/ws`), MCP (`/api/mcp`), OpenAPI (`/swagger-ui`) |
 
 This is the port Open Live needs reachable. Override it with `STROM_PORT` or `--port` if `8080` is taken on the host.
 
@@ -223,8 +225,6 @@ Media-plane ports (RTP/SRT/WHIP/WHEP/AES67/NDI) are determined by the flows you 
 Only relevant when **several** Open Live instances share this Strom. Each of them then reserves a set of SRT listener ports from Strom at startup (`POST /api/ports/reservations`) and registers sources only on ports it holds, so two instances never bind the same UDP port.
 
 The pool is off until you configure ports. Set `STROM_PORTS=47100-47999` (or `[ports] ports` in `.strom.toml`) and open that whole UDP range inbound on the firewall. A Strom serving one Open Live needs none of this — see [PORT_POOL.md](PORT_POOL.md) for the full picture.
-
-Code is the source of truth — this may have drifted; read the code for the current implementation.
 
 ---
 
@@ -322,7 +322,7 @@ Strom runs **unauthenticated by default**. This is acceptable only on a fully tr
 ### Generate a bcrypt password hash
 
 ```bash
-docker run --rm -it eyevinntechnology/strom-full:latest hash-password
+docker run --rm -it eyevinntechnology/strom-full:latest /app/strom hash-password
 # Enter your desired password when prompted
 # Copy the resulting $2b$12$... hash
 ```

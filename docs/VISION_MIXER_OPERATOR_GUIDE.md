@@ -450,7 +450,7 @@ dedicated meter on the PVW and PGM big displays. dBFS thresholds:
 |  `-6 …   0 dBFS` | Red |
 
 A thin **white tick** marks the decay peak so transients are easy to
-read. Meters update at 100 ms intervals.
+read. Meters update at 250 ms intervals.
 
 ### 6.3 What is *not* shown on the multiview
 
@@ -470,15 +470,15 @@ action.
 | Action | What it does | Parameters |
 |---|---|---|
 | **Select PVW source** | Route a regular Input or PiP onto the PVW bus. Updates the multiview PVW display immediately. Never touches the on-air feed. | Source: `input:N` or `pip:N` |
-| **Select PGM source** *(direct)* | Cut a source straight to PGM, bypassing PVW. | Source: `input:N` or `pip:N` |
 | **Take (Auto)** | Animate the transition from PGM to PVW using the currently selected type/duration. Old PGM becomes the new PVW. | Implicit (uses current PVW + selected transition) |
 | **Cut** | Take with `cut` (zero duration). Instant. | — |
-| **Set transition type** | Select which animation Auto will use. | One of `cut`, `fade`, `dip_to_black`, `slide_left/right/up/down`, `push_left/right/up/down` |
+| **Set transition type** | Select which animation Auto will use. | One of `cut`, `fade`, `dip_to_black`, `slide_left/right/up/down`, `push_left/right/up/down`, or a shader transition (§3.1) |
 | **Set transition duration** | Set the length of fade/slide takes. | 0 – 60 000 ms (default 300) |
 | **Fade-to-Black** | Toggle FTB on PGM (first press fades to black, second press fades back). | Duration in ms (0 = instant). |
 | **DSK on/off** | Toggle one DSK channel on or off. | DSK number (1 – 4) + `enabled: true/false` |
 | **Configure PiP** | Set a PiP's background, zones (positions, capacities, source lists, borders) and per-source crop transforms. Live, no restart — staying sources morph, crops animate. | `pip_idx`, `bg`, `zones[]`, `transforms{}` |
 | **Get PiP composition** | Export one PiP's current composition (the save half of save/restore — restore by sending it back to Configure PiP). Used by the layout presets and external tooling. | `pip_idx` |
+| **Looks** | Apply or clear a persistent shader look on a source or on the PGM master (GPU backend with Shader FX, §3.4). | Source or master + look parameters |
 | **Set multiview overlay alpha** | Fade the multiview overlay (borders, labels, clock, VU meters). | `alpha`: 0.0 – 1.0 |
 | **Get state** | Snapshot of current PVW/PGM/DSK/FTB/PiP state. Useful when reconnecting to the mixer mid-show. | — |
 
@@ -506,7 +506,9 @@ WebSocket event so multiple operator panels stay in sync in real time.
 | Show VU meters on multiview | **On** |
 | Initial PGM input | Input 0 |
 | Initial PVW input | Input 1 |
+| Initial PGM / PVW source | Empty (use the initial input). Set `input:N` or `pip:N` to start on a PiP. |
 | Swap PVW/PGM positions on multiview | Off (PVW left, PGM right) |
+| Shader FX | **On** (GPU backend only) |
 | Compositor latency | 20 ms |
 | Min upstream latency | 20 ms |
 
@@ -527,7 +529,7 @@ WebSocket event so multiple operator panels stay in sync in real time.
 | Idle thumbnail border | Gray |
 | Border width (PVW / PGM / thumbnail) | 4 px @ 720p reference, scales with multiview height |
 | Clock refresh | 1 Hz, with timezone re-check every 60 s for DST |
-| VU meter interval | 100 ms |
+| VU meter interval | 250 ms |
 
 ---
 
@@ -541,8 +543,9 @@ WebSocket event so multiple operator panels stay in sync in real time.
 | Overlay sources per PiP | 0 | 15 |
 | Transition duration | 0 ms | 60 000 ms |
 
-Input count, DSK count and PiP count are **construction-time** properties
-— changing them requires restarting the flow. Everything else (PVW/PGM
+Input, DSK and PiP counts, resolutions, framerates, backend and Shader FX
+are **construction-time** properties — changing them requires restarting
+the flow. Everything else (PVW/PGM
 selection, transitions, DSK toggles, PiP configuration, overlay alpha)
 is live and takes effect immediately.
 
@@ -557,7 +560,7 @@ is live and takes effect immediately.
 | **Take** | Atomic swap of PVW ↔ PGM, animated (Auto) or instant (Cut). |
 | **Cut** | Zero-duration take. |
 | **Auto** | Animated take, using the currently selected transition type and duration. |
-| **Transition** | The animation that takes one source to another (`cut`, `fade`, `dip_to_black`, `slide_*`, `push_*`). |
+| **Transition** | The animation that takes one source to another (`cut`, `fade`, `dip_to_black`, `slide_*`, `push_*`, and the shader transitions). |
 | **Engine downgrade** | When the engine cannot honor the requested transition (any non-fade animation involving a PiP) it falls back to `fade`. The response reports both requested and actual. |
 | **FTB (Fade-to-Black)** | Forced fade of PGM to black, independent of takes. |
 | **DSK (Downstream Keyer)** | Alpha-keyed graphics overlay on the PGM output, sitting above the entire PGM composition. |
