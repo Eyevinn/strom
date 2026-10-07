@@ -1091,7 +1091,14 @@ mod tests {
             !cleanup_sent.load(Ordering::SeqCst),
             "a registered session keeps its watchdog"
         );
-        assert_eq!(pipeline.current_state(), gst::State::Playing);
+        // The fixture's live pipeline may still be completing its async
+        // change to PLAYING; wait for it rather than read where it is.
+        let (result, state, _) = pipeline.state(gst::ClockTime::from_seconds(5));
+        assert_eq!(
+            (result, state),
+            (Ok(gst::StateChangeSuccess::Success), gst::State::Playing),
+            "a registered session's pipeline is not torn down"
+        );
         let _ = pipeline.set_state(gst::State::Null);
     }
 }
