@@ -43,6 +43,8 @@ struct RegisteredEndpoints {
 }
 
 pub(crate) mod stinger;
+#[doc(hidden)]
+pub use stinger::{hold_takes_for_tests, takes_held_for_tests};
 
 /// Shared application state.
 #[derive(Clone)]

@@ -86,6 +86,62 @@ fn still_ours(flow: FlowId, block: &str, token: u64) -> bool {
         == Some(token)
 }
 
+/// Why a take whose flow was stopped under it gives up.
+const RESTARTED: &str = "the flow stopped or restarted during the take";
+
+/// Flows whose takes wait before programming the mixer; the value counts
+/// the takes waiting. See [`hold_takes_for_tests`].
+static HELD_TAKES: LazyLock<Mutex<HashMap<FlowId, u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Make takes on `flow` wait after their cue and analysis, just before they
+/// program the mixer, until called again with `hold` false. Lets a test stop
+/// and restart a flow at exactly that point. Returns how many takes wait.
+#[doc(hidden)]
+pub fn hold_takes_for_tests(flow: FlowId, hold: bool) -> u32 {
+    let mut held = HELD_TAKES.lock().unwrap_or_else(|p| p.into_inner());
+    if hold {
+        *held.entry(flow).or_default()
+    } else {
+        held.remove(&flow);
+        0
+    }
+}
+
+/// How many takes on `flow` wait in [`hold_takes_for_tests`].
+#[doc(hidden)]
+pub fn takes_held_for_tests(flow: FlowId) -> u32 {
+    HELD_TAKES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&flow)
+        .copied()
+        .unwrap_or(0)
+}
+
+async fn wait_while_held(flow: FlowId) {
+    let counted = {
+        let mut held = HELD_TAKES.lock().unwrap_or_else(|p| p.into_inner());
+        match held.get_mut(&flow) {
+            Some(n) => {
+                *n += 1;
+                true
+            }
+            None => false,
+        }
+    };
+    if !counted {
+        return;
+    }
+    while HELD_TAKES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains_key(&flow)
+    {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 fn release(flow: FlowId, block: &str, token: u64) {
     with_mixer(flow, block, |s| {
         if s.running == Some(token) {
@@ -541,6 +597,19 @@ impl AppState {
         Ok(())
     }
 
+    /// Whether a take still owns the mixer, and its clip source is still the
+    /// running one. Call with the `pipelines` lock held: a stop clears every
+    /// claim on the flow before it takes the pipeline away.
+    fn take_still_ours(&self, flow_id: &FlowId, block: &str, ctx: &Context, token: u64) -> bool {
+        still_ours(*flow_id, block, token)
+            && MEDIA_PLAYER_REGISTRY
+                .get(&MediaPlayerKey {
+                    flow_id: *flow_id,
+                    block_id: ctx.source_block_id.clone(),
+                })
+                .is_some_and(|p| Arc::ptr_eq(&p, &ctx.player))
+    }
+
     /// Take a stinger from PGM to PVW, playing clip `index` or the cued one.
     pub async fn stinger_take(
         &self,
@@ -665,9 +734,19 @@ impl AppState {
         )
         .map_err(|e| (e, false))?;
 
+        wait_while_held(*flow_id).await;
+
         // Program the mixer for the frame the clip lands on.
         let (take, watch, now, now_at, ftb_cancelled) = {
             let pipelines = self.inner.pipelines.read().await;
+            // A stop during the cue or analysis cleared this take's claim
+            // (before it took the pipeline away, so a claim still held under
+            // this lock means the run the take started on), and a start since
+            // put a new run here. A take that lost its claim leaves that run
+            // alone.
+            if !self.take_still_ours(flow_id, block, ctx, token) {
+                return Err((RESTARTED.to_string(), false));
+            }
             let manager = pipelines
                 .get(flow_id)
                 .ok_or_else(|| ("the flow is not running".to_string(), false))?;
@@ -726,7 +805,11 @@ impl AppState {
             .map_err(|e| (e.to_string(), false))?;
         if let Err(e) = played {
             drop(watch);
-            if let Some(manager) = self.inner.pipelines.read().await.get(flow_id) {
+            let pipelines = self.inner.pipelines.read().await;
+            if !self.take_still_ours(flow_id, block, ctx, token) {
+                return Err((RESTARTED.to_string(), false));
+            }
+            if let Some(manager) = pipelines.get(flow_id) {
                 manager.abort_stinger(block, &take);
             }
             return Err((format!("clip {} could not play ({})", index, e), true));
@@ -846,8 +929,17 @@ impl AppState {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        if let Some(manager) = self.inner.pipelines.read().await.get(&flow) {
-            manager.finish_stinger(&mixer, &take);
+        {
+            // Under the lock that reads the pipeline: a restart since the loop
+            // last looked put another run here.
+            let pipelines = self.inner.pipelines.read().await;
+            if !still_ours(flow, &mixer, token) {
+                debug!("Stinger on {}: flow stopped during the take", mixer);
+                return;
+            }
+            if let Some(manager) = pipelines.get(&flow) {
+                manager.finish_stinger(&mixer, &take);
+            }
         }
         report.frames_arrived = watch.stats.arrived.load(Ordering::Acquire);
         report.frames_late = watch.stats.late.load(Ordering::Acquire);

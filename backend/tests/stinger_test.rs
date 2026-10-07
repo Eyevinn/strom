@@ -279,6 +279,68 @@ async fn stopping_mid_take_releases_the_pipeline() {
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
 
+/// A take whose flow restarts while it cues and analyses its clip gives up
+/// without touching the new run: it neither programs the new mixer nor cuts
+/// its program, and the next take on the new run lands as usual.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_take_outlived_by_a_restart_leaves_the_new_run_alone() {
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let r = start("restart", "cpu").await;
+    let mut events = r.state.events().subscribe();
+
+    // Take A stops just before it programs the mixer; the flow restarts
+    // under it there.
+    strom::state::hold_takes_for_tests(r.flow_id, true);
+    let take_a = {
+        let (state, flow, mixer) = (r.state.clone(), r.flow_id, r.mixer());
+        tokio::spawn(async move { state.stinger_take(&flow, &mixer, Some(1), None).await })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while strom::state::takes_held_for_tests(r.flow_id) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "take A never got there"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+    r.state.start_flow(&r.flow_id).await.unwrap();
+    r.wait_until_parked().await;
+    strom::state::hold_takes_for_tests(r.flow_id, false);
+
+    let err = take_a.await.unwrap().expect_err("take A lost its flow");
+    assert!(err.to_string().contains("restarted"), "{err}");
+    let failed = loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("no StingerFailed for take A")
+        {
+            Ok(strom_types::StromEvent::StingerFailed {
+                program_changed, ..
+            }) => break program_changed,
+            _ => continue,
+        }
+    };
+    assert!(!failed, "take A changed the new run's program");
+    let overlay =
+        strom::blocks::builtin::vision_mixer::overlay::get_overlay_state(&r.flow_id, &r.mixer())
+            .unwrap();
+    assert_eq!(overlay.pgm_input(), Some(0), "take A cut the new run");
+    assert!(
+        !r.state
+            .stinger_state(&r.flow_id, &r.mixer())
+            .await
+            .unwrap()
+            .running
+    );
+
+    // Take B on the new run lands frame by frame.
+    classic_take(&r).await;
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}
+
 /// A clip that will not load costs the graphic, not the change: the take
 /// fails, says so, and the program cuts to PVW anyway.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
