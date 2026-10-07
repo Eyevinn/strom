@@ -242,15 +242,19 @@ async fn wipe_between_letterboxed_sources_animates() {
                 "num_inputs".to_string(),
                 strom_types::PropertyValue::UInt(2),
             );
-            // 1280x720 canvas: the 1280-wide letterboxed sources land
-            // unscaled, mirroring production geometry at lower GL cost.
+            // 640x360 canvas: the 640-wide letterboxed sources land
+            // unscaled, mirroring production geometry at a GL cost a CI
+            // runner renders in real time. A runner that cannot keep up
+            // turns the wipe into a cut: the mixer runs to the clock, the
+            // rendering take slot falls behind it, and the mixer drops every
+            // masked frame as late and keeps the last unmasked one on screen.
             p.insert(
                 "pgm_resolution".to_string(),
-                strom_types::PropertyValue::String("1280x720".to_string()),
+                strom_types::PropertyValue::String("640x360".to_string()),
             );
             p.insert(
                 "multiview_resolution".to_string(),
-                strom_types::PropertyValue::String("640x360".to_string()),
+                strom_types::PropertyValue::String("320x180".to_string()),
             );
             // Download PGM to system memory so the appsink can map pixels.
             p.insert(
@@ -287,7 +291,7 @@ async fn wipe_between_letterboxed_sources_animates() {
         "capsfilter",
         vec![(
             "caps",
-            PV::String("video/x-raw,width=1280,height=534,framerate=30/1".into()),
+            PV::String("video/x-raw,width=640,height=266,framerate=30/1".into()),
         )],
     ));
     flow.elements.push(elem(
@@ -303,7 +307,7 @@ async fn wipe_between_letterboxed_sources_animates() {
         "capsfilter",
         vec![(
             "caps",
-            PV::String("video/x-raw,width=1280,height=546,framerate=30/1".into()),
+            PV::String("video/x-raw,width=640,height=274,framerate=30/1".into()),
         )],
     ));
     flow.elements.push(elem(
@@ -327,6 +331,15 @@ async fn wipe_between_letterboxed_sources_animates() {
             to: to.to_string(),
         });
     }
+
+    // The vision mixer re-fits a source's rect to its aspect once the source's
+    // caps arrive, from the GLib main context (as in the running server). This
+    // test is a tokio test, so nothing would iterate that context: run it.
+    let main_loop = gstreamer::glib::MainLoop::new(None, false);
+    let main_loop_thread = {
+        let ml = main_loop.clone();
+        std::thread::spawn(move || ml.run())
+    };
 
     let temp_file = NamedTempFile::new().unwrap();
     let registry = BlockRegistry::new(temp_file.path());
@@ -409,17 +422,20 @@ async fn wipe_between_letterboxed_sources_animates() {
     // emits on the way there are black — the compositor is running before the
     // source pads have delivered anything. The fixed settle sleep above is not a
     // guarantee, so poll for the picture itself rather than asserting on whichever
-    // frame happens to arrive first.
+    // frame happens to arrive first. The picture must also be letterboxed, not
+    // stretched over the whole canvas: the source's aspect-fitted rect is applied
+    // once its caps arrive, and a take started before that has its layout
+    // re-applied under it mid-wipe.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let (w0, r0) = loop {
         if let Some(s) = appsink.try_pull_sample(gstreamer::ClockTime::from_mseconds(500)) {
             let f = fractions_of(&s);
-            if f.0 > 0.5 {
+            if f.0 > 0.5 && f.0 < 0.9 {
                 break f;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "PGM never settled on a mostly-white picture within 30s, last frame white={:.2} red={:.2}",
+                "PGM never settled on the letterboxed white source within 30s, last frame white={:.2} red={:.2}",
                 f.0,
                 f.1
             );
@@ -548,4 +564,6 @@ async fn wipe_between_letterboxed_sources_animates() {
 
     manager.stop().expect("stop");
     drop(manager);
+    main_loop.quit();
+    main_loop_thread.join().expect("main loop thread");
 }
