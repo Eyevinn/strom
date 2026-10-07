@@ -777,7 +777,7 @@ impl MediaPlayerState {
     /// the internal pipeline paused: a take then only lets it go.
     pub fn cue(&self, index: usize) -> Result<std::time::Duration, String> {
         let started = std::time::Instant::now();
-        let before: u64;
+        let mut before: u64;
         {
             let _control = self.lock_control();
             if self.is_parked_on(index) {
@@ -821,7 +821,24 @@ impl MediaPlayerState {
                 if let Some(sink) = self.park_clocksync_sink() {
                     self.stinger.arm_park_probe(&sink);
                 }
-                self.pause_locked().and_then(|()| self.seek_locked(0))
+                match self.pause_locked().and_then(|()| self.seek_locked(0)) {
+                    Ok(()) => Ok(()),
+                    // A source that cannot seek (an HTTP server without range
+                    // requests) cannot rewind; loading the clip again starts
+                    // it from its first frame. Without this the clip stays
+                    // neither parked nor reloaded, and every later cue takes
+                    // the same failing path. The load builds a new chain,
+                    // which the bridge arms the park probe on; the count is
+                    // read again in case the failed seek let a frame through.
+                    Err(e) => {
+                        warn!(
+                            "Media Player {}: stinger clip {} cannot seek back to its start ({}); loading it again",
+                            self.block_id, index, e
+                        );
+                        before = park.seen.load(Ordering::Acquire);
+                        self.load_current_file_and(false)
+                    }
+                }
             };
             result?;
         }

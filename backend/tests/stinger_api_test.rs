@@ -4,6 +4,8 @@
 //! naming inputs.
 
 pub mod common;
+#[path = "common/http_file.rs"]
+mod http_file;
 #[path = "common/stinger.rs"]
 pub mod rig;
 
@@ -430,6 +432,81 @@ async fn a_cue_loads_a_parked_clip_rewritten_on_disk() {
     assert_eq!(file, classic);
     assert!(marker, "the rewritten clip's graphic never aired");
     assert!(!green, "the clip parked before the rewrite aired");
+
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}
+
+/// A clip served from a source that cannot seek plays on every take: the
+/// re-park after a take cannot rewind it, so it is loaded again instead of
+/// staying unparked, and the next cue or take failing with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clip_that_cannot_seek_plays_on_every_take() {
+    let mut needed = CODEC_ELEMENTS.to_vec();
+    needed.extend(["souphttpsrc", "matroskamux", "matroskademux"]);
+    if !common::plugins_available(&needed) {
+        return;
+    }
+    let r = start("api-noseek", "cpu").await;
+    // The classic clip as uncompressed video in Matroska: Matroska's demuxer
+    // fails a seek it cannot make on a source that cannot seek, and reads the
+    // file front to back without one.
+    let dir = tempfile::tempdir().unwrap();
+    let mov = dir.path().join("classic.mov");
+    let mkv = dir.path().join("classic.mkv");
+    classic_clip(&mov);
+    let remux = gstreamer::parse::launch(&format!(
+        "filesrc location=\"{}\" ! qtdemux ! pngdec ! videoconvert ! video/x-raw,format=AYUV ! matroskamux ! filesink location=\"{}\"",
+        mov.display(),
+        mkv.display()
+    ))
+    .unwrap();
+    use gstreamer::prelude::*;
+    remux.set_state(gstreamer::State::Playing).unwrap();
+    let msg = remux.bus().unwrap().timed_pop_filtered(
+        gstreamer::ClockTime::from_seconds(30),
+        &[gstreamer::MessageType::Eos, gstreamer::MessageType::Error],
+    );
+    remux.set_state(gstreamer::State::Null).unwrap();
+    assert!(
+        matches!(msg.map(|m| m.type_()), Some(gstreamer::MessageType::Eos)),
+        "remux failed"
+    );
+    let url = http_file::serve_without_ranges(
+        std::fs::read(&mkv).unwrap(),
+        "classic.mkv",
+        "video/x-matroska",
+    );
+
+    let clip = r
+        .state
+        .stinger_add_clip(&r.flow_id, &r.mixer(), &url, None)
+        .await
+        .expect("add the URL");
+    r.state
+        .stinger_cue(&r.flow_id, &r.mixer(), clip.index, Some(&url))
+        .await
+        .expect("cue the URL");
+    for take_no in 1..=2 {
+        r.wait_until_parked().await;
+        r.wait_for_analysis().await;
+        let take = r
+            .state
+            .stinger_take(&r.flow_id, &r.mixer(), None, None)
+            .await
+            .unwrap_or_else(|e| panic!("take {take_no}: {e}"));
+        assert_eq!(take.file, url);
+        let report = r.wait_for_report(clip.index).await;
+        assert_eq!(report.take_id, take.take_id);
+        assert!(
+            report.frames_expected + 1 >= N as u32,
+            "take {take_no}: {report:?}"
+        );
+        assert_eq!(
+            report.frames_arrived, report.frames_expected,
+            "take {take_no} lost frames: {report:?}"
+        );
+    }
+    r.wait_until_parked().await;
 
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }

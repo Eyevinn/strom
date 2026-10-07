@@ -290,6 +290,9 @@ alpha in WebM (the usual format of stinger packs), ProRes 4444, FFV1 in
 Matroska, QuickTime Animation. H.264 has no alpha, which is fine for a
 mask or for the matte half of a track-matte clip, but not for a classic
 graphic. Stingers do not take PiP buses: PGM and PVW must be inputs.
+Stinger clips are meant to be local files: upload them with the media API.
+A URL plays, but it is fetched again on every cue, and a take depends on
+the server staying up.
 
 ---
 
