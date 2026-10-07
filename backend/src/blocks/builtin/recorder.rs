@@ -1393,6 +1393,8 @@ impl BlockBuilder for RecorderBuilder {
                     flow_id,
                     block_id: block_id_clone.clone(),
                     filename: relative_path,
+                    start_running_time_ns: None,
+                    start_utc_us: None,
                 });
                 // Return the filename — the signal requires a gchararray return value
                 Some(filename.to_value())

@@ -11083,6 +11083,24 @@
                   "flow_id": {
                     "type": "string",
                     "format": "uuid"
+                  },
+                  "start_running_time_ns": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64",
+                    "description": "Running time, in nanoseconds, of the file's t=0: a sample at file time\n`t` carries running time `start_running_time_ns + t`. Reported by the\nLive Recorder for MP4 and MKV files; `None` for MPEG-TS and from the\nRecorder block.",
+                    "minimum": 0
+                  },
+                  "start_utc_us": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64",
+                    "description": "`start_running_time_ns` on the wall clock, in microseconds since the\nUnix epoch (UTC). Two recorders in one flow run map running time to\nUTC through the same anchor, so a sample at file time `t1` in one and\n`t2` in the other were captured together iff\n`start_utc_us_1 + t1 == start_utc_us_2 + t2`. The absolute value is as\ngood as the host's clock. `None` when `start_running_time_ns` is.",
+                    "minimum": 0
                   }
                 }
               },
