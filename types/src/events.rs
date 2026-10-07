@@ -393,6 +393,10 @@ pub enum StromEvent {
         /// The effect as applied (after parameter clamping).
         effect: crate::effects::VideoEffect,
     },
+    /// A URL download into the media library started, progressed, or ended.
+    /// Progress is throttled per job; the final state (done, failed or
+    /// cancelled) is always sent.
+    MediaDownloadProgress(crate::media_download::MediaDownloadJob),
 }
 
 impl StromEvent {
@@ -861,6 +865,16 @@ impl StromEvent {
                     target
                 )
             }
+            StromEvent::MediaDownloadProgress(job) => match &job.error {
+                Some(error) => format!(
+                    "Media download {} of {} to {}: {:?} ({})",
+                    job.job_id, job.url, job.path, job.state, error
+                ),
+                None => format!(
+                    "Media download {} of {} to {}: {:?}, {} bytes",
+                    job.job_id, job.url, job.path, job.state, job.bytes
+                ),
+            },
         }
     }
 
@@ -916,6 +930,7 @@ impl StromEvent {
             StromEvent::VisionMixerOverlayAlphaChanged { .. } => "VisionMixerOverlayAlphaChanged",
             StromEvent::VisionMixerFtbChanged { .. } => "VisionMixerFtbChanged",
             StromEvent::VisionMixerEffectChanged { .. } => "VisionMixerEffectChanged",
+            StromEvent::MediaDownloadProgress(_) => "MediaDownloadProgress",
         }
     }
 
@@ -978,7 +993,8 @@ impl StromEvent {
             | StromEvent::ThreadStats(_)
             | StromEvent::StreamDiscovered { .. }
             | StromEvent::StreamUpdated { .. }
-            | StromEvent::StreamRemoved { .. } => None,
+            | StromEvent::StreamRemoved { .. }
+            | StromEvent::MediaDownloadProgress(_) => None,
         }
     }
 
@@ -1001,6 +1017,10 @@ impl StromEvent {
             | StromEvent::AudioAnalyzerData { .. }
             | StromEvent::MediaPlayerPosition { .. }
             | StromEvent::BufferAgeProbe { .. } => true,
+
+            // Progress ticks repeat several times a second per job; the final
+            // state of a download is a lifecycle event.
+            StromEvent::MediaDownloadProgress(job) => !job.state.is_finished(),
 
             StromEvent::FlowCreated { .. }
             | StromEvent::FlowUpdated { .. }
@@ -1422,5 +1442,35 @@ mod event_accessor_tests {
 
         assert!(!StromEvent::FlowCreated { flow_id: flow_id() }.is_high_frequency());
         assert!(!StromEvent::Ping.is_high_frequency());
+    }
+
+    fn media_download_event(state: crate::media_download::MediaDownloadState) -> StromEvent {
+        StromEvent::MediaDownloadProgress(crate::media_download::MediaDownloadJob {
+            job_id: "job".to_string(),
+            url: "https://example.com/clip.mp4".to_string(),
+            directory: String::new(),
+            filename: "clip.mp4".to_string(),
+            path: "clip.mp4".to_string(),
+            bytes: 10,
+            total: Some(20),
+            state,
+            error: None,
+        })
+    }
+
+    #[test]
+    fn media_download_progress_is_tagged_and_classified() {
+        use crate::media_download::MediaDownloadState;
+
+        let progress = media_download_event(MediaDownloadState::Downloading);
+        let wire = serde_json::to_value(&progress).unwrap();
+        assert_eq!(wire["type"], "MediaDownloadProgress");
+        assert_eq!(wire["data"]["state"], "downloading");
+        assert_eq!(progress.event_type(), "MediaDownloadProgress");
+        assert_eq!(progress.flow_id(), None);
+        // Ticks are chatty; the final state is a lifecycle event.
+        assert!(progress.is_high_frequency());
+        assert!(!media_download_event(MediaDownloadState::Done).is_high_frequency());
+        assert!(!media_download_event(MediaDownloadState::Failed).is_high_frequency());
     }
 }
