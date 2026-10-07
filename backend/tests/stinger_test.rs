@@ -523,3 +523,64 @@ async fn a_clip_that_will_not_play_still_changes_the_program() {
     );
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
+
+/// Audio and video share the clip source's timing. A clip whose audio starts
+/// before its video took the take's pinned start from whichever stream
+/// reached the bridge first; when that was the audio, the graphic aired
+/// 200 ms (six frames) after the frame the mixer was programmed for, cutting
+/// its last frames, and the cut beneath it came early.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clip_with_early_audio_lands_its_first_video_frame_on_the_take() {
+    if !common::plugins_available(CODEC_ELEMENTS)
+        || !common::plugins_available(&["audiotestsrc", "fakesink"])
+    {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let clip = dir.path().join("classic_av.mov");
+    classic_clip_with_early_audio(&clip, 200_000_000);
+    let tag = "earlyaudio";
+    let r = start_edited(tag, "cpu", dir, vec![clip], |flow| {
+        let player = flow
+            .blocks
+            .iter_mut()
+            .find(|b| b.id == format!("sting-{tag}"))
+            .unwrap();
+        player.properties.insert(
+            "num_audio_tracks".to_string(),
+            strom_types::PropertyValue::UInt(1),
+        );
+        flow.elements.push(strom_types::Element {
+            id: "asink".to_string(),
+            element_type: "fakesink".to_string(),
+            properties: [
+                ("sync", strom_types::PropertyValue::Bool(false)),
+                ("async", strom_types::PropertyValue::Bool(false)),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+            position: [0.0, 0.0].into(),
+            pad_properties: Default::default(),
+        });
+        flow.links.push(strom_types::element::Link {
+            from: format!("sting-{tag}:audio_out"),
+            to: "asink:sink".to_string(),
+        });
+    })
+    .await;
+
+    // Hold the take's first video frame at the bridge, so the audio let go
+    // with it always reaches the shared timing first. Without the hold that
+    // is a race either stream can win. The clip is parked, so the next
+    // video sample is the take's.
+    strom::blocks::builtin::mediaplayer::hold_bridge_for_tests(
+        &format!("sting-{tag}"),
+        "video",
+        30,
+    );
+
+    classic_take(&r).await;
+
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}

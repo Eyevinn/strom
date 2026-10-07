@@ -14,6 +14,8 @@ mod definition;
 mod state;
 mod timing;
 
+#[doc(hidden)]
+pub use bridge::hold_bridge_for_tests;
 pub use builder::MediaPlayerBuilder;
 pub use definition::get_blocks;
 pub use state::{MediaPlayerKey, MediaPlayerState, MEDIA_PLAYER_REGISTRY};

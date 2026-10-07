@@ -115,6 +115,58 @@ pub fn classic_clip(path: &std::path::Path) {
     });
 }
 
+/// [`classic_clip`] with a stereo PCM track that starts `video_delay_ns`
+/// before the video: the video's first frame is stamped that late, so the
+/// file carries an edit list and the demuxer hands video out at that running
+/// time, audio at zero.
+pub fn classic_clip_with_early_audio(path: &std::path::Path, video_delay_ns: u64) {
+    let pipeline = gst::parse::launch(&format!(
+        "appsrc name=v format=time caps=video/x-raw,format=BGRA,width={W},height={H},framerate=30/1 \
+           ! videoconvert ! video/x-raw,format=RGBA ! pngenc compression-level=1 ! queue ! mux. \
+         audiotestsrc num-buffers={} samplesperbuffer=480 \
+           ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! queue ! mux. \
+         qtmux name=mux ! filesink location=\"{}\"",
+        (video_delay_ns / 10_000_000) as usize + N * 4,
+        path.display()
+    ))
+    .unwrap()
+    .downcast::<gst::Pipeline>()
+    .unwrap();
+    let appsrc = pipeline
+        .by_name("v")
+        .unwrap()
+        .downcast::<gst_app::AppSrc>()
+        .unwrap();
+    pipeline.set_state(gst::State::Playing).unwrap();
+    for i in 0..N {
+        let mut data = vec![0u8; (W * H * 4) as usize];
+        for (j, px) in data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            if (j as u32 % W) < W / 2 {
+                px.copy_from_slice(&[0, 255, 0, 255]);
+            }
+        }
+        let mut buf = gst::Buffer::from_mut_slice(data);
+        {
+            let b = buf.get_mut().unwrap();
+            b.set_pts(gst::ClockTime::from_nseconds(
+                video_delay_ns + i as u64 * FRAME_NS,
+            ));
+            b.set_duration(gst::ClockTime::from_nseconds(FRAME_NS));
+        }
+        appsrc.push_buffer(buf).unwrap();
+    }
+    appsrc.end_of_stream().unwrap();
+    let msg = pipeline.bus().unwrap().timed_pop_filtered(
+        gst::ClockTime::from_seconds(30),
+        &[gst::MessageType::Eos, gst::MessageType::Error],
+    );
+    pipeline.set_state(gst::State::Null).unwrap();
+    assert!(
+        matches!(msg.map(|m| m.type_()), Some(gst::MessageType::Eos)),
+        "clip encode failed"
+    );
+}
+
 /// Track matte, side by side: a 20 px yellow marker top left on the graphic,
 /// and a matte whose edge moves `matte_edge` per frame.
 pub fn sbs_clip(path: &std::path::Path) {
@@ -471,6 +523,17 @@ pub async fn start_with(
     dir: tempfile::TempDir,
     clips: Vec<std::path::PathBuf>,
 ) -> Running {
+    start_edited(tag, backend, dir, clips, |_| {}).await
+}
+
+/// [`start_with`], with the flow edited before it starts.
+pub async fn start_edited(
+    tag: &str,
+    backend: &str,
+    dir: tempfile::TempDir,
+    clips: Vec<std::path::PathBuf>,
+    edit: impl FnOnce(&mut Flow),
+) -> Running {
     if std::env::var("STINGER_TEST_LOG").is_ok() {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(std::env::var("STINGER_TEST_LOG").unwrap())
@@ -491,7 +554,8 @@ pub async fn start_with(
         false,
         false,
     );
-    let flow = build_flow(tag, backend, &clips);
+    let mut flow = build_flow(tag, backend, &clips);
+    edit(&mut flow);
     let flow_id = flow.id;
     state.upsert_flow(flow).await.expect("upsert");
     state.start_flow(&flow_id).await.expect("start");

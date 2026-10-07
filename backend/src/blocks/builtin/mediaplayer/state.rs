@@ -127,21 +127,47 @@ pub struct StingerPlayback {
 }
 
 /// Counts the buffers reaching a stinger clip's video clocksync, so a cue
-/// can tell when the clip's first frame is there. Shared with the probe that
-/// counts, so the probe holds no player state.
-#[derive(Default)]
+/// can tell when the clip's first frame is there, and keeps the last one's
+/// PTS, so a take knows where the parked frame is in the clip. Shared with
+/// the probe that counts, so the probe holds no player state.
 pub struct ParkFlags {
     /// Buffers seen so far.
     pub seen: AtomicU64,
     /// The cued clip's first frame waits in the clocksync.
     pub parked: AtomicBool,
+    /// PTS of the last buffer seen, [`ParkFlags::NO_PTS`] for none. While
+    /// parked that is the parked frame: nothing passes the clocksync after it.
+    last_pts: AtomicU64,
+}
+
+impl Default for ParkFlags {
+    fn default() -> Self {
+        Self {
+            seen: AtomicU64::new(0),
+            parked: AtomicBool::new(false),
+            last_pts: AtomicU64::new(Self::NO_PTS),
+        }
+    }
 }
 
 impl ParkFlags {
+    const NO_PTS: u64 = u64::MAX;
+
     /// Called for every buffer entering the video clocksync of a stinger
-    /// source: one relaxed atomic add.
-    pub fn on_buffer(&self) {
-        self.seen.fetch_add(1, Ordering::Relaxed);
+    /// source: two atomic writes.
+    pub fn on_buffer(&self, pts: Option<gst::ClockTime>) {
+        self.last_pts.store(
+            pts.map_or(Self::NO_PTS, |p| p.nseconds()),
+            Ordering::Relaxed,
+        );
+        self.seen.fetch_add(1, Ordering::Release);
+    }
+
+    /// PTS of the last buffer that entered the video clocksync.
+    pub fn last_pts(&self) -> Option<gst::ClockTime> {
+        Some(self.last_pts.load(Ordering::Acquire))
+            .filter(|&p| p != Self::NO_PTS)
+            .map(gst::ClockTime::from_nseconds)
     }
 }
 
@@ -831,8 +857,17 @@ impl MediaPlayerState {
             .as_ref()
             .ok_or("Internal pipeline not created")?;
         self.settle();
+        // The parked frame's running time pins the start to video, whichever
+        // stream reaches the bridge first. Read before the clocksyncs are let
+        // go: then the last frame to enter the video clocksync is still the
+        // parked one. Not parked, the first buffer to arrive takes the pin.
+        let first_video = if self.stinger.park.parked.load(Ordering::Acquire) {
+            self.parked_video_running_time(pipeline)
+        } else {
+            None
+        };
         self.timing.reset(Some(pipeline), &self.main_pipeline);
-        self.timing.pin_start(start_at);
+        self.timing.pin_start(start_at, first_video);
         // The parked frame waits inside its clocksync and is synced against
         // whatever offset the clocksync holds when it is let go; an hour back
         // makes it due already. The first frame after it takes the real one.
@@ -842,6 +877,26 @@ impl MediaPlayerState {
         self.stinger.park.parked.store(false, Ordering::Release);
         self.is_paused.store(false, Ordering::SeqCst);
         self.start(pipeline, "Failed to start stinger clip")
+    }
+
+    /// Running time of the frame parked in the video clocksync, from its PTS
+    /// and the clocksync's segment: the same running time the bridge places
+    /// it by.
+    fn parked_video_running_time(&self, pipeline: &gst::Pipeline) -> Option<i64> {
+        let pts = self.stinger.park.last_pts()?;
+        super::timing::clocksyncs(pipeline)
+            .into_iter()
+            .filter_map(|c| c.static_pad("sink"))
+            .find(|pad| {
+                pad.current_caps()
+                    .and_then(|c| c.structure(0).map(|s| s.name().starts_with("video/")))
+                    .unwrap_or(false)
+            })?
+            .sticky_event::<gst::event::Segment>(0)?
+            .segment()
+            .downcast_ref::<gst::ClockTime>()?
+            .to_running_time(pts)
+            .map(|rt| rt.nseconds() as i64)
     }
 
     /// Seek to a position in nanoseconds.

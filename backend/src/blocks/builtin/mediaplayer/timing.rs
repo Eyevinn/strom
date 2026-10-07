@@ -98,10 +98,20 @@ impl Timing {
         }
     }
 
-    /// Put the first buffer after the next baseline at main-pipeline running
-    /// time `running_time`. Call after [`Self::reset`].
-    pub fn pin_start(&self, running_time: i64) {
-        self.start_at.store(running_time, Ordering::Release);
+    /// Put the clip's first video frame at main-pipeline running time
+    /// `running_time`. Call after [`Self::reset`].
+    ///
+    /// With `first_video_rt`, the first video frame's own running time, the
+    /// baseline is set here, from video: audio and video share it, and a
+    /// clip whose audio starts before or after its video would otherwise
+    /// land its first video frame off the pin whenever its audio reached the
+    /// bridge first. The audio keeps its offset from the video. Without it,
+    /// the first buffer to reach [`Self::place`] takes the pin.
+    pub fn pin_start(&self, running_time: i64, first_video_rt: Option<i64>) {
+        match first_video_rt {
+            Some(rt) => self.sync_offset.store(running_time - rt, Ordering::Release),
+            None => self.start_at.store(running_time, Ordering::Release),
+        }
     }
 
     /// The `ts-offset` the clocksyncs pace with, once a baseline is set.
@@ -458,7 +468,7 @@ mod tests {
     #[test]
     fn a_pinned_start_puts_the_first_buffer_where_the_take_said() {
         let t = Arc::new(Timing::for_stinger(60));
-        t.pin_start(5_000 * MS);
+        t.pin_start(5_000 * MS, None);
         // The parked first frame reaches the bridge early, unpaced.
         let first = t.place(0, 4_870 * MS, true);
         assert_eq!(first.running_time, 5_000 * MS);
@@ -470,6 +480,27 @@ mod tests {
         // The pin is used up: the next baseline is the ordinary one.
         t.reset(None, &gst::glib::WeakRef::new());
         assert_eq!(t.place(0, 9_000 * MS, true).running_time, 9_000 * MS);
+    }
+
+    /// Audio and video share one baseline. A clip whose audio starts 100 ms
+    /// before its video, with the audio reaching the bridge first, used to
+    /// take the pin from the audio, so the first video frame aired 100 ms
+    /// after the frame the mixer was programmed for.
+    #[test]
+    fn a_pinned_start_lands_the_first_video_frame_when_audio_comes_first() {
+        let t = Arc::new(Timing::for_stinger(60));
+        t.pin_start(5_000 * MS, Some(100 * MS));
+        let audio = t.place(0, 4_870 * MS, true);
+        assert_eq!(audio.running_time, 4_900 * MS, "audio keeps its offset");
+        let video = t.place(100 * MS, 4_871 * MS, true);
+        assert_eq!(video.running_time, 5_000 * MS, "video lands on the pin");
+        assert_eq!(t.clocksync_offset(), Some(4_900 * MS - 60 * MS));
+
+        // Audio starting after the video, placed first, the same.
+        t.reset(None, &gst::glib::WeakRef::new());
+        t.pin_start(9_000 * MS, Some(0));
+        assert_eq!(t.place(80 * MS, 8_900 * MS, true).running_time, 9_080 * MS);
+        assert_eq!(t.place(0, 8_901 * MS, true).running_time, 9_000 * MS);
     }
 
     #[test]

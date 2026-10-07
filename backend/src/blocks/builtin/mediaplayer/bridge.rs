@@ -12,7 +12,9 @@ use crate::gst::rtp_hdrext;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use strom_types::{FlowId, StromEvent};
 use tracing::{debug, error, info, warn};
 
@@ -47,6 +49,38 @@ impl Decoder {
             Decoder::Classic => "uridecodebin",
             Decoder::Decodebin3 => "uridecodebin3",
         }
+    }
+}
+
+/// Set while any [`hold_bridge_for_tests`] hold waits, so the bridge looks
+/// up holds only then: one relaxed load per sample otherwise.
+static BRIDGE_HOLDS_ARMED: AtomicBool = AtomicBool::new(false);
+/// Pending holds, by player block id and media type, in ms.
+static BRIDGE_HOLDS: LazyLock<Mutex<HashMap<(String, String), u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Hold the next sample of player `block_id`'s `media_type` stream ("video"
+/// or "audio") for `ms` at the bridge, before it is placed. Lets a test
+/// decide which stream of a take reaches the shared timing first; streams
+/// let go at the same moment otherwise race.
+#[doc(hidden)]
+pub fn hold_bridge_for_tests(block_id: &str, media_type: &str, ms: u64) {
+    let mut holds = BRIDGE_HOLDS.lock().unwrap_or_else(|p| p.into_inner());
+    holds.insert((block_id.to_string(), media_type.to_string()), ms);
+    BRIDGE_HOLDS_ARMED.store(true, Ordering::Release);
+}
+
+fn wait_out_test_hold(block_id: &str, media_type: &str) {
+    let ms = {
+        let mut holds = BRIDGE_HOLDS.lock().unwrap_or_else(|p| p.into_inner());
+        let ms = holds.remove(&(block_id.to_string(), media_type.to_string()));
+        if holds.is_empty() {
+            BRIDGE_HOLDS_ARMED.store(false, Ordering::Release);
+        }
+        ms
+    };
+    if let Some(ms) = ms {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
     }
 }
 
@@ -570,13 +604,15 @@ fn link_pad_through_clocksync(
     }
 
     // A stinger clip source tells a cue when the clip's first frame is parked
-    // here. Per buffer, but a single relaxed atomic add; the counter is
-    // shared, so the probe holds no player state.
+    // here, and a take where that frame is in the clip. Per buffer, but two
+    // atomic writes; the flags are shared, so the probe holds no player state.
     if state.stinger.enabled && media_type == "video" {
         if let Some(sink) = clocksync.static_pad("sink") {
             let park = Arc::clone(&state.stinger.park);
-            sink.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
-                park.on_buffer();
+            sink.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_ref() {
+                    park.on_buffer(buffer.pts());
+                }
                 gst::PadProbeReturn::Ok
             });
         }
@@ -650,6 +686,9 @@ fn link_pad_through_clocksync(
                 let Some((clock, base)) = main_clock.as_ref() else {
                     return Ok(gst::FlowSuccess::Ok);
                 };
+                if BRIDGE_HOLDS_ARMED.load(Ordering::Relaxed) {
+                    wait_out_test_hold(&instance, &media_type_owned);
+                }
                 let now = clock.time().saturating_sub(*base).nseconds() as i64;
                 let placed = timing.place(rt.nseconds() as i64, now, sync);
                 if let Some(lateness) = placed.resynced_after {
