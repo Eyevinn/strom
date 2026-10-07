@@ -307,11 +307,10 @@ fn restart_decodebin(decodebin: &gst::Element, src: &gst::Pad, slot: usize) {
             e
         );
     }
-    // The link asks the appsrc to renegotiate. When this runs on the appsrc's
-    // own streaming thread, its next loop would do that with the previous
-    // session's caps and configure the fresh decoder for them before the new
-    // publisher's arrive. The appsrc negotiates each new publisher's caps from
-    // its samples anyway.
+    // The link asks the appsrc to renegotiate. Its next loop would do that
+    // with the previous session's caps and configure the fresh decoder for
+    // them before the new publisher's arrive. The appsrc negotiates each new
+    // publisher's caps from its samples anyway.
     let _ = src.check_reconfigure();
     match decodebin.sync_state_with_parent() {
         Ok(()) => debug!(
