@@ -240,6 +240,15 @@ impl AppState {
         let pad = cefsrc
             .static_pad("src")
             .ok_or_else(|| ("the stinger page has no output".to_string(), true))?;
+        // The page may have been moved since the block's URL was stored (a
+        // live write through the element endpoint or MCP): check what it
+        // shows, since that is what the take rewrites.
+        let shown: Option<String> = cefsrc.property(html_input::URL_PROPERTY);
+        let shown = crate::cef_pages::shown_url(
+            cefsrc.upcast_ref(),
+            shown.unwrap_or_else(|| page.configured_url()),
+        );
+        check_page_url(&shown).map_err(|e| (e, false))?;
 
         // Stage the take and raise the graphic: the page is transparent at
         // rest, so nothing shows until it starts. Its start is not known
@@ -294,11 +303,6 @@ impl AppState {
         }
         // A new fragment is a same-document navigation: the loaded page gets
         // `hashchange` and starts its animation, rather than reloading.
-        let shown: Option<String> = cefsrc.property(html_input::URL_PROPERTY);
-        let shown = crate::cef_pages::shown_url(
-            cefsrc.upcast_ref(),
-            shown.unwrap_or_else(|| page.configured_url()),
-        );
         let base = shown.split('#').next().unwrap_or_default().to_string();
         crate::cef_pages::load_url(&cefsrc, &format!("{}#{}", base, take_fragment(token)));
         let taken_at = Instant::now();
