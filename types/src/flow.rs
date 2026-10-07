@@ -580,6 +580,68 @@ pub struct BlockHealth {
     /// `None` when the block is healthy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// What failed, for a client that acts on the failure instead of showing
+    /// `detail`. Empty when the block is healthy, and when the scan that
+    /// found the failure has no structured cause to give.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub causes: Vec<BlockHealthCause>,
+}
+
+/// One structured reason a block reported failed.
+///
+/// A block can carry several at once: a WHIP Input block has one seat per
+/// slot, and each can lose a medium on its own. Clients should ignore a
+/// `kind` they do not know.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BlockHealthCause {
+    /// One medium of an occupied WHIP Input seat is not reaching the flow.
+    WhipMedium {
+        /// The seat's slot index within the block.
+        slot: u32,
+        /// The medium that is missing.
+        medium: HealthMedium,
+        /// Where the medium stops.
+        fault: MediumFault,
+    },
+}
+
+/// A medium named in a [`BlockHealthCause`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum HealthMedium {
+    Audio,
+    Video,
+}
+
+impl HealthMedium {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HealthMedium::Audio => "audio",
+            HealthMedium::Video => "video",
+        }
+    }
+}
+
+/// Where a missing medium stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum MediumFault {
+    /// The publisher sent this medium and then stopped while still sending the
+    /// other one: a microphone unplugged, a browser track that ended. Nothing in
+    /// the flow is at fault, the session is not reaped for it, and reconnecting
+    /// with the same track does not help.
+    PublisherStopped,
+    /// The publisher has sent none of this medium although the endpoint takes
+    /// it, while sending the other one.
+    NeverSent,
+    /// The medium still arrives from the publisher, but none of it comes out of
+    /// the slot's decode chain. The fault is inside the flow; the session is
+    /// reaped if it lasts.
+    NotProduced,
 }
 
 #[cfg(test)]

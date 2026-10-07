@@ -67,6 +67,7 @@ pub(crate) fn log_strom_event(event: &StromEvent) {
             block_id,
             status: BlockHealthStatus::Failed,
             detail,
+            ..
         } => error!(
             event.domain = "strom",
             event.name = %name,
@@ -150,6 +151,7 @@ mod tests {
             block_id: "b0".to_string(),
             status: BlockHealthStatus::Failed,
             detail: None,
+            causes: Vec::new(),
         });
     }
 
