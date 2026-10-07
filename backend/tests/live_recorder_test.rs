@@ -772,9 +772,37 @@ fn a_pause_does_not_end_the_file() {
 mod containers {
     use super::*;
 
+    /// Before GStreamer 1.26 matroskamux is not a live muxer, so the block must
+    /// refuse mkv there rather than freeze like the Recorder. Returns whether it
+    /// did, having checked the refusal; the behaviour tests run on 1.26 and later.
+    fn mkv_refused() -> bool {
+        if gst::version() >= (1, 26, 0, 0) {
+            return false;
+        }
+        let props: HashMap<String, PropertyValue> =
+            [("container".to_string(), PropertyValue::String("mkv".into()))].into();
+        let ctx = BlockBuildContext::new(vec![], "all".to_string());
+        let err = match LiveRecorderBuilder.build("rec", &props, &ctx) {
+            Ok(_) => panic!(
+                "mkv built on GStreamer {:?}, where matroskamux is not live",
+                gst::version()
+            ),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("needs GStreamer 1.26") && err.contains("mp4 or mpegts"),
+            "the refusal should say what is needed and what to use: {}",
+            err
+        );
+        true
+    }
+
     /// Audio stalls, then video stalls, then the flow stops with no EOS.
     fn stalls_and_stop(container: &str) {
         init();
+        if container == "mkv" && mkv_refused() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let pipeline = gst::Pipeline::new();
         let (_rec, venc, aenc) = av_recorder(
@@ -866,6 +894,9 @@ mod containers {
     /// Each split file plays on its own; Matroska files start at zero.
     fn split(container: &str) {
         init();
+        if container == "mkv" && mkv_refused() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let pipeline = gst::Pipeline::new();
         let _ = av_recorder(

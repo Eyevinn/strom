@@ -195,11 +195,15 @@ impl Track {
                 gst::PadProbeType::BUFFER
                     | gst::PadProbeType::BUFFER_LIST
                     | gst::PadProbeType::EVENT_DOWNSTREAM,
-                move |_pad, _info| {
-                    if track.retired.load(Ordering::Relaxed) {
-                        gst::PadProbeReturn::Drop
-                    } else {
-                        gst::PadProbeReturn::Ok
+                move |_pad, info| {
+                    if !track.retired.load(Ordering::Relaxed) {
+                        return gst::PadProbeReturn::Ok;
+                    }
+                    // Events are discarded with Handled: before GStreamer 1.24.8 a
+                    // probe that drops an event has it freed twice.
+                    match info.data {
+                        Some(gst::PadProbeData::Event(_)) => gst::PadProbeReturn::Handled,
+                        _ => gst::PadProbeReturn::Drop,
                     }
                 },
             );

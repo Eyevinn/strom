@@ -206,6 +206,16 @@ impl BlockBuilder for LiveRecorderBuilder {
             );
         }
 
+        if container == Container::Mkv && gst::version() < (1, 26, 0, 0) {
+            // Before 1.26 matroskamux waits for every track like splitmuxsink
+            // does, so a quiet track would freeze the recording again.
+            let (major, minor, micro, _) = gst::version();
+            return Err(BlockBuildError::InvalidProperty(format!(
+                "{}: the mkv container needs GStreamer 1.26 or later, where matroskamux became a live muxer; this system has {}.{}.{}. Use mp4 or mpegts",
+                BLOCK_NAME, major, minor, micro
+            )));
+        }
+
         let mux_id = format!("{}:mux", instance_id);
         let (mux, format) = match container {
             Container::Mkv => (
