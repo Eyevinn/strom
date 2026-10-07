@@ -23,10 +23,17 @@
 //! that is the signal used here. `gst_pad_get_task_state()` returns `Stopped`
 //! both for a pad whose task was stopped and for a pad that never had one, so
 //! `Stopped` cannot be told apart from the common case and is not reported.
+//!
+//! The scan cannot see a chain that is linked and simply never pushed to: its
+//! elements sit idle and `PLAYING` with no task to pause. Only the block that
+//! owns it knows, so a block may report on itself through `BlockLiveness`, and
+//! the scan folds that verdict in.
 
+use crate::blocks::BlockLiveness;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use strom_types::flow::{BlockHealth, BlockHealthCause, BlockHealthStatus};
 
 /// A pad whose task has been paused while the pipeline is playing.
@@ -120,7 +127,14 @@ fn owning_block(element_id: &str) -> &str {
 ///
 /// Call only while the pipeline is playing; a paused task is expected in any
 /// other pipeline state.
-pub(crate) fn scan_block_health(elements: &HashMap<String, gst::Element>) -> Vec<BlockHealth> {
+///
+/// `reporters` are blocks that judge their own liveness; see `BlockLiveness`.
+/// A reporter for a block with no element left in the pipeline is skipped, so
+/// its verdict cannot outlive the elements it describes.
+pub(crate) fn scan_block_health(
+    elements: &HashMap<String, gst::Element>,
+    reporters: &[(String, Arc<dyn BlockLiveness>)],
+) -> Vec<BlockHealth> {
     let mut by_block: BTreeMap<&str, BlockHealth> = BTreeMap::new();
 
     for (element_id, element) in elements {
@@ -143,6 +157,22 @@ pub(crate) fn scan_block_health(elements: &HashMap<String, gst::Element>) -> Vec
                 "pad task paused on {}:{} - this branch is not passing data",
                 stalled.element, stalled.pad
             ));
+        }
+    }
+
+    // A block that reports on itself. Checked after the pad-task scan, which
+    // names the more specific failure when both fire.
+    for (block_id, reporter) in reporters {
+        let Some(entry) = by_block.get_mut(block_id.as_str()) else {
+            continue;
+        };
+        if entry.status.is_failed() {
+            continue;
+        }
+        if let Some(failure) = reporter.failure() {
+            entry.status = BlockHealthStatus::Failed;
+            entry.detail = Some(failure.detail);
+            entry.causes = failure.causes;
         }
     }
 
@@ -208,6 +238,7 @@ impl super::PipelineManager {
         let events = self.events.clone();
         let flow_id = self.flow_id;
         let flow_name = self.flow_name.clone();
+        let reporters = self.block_liveness.clone();
 
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(HEALTH_POLL_INTERVAL);
@@ -236,7 +267,7 @@ impl super::PipelineManager {
                     continue;
                 }
 
-                let mut snapshot = scan_block_health(&elements);
+                let mut snapshot = scan_block_health(&elements, &reporters);
 
                 // A block is only reported once it has looked stalled on
                 // CONFIRMATIONS_BEFORE_FAILED scans in a row. Downgrade the
@@ -396,6 +427,67 @@ mod tests {
                 Some(&one_seat)
             ),
             Some(Transition::Recovered)
+        );
+    }
+
+    /// A block that judges its own liveness has to reach the snapshot. Nothing
+    /// else can report it: a chain that is never pushed to stalls no pad task,
+    /// so the scan itself has nothing to find, and the pipeline stays `Playing`
+    /// throughout.
+    #[test]
+    fn a_blocks_own_failure_report_reaches_its_health() {
+        use crate::blocks::LivenessFailure;
+        use strom_types::flow::{HealthMedium, MediumFault};
+        let _ = gst::init();
+
+        let cause = BlockHealthCause::WhipMedium {
+            slot: 0,
+            medium: HealthMedium::Audio,
+            fault: MediumFault::PublisherStopped,
+        };
+        struct HalfDead(BlockHealthCause);
+        impl BlockLiveness for HalfDead {
+            fn failure(&self) -> Option<LivenessFailure> {
+                Some(LivenessFailure {
+                    detail: "slot 0: the publisher stopped sending audio".to_string(),
+                    causes: vec![self.0.clone()],
+                })
+            }
+        }
+
+        let sink = gst::ElementFactory::make("fakesink")
+            .build()
+            .expect("fakesink is part of gstreamer core");
+        let elements: HashMap<String, gst::Element> =
+            HashMap::from([("whip:sink".to_string(), sink)]);
+
+        let healthy = scan_block_health(&elements, &[]);
+        assert_eq!(healthy.len(), 1);
+        assert_eq!(healthy[0].status, BlockHealthStatus::Ok);
+
+        let reporters: Vec<(String, Arc<dyn BlockLiveness>)> =
+            vec![("whip".to_string(), Arc::new(HalfDead(cause.clone())))];
+        let reported = scan_block_health(&elements, &reporters);
+        assert_eq!(reported.len(), 1);
+        assert_eq!(reported[0].block_id, "whip");
+        assert_eq!(reported[0].status, BlockHealthStatus::Failed);
+        assert_eq!(
+            reported[0].detail.as_deref(),
+            Some("slot 0: the publisher stopped sending audio")
+        );
+        assert_eq!(reported[0].causes, vec![cause.clone()]);
+
+        // A verdict about a block with nothing left in the pipeline must not
+        // conjure an entry for it.
+        let orphan: Vec<(String, Arc<dyn BlockLiveness>)> =
+            vec![("gone".to_string(), Arc::new(HalfDead(cause)))];
+        let scanned = scan_block_health(&elements, &orphan);
+        assert_eq!(
+            scanned
+                .iter()
+                .map(|h| h.block_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["whip"]
         );
     }
 
