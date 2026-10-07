@@ -931,7 +931,7 @@ pub async fn whip_resource_options() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::whip_session_manager::ActivityStamp;
+    use crate::whip_session_manager::SlotOutput;
     use gstreamer as gst;
     use gstreamer::prelude::*;
     use std::time::{Duration, Instant};
@@ -970,7 +970,7 @@ mod tests {
             cleanup_sent: Arc::new(AtomicBool::new(false)),
             activity: Arc::new(SessionActivity::new(
                 Instant::now(),
-                Arc::new(ActivityStamp::new(Instant::now())),
+                Arc::new(SlotOutput::new(Instant::now())),
             )),
         }));
         (manager, pending, pipeline)
