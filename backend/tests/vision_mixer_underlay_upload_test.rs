@@ -541,9 +541,15 @@ fn run(block_id: &str, backend: &str, mixer_frame_delay: Option<Duration>) {
         held_on, 3,
         "{held_on} underlay pads hold a frame with one bordered source"
     );
-    // Frames keep coming (a loose bound: CI GL is slow).
+    // Frames keep coming (a loose bound: CI GL is slow, and slower still with
+    // the mixer held on purpose).
+    let min_fps = if mixer_frame_delay.is_some() {
+        3.0
+    } else {
+        10.0
+    };
     assert!(
-        frames as f64 / elapsed > 10.0,
+        frames as f64 / elapsed > min_fps,
         "PGM stalled: {frames} frames in {elapsed:.2}s"
     );
     // An unchanged underlay is not uploaded again. Streaming at 5 fps
