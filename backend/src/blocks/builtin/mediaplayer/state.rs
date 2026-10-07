@@ -120,6 +120,10 @@ pub struct StingerPlayback {
     pub enabled: bool,
     /// Set when the cued clip's first frame waits in its clocksync.
     pub park: Arc<ParkFlags>,
+    /// The playlist entry the internal pipeline holds. A playlist edit can
+    /// put another file at the parked index; this is what tells a cue that
+    /// the parked frame is not the new entry's.
+    pub loaded_file: Mutex<Option<String>>,
 }
 
 /// Counts the buffers reaching a stinger clip's video clocksync, so a cue
@@ -541,6 +545,11 @@ impl MediaPlayerState {
 
         // Set the new URI on source element
         source_element.set_property("uri", &uri);
+        *self
+            .stinger
+            .loaded_file
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(file_path);
 
         // The old stream went at READY: an EOS posted from here on is the new
         // file's, a clip so short it ends while starting included, and must
@@ -700,7 +709,7 @@ impl MediaPlayerState {
                         pl.files.len()
                     ));
                 }
-                let switch = pl.current_index != index;
+                let switch = pl.current_index != index || !self.holds_file(&pl.files[index]);
                 pl.current_index = index;
                 switch
             };
@@ -782,10 +791,28 @@ impl MediaPlayerState {
     }
 
     /// Whether playlist entry `index` is loaded and parked on its first frame.
+    /// The loaded file is compared, not only the index: a playlist edit can
+    /// leave another file at the parked index.
     pub fn is_parked_on(&self, index: usize) -> bool {
-        self.stinger.park.parked.load(Ordering::Acquire)
-            && self.is_paused.load(Ordering::SeqCst)
-            && self.current_index() == index
+        if !self.stinger.park.parked.load(Ordering::Acquire)
+            || !self.is_paused.load(Ordering::SeqCst)
+        {
+            return false;
+        }
+        let Ok(pl) = self.playlist.read() else {
+            return false;
+        };
+        pl.current_index == index && pl.files.get(index).is_some_and(|f| self.holds_file(f))
+    }
+
+    /// Whether the internal pipeline holds playlist entry `file`.
+    fn holds_file(&self, file: &str) -> bool {
+        self.stinger
+            .loaded_file
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_deref()
+            == Some(file)
     }
 
     /// Play the parked clip so that its first frame lands at main-pipeline

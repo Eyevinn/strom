@@ -216,6 +216,89 @@ async fn a_take_is_followed_by_its_id() {
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
 
+/// Take the cued clip and say which clip aired: the side-by-side clip's
+/// graphic carries a yellow marker top left, the classic clip's a green left
+/// half and no marker.
+async fn take_cued_and_watch(r: &Running) -> (String, bool, bool) {
+    r.wait_until_parked().await;
+    r.drain().await;
+    let take = r
+        .state
+        .stinger_take(&r.flow_id, &r.mixer(), None, None)
+        .await
+        .expect("take");
+    let frames = r.collect(take.take_to_air_ms as u64 + 1600).await;
+    let marker = frames
+        .iter()
+        .any(|(_, f)| colour(px(f, 3, 3)) == Colour::Yellow);
+    let green = frames
+        .iter()
+        .any(|(_, f)| colour(px(f, W / 4, H / 2)) == Colour::Green);
+    r.wait_for_report(take.index).await;
+    (take.file, marker, green)
+}
+
+/// Removing the cued clip cues the one that takes its place: the next take
+/// plays that clip, not the removed one still parked in the player.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removing_the_cued_clip_parks_its_successor() {
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let r = start("api-rm-cued", "cpu").await;
+    let app = strom::create_app_with_state(r.state.clone()).await;
+    let base = format!("/api/flows/{}/blocks/{}/stinger", r.flow_id, r.mixer());
+    let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
+    assert_eq!(s.cued_index, Some(0));
+    let classic = s.clips[0].file.clone();
+
+    let (status, _) = call(
+        &app,
+        "DELETE",
+        &format!("{base}/clips/0?file={}", urlencoding(&classic)),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (file, marker, green) = take_cued_and_watch(&r).await;
+    assert!(file.ends_with("sbs.mov"), "{file}");
+    assert!(marker, "the side-by-side clip's graphic never aired");
+    assert!(!green, "the removed classic clip aired");
+
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}
+
+/// A playlist PUT that puts another file at the parked index re-cues it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_playlist_put_over_the_parked_index_recues_it() {
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let r = start("api-put-cued", "cpu").await;
+    let app = strom::create_app_with_state(r.state.clone()).await;
+    let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
+    assert_eq!(s.cued_index, Some(0));
+    let files: Vec<String> = s.clips.iter().map(|c| c.file.clone()).collect();
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!(
+            "/api/flows/{}/blocks/sting-api-put-cued/player/playlist",
+            r.flow_id
+        ),
+        Some(json!({"files": [files[1], files[0], files[2]]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (file, marker, green) = take_cued_and_watch(&r).await;
+    assert!(file.ends_with("sbs.mov"), "{file}");
+    assert!(marker, "the side-by-side clip's graphic never aired");
+    assert!(!green, "the classic clip parked before the PUT aired");
+
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}
+
 /// Percent-encode a query value.
 fn urlencoding(s: &str) -> String {
     s.bytes()

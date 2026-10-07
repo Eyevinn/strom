@@ -343,6 +343,11 @@ fn build_media_player(
     if let Some(ref uri) = initial_uri {
         info!("Media Player {}: Initial URI: {}", instance_id, uri);
     }
+    *state
+        .stinger
+        .loaded_file
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = initial_playlist.first().cloned();
 
     // --- Create internal pipeline ---
     let internal_pipeline = if decode {
