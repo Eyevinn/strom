@@ -9,6 +9,7 @@ use tracing::{debug, info, warn};
 use super::elements::*;
 use super::metering::connect_mixer_meter_handler;
 use super::properties::*;
+use super::voice_isolation::push_voice_isolation;
 use super::{METER_INTERVAL_NS, MIN_KNEE_LINEAR};
 use strom_types::mixer::{
     DEFAULT_INTERNAL_BUS_LATENCY_MS, DEFAULT_LATENCY_MS, DEFAULT_MIN_UPSTREAM_LATENCY_MS,
@@ -811,6 +812,15 @@ impl BlockBuilder for MixerBuilder {
             let hpf = make_hpf_element(&hpf_id, hpf_enabled, hpf_freq)?;
             elements.push((hpf_id.clone(), hpf));
 
+            let voice_isolation = push_voice_isolation(
+                instance_id,
+                ch,
+                properties,
+                sample_rate,
+                &mut elements,
+                &mut internal_links,
+            )?;
+
             // ----------------------------------------------------------------
             // Gate (LSP Gate Stereo with fallback)
             // ----------------------------------------------------------------
@@ -1096,7 +1106,7 @@ impl BlockBuilder for MixerBuilder {
             // ----------------------------------------------------------------
             // Main chain links
             // ----------------------------------------------------------------
-            // Chain: convert → resample → caps → gain → hpf → gate → comp → eq → level → pre_fader_tee
+            // Chain: convert → resample → caps → gain → hpf → [voice isolation] → gate → comp → eq → level → pre_fader_tee
             // The channel `level` element sits pre-fader (after EQ/dynamics, before
             // pan/fader/mute) so the meter reflects the signal hitting the fader.
             internal_links.push((
@@ -1115,10 +1125,22 @@ impl BlockBuilder for MixerBuilder {
                 ElementPadRef::pad(&gain_id, "src"),
                 ElementPadRef::pad(&hpf_id, "sink"),
             ));
-            internal_links.push((
-                ElementPadRef::pad(&hpf_id, "src"),
-                ElementPadRef::pad(&gate_id, "sink"),
-            ));
+            match &voice_isolation {
+                Some((first, last)) => {
+                    internal_links.push((
+                        ElementPadRef::pad(&hpf_id, "src"),
+                        ElementPadRef::pad(first, "sink"),
+                    ));
+                    internal_links.push((
+                        ElementPadRef::pad(last, "src"),
+                        ElementPadRef::pad(&gate_id, "sink"),
+                    ));
+                }
+                None => internal_links.push((
+                    ElementPadRef::pad(&hpf_id, "src"),
+                    ElementPadRef::pad(&gate_id, "sink"),
+                )),
+            }
             internal_links.push((
                 ElementPadRef::pad(&gate_id, "src"),
                 ElementPadRef::pad(&comp_id, "sink"),
