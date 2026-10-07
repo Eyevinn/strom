@@ -116,6 +116,11 @@ const FILE_FINISH_TIMEOUT: Duration = Duration::from_secs(10);
 /// 10 s GOP of a remote encoder that ignores key-unit requests.
 const KEYFRAME_CUT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How long a flow that stops waits for a file switch to finish relinking (see
+/// `RelinkGate`). The relink takes milliseconds; this only bounds a muxer that
+/// will not go to NULL, so a stop cannot hang on it.
+const RELINK_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The most a parked input keeps for replay, in bytes: `RESUME_HOLD` and a switch
 /// of video up to about 70 Mbit/s. Past it the stash drops its oldest GOP.
 const STASH_MAX_BYTES: usize = 32 << 20;
@@ -665,11 +670,13 @@ fn add_park_probe(src: &gst::Pad, activity: &Arc<TrackActivity>) {
             if !activity.parked.load(Ordering::Relaxed) {
                 return gst::PadProbeReturn::Remove;
             }
+            // Events are discarded with Handled rather than Drop: before 1.24.8,
+            // GStreamer frees a dropped event twice and logs a CRITICAL each time.
             match info.data.as_ref() {
                 Some(gst::PadProbeData::Buffer(_)) | Some(gst::PadProbeData::BufferList(_)) => {}
                 Some(gst::PadProbeData::Event(event)) if event.is_upstream() => {
                     return if event.type_() == gst::EventType::Reconfigure {
-                        gst::PadProbeReturn::Drop
+                        gst::PadProbeReturn::Handled
                     } else {
                         gst::PadProbeReturn::Ok
                     };
@@ -677,7 +684,7 @@ fn add_park_probe(src: &gst::Pad, activity: &Arc<TrackActivity>) {
                 Some(gst::PadProbeData::Event(event)) if event.is_sticky() => {
                     return gst::PadProbeReturn::Ok;
                 }
-                _ => return gst::PadProbeReturn::Drop,
+                _ => return gst::PadProbeReturn::Handled,
             }
             let mut stash = activity.stash.lock().unwrap_or_else(|e| e.into_inner());
             // Checked again under the lock: once the stash is replayed, what
@@ -707,8 +714,10 @@ fn add_park_probe(src: &gst::Pad, activity: &Arc<TrackActivity>) {
 /// would park them again. The chain needs the stream's caps and segment before
 /// them. The input holds those and sends them ahead of its next buffer, which may
 /// never come, so they are pushed now: pushing one sticky event sends every one
-/// still pending, in order. An input that took an EOS while parked refuses that
-/// push, so its chain gets them directly; the EOS follows the replay.
+/// still pending, in order. An input that refuses that push, such as one that
+/// took an EOS while parked, has its chain get them directly; buffers without a
+/// segment would leave splitmuxsink unable to place them. An EOS follows the
+/// replay.
 ///
 /// Whatever arrives during the replay is added to the stash and replayed after
 /// it. `parked` is cleared under the stash lock once it is empty, so live data
@@ -720,7 +729,7 @@ fn add_park_probe(src: &gst::Pad, activity: &Arc<TrackActivity>) {
 fn replay_stash(src: &gst::Pad, activity: &TrackActivity, is_video: bool) {
     let peer = src.peer();
     if let Some(segment) = src.sticky_event::<gst::event::Segment>(0) {
-        if !src.push_event(segment) && src.pad_flags().contains(gst::PadFlags::EOS) {
+        if !src.push_event(segment) {
             if let Some(peer) = peer.as_ref() {
                 let stream_start = src.sticky_event::<gst::event::StreamStart>(0);
                 let caps = src.sticky_event::<gst::event::Caps>(0);
@@ -875,10 +884,19 @@ fn track_state(track: &WatchedTrack) -> TrackState {
     }
 }
 
-/// Poll `done` until it holds, the recorder's pipeline stops, or `timeout`
-/// passes (`None`: no limit). Returns whether `done` held.
+/// Whether the recorder's pipeline is running.
+fn pipeline_running(splitmuxsink: &gst::Element) -> bool {
+    splitmuxsink
+        .parent()
+        .and_then(|p| p.downcast::<gst::Element>().ok())
+        .is_some_and(|p| p.current_state() >= gst::State::Paused)
+}
+
+/// Poll `done` until it holds, the flow stops, or `timeout` passes (`None`: no
+/// limit). Returns whether `done` held.
 fn wait_for(
     splitmuxsink: &gst::Element,
+    gate: &RelinkGate,
     timeout: Option<Duration>,
     done: impl Fn() -> bool,
 ) -> bool {
@@ -887,11 +905,10 @@ fn wait_for(
         if done() {
             return true;
         }
-        let pipeline_running = splitmuxsink
-            .parent()
-            .and_then(|p| p.downcast::<gst::Element>().ok())
-            .is_some_and(|p| p.current_state() >= gst::State::Paused);
-        if !pipeline_running || timeout.is_some_and(|t| started.elapsed() >= t) {
+        if gate.is_closed()
+            || !pipeline_running(splitmuxsink)
+            || timeout.is_some_and(|t| started.elapsed() >= t)
+        {
             return false;
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -929,6 +946,62 @@ impl Drop for CommittedStashes {
     }
 }
 
+/// Keeps a flow's stop and a file switch's relink apart.
+///
+/// The relink (steps 3 and 4 of `start_next_file`) holds the pipeline, adds
+/// elements to it and brings the muxer back. A stop that lands in it finds the
+/// pipeline still held right after dropping it, which reads as a leak, and the
+/// new elements take their state from a pipeline already on its way to NULL. The
+/// recorder's pre-stop hook closes the gate and waits for a relink under way; no
+/// relink starts once the gate is closed.
+///
+/// Each side sets its own flag before it reads the other's, so at least one of
+/// them sees the other.
+#[derive(Default)]
+struct RelinkGate {
+    closed: AtomicBool,
+    relinking: AtomicBool,
+}
+
+impl RelinkGate {
+    /// Start a relink, or `None` once the flow is stopping.
+    fn enter(&self) -> Option<Relinking<'_>> {
+        self.relinking.store(true, Ordering::SeqCst);
+        if self.closed.load(Ordering::SeqCst) {
+            self.relinking.store(false, Ordering::SeqCst);
+            return None;
+        }
+        Some(Relinking(self))
+    }
+
+    /// Let no relink start, and wait up to `timeout` for one under way. Returns
+    /// whether none is still running.
+    fn close(&self, timeout: Duration) -> bool {
+        self.closed.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        while self.relinking.load(Ordering::SeqCst) {
+            if started.elapsed() >= timeout {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        true
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+}
+
+/// A relink under way. Dropping it ends the relink.
+struct Relinking<'a>(&'a RelinkGate);
+
+impl Drop for Relinking<'_> {
+    fn drop(&mut self) {
+        self.0.relinking.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Close the current file and start the next one with the tracks in `next`.
 ///
 /// The same splitmuxsink is reused, taken back to NULL and set up as it was at
@@ -955,9 +1028,14 @@ impl Drop for CommittedStashes {
 /// 5. Each track replays what its input kept while parked, from the first
 ///    keyframe on, and goes live (see `replay_stash`). The stall check keeps
 ///    running meanwhile: a replay can wait on a track that died in the switch.
+///
+/// A flow that stops ends the switch where it is. Steps 3 and 4 run inside
+/// `gate`, so a stop waits for them rather than landing in them.
+#[allow(clippy::too_many_arguments)]
 fn start_next_file(
     block_id: &str,
     splitmuxsink: &gst::Element,
+    gate: &RelinkGate,
     tracks: &mut [WatchedTrack],
     next: &NextFile,
     epoch: Instant,
@@ -981,7 +1059,8 @@ fn start_next_file(
             move |_pad, info| match info.data.as_ref() {
                 Some(gst::PadProbeData::Event(e)) if e.type_() == gst::EventType::Eos => {
                     file_written.store(true, Ordering::SeqCst);
-                    gst::PadProbeReturn::Drop
+                    // Not Drop: see `add_park_probe`.
+                    gst::PadProbeReturn::Handled
                 }
                 _ => gst::PadProbeReturn::Ok,
             },
@@ -1028,11 +1107,16 @@ fn start_next_file(
             .iter()
             .all(|&i| tracks[i].activity.parked.load(Ordering::SeqCst))
     };
+    // A wait cut short by a stop is not the timeout the warnings below report.
+    let stopping = || gate.is_closed() || !pipeline_running(splitmuxsink);
     if !cuts.is_empty()
-        && !wait_for(splitmuxsink, Some(KEYFRAME_CUT_TIMEOUT), || {
+        && !wait_for(splitmuxsink, gate, Some(KEYFRAME_CUT_TIMEOUT), || {
             all_parked(&record)
         })
     {
+        if stopping() {
+            return;
+        }
         // No keyframe to start the next file on. The muxer opens a file only once
         // its primary video has one, so such a track would hold the new file
         // empty. It is ended instead, and a new file takes it back once its input
@@ -1061,20 +1145,26 @@ fn start_next_file(
         cut.store(CUT_DONE, Ordering::SeqCst);
     }
     let all_parked = || all_parked(&record) && all_parked(&cut_out);
-    if !wait_for(splitmuxsink, Some(FILE_FINISH_TIMEOUT), all_parked) {
+    if !wait_for(splitmuxsink, gate, Some(FILE_FINISH_TIMEOUT), all_parked) {
+        if stopping() {
+            return;
+        }
         warn!(
             "Recorder {}: a track is still pushing into the current file after {}s — waiting for it before starting the next file",
             block_id,
             FILE_FINISH_TIMEOUT.as_secs()
         );
         // Its old chain cannot be taken down while a push is running through it.
-        if !wait_for(splitmuxsink, None, all_parked) {
+        if !wait_for(splitmuxsink, gate, None, all_parked) {
             return;
         }
     }
 
     let written = || file_written.load(Ordering::SeqCst);
-    if !wait_for(splitmuxsink, Some(FILE_FINISH_TIMEOUT), written) {
+    if !wait_for(splitmuxsink, gate, Some(FILE_FINISH_TIMEOUT), written) {
+        if stopping() {
+            return;
+        }
         // Stopping the muxer while its storage is still taking a write fails the
         // whole flow: the write comes back flushing and mp4mux posts an error. An
         // idle muxer is waiting on a track that will not end, so that file is
@@ -1089,7 +1179,10 @@ fn start_next_file(
                 .as_ref()
                 .is_none_or(|pad| file_sink_idle(pad, &last_write_ms, epoch))
         };
-        wait_for(splitmuxsink, None, || written() || idle());
+        wait_for(splitmuxsink, gate, None, || written() || idle());
+        if stopping() {
+            return;
+        }
         if !written() {
             warn!(
                 "Recorder {}: the muxer is idle without finishing the current file — closing it as it is",
@@ -1100,9 +1193,13 @@ fn start_next_file(
 
     // 3
     //
-    // The pipeline is taken only now, and only while it is running. A flow
-    // that stops checks right after dropping its pipeline that nothing still
-    // holds it, so holding it across the waits above reads as a leak.
+    // The pipeline is taken only now, only while it is running, and only inside
+    // the gate. A flow that stops checks right after dropping its pipeline that
+    // nothing still holds it, so holding it across the waits above, or into a
+    // stop, reads as a leak.
+    let Some(relinking) = gate.enter() else {
+        return;
+    };
     let Some(bin) = splitmuxsink
         .parent()
         .and_then(|p| p.downcast::<gst::Bin>().ok())
@@ -1219,6 +1316,9 @@ fn start_next_file(
     // 4
     splitmuxsink.set_property("async-handling", true);
     activate_recording_sink(splitmuxsink, block_id);
+    // Inside the gate: a stop passes over a muxer that is still locked, so one
+    // brought back during it would be left running.
+    drop(relinking);
 
     // The stall clock restarts now: a track that never reaches the new file is
     // ended again rather than freezing it.
@@ -1304,6 +1404,7 @@ fn spawn_track_stall_watchdog(
     mut tracks: Vec<WatchedTrack>,
     epoch: Instant,
     next_file_index: Arc<AtomicU32>,
+    gate: Arc<RelinkGate>,
 ) {
     if tracks.len() < 2 {
         // One track cannot be held up by another, and ending it would end the
@@ -1319,6 +1420,7 @@ fn spawn_track_stall_watchdog(
             watch_tracks(
                 &block_id,
                 splitmuxsink_weak,
+                &gate,
                 &mut tracks,
                 epoch,
                 &next_file_index,
@@ -1378,6 +1480,7 @@ fn track_holding_the_recording(tracks: &[(u64, Option<u32>)]) -> Option<usize> {
 fn watch_tracks(
     block_id: &str,
     splitmuxsink: gst::glib::WeakRef<gst::Element>,
+    gate: &RelinkGate,
     tracks: &mut [WatchedTrack],
     epoch: Instant,
     next_file_index: &AtomicU32,
@@ -1386,6 +1489,11 @@ fn watch_tracks(
 
     loop {
         std::thread::sleep(TRACK_STALL_POLL);
+
+        // The flow is stopping.
+        if gate.is_closed() {
+            return;
+        }
 
         // The pipeline is gone: nothing left to watch.
         let Some(sink) = splitmuxsink.upgrade() else {
@@ -1411,6 +1519,7 @@ fn watch_tracks(
             start_next_file(
                 block_id,
                 &sink,
+                gate,
                 tracks,
                 &next,
                 epoch,
@@ -2163,6 +2272,31 @@ impl BlockBuilder for RecorderBuilder {
         // Request the sink pads — see the note above the input chains.
         {
             let next_file_index_for_watchdog = Arc::clone(&next_file_index);
+            let relink_gate = Arc::new(RelinkGate::default());
+            {
+                let gate = Arc::clone(&relink_gate);
+                let splitmuxsink_weak = splitmuxsink.downgrade();
+                let block_id = instance_id.to_string();
+                ctx.register_pre_stop(Box::new(move || {
+                    if !gate.close(RELINK_STOP_TIMEOUT) {
+                        warn!(
+                            "Recorder {}: a new file was still being set up after {}s — stopping anyway",
+                            block_id,
+                            RELINK_STOP_TIMEOUT.as_secs()
+                        );
+                    }
+                    // splitmuxsink holds a track's queue until the others reach the
+                    // same point. Going to NULL is meant to release it, but opening
+                    // a file writes over the stop it sets, and the queue then waits
+                    // for good, holding the stream lock that NULL has to take. A
+                    // flush releases it whatever that state says.
+                    if let Some(splitmuxsink) = splitmuxsink_weak.upgrade() {
+                        for pad in splitmuxsink.sink_pads() {
+                            pad.send_event(gst::event::FlushStart::new());
+                        }
+                    }
+                }));
+            }
             let splitmuxsink_weak = splitmuxsink.downgrade();
             let block_id = instance_id.to_string();
             ctx.register_element_setup(Box::new(move |_flow_id, _events| {
@@ -2231,6 +2365,7 @@ impl BlockBuilder for RecorderBuilder {
                     watched,
                     stall_epoch,
                     next_file_index_for_watchdog,
+                    relink_gate,
                 );
             }));
         }
@@ -2826,6 +2961,34 @@ mod tests {
             stash.buffers.is_empty(),
             "once a full stash has dropped the frames a delta depends on, it waits for a keyframe"
         );
+    }
+
+    #[test]
+    fn a_stop_waits_for_a_relink_and_no_relink_starts_after_it() {
+        let gate = RelinkGate::default();
+        let relinking = gate.enter().expect("an open gate lets a relink start");
+
+        std::thread::scope(|scope| {
+            let stop = scope.spawn(|| {
+                let started = Instant::now();
+                assert!(gate.close(Duration::from_secs(5)));
+                started.elapsed()
+            });
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(!stop.is_finished(), "the stop did not wait for the relink");
+            drop(relinking);
+            let waited = stop.join().unwrap();
+            assert!(waited >= Duration::from_millis(200), "waited {waited:?}");
+        });
+
+        assert!(gate.enter().is_none(), "a relink started after the stop");
+    }
+
+    #[test]
+    fn a_stop_gives_up_on_a_relink_that_never_ends() {
+        let gate = RelinkGate::default();
+        let _relinking = gate.enter().unwrap();
+        assert!(!gate.close(Duration::from_millis(50)));
     }
 
     #[test]

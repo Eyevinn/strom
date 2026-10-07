@@ -237,6 +237,14 @@ impl PipelineManager {
         );
     }
 
+    /// Run the blocks' pre-stop hooks, once. Called before every path that sets
+    /// the pipeline to NULL.
+    pub(super) fn run_pre_stop_hooks(&mut self) {
+        for hook in std::mem::take(&mut self.pre_stop_fns) {
+            hook();
+        }
+    }
+
     /// Stop the pipeline (set to NULL state).
     pub fn stop(&mut self) -> Result<PipelineState, PipelineError> {
         info!("Stopping pipeline: {}", self.flow_name);
@@ -262,6 +270,8 @@ impl PipelineManager {
         // Drop cached volume control sources. The bindings themselves are
         // owned by the elements and released when the pipeline goes to NULL.
         self.volume_ramps.clear();
+
+        self.run_pre_stop_hooks();
 
         // Run set_state on a dedicated OS thread to avoid "Cannot start a runtime
         // from within a runtime" panics. Some GStreamer elements (e.g. whipserversrc)

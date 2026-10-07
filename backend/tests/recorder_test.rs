@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use strom::blocks::builtin::recorder::RecorderBuilder;
-use strom::blocks::{BlockBuildContext, BlockBuilder};
+use strom::blocks::{BlockBuildContext, BlockBuilder, PreStopFn};
 use strom::events::EventBroadcaster;
 use strom_types::PropertyValue;
 
@@ -1820,6 +1820,7 @@ mod track_resume {
         video_gate: gst::Element,
         video_stalled: Arc<AtomicBool>,
         audio_stalled: Arc<AtomicBool>,
+        pre_stops: Vec<PreStopFn>,
     }
 
     impl Rig {
@@ -1855,6 +1856,7 @@ mod track_resume {
             feed_video(&pipeline, &video_in, &video_gate, -1, key_int_max);
             feed_audio(&pipeline, &audio_in, &audio_gate);
             recorder.run_setups();
+            let pre_stops = recorder.ctx.take_pre_stops();
             pipeline
                 .set_state(gst::State::Playing)
                 .expect("pipeline accepts PLAYING");
@@ -1867,7 +1869,19 @@ mod track_resume {
                 video_gate,
                 video_stalled,
                 audio_stalled,
+                pre_stops,
             }
+        }
+
+        /// Set the pipeline to NULL as the pipeline manager stops a flow: the
+        /// blocks' pre-stop hooks first.
+        fn set_null(&mut self) {
+            for hook in self.pre_stops.drain(..) {
+                hook();
+            }
+            self.pipeline
+                .set_state(gst::State::Null)
+                .expect("pipeline to NULL");
         }
 
         /// The sink pad of the element splitmuxsink writes the file with.
@@ -1888,11 +1902,9 @@ mod track_resume {
         }
 
         /// Stop the flow with EOS and read back every file it wrote.
-        fn stop(self) -> Vec<FileSummary> {
+        fn stop(mut self) -> Vec<FileSummary> {
             let stopped = stop_with_eos(&self.pipeline);
-            self.pipeline
-                .set_state(gst::State::Null)
-                .expect("pipeline to NULL");
+            self.set_null();
             assert!(stopped, "the recording did not finish on EOS");
             let summaries: Vec<FileSummary> = recordings(&self.media_root, "")
                 .iter()
@@ -2523,7 +2535,7 @@ mod track_resume {
         if !plugins_available() {
             return;
         }
-        let rig = Rig::start_with("rec_stop_in_switch", 300, true);
+        let mut rig = Rig::start_with("rec_stop_in_switch", 300, true);
         std::thread::sleep(Duration::from_secs(3));
         rig.audio_stalled.store(true, Ordering::Relaxed);
         std::thread::sleep(Duration::from_secs(19));
@@ -2532,10 +2544,61 @@ mod track_resume {
         std::thread::sleep(Duration::from_secs(3));
 
         let weak = rig.pipeline.downgrade();
-        rig.pipeline
-            .set_state(gst::State::Null)
-            .expect("pipeline to NULL");
+        rig.set_null();
         drop(rig);
+        assert!(
+            weak.upgrade().is_none(),
+            "the pipeline was still held right after it was dropped"
+        );
+    }
+
+    /// The same for a stop that lands while the switch relinks, with the muxer
+    /// in NULL and the pipeline held to build the new chains. The stop waits for
+    /// the relink to finish, and still reaches NULL.
+    #[test]
+    fn a_flow_stopped_while_the_switch_relinks_leaves_nothing_holding_its_pipeline() {
+        if !plugins_available() {
+            return;
+        }
+        let mut rig = Rig::start("rec_stop_in_relink");
+
+        // The relink releases the old splitmuxsink pads, on the thread running
+        // it. The first release holds the relink open long enough for the stop
+        // to land in it.
+        let (relinking_tx, relinking) = std::sync::mpsc::channel::<()>();
+        let held = AtomicBool::new(false);
+        rig.pipeline
+            .iterate_all_by_element_factory_name("splitmuxsink")
+            .into_iter()
+            .find_map(Result::ok)
+            .expect("the recorder has a splitmuxsink")
+            .connect_pad_removed(move |_, _| {
+                if !held.swap(true, Ordering::SeqCst) {
+                    let _ = relinking_tx.send(());
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            });
+
+        std::thread::sleep(Duration::from_secs(3));
+        rig.audio_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(8));
+        rig.audio_stalled.store(false, Ordering::Relaxed);
+        relinking
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the switch never relinked");
+
+        // The stop lands just as the new file opens, which can leave a
+        // splitmuxsink queue waiting for good with NULL blocked behind it.
+        let weak = rig.pipeline.downgrade();
+        let (stopped_tx, stopped) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            rig.set_null();
+            drop(rig);
+            let _ = stopped_tx.send(());
+        });
+        stopped
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the pipeline did not reach NULL within 30s");
         assert!(
             weak.upgrade().is_none(),
             "the pipeline was still held right after it was dropped"

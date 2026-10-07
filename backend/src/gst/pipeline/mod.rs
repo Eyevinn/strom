@@ -185,6 +185,8 @@ pub struct PipelineManager {
     block_message_connect_fns: Vec<crate::blocks::BusMessageConnectFn>,
     /// Element signal setup functions from blocks (called when pipeline starts)
     element_setup_fns: Vec<crate::blocks::ElementSetupFn>,
+    /// Pre-stop hooks from blocks, run once before the pipeline goes to NULL
+    pre_stop_fns: Vec<crate::blocks::PreStopFn>,
     /// Thread priority state tracker (tracks whether priority was successfully set)
     thread_priority_state: Option<ThreadPriorityState>,
     /// Thread registry for tracking streaming threads (optional, for CPU monitoring)
@@ -253,6 +255,8 @@ impl Drop for PipelineManager {
         self.probe_manager.stop_broadcast_task();
         self.probe_manager.deactivate_all();
         self.stop_qos_broadcast_task();
+
+        self.run_pre_stop_hooks();
 
         // Ensure pipeline is in Null state before releasing references.
         // If stop() was already called this is a no-op. If stop() gave up on
