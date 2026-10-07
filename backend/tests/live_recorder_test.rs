@@ -495,6 +495,19 @@ fn split_files_each_play_on_their_own() {
                 .map(|(k, v)| (k, v.len()))
                 .collect::<Vec<_>>()
         );
+        // Each file starts at zero, not where it sat in the whole recording.
+        let first = samples
+            .values()
+            .filter_map(|v| v.first())
+            .min()
+            .copied()
+            .unwrap();
+        assert!(
+            first < gst::ClockTime::from_mseconds(500),
+            "{} starts at {}",
+            file.display(),
+            first
+        );
     }
 }
 
@@ -647,4 +660,70 @@ mod fragment_sink {
         ]);
         assert_eq!(text(&files), vec!["INIT;FRAG;data;FRAG;data;FRAG;data;"]);
     }
+}
+
+/// A flow stop goes straight to NULL with no EOS. The muxer still holds the
+/// fragment in progress then; the stop must have it written, not drop it.
+#[test]
+fn a_stop_without_eos_still_writes_the_last_fragment() {
+    init();
+    let dir = tempfile::tempdir().unwrap();
+    let pipeline = gst::Pipeline::new();
+    let _rec = av_recorder(&pipeline, "rec", dir.path(), &[]);
+    pipeline.set_state(gst::State::Playing).unwrap();
+    let started = Instant::now();
+    std::thread::sleep(Duration::from_millis(5500));
+    no_errors(&pipeline);
+    let ran = started.elapsed();
+    let stop = Instant::now();
+    pipeline.set_state(gst::State::Null).unwrap();
+    let stop_took = stop.elapsed();
+
+    assert!(
+        stop_took < Duration::from_secs(2),
+        "the stop took {:?}",
+        stop_took
+    );
+    let files = recorder::recordings(dir.path(), "rec");
+    assert_eq!(files.len(), 1, "{:?}", files);
+    let samples = demux(&files[0]);
+    for (kind, pts) in &samples {
+        let (_, span) = largest_gap(pts);
+        // Fragments are 1 s: without the drain the file ends a fragment short.
+        assert!(
+            span.nseconds() as u128 + 400_000_000 >= ran.as_nanos(),
+            "{} spans {} of a {:?} recording",
+            kind,
+            span,
+            ran
+        );
+    }
+}
+
+/// The stop drain must not fire on a pause: the file goes on after PLAYING.
+#[test]
+fn a_pause_does_not_end_the_file() {
+    init();
+    let dir = tempfile::tempdir().unwrap();
+    let pipeline = gst::Pipeline::new();
+    let _rec = av_recorder(&pipeline, "rec", dir.path(), &[]);
+    pipeline.set_state(gst::State::Playing).unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    pipeline.set_state(gst::State::Paused).unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    pipeline.set_state(gst::State::Playing).unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    no_errors(&pipeline);
+    finish(&pipeline);
+
+    let files = recorder::recordings(dir.path(), "rec");
+    assert_eq!(files.len(), 1, "{:?}", files);
+    let samples = demux(&files[0]);
+    let video = &samples["video/x-h264"];
+    let last = *video.last().unwrap();
+    assert!(
+        last >= gst::ClockTime::from_seconds(4),
+        "the file ended at {} — the pause finished it",
+        last
+    );
 }

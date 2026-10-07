@@ -27,6 +27,7 @@
 
 pub mod fragment_sink;
 mod keepalive;
+mod mp4_boxes;
 
 use super::refusal::{audio_refusal, refuse_input, video_refusal};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
@@ -189,6 +190,7 @@ impl BlockBuilder for LiveRecorderBuilder {
                 for track in &tracks {
                     track.connect_to_muxer(&block_id, &mux);
                 }
+                sink.set_drain_pads(tracks.iter().filter_map(|t| t.queue_sink_pad()).collect());
 
                 let events_for_files = events.clone();
                 let block_for_files = block_id.clone();

@@ -104,6 +104,14 @@ impl Track {
         })
     }
 
+    /// Where a stop sends this track's EOS.
+    pub fn queue_sink_pad(&self) -> Option<gst::glib::WeakRef<gst::Pad>> {
+        self.queue
+            .upgrade()?
+            .static_pad("sink")
+            .map(|p| p.downgrade())
+    }
+
     pub fn is_connected(&self) -> bool {
         self.mux_pad.lock().unwrap().is_some()
     }

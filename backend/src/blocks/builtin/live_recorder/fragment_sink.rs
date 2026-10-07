@@ -13,17 +13,23 @@
 //! PLAYING, and it writes each buffer as it arrives, so a crash loses at most
 //! the fragment the muxer has not handed over yet.
 
+use super::mp4_boxes;
 use gst::glib;
 use gst::subclass::prelude::*;
 use gst_base::prelude::*;
 use gst_base::subclass::prelude::*;
 use gstreamer as gst;
 use gstreamer_base as gst_base;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+
+/// How long a stop waits for the muxer to hand over what it holds.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Called with the index and path of every file the sink opens.
 pub type FileOpenedFn = Arc<dyn Fn(u32, &std::path::Path) + Send + Sync>;
@@ -55,6 +61,12 @@ impl FragmentFileSink {
     /// Start a new file at the next fragment.
     pub fn split_now(&self) {
         self.imp().split_requested.store(true, Ordering::SeqCst);
+    }
+
+    /// The pads to send EOS into when the flow stops, so the muxer hands over
+    /// what it still holds before the sink closes the file: each track's queue.
+    pub fn set_drain_pads(&self, pads: Vec<gst::glib::WeakRef<gst::Pad>>) {
+        *self.imp().drain_pads.lock().unwrap() = pads;
     }
 
     /// Report each file the sink opens. Replaces an earlier callback.
@@ -95,6 +107,11 @@ mod imp {
         /// starts. If the stream ends first, it is the muxer's tail and goes at
         /// the end of the current file rather than alone into a new one.
         held: Option<(Option<gst::ClockTime>, Vec<u8>)>,
+        /// Track id → timescale, from the init segment.
+        timescales: HashMap<u32, u32>,
+        /// Decode time the current file starts at, taken from its first
+        /// fragment and subtracted from every fragment in it.
+        file_base_ns: Option<u64>,
     }
 
     #[derive(Default)]
@@ -102,7 +119,11 @@ mod imp {
         pub(super) settings: Mutex<Settings>,
         pub(super) split_requested: AtomicBool,
         pub(super) on_file_opened: Mutex<Option<FileOpenedFn>>,
+        pub(super) drain_pads: Mutex<Vec<gst::glib::WeakRef<gst::Pad>>>,
         state: Mutex<State>,
+        /// Set when EOS reaches the sink, for a stop that waits for it.
+        eos: Mutex<bool>,
+        eos_cond: Condvar,
     }
 
     #[glib::object_subclass]
@@ -137,6 +158,20 @@ mod imp {
                 .unwrap()]
             });
             TEMPLATES.as_ref()
+        }
+
+        fn change_state(
+            &self,
+            transition: gst::StateChange,
+        ) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
+            // Sinks change state first, so here everything upstream is still
+            // PLAYING, and this sink still renders: in PAUSED it would hold the
+            // muxer's last fragment waiting for PLAYING. Only on the way down
+            // to READY or NULL; a pause must not end the file.
+            if transition == gst::StateChange::PlayingToPaused && self.stopping() {
+                self.drain();
+            }
+            self.parent_change_state(transition)
         }
     }
 
@@ -176,6 +211,7 @@ mod imp {
             state.file = Some(file);
             state.next_index += 1;
             state.file_start = None;
+            state.file_base_ns = None;
             state.bytes_in_file = written;
             Ok((index, path))
         }
@@ -206,16 +242,72 @@ mod imp {
             Ok(())
         }
 
+        /// Write a fragment, from its header on, with its decode times moved so
+        /// the file starts at zero.
+        fn write_fragment(&self, state: &mut State, bytes: &[u8]) -> Result<(), gst::ErrorMessage> {
+            let mut bytes = bytes.to_vec();
+            if state.file_base_ns.is_none() {
+                state.file_base_ns = mp4_boxes::fragment_start_ns(&bytes, &state.timescales);
+            }
+            if let Some(base) = state.file_base_ns {
+                mp4_boxes::shift_decode_times(&mut bytes, &state.timescales, base);
+            }
+            self.write(state, &bytes)
+        }
+
         /// Put a held fragment at the end of the current file: the stream ended
         /// before another fragment came to start the next file with.
         fn flush_held(&self, state: &mut State) {
             if let Some((_, bytes)) = state.held.take() {
-                if let Err(msg) = self.write(state, &bytes) {
+                if let Err(msg) = self.write_fragment(state, &bytes) {
                     gst::warning!(CAT, imp = self, "{:?}", msg);
                 }
             }
             if let Some(file) = state.file.as_mut() {
                 let _ = file.flush();
+            }
+        }
+
+        /// Whether the pipeline this sink is in is on its way below PAUSED.
+        fn stopping(&self) -> bool {
+            let mut top: gst::Element = self.obj().clone().upcast();
+            while let Some(parent) = top.parent().and_then(|p| p.downcast::<gst::Element>().ok()) {
+                top = parent;
+            }
+            matches!(top.pending_state(), gst::State::Ready | gst::State::Null)
+        }
+
+        /// Finish the file on a stop: without EOS the muxer keeps its last
+        /// fragment, and the recording ends up to a fragment short.
+        fn drain(&self) {
+            if self.state.lock().unwrap().file.is_none() || *self.eos.lock().unwrap() {
+                return;
+            }
+            let pads: Vec<gst::Pad> = self
+                .drain_pads
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|p| p.upgrade())
+                .collect();
+            if pads.is_empty() {
+                return;
+            }
+            for pad in &pads {
+                pad.send_event(gst::event::Eos::new());
+            }
+            let eos = self.eos.lock().unwrap();
+            let (eos, timeout) = self
+                .eos_cond
+                .wait_timeout_while(eos, DRAIN_TIMEOUT, |seen| !*seen)
+                .unwrap();
+            if timeout.timed_out() && !*eos {
+                gst::warning!(
+                    CAT,
+                    imp = self,
+                    "The muxer did not finish within {:?}; the file may end up to a fragment short",
+                    DRAIN_TIMEOUT
+                );
             }
         }
 
@@ -234,6 +326,7 @@ mod imp {
     impl BaseSinkImpl for FragmentFileSink {
         fn start(&self) -> Result<(), gst::ErrorMessage> {
             *self.state.lock().unwrap() = State::default();
+            *self.eos.lock().unwrap() = false;
             self.split_requested.store(false, Ordering::SeqCst);
             Ok(())
         }
@@ -267,6 +360,7 @@ mod imp {
                     // first one. It starts a file.
                     self.flush_held(&mut state);
                     state.init_segment = Some(bytes.to_vec());
+                    state.timescales = mp4_boxes::track_timescales(bytes);
                     opened = Some(self.open_next_file(&mut state)?);
                     return Ok(());
                 }
@@ -277,7 +371,7 @@ mod imp {
                         // it starts the next file.
                         opened = Some(self.open_next_file(&mut state)?);
                         state.file_start = pts;
-                        self.write(&mut state, &held)?;
+                        self.write_fragment(&mut state, &held)?;
                     }
                     if state.file.is_none() {
                         opened = Some(self.open_next_file(&mut state)?);
@@ -299,7 +393,11 @@ mod imp {
                 if state.file.is_none() {
                     opened = Some(self.open_next_file(&mut state)?);
                 }
-                self.write(&mut state, bytes)
+                if fragment_start {
+                    self.write_fragment(&mut state, bytes)
+                } else {
+                    self.write(&mut state, bytes)
+                }
             })();
 
             self.report_opened(opened);
@@ -315,6 +413,8 @@ mod imp {
         fn event(&self, event: gst::Event) -> bool {
             if let gst::EventView::Eos(_) = event.view() {
                 self.flush_held(&mut self.state.lock().unwrap());
+                *self.eos.lock().unwrap() = true;
+                self.eos_cond.notify_all();
             }
             self.parent_event(event)
         }
