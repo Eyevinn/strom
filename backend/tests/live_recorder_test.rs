@@ -949,6 +949,44 @@ mod containers {
         }
     }
 
+    /// matroskamux labels a recording without video `audio/x-matroska`.
+    #[test]
+    fn mkv_audio_only_records() {
+        init();
+        if mkv_refused() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let rec = add_live_recorder(
+            &pipeline,
+            "rec",
+            dir.path(),
+            &[
+                ("container", PropertyValue::String("mkv".into())),
+                ("num_video_tracks", PropertyValue::UInt(0)),
+                ("num_audio_tracks", PropertyValue::UInt(1)),
+            ],
+        );
+        recorder::audio_source(&pipeline, -1, true)
+            .link(&rec.input("audio_input_0"))
+            .unwrap();
+        rec.run_setups();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        no_errors(&pipeline);
+        finish(&pipeline);
+        let files = recorder::recordings(dir.path(), "rec");
+        assert_eq!(files.len(), 1, "{:?}", files);
+        assert!(
+            demux(&files[0])
+                .get("audio/mpeg")
+                .is_some_and(|a| !a.is_empty()),
+            "{} has no audio",
+            files[0].display()
+        );
+    }
+
     #[test]
     fn mkv_stalls_and_stop() {
         stalls_and_stop("mkv");

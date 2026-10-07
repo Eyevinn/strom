@@ -207,6 +207,8 @@ mod imp {
                             .build(),
                     )
                     .structure(gst::Structure::new_empty("video/x-matroska"))
+                    // What matroskamux calls a recording without video.
+                    .structure(gst::Structure::new_empty("audio/x-matroska"))
                     .structure(gst::Structure::new_empty("video/mpegts"))
                     .build();
                 vec![gst::PadTemplate::new(
