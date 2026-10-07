@@ -43,6 +43,17 @@ pub fn write_clip(
     format: &str,
     frame: &dyn Fn(usize, &mut [u8]),
 ) {
+    write_clip_sized(path, width, H, format, frame)
+}
+
+/// [`write_clip`] at any frame height.
+pub fn write_clip_sized(
+    path: &std::path::Path,
+    width: u32,
+    height: u32,
+    format: &str,
+    frame: &dyn Fn(usize, &mut [u8]),
+) {
     let bpp = if format == "GRAY8" { 1 } else { 4 };
     let pipeline = gst::Pipeline::new();
     let appsrc = gst_app::AppSrc::builder()
@@ -50,7 +61,7 @@ pub fn write_clip(
             &gst::Caps::builder("video/x-raw")
                 .field("format", format)
                 .field("width", width as i32)
-                .field("height", H as i32)
+                .field("height", height as i32)
                 .field("framerate", gst::Fraction::new(30, 1))
                 .build(),
         )
@@ -82,7 +93,7 @@ pub fn write_clip(
     gst::Element::link_many([appsrc.upcast_ref(), &convert, &to_codec, &enc, &mux, &sink]).unwrap();
     pipeline.set_state(gst::State::Playing).unwrap();
     for i in 0..N {
-        let mut data = vec![0u8; (width * H) as usize * bpp];
+        let mut data = vec![0u8; (width * height) as usize * bpp];
         frame(i, &mut data);
         let mut buf = gst::Buffer::from_mut_slice(data);
         {
@@ -109,6 +120,19 @@ pub fn classic_clip(path: &std::path::Path) {
     write_clip(path, W, "BGRA", &|_, d| {
         for (i, px) in d.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             if (i as u32 % W) < W / 2 {
+                px.copy_from_slice(&[0, 255, 0, 255]);
+            }
+        }
+    });
+}
+
+/// [`classic_clip`] at 1920x1080: long enough to analyse that a take
+/// straight after adding it finds the analysis still running.
+pub fn big_classic_clip(path: &std::path::Path) {
+    let (w, h) = (1920u32, 1080u32);
+    write_clip_sized(path, w, h, "BGRA", &|_, d| {
+        for (i, px) in d.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            if (i as u32 % w) < w / 2 {
                 px.copy_from_slice(&[0, 255, 0, 255]);
             }
         }

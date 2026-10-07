@@ -584,3 +584,42 @@ async fn a_clip_with_early_audio_lands_its_first_video_frame_on_the_take() {
 
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
+
+/// A clip taken straight after it was added waits for the analysis the add
+/// started instead of decoding the clip a second time: on a 4K ProRes clip
+/// that second decode cost the take most of a second.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clip_taken_straight_after_it_was_added_is_analysed_once() {
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("classic.mov");
+    let added = dir.path().join("big.mov");
+    classic_clip(&first);
+    big_classic_clip(&added);
+    let r = start_with("addtake", "cpu", dir, vec![first]).await;
+    // The URI the stinger source plays the file by.
+    let uri = strom::blocks::builtin::mediaplayer::normalize_uri(
+        &added.to_string_lossy(),
+        std::path::Path::new("/"),
+    );
+
+    let clip = r
+        .state
+        .stinger_add_clip(&r.flow_id, &r.mixer(), &added.to_string_lossy(), None)
+        .await
+        .expect("add");
+    r.state
+        .stinger_take(&r.flow_id, &r.mixer(), Some(clip.index), None)
+        .await
+        .expect("take");
+    r.wait_for_report(clip.index).await;
+    assert_eq!(
+        strom::stinger::analysis::analysis_runs_for_tests(&uri),
+        1,
+        "the clip was decoded for analysis more than once"
+    );
+
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}

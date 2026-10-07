@@ -725,7 +725,8 @@ impl AppState {
 
         // The plan needs the clip's layout and length: a track-matte clip
         // planned blind would show its matte. A cue starts the analysis, so
-        // this waits only for a clip taken straight after it was added.
+        // this waits only for a clip taken straight after it was added, and
+        // then on the run the add started rather than decoding it again.
         let uri = ctx.uri(file);
         let info = match analysis::cached(&uri) {
             Some(info) => Some(info),

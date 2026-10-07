@@ -12,7 +12,7 @@ use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use gstreamer_video::prelude::*;
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use strom_types::stinger::{StingerClipInfo, StingerLayout};
 use tracing::{debug, info};
@@ -73,16 +73,105 @@ pub fn cached(uri: &str) -> Option<StingerClipInfo> {
     CACHE.lock().ok()?.get(&key).cloned()
 }
 
+/// The result of one analysis run, shared with every caller that asked for
+/// the same file while it ran.
+type Flight = Arc<(Mutex<Option<Result<StingerClipInfo, String>>>, Condvar)>;
+
+/// Analyses running now, by cache key.
+static IN_FLIGHT: LazyLock<Mutex<HashMap<CacheKey, Flight>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Analysis runs started by [`analyze_cached`], per URI.
+static RUNS: LazyLock<Mutex<HashMap<String, u64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// How many times [`analyze_cached`] has decoded `uri`.
+#[doc(hidden)]
+pub fn analysis_runs_for_tests(uri: &str) -> u64 {
+    RUNS.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(uri)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Ends a run: hands its result to the callers waiting on it, and lets the
+/// next caller start a new one. Also on a panic, so no caller waits forever.
+struct FlightGuard {
+    key: CacheKey,
+    flight: Flight,
+}
+
+impl FlightGuard {
+    fn finish(&self, result: Result<StingerClipInfo, String>) {
+        let (slot, done) = &*self.flight;
+        let mut slot = slot.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.is_none() {
+            *slot = Some(result);
+            done.notify_all();
+        }
+    }
+}
+
+impl Drop for FlightGuard {
+    fn drop(&mut self) {
+        self.finish(Err("the clip analysis stopped".to_string()));
+        IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.key);
+    }
+}
+
 /// Analyse `uri`, or return the cached result. Blocks while decoding.
+///
+/// One run at a time per file: a caller that comes while one runs (a take
+/// straight after a clip was added, say) waits for it and shares its result
+/// instead of decoding the clip again.
 pub fn analyze_cached(uri: &str) -> Result<StingerClipInfo, String> {
-    if let Some(info) = cached(uri) {
-        return Ok(info);
+    let key = cache_key(uri);
+    let running = {
+        let mut in_flight = IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner());
+        match in_flight.get(&key) {
+            Some(flight) => Err(Arc::clone(flight)),
+            None => {
+                // A run caches its result before it leaves `IN_FLIGHT`, so
+                // with none running the cache is up to date.
+                if let Some(info) = CACHE.lock().ok().and_then(|c| c.get(&key).cloned()) {
+                    return Ok(info);
+                }
+                let flight = Flight::default();
+                in_flight.insert(key.clone(), Arc::clone(&flight));
+                Ok(FlightGuard {
+                    key: key.clone(),
+                    flight,
+                })
+            }
+        }
+    };
+    let guard = match running {
+        Ok(guard) => guard,
+        Err(flight) => {
+            let (slot, done) = &*flight;
+            let mut slot = slot.lock().unwrap_or_else(|p| p.into_inner());
+            while slot.is_none() {
+                slot = done.wait(slot).unwrap_or_else(|p| p.into_inner());
+            }
+            return slot.clone().expect("set before the wait ends");
+        }
+    };
+    *RUNS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .entry(uri.to_string())
+        .or_default() += 1;
+    let result = analyze(uri);
+    if let Ok(info) = &result {
+        if let Ok(mut cache) = CACHE.lock() {
+            cache.insert(key, info.clone());
+        }
     }
-    let info = analyze(uri)?;
-    if let Ok(mut cache) = CACHE.lock() {
-        cache.insert(cache_key(uri), info.clone());
-    }
-    Ok(info)
+    guard.finish(result.clone());
+    result
 }
 
 /// Decode `uri` and measure it. Blocks while decoding.
