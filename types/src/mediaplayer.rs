@@ -26,7 +26,7 @@ impl std::fmt::Display for PlayerState {
 }
 
 /// Player control action.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum PlayerAction {
@@ -38,14 +38,14 @@ pub enum PlayerAction {
 }
 
 /// Request to control the media player.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct PlayerControlRequest {
     pub action: PlayerAction,
 }
 
 /// Request to set the playlist.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "validation", derive(garde::Validate))]
 pub struct SetPlaylistRequest {
@@ -55,7 +55,7 @@ pub struct SetPlaylistRequest {
 }
 
 /// Request to seek to a position.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct SeekRequest {
     /// Position in nanoseconds
@@ -63,7 +63,7 @@ pub struct SeekRequest {
 }
 
 /// Request to go to a specific file.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct GotoRequest {
     /// File index (0-based)
@@ -90,4 +90,29 @@ pub struct PlayerStateResponse {
     pub playlist: Vec<String>,
     /// Whether playlist loops
     pub loop_playlist: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn player_control_request_wire_format() {
+        for (action, name) in [
+            (PlayerAction::Play, "play"),
+            (PlayerAction::Pause, "pause"),
+            (PlayerAction::Stop, "stop"),
+            (PlayerAction::Next, "next"),
+            (PlayerAction::Previous, "previous"),
+        ] {
+            let json = serde_json::to_string(&PlayerControlRequest { action }).unwrap();
+            assert_eq!(json, format!(r#"{{"action":"{name}"}}"#));
+        }
+    }
+
+    #[test]
+    fn goto_request_wire_format() {
+        let json = serde_json::to_string(&GotoRequest { index: 3 }).unwrap();
+        assert_eq!(json, r#"{"index":3}"#);
+    }
 }

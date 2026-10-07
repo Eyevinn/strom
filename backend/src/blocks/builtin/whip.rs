@@ -16,16 +16,22 @@ use crate::blocks::{
     APPSRC_MAX_BYTES_AUDIO, APPSRC_MAX_BYTES_VIDEO, APPSRC_MAX_TIME,
 };
 use crate::gst::ice_preflight;
-use crate::gst::keyframe_request;
+use crate::gst::keyframe_request::{self, RecoveryStep, VideoDamage};
+use crate::gst::orphan_guard;
+use crate::gst::pipeline_bridge::{self, SessionBridge};
 use crate::gst::rtp_hdrext;
-use crate::whip_session_manager::{SessionActivity, SessionCleanupRequest, WhipEndpointConfig};
+use crate::whip_session_manager::{
+    ActivityStamp, SessionActivity, SessionCleanupRequest, SlotDecodebin, SlotOutput, StallSide,
+    WhipEndpointConfig, DECODE_GRACE,
+};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
+use gstreamer_rtp as gst_rtp;
 use gstreamer_video as gst_video;
 use std::collections::HashMap;
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use strom_types::block::StreamMode;
@@ -249,6 +255,44 @@ fn prepare_idle_decodebin(decodebin: &gst::Element) {
     decodebin.set_locked_state(true);
 }
 
+/// Stamp a slot's output activity for every buffer that reaches its tee.
+///
+/// The tee's sink pad is the far end of the slot's chain: with `decode=true`
+/// everything upstream of it — `decodebin`, the converter — has already run, and
+/// everything downstream is a flow consumer. A buffer here is media the flow can
+/// actually use, which is the thing the session's appsink cannot see. The appsink
+/// sits in the isolated session pipeline, upstream of all of this, so it stamps
+/// bytes arriving over the network and nothing more.
+///
+/// It is also where a stall shows up: a blocked consumer backs pressure up
+/// through the tee, and the probe simply stops firing while RTP keeps arriving.
+///
+/// BUFFER probes fire per buffer, so the callback is one clock read (`Instant`
+/// takes the vDSO fast path) and a couple of relaxed atomic ops — no lock, no
+/// allocation, no formatting. See `ActivityStamp::touch`.
+fn stamp_slot_output(tee: &gst::Element, stamp: Arc<ActivityStamp>, slot: usize, media: &str) {
+    let Some(sink_pad) = tee.static_pad("sink") else {
+        // Unreachable: a tee has a static sink pad. If it ever were not, nothing
+        // would stamp this slot and every session on it would be reaped once its
+        // decode grace ran out — recoverable, unlike a panic in a block build,
+        // and this line is what makes it diagnosable.
+        warn!(
+            "WHIP Input: slot {} {} output tee has no sink pad, cannot track its liveness",
+            slot, media
+        );
+        return;
+    };
+    sink_pad.add_probe(
+        // BUFFER_LIST as well: nothing on this chain batches today, but an
+        // element that started to would silently stop the stamp otherwise.
+        gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+        move |_pad, _info| {
+            stamp.touch();
+            gst::PadProbeReturn::Ok
+        },
+    );
+}
+
 /// Build WHIP Input per-slot output chains.
 ///
 /// At build time, per-slot chains are created in the main pipeline:
@@ -345,15 +389,30 @@ pub fn build_whipserversrc(
     let mut slot_video_appsrcs: Vec<gst_app::AppSrc> = Vec::new();
     // Per-slot decodebins, locked until a session claims the slot. Weak refs:
     // the pipeline owns them.
-    let mut slot_decodebins: Vec<Vec<gst::glib::WeakRef<gst::Element>>> = Vec::new();
+    let mut slot_decodebins: Vec<Vec<SlotDecodebin>> = Vec::new();
 
     // One flag per slot, set when decodebin exposes that slot's video pad.
     // A session stops asking the publisher for keyframes once its flag flips.
     let video_decoding: Arc<Vec<AtomicBool>> =
         Arc::new((0..max_sessions).map(|_| AtomicBool::new(false)).collect());
 
-    for slot in 0..max_sessions {
-        let mut decodebins_for_slot: Vec<gst::glib::WeakRef<gst::Element>> = Vec::new();
+    // One per slot, raised by the slot's decode chain when a running session's
+    // video has lost data that only a keyframe can repair.
+    let video_damage: Arc<Vec<VideoDamage>> =
+        Arc::new((0..max_sessions).map(|_| VideoDamage::default()).collect());
+
+    // One stamp per slot and medium, written by a probe on that slot's output
+    // tees below. This is where a session's media becomes usable to the flow,
+    // so this is where its liveness is measured; see `SessionActivity`. All
+    // share an epoch — the stamps are only ever compared against their own
+    // readings.
+    let output_epoch = Instant::now();
+    let slot_output: Vec<Arc<SlotOutput>> = (0..max_sessions)
+        .map(|_| Arc::new(SlotOutput::new(output_epoch)))
+        .collect();
+
+    for (slot, output_stamp) in slot_output.iter().enumerate() {
+        let mut decodebins_for_slot: Vec<SlotDecodebin> = Vec::new();
 
         // Audio chain for this slot
         if mode.has_audio() {
@@ -393,7 +452,12 @@ pub fn build_whipserversrc(
                     })?;
 
                 prepare_idle_decodebin(&decodebin);
-                decodebins_for_slot.push(decodebin.downgrade());
+                // Audio keeps its running chain across sessions; only the
+                // video decoder fails on reuse (see `restart_decodebin`).
+                decodebins_for_slot.push(SlotDecodebin {
+                    element: decodebin.downgrade(),
+                    restart_on_reuse: false,
+                });
 
                 let audioconvert = gst::ElementFactory::make("audioconvert")
                     .name(&audioconvert_id)
@@ -474,6 +538,8 @@ pub fn build_whipserversrc(
                 ));
             }
 
+            stamp_slot_output(&audio_out_tee, output_stamp.audio.clone(), slot, "audio");
+
             slot_audio_appsrcs.push(appsrc.clone());
             elements.push((appsrc_id, appsrc.upcast()));
             elements.push((audio_out_tee_id, audio_out_tee));
@@ -515,7 +581,31 @@ pub fn build_whipserversrc(
                     })?;
 
                 prepare_idle_decodebin(&decodebin);
-                decodebins_for_slot.push(decodebin.downgrade());
+                decodebins_for_slot.push(SlotDecodebin {
+                    element: decodebin.downgrade(),
+                    restart_on_reuse: true,
+                });
+
+                // The depayloader decodebin plugs is the one element that sees
+                // a loss the jitterbuffer gave up on.
+                let video_damage_for_depay = video_damage.clone();
+                decodebin
+                    .downcast_ref::<gst::Bin>()
+                    .expect("decodebin is a bin")
+                    .connect_element_added(move |_bin, element| {
+                        // By klass, not by C type: the Rust `*depay2` elements
+                        // are registered too and do not derive from
+                        // RTPBaseDepayload.
+                        let is_depayloader = element
+                            .factory()
+                            .and_then(|f| {
+                                f.metadata(gst::ELEMENT_METADATA_KLASS).map(str::to_owned)
+                            })
+                            .is_some_and(|klass| klass.contains("Depayloader"));
+                        if is_depayloader {
+                            watch_depayloader_for_damage(element, &video_damage_for_depay, slot);
+                        }
+                    });
 
                 let videoconvert = gst::ElementFactory::make("videoconvert")
                     .name(&videoconvert_id)
@@ -533,10 +623,20 @@ pub fn build_whipserversrc(
                 // decodebin has dynamic pads — connect pad-added to link to videoconvert
                 let videoconvert_weak = videoconvert.downgrade();
                 let video_decoding_for_pad = video_decoding.clone();
+                let video_damage_for_pad = video_damage.clone();
                 decodebin.connect_pad_added(move |_dec, src_pad| {
                     if src_pad.direction() != gst::PadDirection::Src {
                         return;
                     }
+                    // Pictures out of the decoder: the other half of the
+                    // slot's silent-decoder check. Per frame, one atomic.
+                    let damage = video_damage_for_pad.clone();
+                    src_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, _info| {
+                        if let Some(damage) = damage.get(slot) {
+                            damage.decoded();
+                        }
+                        gst::PadProbeReturn::Ok
+                    });
                     // Video is decoding: whoever is asking for keyframes on
                     // this slot can stop.
                     if let Some(flag) = video_decoding_for_pad.get(slot) {
@@ -573,6 +673,8 @@ pub fn build_whipserversrc(
                 ));
             }
 
+            stamp_slot_output(&video_out_tee, output_stamp.video.clone(), slot, "video");
+
             slot_video_appsrcs.push(appsrc.clone());
             elements.push((appsrc_id, appsrc.upcast()));
             elements.push((video_out_tee_id, video_out_tee));
@@ -608,6 +710,7 @@ pub fn build_whipserversrc(
             pipeline_weak: gst::glib::WeakRef::new(),
             decode,
             video_decoding,
+            video_damage,
             jitterbuffer_latency_ms,
             do_retransmission,
             drop_on_latency,
@@ -617,6 +720,7 @@ pub fn build_whipserversrc(
             slot_audio_appsrcs,
             slot_video_appsrcs,
             slot_decodebins,
+            slot_output,
             slot_assignments,
         },
     );
@@ -629,8 +733,64 @@ pub fn build_whipserversrc(
     })
 }
 
-/// How long a session may go without a buffer before the watchdog tears it down.
+/// Report a mid-session recovery step for `slot`.
+fn log_recovery_step(step: RecoveryStep, slot: usize) {
+    match step {
+        RecoveryStep::Wait => {}
+        RecoveryStep::Request { attempt } => debug!(
+            "WHIP Input: slot {} video damaged (a gap, or the decoder stopped producing), requesting keyframe (PLI) attempt {}",
+            slot, attempt
+        ),
+        RecoveryStep::Recovered { after, requests } => info!(
+            "WHIP Input: slot {} video recovered after {} ms ({} keyframe request(s))",
+            slot,
+            after.as_millis(),
+            requests
+        ),
+        RecoveryStep::GaveUp { requests } => warn!(
+            "WHIP Input: slot {} video still damaged after {} keyframe request(s); not asking again until it recovers",
+            slot, requests
+        ),
+    }
+}
+
+/// Feed every access unit leaving a slot's video depayloader into the slot's
+/// damage flag. A BUFFER probe, so it runs per frame: atomics only.
+fn watch_depayloader_for_damage(depay: &gst::Element, damage: &Arc<Vec<VideoDamage>>, slot: usize) {
+    let Some(src) = depay.static_pad("src") else {
+        return;
+    };
+    let damage = damage.clone();
+    src.add_probe(
+        gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+        move |_pad, info| {
+            let Some(damage) = damage.get(slot) else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let observe = |buffer: &gst::BufferRef| {
+                let flags = buffer.flags();
+                damage.depayloaded(
+                    flags.contains(gst::BufferFlags::DISCONT),
+                    !flags.contains(gst::BufferFlags::DELTA_UNIT),
+                );
+            };
+            match &info.data {
+                Some(gst::PadProbeData::Buffer(buffer)) => observe(buffer),
+                Some(gst::PadProbeData::BufferList(list)) => list.iter().for_each(observe),
+                _ => {}
+            }
+            gst::PadProbeReturn::Ok
+        },
+    );
+}
+
+/// How long a session may go without producing usable media before the watchdog
+/// tears it down; see `SessionActivity::idle`.
 const INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+// A session is not judged until `DECODE_GRACE` has passed, so a timeout inside
+// it would never reap a session that decodes nothing.
+const _: () = assert!(DECODE_GRACE.as_millis() < INACTIVITY_TIMEOUT.as_millis());
 
 /// How often the watchdog re-checks its stop flag while waiting.
 const WATCHDOG_POLL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -655,14 +815,18 @@ fn wait_until_deadline_or_stop(stop: &AtomicBool, deadline: Instant) -> bool {
     }
 }
 
-/// Block until the session has been idle for `timeout`, or until `stop` is set.
+/// Block until the session has gone `timeout` without producing usable media, or
+/// until `stop` is set.
 ///
-/// Returns `Some(idle_ms)` once the idle time crosses `timeout`, or `None` if a
-/// teardown path set `stop` first.
+/// Returns `Some((idle_ms, side))` once the idle time crosses `timeout`, or
+/// `None` if a teardown path set `stop` first. `side` names which stamp froze,
+/// so the reap log can point at the publisher or at the flow's own consumers.
 ///
-/// `last_buffer_ms` is the arrival time of the most recent buffer on any stream,
-/// as milliseconds since `epoch`; 0 means no buffer has arrived yet, in which case
-/// the session is still negotiating and the clock has not started.
+/// Idle comes from `SessionActivity::idle`, so this reaps both a publisher that
+/// went away and a seat that keeps receiving RTP while nothing comes out of its
+/// slot's chain. `None` from it means the session must not be judged yet — still
+/// negotiating, or inside the grace a decoder gets before its first frame — and
+/// the clock has not started.
 ///
 /// Idle is re-evaluated on every `WATCHDOG_POLL` tick. The poll must stay finer than
 /// `timeout`: evaluating once per `timeout` puts detection anywhere between one and
@@ -670,24 +834,71 @@ fn wait_until_deadline_or_stop(stop: &AtomicBool, deadline: Instant) -> bool {
 /// the next one.
 fn wait_for_inactivity(
     stop: &AtomicBool,
-    last_buffer_ms: &AtomicU64,
-    epoch: Instant,
+    activity: &SessionActivity,
     timeout: std::time::Duration,
-) -> Option<u64> {
-    let timeout_ms = timeout.as_millis() as u64;
+) -> Option<(u64, StallSide)> {
     loop {
         if wait_until_deadline_or_stop(stop, Instant::now() + WATCHDOG_POLL) {
             return None;
         }
-        let last = last_buffer_ms.load(Ordering::Relaxed);
-        if last == 0 {
+        let Some((idle, side)) = activity.idle() else {
             continue;
-        }
-        let idle_ms = (epoch.elapsed().as_millis() as u64).saturating_sub(last);
-        if idle_ms >= timeout_ms {
-            return Some(idle_ms);
+        };
+        if idle >= timeout {
+            return Some((idle.as_millis() as u64, side));
         }
     }
+}
+
+/// Wire one session stream's appsink into its slot's appsrc in the main
+/// pipeline.
+///
+/// A function rather than an inline closure so a test can drive the callback:
+/// the guard that matters is here, not in [`pipeline_bridge`]. A bare
+/// `appsrc.push_sample(&sample)` in this body re-opens the cascade an unstamped
+/// buffer starts and fails nothing in that module's tests.
+#[allow(clippy::too_many_arguments)]
+fn install_slot_bridge(
+    appsink: &gst_app::AppSink,
+    appsrc: gst_app::AppSrc,
+    bridge: Arc<SessionBridge>,
+    main_pipeline_weak: gst::glib::WeakRef<gst::Pipeline>,
+    media_type: &str,
+    slot: usize,
+    activity: Arc<SessionActivity>,
+    session_finished: Arc<AtomicBool>,
+) {
+    // Resolved here, not per buffer: the pad's media type is fixed.
+    let pad_is_audio = media_type == "audio";
+    let video_order = VideoPtsOrder::new();
+
+    appsink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                // Media arriving from the publisher. Half of this session's
+                // liveness; the other half is stamped on the slot's output tee
+                // in the main pipeline.
+                activity.touch_ingress(pad_is_audio);
+
+                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                forward_sample_to_slot(
+                    &sample,
+                    &appsrc,
+                    &session_finished,
+                    &bridge,
+                    &main_pipeline_weak,
+                    if pad_is_audio {
+                        SlotMedia::Audio
+                    } else {
+                        SlotMedia::Video(&video_order)
+                    },
+                    slot,
+                )?;
+
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build(),
+    );
 }
 
 /// A whipserversrc session that has been created and is playing, handed back to
@@ -699,6 +910,91 @@ pub struct CreatedSession {
     pub port: u16,
     /// Liveness handle, shared with the appsink callbacks that feed the slot.
     pub activity: Arc<SessionActivity>,
+}
+
+/// Drain one `whipserversrc` pad into the session pipeline: `pad → tee →
+/// fakesink + appsink`, with every element brought up to the pipeline's state.
+///
+/// Returns the appsink the caller installs its bridge callbacks on, or `None`
+/// if the branch could not be built — every failure is logged here.
+///
+/// Both sinks run with `async` off. The pipeline they join is already PLAYING,
+/// and a sink that still wants a preroll answers the state change with ASYNC.
+/// whipserversrc adds its audio and video pads one after the other within a
+/// millisecond, so the second branch lands while the first is still waiting,
+/// and the second is then left below PLAYING: it takes a single buffer and
+/// blocks its streaming thread for good. From the outside that is a publisher
+/// whose audio or video never starts, with nothing in the log to say so —
+/// `sync_state_with_parent` reports the state change as accepted either way.
+///
+/// The pad is linked only once the branch is PLAYING, because it is already
+/// carrying media when it appears (see the comment at the link).
+pub fn attach_session_branch(
+    session_pipeline: &gst::Pipeline,
+    pad: &gst::Pad,
+    appsink_name: &str,
+) -> Option<gst_app::AppSink> {
+    let tee = match gst::ElementFactory::make("tee")
+        .property("allow-not-linked", true)
+        .build()
+    {
+        Ok(t) => t,
+        Err(e) => {
+            error!("WHIP Input: Failed to create tee in pad-added: {}", e);
+            return None;
+        }
+    };
+    let fakesink = match gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .property("async", false)
+        .build()
+    {
+        Ok(f) => f,
+        Err(e) => {
+            error!("WHIP Input: Failed to create fakesink in pad-added: {}", e);
+            return None;
+        }
+    };
+    let appsink = gst_app::AppSink::builder()
+        .name(appsink_name)
+        .sync(false)
+        .async_(false)
+        .build();
+
+    if let Err(e) = session_pipeline.add_many([&tee, &fakesink, appsink.upcast_ref()]) {
+        error!(
+            "WHIP Input: Failed to add elements to session pipeline: {}",
+            e
+        );
+        return None;
+    }
+    if let (Some(tee_src1), Some(tee_src2)) = (
+        tee.request_pad_simple("src_%u"),
+        tee.request_pad_simple("src_%u"),
+    ) {
+        let _ = tee_src1.link(
+            &fakesink
+                .static_pad("sink")
+                .expect("fakesink has no sink pad"),
+        );
+        let _ = tee_src2.link(&appsink.static_pad("sink").expect("appsink has no sink pad"));
+    } else {
+        error!("WHIP Input: Failed to request tee src pads");
+        return None;
+    }
+    // Downstream first, and the live pad last: until an element has left NULL
+    // its sink pad is flushing, and a buffer pushed into it comes back as
+    // FLUSHING. Upstream reads that as "shutting down" and pauses its streaming
+    // task for good, so a pad linked before the branch is up can lose its
+    // stream on the very first buffer.
+    let _ = appsink.sync_state_with_parent();
+    let _ = fakesink.sync_state_with_parent();
+    let _ = tee.sync_state_with_parent();
+    if let Err(e) = pad.link(&tee.static_pad("sink").expect("tee has no sink pad")) {
+        error!("WHIP Input: Failed to link pad to tee: {:?}", e);
+        return None;
+    }
+    Some(appsink)
 }
 
 /// Create a new whipserversrc element for a single WHIP client session.
@@ -793,6 +1089,11 @@ pub fn create_whipserversrc_for_session(
     let cleanup_tx_for_ice = cleanup_tx.clone();
 
     if let Ok(bin) = whipserversrc.clone().downcast::<gst::Bin>() {
+        // whipserversrc removes each session's internal bin from a thread of its
+        // own, which can land while this pipeline is on its way down and leave
+        // the bin orphaned above NULL with its WebRTC sockets still open.
+        orphan_guard::install(&bin);
+
         bin.connect("deep-element-added", false, move |values| {
             let element = values[2].get::<gst::Element>().unwrap();
             let element_name = element.name();
@@ -916,34 +1217,48 @@ pub fn create_whipserversrc_for_session(
     if let Some(flag) = video_decoding.get(slot) {
         flag.store(false, Ordering::Relaxed);
     }
+    let video_damage = config.video_damage.clone();
+    if let Some(damage) = video_damage.get(slot) {
+        damage.clear();
+    }
+    let decode = config.decode;
 
-    // Shared timestamp offset for A/V sync across audio and video appsrcs.
-    // Computed from the first buffer on either stream:
-    //   offset = main_pipeline_running_time - buffer_pts
-    // i64::MIN means "not yet computed".
-    let shared_ts_offset = Arc::new(AtomicI64::new(i64::MIN));
+    // Shared appsink -> appsrc bridge state for this session: the A/V timestamp
+    // offset both streams rebase onto, and the unstamped-buffer drop count.
+    let session_bridge = Arc::new(SessionBridge::new());
 
-    // Inactivity watchdog: tracks when the last buffer arrived on any stream.
-    // A background thread checks this and triggers cleanup if no data arrives
-    // for INACTIVITY_TIMEOUT (covers the case where ICE disconnect
-    // notification doesn't fire from the isolated session pipeline).
+    // Liveness for this session, in the shape the session manager reads it: it
+    // has to tell a slot that still has a publisher producing media behind it
+    // from one whose publisher went away without a WHIP DELETE, or whose media
+    // arrives but never comes out of the slot's chain.
+    let slot_output = match config.slot_output.get(slot) {
+        Some(stamp) => stamp.clone(),
+        None => {
+            // Unreachable: one stamp is built per slot. The orphan below is
+            // never written, so this session would be reaped once its decode
+            // grace ran out; this line is what makes that diagnosable.
+            warn!(
+                "WHIP Input: no output stamp for slot {}, its liveness cannot be tracked",
+                slot
+            );
+            Arc::new(SlotOutput::new(Instant::now()))
+        }
+    };
+    let activity = Arc::new(SessionActivity::new(Instant::now(), slot_output));
+
+    // Inactivity watchdog. A background thread triggers cleanup once the session
+    // has gone INACTIVITY_TIMEOUT without producing usable media — which covers
+    // both a transport that went away without the ICE disconnect notification
+    // reaching this isolated session pipeline, and a seat that keeps receiving
+    // RTP while nothing decodes out the other end. Neither is worth a slot.
     //
     // The wait is sliced rather than one long sleep so that `cleanup_sent` — set by
     // the ICE callback and by every teardown path in the session manager — ends the
     // thread promptly. A watchdog that outlived its session would send a cleanup
     // request for a port the manager no longer knows, and the manager would then mark
     // that (recycled) port pending cleanup for nothing.
-    let last_buffer_epoch = Instant::now();
-    let last_buffer_ms = Arc::new(AtomicU64::new(0));
-    // Same two values, in the shape the session manager reads them: it has to be
-    // able to tell a slot with a live publisher behind it from one whose
-    // publisher went away without a WHIP DELETE.
-    let activity = Arc::new(SessionActivity::new(
-        last_buffer_epoch,
-        last_buffer_ms.clone(),
-    ));
     {
-        let last_buffer_ms_watchdog = last_buffer_ms.clone();
+        let activity_watchdog = activity.clone();
         let cleanup_sent_watchdog = cleanup_sent.clone();
         let cleanup_tx_watchdog = cleanup_tx.clone();
         std::thread::Builder::new()
@@ -951,22 +1266,21 @@ pub fn create_whipserversrc_for_session(
             .spawn(move || {
                 // Returns None when another path (ICE callback, DELETE, flow stop)
                 // finished with this session first.
-                let Some(idle_ms) = wait_for_inactivity(
+                let Some((idle_ms, side)) = wait_for_inactivity(
                     &cleanup_sent_watchdog,
-                    &last_buffer_ms_watchdog,
-                    last_buffer_epoch,
+                    &activity_watchdog,
                     INACTIVITY_TIMEOUT,
                 ) else {
                     return;
                 };
                 if !cleanup_sent_watchdog.swap(true, Ordering::SeqCst) {
                     info!(
-                        "WHIP Input: Inactivity timeout ({}ms idle) on port {}, triggering cleanup",
-                        idle_ms, port
+                        "WHIP Input: Inactivity timeout ({}ms without usable media: {}) on port {}, triggering cleanup",
+                        idle_ms, side, port
                     );
                     let _ = cleanup_tx_watchdog.send(SessionCleanupRequest {
                         port,
-                        reason: format!("inactivity ({}ms idle)", idle_ms),
+                        reason: format!("inactivity ({}ms without usable media: {})", idle_ms, side),
                     });
                 }
             })
@@ -994,54 +1308,13 @@ pub fn create_whipserversrc_for_session(
                 return;
             };
 
-            // Session pipeline: pad → tee → fakesink (drain) + appsink (bridge)
-            let tee = match gst::ElementFactory::make("tee")
-                .property("allow-not-linked", true)
-                .build()
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    error!("WHIP Input: Failed to create tee in pad-added: {}", e);
-                    return;
-                }
+            let Some(appsink) = attach_session_branch(
+                &session_pipeline,
+                pad,
+                &format!("{}:{}_appsink_{}", prefix, pad_name, stream_num),
+            ) else {
+                return;
             };
-            let fakesink = match gst::ElementFactory::make("fakesink")
-                .property("sync", false)
-                .property("async", false)
-                .build()
-            {
-                Ok(f) => f,
-                Err(e) => {
-                    error!("WHIP Input: Failed to create fakesink in pad-added: {}", e);
-                    return;
-                }
-            };
-            let appsink = gst_app::AppSink::builder()
-                .name(format!("{}:{}_appsink_{}", prefix, pad_name, stream_num))
-                .sync(false)
-                .build();
-
-            if let Err(e) = session_pipeline.add_many([&tee, &fakesink, appsink.upcast_ref()]) {
-                error!("WHIP Input: Failed to add elements to session pipeline: {}", e);
-                return;
-            }
-            if let Err(e) = pad.link(&tee.static_pad("sink").expect("tee has no sink pad")) {
-                error!("WHIP Input: Failed to link pad to tee: {:?}", e);
-                return;
-            }
-            if let (Some(tee_src1), Some(tee_src2)) = (
-                tee.request_pad_simple("src_%u"),
-                tee.request_pad_simple("src_%u"),
-            ) {
-                let _ = tee_src1.link(&fakesink.static_pad("sink").expect("fakesink has no sink pad"));
-                let _ = tee_src2.link(&appsink.static_pad("sink").expect("appsink has no sink pad"));
-            } else {
-                error!("WHIP Input: Failed to request tee src pads");
-                return;
-            }
-            let _ = tee.sync_state_with_parent();
-            let _ = fakesink.sync_state_with_parent();
-            let _ = appsink.sync_state_with_parent();
 
             // Determine which slot appsrc to feed based on pad type
             let target_appsrc: Option<gst_app::AppSrc> =
@@ -1122,37 +1395,66 @@ pub fn create_whipserversrc_for_session(
                             slot, e
                         );
                     }
+
+                    // Once decoding, ask again whenever the slot's decode chain
+                    // reports damage only a keyframe repairs. Without decode
+                    // there is no decode chain, and nothing ever reports.
+                    if decode {
+                        let repair_pad = pad.downgrade();
+                        let repair_damage = video_damage.clone();
+                        let repair_stop = cleanup_sent_for_pads.clone();
+                        let repair_slot = slot;
+                        if let Err(e) = std::thread::Builder::new()
+                            .name(format!("whip-repair-{}", repair_slot))
+                            .spawn(move || {
+                                let Some(damage) = repair_damage.get(repair_slot) else {
+                                    return;
+                                };
+                                let epoch = Instant::now();
+                                keyframe_request::recover_while(
+                                    keyframe_request::RecoveryPolicy::default(),
+                                    damage,
+                                    // The session's teardown paths set the
+                                    // flag; a dropped session pipeline also
+                                    // ends it.
+                                    || {
+                                        repair_stop.load(Ordering::SeqCst)
+                                            || repair_pad.upgrade().is_none()
+                                    },
+                                    || epoch.elapsed(),
+                                    std::thread::sleep,
+                                    |step| {
+                                        log_recovery_step(step, repair_slot);
+                                        if let RecoveryStep::Request { .. } = step {
+                                            if let Some(pad) = repair_pad.upgrade() {
+                                                pad.send_event(
+                                                    gst_video::UpstreamForceKeyUnitEvent::builder()
+                                                        .all_headers(true)
+                                                        .build(),
+                                                );
+                                            }
+                                        }
+                                    },
+                                );
+                            })
+                        {
+                            warn!(
+                                "WHIP Input: could not spawn keyframe repairer for slot {}: {}",
+                                slot, e
+                            );
+                        }
+                    }
                 }
 
-                let ts_offset = shared_ts_offset.clone();
-                let main_pipeline_for_ts = main_pipeline_weak.clone();
-                let media_for_log = media_type.to_string();
-                let activity_cb = activity_for_pads.clone();
-                let session_finished = cleanup_sent_for_pads.clone();
-                // Resolved here, not per buffer: the pad's media type is fixed.
-                let pad_is_audio = media_type == "audio";
-
-                appsink.set_callbacks(
-                    gst_app::AppSinkCallbacks::builder()
-                        .new_sample(move |sink| {
-                            // Mark the session live: read by its inactivity
-                            // watchdog and by slot takeover
-                            activity_cb.touch(pad_is_audio);
-
-                            let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                            forward_sample_to_slot(
-                                &sample,
-                                &appsrc,
-                                &session_finished,
-                                &ts_offset,
-                                &main_pipeline_for_ts,
-                                &media_for_log,
-                                slot,
-                            )?;
-
-                            Ok(gst::FlowSuccess::Ok)
-                        })
-                        .build(),
+                install_slot_bridge(
+                    &appsink,
+                    appsrc,
+                    session_bridge.clone(),
+                    main_pipeline_weak.clone(),
+                    media_type,
+                    slot,
+                    activity_for_pads.clone(),
+                    cleanup_sent_for_pads.clone(),
                 );
             } else {
                 info!(
@@ -1201,11 +1503,103 @@ pub fn create_whipserversrc_for_session(
     })
 }
 
+/// How far behind the previous frame's PTS a new frame's may be and still be
+/// treated as landing on it. A run released on one PTS falls behind by 1 ns
+/// per frame already moved; a frame interval is over 8 ms at up to 120 fps.
+const MAX_PTS_NUDGE_NS: u64 = 1_000_000;
+
+/// Gives each of a session's video frames its own PTS when several arrive on one.
+///
+/// The session's jitterbuffer can release a run of packets from different
+/// frames all on one PTS, as it does when a publisher joins a slot. The
+/// slot's `h264parse` takes a PTS only when it differs from the previous
+/// buffer's, so every later frame of the run leaves it with none; a browser
+/// stream has no framerate to derive one from, and the vision mixer's
+/// compositor fails the whole flow on a frame without a timestamp.
+///
+/// Packets of one frame keep their shared PTS. A new frame whose PTS is at
+/// most [`MAX_PTS_NUDGE_NS`] behind the previous frame's is moved 1 ns past it.
+/// Any other PTS passes through: a larger step back is real timing (a B-frame,
+/// sent before the frame it precedes, or a step in the sender's clock), and
+/// holding later frames behind a PTS far ahead would freeze the seat. Only the
+/// appsink's streaming thread touches it.
+struct VideoPtsOrder {
+    /// RTP timestamp of the last frame, `u64::MAX` before the first.
+    last_rtptime: AtomicU64,
+    last_pts: AtomicU64,
+}
+
+impl VideoPtsOrder {
+    fn new() -> Self {
+        Self {
+            last_rtptime: AtomicU64::new(u64::MAX),
+            last_pts: AtomicU64::new(0),
+        }
+    }
+
+    fn order(&self, rtptime: u32, pts: u64) -> u64 {
+        let last_rtptime = self.last_rtptime.load(Ordering::Relaxed);
+        let last_pts = self.last_pts.load(Ordering::Relaxed);
+        if last_rtptime == u64::from(rtptime) {
+            return last_pts;
+        }
+        let duplicate =
+            last_rtptime != u64::MAX && pts <= last_pts && last_pts - pts <= MAX_PTS_NUDGE_NS;
+        let pts = if duplicate { last_pts + 1 } else { pts };
+        self.last_rtptime
+            .store(u64::from(rtptime), Ordering::Relaxed);
+        self.last_pts.store(pts, Ordering::Relaxed);
+        pts
+    }
+}
+
+/// Which of a slot's streams a sample is bridged into.
+#[derive(Clone, Copy)]
+enum SlotMedia<'a> {
+    Audio,
+    Video(&'a VideoPtsOrder),
+}
+
+impl SlotMedia<'_> {
+    fn name(self) -> &'static str {
+        match self {
+            SlotMedia::Audio => "audio",
+            SlotMedia::Video(_) => "video",
+        }
+    }
+}
+
+/// `sample` with its PTS moved by `order`, or `None` when it stays as it is.
+/// Copies the buffer only when the PTS changes. A buffer with no PTS, or one
+/// that is not RTP, is left for the bridge to judge.
+fn order_video_pts(sample: &gst::Sample, order: &VideoPtsOrder) -> Option<gst::Sample> {
+    let buffer = sample.buffer()?;
+    let pts = buffer.pts()?.nseconds();
+    let rtptime = gst_rtp::RTPBuffer::from_buffer_readable(buffer)
+        .ok()?
+        .timestamp();
+    let ordered = order.order(rtptime, pts);
+    if ordered == pts {
+        return None;
+    }
+    let mut new_buffer = buffer.copy();
+    new_buffer
+        .make_mut()
+        .set_pts(gst::ClockTime::from_nseconds(ordered));
+    let mut builder = gst::Sample::builder().buffer(&new_buffer);
+    let caps = sample.caps_owned();
+    if let Some(caps) = caps.as_ref() {
+        builder = builder.caps(caps);
+    }
+    Some(builder.build())
+}
+
 /// Bridge one sample from a session's appsink into its slot's appsrc, shifting
 /// its PTS by the offset shared across the session's audio and video.
 ///
-/// The offset is computed once, from the first buffer on either stream, then
-/// applied to every buffer on both streams to preserve A/V sync.
+/// The offset and the drop of unstamped buffers are [`SessionBridge`]'s: a
+/// buffer with no PTS never reaches the slot, because a muxer downstream
+/// answers it with `GST_FLOW_ERROR` and takes the whole flow down.
 ///
 /// Nothing is pushed once `session_finished` is set. The slot's appsrc belongs to
 /// whoever holds the slot, and takeover releases the slot while the displaced
@@ -1215,65 +1609,50 @@ fn forward_sample_to_slot(
     sample: &gst::Sample,
     appsrc: &gst_app::AppSrc,
     session_finished: &AtomicBool,
-    ts_offset: &AtomicI64,
+    bridge: &SessionBridge,
     main_pipeline: &gst::glib::WeakRef<gst::Pipeline>,
-    media: &str,
+    media: SlotMedia,
     slot: usize,
 ) -> Result<(), gst::FlowError> {
     if session_finished.load(Ordering::Relaxed) {
         return Ok(());
     }
 
-    let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-    let pts = buffer.pts();
-
-    // Compute offset on the first buffer from either stream
-    let offset_ns = {
-        let current = ts_offset.load(Ordering::Relaxed);
-        if current != i64::MIN {
-            current
-        } else if let (Some(pts_val), Some(main_pipeline)) = (pts, main_pipeline.upgrade()) {
-            let clock = main_pipeline.clock();
-            let base_time = main_pipeline.base_time();
-            if let (Some(clock), Some(base_time)) = (clock, base_time) {
-                let now = clock.time();
-                let running = now.saturating_sub(base_time);
-                let offset = running.nseconds() as i64 - pts_val.nseconds() as i64;
-                ts_offset.store(offset, Ordering::Relaxed);
-                info!(
-                    "WHIP Input: Computed shared ts-offset={}ms from {} stream (slot {})",
-                    offset / 1_000_000,
-                    media,
-                    slot
-                );
-                offset
-            } else {
-                0
-            }
-        } else {
-            0
-        }
+    let ordered = match media {
+        SlotMedia::Video(order) => order_video_pts(sample, order),
+        SlotMedia::Audio => None,
     };
+    let sample = ordered.as_ref().unwrap_or(sample);
 
-    // Apply offset to buffer PTS
-    if offset_ns != 0 {
-        if let Some(pts_val) = pts {
-            let adjusted = (pts_val.nseconds() as i64 + offset_ns).max(0) as u64;
-            let mut new_buffer = buffer.copy();
-            {
-                let buf_ref = new_buffer.get_mut().unwrap();
-                buf_ref.set_pts(gst::ClockTime::from_nseconds(adjusted));
-            }
-            let new_sample = gst::Sample::builder()
-                .buffer(&new_buffer)
-                .caps(&sample.caps().unwrap().to_owned())
-                .build();
-            let _ = appsrc.push_sample(&new_sample);
-        } else {
-            let _ = appsrc.push_sample(sample);
+    let outcome = bridge
+        .forward(sample, appsrc, || {
+            let main_pipeline = main_pipeline.upgrade()?;
+            let clock = main_pipeline.clock()?;
+            let base_time = main_pipeline.base_time()?;
+            Some(clock.time().saturating_sub(base_time))
+        })
+        .ok_or(gst::FlowError::Error)?;
+
+    match outcome {
+        pipeline_bridge::Forwarded::OffsetComputed(offset) => {
+            info!(
+                "WHIP Input: Computed shared ts-offset={}ms from {} stream (slot {})",
+                offset / 1_000_000,
+                media.name(),
+                slot
+            );
         }
-    } else {
-        let _ = appsrc.push_sample(sample);
+        pipeline_bridge::Forwarded::DroppedUnstamped { dropped } => {
+            if pipeline_bridge::should_log_drop(dropped) {
+                warn!(
+                    "WHIP Input: dropped {} buffer(s) with no PTS on the {} stream (slot {}); forwarding one fails the downstream muxer and takes the whole flow with it",
+                    dropped, media.name(), slot
+                );
+            }
+        }
+        pipeline_bridge::Forwarded::Restamped
+        | pipeline_bridge::Forwarded::Unadjusted
+        | pipeline_bridge::Forwarded::PushFailed(_) => {}
     }
 
     Ok(())
@@ -2083,6 +2462,67 @@ fn setup_incoming_rtp_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gst::pipeline_bridge::test_support::{at, Harness, SessionPipeline};
+
+    /// The wiring guard for this block. [`pipeline_bridge`] can only promise
+    /// that [`SessionBridge::forward`] drops an unstamped buffer; it cannot
+    /// promise this block still calls it. So drive the real appsink callback:
+    /// three buffers into a session pipeline, the middle one with no PTS, and
+    /// only the two stamped ones may reach the slot's appsrc.
+    ///
+    /// Forwarding that buffer is what makes `qtmux` answer `Buffer has no PTS`
+    /// with `GST_FLOW_ERROR`, which tears down the whole flow — every seat, not
+    /// just this one.
+    #[test]
+    fn an_unstamped_buffer_never_reaches_the_slot_appsrc() {
+        let slot_pipeline = Harness::new();
+        let session = SessionPipeline::new();
+
+        let appsink = gst_app::AppSink::builder().sync(false).build();
+        session
+            .pipeline
+            .add(appsink.upcast_ref::<gst::Element>())
+            .expect("add appsink");
+        session
+            .src
+            .link(&appsink)
+            .expect("link session appsrc to appsink");
+
+        install_slot_bridge(
+            &appsink,
+            slot_pipeline.src.clone(),
+            Arc::new(SessionBridge::new()),
+            slot_pipeline.pipeline_weak(),
+            "video",
+            0,
+            Arc::new(SessionActivity::new(
+                Instant::now(),
+                Arc::new(SlotOutput::new(Instant::now())),
+            )),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        session.start();
+        session.push(at(1));
+        session.push(None);
+        session.push(at(3));
+
+        let first = slot_pipeline.next_pts().expect("first buffer crossed");
+        assert!(first.is_some(), "a stamped buffer must keep its stamp");
+        let second = slot_pipeline
+            .next_pts()
+            .expect("the third buffer crossed too");
+        assert!(
+            second.is_some(),
+            "the unstamped buffer must not be here — the third one is next"
+        );
+        assert!(second > first, "and it must follow the first");
+        assert_eq!(
+            slot_pipeline.next_pts(),
+            None,
+            "nothing else should have crossed"
+        );
+    }
 
     fn props(entries: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
         entries
@@ -2163,38 +2603,55 @@ mod tests {
         );
     }
 
-    /// A dead session must be detected one poll interval after the inactivity
-    /// threshold, not one whole extra timeout later.
+    /// A dead session must be detected on the first poll after it crosses the
+    /// inactivity threshold, not at the next whole-timeout boundary.
     ///
-    /// The last buffer here lands 150 ms after the epoch, so the threshold is crossed
-    /// at ~1150 ms — just *after* a once-per-timeout check at 1000 ms would have run,
-    /// and far enough past it that scheduler slop cannot blur the two. Evaluating once
-    /// per `timeout` instead of once per poll fails this test: it detects at ~2000 ms,
-    /// where polling detects at ~1250 ms.
+    /// The session starts with its last buffer `timeout - 50 ms` ago, so it crosses
+    /// the threshold 50 ms into the wait. Polling sees that on its first tick, one
+    /// `WATCHDOG_POLL` in. Evaluating once per `timeout` cannot: its first check runs
+    /// a whole `timeout` in, because the sliced sleep never returns before its
+    /// deadline. So "detected before one timeout had passed" separates the two with
+    /// no dependence on scheduler latency in the failing direction, and the passing
+    /// side has `timeout - WATCHDOG_POLL` of headroom for one late wakeup. There is
+    /// no helper thread whose own wakeup could land late and move the threshold.
     #[test]
     fn watchdog_detects_inactivity_within_one_poll_of_the_timeout() {
-        let timeout = std::time::Duration::from_millis(1000);
+        let timeout = std::time::Duration::from_secs(2);
+        let idle_at_start = timeout - std::time::Duration::from_millis(50);
         let stop = Arc::new(AtomicBool::new(false));
-        let epoch = Instant::now();
-        let last_buffer_ms = Arc::new(AtomicU64::new(150));
+        // Running for a minute already, so the decoder's grace is long spent and
+        // only the inactivity timeout is under test. Both stamps froze together.
+        let stalled =
+            || ActivityStamp::backdated(std::time::Duration::from_secs(60), idle_at_start);
+        let activity = Arc::new(SessionActivity::from_stamps(
+            stalled(),
+            Arc::new(SlotOutput::with_audio(stalled())),
+        ));
 
         let started = Instant::now();
-        let idle_ms = wait_for_inactivity(&stop, &last_buffer_ms, epoch, timeout)
+        let (idle_ms, side) = wait_for_inactivity(&stop, &activity, timeout)
             .expect("watchdog must report inactivity, not a stop");
         let detection = started.elapsed();
 
-        // Slack over the expected 1250 ms covers scheduler jitter but stays well
-        // clear of the 2000 ms the once-per-timeout evaluation would take.
+        // Both stamps froze together, which is a publisher that went away.
+        assert_eq!(
+            side,
+            StallSide::Ingress,
+            "a session whose arrivals stopped must be reported against the publisher"
+        );
+
         assert!(
-            detection < std::time::Duration::from_millis(1600),
-            "inactivity took {:?} to detect with a {:?} timeout — idle is being \
-             evaluated once per timeout, not once per poll",
+            detection < timeout,
+            "inactivity took {:?} to detect with a {:?} timeout and a {:?} poll, for a \
+             session that crossed the threshold 50 ms in — idle is being evaluated once \
+             per timeout, not once per poll",
             detection,
-            timeout
+            timeout,
+            WATCHDOG_POLL
         );
         assert!(
-            idle_ms < 2 * timeout.as_millis() as u64,
-            "reported idle time was {} ms for a {:?} timeout — the check is too coarse",
+            idle_ms >= timeout.as_millis() as u64,
+            "reported idle time was {} ms, below the {:?} timeout it was reaped for",
             idle_ms,
             timeout
         );
@@ -2205,10 +2662,12 @@ mod tests {
     #[test]
     fn watchdog_inactivity_wait_gives_up_when_stopped() {
         let stop = Arc::new(AtomicBool::new(false));
-        let epoch = Instant::now();
-        // Still negotiating: no buffer has arrived, so the idle clock never starts
+        // Still negotiating: nothing has arrived, so the idle clock never starts
         // and only the stop flag can end the wait.
-        let last_buffer_ms = Arc::new(AtomicU64::new(0));
+        let activity = Arc::new(SessionActivity::new(
+            Instant::now(),
+            Arc::new(SlotOutput::new(Instant::now())),
+        ));
 
         let setter = stop.clone();
         std::thread::spawn(move || {
@@ -2217,12 +2676,7 @@ mod tests {
         });
 
         let started = Instant::now();
-        let result = wait_for_inactivity(
-            &stop,
-            &last_buffer_ms,
-            epoch,
-            std::time::Duration::from_secs(30),
-        );
+        let result = wait_for_inactivity(&stop, &activity, std::time::Duration::from_secs(30));
 
         assert!(
             result.is_none(),
@@ -2233,6 +2687,290 @@ mod tests {
             "wait took {:?} — it is not polling the stop flag",
             started.elapsed()
         );
+    }
+
+    /// The watchdog reads the same signal slot takeover does, so it reaps a seat
+    /// that keeps receiving RTP while nothing comes out of its slot's chain.
+    /// Measured on arriving bytes alone such a seat never goes idle, and holds
+    /// its slot for as long as its publisher keeps sending.
+    #[test]
+    fn watchdog_reaps_a_session_that_receives_media_it_never_decodes() {
+        let stop = Arc::new(AtomicBool::new(false));
+        // Receiving for a minute already, so the decoder's grace is long spent.
+        let activity = Arc::new(SessionActivity::from_stamps(
+            ActivityStamp::backdated(
+                std::time::Duration::from_secs(60),
+                std::time::Duration::ZERO,
+            ),
+            Arc::new(SlotOutput::new(Instant::now())),
+        ));
+
+        let publisher_stop = Arc::new(AtomicBool::new(false));
+        let receiving = activity.clone();
+        let stop_receiving = publisher_stop.clone();
+        std::thread::spawn(move || {
+            while !stop_receiving.load(Ordering::SeqCst) {
+                receiving.touch_ingress(true);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+
+        // The wait never returns while the seat counts as live, so it runs on its
+        // own thread: a regression has to fail this test, not hang it.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let watched = activity.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(wait_for_inactivity(&stop, &watched, INACTIVITY_TIMEOUT));
+        });
+        let reaped = rx.recv_timeout(std::time::Duration::from_secs(5));
+        publisher_stop.store(true, Ordering::SeqCst);
+
+        assert!(
+            matches!(reaped, Ok(Some((ms, StallSide::Output))) if ms >= INACTIVITY_TIMEOUT.as_millis() as u64),
+            "a seat receiving RTP it never decodes must be reaped against the \
+             slot's output, not held alive by its arriving-bytes counter: {:?}",
+            reaped
+        );
+    }
+
+    /// Assemble a built block's elements into a pipeline the way the flow
+    /// builder does: add them all, then make the links the block asked for.
+    /// `decodebin`'s src pad is dynamic and is linked by the block's own
+    /// `pad-added` handler, so it is deliberately absent from `internal_links`.
+    fn assemble(result: &BlockBuildResult) -> gst::Pipeline {
+        let pipeline = gst::Pipeline::new();
+        for (_, element) in &result.elements {
+            pipeline.add(element).expect("add element");
+        }
+        let by_id: HashMap<&str, &gst::Element> = result
+            .elements
+            .iter()
+            .map(|(id, element)| (id.as_str(), element))
+            .collect();
+        for (from, to) in &result.internal_links {
+            let src = by_id[from.element_id.as_str()]
+                .static_pad(from.pad_name.as_deref().unwrap_or("src"))
+                .expect("source pad");
+            let sink = by_id[to.element_id.as_str()]
+                .static_pad(to.pad_name.as_deref().unwrap_or("sink"))
+                .expect("sink pad");
+            src.link(&sink).expect("internal link");
+        }
+        pipeline
+    }
+
+    fn i420_frame(index: u64) -> gst::Buffer {
+        let mut buffer = gst::Buffer::with_size(64 * 64 * 3 / 2).expect("allocate frame");
+        {
+            let buffer = buffer.get_mut().unwrap();
+            buffer.set_pts(gst::ClockTime::from_mseconds(index * 33));
+            buffer.set_duration(gst::ClockTime::from_mseconds(33));
+        }
+        buffer
+    }
+
+    /// Poll until `check` holds, up to five seconds. Buffers cross a pipeline on
+    /// its own streaming threads, so a test cannot read the result straight after
+    /// pushing.
+    fn wait_for(what: &str, check: impl Fn() -> bool) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if check() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("timed out waiting for {}", what);
+    }
+
+    /// The signal a WHIP slot is judged by has to mean "this session is producing
+    /// media the flow can use", so it is stamped at the end of the slot's chain,
+    /// past `decodebin` and the converter. The session's own appsink is upstream
+    /// of all of that, in a separate pipeline, and only ever sees bytes arrive.
+    ///
+    /// Both halves matter, so this checks both: media that gets through stamps
+    /// the slot, and media that arrives but cannot get through does not. The
+    /// second half is a seat that keeps receiving RTP while nothing gets
+    /// through: here a stuck consumer blocks its tee, which is what a stalled
+    /// recorder branch does in a real flow.
+    #[test]
+    fn the_slot_stamp_follows_media_out_of_the_decode_chain_not_into_it() {
+        let _ = gst::init();
+
+        let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+        let result = build_whipserversrc(
+            "whip-liveness-test",
+            &props(&[
+                ("mode", PropertyValue::String("video".to_string())),
+                ("decode", PropertyValue::Bool(true)),
+                ("max_sessions", PropertyValue::Int(1)),
+            ]),
+            &ctx,
+        )
+        .expect("build_whipserversrc failed");
+
+        let configs = ctx.take_whip_endpoint_configs();
+        let config = &configs[0].1;
+        let stamp = config.slot_output[0].video.clone();
+        let appsrc = config.slot_video_appsrcs[0].clone();
+        assert_eq!(
+            stamp.last(),
+            0,
+            "nothing has gone through the slot's chain yet"
+        );
+
+        let pipeline = assemble(&result);
+
+        // The slot's `decodebin` is built with its state locked so an unclaimed
+        // slot cannot hold the pipeline short of PLAYING. Claiming the slot is
+        // what unlocks it, exactly as a WHIP POST does.
+        assert_eq!(
+            config.allocate_slot("test-session"),
+            Some(0),
+            "the endpoint starts with its only slot free"
+        );
+
+        // Somewhere for the slot's tee to push, and a pad this test can block to
+        // stall the chain.
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("async", false)
+            .property("sync", false)
+            .build()
+            .expect("fakesink is part of gstreamer core");
+        pipeline.add(&sink).expect("add fakesink");
+        let tee = result
+            .elements
+            .iter()
+            .find(|(id, _)| id.ends_with(":video_out_tee_0"))
+            .map(|(_, element)| element.clone())
+            .expect("the block builds an output tee per slot");
+        let tee_src = tee.request_pad_simple("src_%u").expect("tee src pad");
+        tee_src
+            .link(&sink.static_pad("sink").unwrap())
+            .expect("link tee to fakesink");
+
+        appsrc.set_caps(Some(
+            &gst::Caps::builder("video/x-raw")
+                .field("format", "I420")
+                .field("width", 64i32)
+                .field("height", 64i32)
+                .field("framerate", gst::Fraction::new(30, 1))
+                .build(),
+        ));
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline to PLAYING");
+
+        for index in 0..30 {
+            appsrc.push_buffer(i420_frame(index)).expect("push frame");
+        }
+        wait_for("the slot's stamp to follow the first frames", || {
+            stamp.last() != 0
+        });
+
+        // Now stall the slot's consumer, the way a stuck recorder branch does:
+        // hold the streaming thread inside a probe until the test releases it.
+        // Returning from the callback would let the buffer straight through.
+        let release = Arc::new(AtomicBool::new(false));
+        let gate = release.clone();
+        let block = tee_src
+            .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, move |_, _| {
+                while !gate.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                gst::PadProbeReturn::Ok
+            })
+            .expect("block probe");
+        // One buffer still reaches the tee's sink pad — it is the one that runs
+        // into the block — and stamps the slot on its way. Let it, and read the
+        // stamp afterwards: everything behind it is stuck upstream.
+        for index in 30..60 {
+            appsrc.push_buffer(i420_frame(index)).expect("push frame");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let stalled_at = stamp.last();
+
+        for index in 60..150 {
+            appsrc.push_buffer(i420_frame(index)).expect("push frame");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        assert_eq!(
+            stamp.last(),
+            stalled_at,
+            "media kept arriving at the slot's appsrc while its chain was blocked; \
+             the stamp must not move for media that never gets through"
+        );
+
+        // Let the held streaming thread go before removing the probe: removing it
+        // waits for the callback to return.
+        release.store(true, Ordering::Relaxed);
+        tee_src.remove_probe(block);
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline to NULL");
+    }
+
+    /// Each medium is judged on its own stamp, so each tee has to write its
+    /// own: audio wired to the video stamp would leave the audio stamp still
+    /// and reap every audio-bearing seat once its grace ran out.
+    #[test]
+    fn audio_out_of_the_slot_stamps_the_audio_stamp_only() {
+        let _ = gst::init();
+
+        let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+        let result = build_whipserversrc(
+            "whip-audio-stamp-test",
+            &props(&[
+                ("mode", PropertyValue::String("audio_video".to_string())),
+                ("decode", PropertyValue::Bool(true)),
+                ("max_sessions", PropertyValue::Int(1)),
+            ]),
+            &ctx,
+        )
+        .expect("build_whipserversrc failed");
+
+        let configs = ctx.take_whip_endpoint_configs();
+        let config = &configs[0].1;
+        let output = config.slot_output[0].clone();
+        let appsrc = config.slot_audio_appsrcs[0].clone();
+        let pipeline = assemble(&result);
+        assert_eq!(config.allocate_slot("test-session"), Some(0));
+
+        appsrc.set_caps(Some(
+            &gst::Caps::builder("audio/x-raw")
+                .field("format", "S16LE")
+                .field("layout", "interleaved")
+                .field("rate", 48000i32)
+                .field("channels", 2i32)
+                .build(),
+        ));
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline to PLAYING");
+
+        // 20 ms of stereo S16 at 48 kHz per buffer.
+        for index in 0..25u64 {
+            let mut buffer = gst::Buffer::with_size(960 * 4).expect("allocate audio");
+            {
+                let buffer = buffer.get_mut().unwrap();
+                buffer.set_pts(gst::ClockTime::from_mseconds(index * 20));
+                buffer.set_duration(gst::ClockTime::from_mseconds(20));
+            }
+            appsrc.push_buffer(buffer).expect("push audio");
+        }
+        wait_for("audio to stamp the slot's audio stamp", || {
+            output.audio.last() != 0
+        });
+        assert_eq!(
+            output.video.last(),
+            0,
+            "audio coming out of the slot must not stamp its video"
+        );
+
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline to NULL");
     }
 
     /// The block property must reach the `WhipEndpointConfig` handed to the
@@ -2304,8 +3042,8 @@ mod tests {
                 .set_pts(gst::ClockTime::from_seconds(seconds));
             gst::Sample::builder().buffer(&buffer).caps(&caps).build()
         };
-        // Offsets already computed, so no main pipeline is needed.
-        let ts_offset = AtomicI64::new(0);
+        // No main pipeline, so the bridge forwards both samples unadjusted.
+        let bridge = SessionBridge::new();
         let no_main_pipeline = gst::glib::WeakRef::new();
 
         let displaced = AtomicBool::new(true);
@@ -2313,9 +3051,9 @@ mod tests {
             &sample_at(1),
             &appsrc,
             &displaced,
-            &ts_offset,
+            &bridge,
             &no_main_pipeline,
-            "audio",
+            SlotMedia::Audio,
             0,
         )
         .unwrap();
@@ -2325,9 +3063,9 @@ mod tests {
             &sample_at(2),
             &appsrc,
             &current,
-            &ts_offset,
+            &bridge,
             &no_main_pipeline,
-            "audio",
+            SlotMedia::Audio,
             0,
         )
         .unwrap();
@@ -2341,6 +3079,128 @@ mod tests {
             first.buffer().unwrap().pts(),
             Some(gst::ClockTime::from_seconds(2)),
             "the first sample in the slot must be the current session's, not the displaced one's"
+        );
+    }
+
+    /// Bridge RTP video packets, given as (RTP timestamp, PTS in ms), through
+    /// one session's `forward_sample_to_slot` and return the PTS each reached
+    /// the slot with, in ns.
+    fn bridge_video_packets(packets: &[(u32, u64)]) -> Vec<u64> {
+        use gst_rtp::prelude::RTPBufferExt;
+        let _ = gst::init();
+
+        let pipeline = gst::Pipeline::new();
+        let appsrc = gst_app::AppSrc::builder().format(gst::Format::Time).build();
+        let appsink = gst_app::AppSink::builder().sync(false).build();
+        pipeline
+            .add_many([appsrc.upcast_ref::<gst::Element>(), appsink.upcast_ref()])
+            .unwrap();
+        appsrc.link(&appsink).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let caps = gst::Caps::builder("application/x-rtp")
+            .field("media", "video")
+            .field("clock-rate", 90000i32)
+            .field("encoding-name", "H264")
+            .build();
+        // No main pipeline, so the bridge forwards every PTS unadjusted and
+        // only the ordering moves it.
+        let bridge = SessionBridge::new();
+        let no_main_pipeline = gst::glib::WeakRef::new();
+        let session_finished = AtomicBool::new(false);
+        let order = VideoPtsOrder::new();
+
+        let mut out = Vec::new();
+        for &(rtptime, pts_ms) in packets {
+            let mut buffer = gst::Buffer::new_rtp_with_sizes(4, 0, 0).unwrap();
+            {
+                let buffer = buffer.get_mut().unwrap();
+                buffer.set_pts(gst::ClockTime::from_mseconds(pts_ms));
+                let mut rtp = gst_rtp::RTPBuffer::from_buffer_writable(buffer).unwrap();
+                rtp.set_timestamp(rtptime);
+            }
+            let sample = gst::Sample::builder().buffer(&buffer).caps(&caps).build();
+            forward_sample_to_slot(
+                &sample,
+                &appsrc,
+                &session_finished,
+                &bridge,
+                &no_main_pipeline,
+                SlotMedia::Video(&order),
+                0,
+            )
+            .unwrap();
+            let pulled = appsink
+                .try_pull_sample(gst::ClockTime::from_seconds(5))
+                .expect("every packet must reach the slot");
+            out.push(pulled.buffer().unwrap().pts().unwrap().nseconds());
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        out
+    }
+
+    /// A session's jitterbuffer can release packets of several frames on one
+    /// PTS. Each frame must still reach the slot with its own, increasing PTS,
+    /// and the packets of one frame with a shared one.
+    #[test]
+    fn video_frames_on_one_pts_reach_the_slot_in_order() {
+        // Two packets of frame A, then frames B and C released on A's PTS,
+        // then frame D on its own later PTS.
+        let out = bridge_video_packets(&[
+            (1000, 1000),
+            (1000, 1000),
+            (4000, 1000),
+            (7000, 1000),
+            (10000, 1100),
+        ]);
+
+        let ms = 1_000_000;
+        assert_eq!(out[0], 1000 * ms);
+        assert_eq!(out[1], out[0], "packets of one frame share a PTS");
+        assert!(out[2] > out[1], "frame B must follow frame A: {:?}", out);
+        assert!(out[3] > out[2], "frame C must follow frame B: {:?}", out);
+        assert_eq!(out[4], 1100 * ms, "a frame already in order keeps its PTS");
+    }
+
+    /// An encoder with B-frames sends a frame after the one it precedes, so
+    /// its PTS is a frame or more behind the previous packet's. It must keep
+    /// that PTS: moving it past the later frame bunches the decoded video.
+    #[test]
+    fn video_b_frames_keep_their_pts() {
+        // Decode order I P B B P, 33 ms per frame: display order I B B P P.
+        let out = bridge_video_packets(&[
+            (0, 1000),
+            (9000, 1100),
+            (3000, 1033),
+            (6000, 1066),
+            (18000, 1200),
+        ]);
+
+        let ms = 1_000_000;
+        assert_eq!(
+            out,
+            vec![1000 * ms, 1100 * ms, 1033 * ms, 1066 * ms, 1200 * ms],
+            "B-frames must reach the slot with their own PTS"
+        );
+    }
+
+    /// One frame with a PTS far ahead of the rest must not hold back the
+    /// frames after it, or the seat freezes until real time catches up.
+    #[test]
+    fn video_frame_far_ahead_does_not_hold_back_later_frames() {
+        let out = bridge_video_packets(&[
+            (0, 1000),
+            (3000, 1033),
+            (6000, 10_000),
+            (9000, 1100),
+            (12000, 1133),
+        ]);
+
+        let ms = 1_000_000;
+        assert_eq!(
+            out,
+            vec![1000 * ms, 1033 * ms, 10_000 * ms, 1100 * ms, 1133 * ms],
+            "frames after an outlier must keep their own PTS"
         );
     }
 }

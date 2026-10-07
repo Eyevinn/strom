@@ -350,27 +350,27 @@ fn overlay_registries_round_trip() {
     register_overlay_renderer(other_flow_id, other_block_id, Arc::clone(&renderer));
 
     assert!(
-        get_overlay_state(block_id).is_some(),
+        get_overlay_state(&flow_id, block_id).is_some(),
         "state should be registered"
     );
     assert!(
-        get_overlay_renderer(block_id).is_some(),
+        get_overlay_renderer(&flow_id, block_id).is_some(),
         "renderer should be registered"
     );
 
     unregister_flow(&flow_id);
 
     assert!(
-        get_overlay_state(block_id).is_none(),
+        get_overlay_state(&flow_id, block_id).is_none(),
         "state must be cleaned (otherwise API still sees stale block)"
     );
     assert!(
-        get_overlay_renderer(block_id).is_none(),
+        get_overlay_renderer(&flow_id, block_id).is_none(),
         "renderer must be cleaned (otherwise overlay-timer-* thread leaks)"
     );
     assert!(
-        get_overlay_state(other_block_id).is_some()
-            && get_overlay_renderer(other_block_id).is_some(),
+        get_overlay_state(&other_flow_id, other_block_id).is_some()
+            && get_overlay_renderer(&other_flow_id, other_block_id).is_some(),
         "tearing down one flow must not clear another flow's overlay"
     );
 
@@ -451,7 +451,12 @@ fn shutdown_overlay_timers_joins_running_timer() {
     register_overlay_renderer(flow_id, block_id, Arc::clone(&renderer));
 
     let before = overlay_timers_running();
-    start_overlay_timer(block_id.to_string(), Arc::clone(&renderer), (50, 1));
+    start_overlay_timer(
+        flow_id,
+        block_id.to_string(),
+        Arc::clone(&renderer),
+        (50, 1),
+    );
 
     // Wait for a real render, so shutdown interrupts a thread inside cairo
     // rather than one waiting for PLAYING.
@@ -549,7 +554,12 @@ fn overlay_timer_exits_when_its_appsrc_is_orphaned() {
     register_overlay_renderer(flow_id, block_id, Arc::clone(&renderer));
 
     let before = overlay_timers_running();
-    start_overlay_timer(block_id.to_string(), Arc::clone(&renderer), (50, 1));
+    start_overlay_timer(
+        flow_id,
+        block_id.to_string(),
+        Arc::clone(&renderer),
+        (50, 1),
+    );
 
     // Let it reach the push loop first, so the exit is the backstop firing and
     // not the thread still waiting for PLAYING.
@@ -623,4 +633,455 @@ fn test_cpu_auto_format_inputs_are_held_to_videocrop_formats() {
             caps
         );
     }
+}
+
+/// The PGM compositor runs before any source publishes, drawing background.
+/// A source's first frame must not move its output back to 0: the frame
+/// stamped 0 reaches the encoder and every WHEP viewer of program.
+#[test]
+fn dist_compositor_late_first_input_does_not_rewind() {
+    use super::elements::{make_dist_compositor, CompositorBackend};
+    use crate::gst::aggregator_start::test_support::*;
+    use gstreamer as gst;
+
+    gst::init().unwrap();
+    let mixer = make_dist_compositor(CompositorBackend::Software, 100, 30).unwrap();
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", "I420")
+        .field("width", 64i32)
+        .field("height", 64i32)
+        .field("framerate", gst::Fraction::new(30, 1))
+        .build();
+    // One 64x64 I420 frame
+    let (pushed, pts) = output_pts_around_late_first_input(
+        &mixer,
+        &caps,
+        64 * 64 * 3 / 2,
+        gst::ClockTime::from_nseconds(33_333_333),
+        std::time::Duration::from_millis(500),
+    );
+    assert_no_rewind(pushed, &pts);
+}
+
+/// A flow feeds a vision mixer audio input from a tee whose other branch goes
+/// to a clock-synced sink. With a source that pushes in PAUSED (a file, a
+/// non-live test source), the tee pushes the first buffer into each branch in
+/// turn. The metering branch must take it without holding the thread, or the
+/// other branch never gets a buffer, its sink never prerolls, and the flow
+/// never reaches PLAYING. It must still meter.
+#[test]
+fn audio_meter_does_not_hold_the_upstream_thread_in_preroll() {
+    use crate::blocks::{builtin::get_builder, BlockBuildContext};
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+    use std::collections::{HashSet, VecDeque};
+    use strom_types::MediaType;
+
+    gst::init().unwrap();
+    crate::gpu::detect_gpu_capabilities();
+
+    let mut props = HashMap::new();
+    props.insert(
+        "compositor_preference".to_string(),
+        PropertyValue::String("cpu".to_string()),
+    );
+    props.insert("num_inputs".to_string(), PropertyValue::UInt(2));
+    let builder = get_builder("builtin.vision_mixer").expect("vision mixer has a builder");
+    let pads = builder.get_external_pads(&props).expect("external pads");
+    let ctx = BlockBuildContext::new(vec![], "all".to_string());
+    let built = builder
+        .build("vm", &props, &ctx)
+        .expect("CPU vision mixer builds");
+
+    // Only the metering chains run: everything reachable from the audio
+    // inputs through the block's own links.
+    let audio_inputs: Vec<_> = pads
+        .inputs
+        .iter()
+        .filter(|p| p.media_type == MediaType::Audio)
+        .collect();
+    assert!(audio_inputs.len() >= 2, "per-input audio plus PGM audio");
+    let mut chain: HashSet<String> = HashSet::new();
+    let mut todo: VecDeque<String> = audio_inputs
+        .iter()
+        .map(|p| format!("vm:{}", p.internal_element_id))
+        .collect();
+    while let Some(id) = todo.pop_front() {
+        if chain.insert(id.clone()) {
+            for (from, to) in &built.internal_links {
+                if from.element_id == id {
+                    todo.push_back(to.element_id.clone());
+                }
+            }
+        }
+    }
+    let pipeline = gst::Pipeline::new();
+    let element = |id: &str| {
+        built
+            .elements
+            .iter()
+            .find(|(eid, _)| eid == id)
+            .map(|(_, e)| e.clone())
+            .unwrap_or_else(|| panic!("builder produced no element {id}"))
+    };
+    for id in &chain {
+        pipeline.add(&element(id)).unwrap();
+    }
+    // No queue (a thread per meter) and no sink (it would preroll) in the
+    // chain, and the chain ends at the level, whose probe drops every buffer.
+    // An identity there drops by `rand()`, and can let a buffer through to
+    // its unlinked src pad.
+    for id in &chain {
+        let e = element(id);
+        let type_name = e.type_().name();
+        assert_ne!(type_name, "GstQueue", "{id} adds a thread per meter");
+        assert!(
+            !e.element_flags().contains(gst::ElementFlags::SINK),
+            "{id} is a sink: it would preroll in the upstream thread"
+        );
+        for pad in e.src_pads() {
+            let linked_inside = built
+                .internal_links
+                .iter()
+                .any(|(from, _)| from.element_id == *id);
+            if !linked_inside {
+                assert_eq!(
+                    type_name,
+                    "GstLevel",
+                    "{id} ({type_name}) ends the meter chain with {} unlinked",
+                    pad.name()
+                );
+            }
+        }
+    }
+    for (from, to) in &built.internal_links {
+        if chain.contains(&from.element_id) {
+            let src = element(&from.element_id);
+            let dst = element(&to.element_id);
+            src.link_pads(from.pad_name.as_deref(), &dst, to.pad_name.as_deref())
+                .unwrap_or_else(|e| panic!("link {from:?} -> {to:?}: {e}"));
+        }
+    }
+
+    for input in &audio_inputs {
+        let src = gst::ElementFactory::make("audiotestsrc")
+            .property("is-live", false)
+            .build()
+            .unwrap();
+        let tee = gst::ElementFactory::make("tee").build().unwrap();
+        let queue = gst::ElementFactory::make("queue").build().unwrap();
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("sync", true)
+            .build()
+            .unwrap();
+        pipeline.add_many([&src, &tee, &queue, &sink]).unwrap();
+        src.link(&tee).unwrap();
+        // The metering branch first, so the tee pushes into it first.
+        tee.request_pad_simple("src_%u")
+            .unwrap()
+            .link(
+                &element(&format!("vm:{}", input.internal_element_id))
+                    .static_pad(&input.internal_pad_name)
+                    .unwrap(),
+            )
+            .expect("audio input links");
+        gst::Element::link_many([&tee, &queue, &sink]).unwrap();
+    }
+
+    let result = pipeline.set_state(gst::State::Playing);
+    let (reached, state, _) = pipeline.state(gst::ClockTime::from_seconds(5));
+    let _ = pipeline.set_state(gst::State::Null);
+    assert!(
+        result.is_ok() && reached.is_ok() && state == gst::State::Playing,
+        "the flow did not reach PLAYING ({reached:?}, {state:?}): the metering \
+         branch held the upstream thread in preroll"
+    );
+
+    // Run again and wait for every meter to report.
+    pipeline.set_state(gst::State::Playing).unwrap();
+    let bus = pipeline.bus().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut metered = HashSet::new();
+    while metered.len() < audio_inputs.len() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "meters reported: {metered:?}"
+        );
+        let Some(msg) = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(50),
+            &[gst::MessageType::Element, gst::MessageType::Error],
+        ) else {
+            continue;
+        };
+        if let gst::MessageView::Error(err) = msg.view() {
+            panic!("pipeline error: {err:?}");
+        }
+        if msg
+            .structure()
+            .map(|s| s.name() == "level")
+            .unwrap_or(false)
+        {
+            metered.insert(msg.src().unwrap().name().to_string());
+        }
+    }
+    pipeline.set_state(gst::State::Null).unwrap();
+}
+
+/// Overlay state with four inputs labelled A-D, for the live label tests.
+fn four_input_overlay_state() -> std::sync::Arc<super::overlay::VisionMixerOverlayState> {
+    let lo = layout::compute_layout(1280, 720, 4, 0, ASPECT_16_9, false);
+    std::sync::Arc::new(super::overlay::VisionMixerOverlayState::new(
+        4,
+        0,
+        0,
+        1,
+        vec!["A".into(), "B".into(), "C".into(), "D".into()],
+        lo,
+        1920,
+        1080,
+        false,
+        super::overlay::PipInitialState::default(),
+    ))
+}
+
+/// A label changed on a running mixer has to reach the multiview on the next
+/// tick, not wait for something else (a take, the clock) to redraw it. The
+/// renderer only redraws on a state change, so the label has to count as one.
+#[test]
+fn live_label_change_redraws_the_multiview() {
+    use super::overlay::OverlayRenderer;
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+    use gstreamer_app as gst_app;
+    use std::time::{Duration, SystemTime};
+
+    gst::init().unwrap();
+
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", "BGRA")
+        .field("width", 1280i32)
+        .field("height", 720i32)
+        .field("framerate", gst::Fraction::new(50, 1))
+        .build();
+    let now_secs = || {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+
+    // The overlay clock also redraws once a second. A run that crosses a
+    // second boundary cannot tell the two apart, so it is retried.
+    for _attempt in 0..3 {
+        let state = four_input_overlay_state();
+        let appsrc = gst_app::AppSrc::builder()
+            .caps(&caps)
+            .format(gst::Format::Time)
+            .do_timestamp(true)
+            .max_buffers(2)
+            .build();
+        let appsink = gst_app::AppSink::builder().sync(false).build();
+        let pipeline = gst::Pipeline::new();
+        pipeline
+            .add_many([appsrc.upcast_ref::<gst::Element>(), appsink.upcast_ref()])
+            .unwrap();
+        appsrc.link(&appsink).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let mut renderer =
+            OverlayRenderer::new(appsrc.clone(), caps.clone(), state.clone(), 1280, 720);
+        let pull = || appsink.try_pull_sample(gst::ClockTime::from_mseconds(500));
+
+        let started = now_secs();
+        assert!(renderer.render_if_dirty(), "first render should push");
+        let first = pull().expect("first frame");
+
+        // Nothing changed: no new frame.
+        renderer.render_if_dirty();
+        let idle = appsink.try_pull_sample(gst::ClockTime::from_mseconds(100));
+
+        let flow_id = strom_types::FlowId::new_v4();
+        let block_id = "test-vm-live-label-redraw-block-id";
+        super::overlay::register_overlay_state(flow_id, block_id, state.clone());
+        let applied = super::apply_live_label(
+            &flow_id,
+            block_id,
+            "input_2_label",
+            &PropertyValue::String("Guest".into()),
+        );
+        super::overlay::unregister_flow(&flow_id);
+        applied.expect("label should apply to the registered mixer");
+        renderer.render_if_dirty();
+        let relabelled = pull();
+        let crossed_second = now_secs() != started;
+
+        pipeline.set_state(gst::State::Null).unwrap();
+        if crossed_second {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+
+        assert!(idle.is_none(), "an unchanged overlay must not redraw");
+        let relabelled = relabelled.expect("a label change must redraw the multiview");
+        let bytes = |s: &gst::Sample| s.buffer().unwrap().map_readable().unwrap().to_vec();
+        assert_ne!(
+            bytes(&first),
+            bytes(&relabelled),
+            "the redrawn frame should show the new label"
+        );
+        return;
+    }
+    panic!("every attempt crossed a second boundary");
+}
+
+/// `input_N_label` maps to `_block`, which the live property path otherwise
+/// refuses as having no element to write. A label change on a running mixer
+/// has to be accepted, reach the overlay, and be stored with the flow so it
+/// survives a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_label_update_reaches_the_overlay_and_is_stored() {
+    use super::overlay::{register_overlay_state, unregister_flow};
+    use crate::state::AppState;
+    use strom_types::block::{BlockInstance, Position};
+
+    gstreamer::init().unwrap();
+    let storage_file = tempfile::NamedTempFile::new().unwrap();
+    let blocks_file = tempfile::NamedTempFile::new().unwrap();
+    let app = AppState::new(
+        crate::storage::JsonFileStorage::new(storage_file.path()),
+        blocks_file.path(),
+        std::env::temp_dir(),
+        vec![],
+        "all".to_string(),
+        vec![],
+        false,
+        false,
+    );
+
+    let block_id = "test-vm-live-label-block-id";
+    let mut flow = strom_types::Flow::new("vision-mixer-live-label-test");
+    flow.blocks.push(BlockInstance {
+        id: block_id.to_string(),
+        block_definition_id: super::BLOCK_ID.to_string(),
+        name: None,
+        properties: HashMap::from([("num_inputs".to_string(), PropertyValue::UInt(4))]),
+        position: Position { x: 0.0, y: 0.0 },
+        runtime_data: None,
+        computed_external_pads: None,
+    });
+    let flow_id = flow.id;
+    app.upsert_flow(flow).await.expect("upsert_flow");
+
+    // Stands in for the running mixer's build, which registers its overlay.
+    let state = four_input_overlay_state();
+    register_overlay_state(flow_id, block_id, state.clone());
+
+    let (_, rejected) = app
+        .update_block_properties(
+            &flow_id,
+            block_id,
+            HashMap::from([
+                (
+                    "input_1_label".to_string(),
+                    PropertyValue::String("Guest: Alex".to_string()),
+                ),
+                (
+                    "input_3_label".to_string(),
+                    PropertyValue::String(String::new()),
+                ),
+                (
+                    "input_7_label".to_string(),
+                    PropertyValue::String("Beyond".to_string()),
+                ),
+            ]),
+            None,
+            None,
+        )
+        .await
+        .expect("update_block_properties");
+    unregister_flow(&flow_id);
+
+    assert_eq!(
+        rejected.keys().collect::<Vec<_>>(),
+        vec!["input_7_label"],
+        "only the label beyond num_inputs should be refused: {rejected:?}"
+    );
+    assert_eq!(state.labels(), vec!["A", "Guest: Alex", "C", "In 4"]);
+
+    let stored = app.get_flow(&flow_id).await.expect("flow");
+    let block = stored.blocks.iter().find(|b| b.id == block_id).unwrap();
+    assert!(matches!(
+        block.properties.get("input_1_label"),
+        Some(PropertyValue::String(s)) if s == "Guest: Alex"
+    ));
+    assert!(!block.properties.contains_key("input_7_label"));
+}
+
+/// Block ids are only unique within a flow. Flows built through the API can
+/// give their mixers the same id (`mixer`), and two such flows can run at
+/// once. Each must find its own overlay: otherwise a take, a PiP change or a
+/// label meant for one flow lands on the other, and the second registration
+/// stops the first flow's overlay timer (its ownership check no longer finds
+/// its own renderer), freezing that multiview.
+#[test]
+fn flows_sharing_a_block_id_keep_their_own_overlay() {
+    use super::overlay::{
+        get_overlay_renderer, get_overlay_state, register_overlay_renderer, register_overlay_state,
+        unregister_flow, OverlayRenderer,
+    };
+    use gstreamer as gst;
+    use gstreamer_app as gst_app;
+    use std::sync::{Arc, Mutex};
+
+    gst::init().unwrap();
+
+    let block_id = "mixer";
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", "BGRA")
+        .field("width", 1280i32)
+        .field("height", 720i32)
+        .field("framerate", gst::Fraction::new(50, 1))
+        .build();
+    let register = |flow_id| {
+        let state = four_input_overlay_state();
+        let appsrc = gst_app::AppSrc::builder().caps(&caps).build();
+        let renderer = Arc::new(Mutex::new(OverlayRenderer::new(
+            appsrc,
+            caps.clone(),
+            Arc::clone(&state),
+            1280,
+            720,
+        )));
+        register_overlay_state(flow_id, block_id, Arc::clone(&state));
+        register_overlay_renderer(flow_id, block_id, Arc::clone(&renderer));
+        (state, renderer)
+    };
+
+    let flow_a = strom_types::FlowId::new_v4();
+    let flow_b = strom_types::FlowId::new_v4();
+    let (state_a, renderer_a) = register(flow_a);
+    let (state_b, renderer_b) = register(flow_b);
+
+    let found = |flow_id| {
+        (
+            get_overlay_state(&flow_id, block_id).expect("state registered"),
+            get_overlay_renderer(&flow_id, block_id).expect("renderer registered"),
+        )
+    };
+    let (found_state, found_renderer) = found(flow_a);
+    assert!(
+        Arc::ptr_eq(&found_state, &state_a) && Arc::ptr_eq(&found_renderer, &renderer_a),
+        "flow A must still find its own overlay after flow B registered the same block id"
+    );
+    let (found_state, found_renderer) = found(flow_b);
+    assert!(Arc::ptr_eq(&found_state, &state_b) && Arc::ptr_eq(&found_renderer, &renderer_b));
+
+    unregister_flow(&flow_a);
+    assert!(get_overlay_state(&flow_a, block_id).is_none());
+    let (found_state, _) = found(flow_b);
+    assert!(
+        Arc::ptr_eq(&found_state, &state_b),
+        "tearing down flow A must leave flow B's overlay registered"
+    );
+    unregister_flow(&flow_b);
 }

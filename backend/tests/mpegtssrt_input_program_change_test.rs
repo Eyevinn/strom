@@ -11,10 +11,6 @@
 //! pad before removing the old one, `decodebin` removes first — so both modes
 //! are driven here.
 
-// Not on Windows: `gstsrt.dll` intermittently fails to load inside the test
-// process there (#834); see `mpegtssrt_streamheader_test.rs`.
-#![cfg(not(target_os = "windows"))]
-
 pub mod common;
 
 use std::collections::HashMap;
@@ -70,8 +66,13 @@ fn caller(port: u16, mux_pad: &str) -> gst::Pipeline {
 
 /// First error on the bus within `wait`, named by the element that posted it.
 fn first_error(bus: &gst::Bus, wait: Duration) -> Option<String> {
+    first_error_until(bus, wait, || false)
+}
+
+/// As `first_error`, but stops watching as soon as `done` holds.
+fn first_error_until(bus: &gst::Bus, wait: Duration, done: impl Fn() -> bool) -> Option<String> {
     let deadline = Instant::now() + wait;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !done() {
         if let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(50)) {
             if let gst::MessageView::Error(err) = msg.view() {
                 let src = err
@@ -183,7 +184,9 @@ fn buffers_across_pid_change(decode: bool) -> (u64, u64, Option<String>) {
         .set_state(gst::State::Playing)
         .expect("caller A goes to PLAYING");
     if error.is_none() {
-        error = first_error(&bus, Duration::from_millis(2500));
+        error = first_error_until(&bus, Duration::from_millis(2500), || {
+            buffers.load(Ordering::Relaxed) >= MIN_BUFFERS_FROM_B
+        });
     }
     let _ = caller_a.set_state(gst::State::Null);
     let from_a = buffers.load(Ordering::Relaxed);
@@ -197,10 +200,13 @@ fn buffers_across_pid_change(decode: bool) -> (u64, u64, Option<String>) {
     caller_b
         .set_state(gst::State::Playing)
         .expect("caller B goes to PLAYING");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let b_delivered = || buffers.load(Ordering::Relaxed) - before_b >= MIN_BUFFERS_FROM_B;
     if error.is_none() {
-        error = first_error(&bus, Duration::from_secs(3));
-    } else {
-        std::thread::sleep(Duration::from_secs(3));
+        error = first_error_until(&bus, Duration::from_secs(3), b_delivered);
+    }
+    while !b_delivered() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
     }
     let from_b = buffers.load(Ordering::Relaxed) - before_b;
 
@@ -210,8 +216,9 @@ fn buffers_across_pid_change(decode: bool) -> (u64, u64, Option<String>) {
     (from_a, from_b, error)
 }
 
-/// At ~47 AAC frames a second, three seconds of a working caller B delivers
-/// well over this. The regression delivers one buffer, then nothing.
+/// At ~47 AAC frames a second, a working caller B reaches this well inside
+/// the three seconds it is given, and the test stops watching once it has.
+/// The regression delivers one buffer, then nothing.
 const MIN_BUFFERS_FROM_B: u64 = 10;
 
 fn assert_survives_pid_change(decode: bool) {

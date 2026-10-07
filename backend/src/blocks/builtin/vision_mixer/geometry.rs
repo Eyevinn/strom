@@ -14,6 +14,10 @@
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_controller::prelude::*;
+use gstreamer_controller::InterpolationControlSource;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 use strom_types::vision_mixer::{self, aspect_fit_rect, SourceAspects};
 use tracing::debug;
 
@@ -22,15 +26,17 @@ use crate::gst::pipeline::effects::{
     apply_input_group_to_region, apply_pip_layout_to_region, find_pad,
 };
 use crate::gst::underlay::UnderlayCtx;
+use strom_types::FlowId;
 
-/// Install CAPS event probes on every input video sink pad of the dist and
-/// multiview compositors. Each caps arrival/change triggers a full geometry
-/// refresh from the current overlay state.
+/// Watch the caps of every input video sink pad of the dist and multiview
+/// compositors. Each caps arrival/change triggers a full geometry refresh
+/// from the current overlay state.
 ///
 /// Must run after linking (request pads exist). Elements are captured as
-/// `WeakRef`s in the probe closures — pads own their probes, and a strong
+/// `WeakRef`s in the handlers — pads own their handlers, and a strong
 /// element reference would create a cycle that leaks the pipeline.
 pub fn install_caps_probes(
+    flow_id: FlowId,
     block_id: &str,
     mixer: &gst::Element,
     mv_comp: &gst::Element,
@@ -55,37 +61,34 @@ pub fn install_caps_probes(
         let block_id = block_id.to_string();
         let mixer_weak = mixer.downgrade();
         let mv_weak = mv_comp.downgrade();
-        pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
-            if let Some(gst::PadProbeData::Event(ev)) = &info.data {
-                if ev.type_() == gst::EventType::Caps {
-                    // Defer the refresh to the glib main loop instead of
-                    // running it inline: sticky caps are stored on the pad
-                    // only AFTER the probes return, and sibling branches
-                    // negotiate concurrently on their own streaming threads —
-                    // an inline refresh races both, and two probes of the
-                    // same input firing simultaneously can each miss the
-                    // other's caps, leaving that input's thumbnail stretched
-                    // forever. Serialized on the main context, the last
-                    // refresh always sees every negotiated pad.
-                    let block_id = block_id.clone();
-                    let mixer_weak = mixer_weak.clone();
-                    let mv_weak = mv_weak.clone();
-                    gst::glib::idle_add_once(move || {
-                        // Pipeline teardown in progress → nothing to refresh.
-                        let (Some(mixer), Some(mv_comp)) =
-                            (mixer_weak.upgrade(), mv_weak.upgrade())
-                        else {
-                            return;
-                        };
-                        refresh_geometry(&block_id, &mixer, &mv_comp);
-                    });
-                }
+        // `notify::caps` fires once the pad has stored the new caps; a caps
+        // EVENT probe fires before, so a refresh queued from one can read the
+        // old size and leave the rect in the old shape.
+        pad.connect_notify(Some("caps"), move |pad, _| {
+            // Caps are cleared on deactivation; nothing to fit.
+            if pad.current_caps().is_none() {
+                return;
             }
-            gst::PadProbeReturn::Ok
+            // Defer the refresh to the glib main loop instead of running it
+            // inline: sibling branches negotiate concurrently on their own
+            // streaming threads, and two notifies of the same input firing
+            // simultaneously can each miss the other's caps, leaving that
+            // input's thumbnail stretched forever. Serialized on the main
+            // context, the last refresh always sees every negotiated pad.
+            let block_id = block_id.clone();
+            let mixer_weak = mixer_weak.clone();
+            let mv_weak = mv_weak.clone();
+            gst::glib::idle_add_once(move || {
+                // Pipeline teardown in progress → nothing to refresh.
+                let (Some(mixer), Some(mv_comp)) = (mixer_weak.upgrade(), mv_weak.upgrade()) else {
+                    return;
+                };
+                refresh_geometry(flow_id, &block_id, &mixer, &mv_comp);
+            });
         });
     }
     debug!(
-        "Vision mixer {}: installed {} caps probes for reactive geometry",
+        "Vision mixer {}: watching caps on {} pads for reactive geometry",
         block_id, installed
     );
 }
@@ -100,8 +103,8 @@ fn pad_caps_dims(element: &gst::Element, pad_name: &str) -> Option<(i32, i32)> {
 /// Re-apply aspect-correct geometry (and crop pixel values) for every input
 /// video pad from the current overlay state. Idempotent — safe to run on
 /// every caps event.
-fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element) {
-    let Some(state) = overlay::get_overlay_state(block_id) else {
+fn refresh_geometry(flow_id: FlowId, block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element) {
+    let Some(state) = overlay::get_overlay_state(&flow_id, block_id) else {
         return;
     };
     let n = state.num_inputs;
@@ -122,8 +125,26 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
     // refreshing on each of those events would clear control bindings and
     // kill the very animation producing them. Source dims are read upstream
     // of videocrop, so crop-induced caps events never count as changes.
-    if !state.update_input_dims(&dims) {
+    let dims_changed = state.update_input_dims(&dims);
+    if !dims_changed && !state.layout_refit_pending.load(Ordering::Relaxed) {
         return;
+    }
+
+    // A take, FTB or DSK fade animates pad properties through control
+    // bindings, and re-applying a layout wipes them: the animation would
+    // end as a cut. Leave an animating compositor alone and re-fit it once
+    // the animation is over. FTB off re-fits the dist mixer itself.
+    let ftb = state.ftb_active.load(Ordering::Relaxed);
+    let dist_animation = animation_remaining(mixer);
+    let mv_animation = animation_remaining(mv_comp);
+    let dist_busy = ftb || dist_animation.is_some();
+    let mv_busy = mv_animation.is_some();
+    state
+        .layout_refit_pending
+        .store(dist_busy || mv_busy, Ordering::Relaxed);
+    let retry = [dist_animation, mv_animation].into_iter().flatten().max();
+    if let Some(wait) = retry {
+        refit_after(flow_id, block_id, mixer, mv_comp, wait + REFIT_MARGIN);
     }
 
     let mut aspects = SourceAspects::new();
@@ -133,12 +154,10 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
         }
     }
 
-    // Dist canvas size from the mixer's negotiated output caps.
-    let (cw, ch) = pad_caps_dims_src(mixer).unwrap_or_else(|| {
-        strom_types::parse_resolution_string(vision_mixer::DEFAULT_PGM_RESOLUTION)
-            .map(|(w, h)| (w as i32, h as i32))
-            .expect("DEFAULT_PGM_RESOLUTION must be valid")
-    });
+    // Dist canvas size from the mixer's negotiated output caps, or the PGM
+    // size it is built to produce: the first refresh can run before the
+    // output has negotiated, and no later one runs unless an input changes.
+    let (cw, ch) = pad_caps_dims_src(mixer).unwrap_or((state.pgm_w as i32, state.pgm_h as i32));
     let fallback = if ch > 0 {
         cw as f64 / ch as f64
     } else {
@@ -155,8 +174,8 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
         scale: state.layout.pvw_rect.w / pgm_w,
     });
 
-    // --- Dist compositor (PGM) — skip while FTB drives the alphas. ---
-    if !state.ftb_active.load(std::sync::atomic::Ordering::Relaxed) {
+    // --- Dist compositor (PGM). ---
+    if !dist_busy {
         if let Some(p) = state.pgm_pip() {
             apply_pip_layout_to_region(
                 mixer,
@@ -199,6 +218,10 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
         pad.set_property("ypos", y);
         pad.set_property("width", w);
         pad.set_property("height", h);
+    }
+
+    if mv_busy {
+        return;
     }
 
     // --- Multiview PVW big region. ---
@@ -264,6 +287,59 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
         block_id,
         aspects.len()
     );
+}
+
+/// Pad properties that takes, FTB and layout code animate.
+const ANIMATED_PAD_PROPS: [&str; 6] = ["alpha", "xpos", "ypos", "width", "height", "zorder"];
+
+/// Slack after an animation's last keyframe before re-fitting.
+const REFIT_MARGIN: Duration = Duration::from_millis(50);
+
+/// How long until the last keyframe programmed on any of `compositor`'s sink
+/// pads, or `None` when none lies ahead. Keyframes are in the compositor's
+/// stream time, which is what its position query reports.
+fn animation_remaining(compositor: &gst::Element) -> Option<Duration> {
+    let now = compositor.query_position::<gst::ClockTime>()?;
+    compositor
+        .sink_pads()
+        .iter()
+        .flat_map(|pad| {
+            ANIMATED_PAD_PROPS
+                .iter()
+                .filter_map(move |prop| last_keyframe(pad, prop))
+        })
+        .max()
+        .filter(|end| *end > now)
+        .map(|end| Duration::from_nanos((end - now).nseconds()))
+}
+
+fn last_keyframe(pad: &gst::Pad, prop: &str) -> Option<gst::ClockTime> {
+    let cs = pad
+        .control_binding(prop)?
+        .property::<Option<gst::ControlSource>>("control-source")?
+        .downcast::<InterpolationControlSource>()
+        .ok()?;
+    cs.list_control_points().last().map(|tv| tv.timestamp())
+}
+
+/// Run a geometry refresh after `wait`, on the main loop.
+fn refit_after(
+    flow_id: FlowId,
+    block_id: &str,
+    mixer: &gst::Element,
+    mv_comp: &gst::Element,
+    wait: Duration,
+) {
+    let block_id = block_id.to_string();
+    let mixer_weak = mixer.downgrade();
+    let mv_weak = mv_comp.downgrade();
+    gst::glib::timeout_add_once(wait, move || {
+        // Pipeline teardown in progress → nothing to refresh.
+        let (Some(mixer), Some(mv_comp)) = (mixer_weak.upgrade(), mv_weak.upgrade()) else {
+            return;
+        };
+        refresh_geometry(flow_id, &block_id, &mixer, &mv_comp);
+    });
 }
 
 /// Read `(width, height)` from an element's `src` pad caps.

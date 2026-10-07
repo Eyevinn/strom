@@ -499,6 +499,11 @@ impl AppState {
                     }
                 }
 
+                // Nothing runs yet, so no browser has a profile open.
+                if let Some(root) = crate::cef_profiles::cache_root() {
+                    crate::cef_profiles::remove_unused_profiles(&root, flows.values());
+                }
+
                 let mut state_flows = self.inner.flows.write().await;
                 *state_flows = flows;
                 info!("Loaded {} flows from storage", count);
@@ -783,8 +788,10 @@ impl AppState {
             let pipelines = self.inner.pipelines.read().await;
             pipelines.contains_key(id)
         };
+        let mut stopped = true;
         if pipeline_active {
             if let Err(e) = self.stop_flow(id).await {
+                stopped = false;
                 error!(
                     "Failed to stop flow {} before delete: {} — pipeline resources may leak",
                     id, e
@@ -812,6 +819,17 @@ impl AppState {
 
         // Unregister from PTP monitor
         self.inner.ptp_monitor.unregister_flow(*id);
+
+        // The flow is stopped, so its pages are closed. Their profiles hold
+        // whatever they were logged in to; nothing would use them again. A
+        // flow that would not stop may still have a browser in one, and the
+        // next startup removes what is left.
+        if stopped {
+            if let Some(root) = crate::cef_profiles::cache_root() {
+                crate::cef_profiles::remove_flow_profiles(&root, id);
+            }
+            crate::cef_pages::forget_flow(id);
+        }
 
         // Broadcast event
         self.inner
@@ -1391,6 +1409,44 @@ impl AppState {
         Ok(state)
     }
 
+    /// Take removed WHIP session pipelines to NULL, keeping each element alive
+    /// until its pipeline is down. Runs on the blocking pool: that can take
+    /// seconds and this is awaited from an HTTP handler.
+    async fn teardown_whip_sessions(
+        endpoint_id: &str,
+        session_entries: Vec<(gstreamer::Pipeline, gstreamer::Element)>,
+    ) {
+        let count = session_entries.len();
+        if count == 0 {
+            return;
+        }
+        let endpoint_id_log = endpoint_id.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            for (pipeline, element) in session_entries {
+                WhipSessionManager::teardown_session_pipeline(&pipeline);
+                drop(element);
+            }
+            info!(
+                "Torn down {} active WHIP session(s) for endpoint '{}'",
+                count, endpoint_id_log
+            );
+        })
+        .await;
+    }
+
+    /// Shut the flow's Media Players down off the async runtime: a shutdown
+    /// waits for a control call in progress and for the source to finish
+    /// setting up, which can take seconds.
+    async fn unregister_media_players(id: FlowId) {
+        let unregistered = tokio::task::spawn_blocking(move || {
+            crate::blocks::builtin::mediaplayer::MEDIA_PLAYER_REGISTRY.unregister_flow(&id)
+        })
+        .await;
+        if let Err(e) = unregistered {
+            error!("Media Player shutdown for flow {} failed: {}", id, e);
+        }
+    }
+
     /// Stop a flow (stop and remove its pipeline).
     /// Release everything a flow's pipeline holds. The single way it is done.
     ///
@@ -1432,7 +1488,7 @@ impl AppState {
             // No pipeline was ever built. Blocks constructed before the failing
             // one can still have registered themselves, and the CPU allocation
             // may already be held; deallocate() ignores an id it does not know.
-            crate::blocks::builtin::mediaplayer::MEDIA_PLAYER_REGISTRY.unregister_flow(id);
+            Self::unregister_media_players(*id).await;
             self.inner.affinity_manager.deallocate(id);
             return Ok(PipelineState::Null);
         };
@@ -1464,26 +1520,14 @@ impl AppState {
                 .inner
                 .whip_session_manager
                 .remove_all_sessions(endpoint_id);
-            let count = session_entries.len();
-            if count > 0 {
-                // Session pipelines go to NULL on the blocking pool: that can
-                // take seconds and this is awaited from an HTTP handler.
-                let endpoint_id_log = endpoint_id.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    for (pipeline, element) in session_entries {
-                        WhipSessionManager::teardown_session_pipeline(&pipeline);
-                        drop(element);
-                    }
-                    info!(
-                        "Torn down {} active WHIP session(s) for endpoint '{}'",
-                        count, endpoint_id_log
-                    );
-                })
-                .await;
-            }
-            self.inner
+            Self::teardown_whip_sessions(endpoint_id, session_entries).await;
+            // A POST still in flight can register a session while the ones
+            // above are torn down; unregistering hands those back too.
+            let late_entries = self
+                .inner
                 .whip_session_manager
                 .unregister_endpoint(endpoint_id);
+            Self::teardown_whip_sessions(endpoint_id, late_entries).await;
             self.inner.whip_registry.unregister(endpoint_id).await;
         }
 
@@ -1491,7 +1535,7 @@ impl AppState {
         // Drop is the only thing that takes the block's *internal* pipeline to
         // NULL. Skip this and a Media Player flow leaves a decoding pipeline
         // and its file descriptors running for the life of the process.
-        crate::blocks::builtin::mediaplayer::MEDIA_PLAYER_REGISTRY.unregister_flow(id);
+        Self::unregister_media_players(*id).await;
 
         // stop() — not just dropping the manager. Drop aborts the thumbnail
         // task, stops probes and sets NULL; stop() is also what removes the bus
@@ -1594,6 +1638,8 @@ impl AppState {
 
         // Endpoints, Media Player registry, pipeline, leak check, CPU cores.
         let state = self.teardown_flow(id, Some(manager), None).await?;
+        crate::cef_pages::report_leftover_pages(id).await;
+        crate::cef_pages::forget_flow(id);
 
         // Clear runtime_data from all blocks (SDP is only valid while running)
         let flow = {
@@ -1837,6 +1883,70 @@ impl AppState {
                 continue;
             }
 
+            // Remote control of an HTML source is read from the stored block
+            // when a link is minted, so storing it is the whole write. An
+            // operator turns it on to intervene in a page that is already on
+            // air, which is exactly when a restart is not an option. Handled
+            // before the `_block` rejection below.
+            if definition.id == crate::blocks::builtin::html_input::BLOCK_ID
+                && name == crate::blocks::builtin::html_input::REMOTE_CONTROL_PROPERTY
+            {
+                // Storing it is the whole write, so this is the only place
+                // that can check it. Anything but a bool would be persisted,
+                // reported as applied, and then read back as "off" when a link
+                // is asked for - an operator flipping the switch and being
+                // refused anyway, with nothing saying why.
+                if !matches!(value, PropertyValue::Bool(_)) {
+                    rejected.insert(name, "value must be a boolean".to_string());
+                    continue;
+                }
+                to_persist.push((name, value));
+                continue;
+            }
+
+            // An HTML source renders only what `normalize_url` allows, and the
+            // same check has to hold for a page changed on air as for one the
+            // flow started with.
+            let value = if definition.id == crate::blocks::builtin::html_input::BLOCK_ID
+                && name == crate::blocks::builtin::html_input::URL_PROPERTY
+            {
+                let PropertyValue::String(raw) = &value else {
+                    rejected.insert(name, "value must be a string".to_string());
+                    continue;
+                };
+                let strict = crate::blocks::builtin::html_input::strict_network(&stored_properties);
+                match crate::blocks::builtin::html_input::checked_destination(raw, strict) {
+                    Ok(url) => PropertyValue::String(url),
+                    Err(reason) => {
+                        rejected.insert(name, reason);
+                        continue;
+                    }
+                }
+            } else {
+                value
+            };
+
+            // Vision mixer input labels are drawn by the multiview overlay, which
+            // reads them from its shared state, so they change without a restart.
+            // Handled before the `_block` rejection below.
+            if definition.id == crate::blocks::builtin::vision_mixer::BLOCK_ID
+                && crate::blocks::builtin::vision_mixer::properties::label_property_input(&name)
+                    .is_some()
+            {
+                match crate::blocks::builtin::vision_mixer::apply_live_label(
+                    flow_id,
+                    block_instance_id,
+                    &name,
+                    &value,
+                ) {
+                    Ok(()) => to_persist.push((name, value)),
+                    Err(reason) => {
+                        rejected.insert(name, reason);
+                    }
+                }
+                continue;
+            }
+
             // The `_block` element_id marker is a virtual element for properties that
             // get baked into the block at build time — they have no underlying element
             // to write to live.
@@ -1906,6 +2016,14 @@ impl AppState {
         // pipeline restart. Done after the pipeline writes so we don't store
         // values that failed to apply.
         if !to_persist.is_empty() {
+            // Remote control links are revoked when a flow changes under them
+            // (see `DevToolsState::watch_flows`), and switching it off has to
+            // end the sessions already open rather than only refuse new ones.
+            let remote_control_changed = definition.id
+                == crate::blocks::builtin::html_input::BLOCK_ID
+                && to_persist.iter().any(|(name, _)| {
+                    name == crate::blocks::builtin::html_input::REMOTE_CONTROL_PROPERTY
+                });
             {
                 let mut flows = self.inner.flows.write().await;
                 if let Some(flow) = flows.get_mut(flow_id) {
@@ -1918,6 +2036,11 @@ impl AppState {
                 }
             }
             self.mark_flow_dirty(*flow_id).await;
+            if remote_control_changed {
+                self.inner
+                    .events
+                    .broadcast(StromEvent::FlowUpdated { flow_id: *flow_id });
+            }
         }
 
         let current = self
@@ -2240,6 +2363,7 @@ impl AppState {
                 // reflected (the local new_pgm/new_pvw are input-centric and
                 // don't carry PiP info).
                 let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+                    flow_id,
                     block_instance_id,
                 );
                 let preview_input = overlay.as_ref().and_then(|s| s.pvw_input());
@@ -2304,8 +2428,10 @@ impl AppState {
 
         // Broadcast state change event. Reads authoritative state from the
         // overlay so PiP visibility is reflected alongside the inputs.
-        let overlay =
-            crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id);
+        let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+            flow_id,
+            block_instance_id,
+        );
         let preview_pip = overlay.as_ref().and_then(|s| s.pvw_pip());
         let program_pip = overlay.as_ref().and_then(|s| s.pgm_pip());
         self.inner

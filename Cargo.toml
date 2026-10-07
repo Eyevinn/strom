@@ -4,7 +4,7 @@ members = ["types", "backend", "frontend"]
 default-members = ["backend"]
 
 [workspace.package]
-version = "0.6.11"
+version = "0.7.0-alpha2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Per Enstedt <per.enstedt@eyevinn.se>"]
@@ -28,6 +28,7 @@ tower-http = { version = "0.7", features = ["cors", "trace"] }
 cairo-rs = { version = "0.22", features = ["v1_16"] }
 gstreamer = { version = "0.25", features = ["v1_22"] }
 gstreamer-app = { version = "0.25", features = ["v1_22"] }
+gstreamer-base = { version = "0.25", features = ["v1_22"] }
 gstreamer-controller = { version = "0.25", features = ["v1_22"] }
 gstreamer-net = { version = "0.25", features = ["v1_22"] }
 gstreamer-rtp = { version = "0.25", features = ["v1_22"] }

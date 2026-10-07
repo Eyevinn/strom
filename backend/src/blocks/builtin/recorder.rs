@@ -216,6 +216,26 @@ impl Stash {
     }
 }
 
+/// `TRACK_STALL_TIMEOUT` for stall watchdogs started from now on, in milliseconds;
+/// 0 keeps the default. Set by [`set_track_stall_timeout_for_tests`] only.
+static TRACK_STALL_TIMEOUT_OVERRIDE_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Shorten the track stall timeout for every recorder this process starts from
+/// now on, so a test can watch a recording through a stall without waiting out
+/// five seconds of it. Process-wide: call it only from a test binary in which
+/// every recorder should run with the shorter timeout.
+#[doc(hidden)]
+pub fn set_track_stall_timeout_for_tests(timeout: Duration) {
+    TRACK_STALL_TIMEOUT_OVERRIDE_MS.store(timeout.as_millis() as u64, Ordering::Relaxed);
+}
+
+fn track_stall_timeout() -> Duration {
+    match TRACK_STALL_TIMEOUT_OVERRIDE_MS.load(Ordering::Relaxed) {
+        0 => TRACK_STALL_TIMEOUT,
+        ms => Duration::from_millis(ms),
+    }
+}
+
 /// What the stall watchdog knows about one track, written by that track's probes.
 struct TrackActivity {
     /// Milliseconds since the recorder's epoch when the muxer last took a buffer
@@ -1486,9 +1506,12 @@ fn watch_tracks(
     next_file_index: &AtomicU32,
 ) {
     let mut stall = StallCheck::default();
+    let timeout = track_stall_timeout();
+    // A tenth of the timeout at most, so a shortened timeout is still seen in time.
+    let poll = TRACK_STALL_POLL.min(timeout / 10);
 
     loop {
-        std::thread::sleep(TRACK_STALL_POLL);
+        std::thread::sleep(poll);
 
         // The flow is stopping.
         if gate.is_closed() {
@@ -1556,7 +1579,7 @@ impl StallCheck {
         states: &[TrackState],
         epoch: Instant,
     ) {
-        let timeout_ms = TRACK_STALL_TIMEOUT.as_millis() as u64;
+        let timeout_ms = track_stall_timeout().as_millis() as u64;
         let now_ms = epoch.elapsed().as_millis() as u64;
         let mut live = Vec::with_capacity(tracks.len());
 

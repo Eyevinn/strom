@@ -7,7 +7,10 @@
 //! (llvmpipe) so it runs in CI and on dev boxes without a GPU.
 //!
 //! The whole test skips when the environment cannot create a GL context at
-//! all (probed with the identity fragment, which is trivially valid GLSL).
+//! all (probed without a `glshader`, see `common::gl_available`), unless
+//! `STROM_REQUIRE_GL` is set.
+
+pub mod common;
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -82,42 +85,15 @@ fn run_fragment(fragment: &str) -> Result<(), String> {
     )
 }
 
-/// Can this environment create a GL context at all? Probed with a GL pipeline
-/// that contains no `glshader`, so a shader compile bug can never masquerade
-/// as "no GL here" and silently skip the whole test.
-fn gl_environment_available() -> bool {
-    match run_gl_pipeline(
-        "gltestsrc num-buffers=3 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,framerate=30/1 ! fakesink sync=false",
-        None,
-    ) {
-        Ok(()) => true,
-        Err(e) => {
-            assert!(
-                strom_types::env::var_opt("STROM_REQUIRE_GL").is_none(),
-                "STROM_REQUIRE_GL is set but no GL context could be created ({}) — this \
-                 platform is supposed to render, so a skip here would hide a GL regression",
-                e
-            );
-            eprintln!("SKIP: GL environment unavailable ({})", e);
-            false
-        }
-    }
-}
+/// The GL elements this test needs. Every CI job installs them, so a missing
+/// one is a broken install and must not skip silently.
+const GL_ELEMENTS: &[&str] = &["glshader", "gltestsrc"];
 
 #[test]
 fn all_shader_fragments_compile() {
-    gst::init().expect("gst init");
-
-    if gst::ElementFactory::find("glshader").is_none()
-        || gst::ElementFactory::find("gltestsrc").is_none()
-    {
-        eprintln!("SKIP: GStreamer GL elements not available");
-        return;
-    }
-
-    // Environment probe: skip only when no GL context can be created at all
-    // (headless without llvmpipe) — never on a shader compile failure.
-    if !gl_environment_available() {
+    // Skips only when no GL context can be created at all (the probe has no
+    // `glshader`), never on a shader compile failure.
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
 
@@ -150,15 +126,7 @@ fn all_shader_fragments_compile() {
 /// swap bug found in production.
 #[test]
 fn runtime_fragment_swap_takes_effect() {
-    gst::init().expect("gst init");
-
-    if gst::ElementFactory::find("glshader").is_none()
-        || gst::ElementFactory::find("gltestsrc").is_none()
-    {
-        eprintln!("SKIP: GStreamer GL elements not available");
-        return;
-    }
-    if !gl_environment_available() {
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
 

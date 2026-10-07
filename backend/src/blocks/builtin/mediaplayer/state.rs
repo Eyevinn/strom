@@ -1,15 +1,21 @@
 //! Media player runtime state, global registry, and lifecycle methods.
 
 use super::normalize_uri;
+use super::timing::Timing;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock};
 use strom_types::FlowId;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+/// How long a control call waits for the source to finish setting up the
+/// stream it was last given (see [`MediaPlayerState::settle`]). A file is
+/// done in milliseconds; a slow network source carries on after this.
+const SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Global registry of media player instances for API access.
 pub static MEDIA_PLAYER_REGISTRY: LazyLock<MediaPlayerRegistry> =
@@ -36,10 +42,12 @@ pub struct MediaPlayerState {
     pub source_element: gst::glib::WeakRef<gst::Element>,
     /// The isolated internal pipeline (owned by this block)
     pub internal_pipeline: RwLock<Option<gst::Pipeline>>,
-    /// Video appsrc in the main pipeline (bridge target)
-    pub video_appsrc: Option<gst_app::AppSrc>,
-    /// Audio appsrc in the main pipeline (bridge target)
-    pub audio_appsrc: Option<gst_app::AppSrc>,
+    /// Video appsrcs in the main pipeline, one per video track slot (bridge targets).
+    /// Slot 0 feeds `video_out`.
+    pub video_appsrcs: Vec<gst_app::AppSrc>,
+    /// Audio appsrcs in the main pipeline, one per audio track slot (bridge targets).
+    /// Slot 0 feeds `audio_out`.
+    pub audio_appsrcs: Vec<gst_app::AppSrc>,
     /// Playlist and current index (single lock for atomicity)
     pub playlist: RwLock<Playlist>,
     /// Whether playback is paused
@@ -50,22 +58,39 @@ pub struct MediaPlayerState {
     pub block_id: String,
     /// Flow ID for event broadcasting
     pub flow_id: FlowId,
-    /// True while load_current_file() is in progress — bus watch should ignore EOS.
-    pub switching_file: AtomicBool,
-    /// Whether video pad has been linked (reset on file switch)
-    pub video_linked: AtomicBool,
-    /// Whether audio pad has been linked (reset on file switch)
-    pub audio_linked: AtomicBool,
+    /// Held across every control call that changes the internal pipeline's
+    /// state or position (file switch, play, pause, seek, shutdown), so one
+    /// never starts while another is still under way. Never taken on a
+    /// streaming thread: the EOS handler hands its work to a thread of its
+    /// own (see `bridge::watch_internal_bus`).
+    pub control: Mutex<()>,
+    /// Counts file switches, seqlock style: odd while a switch is in
+    /// progress, even otherwise. An EOS posted while it is odd, or under an
+    /// earlier value, is the old file's and must not advance the playlist.
+    pub switch_generation: AtomicU64,
+    /// False from when the internal pipeline starts a new stream until its
+    /// source has exposed a pad (or failed): until then the source may still
+    /// be setting itself up on its streaming thread. See [`Self::settle`].
+    pub source_ready: Mutex<bool>,
+    /// Signalled when `source_ready` turns true.
+    pub source_ready_cv: Condvar,
+    /// Which source pad holds each video slot, by pad name; `None` is free.
+    /// A slot is freed when its pad goes away - an HLS variant switch replaces
+    /// every stream pad - so the next pad of that kind takes over the same
+    /// output. Reset on file switch.
+    pub video_slots: Mutex<Vec<Option<String>>>,
+    /// Which source pad holds each audio slot, as for `video_slots`.
+    pub audio_slots: Mutex<Vec<Option<String>>>,
     /// Whether to decode streams (true) or pass through encoded (false)
     pub decode: bool,
     /// Whether clocksync pacing is enabled
     pub sync: bool,
     /// Configured media files directory (for resolving relative playlist paths)
     pub media_path: std::path::PathBuf,
-    /// Shared timestamp offset (ns) for the appsink→appsrc bridge.
-    /// Computed once from the first buffer: `main_running_time - buffer_pts`.
-    /// Set to `i64::MIN` to signal "needs recomputation" (on startup, file switch, resume).
-    pub ts_offset: Arc<AtomicI64>,
+    /// When the bridge lets buffers go and what it stamps them with, shared
+    /// by every stream so audio and video stay together. Reset on file
+    /// switch, seek and resume.
+    pub timing: Arc<Timing>,
     /// Weak reference to the main pipeline (for computing running time in the bridge).
     pub main_pipeline: gst::glib::WeakRef<gst::Pipeline>,
     /// Handler id of the signal watch on the internal pipeline's bus.
@@ -80,6 +105,48 @@ pub struct MediaPlayerState {
 }
 
 impl MediaPlayerState {
+    /// `n` free slots.
+    pub fn free_slots(n: usize) -> Mutex<Vec<Option<String>>> {
+        Mutex::new(vec![None; n])
+    }
+
+    /// Run `internal` on the flow's clock and base time, so a running time
+    /// means the same in both pipelines (see `timing`). Without a start time
+    /// the internal pipeline keeps that base time through pause and resume.
+    /// Returns false when the flow is not playing yet.
+    pub fn follow_main_clock(&self, internal: &gst::Pipeline) -> bool {
+        let Some(main) = self.main_pipeline.upgrade() else {
+            return false;
+        };
+        let (Some(clock), Some(base)) = (main.clock(), main.base_time()) else {
+            return false;
+        };
+        internal.use_clock(Some(&clock));
+        internal.set_start_time(gst::ClockTime::NONE);
+        internal.set_base_time(base);
+        true
+    }
+
+    /// Free every slot, for a new file.
+    pub fn free_all_slots(&self) {
+        for slots in [&self.video_slots, &self.audio_slots] {
+            let mut slots = slots.lock().unwrap_or_else(|p| p.into_inner());
+            slots.iter_mut().for_each(|s| *s = None);
+        }
+    }
+
+    /// Free the slot `pad_name` holds, if any.
+    pub fn free_slot_of(&self, pad_name: &str) {
+        for slots in [&self.video_slots, &self.audio_slots] {
+            let mut slots = slots.lock().unwrap_or_else(|p| p.into_inner());
+            for slot in slots.iter_mut() {
+                if slot.as_deref() == Some(pad_name) {
+                    *slot = None;
+                }
+            }
+        }
+    }
+
     /// Get the current file URI, if any.
     pub fn current_file(&self) -> Option<String> {
         let pl = self.playlist.read().ok()?;
@@ -114,8 +181,78 @@ impl MediaPlayerState {
         }
     }
 
+    /// Take the control lock. A panic in another control call must not leave
+    /// the player uncontrollable, so a poisoned lock is taken over.
+    fn lock_control(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.control.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// A new stream is starting: its source sets itself up from here on.
+    fn expect_source(&self) {
+        *self.source_ready.lock().unwrap_or_else(|p| p.into_inner()) = false;
+    }
+
+    /// The source has set itself up, or given up trying. Called from the
+    /// source's pad-added handlers and from the bus on an error or EOS.
+    pub fn mark_source_ready(&self) {
+        let mut ready = self.source_ready.lock().unwrap_or_else(|p| p.into_inner());
+        if !*ready {
+            *ready = true;
+            self.source_ready_cv.notify_all();
+        }
+    }
+
+    /// Wait until the internal pipeline can take another state change.
+    ///
+    /// Changing its state while the source is still setting up a new stream
+    /// deadlocks uridecodebin3 and urisourcebin (issue #963): urisourcebin's
+    /// typefind thread adds a parsebin and then brings it to its own state,
+    /// and a state change that walks into that parsebin first waits for the
+    /// typefind thread's stream lock, while the typefind thread waits for the
+    /// parsebin's state lock. The pipeline's state is no guide: it can report
+    /// a change complete while typefinding is still under way. A pad on the
+    /// source is: no source exposes one before its typefinding is done.
+    ///
+    /// Waiting for the pipeline to preroll as well is not needed, and costs
+    /// the whole playout delay on every call: the bridge's clocksync holds the
+    /// first buffer back for that long.
+    ///
+    /// Only sources built on urisourcebin wait (uridecodebin3, and urisourcebin
+    /// itself in passthrough mode). Classic uridecodebin has not shown the
+    /// deadlock, and its calls do not wait.
+    ///
+    /// Known cost: callers hold the control lock while this waits, up to
+    /// `SETTLE_TIMEOUT`, so a slow network source queues every other control
+    /// call for the player behind it.
+    fn settle(&self) {
+        let uses_urisourcebin = self
+            .source_element
+            .upgrade()
+            .and_then(|source| source.factory())
+            .is_some_and(|factory| factory.name() != "uridecodebin");
+        if !uses_urisourcebin {
+            return;
+        }
+        let ready = self.source_ready.lock().unwrap_or_else(|p| p.into_inner());
+        let (mut ready, waited) = self
+            .source_ready_cv
+            .wait_timeout_while(ready, SETTLE_TIMEOUT, |ready| !*ready)
+            .unwrap_or_else(|p| p.into_inner());
+        if waited.timed_out() {
+            warn!(
+                "Media Player {}: source exposed no stream within {:?}, carrying on",
+                self.block_id, SETTLE_TIMEOUT
+            );
+            // Wait once per stream, not once per call: a source that sets up
+            // nothing (no stream it can select, a stalled server) would
+            // otherwise cost every later call the full timeout.
+            *ready = true;
+        }
+    }
+
     /// Go to a specific file index.
     pub fn goto(&self, index: usize) -> Result<(), String> {
+        let _control = self.lock_control();
         {
             let mut pl = self
                 .playlist
@@ -135,6 +272,11 @@ impl MediaPlayerState {
 
     /// Advance to the next file.
     pub fn next(&self) -> Result<(), String> {
+        let _control = self.lock_control();
+        self.next_locked()
+    }
+
+    fn next_locked(&self) -> Result<(), String> {
         {
             let mut pl = self
                 .playlist
@@ -157,8 +299,34 @@ impl MediaPlayerState {
         self.load_current_file()
     }
 
+    /// The switch generation an EOS posted now belongs to, or `None` when a
+    /// switch is in progress and the EOS is the old file's.
+    pub fn eos_generation(&self) -> Option<u64> {
+        let generation = self.switch_generation.load(Ordering::SeqCst);
+        generation.is_multiple_of(2).then_some(generation)
+    }
+
+    /// Advance on an EOS that was posted under `generation`. Returns
+    /// `Ok(false)` without touching anything when a file switch has happened
+    /// since (that EOS ended a file that is no longer playing), when the user
+    /// has paused or stopped since, or when the player has been shut down.
+    pub fn advance_after_eos(&self, generation: u64) -> Result<bool, String> {
+        let _control = self.lock_control();
+        if self.switch_generation.load(Ordering::SeqCst) != generation
+            || self.is_paused.load(Ordering::SeqCst)
+            || self
+                .internal_pipeline
+                .read()
+                .map_or(true, |guard| guard.is_none())
+        {
+            return Ok(false);
+        }
+        self.next_locked().map(|()| true)
+    }
+
     /// Go to the previous file.
     pub fn previous(&self) -> Result<(), String> {
+        let _control = self.lock_control();
         {
             let mut pl = self
                 .playlist
@@ -181,14 +349,23 @@ impl MediaPlayerState {
     }
 
     /// Load the current file into the internal pipeline's source element.
+    /// The caller holds the control lock.
     ///
     /// Removes dynamically-created elements (clocksync, appsink) from the previous
     /// file, then sets the new URI and restarts. The pad-added callback will recreate
     /// the clocksync→appsink chain for the new file's pads.
     fn load_current_file(&self) -> Result<(), String> {
-        self.switching_file.store(true, Ordering::SeqCst);
+        // Odd from here: an EOS posted now is the old file's.
+        let switching = self.switch_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let result = self.load_current_file_inner();
-        self.switching_file.store(false, Ordering::SeqCst);
+        // `load_current_file_inner` ends the switch once the old stream is
+        // gone; this ends it on a failure before that.
+        let _ = self.switch_generation.compare_exchange(
+            switching,
+            switching + 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
         result
     }
 
@@ -211,6 +388,7 @@ impl MediaPlayerState {
             .ok_or("Internal pipeline not created")?;
 
         // Set internal pipeline to READY to flush the old stream
+        self.settle();
         pipeline.set_state(gst::State::Ready).map_err(|e| {
             error!("Failed to set internal pipeline to Ready: {:?}", e);
             "Failed to prepare pipeline for file switch".to_string()
@@ -234,26 +412,79 @@ impl MediaPlayerState {
 
         // Reset linked flags and timestamp offset so new pads get linked
         // and the bridge recomputes the offset from the first buffer
-        self.video_linked.store(false, Ordering::SeqCst);
-        self.audio_linked.store(false, Ordering::SeqCst);
-        self.ts_offset.store(i64::MIN, Ordering::SeqCst);
+        self.free_all_slots();
+        self.timing.reset(None, &self.main_pipeline);
 
         // Set the new URI on source element
         source_element.set_property("uri", &uri);
 
-        // Start playing again
-        pipeline.set_state(gst::State::Playing).map_err(|e| {
-            error!("Failed to start internal pipeline: {:?}", e);
-            "Failed to start playback".to_string()
-        })?;
+        // The old stream went at READY: an EOS posted from here on is the new
+        // file's, a clip so short it ends while starting included, and must
+        // advance the playlist.
+        self.switch_generation.fetch_add(1, Ordering::SeqCst);
 
         self.is_paused.store(false, Ordering::SeqCst);
+        self.start(pipeline, "Failed to start playback")
+    }
 
+    /// Start `pipeline` on the flow's clock and base time. Before the flow
+    /// plays it has neither, so the pipeline only prerolls, and the flow's
+    /// PLAYING handler starts it on the right clock then
+    /// ([`MediaPlayerState::start_with_flow`]). Going to PLAYING on its own
+    /// clock instead would keep that clock and base time for good: that
+    /// handler leaves a pipeline that is already playing alone.
+    ///
+    /// From READY the way up stops at PAUSED until the source has set up the
+    /// new stream (see [`MediaPlayerState::settle`]): one change straight to
+    /// PLAYING makes its PAUSED-to-PLAYING pass while the source is still
+    /// doing so, and deadlocks.
+    fn start(&self, pipeline: &gst::Pipeline, failure: &str) -> Result<(), String> {
+        let fail = |e: gst::StateChangeError| {
+            error!("{}: {:?}", failure, e);
+            // Nothing is setting up now, so nothing to wait for.
+            self.mark_source_ready();
+            failure.to_string()
+        };
+        if is_stopped(pipeline) {
+            self.expect_source();
+            pipeline.set_state(gst::State::Paused).map_err(fail)?;
+            self.settle();
+        }
+        if !self.follow_main_clock(pipeline) {
+            debug!(
+                "Media Player {}: flow not playing yet, prerolling until it does",
+                self.block_id
+            );
+            return Ok(());
+        }
+        pipeline.set_state(gst::State::Playing).map_err(fail)?;
         Ok(())
+    }
+
+    /// Start the internal pipeline on the flow's clock, now that the flow
+    /// plays, unless the user paused it. Does nothing while the flow has no
+    /// clock yet, or when the internal pipeline already plays.
+    pub fn start_with_flow(&self) {
+        let _control = self.lock_control();
+        if self.is_paused.load(Ordering::SeqCst) {
+            return;
+        }
+        let Ok(guard) = self.internal_pipeline.read() else {
+            return;
+        };
+        let Some(pipeline) = guard.as_ref() else {
+            return;
+        };
+        self.settle();
+        if pipeline.current_state() == gst::State::Playing || !self.follow_main_clock(pipeline) {
+            return;
+        }
+        let _ = self.start(pipeline, "Failed to start internal pipeline");
     }
 
     /// Play the media.
     pub fn play(&self) -> Result<(), String> {
+        let _control = self.lock_control();
         let pipeline_guard = self
             .internal_pipeline
             .read()
@@ -261,19 +492,21 @@ impl MediaPlayerState {
         let pipeline = pipeline_guard
             .as_ref()
             .ok_or("Internal pipeline not created")?;
+        self.settle();
         // Reset timestamp offset so the bridge recomputes from the first buffer
         // after resume — prevents accumulated drift from pause duration.
-        self.ts_offset.store(i64::MIN, Ordering::SeqCst);
-        pipeline.set_state(gst::State::Playing).map_err(|e| {
-            error!("Failed to resume playback: {:?}", e);
-            "Failed to resume playback".to_string()
-        })?;
+        self.timing.reset(Some(pipeline), &self.main_pipeline);
         self.is_paused.store(false, Ordering::SeqCst);
-        Ok(())
+        self.start(pipeline, "Failed to resume playback")
     }
 
     /// Pause the media.
     pub fn pause(&self) -> Result<(), String> {
+        let _control = self.lock_control();
+        self.pause_locked()
+    }
+
+    fn pause_locked(&self) -> Result<(), String> {
         let pipeline_guard = self
             .internal_pipeline
             .read()
@@ -281,7 +514,13 @@ impl MediaPlayerState {
         let pipeline = pipeline_guard
             .as_ref()
             .ok_or("Internal pipeline not created")?;
+        self.settle();
+        if is_stopped(pipeline) {
+            // Pausing a pipeline that never started starts its source.
+            self.expect_source();
+        }
         pipeline.set_state(gst::State::Paused).map_err(|e| {
+            self.mark_source_ready();
             error!("Failed to pause playback: {:?}", e);
             "Failed to pause playback".to_string()
         })?;
@@ -291,8 +530,9 @@ impl MediaPlayerState {
 
     /// Stop playback: pause and seek to the beginning.
     pub fn stop(&self) -> Result<(), String> {
-        self.pause()?;
-        self.seek(0)?;
+        let _control = self.lock_control();
+        self.pause_locked()?;
+        self.seek_locked(0)?;
         Ok(())
     }
 
@@ -301,6 +541,11 @@ impl MediaPlayerState {
     /// Seeks on the internal pipeline's source element. The timestamp offset is reset
     /// so the bridge recomputes it from the first buffer at the new position.
     pub fn seek(&self, position_ns: u64) -> Result<(), String> {
+        let _control = self.lock_control();
+        self.seek_locked(position_ns)
+    }
+
+    fn seek_locked(&self, position_ns: u64) -> Result<(), String> {
         let secs = position_ns / 1_000_000_000;
         let hours = secs / 3600;
         let mins = (secs % 3600) / 60;
@@ -317,7 +562,10 @@ impl MediaPlayerState {
 
         // Reset timestamp offset so the bridge recomputes from the first buffer
         // after the seek — the file PTS jumps but main pipeline running time doesn't.
-        self.ts_offset.store(i64::MIN, Ordering::SeqCst);
+        if let Ok(guard) = self.internal_pipeline.read() {
+            self.settle();
+            self.timing.reset(guard.as_ref(), &self.main_pipeline);
+        }
 
         let seek_result = source.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
@@ -407,6 +655,10 @@ impl MediaPlayerState {
     /// callback — which reads the same lock — cannot be blocked by a
     /// `set_state(Null)` that is itself waiting for the callback's thread.
     pub fn shutdown(&self) {
+        // Wait out a control call in progress, then for the source to finish
+        // setting up: going to NULL while it does deadlocks like any other
+        // state change (see `settle`).
+        let _control = self.lock_control();
         let pipeline = match self.internal_pipeline.write() {
             Ok(mut guard) => guard.take(),
             Err(poisoned) => poisoned.into_inner().take(),
@@ -431,8 +683,17 @@ impl MediaPlayerState {
             "Media Player {}: Stopping internal pipeline on shutdown",
             self.block_id
         );
+        self.settle();
         let _ = pipeline.set_state(gst::State::Null);
     }
+}
+
+/// Whether `pipeline` is at READY or below with no change under way, so that
+/// taking it up starts its source on a new stream. One already on its way up
+/// from READY has started its source, and `source_ready` covers it.
+fn is_stopped(pipeline: &gst::Pipeline) -> bool {
+    pipeline.current_state() <= gst::State::Ready
+        && pipeline.pending_state() == gst::State::VoidPending
 }
 
 /// Fallback for a state that was dropped without going through

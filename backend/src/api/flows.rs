@@ -1887,7 +1887,8 @@ pub async fn select_preview(
             })?;
 
         // Read back authoritative state for response.
-        let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id);
+        let overlay =
+            crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&flow_id, &block_id);
         return Ok(Json(strom_types::api::SelectPreviewResponse {
             message: format!("Preview set to PiP {}", pip_idx),
             preview_input: overlay.as_ref().and_then(|s| s.pvw_input()),
@@ -1920,9 +1921,10 @@ pub async fn select_preview(
             )
         })?;
 
-    let pgm_pip = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id)
-        .as_ref()
-        .and_then(|s| s.pgm_pip());
+    let pgm_pip =
+        crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&flow_id, &block_id)
+            .as_ref()
+            .and_then(|s| s.pgm_pip());
 
     Ok(Json(strom_types::api::SelectPreviewResponse {
         message: format!("Preview set to input {}", input),
@@ -1956,19 +1958,20 @@ pub async fn select_preview(
 pub async fn get_pip_config(
     Path((flow_id, block_id, pip_idx)): Path<(FlowId, String, usize)>,
 ) -> Result<Json<strom_types::api::PipState>, (StatusCode, Json<ErrorResponse>)> {
-    let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id)
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::with_details(
-                    "Vision mixer state not available",
-                    format!(
-                        "No live overlay state for block {} in flow {} (pipeline not running)",
-                        block_id, flow_id
-                    ),
-                )),
-            )
-        })?;
+    let overlay =
+        crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&flow_id, &block_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse::with_details(
+                        "Vision mixer state not available",
+                        format!(
+                            "No live overlay state for block {} in flow {} (pipeline not running)",
+                            block_id, flow_id
+                        ),
+                    )),
+                )
+            })?;
 
     if pip_idx >= overlay.num_pips {
         return Err((
@@ -2046,7 +2049,7 @@ pub async fn update_pip_config(
     // rect/crop clamping (NormRect → [0,1], SourceCrop clamped + zero
     // entries dropped).
     let (bg, zones, transforms) = if let Some(s) =
-        crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id)
+        crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&flow_id, &block_id)
     {
         (
             s.pip_bg_input(pip_idx),
@@ -2089,19 +2092,20 @@ pub async fn get_vision_mixer_state(
     State(state): State<AppState>,
     Path((flow_id, block_id)): Path<(FlowId, String)>,
 ) -> Result<Json<strom_types::api::VisionMixerState>, (StatusCode, Json<ErrorResponse>)> {
-    let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id)
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::with_details(
-                    "Vision mixer state not available",
-                    format!(
-                        "No live overlay state for block {} in flow {} (pipeline not running)",
-                        block_id, flow_id
-                    ),
-                )),
-            )
-        })?;
+    let overlay =
+        crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&flow_id, &block_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse::with_details(
+                        "Vision mixer state not available",
+                        format!(
+                            "No live overlay state for block {} in flow {} (pipeline not running)",
+                            block_id, flow_id
+                        ),
+                    )),
+                )
+            })?;
 
     let pips: Vec<strom_types::api::PipState> = (0..overlay.num_pips)
         .map(|i| strom_types::api::PipState {

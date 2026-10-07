@@ -37,12 +37,13 @@ impl PipelineManager {
             .get(&mv_comp_id)
             .ok_or_else(|| PipelineError::ElementNotFound(mv_comp_id.clone()))?;
 
-        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
-            PipelineError::ElementNotFound(format!(
-                "Vision mixer overlay state not found for {}",
-                block_instance_id
-            ))
-        })?;
+        let state =
+            overlay::get_overlay_state(&self.flow_id, block_instance_id).ok_or_else(|| {
+                PipelineError::ElementNotFound(format!(
+                    "Vision mixer overlay state not found for {}",
+                    block_instance_id
+                ))
+            })?;
 
         // Validate first — don't mutate any state until we know we can complete.
         if input >= num_inputs {
@@ -118,7 +119,7 @@ impl PipelineManager {
         }
 
         state.set_pvw_input(new_pvw);
-        overlay::trigger_overlay_update(block_instance_id);
+        overlay::trigger_overlay_update(&self.flow_id, block_instance_id);
 
         info!(
             "Vision mixer {} preview changed: {:?} -> {:?}",
@@ -147,12 +148,13 @@ impl PipelineManager {
             .get(&mv_comp_id)
             .ok_or_else(|| PipelineError::ElementNotFound(mv_comp_id.clone()))?;
 
-        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
-            PipelineError::ElementNotFound(format!(
-                "Vision mixer overlay state not found for {}",
-                block_instance_id
-            ))
-        })?;
+        let state =
+            overlay::get_overlay_state(&self.flow_id, block_instance_id).ok_or_else(|| {
+                PipelineError::ElementNotFound(format!(
+                    "Vision mixer overlay state not found for {}",
+                    block_instance_id
+                ))
+            })?;
 
         // Skip this entirely when PiP is involved on either bus — the PiP-aware
         // path in trigger_transition has already configured the right pads
@@ -162,7 +164,7 @@ impl PipelineManager {
             // Still persist the input state so cairo overlay stays consistent.
             state.set_pgm_input(new_pgm);
             state.set_pvw_input(new_pvw);
-            overlay::trigger_overlay_update(block_instance_id);
+            overlay::trigger_overlay_update(&self.flow_id, block_instance_id);
             return Ok(());
         }
 
@@ -212,7 +214,7 @@ impl PipelineManager {
         state.set_pgm_input(new_pgm);
         state.set_pvw_input(new_pvw);
 
-        overlay::trigger_overlay_update(block_instance_id);
+        overlay::trigger_overlay_update(&self.flow_id, block_instance_id);
 
         info!(
             "Vision mixer {} take: PGM -> {:?}, PVW -> {:?}",
@@ -242,9 +244,10 @@ impl PipelineManager {
             let alpha = if enabled { 1.0f64 } else { 0.0f64 };
             pad.set_property("alpha", alpha);
             // Update overlay state for DSK tracking
-            if let Some(state) =
-                crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id)
-            {
+            if let Some(state) = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+                &self.flow_id,
+                block_instance_id,
+            ) {
                 if dsk_index < state.dsk_enabled.len() {
                     state.dsk_enabled[dsk_index]
                         .store(enabled, std::sync::atomic::Ordering::Relaxed);
@@ -284,18 +287,21 @@ impl PipelineManager {
         //   sink_N+1..2N     : PVW big candidates
         //   sink_2N+1..2N+P  : PiP-tile candidates (P = num_pips * num_inputs)
         //   sink_2N+1+P      : cairo overlay  ← this one
-        let num_pips =
-            crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id)
-                .as_ref()
-                .map(|s| s.num_pips)
-                .unwrap_or(0);
+        let num_pips = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+            &self.flow_id,
+            block_instance_id,
+        )
+        .as_ref()
+        .map(|s| s.num_pips)
+        .unwrap_or(0);
         let overlay_idx = 2 * num_inputs + 1 + num_pips * num_inputs;
         let pad_name = format!("sink_{}", overlay_idx);
         if let Some(pad) = find_pad(mv_comp, &pad_name) {
             pad.set_property("alpha", alpha);
-            if let Some(state) =
-                crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id)
-            {
+            if let Some(state) = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+                &self.flow_id,
+                block_instance_id,
+            ) {
                 state.set_overlay_alpha(alpha);
             }
             info!(
@@ -330,12 +336,13 @@ impl PipelineManager {
             .get(&mixer_id)
             .ok_or_else(|| PipelineError::ElementNotFound(mixer_id.clone()))?;
 
-        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
-            PipelineError::ElementNotFound(format!(
-                "Vision mixer overlay state not found for {}",
-                block_instance_id
-            ))
-        })?;
+        let state =
+            overlay::get_overlay_state(&self.flow_id, block_instance_id).ok_or_else(|| {
+                PipelineError::ElementNotFound(format!(
+                    "Vision mixer overlay state not found for {}",
+                    block_instance_id
+                ))
+            })?;
 
         let was_active = state.ftb_active.load(std::sync::atomic::Ordering::Relaxed);
         let pgm = state.pgm_input();
@@ -359,7 +366,7 @@ impl PipelineManager {
                 base,
                 scale: cw as f64 / state.pgm_w.max(1) as f64,
             });
-            pads_for_source(
+            let targets = pads_for_source(
                 &state,
                 state.pgm_pip(),
                 pgm,
@@ -370,12 +377,43 @@ impl PipelineManager {
                 src_aspect,
                 &self.vision_mixer_source_aspects(block_instance_id, state.num_inputs),
                 dist_underlay,
-            )
-            .into_iter()
-            // Restore bordered zone sources' underlay pads along with their
-            // content pads.
-            .flat_map(|t| std::iter::once(t.pad_idx).chain(t.underlay.map(|u| u.pad_idx)))
-            .collect()
+            );
+            // Fit the pads to their sources' current shapes before they fade
+            // back in: a source that changed shape during FTB was not re-fitted.
+            // Content pads (dist pad index = input index) also get their crop
+            // again, which is in pixels of the source's size.
+            let transforms = state.pgm_pip().map(|p| state.pip_transforms(p));
+            for (pad_idx, (x, y, w, h), content) in targets.iter().flat_map(|t| {
+                std::iter::once((t.pad_idx, (t.x, t.y, t.w, t.h), true)).chain(
+                    t.underlay
+                        .as_ref()
+                        .map(|u| (u.pad_idx, (u.x, u.y, u.w, u.h), false)),
+                )
+            }) {
+                if let Some(pad) = find_pad(mixer, &format!("sink_{}", pad_idx)) {
+                    crate::gst::control_bindings::wipe_control_bindings(
+                        pad.upcast_ref(),
+                        &["xpos", "ypos", "width", "height"],
+                    );
+                    pad.set_property("xpos", x);
+                    pad.set_property("ypos", y);
+                    pad.set_property("width", w);
+                    pad.set_property("height", h);
+                    if content {
+                        let crop = transforms
+                            .as_ref()
+                            .and_then(|t| t.get(&pad_idx).copied())
+                            .unwrap_or_default();
+                        set_pad_crop(&pad, &crop);
+                    }
+                }
+            }
+            targets
+                .into_iter()
+                // Restore bordered zone sources' underlay pads along with their
+                // content pads.
+                .flat_map(|t| std::iter::once(t.pad_idx).chain(t.underlay.map(|u| u.pad_idx)))
+                .collect()
         };
 
         // Use mixer position for stream-time (same as transitions).
@@ -451,19 +489,11 @@ impl PipelineManager {
         // Once the fade completes, neutralize the alpha bindings (keyframe
         // wipe) so later direct alpha writes (DSK toggles, takes) stick.
         if !control_sources.is_empty() {
-            let cleanup_mixer = mixer.clone();
-            let cleanup_duration = duration_ms + 100; // small margin
-            gst::glib::timeout_add_once(
-                std::time::Duration::from_millis(cleanup_duration),
-                move || {
-                    for pad in cleanup_mixer.sink_pads() {
-                        crate::gst::control_bindings::wipe_control_binding(
-                            pad.upcast_ref(),
-                            "alpha",
-                        );
-                    }
-                    drop(control_sources);
-                },
+            wipe_ftb_fade_once_played(
+                mixer.downgrade(),
+                end_time,
+                control_sources,
+                std::time::Duration::from_millis(duration_ms + 100),
             );
         }
 
@@ -471,7 +501,7 @@ impl PipelineManager {
             .ftb_active
             .store(now_active, std::sync::atomic::Ordering::Relaxed);
 
-        overlay::trigger_overlay_update(block_instance_id);
+        overlay::trigger_overlay_update(&self.flow_id, block_instance_id);
 
         info!(
             "Vision mixer {} FTB {}",
@@ -507,12 +537,13 @@ impl PipelineManager {
 
         const ZONE_MORPH_MS: u64 = 250;
 
-        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
-            PipelineError::ElementNotFound(format!(
-                "Vision mixer overlay state not found for {}",
-                block_instance_id
-            ))
-        })?;
+        let state =
+            overlay::get_overlay_state(&self.flow_id, block_instance_id).ok_or_else(|| {
+                PipelineError::ElementNotFound(format!(
+                    "Vision mixer overlay state not found for {}",
+                    block_instance_id
+                ))
+            })?;
 
         if pip_idx >= state.num_pips {
             return Err(PipelineError::InvalidProperty {
@@ -765,6 +796,10 @@ impl PipelineManager {
         if on_pvw {
             state.set_pvw_input(bg);
         }
+        // Border underlays follow the configured zones (held frames, colors).
+        if let Some(mixer) = mixer {
+            crate::blocks::builtin::vision_mixer::underlays::refresh(&state, mixer, mv_comp);
+        }
 
         // ---- 3) Compute NEW pad targets (after mutation).
         let new_tile = pip_tile_rect.map(|reg| {
@@ -879,7 +914,7 @@ impl PipelineManager {
             );
         }
 
-        overlay::trigger_overlay_update(block_instance_id);
+        overlay::trigger_overlay_update(&self.flow_id, block_instance_id);
 
         info!(
             "Vision mixer {} PiP {} config updated: bg={:?}, zones={:?}",
@@ -942,12 +977,13 @@ impl PipelineManager {
         use crate::blocks::builtin::vision_mixer::overlay;
         use strom_types::vision_mixer;
 
-        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
-            PipelineError::ElementNotFound(format!(
-                "Vision mixer overlay state not found for {}",
-                block_instance_id
-            ))
-        })?;
+        let state =
+            overlay::get_overlay_state(&self.flow_id, block_instance_id).ok_or_else(|| {
+                PipelineError::ElementNotFound(format!(
+                    "Vision mixer overlay state not found for {}",
+                    block_instance_id
+                ))
+            })?;
 
         if pip_idx >= state.num_pips {
             return Err(PipelineError::InvalidProperty {
@@ -984,6 +1020,11 @@ impl PipelineManager {
         let bg = state.pip_bg_input(pip_idx);
         let zones = state.pip_zones(pip_idx);
         state.set_pvw_input(bg);
+        // The PiP now on PVW is the one a take brings to PGM: give the
+        // hidden PGM border underlays its colors.
+        if let Some(mixer) = self.elements.get(&format!("{}:mixer", block_instance_id)) {
+            crate::blocks::builtin::vision_mixer::underlays::refresh(&state, mixer, mv_comp);
+        }
 
         // Render PiP layout into the PVW big rectangle.
         let r = &state.layout.pvw_rect;
@@ -1012,7 +1053,7 @@ impl PipelineManager {
             pvw_underlay,
         );
 
-        overlay::trigger_overlay_update(block_instance_id);
+        overlay::trigger_overlay_update(&self.flow_id, block_instance_id);
 
         info!(
             "Vision mixer {} PVW set to PiP {}: bg={:?}, zones={:?}",
@@ -1020,4 +1061,42 @@ impl PipelineManager {
         );
         Ok(())
     }
+}
+
+/// Wipe an FTB fade's alpha keyframes once the mixer has played past `end`,
+/// so later direct alpha writes (DSK toggles, takes) stick. Keyframes are in
+/// the mixer's stream time, which lags the wall clock whenever the mixer runs
+/// slower than real time, so `wait` is only when to look first. A control
+/// source whose last keyframe is no longer `end` was reprogrammed by a later
+/// FTB or take, and is left alone.
+fn wipe_ftb_fade_once_played(
+    mixer: gst::glib::WeakRef<gst::Element>,
+    end: gst::ClockTime,
+    sources: Vec<gstreamer_controller::InterpolationControlSource>,
+    wait: std::time::Duration,
+) {
+    use gstreamer_controller::prelude::*;
+    gst::glib::timeout_add_once(wait, move || {
+        // Pipeline teardown in progress → nothing to clean up.
+        let Some(m) = mixer.upgrade() else {
+            return;
+        };
+        if let Some(pos) = m.query_position::<gst::ClockTime>() {
+            if pos < end {
+                let behind = std::time::Duration::from_nanos((end - pos).nseconds());
+                wipe_ftb_fade_once_played(
+                    mixer,
+                    end,
+                    sources,
+                    behind + std::time::Duration::from_millis(50),
+                );
+                return;
+            }
+        }
+        for cs in &sources {
+            if cs.list_control_points().last().map(|p| p.timestamp()) == Some(end) {
+                cs.unset_all();
+            }
+        }
+    });
 }

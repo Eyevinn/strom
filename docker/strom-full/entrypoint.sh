@@ -69,14 +69,31 @@ else
     export GST_CEF_CHROME_EXTRA_FLAGS="no-sandbox,disable-gpu,disable-gpu-compositing,use-gl=disabled,disable-features=BackgroundTracing,no-periodic-tasks,force-fieldtrials=,disable-field-trial-config,disable-breakpad,disable-crash-reporter,disable-dev-shm-usage,disable-background-networking,disable-component-update,enable-logging=stderr"
 fi
 
-# Set CEF cache location to avoid singleton behavior warning
-# Clean up stale CEF cache/locks from previous runs/crashes
-export GST_CEF_CACHE_LOCATION="/tmp/cef-cache"
-rm -rf /tmp/cef-cache
-mkdir -p /tmp/cef-cache
+# CEF cache directory. It holds the browser profiles HTML sources keep their
+# logins in, so it is kept across a restart of the container; mount a volume
+# here (or point GST_CEF_CACHE_LOCATION at one) to keep it across a
+# replacement too. It is not wiped; Strom removes the profiles no flow uses
+# at startup.
+export GST_CEF_CACHE_LOCATION="${GST_CEF_CACHE_LOCATION:-/tmp/cef-cache}"
+mkdir -p "$GST_CEF_CACHE_LOCATION"
 
-# Enable CEF debug logging
-export GST_CEF_LOG_SEVERITY="verbose"
+# A restarted container keeps its hostname and often its pids, so Chromium's
+# lock from the previous run (a SingletonLock symlink to "<host>-<pid>") can
+# look live. Nothing in this container runs Chromium yet, so a lock naming
+# this host is stale: drop it here. A lock naming another host is left for
+# Strom, which clears it before CEF starts.
+CEF_LOCK="$GST_CEF_CACHE_LOCATION/SingletonLock"
+if [ -L "$CEF_LOCK" ] && [ "$(readlink "$CEF_LOCK" | sed 's/-[0-9]*$//')" = "$(uname -n)" ]; then
+    rm -f "$CEF_LOCK" \
+          "$GST_CEF_CACHE_LOCATION/SingletonSocket" \
+          "$GST_CEF_CACHE_LOCATION/SingletonCookie"
+fi
+
+# CEF's own logging, to stderr. Warnings and errors only: verbose writes
+# everything Chromium does into the container log. Chromium logs a page's
+# console messages at info, console.error included, so warning also keeps a
+# page logging in a loop out of the log. GST_CEF_LOG_SEVERITY=info shows them.
+export GST_CEF_LOG_SEVERITY="${GST_CEF_LOG_SEVERITY:-warning}"
 
 # LD_PRELOAD the mallinfo shim to neutralise the MemoryInfra SIGILL crash.
 # libcef.so was built against an old sysroot and calls glibc's int-based

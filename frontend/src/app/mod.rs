@@ -3,6 +3,7 @@
 mod block_thumbnails;
 mod constructors;
 mod data_loading;
+mod devtools_links;
 mod dialogs;
 mod flow_ops;
 mod flow_selection;
@@ -774,6 +775,15 @@ pub struct StromApp {
     block_thumbnail_loading: std::collections::HashSet<(strom_types::FlowId, String)>,
     /// Block ID and URL to show as inline QR code in the properties panel
     qr_inline: Option<(String, String)>,
+    /// Remote control links the server has been asked for but not yet answered,
+    /// by the block that asked. Kept as the pair rather than a formatted key so
+    /// nothing has to parse a block id back out of a string.
+    devtools_link_pending: std::collections::HashSet<(strom_types::FlowId, String)>,
+    /// Answers to those requests, in memory: a link is a credential.
+    devtools_link_inbox: devtools_links::LinkInbox,
+    /// The block whose link was handed out last, and what the server says
+    /// that link hands over.
+    devtools_link_warning: Option<(String, String)>,
     /// QR code texture cache (for properties popup)
     qr_cache: crate::qr::QrCache,
     /// Current recording filename per recorder block (flow_id, block_id) -> filename
@@ -783,6 +793,8 @@ pub struct StromApp {
         std::collections::HashMap<(strom_types::FlowId, String), instant::Instant>,
     /// Debounce state for live property updates: tracks last-sent time and any pending update
     /// Key: (element_id, property_name)
-    live_property_debounce:
-        std::collections::HashMap<(String, String), crate::properties::LivePropertyDebounce>,
+    live_property_debounce: std::collections::HashMap<
+        crate::properties::LivePropertyKey,
+        crate::properties::LivePropertyDebounce,
+    >,
 }

@@ -16,6 +16,18 @@ use tracing::info;
 use crate::blocks::builtin::mediaplayer::{MediaPlayerKey, MEDIA_PLAYER_REGISTRY};
 use crate::state::AppState;
 
+/// Run a player control call off the async runtime. It waits for the
+/// player's other control calls and, after a file switch, for the source to
+/// set up the new stream, none of which may stall a runtime worker.
+async fn control<F>(call: F) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(call)
+        .await
+        .unwrap_or_else(|e| Err(format!("control call failed: {}", e)))
+}
+
 /// Get the current state of a media player block.
 #[utoipa::path(
     get,
@@ -125,7 +137,7 @@ pub async fn set_playlist(
 
         // Only auto-start from the beginning if the player was stopped
         if was_stopped && player.playlist_len() > 0 {
-            let _ = player.goto(0);
+            let _ = control(move || player.goto(0)).await;
         }
     }
 
@@ -165,13 +177,15 @@ pub async fn control_player(
 
     info!("Player {} control: {:?}", block_id, req.action);
 
-    let result = match req.action {
+    let action = req.action;
+    let result = control(move || match action {
         PlayerAction::Play => player.play(),
         PlayerAction::Pause => player.pause(),
         PlayerAction::Stop => player.stop(),
         PlayerAction::Next => player.next(),
         PlayerAction::Previous => player.previous(),
-    };
+    })
+    .await;
 
     result.map_err(|e| {
         (
@@ -231,12 +245,15 @@ pub async fn seek_player(
     }
 
     info!("Player {} seek to {} ns", block_id, req.position_ns);
-    player.seek(req.position_ns).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::with_details("Seek failed", e)),
-        )
-    })?;
+    let position_ns = req.position_ns;
+    control(move || player.seek(position_ns))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_details("Seek failed", e)),
+            )
+        })?;
 
     Ok(StatusCode::OK)
 }
@@ -274,7 +291,8 @@ pub async fn goto_file(
 
     info!("Player {} goto file index {}", block_id, req.index);
 
-    player.goto(req.index).map_err(|e| {
+    let index = req.index;
+    control(move || player.goto(index)).await.map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::with_details("Goto failed", e)),

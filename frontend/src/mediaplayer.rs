@@ -7,6 +7,9 @@ use std::time::Duration;
 use strom_types::mediaplayer::PlayerState;
 use strom_types::FlowId;
 
+mod channels;
+use channels::LIVE_CHANNELS;
+
 /// Time-to-live for media player data before it's considered stale.
 const PLAYER_DATA_TTL: Duration = Duration::from_millis(1000);
 
@@ -233,7 +236,7 @@ pub fn calculate_compact_height() -> f32 {
 /// Render a compact media player widget (for graph nodes).
 ///
 /// Returns a tuple of (action, seek_position) if user interacted with controls.
-/// Action can be: "play", "pause", "prev", "next", "seek", or "playlist".
+/// Action can be: "play", "pause", "previous", "next", "seek", or "playlist".
 pub fn show_compact(ui: &mut Ui, player_data: &MediaPlayerData) -> Option<(String, Option<u64>)> {
     // Show current file name (if any), truncated with hover for full path
     if let Some(ref file) = player_data.current_file {
@@ -600,6 +603,10 @@ pub struct PlaylistEditor {
     pub current_playing_index: Option<usize>,
     /// Width in pixels of the file browser left pane (draggable)
     pub browser_width_px: f32,
+    /// A URL being typed in, to add to the playlist
+    pub url_input: String,
+    /// The entry double-clicked to play now, until the app sends it
+    goto_request: Option<usize>,
 }
 
 impl PlaylistEditor {
@@ -617,6 +624,8 @@ impl PlaylistEditor {
             browser_needs_refresh: true, // Load on first show
             current_playing_index: None,
             browser_width_px: 350.0,
+            url_input: String::new(),
+            goto_request: None,
         }
     }
 
@@ -638,6 +647,34 @@ impl PlaylistEditor {
         self.browser_entries = entries;
         self.browser_loading = false;
         self.browser_needs_refresh = false;
+    }
+
+    /// The entry the user double-clicked, to play now. When the list has
+    /// unsaved edits it comes with the list, which has to be saved first so
+    /// the index means the entry the user sees.
+    pub fn take_goto(&mut self) -> Option<(usize, Option<Vec<String>>)> {
+        let index = self.goto_request.take()?;
+        let unsaved = self.dirty.then(|| self.playlist.clone());
+        self.dirty = false;
+        Some((index, unsaved))
+    }
+
+    /// Put `url` first in the list and play it. A live channel already first
+    /// is replaced, so zapping between channels keeps one entry; anything else
+    /// first stays and moves down. The list is unsaved now, so `take_goto`
+    /// hands it over to be saved before entry 0 is played.
+    fn play_now(&mut self, url: &str) {
+        let first_is_channel = self
+            .playlist
+            .first()
+            .is_some_and(|first| LIVE_CHANNELS.iter().any(|c| c.url == first));
+        if first_is_channel {
+            self.playlist[0] = url.to_string();
+        } else {
+            self.playlist.insert(0, url.to_string());
+        }
+        self.dirty = true;
+        self.goto_request = Some(0);
     }
 
     /// Request to navigate to a path in the browser.
@@ -685,10 +722,23 @@ impl PlaylistEditor {
                                 .size(egui_extras::Size::remainder().at_least(120.0))
                                 .clip(true)
                                 .horizontal(|mut strip| {
-                                    // Left pane — file browser
+                                    // Left pane — file browser above live channels
                                     strip.cell(|ui| {
-                                        ui.heading("Server Media Files");
-                                        self.show_browser_panel(ui);
+                                        egui_extras::StripBuilder::new(ui)
+                                            .size(egui_extras::Size::relative(0.55))
+                                            .size(egui_extras::Size::remainder())
+                                            .clip(true)
+                                            .vertical(|mut strip| {
+                                                strip.cell(|ui| {
+                                                    ui.heading("Server Media Files");
+                                                    self.show_browser_panel(ui);
+                                                });
+                                                strip.cell(|ui| {
+                                                    ui.separator();
+                                                    ui.heading("Live Channels");
+                                                    self.show_channels_panel(ui);
+                                                });
+                                            });
                                     });
 
                                     // Draggable divider
@@ -831,7 +881,73 @@ impl PlaylistEditor {
         }
     }
 
+    fn show_channels_panel(&mut self, ui: &mut Ui) {
+        ui.label("Click a channel to play it now, + to add it to the end of the playlist.");
+        egui::ScrollArea::vertical()
+            .id_salt("live_channels_scroll")
+            .auto_shrink(false)
+            .max_height(ui.available_height())
+            .show(ui, |ui| {
+                let mut play = None;
+                let mut add = None;
+                for channel in LIVE_CHANNELS {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(egui_phosphor::regular::PLUS)
+                            .on_hover_text("Add to playlist")
+                            .clicked()
+                        {
+                            add = Some(channel.url);
+                        }
+                        if ui
+                            .button(format!(
+                                "{} {}",
+                                egui_phosphor::regular::BROADCAST,
+                                channel.name
+                            ))
+                            .on_hover_text(format!("{}\n\nClick to play now", channel.url))
+                            .clicked()
+                        {
+                            play = Some(channel.url);
+                        }
+                    });
+                }
+                if let Some(url) = add {
+                    self.playlist.push(url.to_string());
+                    self.dirty = true;
+                }
+                if let Some(url) = play {
+                    self.play_now(url);
+                }
+            });
+    }
+
     fn show_playlist_panel(&mut self, ui: &mut Ui, result: &mut Option<Vec<String>>) {
+        // A stream or file by URL, next to files from the media folder: the
+        // player opens anything GStreamer has a source for.
+        ui.horizontal(|ui| {
+            let url = self.url_input.trim();
+            let valid = is_url(url);
+            let add = ui
+                .add_enabled(
+                    valid,
+                    egui::Button::new(format!("{} Add URL", egui_phosphor::regular::LINK)),
+                )
+                .on_hover_text("http(s) including HLS and DASH, rtsp, srt, udp, ...")
+                .on_disabled_hover_text("Enter a URL such as https://example.com/live.m3u8");
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut self.url_input)
+                    .hint_text("https://example.com/live.m3u8")
+                    .desired_width(f32::INFINITY),
+            );
+            let entered = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if valid && (add.clicked() || entered) {
+                self.playlist.push(self.url_input.trim().to_string());
+                self.url_input.clear();
+                self.dirty = true;
+            }
+        });
+
         // Action buttons BEFORE scroll area so they don't overflow the cell
         ui.horizontal(|ui| {
             if ui
@@ -860,7 +976,7 @@ impl PlaylistEditor {
         ui.separator();
 
         if self.playlist.is_empty() {
-            ui.label("(empty - click files on the left or enter path above)");
+            ui.label("(empty - click files on the left or add a URL above)");
         }
 
         // Scrollable playlist (LAST so it fills the remaining cell height)
@@ -916,22 +1032,47 @@ impl PlaylistEditor {
                                 to_move_up = Some(i);
                             }
 
-                            // Filename fills the remaining space with truncation
-                            let display_name = std::path::Path::new(file)
-                                .file_name()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_else(|| file.clone());
+                            // Name fills the remaining space with truncation
+                            let display_name = playlist_entry_name(file);
                             let color = if is_playing {
                                 Color32::GREEN
                             } else {
                                 ui.style().visuals.text_color()
                             };
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(&display_name).color(color))
-                                    .truncate()
-                                    .sense(egui::Sense::hover()),
-                            )
-                            .on_hover_text(file);
+                            // Left-aligned from the index number to the
+                            // buttons, cut short only when it does not fit; the
+                            // full entry is on hover. A double-click plays it,
+                            // the context menu copies it.
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    let label = ui
+                                        .add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&display_name).color(color),
+                                            )
+                                            .truncate()
+                                            .sense(egui::Sense::click()),
+                                        )
+                                        .on_hover_text(format!(
+                                            "{}\n\nDouble-click to play, right-click to copy",
+                                            file
+                                        ));
+                                    if label.double_clicked() {
+                                        self.goto_request = Some(i);
+                                    }
+                                    label.context_menu(|ui| {
+                                        if ui.button("Play now").clicked() {
+                                            self.goto_request = Some(i);
+                                            ui.close();
+                                        }
+                                        if ui.button("Copy").clicked() {
+                                            ui.ctx().copy_text(file.clone());
+                                            ui.close();
+                                        }
+                                    });
+                                },
+                            );
                         });
                     });
                 }
@@ -953,6 +1094,31 @@ impl PlaylistEditor {
     }
 }
 
+/// Whether `s` is a URL with a scheme (`scheme://...`), as opposed to a path in
+/// the media folder.
+fn is_url(s: &str) -> bool {
+    let Some((scheme, rest)) = s.split_once("://") else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    !rest.is_empty()
+        && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// What a playlist entry is called in the list: a file's name, and a URL in
+/// full, scheme and all - `rtsp://` and `https://` to the same host are
+/// different sources.
+fn playlist_entry_name(entry: &str) -> String {
+    if is_url(entry) && !entry.starts_with("file://") {
+        return entry.to_string();
+    }
+    std::path::Path::new(entry)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| entry.to_string())
+}
+
 /// Format file size for display.
 fn format_file_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -967,5 +1133,122 @@ fn format_file_size(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_url_is_told_from_a_media_folder_path() {
+        for url in [
+            "https://example.com/live/master.m3u8?format=hls",
+            "rtsp://192.0.2.10:8554/stream",
+            "srt://192.0.2.10:9000?mode=caller",
+            "udp://239.0.0.1:5000",
+            "file:///media/clip.mp4",
+        ] {
+            assert!(is_url(url), "{}", url);
+        }
+        for path in [
+            "clip.mp4",
+            "folder/clip.mp4",
+            "/abs/clip.mp4",
+            "https://",
+            "://x",
+            "1http://x",
+        ] {
+            assert!(!is_url(path), "{}", path);
+        }
+    }
+
+    #[test]
+    fn a_double_clicked_entry_plays_after_unsaved_edits_are_saved() {
+        let mut editor = PlaylistEditor::new(uuid::Uuid::nil(), "b".into());
+        editor.set_playlist(vec!["a.mp4".into(), "b.mp4".into()]);
+        assert_eq!(editor.take_goto(), None);
+
+        editor.goto_request = Some(1);
+        assert_eq!(editor.take_goto(), Some((1, None)), "saved list: just go");
+        assert_eq!(editor.take_goto(), None, "sent once");
+
+        // An entry added but not saved: the server's index 2 does not exist yet.
+        editor.playlist.push("https://example.com/live.m3u8".into());
+        editor.dirty = true;
+        editor.goto_request = Some(2);
+        let (index, unsaved) = editor.take_goto().unwrap();
+        assert_eq!(index, 2);
+        assert_eq!(unsaved.as_deref().map(|p| p.len()), Some(3));
+        assert!(!editor.dirty);
+    }
+
+    #[test]
+    fn a_channel_played_now_goes_first_and_plays_after_the_list_is_saved() {
+        let mut editor = PlaylistEditor::new(uuid::Uuid::nil(), "b".into());
+        editor.set_playlist(vec!["a.mp4".into()]);
+        let channel = &LIVE_CHANNELS[0];
+
+        editor.play_now(channel.url);
+
+        assert_eq!(
+            editor.take_goto(),
+            Some((0, Some(vec![channel.url.to_string(), "a.mp4".into()])))
+        );
+        assert!(!editor.dirty);
+    }
+
+    #[test]
+    fn a_channel_played_now_replaces_a_channel_first_in_the_list() {
+        let mut editor = PlaylistEditor::new(uuid::Uuid::nil(), "b".into());
+        editor.set_playlist(vec![LIVE_CHANNELS[0].url.into(), "a.mp4".into()]);
+        let channel = &LIVE_CHANNELS[1];
+
+        editor.play_now(channel.url);
+
+        assert_eq!(
+            editor.take_goto(),
+            Some((0, Some(vec![channel.url.to_string(), "a.mp4".into()])))
+        );
+    }
+
+    #[test]
+    fn a_channel_played_now_keeps_a_url_first_that_is_not_a_channel() {
+        let mut editor = PlaylistEditor::new(uuid::Uuid::nil(), "b".into());
+        editor.set_playlist(vec!["https://example.com/live.m3u8".into()]);
+        let channel = &LIVE_CHANNELS[0];
+
+        editor.play_now(channel.url);
+
+        assert_eq!(
+            editor.take_goto(),
+            Some((
+                0,
+                Some(vec![
+                    channel.url.to_string(),
+                    "https://example.com/live.m3u8".into()
+                ])
+            ))
+        );
+    }
+
+    #[test]
+    fn every_live_channel_is_a_url_the_player_takes() {
+        for channel in LIVE_CHANNELS {
+            assert!(is_url(channel.url), "{}: {}", channel.name, channel.url);
+        }
+    }
+
+    #[test]
+    fn a_url_is_listed_in_full_and_a_file_by_name() {
+        for url in [
+            "https://cdn.example.com/l4/se/svt1/master.m3u8?format=hls",
+            "rtsp://192.0.2.10:8554",
+            "srt://192.0.2.10:9000?mode=caller",
+        ] {
+            assert_eq!(playlist_entry_name(url), url);
+        }
+        assert_eq!(playlist_entry_name("folder/clip.mp4"), "clip.mp4");
+        assert_eq!(playlist_entry_name("file:///media/clip.mp4"), "clip.mp4");
     }
 }

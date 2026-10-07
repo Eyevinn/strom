@@ -18,11 +18,26 @@ on:
         default: both
         options: [both, macos, windows, none]
 
+# One run per ref, and the newest event wins on a pull request: a push or a
+# `ci:` label cancels the run in progress and starts a full one, so a PR never
+# builds macOS/Windows twice at once (a label run used to be left running on
+# the old commit next to the push run). On main a running build is left to
+# finish, and only the newest waiting push is kept: without this a burst of
+# merges stacked up one 45-minute macOS + Windows pair per commit. Any other
+# label gets a group of its own, cancels nothing, and its run skips every job.
+concurrency:
+  group: ci-${{ github.ref }}${{ (github.event.action == 'labeled' && !startsWith(github.event.label.name, 'ci:')) && format('-unrelated-label-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   TRUNK_VERSION: "0.21.14"
   CARGO_INCREMENTAL: 0
+  # Line tables only in dev/test builds: backtraces keep file and line, but
+  # the full debuginfo that made test builds slow to link and the sccache
+  # objects large is dropped. Release builds carry no debuginfo either way.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   # sccache -> self-hosted MinIO (S3-compatible) cache in OSC.
   # Replaces the GitHub Actions cache backend, which shares a hard 10 GB/repo
   # ceiling with the docker buildkit blobs. The same backend is reused by the
@@ -47,14 +62,10 @@ jobs:
   # build instead of failing CI. Exposes cache_ok consumed by every build job.
   preflight:
     name: sccache preflight
-    # A `labeled` event is only interesting when the label is one of the two
-    # that ask for a platform build. Skipping here takes every job that needs
-    # this one with it, and api-contract excludes `labeled` itself, so adding an
-    # unrelated label to a pull request costs nothing.
-    if: >-
-      github.event.action != 'labeled'
-      || contains(github.event.pull_request.labels.*.name, 'ci:macos')
-      || contains(github.event.pull_request.labels.*.name, 'ci:windows')
+    # Only a `ci:` label starts work: it cancels the run in progress (see
+    # `concurrency`), so its run has to do everything that run would have.
+    # Any other label skips every job and costs nothing.
+    if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
     runs-on: ubuntu-latest
     outputs:
       cache_ok: ${{ steps.probe.outputs.cache_ok }}
@@ -67,24 +78,33 @@ jobs:
             echo "cache_ok=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # list-objects-v2 needs only s3:ListBucket, which the scoped service
-          # account has. NoSuchBucket / unreachable endpoint -> non-zero -> off.
-          if timeout 25 aws --endpoint-url "$SCCACHE_ENDPOINT" --region "$SCCACHE_REGION" \
-               --cli-connect-timeout 8 --cli-read-timeout 8 \
-               s3api list-objects-v2 --bucket "$SCCACHE_BUCKET" --max-keys 1 >/dev/null 2>&1; then
-            echo "sccache backend reachable - cache enabled"
-            echo "cache_ok=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::sccache backend unreachable or bucket missing - building WITHOUT compile cache"
+          # Probe a write, not just a list. When the MinIO drive fills up it
+          # keeps serving reads and health checks but rejects every PUT, so
+          # list-objects-v2 passes while sccache records a write error on every
+          # miss and the cache never fills (2026-08 to 2026-10, unnoticed).
+          # A fixed key is overwritten each run, so no delete is needed.
+          # NoSuchBucket / unreachable endpoint / denied write -> off.
+          probe() {
+            timeout 25 aws --endpoint-url "$SCCACHE_ENDPOINT" --region "$SCCACHE_REGION" \
+              --cli-connect-timeout 8 --cli-read-timeout 8 s3api "$@" >/dev/null 2>probe.err
+          }
+          echo "preflight $GITHUB_RUN_ID" > probe.txt
+          if ! probe list-objects-v2 --bucket "$SCCACHE_BUCKET" --max-keys 1; then
+            echo "::warning::sccache backend unreachable or bucket missing - building WITHOUT compile cache: $(tr '\n' ' ' < probe.err)"
             echo "cache_ok=false" >> "$GITHUB_OUTPUT"
+          elif ! probe put-object --bucket "$SCCACHE_BUCKET" --key preflight/probe --body probe.txt; then
+            echo "::warning::sccache backend rejects writes - building WITHOUT compile cache: $(tr '\n' ' ' < probe.err)"
+            echo "cache_ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "sccache backend reachable and writable - cache enabled"
+            echo "cache_ok=true" >> "$GITHUB_OUTPUT"
           fi
   # Fast checks on Linux: fmt + clippy + test
   check-linux:
     name: Check (Linux)
-    # Labelling a PR must not re-run everything that already passed. Only the
-    # platform builds care about the label; `github.event.action` is unset for
-    # push and workflow_dispatch, so this is a no-op there.
-    if: github.event.action != 'labeled'
+    # See preflight for the label condition. `github.event.action` is unset
+    # for push and workflow_dispatch, so it is a no-op there.
+    if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
     needs: preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -103,7 +123,7 @@ jobs:
       - name: Cache apt packages
         uses: awalsh128/cache-apt-pkgs-action@v1.6.1
         with:
-          packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-gl gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice pkg-config cmake libclang-dev
+          packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-gl gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice libegl-mesa0 libgl1-mesa-dri pkg-config cmake libclang-dev
           version: 1.5
 
       # cache-apt-pkgs-action restores package files but does not run postinst,
@@ -137,13 +157,17 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy on backend
-        run: cargo clippy --package strom --all-targets --features efp,nvidia -- -D warnings
+        run: cargo clippy --package strom --all-targets --features efp -- -D warnings
 
       - name: Run tests on backend
-        run: cargo test --package strom --features efp,nvidia
+        run: cargo test --package strom --features efp
         env:
           # Turn a missing-element skip into a failure — see plugins_available().
           STROM_REQUIRE_GST_PLUGINS: 1
+          # The GL tests get a surfaceless EGL context from Mesa's software
+          # rasteriser (libegl-mesa0, libgl1-mesa-dri) — see common::init_gl().
+          # So they must run here rather than skip green — see gl_available().
+          STROM_REQUIRE_GL: 1
 
       - name: Run tests on shared types
         run: cargo test --package strom-types
@@ -215,8 +239,10 @@ jobs:
   api-contract:
     name: API Contract Check
     runs-on: ubuntu-latest
-    # See check-linux for the `labeled` exclusion.
-    if: github.event_name == 'pull_request' && github.event.action != 'labeled'
+    # See preflight for the label condition.
+    if: >-
+      github.event_name == 'pull_request'
+      && (github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:'))
     steps:
       - uses: actions/checkout@v6
         with:
@@ -245,10 +271,9 @@ jobs:
   # by cargo, so nothing else in this workflow would notice a break in them.
   static-js:
     name: Static JS Tests
-    # Same reason as check-linux: a label event must not re-run what already
-    # passed. This job is the one dependabot keeps paying for, since its PRs get
-    # labelled after they open.
-    if: github.event.action != 'labeled'
+    # See preflight. Dependabot's labels are not `ci:` labels, so labelling its
+    # PRs after they open still costs nothing.
+    if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -272,8 +297,8 @@ jobs:
   # Linux x86_64 build
   build-linux-x86_64:
     name: Build (Linux x86_64)
-    # See check-linux for the `labeled` exclusion.
-    if: github.event.action != 'labeled'
+    # See preflight for the label condition.
+    if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
     needs: [check-wasm, preflight]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -318,7 +343,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: /tmp/cargo-zigbuild.tar.xz
-          key: cargo-zigbuild-0.22.3-linux-x86_64
+          key: cargo-zigbuild-0.23.4-linux-x86_64
 
       - name: Install Zig and cargo-zigbuild
         run: |
@@ -338,8 +363,8 @@ jobs:
           sudo ln -sf /usr/local/zig-linux-x86_64-${ZIG_VERSION}/zig /usr/local/bin/zig
 
           # cargo-zigbuild: download prebuilt binary (cargo install would compile from source, ~10 min)
-          CZB_VERSION="0.22.3"
-          CZB_SHA256="6a014d41ba41ca4b69ca4c4819b9f78a41b0197b5d486904e31c1244e3686190"
+          CZB_VERSION="0.23.4"
+          CZB_SHA256="6b69963040818ca1ef573d8135a95aa902e17cf7f873c32c6426642dadfe7f59"
           CZB_URL="https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CZB_VERSION}/cargo-zigbuild-x86_64-unknown-linux-gnu.tar.xz"
           if [ ! -s /tmp/cargo-zigbuild.tar.xz ] || ! echo "${CZB_SHA256}  /tmp/cargo-zigbuild.tar.xz" | sha256sum -c --quiet; then
             curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \
@@ -356,7 +381,7 @@ jobs:
       - name: Install GStreamer (cached)
         uses: awalsh128/cache-apt-pkgs-action@v1.6.1
         with:
-          packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-gl gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice pkg-config cmake libclang-dev
+          packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-gl gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice libegl-mesa0 libgl1-mesa-dri pkg-config cmake libclang-dev
           version: 1.5
 
       - name: Download frontend dist
@@ -382,8 +407,8 @@ jobs:
   # Linux ARM64 build (build only - no native clippy/test)
   build-linux-arm64:
     name: Build (Linux ARM64)
-    # See check-linux for the `labeled` exclusion.
-    if: github.event.action != 'labeled'
+    # See preflight for the label condition.
+    if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
     needs: [check-wasm, preflight]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
@@ -423,7 +448,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: /tmp/cargo-zigbuild.tar.xz
-          key: cargo-zigbuild-0.22.3-linux-aarch64
+          key: cargo-zigbuild-0.23.4-linux-aarch64
 
       - name: Install Zig and cargo-zigbuild
         run: |
@@ -441,8 +466,8 @@ jobs:
           sudo tar -xJ -C /usr/local -f /tmp/zig.tar.xz
           sudo ln -sf /usr/local/zig-linux-aarch64-${ZIG_VERSION}/zig /usr/local/bin/zig
 
-          CZB_VERSION="0.22.3"
-          CZB_SHA256="6f86a78cf8be222ac08a68a944ffd8a1ef9d455c504097f0ffbd8bcfbe434a55"
+          CZB_VERSION="0.23.4"
+          CZB_SHA256="25cf2cdc6cde848b33a761ff2cf46d1efe6ba7e1adfc4b6f3ee2d570cacb5419"
           CZB_URL="https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CZB_VERSION}/cargo-zigbuild-aarch64-unknown-linux-gnu.tar.xz"
           if [ ! -s /tmp/cargo-zigbuild.tar.xz ] || ! echo "${CZB_SHA256}  /tmp/cargo-zigbuild.tar.xz" | sha256sum -c --quiet; then
             curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \
@@ -459,7 +484,7 @@ jobs:
       - name: Install GStreamer (cached)
         uses: awalsh128/cache-apt-pkgs-action@v1.6.1
         with:
-          packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-gl gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice pkg-config cmake libclang-dev
+          packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-gl gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice libegl-mesa0 libgl1-mesa-dri pkg-config cmake libclang-dev
           version: 1.5
 
       - name: Download frontend dist
@@ -586,7 +611,7 @@ jobs:
 
       - name: Run Clippy
         run: |
-          cargo clippy --package strom --features nvidia -- -D warnings
+          cargo clippy --package strom -- -D warnings
 
       - name: Run tests
         run: |
@@ -604,7 +629,7 @@ jobs:
             done
           done < <(echo "$PATH" | tr ':' '\n')
           export PATH="$gst_bin:$PATH"
-          cargo test --package strom --features nvidia
+          cargo test --no-fail-fast --package strom
           cargo test --package strom-types
         env:
           # Turn a missing-element skip into a failure — see plugins_available().
@@ -612,11 +637,16 @@ jobs:
           # installed every plugin group; both are true as of this commit.
           STROM_REQUIRE_GST_PLUGINS: 1
 
+      # A pull request asks this job to verify the platform code, which
+      # clippy and the tests do. The release binary is only wanted from main
+      # and dispatch, and building it is a second full compile of the tree.
       - name: Build
+        if: github.event_name != 'pull_request'
         run: |
           cargo build --release --package strom
 
       - name: Upload backend binary
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: strom-v${{ steps.version.outputs.version }}-windows-x86_64-pc-windows-msvc
@@ -688,25 +718,29 @@ jobs:
 
       - name: Run Clippy
         run: |
-          cargo clippy --package strom --features efp,nvidia -- -D warnings
+          cargo clippy --package strom --features efp -- -D warnings
 
       - name: Run tests
         run: |
-          cargo test --package strom --features efp,nvidia
+          cargo test --no-fail-fast --package strom --features efp
           cargo test --package strom-types
         env:
           # Turn a missing-element skip into a failure — see plugins_available().
           STROM_REQUIRE_GST_PLUGINS: 1
           # This runner can create a GL context, so the GL tests must run here
-          # rather than skip green — see gl_available_or_required(). It is set on
-          # macOS alone: the Linux runners are headless and legitimately skip.
+          # rather than skip green — see gl_available(). check-linux sets it too:
+          # its headless runner renders through surfaceless EGL. Windows does
+          # not: its runner has no OpenGL driver GStreamer can use.
           STROM_REQUIRE_GL: 1
 
+      # Not on a pull request: see the Windows job.
       - name: Build
+        if: github.event_name != 'pull_request'
         run: |
           cargo build --release --package strom --features efp
 
       - name: Upload backend binary
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: strom-v${{ steps.version.outputs.version }}-macos-aarch64-apple-darwin

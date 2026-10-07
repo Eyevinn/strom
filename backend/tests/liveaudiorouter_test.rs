@@ -74,6 +74,8 @@ fn liveaudiorouter_exposes_the_same_property_set_as_audiorouter() {
         "latency".to_string(),
         "min_upstream_latency".to_string(),
         "output_buffer_duration".to_string(),
+        // ...the rate every bus runs at, resampling each input to it...
+        liveaudiorouter::SAMPLE_RATE_PROPERTY.to_string(),
         // ...including the two that give the bus somewhere to put a fan-in
         // sum. `builtin.audiorouter` has neither and clips the same way.
         liveaudiorouter::OUTPUT_FADER_PROPERTY.to_string(),
@@ -216,6 +218,7 @@ const REQUIRED_ELEMENTS: &[&str] = &[
     "valve",
     "audiotestsrc",
     "audioconvert",
+    "audioresample",
     "level",
     "fakesink",
 ];
@@ -408,9 +411,31 @@ fn tap_after(h: &Harness, upstream: &gst::Element, format: &str) {
 /// rounded to 0.1 dB. Any pipeline error fails the test rather than showing
 /// up later as unexplained silence.
 fn observe_peaks(pipeline: &gst::Pipeline, channels: usize, timeout: Duration) -> Vec<f64> {
+    observe_peaks_until(pipeline, channels, timeout, |_| false)
+}
+
+/// How long `observe_peaks_until` watches a condition hold before taking it as
+/// the answer: ten `level` intervals.
+const HOLD: Duration = Duration::from_millis(500);
+
+/// As `observe_peaks`, but done once `expected` has held for `HOLD` rather than
+/// at `timeout`. Peaks only rise over a window, so a condition that only asks
+/// for at least this loud gets the verdict the whole window would have given;
+/// `HOLD` is for conditions with an upper bound or a silent channel, to see that
+/// what was measured stays put. On a timeout it returns what it saw, for the
+/// caller's assert to report.
+fn observe_peaks_until(
+    pipeline: &gst::Pipeline,
+    channels: usize,
+    timeout: Duration,
+    expected: impl Fn(&[f64]) -> bool,
+) -> Vec<f64> {
     let bus = pipeline.bus().expect("pipeline bus");
     let mut peaks = vec![f64::NEG_INFINITY; channels];
+    let rounded =
+        |peaks: &[f64]| -> Vec<f64> { peaks.iter().map(|p| (p * 10.0).round() / 10.0).collect() };
     let start = Instant::now();
+    let mut held_since: Option<Instant> = None;
 
     while start.elapsed() < timeout {
         let remaining = timeout.saturating_sub(start.elapsed());
@@ -443,12 +468,20 @@ fn observe_peaks(pipeline: &gst::Pipeline, channels: usize, timeout: Duration) -
                         }
                     }
                 }
+                if expected(&rounded(&peaks)) {
+                    let since = *held_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= HOLD {
+                        break;
+                    }
+                } else {
+                    held_since = None;
+                }
             }
             _ => {}
         }
     }
 
-    peaks.iter().map(|p| (p * 10.0).round() / 10.0).collect()
+    rounded(&peaks)
 }
 
 /// A channel that carries no routed audio.
@@ -486,7 +519,9 @@ fn two_input_channels_routed_to_one_output_channel_are_summed() {
         .set_state(gst::State::Playing)
         .expect("set Playing");
 
-    let peaks = observe_peaks(&h.pipeline, 2, Duration::from_secs(3));
+    let peaks = observe_peaks_until(&h.pipeline, 2, Duration::from_secs(3), |p| {
+        p[0] > amplitude_db(0.4) + 1.0
+    });
 
     // Both inputs land on channel 0, so it must read louder than either alone.
     assert!(
@@ -525,7 +560,9 @@ fn one_input_channel_routed_to_several_outputs_fans_out() {
 
     // Both taps post on the same bus; each output is mono, so channel 0 of
     // every message is the routed channel. Input channel 1 is at 0.25.
-    let peaks = observe_peaks(&h.pipeline, 1, Duration::from_secs(3));
+    let peaks = observe_peaks_until(&h.pipeline, 1, Duration::from_secs(3), |p| {
+        (p[0] - amplitude_db(0.25)).abs() < 1.0
+    });
     assert!(
         (peaks[0] - amplitude_db(0.25)).abs() < 1.0,
         "both outputs must carry input 0 channel 1 ({} dB), got {peaks:?}",
@@ -554,7 +591,9 @@ fn a_crosspoint_gain_below_unity_attenuates_rather_than_switching() {
         .set_state(gst::State::Playing)
         .expect("set Playing");
 
-    let peaks = observe_peaks(&h.pipeline, 2, Duration::from_secs(3));
+    let peaks = observe_peaks_until(&h.pipeline, 2, Duration::from_secs(3), |p| {
+        (p[0] - p[1] + amplitude_db(0.25)).abs() < 1.5
+    });
     let expected_drop = -amplitude_db(0.25); // 0.25 gain = 12 dB down
     assert!(
         (peaks[0] - peaks[1] - expected_drop).abs() < 1.5,
@@ -586,7 +625,9 @@ fn a_routing_change_moves_audio_between_output_channels_while_playing() {
         .set_state(gst::State::Playing)
         .expect("set Playing");
 
-    let before = observe_peaks(&h.pipeline, 2, Duration::from_secs(2));
+    let before = observe_peaks_until(&h.pipeline, 2, Duration::from_secs(2), |p| {
+        !is_silent(p[0]) && is_silent(p[1])
+    });
     assert!(
         !is_silent(before[0]) && is_silent(before[1]),
         "expected audio on output channel 0 only before the change, got {before:?}"
@@ -608,7 +649,9 @@ fn a_routing_change_moves_audio_between_output_channels_while_playing() {
 
     // Let the old buffers drain before measuring the new state.
     let _ = observe_peaks(&h.pipeline, 2, Duration::from_millis(500));
-    let after = observe_peaks(&h.pipeline, 2, Duration::from_secs(2));
+    let after = observe_peaks_until(&h.pipeline, 2, Duration::from_secs(2), |p| {
+        is_silent(p[0]) && !is_silent(p[1])
+    });
     assert!(
         is_silent(after[0]) && !is_silent(after[1]),
         "the routing change did not move audio to output channel 1 on the running \
@@ -636,9 +679,11 @@ fn closing_every_crosspoint_silences_the_output_without_a_silence_source() {
         .set_state(gst::State::Playing)
         .expect("set Playing");
     assert!(
-        observe_peaks(&h.pipeline, 2, Duration::from_secs(2))
+        observe_peaks_until(&h.pipeline, 2, Duration::from_secs(2), |p| p
             .iter()
-            .all(|p| !is_silent(*p)),
+            .all(|p| !is_silent(*p)))
+        .iter()
+        .all(|p| !is_silent(*p)),
         "both channels should carry audio to start with"
     );
 
@@ -727,6 +772,16 @@ fn play_then_connect_late_input(
         }
     }
 
+    // Caps on the bus do not mean the pipeline is in PLAYING. With an async
+    // sink downstream, the bin finishes the state change on a thread of its
+    // own and sets every child it holds to PLAYING. A source added before
+    // that would start streaming before it is linked, and stop `not-linked`.
+    let (result, state, _) = h.pipeline.state(gst::ClockTime::from_seconds(5));
+    assert!(
+        result.is_ok() && state == gst::State::Playing,
+        "the pipeline never reached PLAYING with no input connected: {result:?} {state:?}"
+    );
+
     let src = gst::ElementFactory::make("audiotestsrc")
         .property("is-live", true)
         .property("freq", 440.0)
@@ -744,7 +799,9 @@ fn play_then_connect_late_input(
     mono.sync_state_with_parent().expect("sync capsfilter");
     src.sync_state_with_parent().expect("sync source");
 
-    observe_peaks(&h.pipeline, 2, Duration::from_secs(2))
+    observe_peaks_until(&h.pipeline, 2, Duration::from_secs(2), |p| {
+        !is_silent(p[0]) && is_silent(p[1])
+    })
 }
 
 #[test]
@@ -865,7 +922,7 @@ fn bus_format_before_a_converting_consumer(
         .set_state(gst::State::Playing)
         .expect("set Playing");
 
-    let peaks = observe_peaks(&h.pipeline, 2, Duration::from_secs(2));
+    let peaks = observe_peaks_until(&h.pipeline, 2, Duration::from_secs(2), |p| !is_silent(p[0]));
     assert!(
         !is_silent(peaks[0]),
         "no audio through the converting consumer: {peaks:?}"
@@ -943,7 +1000,7 @@ fn an_unconnected_input_does_not_stall_the_router() {
         .set_state(gst::State::Playing)
         .expect("set Playing");
 
-    let peaks = observe_peaks(&h.pipeline, 1, Duration::from_secs(3));
+    let peaks = observe_peaks_until(&h.pipeline, 1, Duration::from_secs(3), |p| !is_silent(p[0]));
     assert!(
         !is_silent(peaks[0]),
         "input 0 must reach the output even though inputs 1 and 2 are unconnected, got {peaks:?}"
@@ -994,7 +1051,9 @@ fn a_source_that_stops_does_not_stall_the_other_inputs() {
         .set_state(gst::State::Playing)
         .expect("set Playing");
 
-    let before = observe_peaks(&h.pipeline, 2, Duration::from_secs(2));
+    let before = observe_peaks_until(&h.pipeline, 2, Duration::from_secs(2), |p| {
+        !is_silent(p[0]) && !is_silent(p[1])
+    });
     assert!(
         !is_silent(before[0]) && !is_silent(before[1]),
         "both inputs should be flowing to start with, got {before:?}"
@@ -1002,7 +1061,7 @@ fn a_source_that_stops_does_not_stall_the_other_inputs() {
 
     valve.set_property("drop", true);
     let _ = observe_peaks(&h.pipeline, 2, Duration::from_millis(500));
-    let after = observe_peaks(&h.pipeline, 2, Duration::from_secs(2));
+    let after = observe_peaks_until(&h.pipeline, 2, Duration::from_secs(2), |p| !is_silent(p[0]));
     assert!(
         !is_silent(after[0]),
         "input 0 must keep flowing after input 1 stops, got {after:?}"
@@ -1276,7 +1335,9 @@ fn the_original_audiorouter_still_routes_audio() {
         .set_state(gst::State::Playing)
         .expect("set Playing");
 
-    let peaks = observe_peaks(&h.pipeline, 2, Duration::from_secs(3));
+    let peaks = observe_peaks_until(&h.pipeline, 2, Duration::from_secs(3), |p| {
+        (p[0] - amplitude_db(0.5)).abs() < 1.5 && (p[1] - amplitude_db(0.25)).abs() < 1.5
+    });
     assert!(
         (peaks[0] - amplitude_db(0.5)).abs() < 1.5,
         "output channel 0 must carry input 0 ({} dB), got {peaks:?}",
@@ -1869,4 +1930,175 @@ fn the_headroom_properties_are_offered_and_default_to_no_op() {
             "defaulting the soft clipper on would change what every existing flow sounds like"
         )
     };
+}
+
+// ============================================================================
+// Inputs at different sample rates (#886)
+// ============================================================================
+
+/// Two mono inputs, each on its own channel of one stereo output.
+fn two_rate_router(extra: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
+    let mut properties = props(&[
+        ("num_inputs", PropertyValue::UInt(2)),
+        ("num_outputs", PropertyValue::UInt(1)),
+        ("input_0_channels", PropertyValue::UInt(1)),
+        ("input_1_channels", PropertyValue::UInt(1)),
+        ("output_0_channels", PropertyValue::UInt(2)),
+        (
+            "routing_matrix",
+            PropertyValue::String(r#"{"i0c0":["o0c0"],"i1c0":["o0c1"]}"#.to_string()),
+        ),
+    ]);
+    for (k, v) in extra {
+        properties.insert(k.to_string(), v.clone());
+    }
+    properties
+}
+
+/// A live mono tone at `rate`, with no resampler of its own, linked to
+/// `input`. Returns the source and its capsfilter so a late caller can sync
+/// their state.
+fn connect_mono_at_rate(h: &Harness, instance: &str, input: usize, rate: i32) -> [gst::Element; 2] {
+    let src = gst::ElementFactory::make("audiotestsrc")
+        .property("is-live", true)
+        .property("freq", 440.0)
+        .property("volume", 0.5)
+        .build()
+        .expect("audiotestsrc");
+    let caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("channels", 1i32)
+                .field("rate", rate)
+                .field("format", "F32LE")
+                .build(),
+        )
+        .build()
+        .expect("capsfilter");
+    h.pipeline.add_many([&src, &caps]).expect("add source");
+    src.link(&caps).expect("link source");
+    caps.link(&h.elements[&format!("{instance}:identity_in_{input}")])
+        .expect("link input");
+    [src, caps]
+}
+
+/// The rate `mixer_0` negotiated, waiting up to five seconds for it.
+fn bus_rate(h: &Harness, instance: &str) -> i32 {
+    let pad = h.elements[&format!("{instance}:mixer_0")]
+        .static_pad("src")
+        .expect("mixer src pad");
+    let start = Instant::now();
+    loop {
+        if let Some(caps) = pad.current_caps() {
+            return caps.structure(0).unwrap().get::<i32>("rate").unwrap();
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "mixer_0 never negotiated"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn inputs_at_two_rates_connected_at_start_are_both_heard() {
+    let instance = "two_rates";
+    let h = assemble(instance, &two_rate_router(&[]));
+    tap(&h, instance, 0);
+    connect_mono_at_rate(&h, instance, 0, 48_000);
+    connect_mono_at_rate(&h, instance, 1, 44_100);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let peaks = observe_peaks_until(&h.pipeline, 2, Duration::from_secs(2), |p| {
+        !is_silent(p[0]) && !is_silent(p[1])
+    });
+    assert!(
+        !is_silent(peaks[0]) && !is_silent(peaks[1]),
+        "a 48 kHz and a 44.1 kHz input must both reach the output, got {peaks:?}"
+    );
+    assert_eq!(
+        bus_rate(&h, instance),
+        48_000,
+        "the bus runs at the default"
+    );
+}
+
+#[test]
+fn an_input_at_another_rate_joining_a_running_bus_is_heard() {
+    let instance = "join_rate";
+    let h = assemble(instance, &two_rate_router(&[]));
+    tap(&h, instance, 0);
+    connect_mono_at_rate(&h, instance, 0, 48_000);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+    let first = observe_peaks_until(&h.pipeline, 2, Duration::from_secs(1), |p| !is_silent(p[0]));
+    assert!(
+        !is_silent(first[0]),
+        "the first input must be heard before the second joins, got {first:?}"
+    );
+
+    for element in connect_mono_at_rate(&h, instance, 1, 44_100) {
+        element.sync_state_with_parent().expect("sync late source");
+    }
+    let peaks = observe_peaks_until(&h.pipeline, 2, Duration::from_secs(2), |p| {
+        !is_silent(p[0]) && !is_silent(p[1])
+    });
+    assert!(
+        !is_silent(peaks[0]) && !is_silent(peaks[1]),
+        "a 44.1 kHz input joining a running 48 kHz bus must be heard, got {peaks:?}"
+    );
+}
+
+#[test]
+fn the_sample_rate_property_sets_the_bus_rate() {
+    let instance = "rate_prop";
+    let h = assemble(
+        instance,
+        &two_rate_router(&[(
+            liveaudiorouter::SAMPLE_RATE_PROPERTY,
+            PropertyValue::String("44100".to_string()),
+        )]),
+    );
+    tap(&h, instance, 0);
+    connect_mono_at_rate(&h, instance, 0, 48_000);
+    connect_mono_at_rate(&h, instance, 1, 48_000);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let peaks = observe_peaks_until(&h.pipeline, 2, Duration::from_secs(2), |p| {
+        !is_silent(p[0]) && !is_silent(p[1])
+    });
+    assert!(
+        !is_silent(peaks[0]) && !is_silent(peaks[1]),
+        "48 kHz inputs must be resampled onto a 44.1 kHz bus, got {peaks:?}"
+    );
+    assert_eq!(bus_rate(&h, instance), 44_100);
+}
+
+#[test]
+fn the_sample_rate_property_offers_the_common_rates_and_defaults_to_48k() {
+    let def = definition(liveaudiorouter::get_blocks(), "builtin.liveaudiorouter");
+    let prop = def
+        .exposed_properties
+        .iter()
+        .find(|p| p.name == liveaudiorouter::SAMPLE_RATE_PROPERTY)
+        .expect("sample_rate is exposed");
+    assert_eq!(
+        format!("{:?}", prop.default_value),
+        format!("{:?}", Some(PropertyValue::String("48000".to_string())))
+    );
+    assert_eq!(
+        format!("{:?}", prop.property_type),
+        format!(
+            "{:?}",
+            strom_types::PropertyType::Enum {
+                values: strom_types::common_audio_sample_rate_enum_values(false)
+            }
+        )
+    );
 }

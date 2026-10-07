@@ -25,10 +25,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
-use tower_sessions::Session;
 use tracing::{debug, info, warn};
 
-use crate::auth::AuthConfig;
+use crate::auth::{AuthConfig, SessionCookie};
 use crate::mcp::{
     handler::{JsonRpcRequest, McpHandler},
     session::McpEvent,
@@ -181,12 +180,12 @@ pub async fn mcp_post(
     State(state): State<AppState>,
     Extension(sessions): Extension<McpSessionManager>,
     Extension(auth_config): Extension<Arc<AuthConfig>>,
-    session: Session,
+    Extension(session): Extension<Arc<SessionCookie>>,
     headers: HeaderMap,
     JsonBody(request): JsonBody<JsonRpcRequest>,
 ) -> Response {
     // Validate authentication
-    let session_ok = crate::auth::session_is_authenticated(&session).await;
+    let session_ok = session.is_authenticated(&headers);
     if let Err(response) = validate_mcp_auth(&auth_config, &headers, session_ok) {
         return response;
     }
@@ -285,11 +284,11 @@ pub async fn mcp_get(
     State(state): State<AppState>,
     Extension(sessions): Extension<McpSessionManager>,
     Extension(auth_config): Extension<Arc<AuthConfig>>,
-    session: Session,
+    Extension(session): Extension<Arc<SessionCookie>>,
     headers: HeaderMap,
 ) -> Response {
     // Validate authentication
-    let session_ok = crate::auth::session_is_authenticated(&session).await;
+    let session_ok = session.is_authenticated(&headers);
     if let Err(response) = validate_mcp_auth(&auth_config, &headers, session_ok) {
         return response;
     }
@@ -448,11 +447,11 @@ fn create_sse_stream(
 pub async fn mcp_delete(
     Extension(sessions): Extension<McpSessionManager>,
     Extension(auth_config): Extension<Arc<AuthConfig>>,
-    session: Session,
+    Extension(session): Extension<Arc<SessionCookie>>,
     headers: HeaderMap,
 ) -> Response {
     // Validate authentication
-    let session_ok = crate::auth::session_is_authenticated(&session).await;
+    let session_ok = session.is_authenticated(&headers);
     if let Err(response) = validate_mcp_auth(&auth_config, &headers, session_ok) {
         return response;
     }
@@ -499,6 +498,8 @@ mod tests {
             api_key: None,
             native_gui_token: None,
             enabled: true,
+            session_key: crate::auth::SessionKey::random(),
+            session_cookie_secure: false,
         }
     }
 
@@ -509,6 +510,8 @@ mod tests {
             api_key: Some("secret".to_string()),
             native_gui_token: None,
             enabled: true,
+            session_key: crate::auth::SessionKey::random(),
+            session_cookie_secure: false,
         }
     }
 
@@ -569,6 +572,8 @@ mod tests {
             api_key: None,
             native_gui_token: None,
             enabled: false,
+            session_key: crate::auth::SessionKey::random(),
+            session_cookie_secure: false,
         };
         assert!(validate_mcp_auth(&config, &headers(&[]), false).is_ok());
     }

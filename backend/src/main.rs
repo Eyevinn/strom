@@ -353,8 +353,11 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Load configuration early to get log_file setting
-    let config = Config::from_figment(
+    // Load configuration early to get log_file setting.
+    // Mutable because the CEF debug port is resolved against the flags already
+    // in the environment further down, and the proxy has to follow the port
+    // that is really in force.
+    let mut config = Config::from_figment(
         args.port,
         args.data_dir.clone(),
         args.flows_path.clone(),
@@ -399,40 +402,15 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Give CEF (the `cefsrc` element behind HTML sources and DSK graphics) a
-    // per-instance cache directory. Native runs otherwise get Chromium's
-    // default, which warns
-    //
-    //   Please customize CefSettings.root_cache_path for your application. Use
-    //   of the default value may lead to unintended process singleton behavior.
-    //
-    // and leaves Chromium's process singleton shared: a second Strom instance
-    // on the same machine cannot start any cefsrc element, failing in
-    // gst_base_src_start() so the flow start returns 500 "Element failed to
-    // change its state". The resolved path is per data directory, so instances
-    // stay isolated while keeping a warm profile across restarts, which also
-    // cuts repeat flow-start latency. GST_CEF_CACHE_LOCATION always wins if it
-    // is already set — the strom-full Docker image sets it in its entrypoint.
-    //
-    // set_var is safe here: this is early in main(), before any thread is
-    // spawned and before GStreamer (and therefore CEF) is initialized.
-    match std::env::var_os("GST_CEF_CACHE_LOCATION") {
-        Some(existing) => info!(
-            "CEF cache directory: {} (from GST_CEF_CACHE_LOCATION)",
-            PathBuf::from(existing).display()
-        ),
-        None => {
-            if let Err(e) = std::fs::create_dir_all(&config.cef_cache_path) {
-                warn!(
-                    "Could not create CEF cache directory {}: {}",
-                    config.cef_cache_path.display(),
-                    e
-                );
-            }
-            std::env::set_var("GST_CEF_CACHE_LOCATION", &config.cef_cache_path);
-            info!("CEF cache directory: {}", config.cef_cache_path.display());
-        }
-    }
+    // CEF (the `cefsrc` element behind HTML sources and DSK graphics) reads
+    // its switches once, from the environment, so it is set up here: early,
+    // before any thread is spawned and before GStreamer is initialized.
+    config.cef_debug_port = strom::cef_flags::configure(strom::cef_flags::CefSetup {
+        cache_path: &config.cef_cache_path,
+        debug_port: config.cef_debug_port,
+        full_devtools: config.cef_full_devtools,
+        auth_configured: auth::AuthConfig::is_configured_in_env(),
+    });
 
     // Determine if GUI should be enabled
     #[cfg(not(feature = "no-gui"))]
@@ -514,7 +492,7 @@ fn run_with_gui(
     let shutdown_flag_gui = shutdown_flag.clone();
 
     // Create auth config and generate native GUI token if auth is enabled
-    let mut auth_config = auth::AuthConfig::from_env();
+    let mut auth_config = auth::AuthConfig::load(&config.data_dir, config.tls_cert.is_some())?;
     let native_gui_token = if auth_config.enabled {
         let token = auth_config.generate_native_gui_token();
         info!("Generated native GUI token for auto-authentication");
@@ -634,6 +612,7 @@ fn run_with_gui(
             auth_config,
             config.cors_allowed_origins.clone(),
             config.port,
+            devtools_config(&config),
         )
         .await;
 
@@ -766,6 +745,18 @@ fn run_headless_entry(
     }
 }
 
+/// The DevTools proxy's view of the configuration.
+///
+/// Whether the link it hands out says `ws://` or `wss://` follows this
+/// instance's own TLS, unless something in front of us says otherwise.
+fn devtools_config(config: &Config) -> strom::api::devtools::DevToolsState {
+    strom::api::devtools::DevToolsState::new(strom::api::devtools::DevToolsConfig {
+        debug_port: config.cef_debug_port,
+        tls: config.tls_cert.is_some() && config.tls_key.is_some(),
+        full_devtools: config.cef_full_devtools,
+    })
+}
+
 #[tokio::main]
 async fn run_headless(
     config: Config,
@@ -870,9 +861,10 @@ async fn run_headless(
     // Create the HTTP app BEFORE auto-restart, then bind AFTER
     let app = create_app_with_config(
         state.clone(),
-        auth::AuthConfig::from_env(),
+        auth::AuthConfig::load(&config.data_dir, config.tls_cert.is_some())?,
         config.cors_allowed_origins.clone(),
         config.port,
+        devtools_config(&config),
     )
     .await;
 

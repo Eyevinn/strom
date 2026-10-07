@@ -124,6 +124,7 @@ fn apply_post_build_properties(
         // for live pipelines using monotonic clock.
         mixer.set_property_from_str("start-time-selection", "zero");
     }
+    crate::gst::aggregator_start::disarm_start_time_selection(mixer);
 }
 
 /// Create a tee element for splitting input to multiple consumers.
@@ -153,23 +154,9 @@ pub fn make_level(name: &str) -> Result<gst::Element, BlockBuildError> {
         .map_err(|e| BlockBuildError::ElementCreation(format!("level: {}", e)))
 }
 
-/// Create a terminating `fakesink` for an audio metering branch.
-///
-/// `sync=false` and `async=false` so an unconnected audio input doesn't stall
-/// preroll — the level element still posts messages when data flows.
-pub fn make_meter_fakesink(name: &str) -> Result<gst::Element, BlockBuildError> {
-    gst::ElementFactory::make("fakesink")
-        .name(name)
-        .property("sync", false)
-        .property("async", false)
-        .property("silent", true)
-        .property("enable-last-sample", false)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("fakesink: {}", e)))
-}
-
-/// Create a `glshader` FX slot, pre-loaded with the identity fragment so it
-/// negotiates and renders as a passthrough until an effect is programmed.
+/// Create a `glshader` FX slot, pre-loaded with the identity fragment. It
+/// negotiates as a GL filter, then runs in passthrough from its first buffer
+/// until an effect is programmed (see `gst::shaders::request_passthrough`).
 /// The `create-shader` handler enables runtime fragment swaps — without it
 /// the fragment property is inert once the first shader is compiled.
 /// GPU pipeline only — the CPU path has no FX slots.
@@ -180,7 +167,58 @@ pub fn make_glshader(name: &str) -> Result<gst::Element, BlockBuildError> {
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("glshader: {}", e)))?;
     crate::gst::shaders::attach_create_shader_handler(&elem);
+    crate::gst::shaders::request_passthrough(&elem, true);
     Ok(elem)
+}
+
+/// Keep a per-input GL filter at the frame size it is given.
+///
+/// `glshader` can scale, and takes its output size from the first entry of
+/// downstream's caps. A running compositor answers with the size it already
+/// has, so when a source changes size the filter stretches the new frames to
+/// the old size: a camera switched to portrait, or a new publisher on a
+/// reused WHIP slot, keeps the first source's shape, and the mixer never sees
+/// a caps change to aspect-fit. Opening width and height in that answer keeps
+/// the filter at its input size; the compositor pads take any size.
+///
+/// The filter asks its peer pad directly (`gst_pad_query_caps` on the peer),
+/// so the answer can only be rewritten on the peer, which is not known until
+/// the filter's src pad is linked.
+pub fn keep_input_size(filter: &gst::Element) {
+    let Some(src) = filter.static_pad("src") else {
+        return;
+    };
+    src.connect_linked(|_src, peer| {
+        open_caps_answer_size(peer);
+    });
+}
+
+fn open_caps_answer_size(pad: &gst::Pad) {
+    // PULL: runs once the pad has answered a caps query. Never per buffer.
+    pad.add_probe(
+        gst::PadProbeType::QUERY_DOWNSTREAM | gst::PadProbeType::PULL,
+        |_pad, info| {
+            let Some(query) = info.query_mut() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let gst::QueryViewMut::Caps(q) = query.view_mut() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let Some(mut result) = q.result_owned() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            for s in result.make_mut().iter_mut() {
+                s.set("width", gst::IntRange::new(1, i32::MAX));
+                s.set("height", gst::IntRange::new(1, i32::MAX));
+                s.remove_field("pixel-aspect-ratio");
+            }
+            if let Some(filter) = q.filter() {
+                result = filter.intersect_with_mode(&result, gst::CapsIntersectMode::First);
+            }
+            q.set_result(&result);
+            gst::PadProbeReturn::Ok
+        },
+    );
 }
 
 /// Create a simple GStreamer element by factory name.

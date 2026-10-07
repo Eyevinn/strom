@@ -134,7 +134,7 @@ impl ApiClient {
     /// Get discovered SAP/AES67 streams.
     pub async fn get_discovered_streams(
         &self,
-    ) -> ApiResult<Vec<crate::discovery::DiscoveredStream>> {
+    ) -> ApiResult<Vec<strom_types::discovery::DiscoveredStreamResponse>> {
         let url = format!("{}/discovery/streams", self.base_url);
         tracing::debug!("Fetching discovered streams from: {}", url);
 
@@ -154,7 +154,7 @@ impl ApiClient {
             return Err(ApiError::Http(status, text));
         }
 
-        let streams: Vec<crate::discovery::DiscoveredStream> =
+        let streams: Vec<strom_types::discovery::DiscoveredStreamResponse> =
             response.json().await.map_err(|e| {
                 tracing::error!("Failed to parse discovered streams response: {}", e);
                 ApiError::Decode(e.to_string())
@@ -165,7 +165,9 @@ impl ApiClient {
     }
 
     /// Get streams we are announcing via SAP.
-    pub async fn get_announced_streams(&self) -> ApiResult<Vec<crate::discovery::AnnouncedStream>> {
+    pub async fn get_announced_streams(
+        &self,
+    ) -> ApiResult<Vec<strom_types::discovery::AnnouncedStreamResponse>> {
         let url = format!("{}/discovery/announced", self.base_url);
         tracing::debug!("Fetching announced streams from: {}", url);
 
@@ -185,7 +187,7 @@ impl ApiClient {
             return Err(ApiError::Http(status, text));
         }
 
-        let streams: Vec<crate::discovery::AnnouncedStream> =
+        let streams: Vec<strom_types::discovery::AnnouncedStreamResponse> =
             response.json().await.map_err(|e| {
                 tracing::error!("Failed to parse announced streams response: {}", e);
                 ApiError::Decode(e.to_string())
@@ -248,15 +250,11 @@ impl ApiClient {
             return Ok((false, Vec::new()));
         }
 
-        #[derive(serde::Deserialize)]
-        struct NdiStatus {
-            available: bool,
-        }
-
-        let status: NdiStatus = status_response.json().await.map_err(|e| {
-            tracing::error!("Failed to parse NDI status response: {}", e);
-            ApiError::Decode(e.to_string())
-        })?;
+        let status: strom_types::discovery::NdiDiscoveryStatus =
+            status_response.json().await.map_err(|e| {
+                tracing::error!("Failed to parse NDI status response: {}", e);
+                ApiError::Decode(e.to_string())
+            })?;
 
         if !status.available {
             return Ok((false, Vec::new()));

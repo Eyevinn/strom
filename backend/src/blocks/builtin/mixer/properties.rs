@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use strom_types::PropertyValue;
+use strom_types::{parse_common_audio_sample_rate, PropertyValue, DEFAULT_AUDIO_SAMPLE_RATE};
+use tracing::warn;
 
 use super::{DEFAULT_CHANNELS, MAX_AUX_BUSES, MAX_CHANNELS, MAX_GROUPS, MIN_KNEE_LINEAR};
 
@@ -42,6 +43,22 @@ pub(super) fn parse_num_groups(properties: &HashMap<String, PropertyValue>) -> u
         .and_then(parse_count)
         .unwrap_or(0)
         .clamp(0, MAX_GROUPS)
+}
+
+/// Parse the rate every bus runs at. An unset property gives
+/// `DEFAULT_AUDIO_SAMPLE_RATE`; a value outside the common rates is logged
+/// and falls back to the default too.
+pub(super) fn parse_sample_rate(properties: &HashMap<String, PropertyValue>) -> u32 {
+    match properties.get("sample_rate") {
+        None => DEFAULT_AUDIO_SAMPLE_RATE,
+        Some(v) => parse_common_audio_sample_rate(v).unwrap_or_else(|| {
+            warn!(
+                "Unsupported mixer sample_rate {:?}, using {}",
+                v, DEFAULT_AUDIO_SAMPLE_RATE
+            );
+            DEFAULT_AUDIO_SAMPLE_RATE
+        }),
+    }
 }
 
 /// Get a float property with default.

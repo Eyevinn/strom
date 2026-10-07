@@ -31,17 +31,10 @@
 ## GStreamer Queues
 - Leave `queue`, `queue2`, and `multiqueue` elements with default property values unless there is a documented latency requirement that justifies overriding them.
 
-## GStreamer Memory Formats
-- A block emits the memory type it naturally produces (system, GL, CUDA, ...). The **consuming** block adapts its own input. A producer does not know its consumer, so any producer-side download is wrong for half the graph and costs a GPU round trip per frame in the other half.
-- Adapt at build time where the input is known (`glupload` on a GL consumer's inputs). Where it depends on what `decodebin` autoplugged upstream, decide from the negotiated caps — `gst::gl_bridge` does this for GL memory.
-- Beware sinks that advertise GPU memory features they cannot actually process: `whepserversink` accepts `video/x-raw(memory:GLMemory)` and then fails encoder discovery. A successful link is not proof the consumer can use the frames.
+## Block Guidelines
+@docs/BLOCK_GUIDELINES.md
 
-## Output Block Inputs
-- This applies to output blocks that carry encoded media (SRT, RTMP, recorder, TAMS, ...). Outputs whose target takes raw media (NDI, DeckLink, AES67) take raw only. WebRTC outputs (WHEP, WHIP) are exempt from the video rule below: codec negotiation is part of the protocol, and the sink encodes.
-- **Video must arrive encoded.** Refuse raw video and name `builtin.videoenc` in the message. Never encode video inside an output block: codec, profile and bitrate are the operator's choice, made in one explicit block.
-- **Audio may arrive either way.** Pass encoded audio through as it is. Encode raw audio inside the block, with defaults that suit the target.
-- Check what the target actually accepts from the negotiated caps, not only the caps name. That means the codec, and also `profile` where the target restricts it.
-- **A refusal fails the flow, with a message the operator can act on.** Post an element error from the block (`gst::element_error!`) saying what arrived, what the target needs, and which block property fixes it. Do not only log the refusal and leave the pad unlinked: the flow then shows only `Internal data stream error`, or a track goes missing without a word.
+The block contract (what a block emits and accepts, memory formats, output block inputs) lives in that file, shared with human contributors. Follow it for every block change.
 
 ## Code Organization
 - When working in or near a file that exceeds 1500 lines, proactively suggest splitting it into focused sub-modules (following the pattern used for `pipeline.rs` and `app.rs`)
@@ -61,6 +54,11 @@
 - Before defining a new struct, enum, constant, or default value — always check if it already exists in `strom-types`. All new API-visible or shared types must be placed in `strom-types`, never directly in the backend. If you find a duplicate, move it to `strom-types`.
 - `strom-types` must not depend on the backend, GStreamer crates, or other internal crates — only pure utility crates such as `serde` and `uuid`.
 
+## Block IDs Are Only Unique Within a Flow
+- A block instance id is unique inside its flow, not across the instance. Flows created through the API keep the block ids the client sends, so two running flows can both have a block called `mixer`. Only the flow id is unique.
+- Never add a new key on the block id alone for anything global or shared across flows (registries, maps, caches, channel names). Key on the pair `(flow_id, block_id)`, as `MediaPlayerKey` and the vision mixer overlay registries do. State that lives inside one flow (a `PipelineManager`'s own maps) may use the block id.
+- If you find existing code keyed on the block id alone, check whether that state is global (shared across flows). If it is, propose a fix or an issue for it, with the failure: what a second flow with the same block id breaks.
+
 ## API Contract
 - Every new endpoint must have a `#[utoipa::path(...)]` annotation AND be registered in `openapi.rs`. Both are required — an annotation without registration does not appear in the schema.
 - After changes to API types or endpoints, run the snapshot test (`cargo test --test openapi_test`). If it fails, update `openapi.json` in the repo root intentionally — do not silently let the schema drift.
@@ -74,6 +72,7 @@
 - A regression test must fail if the fix is reverted. If it hardcodes the fixed path (e.g. a `use_queues: true` flag with no failing counterpart), it is a demonstration, not a guard — say so in the PR body and explain why a real guard is not feasible.
 - A test that requires a GStreamer element must be able to run in CI. Tests that skip on a missing element pass green and guard nothing, so check the package list in `.github/workflows/ci.yml` before relying on one, and add the missing package in the same PR.
 - State in the PR body which tests you actually ran, and which were skipped or not run. "CI is green" is not the same as "the new test executed".
+- Write the PR body from `.github/PULL_REQUEST_TEMPLATE.md`. `gh pr create --body` and `--body-file` skip the template, so read it first. The scheduled fix stage follows `scripts/agent/FIX.md` instead.
 
 ## Dead Code
 - Never use blanket `#![allow(dead_code)]`. Each case must be handled individually. Never use `#[allow(dead_code)]` in `strom-types`.

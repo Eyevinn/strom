@@ -1,4 +1,5 @@
 use super::{PipelineError, PipelineManager, QoSAggregator};
+use crate::blocks::builtin::html_input;
 use crate::blocks::BlockRegistry;
 use crate::events::EventBroadcaster;
 use crate::whip_registry::WhipRegistry;
@@ -24,11 +25,19 @@ fn is_sink_element(element: &gst::Element) -> bool {
 /// Used on qos-enabled sink pads to stop the per-buffer upstream QoS event
 /// storm from propagating (and leaking) into the rest of the pipeline. See the
 /// call site in `add_element` for the rationale.
+///
+/// Returns `Handled`, not `Drop`. gstreamer-rs takes the event out of the
+/// probe info and frees it itself either way; after `Drop`, GStreamer before
+/// 1.26 then unrefs the (now NULL) event once more in
+/// `gst_pad_push_event_unchecked` and logs `gst_mini_object_unref: assertion
+/// 'mini_object != NULL' failed` — once per QoS event, i.e. per buffer at
+/// every qos-enabled sink. `Handled` means "consumed by the probe": the core
+/// does not touch the event again, and the push still counts as a success.
 fn drop_upstream_qos_events(pad: &gst::Pad) {
     pad.add_probe(gst::PadProbeType::EVENT_UPSTREAM, |_pad, info| {
         if let Some(gst::PadProbeData::Event(ref event)) = info.data {
             if event.type_() == gst::EventType::Qos {
-                return gst::PadProbeReturn::Drop;
+                return gst::PadProbeReturn::Handled;
             }
         }
         gst::PadProbeReturn::Pass
@@ -356,6 +365,36 @@ impl PipelineManager {
             debug!("Enabled is-live on test source {}", element_def.id);
         }
 
+        // A raw cefsrc gets a browser context of its own, the same as the HTML
+        // Input block, so HTML sources in different flows do not share a
+        // cookie jar. A flow that sets isolated-context itself decides.
+        if element_def.element_type == "cefsrc"
+            && !element_def
+                .properties
+                .contains_key(html_input::ISOLATED_CONTEXT_PROPERTY)
+        {
+            let flow_id = self.flow_id.to_string();
+            html_input::isolate_browser(
+                &element,
+                &format!("cefsrc {} in flow {}", element_def.id, flow_id),
+                |root| html_input::element_profile_dir(root, &flow_id, &element_def.id),
+            );
+        }
+
+        // Strict about this machine and its network unless the flow says
+        // otherwise, the same default as the HTML Input block.
+        if element_def.element_type == "cefsrc"
+            && !element_def
+                .properties
+                .contains_key(html_input::CEFSRC_STRICT_NETWORK_PROPERTY)
+        {
+            html_input::restrict_network(
+                &element,
+                &format!("cefsrc {} in flow {}", element_def.id, self.flow_id),
+                true,
+            );
+        }
+
         // Set properties
         if !element_def.properties.is_empty() {
             debug!(
@@ -369,6 +408,17 @@ impl PipelineManager {
             // volume_ramp routing inside set_property falls back to a direct
             // set. Pass None to make that explicit.
             self.set_property(&element, &element_def.id, prop_name, prop_value, None)?;
+        }
+
+        // Named once its URL is final, so remote control can find its page.
+        if element_def.element_type == "cefsrc" {
+            crate::cef_pages::name_page(
+                &element,
+                crate::cef_pages::PageOwner::Element {
+                    flow_id: self.flow_id,
+                    element_id: element_def.id.clone(),
+                },
+            );
         }
 
         // Store pad properties for later application (after pads are created)

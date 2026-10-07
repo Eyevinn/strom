@@ -16,6 +16,11 @@ on:
         required: true
         default: 'b63340852fc93b0ab67b07200e1ff44f59ba6769'
         type: string
+      build_suffix:
+        description: 'Suffix naming this build, e.g. strom1. Required whenever the build differs from an existing one at the same CEF version (such as when Strom''s patches in docker/gstcefsrc change), so that it gets a name of its own instead of replacing the binaries existing images download.'
+        required: false
+        type: string
+        default: ''
       upload_to_release:
         description: 'Upload artifacts to GitHub release'
         required: false
@@ -54,20 +59,52 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      # Inputs reach the shell through env, never through ${{ }} in the
+      # script: an expression is pasted into the script before it runs, so a
+      # quote in an input would run as shell. Each value is checked whole
+      # with [[ =~ ]]: grep matches line by line, so a value with a newline
+      # in it would pass and write extra lines to $GITHUB_OUTPUT.
       - name: Extract CEF short version
         id: cef
+        env:
+          CEF_VERSION: ${{ inputs.cef_version }}
+          GSTCEFSRC_REF: ${{ inputs.gstcefsrc_ref }}
+          BUILD_SUFFIX: ${{ inputs.build_suffix }}
         run: |
           # Extract just the version number (e.g., 138.0.56)
-          CEF_SHORT=$(echo "${{ inputs.cef_version }}" | cut -d'+' -f1)
-          echo "short_version=$CEF_SHORT" >> $GITHUB_OUTPUT
+          CEF_SHORT="${CEF_VERSION%%+*}"
+          if ! [[ "$CEF_SHORT" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::cef_version must start with a version number such as 144.0.21"
+            exit 1
+          fi
+          if ! [[ "$CEF_VERSION" =~ ^[A-Za-z0-9.+_-]+$ ]]; then
+            echo "::error::cef_version may hold letters, digits and . + _ - only"
+            exit 1
+          fi
+          if ! [[ "$GSTCEFSRC_REF" =~ ^[A-Za-z0-9._/][A-Za-z0-9._/-]*$ ]]; then
+            echo "::error::gstcefsrc_ref may hold letters, digits and . _ / - only, and not start with -"
+            exit 1
+          fi
+          echo "short_version=$CEF_SHORT" >> "$GITHUB_OUTPUT"
           echo "CEF short version: $CEF_SHORT"
+          # The name strom-full downloads by: the CEF version, plus the suffix
+          # that tells one build of Strom's patches from another.
+          SUFFIX="$BUILD_SUFFIX"
+          if [ -n "$SUFFIX" ] && ! [[ "$SUFFIX" =~ ^[A-Za-z0-9._]+$ ]]; then
+            echo "::error::build_suffix may hold letters, digits, dots and underscores only"
+            exit 1
+          fi
+          echo "build_version=${CEF_SHORT}${SUFFIX:+-$SUFFIX}" >> "$GITHUB_OUTPUT"
 
       - name: Build gstcefsrc Docker image
+        env:
+          CEF_VERSION: ${{ inputs.cef_version }}
+          GSTCEFSRC_REF: ${{ inputs.gstcefsrc_ref }}
         run: |
           docker build \
             --platform ${{ matrix.docker_platform }} \
-            --build-arg CEF_VERSION="${{ inputs.cef_version }}" \
-            --build-arg GSTCEFSRC_REF="${{ inputs.gstcefsrc_ref }}" \
+            --build-arg CEF_VERSION="$CEF_VERSION" \
+            --build-arg GSTCEFSRC_REF="$GSTCEFSRC_REF" \
             -t gstcefsrc-builder:${{ matrix.arch }} \
             -f docker/gstcefsrc/Dockerfile \
             docker/gstcefsrc/
@@ -84,19 +121,23 @@ jobs:
           du -sh output/
 
       - name: Create artifact archive
+        env:
+          BUILD_VERSION: ${{ steps.cef.outputs.build_version }}
         run: |
           cd output
-          ARCHIVE_NAME="gstcefsrc-${{ steps.cef.outputs.short_version }}-${{ matrix.platform }}.tar.gz"
+          ARCHIVE_NAME="gstcefsrc-${BUILD_VERSION}-${{ matrix.platform }}.tar.gz"
           tar -czvf "../$ARCHIVE_NAME" .
           cd ..
           ls -lh "$ARCHIVE_NAME"
+          # docker/strom-full/Dockerfile pins this.
+          echo "sha256: $(sha256sum "$ARCHIVE_NAME" | cut -d' ' -f1)"
           echo "archive_name=$ARCHIVE_NAME" >> $GITHUB_OUTPUT
         id: archive
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: gstcefsrc-${{ steps.cef.outputs.short_version }}-${{ matrix.platform }}
+          name: gstcefsrc-${{ steps.cef.outputs.build_version }}-${{ matrix.platform }}
           path: ${{ steps.archive.outputs.archive_name }}
           retention-days: 30
 
@@ -109,6 +150,10 @@ jobs:
           # Don't update body on subsequent uploads (append_body not supported, so we skip body after first)
           files: ${{ steps.archive.outputs.archive_name }}
           fail_on_unmatched_files: false
+          # A published archive is what existing images download, pinned by
+          # hash. A rebuild under the same name would break every one of them,
+          # so a new build needs a new build_suffix instead.
+          overwrite_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -119,11 +164,14 @@ jobs:
     if: always()
     steps:
       - name: Summary
+        env:
+          CEF_VERSION: ${{ inputs.cef_version }}
+          GSTCEFSRC_REF: ${{ inputs.gstcefsrc_ref }}
         run: |
           echo "## gstcefsrc Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**CEF Version:** \`${{ inputs.cef_version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**gstcefsrc ref:** \`${{ inputs.gstcefsrc_ref }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**CEF Version:** \`$CEF_VERSION\`" >> $GITHUB_STEP_SUMMARY
+          echo "**gstcefsrc ref:** \`$GSTCEFSRC_REF\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY

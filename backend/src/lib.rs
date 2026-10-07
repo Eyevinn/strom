@@ -14,7 +14,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tower_sessions::{cookie::time::Duration, Expiry, MemoryStore, SessionManagerLayer};
 use utoipa_swagger_ui::SwaggerUi;
 
 pub mod affinity_manager;
@@ -22,6 +21,10 @@ pub mod api;
 pub mod assets;
 pub mod auth;
 pub mod blocks;
+pub mod cef_flags;
+pub mod cef_media;
+pub mod cef_pages;
+pub mod cef_profiles;
 pub mod client_auth;
 pub mod config;
 pub mod discovery;
@@ -76,7 +79,18 @@ pub async fn create_app_with_state_and_auth(
     state: AppState,
     auth_config: auth::AuthConfig,
 ) -> Router {
-    create_app_with_config(state, auth_config, Vec::new(), 0).await
+    create_app_with_config(
+        state,
+        auth_config,
+        Vec::new(),
+        0,
+        api::devtools::DevToolsState::new(api::devtools::DevToolsConfig {
+            debug_port: None,
+            tls: false,
+            full_devtools: false,
+        }),
+    )
+    .await
 }
 
 /// Create the Axum application router with a given state, auth configuration, and CORS origins.
@@ -90,12 +104,17 @@ pub async fn create_app_with_config(
     auth_config: auth::AuthConfig,
     cors_allowed_origins: Vec<String>,
     port: u16,
+    devtools: api::devtools::DevToolsState,
 ) -> Router {
     // Note: GStreamer is already initialized in main.rs before this is called.
     // DO NOT call gst::init() here - it can corrupt internal state if pipelines
     // are already running (e.g., during auto-restart at startup).
 
     let auth_config = Arc::new(auth_config);
+
+    // Remote control links end as soon as the block they were minted for
+    // stops allowing them.
+    devtools.watch_flows(state.clone());
 
     if auth_config.enabled {
         tracing::info!("Authentication enabled");
@@ -109,14 +128,8 @@ pub async fn create_app_with_config(
         tracing::warn!("Authentication disabled - all endpoints are public!");
     }
 
-    // Create session store (in-memory, sessions lost on restart)
-    // Cookie name includes the port so multiple instances on the same host don't collide
-    let session_store = MemoryStore::default();
-    let session_layer = SessionManagerLayer::new(session_store)
-        .with_name(format!("strom_session_{}", port))
-        .with_expiry(Expiry::OnInactivity(Duration::hours(24)))
-        .with_secure(false)
-        .with_always_save(true);
+    // The login cookie is signed, not stored, so a login survives a restart
+    let session_cookie = Arc::new(auth::SessionCookie::new(port, &auth_config));
 
     // Build protected API router (requires authentication)
     let protected_api_router = Router::new()
@@ -343,6 +356,21 @@ pub async fn create_app_with_config(
             "/flows/{flow_id}/blocks/{block_id}/player/goto",
             post(api::mediaplayer::goto_file),
         )
+        // Remote control of the Chromium browsers behind HTML sources.
+        // Minting a link is authenticated; opening one is not, because the
+        // key in the link is itself the credential (see api::devtools).
+        .route("/devtools/targets", get(api::devtools::list_targets))
+        .route(
+            "/devtools/targets/{target_id}/link",
+            post(api::devtools::create_link),
+        )
+        .route(
+            "/flows/{flow_id}/blocks/{block_id}/devtools/link",
+            post(api::devtools::create_block_link),
+        )
+        .route("/devtools/links", get(api::devtools::list_links))
+        .route("/devtools/links", delete(api::devtools::revoke_all_links))
+        .route("/devtools/links/{id}", delete(api::devtools::revoke_link))
         // Logging
         .route("/log-level", get(api::logging::get_log_level))
         .route("/log-level", put(api::logging::set_log_level))
@@ -376,6 +404,15 @@ pub async fn create_app_with_config(
         .route("/mcp", post(api::mcp::mcp_post))
         .route("/mcp", get(api::mcp::mcp_get))
         .route("/mcp", delete(api::mcp::mcp_delete));
+
+    // Remote control of HTML sources - outside /api, because the key in the
+    // path is the credential and the DevTools application resolves its own
+    // files relative to it.
+    let devtools_router = Router::new()
+        .route("/{key}", get(api::devtools::open_link))
+        .route("/{key}/ui/{*path}", get(api::devtools::proxy_ui))
+        .route("/{key}/ws", get(api::devtools::proxy_cdp))
+        .layer(Extension(devtools.clone()));
 
     // Player/ingest pages (HTML) - outside /api
     let player_router = Router::new()
@@ -492,6 +529,7 @@ pub async fn create_app_with_config(
         .merge(protected_api_router)
         .fallback(api::not_found)
         .layer(Extension(auth_config.clone()))
+        .layer(Extension(devtools))
         .layer(Extension(mcp_sessions));
 
     // Build Swagger UI router behind authentication
@@ -505,11 +543,12 @@ pub async fn create_app_with_config(
         .route("/health", get(health))
         .merge(swagger_router)
         .nest("/api", api_router)
+        .nest("/devtools", devtools_router)
         .nest("/player", player_router)
         .nest("/whep", whep_router)
         .nest("/whip", whip_router)
         .nest("/static", static_router)
-        .layer(session_layer)
+        .layer(Extension(session_cookie))
         .layer({
             let cors = CorsLayer::new()
                 .allow_methods([
@@ -526,8 +565,19 @@ pub async fn create_app_with_config(
                     header::ACCEPT,
                     header::COOKIE,
                     HeaderName::from_static("mcp-session-id"),
+                    // A WHIP PATCH carries the session's ETag back in If-Match.
+                    header::IF_MATCH,
                 ])
-                .expose_headers([HeaderName::from_static("mcp-session-id")]);
+                // This list replaces any Access-Control-Expose-Headers a handler
+                // sets, so it must carry what the WHIP/WHEP proxies expose: a
+                // client on another origin needs Location to end its session.
+                .expose_headers([
+                    HeaderName::from_static("mcp-session-id"),
+                    header::LOCATION,
+                    header::LINK,
+                    HeaderName::from_static("accept-patch"),
+                    header::ETAG,
+                ]);
 
             // If no origins specified, allow any origin
             // Otherwise, restrict to the specified origins
@@ -550,7 +600,7 @@ pub async fn create_app_with_config(
                 tracing::info_span!(
                     "http",
                     method = %req.method(),
-                    path = %req.uri().path(),
+                    path = %api::devtools::redact_path(req.uri().path()),
                     peer = %peer.map_or_else(|| "unknown".to_string(), |a| a.to_string()),
                 )
             }),

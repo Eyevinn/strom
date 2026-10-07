@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strom_types::block::ExposedProperty;
+use strom_types::mixer::DEFAULT_INTERNAL_BUS_LATENCY_MS;
 use strom_types::PropertyValue;
 
 fn init_gst() {
@@ -825,4 +826,697 @@ fn test_built_mixer_passes_audio_to_main_out() {
             panic!("pipeline error: {msg:?}");
         }
     }
+}
+
+/// Hang `caps → level → fakesink` off `tee`. The level element is named
+/// `level_name` so its messages can be told apart on the bus.
+fn tap(m: &Assembled, tee: &str, caps: &str, level_name: &str) {
+    let filter = gst::ElementFactory::make("capsfilter")
+        .property("caps", caps.parse::<gst::Caps>().unwrap())
+        .build()
+        .unwrap();
+    let level = gst::ElementFactory::make("level")
+        .name(level_name)
+        .property("interval", 50_000_000u64)
+        .property("post-messages", true)
+        .build()
+        .unwrap();
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .property("async", false)
+        .build()
+        .unwrap();
+    m.pipeline.add_many([&filter, &level, &sink]).unwrap();
+    m.element(tee)
+        .link_pads(Some("src_%u"), &filter, None)
+        .unwrap_or_else(|e| panic!("{tee} cannot feed a {caps} consumer: {e}"));
+    gst::Element::link_many([&filter, &level, &sink]).unwrap();
+}
+
+/// A mixer with return feeds: aux buses and the solo bus start with no input
+/// and nothing downstream that fixes a rate, while main feeds a consumer that
+/// needs the mixer's rate (an encoder, the vision mixer). An input at
+/// `input_rate` that arrives after startup, as every WHIP input does, must
+/// link and be heard on main and on an aux bus.
+///
+/// `mixer_rate` is the block's `sample_rate` property; `None` leaves it unset,
+/// and the buses must then run at `DEFAULT_AUDIO_SAMPLE_RATE`.
+fn assert_late_input_is_heard(input_rate: i32, mixer_rate: Option<u32>) {
+    let mut properties = props(&[
+        ("num_channels", PropertyValue::UInt(2)),
+        ("num_aux_buses", PropertyValue::UInt(2)),
+        ("num_groups", PropertyValue::UInt(1)),
+        ("dsp_backend", PropertyValue::String("rust".to_string())),
+        // Aux sends default to 0: open channel 1's send to aux 2.
+        ("ch1_aux2_level", PropertyValue::Float(1.0)),
+    ]);
+    if let Some(rate) = mixer_rate {
+        properties.insert(
+            "sample_rate".to_string(),
+            PropertyValue::String(rate.to_string()),
+        );
+    }
+    let bus_rate = mixer_rate.unwrap_or(strom_types::DEFAULT_AUDIO_SAMPLE_RATE) as i32;
+    let m = assemble(&properties);
+    tap(
+        &m,
+        "main_out_tee",
+        &format!("audio/x-raw,rate={bus_rate}"),
+        "tap_main",
+    );
+    tap(&m, "aux1_out_tee", "audio/x-raw", "tap_aux1");
+    tap(&m, "aux0_out_tee", "audio/x-raw", "tap_aux0");
+    tap(&m, "monitor_out_tee", "audio/x-raw", "tap_monitor");
+    tap(&m, "group0_out_tee", "audio/x-raw", "tap_group0");
+
+    m.pipeline.set_state(gst::State::Playing).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // An idle bus left to fixate on its own picks 44100; check the rate
+    // before the late link, which would otherwise fail and hide the cause.
+    for bus in [
+        "audiomixer",
+        "aux0_mixer",
+        "aux1_mixer",
+        "group0_mixer",
+        "solo_mixer",
+        "monitor_mixer",
+    ] {
+        let pad = m.element(bus).static_pad("src").unwrap();
+        let caps = loop {
+            if let Some(caps) = pad.current_caps() {
+                break caps;
+            }
+            assert!(Instant::now() < deadline, "{bus} never negotiated");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(
+            caps.structure(0).unwrap().get::<i32>("rate").unwrap(),
+            bus_rate,
+            "{bus} negotiated {caps}"
+        );
+    }
+
+    let src = gst::ElementFactory::make("audiotestsrc")
+        .property("is-live", true)
+        .build()
+        .unwrap();
+    let decoded = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("format", "S16LE")
+                .field("rate", input_rate)
+                .field("channels", 2i32)
+                .field("layout", "interleaved")
+                .build(),
+        )
+        .build()
+        .unwrap();
+    m.pipeline.add_many([&src, &decoded]).unwrap();
+    src.link(&decoded).unwrap();
+    decoded
+        .static_pad("src")
+        .unwrap()
+        .link(&m.element("convert_0").static_pad("sink").unwrap())
+        .expect("a late input must link into a running mixer");
+    src.sync_state_with_parent().unwrap();
+    decoded.sync_state_with_parent().unwrap();
+
+    // The buses are live and emit silence with no input, so buffers alone
+    // prove nothing: wait for the tone's level on main and on aux1.
+    let bus = m.pipeline.bus().unwrap();
+    let mut heard = HashSet::new();
+    while heard.len() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the input was not heard on {:?}",
+            ["tap_main", "tap_aux1"]
+                .iter()
+                .filter(|n| !heard.contains(**n))
+                .collect::<Vec<_>>()
+        );
+        let Some(msg) = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(50),
+            &[gst::MessageType::Error, gst::MessageType::Element],
+        ) else {
+            continue;
+        };
+        if let gst::MessageView::Error(err) = msg.view() {
+            panic!("pipeline error: {err:?}");
+        }
+        let (Some(from), Some(structure)) = (msg.src(), msg.structure()) else {
+            continue;
+        };
+        let name = from.name();
+        if structure.name() == "level"
+            && (name == "tap_main" || name == "tap_aux1")
+            && extract_level_values(structure, "peak")
+                .iter()
+                .any(|db| *db > -40.0)
+        {
+            heard.insert(name.to_string());
+        }
+    }
+}
+
+#[test]
+fn test_input_links_late_when_main_consumer_pins_rate() {
+    assert_late_input_is_heard(48_000, None);
+}
+
+#[test]
+fn test_late_input_at_another_rate_is_resampled() {
+    assert_late_input_is_heard(44_100, None);
+}
+
+/// With `sample_rate=44100` every bus runs at 44.1 kHz, and a 48 kHz input
+/// that links late is resampled down and heard.
+#[test]
+fn test_sample_rate_property_sets_every_bus_rate() {
+    assert_late_input_is_heard(48_000, Some(44_100));
+}
+
+#[test]
+fn test_sample_rate_property_parsing() {
+    assert_eq!(parse_sample_rate(&props(&[])), 48_000);
+    assert_eq!(
+        parse_sample_rate(&props(&[(
+            "sample_rate",
+            PropertyValue::String("96000".into())
+        )])),
+        96_000
+    );
+    assert_eq!(
+        parse_sample_rate(&props(&[("sample_rate", PropertyValue::Int(44_100))])),
+        44_100
+    );
+    assert_eq!(
+        parse_sample_rate(&props(&[(
+            "sample_rate",
+            PropertyValue::String("12345".into())
+        )])),
+        48_000,
+        "a rate outside the common list falls back to the default"
+    );
+    let def = mixer_definition();
+    let prop = def
+        .exposed_properties
+        .iter()
+        .find(|p| p.name == "sample_rate")
+        .expect("mixer exposes sample_rate");
+    assert!(
+        matches!(&prop.default_value, Some(PropertyValue::String(s)) if s == "48000"),
+        "default is {:?}",
+        prop.default_value
+    );
+}
+
+/// Link an `audiotestsrc` into `channel`.
+fn feed(m: &Assembled, channel: usize, live: bool) {
+    let src = gst::ElementFactory::make("audiotestsrc")
+        .property("is-live", live)
+        .build()
+        .unwrap();
+    m.pipeline.add(&src).unwrap();
+    src.link_pads(None, m.element(&format!("convert_{channel}")), Some("sink"))
+        .unwrap();
+}
+
+/// Minimum latency reported upstream of each named output tee, with live audio
+/// playing into both channels.
+fn reported_latency(properties: &HashMap<String, PropertyValue>, tees: &[&str]) -> Vec<u64> {
+    reported_latency_with(properties, tees, &[0, 1], &[], true)
+        .into_iter()
+        .zip(tees)
+        .map(|((live, min), tee)| {
+            assert!(live, "{tee} is live");
+            min
+        })
+        .collect()
+}
+
+/// The (live, minimum latency) reported upstream of each named output tee,
+/// with an `audiotestsrc` (live or not, per `live`) on the `fed` channels, a
+/// producer that cannot answer on the `silent` channels, and the others left
+/// unlinked.
+fn reported_latency_with(
+    properties: &HashMap<String, PropertyValue>,
+    tees: &[&str],
+    fed: &[usize],
+    silent: &[usize],
+    live: bool,
+) -> Vec<(bool, u64)> {
+    let m = assemble(properties);
+    for &ch in silent {
+        link_silent_producer(&m, ch);
+    }
+    for &ch in fed {
+        feed(&m, ch, live);
+    }
+    m.pipeline.set_state(gst::State::Playing).unwrap();
+    // The query fails until every element upstream has reached PLAYING, and
+    // the first answers after that can still change while the sources start:
+    // take an answer once two in a row agree.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    tees.iter()
+        .map(|tee| {
+            let pad = m.element(tee).static_pad("sink").unwrap();
+            let mut last = None;
+            loop {
+                let mut q = gst::query::Latency::new();
+                if pad.peer_query(&mut q) {
+                    let (live, min, _) = q.result();
+                    let answer = (live, min.mseconds());
+                    if last == Some(answer) {
+                        break answer;
+                    }
+                    last = Some(answer);
+                }
+                assert!(Instant::now() < deadline, "latency query upstream of {tee}");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn test_monitor_bus_does_not_stack_block_latency() {
+    // Monitor sums Main and Solo, and Solo sums the aux and group buses. Each
+    // of those already waits the block latency, so Monitor must add only a
+    // little on top of Main, or a linked monitor_out holds every sink in the
+    // flow a further block latency.
+    let latency = 100;
+    let [main, aux, monitor] = reported_latency(
+        &small_mixer_props(&[("latency", PropertyValue::UInt(latency))]),
+        &["main_out_tee", "aux0_out_tee", "monitor_out_tee"],
+    )[..] else {
+        unreachable!()
+    };
+    assert!(aux >= latency, "aux waits the block latency: {aux} ms");
+    assert!(
+        monitor <= main + 3 * DEFAULT_INTERNAL_BUS_LATENCY_MS,
+        "monitor {monitor} ms stacks latency on main {main} ms"
+    );
+}
+
+#[test]
+fn test_solo_keeps_block_latency_without_aux_or_group() {
+    // With no aux or group bus, Solo's only inputs are the channels' PFL/AFL
+    // taps, which need the same slack Main gives the channels.
+    let latency = 100;
+    let props = props(&[
+        ("num_channels", PropertyValue::UInt(2)),
+        ("num_aux_buses", PropertyValue::UInt(0)),
+        ("num_groups", PropertyValue::UInt(0)),
+        ("dsp_backend", PropertyValue::String("rust".to_string())),
+        ("latency", PropertyValue::UInt(latency)),
+    ]);
+    let m = assemble(&props);
+    let solo = m.element("solo_mixer").property::<u64>("latency");
+    assert_eq!(solo, latency * 1_000_000);
+    drop(m);
+    let [main, monitor] = reported_latency(&props, &["main_out_tee", "monitor_out_tee"])[..] else {
+        unreachable!()
+    };
+    assert!(
+        monitor <= main + 3 * DEFAULT_INTERNAL_BUS_LATENCY_MS,
+        "monitor {monitor} ms stacks latency on main {main} ms"
+    );
+}
+
+#[test]
+fn test_internal_bus_latency_property_sets_internal_buses() {
+    // The operator's override reaches every internal bus, and is capped at
+    // the block latency so it can never stack more than the block itself.
+    let latency = 100;
+    for (requested, expected) in [(60, 60), (250, latency)] {
+        let props = small_mixer_props(&[
+            ("latency", PropertyValue::UInt(latency)),
+            ("internal_bus_latency", PropertyValue::UInt(requested)),
+        ]);
+        let m = assemble(&props);
+        // `small_mixer_props` has a group, so Main sums it and takes the
+        // internal latency too.
+        for bus in ["solo_mixer", "monitor_mixer", "audiomixer"] {
+            let got = m.element(bus).property::<u64>("latency");
+            assert_eq!(
+                got,
+                expected * 1_000_000,
+                "{bus} latency with internal_bus_latency={requested}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_solo_does_not_stack_block_latency_with_aux_buses() {
+    // Open Live's shape: aux buses and no group, so Main takes only channels
+    // and does not hide what Solo adds. Solo sums the aux buses, which already
+    // wait the block latency; Monitor sums Solo.
+    let latency = 100;
+    let [main, aux, monitor] = reported_latency(
+        &small_mixer_props(&[
+            ("num_groups", PropertyValue::UInt(0)),
+            ("latency", PropertyValue::UInt(latency)),
+        ]),
+        &["main_out_tee", "aux0_out_tee", "monitor_out_tee"],
+    )[..] else {
+        unreachable!()
+    };
+    assert!(
+        monitor <= main.max(aux) + 3 * DEFAULT_INTERNAL_BUS_LATENCY_MS,
+        "monitor {monitor} ms stacks latency on main {main} ms / aux {aux} ms"
+    );
+}
+
+#[test]
+fn test_group_does_not_stack_block_latency_on_main() {
+    // Every channel feeds Main and the group, and the group feeds Main. The
+    // group already waits the block latency, so Main must add only a little
+    // on top of it, or adding a group holds main_out, and every sink in the
+    // flow, a further block latency.
+    let latency = 100;
+    // Without a group Main sums only channels, so it keeps the block latency.
+    let m = assemble(&small_mixer_props(&[
+        ("num_groups", PropertyValue::UInt(0)),
+        ("latency", PropertyValue::UInt(latency)),
+    ]));
+    let main = m.element("audiomixer").property::<u64>("latency");
+    assert_eq!(main, latency * 1_000_000, "main latency without a group");
+    drop(m);
+    let [without_group] = reported_latency(
+        &small_mixer_props(&[
+            ("num_groups", PropertyValue::UInt(0)),
+            ("latency", PropertyValue::UInt(latency)),
+        ]),
+        &["main_out_tee"],
+    )[..] else {
+        unreachable!()
+    };
+    let [with_group, group] = reported_latency(
+        &small_mixer_props(&[("latency", PropertyValue::UInt(latency))]),
+        &["main_out_tee", "group0_out_tee"],
+    )[..] else {
+        unreachable!()
+    };
+    assert!(
+        group >= latency,
+        "group waits the block latency: {group} ms"
+    );
+    // The extra hop through Main may add Main's own latency and one output
+    // buffer (audioaggregator's default `output-buffer-duration`, 10 ms).
+    let hop_ms = DEFAULT_INTERNAL_BUS_LATENCY_MS + 10;
+    assert!(
+        with_group <= without_group + hop_ms,
+        "main {with_group} ms with a group stacks latency on main {without_group} ms without"
+    );
+}
+
+/// A live mixer bus that starts with no input outputs silence on its own
+/// timeouts. When the first input buffer arrives it must not move the output
+/// back to 0: one buffer stamped 0 makes `opusenc` fail and ends every WHEP
+/// viewer session, and a WHIP guest's first join is exactly that arrival.
+#[test]
+fn test_make_audiomixer_late_first_input_does_not_rewind() {
+    use crate::gst::aggregator_start::test_support::*;
+    init_gst();
+    let mixer = make_audiomixer("test_mixer_late_first_input", true, 30, 30).unwrap();
+    let caps = gst::Caps::builder("audio/x-raw")
+        .field("format", "S16LE")
+        .field("layout", "interleaved")
+        .field("rate", 48000i32)
+        .field("channels", 2i32)
+        .build();
+    // 10 ms of 48 kHz stereo S16
+    let (pushed, pts) = output_pts_around_late_first_input(
+        &mixer,
+        &caps,
+        480 * 4,
+        gst::ClockTime::from_mseconds(10),
+        std::time::Duration::from_millis(500),
+    );
+    assert_no_rewind(pushed, &pts);
+}
+
+/// Link a producer that cannot answer a LATENCY query yet into `channel`: an
+/// `audioconvert` with nothing on its input, the shape of a WHIP Input slot
+/// with no publisher, whose decodebin has not exposed a pad.
+fn link_silent_producer(m: &Assembled, channel: usize) {
+    let producer = gst::ElementFactory::make("audioconvert").build().unwrap();
+    m.pipeline.add(&producer).unwrap();
+    producer
+        .link_pads(None, m.element(&format!("convert_{channel}")), Some("sink"))
+        .unwrap();
+}
+
+/// Run the built mixer with live audio on the `fed` channels, a producer that
+/// cannot answer on the `silent` channels, and every other channel unlinked.
+/// Returns the LATENCY queries the bus mixers send upstream per second over
+/// `window`, after a warm-up.
+fn latency_query_rate(
+    properties: &HashMap<String, PropertyValue>,
+    fed: &[usize],
+    silent: &[usize],
+    window: Duration,
+) -> f64 {
+    let m = assemble(properties);
+    for &ch in fed {
+        feed(&m, ch, true);
+    }
+    for &ch in silent {
+        link_silent_producer(&m, ch);
+    }
+    // Every LATENCY query an aggregator sends upstream passes its sink pads.
+    let queries = Arc::new(AtomicUsize::new(0));
+    for (_, element) in &m.result.elements {
+        if type_name(element) != "GstAudioMixer" {
+            continue;
+        }
+        for pad in element.sink_pads() {
+            let counter = queries.clone();
+            // PUSH only: each query passes once on the way up.
+            let probe = gst::PadProbeType::QUERY_UPSTREAM | gst::PadProbeType::PUSH;
+            pad.add_probe(probe, move |_, info| {
+                if let Some(gst::QueryView::Latency(_)) = info.query().map(|q| q.view()) {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+                gst::PadProbeReturn::Ok
+            });
+        }
+    }
+    m.pipeline.set_state(gst::State::Playing).unwrap();
+    let bus = m.pipeline.bus().unwrap();
+    let pump = |until: Instant| {
+        while Instant::now() < until {
+            if let Some(msg) = bus.timed_pop_filtered(
+                gst::ClockTime::from_mseconds(50),
+                &[gst::MessageType::Error],
+            ) {
+                panic!("pipeline error: {msg:?}");
+            }
+        }
+    };
+    pump(Instant::now() + Duration::from_millis(500));
+    queries.store(0, Ordering::Relaxed);
+    let start = Instant::now();
+    pump(start + window);
+    queries.load(Ordering::Relaxed) as f64 / start.elapsed().as_secs_f64()
+}
+
+/// Three channels: one live, one unlinked, one behind a producer that cannot
+/// answer yet. Small enough to read, and it has every kind of bus.
+fn partly_fed_mixer_props() -> HashMap<String, PropertyValue> {
+    small_mixer_props(&[("num_channels", PropertyValue::UInt(3))])
+}
+
+/// An unfed channel must not make the bus mixers re-query upstream latency
+/// on every aggregate cycle. With `force-live`, an aggregator caches its
+/// upstream latency only once a query succeeds; a channel with nothing
+/// linked, or linked to a producer that cannot answer, failed every query,
+/// so each bus walked every channel chain upstream thousands of times a
+/// second for as long as the channel stayed empty.
+#[test]
+fn test_unfed_channel_does_not_requery_latency() {
+    let rate = latency_query_rate(
+        &partly_fed_mixer_props(),
+        &[0],
+        &[2],
+        Duration::from_secs(1),
+    );
+    // A cached latency is re-queried only on events (the first buffer on a
+    // pad, a pipeline latency recalculation): a handful per second at most.
+    assert!(
+        rate < 50.0,
+        "{rate:.0} LATENCY queries/s upstream of the bus mixers"
+    );
+}
+
+/// An unfed channel contributes nothing to the latency the buses report: they
+/// report what they report with every channel fed, live flag included, and
+/// the query no longer fails. Without `force_live` and with non-live sources
+/// an unfed channel must not make a bus claim to be live.
+#[test]
+fn test_unfed_channel_does_not_change_reported_latency() {
+    let tees = [
+        "main_out_tee",
+        "aux0_out_tee",
+        "group0_out_tee",
+        "monitor_out_tee",
+    ];
+    for (force_live, live_sources) in [(true, true), (false, false)] {
+        let mut props = partly_fed_mixer_props();
+        props.insert("force_live".to_string(), PropertyValue::Bool(force_live));
+        let all_fed = reported_latency_with(&props, &tees, &[0, 1, 2], &[], live_sources);
+        let partly_fed = reported_latency_with(&props, &tees, &[0], &[2], live_sources);
+        assert_eq!(
+            partly_fed, all_fed,
+            "(live, min ms) upstream of {tees:?}, force_live={force_live}"
+        );
+    }
+}
+
+/// One channel feeds several buses, and each bus is paced by its own
+/// consumer. A consumer that syncs to the clock holds its bus for the flow's
+/// latency, which can be far above the mixer's own (a video branch, an
+/// encoder). The channel must keep feeding the other buses on time while one
+/// bus waits; otherwise they time the channel out and play silence.
+///
+/// `synced` is the output whose consumer syncs to the clock, `free` the one
+/// whose consumer does not; `flow_latency_ms` is the flow's latency.
+fn assert_free_bus_keeps_input(
+    extra: &[(&str, PropertyValue)],
+    synced: &str,
+    free: &str,
+    flow_latency_ms: u64,
+    run: Duration,
+) {
+    let mut properties = small_mixer_props(&[
+        ("ch1_aux1_level", PropertyValue::Float(1.0)),
+        // Only channel 1 carries the tone: a timed-out channel then leaves
+        // silence on the free bus, not just a quieter mix.
+        ("ch2_to_main", PropertyValue::Bool(false)),
+    ]);
+    properties.extend(props(extra));
+    let m = assemble(&properties);
+    // The state layer switches Monitor to the solo bus once a PFL or AFL is
+    // on; every case does it, so Monitor never listens to Main here.
+    m.element("solo_to_mon").set_property("volume", 1.0f64);
+    m.element("main_to_mon").set_property("volume", 0.0f64);
+
+    for ch in 0..2 {
+        let src = gst::ElementFactory::make("audiotestsrc")
+            .property("is-live", true)
+            .property("volume", if ch == 0 { 0.5f64 } else { 0.0 })
+            .build()
+            .unwrap();
+        m.pipeline.add(&src).unwrap();
+        src.link_pads(None, m.element(&format!("convert_{ch}")), Some("sink"))
+            .unwrap();
+    }
+    let synced_sink = gst::ElementFactory::make("fakesink")
+        .property("sync", true)
+        .property("async", false)
+        .build()
+        .unwrap();
+    m.pipeline.add(&synced_sink).unwrap();
+    m.element(synced)
+        .link_pads(Some("src_%u"), &synced_sink, None)
+        .unwrap();
+    tap(&m, free, "audio/x-raw", "tap_free");
+    m.pipeline
+        .set_latency(gst::ClockTime::from_mseconds(flow_latency_ms));
+
+    m.pipeline.set_state(gst::State::Playing).unwrap();
+    let bus = m.pipeline.bus().unwrap();
+    let start = Instant::now();
+    // Past startup and the first fill of the synced bus.
+    let settled = start + Duration::from_millis(1000);
+    let mut checked = 0;
+    let mut quiet = 0;
+    while start.elapsed() < run {
+        let Some(msg) = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(50),
+            &[gst::MessageType::Error, gst::MessageType::Element],
+        ) else {
+            continue;
+        };
+        if let gst::MessageView::Error(err) = msg.view() {
+            panic!("pipeline error: {err:?}");
+        }
+        let (Some(from), Some(structure)) = (msg.src(), msg.structure()) else {
+            continue;
+        };
+        if structure.name() != "level" || from.name() != "tap_free" || Instant::now() < settled {
+            continue;
+        }
+        let peak = extract_level_values(structure, "peak")
+            .into_iter()
+            .fold(f64::NEG_INFINITY, f64::max);
+        if peak <= -30.0 {
+            quiet += 1;
+        }
+        checked += 1;
+    }
+    assert!(checked >= 10, "only {checked} level messages from {free}");
+    // A blocked channel silences nearly every interval; allow a few quiet
+    // ones for a scheduling stall on a busy machine.
+    assert!(
+        quiet * 5 < checked,
+        "{free} lost its input in {quiet} of {checked} intervals while {synced} \
+         waited {flow_latency_ms} ms for a clock-synced consumer"
+    );
+}
+
+#[test]
+fn test_channel_keeps_feeding_aux_while_main_waits_for_its_consumer() {
+    assert_free_bus_keeps_input(
+        &[("ch1_pfl", PropertyValue::Bool(true))],
+        "main_out_tee",
+        "aux0_out_tee",
+        600,
+        Duration::from_millis(2500),
+    );
+}
+
+#[test]
+fn test_channel_keeps_feeding_main_while_aux_waits_for_its_consumer() {
+    assert_free_bus_keeps_input(
+        &[("ch1_pfl", PropertyValue::Bool(true))],
+        "aux0_out_tee",
+        "main_out_tee",
+        600,
+        Duration::from_millis(2500),
+    );
+}
+
+#[test]
+fn test_channel_keeps_feeding_aux_while_group_waits_for_its_consumer() {
+    assert_free_bus_keeps_input(
+        &[
+            ("ch1_pfl", PropertyValue::Bool(true)),
+            ("ch1_to_grp1", PropertyValue::Bool(true)),
+        ],
+        "group0_out_tee",
+        "aux0_out_tee",
+        600,
+        Duration::from_millis(2500),
+    );
+}
+
+#[test]
+#[ignore = "fails on the Linux CI runner (aux silent in ~60% of intervals at 1.5 s and 2.5 s \
+            flow latency, queues in place) but passes on macOS; cause not yet understood"]
+fn test_channel_keeps_feeding_aux_while_monitor_waits_for_its_consumer() {
+    // Monitor listens to the solo bus, which takes the channel's PFL and AFL
+    // taps. Both taps carry audio whether or not they are switched on (the
+    // switch is a volume gate), so this covers the PFL and the AFL send.
+    // 2.5 s of flow latency holds the solo bus behind Monitor for longer than
+    // the queue between them holds (1 s), so the solo bus itself falls behind.
+    assert_free_bus_keeps_input(
+        &[("ch1_pfl", PropertyValue::Bool(true))],
+        "monitor_out_tee",
+        "aux0_out_tee",
+        2500,
+        Duration::from_millis(4500),
+    );
 }

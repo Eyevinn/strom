@@ -154,12 +154,26 @@ pub(super) fn mixer_definition() -> BlockDefinition {
     exposed_properties.push(ExposedProperty {
         name: "latency".to_string(),
         label: "Latency".to_string(),
-        description: "Mixer aggregator latency in milliseconds. Time to wait for slower inputs before producing output. Construction-time only.".to_string(),
+        description: "Aggregator latency in milliseconds of the buses that sum channel inputs: aux buses, groups, and Main when the mixer has no groups. Time to wait for slower inputs before producing output. Construction-time only.".to_string(),
         property_type: PropertyType::UInt,
         default_value: Some(PropertyValue::UInt(DEFAULT_LATENCY_MS)),
         mapping: PropertyMapping {
             element_id: "_block".to_string(),
             property_name: "latency".to_string(),
+            transform: None,
+        },
+        live: false,
+        persist: None,
+    });
+    exposed_properties.push(ExposedProperty {
+        name: "internal_bus_latency".to_string(),
+        label: "Internal Bus Latency".to_string(),
+        description: "Aggregator latency in milliseconds of the Solo and Monitor buses, and of Main when the mixer has groups: buses that sum other buses of this mixer. Slack for a late buffer from Main, an aux bus or a group; raise it if Monitor has gaps while a channel input is idle. Capped at Latency. Construction-time only.".to_string(),
+        property_type: PropertyType::UInt,
+        default_value: Some(PropertyValue::UInt(DEFAULT_INTERNAL_BUS_LATENCY_MS)),
+        mapping: PropertyMapping {
+            element_id: "_block".to_string(),
+            property_name: "internal_bus_latency".to_string(),
             transform: None,
         },
         live: false,
@@ -174,6 +188,22 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         mapping: PropertyMapping {
             element_id: "_block".to_string(),
             property_name: "min_upstream_latency".to_string(),
+            transform: None,
+        },
+        live: false,
+        persist: None,
+    });
+    exposed_properties.push(ExposedProperty {
+        name: "sample_rate".to_string(),
+        label: "Sample Rate".to_string(),
+        description: "Sample rate the mixer runs at. Every input is resampled to this rate, and every output (main, monitor, aux, group) runs at it. Construction-time only.".to_string(),
+        property_type: PropertyType::Enum {
+            values: common_audio_sample_rate_enum_values(false),
+        },
+        default_value: Some(PropertyValue::String(DEFAULT_AUDIO_SAMPLE_RATE.to_string())),
+        mapping: PropertyMapping {
+            element_id: "_block".to_string(),
+            property_name: "sample_rate".to_string(),
             transform: None,
         },
         live: false,

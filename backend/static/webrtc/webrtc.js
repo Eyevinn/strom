@@ -143,3 +143,23 @@ function restoreDebugMode(storageKey) {
     } catch (e) {}
     return false;
 }
+
+/**
+ * Resolve a WHIP/WHEP Location header to the session resource URL.
+ * Strom's proxies return a path, which belongs to the server the offer was
+ * POSTed to. That need not be the server that served the page.
+ * @param {string|null} location - the Location response header
+ * @param {string}      endpoint - the URL the offer was POSTed to
+ * @param {string}      [pageUrl] - base for a relative endpoint
+ * @returns {string|null} absolute resource URL, or null without a Location
+ */
+function resolveResourceUrl(location, endpoint, pageUrl = globalThis.location?.href) {
+    if (!location) return null;
+    return new URL(location, new URL(endpoint, pageUrl)).href;
+}
+
+// The browser loads this file as a classic script, where `module` is undefined and
+// this block is skipped. Node's test runner require()s it for ../tests/.
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { resolveResourceUrl };
+}

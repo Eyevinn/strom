@@ -26,48 +26,10 @@
 //! this code, so no flow pays for a download it did not need, and CUDA, NVMM,
 //! D3D11 and VA producers are left alone.
 
+use crate::gst::video_adapt::{self, Adapter, Consumer};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use tracing::{info, warn};
-
-/// The caps feature that marks a buffer as living in GL memory.
-const GL_MEMORY_FEATURE: &str = "memory:GLMemory";
-
-/// True when every format `caps` offers is raw video in GL memory.
-///
-/// A producer that also offers system memory would have linked without help,
-/// so a download is not what it is missing.
-fn offers_only_gl_memory(caps: &gst::Caps) -> bool {
-    if caps.is_any() || caps.is_empty() {
-        return false;
-    }
-    caps.iter_with_features().all(|(structure, features)| {
-        // `video/x-raw(ANY)` contains every feature, GL included, but it offers
-        // system memory too and would have linked on its own.
-        structure.name() == "video/x-raw"
-            && !features.is_any()
-            && features.contains(GL_MEMORY_FEATURE)
-    })
-}
-
-/// True when `caps` accept raw video in system memory.
-///
-/// This is the consumer half of the test: a `videoconvert` with an encoder
-/// behind it advertises plain `video/x-raw`, which is what a `gldownload`
-/// produces. A consumer that takes only GPU memory of any kind, or no raw
-/// video at all, is refusing the link for a reason a download does not address.
-fn accepts_system_memory_raw_video(caps: &gst::Caps) -> bool {
-    if caps.is_empty() {
-        return false;
-    }
-    if caps.is_any() {
-        return true;
-    }
-    caps.iter_with_features().any(|(structure, features)| {
-        structure.name() == "video/x-raw"
-            && (features.is_any() || features.contains(gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY))
-    })
-}
 
 /// True when a `gldownload` is the only thing keeping `src` and `sink` apart.
 ///
@@ -76,9 +38,16 @@ fn accepts_system_memory_raw_video(caps: &gst::Caps) -> bool {
 /// it, and the consumer's by whatever is downstream, which is what makes a
 /// `videoconvert` in front of an encoder answer "system memory" rather than
 /// "anything".
+///
+/// [`video_adapt::decide`] makes the call; this asks the pads.
 pub fn needs_gl_download_to_link(src: &gst::Pad, sink: &gst::Pad) -> bool {
-    offers_only_gl_memory(&src.query_caps(None))
-        && accepts_system_memory_raw_video(&sink.query_caps(None))
+    let accepted = sink.query_caps(None);
+    video_adapt::decide(
+        &src.query_caps(None),
+        Consumer::Accepts(&accepted),
+        video_adapt::factory_available,
+    )
+    .is_ok_and(|adapters| adapters.contains(&Adapter::GlDownload))
 }
 
 /// Link `src` to `sink` through a `gldownload`, for a pair whose direct link was
@@ -106,7 +75,7 @@ pub fn retry_link_with_gl_download(
         .ok_or_else(|| "source pad's element has no parent bin".to_string())?;
 
     let name = download_name(sink);
-    let gldownload = gst::ElementFactory::make("gldownload")
+    let gldownload = gst::ElementFactory::make(video_adapt::GL_DOWNLOAD_FACTORY)
         .name(&name)
         .build()
         .map_err(|e| format!("gldownload could not be created: {}", e))?;
@@ -221,95 +190,5 @@ fn download_name(sink: &gst::Pad) -> String {
     match sink.parent_element() {
         Some(element) => format!("{}_{}_gldownload", element.name(), sink.name()),
         None => format!("{}_gldownload", sink.name()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::str::FromStr;
-
-    fn caps(s: &str) -> gst::Caps {
-        let _ = gst::init();
-        gst::Caps::from_str(s).expect("valid caps")
-    }
-
-    #[test]
-    fn a_gl_only_producer_is_a_candidate() {
-        assert!(offers_only_gl_memory(&caps(
-            "video/x-raw(memory:GLMemory), format=RGBA, width=1280, height=720"
-        )));
-    }
-
-    /// It would have linked on its own, so the download is not what is missing.
-    #[test]
-    fn a_producer_that_also_offers_system_memory_is_not() {
-        assert!(!offers_only_gl_memory(&caps(
-            "video/x-raw(memory:GLMemory), format=RGBA; video/x-raw, format=NV12"
-        )));
-    }
-
-    /// The consumers that advertise these really do take them, and a
-    /// `gldownload` could not link to them anyway.
-    #[test]
-    fn other_gpu_memory_types_are_left_alone() {
-        for feature in [
-            "memory:CUDAMemory",
-            "memory:NVMM",
-            "memory:D3D11Memory",
-            "memory:VAMemory",
-            "memory:DMABuf",
-        ] {
-            assert!(
-                !offers_only_gl_memory(&caps(&format!("video/x-raw({}), format=NV12", feature))),
-                "{} should not be downloaded",
-                feature
-            );
-        }
-    }
-
-    #[test]
-    fn encoded_video_and_audio_are_not_candidates() {
-        assert!(!offers_only_gl_memory(&caps("video/x-h264")));
-        assert!(!offers_only_gl_memory(&caps("audio/x-raw, rate=48000")));
-        assert!(!offers_only_gl_memory(&caps("ANY")));
-        assert!(!offers_only_gl_memory(&caps("EMPTY")));
-    }
-
-    #[test]
-    fn a_system_memory_consumer_can_be_fed() {
-        assert!(accepts_system_memory_raw_video(&caps(
-            "video/x-raw, format=(string){ NV12, I420 }"
-        )));
-        assert!(accepts_system_memory_raw_video(&caps("video/x-raw(ANY)")));
-        assert!(accepts_system_memory_raw_video(&caps("ANY")));
-    }
-
-    /// A `gldownload` produces system memory, so a consumer that takes only GPU
-    /// memory, of whatever kind, cannot be fed by one.
-    #[test]
-    fn a_consumer_that_takes_only_gpu_memory_cannot() {
-        for feature in [
-            "memory:GLMemory",
-            "memory:CUDAMemory",
-            "memory:NVMM",
-            "memory:D3D11Memory",
-            "memory:VAMemory",
-        ] {
-            assert!(
-                !accepts_system_memory_raw_video(&caps(&format!(
-                    "video/x-raw({}), format=NV12",
-                    feature
-                ))),
-                "a {} consumer should not be fed through a gldownload",
-                feature
-            );
-        }
-    }
-
-    #[test]
-    fn a_consumer_that_takes_no_raw_video_cannot() {
-        assert!(!accepts_system_memory_raw_video(&caps("EMPTY")));
-        assert!(!accepts_system_memory_raw_video(&caps("video/x-h264")));
     }
 }
