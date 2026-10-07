@@ -415,8 +415,16 @@ fn run(block_id: &str, backend: &str) {
     let pads = underlay_pads(&manager, block_id);
     assert_eq!(pads.len(), expected, "mixer pads fed by underlays");
 
-    // No border anywhere: no underlay pad should hold a frame.
-    std::thread::sleep(Duration::from_millis(500));
+    // No border anywhere: no underlay pad should hold a frame. Each one does
+    // hold its single start-up frame until the mixer's output has passed the
+    // frame's end (200 ms of running time). A mixer that renders slower than
+    // real time (software or virtualized GL on a CI runner) takes seconds of
+    // wall-clock time to get there, so wait for it. A pad that keeps its frame
+    // never gets there and fails below.
+    let settle_deadline = Instant::now() + Duration::from_secs(10);
+    while underlay_pads_holding_a_frame(&pads) > 0 && Instant::now() < settle_deadline {
+        pull(&appsink);
+    }
     let maps_off = underlay_maps_per_sec(&appsink, &pads, Duration::from_secs(1));
     eprintln!("{backend}: borders off: underlay frame maps {maps_off:.0}/s");
 
