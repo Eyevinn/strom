@@ -10,7 +10,7 @@ pub mod common;
 pub mod recorder;
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -55,6 +55,25 @@ mod stalled_track {
     /// The window the tests measure a running track over.
     const WINDOW: Duration = Duration::from_secs(2);
     const MIN_IN_WINDOW: u64 = MIN_PER_SECOND * WINDOW.as_secs();
+
+    /// How long a test waits for a running track to hand the muxer
+    /// `MIN_IN_WINDOW` buffers. A slow runner (a debug `x264enc` on Windows CI)
+    /// can fall behind real time and miss them in `WINDOW`; a track that was
+    /// ended delivers none however long the test waits.
+    const PROGRESS_DEADLINE: Duration = Duration::from_secs(30);
+
+    /// Wait until every counter has moved `MIN_IN_WINDOW` past where it stood,
+    /// or `PROGRESS_DEADLINE` has passed.
+    fn wait_for_progress(counters: &[(&AtomicU64, u64)]) {
+        let deadline = Instant::now() + PROGRESS_DEADLINE;
+        while Instant::now() < deadline
+            && counters
+                .iter()
+                .any(|(counter, from)| counter.load(Ordering::Relaxed) - from < MIN_IN_WINDOW)
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
 
     /// Swallow EOS on `element`'s src pad, so a source that runs out of buffers
     /// looks like a track that simply stopped arriving. This is what the
@@ -148,7 +167,7 @@ mod stalled_track {
             video_into_muxer.load(Ordering::Relaxed),
             total_bytes(&recordings(media_root, "")),
         );
-        std::thread::sleep(WINDOW);
+        wait_for_progress(&[(&video_into_muxer, buffers_before)]);
         let (buffers_after, bytes_after) = (
             video_into_muxer.load(Ordering::Relaxed),
             total_bytes(&recordings(media_root, "")),
@@ -161,9 +180,9 @@ mod stalled_track {
         // waiting on the dead track.
         assert!(
             buffers_after - buffers_before >= MIN_IN_WINDOW,
-            "the recording froze on the track that stopped: {} video buffers reached the muxer in {:?} ({} bytes written)",
+            "the recording froze on the track that stopped: {} video buffers reached the muxer within {:?} ({} bytes written)",
             buffers_after - buffers_before,
-            WINDOW,
+            PROGRESS_DEADLINE,
             bytes_after - bytes_before
         );
     }
@@ -192,7 +211,10 @@ mod stalled_track {
             audio_into_muxer.load(Ordering::Relaxed),
             video_into_muxer.load(Ordering::Relaxed),
         );
-        std::thread::sleep(WINDOW);
+        wait_for_progress(&[
+            (&audio_into_muxer, audio_before),
+            (&video_into_muxer, video_before),
+        ]);
         let (audio_after, video_after) = (
             audio_into_muxer.load(Ordering::Relaxed),
             video_into_muxer.load(Ordering::Relaxed),
@@ -203,15 +225,15 @@ mod stalled_track {
 
         assert!(
             audio_after - audio_before >= MIN_IN_WINDOW,
-            "the audio track was ended while it was still delivering: {} buffers reached the muxer in {:?}",
+            "the audio track was ended while it was still delivering: {} buffers reached the muxer within {:?}",
             audio_after - audio_before,
-            WINDOW
+            PROGRESS_DEADLINE
         );
         assert!(
             video_after - video_before >= MIN_IN_WINDOW,
-            "the video track was ended while it was still delivering: {} buffers reached the muxer in {:?}",
+            "the video track was ended while it was still delivering: {} buffers reached the muxer within {:?}",
             video_after - video_before,
-            WINDOW
+            PROGRESS_DEADLINE
         );
     }
 
@@ -275,7 +297,10 @@ mod stalled_track {
             audio_into_muxer.load(Ordering::Relaxed),
             video_into_muxer.load(Ordering::Relaxed),
         );
-        std::thread::sleep(WINDOW);
+        wait_for_progress(&[
+            (&audio_into_muxer, audio_before),
+            (&video_into_muxer, video_before),
+        ]);
         let (audio_after, video_after) = (
             audio_into_muxer.load(Ordering::Relaxed),
             video_into_muxer.load(Ordering::Relaxed),
@@ -291,15 +316,15 @@ mod stalled_track {
         );
         assert!(
             audio_after - audio_before >= MIN_IN_WINDOW,
-            "the audio track was ended during a stall that was not its fault: {} buffers reached the muxer in {:?} after it cleared",
+            "the audio track was ended during a stall that was not its fault: {} buffers reached the muxer within {:?} after it cleared",
             audio_after - audio_before,
-            WINDOW
+            PROGRESS_DEADLINE
         );
         assert!(
             video_after - video_before >= MIN_IN_WINDOW,
-            "the video track was ended during a stall that was not its fault: {} buffers reached the muxer in {:?} after it cleared",
+            "the video track was ended during a stall that was not its fault: {} buffers reached the muxer within {:?} after it cleared",
             video_after - video_before,
-            WINDOW
+            PROGRESS_DEADLINE
         );
     }
 }
