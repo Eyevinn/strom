@@ -6,8 +6,10 @@
 //! drain into the new session: through the decoder restarted for it, as its
 //! first output, with the previous session's timestamps.
 //!
-//! The guard: frames the previous session left queued never come out of the
-//! slot once a new session has claimed it.
+//! The guards: frames the previous session left queued never come out of the
+//! slot once a new session has claimed it, and the work that keeps them out
+//! (the release's flush, the claim's decoder restart) never stops the slot's
+//! input.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -220,6 +222,16 @@ fn a_new_session_gets_none_of_the_frames_its_predecessor_left_queued() {
         eprintln!("skipping: required GStreamer elements missing");
         return;
     }
+    // VideoToolbox outputs decoded frames from a thread of its own, so the few
+    // it already holds at the release keep draining until the claim restarts
+    // the decoder. That is decoder latency, not the appsrc backlog this test
+    // guards: decode as CI's software decoder does, so the output count is
+    // the same on every platform.
+    for name in ["vtdec_hw", "vtdec"] {
+        if let Some(feature) = gst::Registry::get().lookup_feature(name) {
+            feature.set_rank(gst::Rank::NONE);
+        }
+    }
     let slot = start_slot("whip_flush");
     let config = &slot.config;
 
@@ -228,6 +240,16 @@ fn a_new_session_gets_none_of_the_frames_its_predecessor_left_queued() {
     let index = config.allocate_slot("first").expect("a free slot");
     let appsrc = config.slot_video_appsrcs[index].clone();
     let publisher = start_publisher(appsrc.clone());
+    // Buffers out of the slot's appsrc, whatever the decoder makes of them.
+    let pushed = Arc::new(AtomicUsize::new(0));
+    let pushed_in_probe = pushed.clone();
+    appsrc
+        .static_pad("src")
+        .expect("appsrc has a src pad")
+        .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            pushed_in_probe.fetch_add(1, Ordering::Relaxed);
+            gst::PadProbeReturn::Ok
+        });
     assert!(
         wait_for_frames(&slot.frames, 10) >= 10,
         "the first session never decoded"
@@ -248,14 +270,24 @@ fn a_new_session_gets_none_of_the_frames_its_predecessor_left_queued() {
     config.video_decoding[index].store(false, Ordering::Relaxed);
     slot.slow.store(false, Ordering::Relaxed);
     let before = slot.frames.load(Ordering::Relaxed);
+    let pushed_before = pushed.load(Ordering::Relaxed);
     let index = config.allocate_slot("second").expect("a free slot");
     std::thread::sleep(Duration::from_secs(3));
     let leaked = slot.frames.load(Ordering::Relaxed) - before;
+    let drained = pushed.load(Ordering::Relaxed) - pushed_before;
     let flagged = config.video_decoding[index].load(Ordering::Relaxed);
 
     assert!(
         queued >= 10,
         "the setup did not back the slot up: only {} frame(s) queued",
+        queued
+    );
+    // The backlog itself: a fresh decoder may drop what it cannot decode, so
+    // the output count alone does not show what was fed into it.
+    assert!(
+        drained <= 1,
+        "{} of the previous session's frames (of {} queued) left the slot's appsrc after the next session claimed it",
+        drained,
         queued
     );
     assert!(
@@ -269,5 +301,49 @@ fn a_new_session_gets_none_of_the_frames_its_predecessor_left_queued() {
     assert!(
         !flagged,
         "the previous session's frames marked the new session's video as decoding"
+    );
+}
+
+/// The bug this guards: the claim's decoder restart unlinked the slot's appsrc
+/// from its decoder while the appsrc kept pushing, so a push landed on the
+/// unlinked pad, failed `not-linked`, and stopped the slot's input for good.
+#[test]
+fn a_claim_while_the_input_is_pushing_keeps_the_slot_running() {
+    gst::init().expect("gstreamer init");
+    if !plugins_available() {
+        eprintln!("skipping: required GStreamer elements missing");
+        return;
+    }
+    let slot = start_slot("whip_busy_claim");
+    let config = &slot.config;
+
+    let index = config.allocate_slot("first").expect("a free slot");
+    let appsrc = config.slot_video_appsrcs[index].clone();
+    // Stands for the media of both sessions: it keeps pushing across the
+    // release and the claim, so the appsrc has a push in flight at the claim.
+    let publisher = start_publisher(appsrc.clone());
+    assert!(
+        wait_for_frames(&slot.frames, 10) >= 10,
+        "the first session never decoded"
+    );
+    slot.slow.store(true, Ordering::Relaxed);
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(config.release_slot(index, "first"));
+    std::thread::sleep(Duration::from_millis(300));
+
+    let index = config.allocate_slot("second").expect("a free slot");
+    std::thread::sleep(Duration::from_millis(300));
+    slot.slow.store(false, Ordering::Relaxed);
+    let before = slot.frames.load(Ordering::Relaxed);
+    std::thread::sleep(Duration::from_secs(3));
+    let after = slot.frames.load(Ordering::Relaxed);
+    let _ = publisher.set_state(gst::State::Null);
+
+    assert_eq!(index, 0);
+    // 30 fps for 3 s, less the wait for a keyframe (one every 0.5 s).
+    assert!(
+        after - before >= 30,
+        "the slot's input stopped after the claim: {} frame(s) in 3 s",
+        after - before
     );
 }

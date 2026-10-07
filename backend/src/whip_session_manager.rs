@@ -116,8 +116,9 @@ const INPUT_RESTART: u8 = 2;
 /// its decoder then waits for a keyframe it asks for. `pending` holds the
 /// work, `armed` says a probe is installed that will pick it up.
 ///
-/// The probe only blocks the pad. The work itself runs on a thread of its
-/// own, for two reasons:
+/// The IDLE probe only blocks the pad's data, with a blocking probe the worker
+/// removes when it is done. The work itself runs on a thread of its own, for
+/// two reasons:
 /// - The probe can fire on the appsrc's streaming thread right after an event
 ///   push that `basesrc` makes holding its live lock, and the flush-start takes
 ///   that lock: flushing there would deadlock the slot's streaming thread.
@@ -163,30 +164,43 @@ impl SlotInputWork {
         // probe would keep it alive forever.
         let appsrc_weak = appsrc.downgrade();
         let work = self.clone();
-        src.add_probe(gst::PadProbeType::IDLE, move |src, info| {
-            let Some(id) = info.id.take() else {
-                work.armed.store(false, Ordering::SeqCst);
-                return gst::PadProbeReturn::Remove;
-            };
-            // Returning Ok keeps the probe, so the pad stays blocked until the
-            // worker has done the work and removes it.
-            let src = src.clone();
+        src.add_probe(gst::PadProbeType::IDLE, move |src, _| {
+            // An IDLE probe only holds the pad while its callback runs, and the
+            // work does not run here. The worker starts first and waits for a
+            // blocking probe that holds the pad's data until it is done: the
+            // appsrc's next push waits there instead of racing the decoder
+            // restart's unlink.
+            let (block_tx, block_rx) = std::sync::mpsc::sync_channel::<gst::PadProbeId>(1);
+            let src_for_worker = src.clone();
             let appsrc_weak = appsrc_weak.clone();
-            let work = work.clone();
+            let worker = work.clone();
             let restart = restart.clone();
             let spawned = std::thread::Builder::new()
                 .name(format!("whip-slot{}-input", slot))
                 .spawn(move || {
-                    work.run(appsrc_weak.upgrade().as_ref(), &src, &restart, slot);
-                    src.remove_probe(id);
+                    let Ok(block) = block_rx.recv() else {
+                        // No block: leave the work pending for the next `schedule`.
+                        worker.armed.store(false, Ordering::SeqCst);
+                        return;
+                    };
+                    let src = src_for_worker;
+                    worker.run(appsrc_weak.upgrade().as_ref(), &src, &restart, slot);
+                    src.remove_probe(block);
                 });
             if let Err(e) = spawned {
                 error!(
-                    "WhipEndpointConfig: Cannot start the input worker for slot {}, its input stays blocked: {}",
+                    "WhipEndpointConfig: Cannot start the input worker for slot {}: {}",
                     slot, e
                 );
+                work.armed.store(false, Ordering::SeqCst);
+                return gst::PadProbeReturn::Remove;
             }
-            gst::PadProbeReturn::Ok
+            if let Some(block) = src.add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_, _| {
+                gst::PadProbeReturn::Ok
+            }) {
+                let _ = block_tx.send(block);
+            }
+            gst::PadProbeReturn::Remove
         });
     }
 
