@@ -1377,7 +1377,9 @@ mod track_resume {
                         Some(gst::PadProbeData::Event(e))
                             if e.type_() == gst::EventType::CustomUpstream =>
                         {
-                            gst::PadProbeReturn::Drop
+                            // Handled, not Drop: before 1.24.8 GStreamer frees a
+                            // dropped event twice and logs a CRITICAL.
+                            gst::PadProbeReturn::Handled
                         }
                         _ => gst::PadProbeReturn::Ok,
                     },
