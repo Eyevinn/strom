@@ -18,8 +18,9 @@
 //! graphic goes on top. A matte frame that does not arrive leaves `dst.a` at
 //! 1, so a late clip shows the old source, never a premature new one.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 
 use gstreamer as gst;
@@ -30,6 +31,7 @@ use strom_types::stinger::{StingerLayout, StingerVariant};
 use strom_types::vision_mixer::{
     DIST_PGM_ZORDER, DIST_STINGER_FILL_ZORDER, DIST_STINGER_INCOMING_ZORDER,
 };
+use strom_types::FlowId;
 use tracing::{debug, info, warn};
 
 use super::super::{PipelineError, PipelineManager};
@@ -58,6 +60,32 @@ pub struct StingerTake {
     /// Spacing of the clip's frames, so the take knows which one is due at
     /// the cut point.
     pub clip_frame_ns: u64,
+}
+
+/// Flows whose stinger programming fails once all its pad changes are made.
+/// See [`fail_stinger_programming_for_tests`].
+static FAIL_PROGRAMMING: LazyLock<Mutex<HashSet<FlowId>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Make every stinger take on `flow` fail after it has programmed the
+/// mixer's pads, so a test can check what a failure part way through leaves
+/// on air. No real failure can be caused on demand there.
+#[doc(hidden)]
+pub fn fail_stinger_programming_for_tests(flow: FlowId, fail: bool) {
+    let mut set = FAIL_PROGRAMMING.lock().unwrap_or_else(|p| p.into_inner());
+    if fail {
+        set.insert(flow);
+    } else {
+        set.remove(&flow);
+    }
+}
+
+/// A take that could not be programmed.
+#[derive(Debug)]
+pub struct StingerProgramError {
+    pub error: PipelineError,
+    /// It had cancelled a fade-to-black before it failed.
+    pub ftb_cancelled: bool,
 }
 
 /// The stinger pads of one mixer.
@@ -261,29 +289,38 @@ impl PipelineManager {
 
     /// Program a whole stinger take, and start counting the clip's frames.
     /// Also returns whether it cancelled a fade-to-black, as any take does.
+    ///
+    /// A failure once it has started changing pads aborts the take (the old
+    /// source alone on air, the stinger pads down) before it returns; the
+    /// error then says whether a fade-to-black was cancelled on the way.
     pub fn program_stinger(
         &self,
         block_instance_id: &str,
         take: &StingerTake,
-    ) -> Result<(StingerWatch, bool), PipelineError> {
-        let mixer = self.dist_mixer(block_instance_id)?;
-        let pads =
-            self.stinger_pads(block_instance_id)
-                .ok_or_else(|| PipelineError::InvalidProperty {
-                    element: block_instance_id.to_string(),
-                    property: strom_types::stinger::ENABLE_STINGER_PROPERTY.to_string(),
-                    reason: "this vision mixer has no stinger input".to_string(),
-                })?;
-        let variant = take.plan.variant;
-        if variant.uses_matte() && pads.matte.is_none() {
-            return Err(PipelineError::TransitionError(
+    ) -> Result<(StingerWatch, bool), StingerProgramError> {
+        let unchanged = |error| StingerProgramError {
+            error,
+            ftb_cancelled: false,
+        };
+        let mixer = self.dist_mixer(block_instance_id).map_err(unchanged)?;
+        let pads = self
+            .stinger_pads(block_instance_id)
+            .ok_or_else(|| PipelineError::InvalidProperty {
+                element: block_instance_id.to_string(),
+                property: strom_types::stinger::ENABLE_STINGER_PROPERTY.to_string(),
+                reason: "this vision mixer has no stinger input".to_string(),
+            })
+            .map_err(unchanged)?;
+        if take.plan.variant.uses_matte() && pads.matte.is_none() {
+            return Err(unchanged(PipelineError::TransitionError(
                 "a matte stinger needs the GPU mixer".to_string(),
-            ));
+            )));
         }
-        let state =
-            overlay::get_overlay_state(&self.flow_id, block_instance_id).ok_or_else(|| {
+        let state = overlay::get_overlay_state(&self.flow_id, block_instance_id)
+            .ok_or_else(|| {
                 PipelineError::ElementNotFound(format!("overlay state of {}", block_instance_id))
-            })?;
+            })
+            .map_err(unchanged)?;
         let pad = |idx: usize| {
             mixer
                 .static_pad(&format!("sink_{}", idx))
@@ -292,9 +329,8 @@ impl PipelineManager {
                     pad: format!("sink_{}", idx),
                 })
         };
-        let a = pad(take.from_input)?;
-        let b = pad(take.to_input)?;
-        let gpu = pads.matte.is_some();
+        let a = pad(take.from_input).map_err(unchanged)?;
+        let b = pad(take.to_input).map_err(unchanged)?;
 
         // Start from the resting state of a classic take: A alone on air,
         // the stinger pads down, no shader take left running. That also
@@ -302,12 +338,39 @@ impl PipelineManager {
         let ftb_cancelled = state
             .ftb_active
             .swap(false, std::sync::atomic::Ordering::Relaxed);
+        match self.program_stinger_pads(block_instance_id, take, mixer, &pads, &a, &b, &state) {
+            Ok(watch) => Ok((watch, ftb_cancelled)),
+            Err(error) => {
+                self.abort_stinger(block_instance_id, take);
+                Err(StingerProgramError {
+                    error,
+                    ftb_cancelled,
+                })
+            }
+        }
+    }
+
+    /// The pad changes of [`Self::program_stinger`], from the resting state
+    /// on. Any of them may have run when this fails.
+    #[allow(clippy::too_many_arguments)]
+    fn program_stinger_pads(
+        &self,
+        block_instance_id: &str,
+        take: &StingerTake,
+        mixer: &gst::Element,
+        pads: &StingerPads,
+        a: &gst::Pad,
+        b: &gst::Pad,
+        state: &overlay::VisionMixerOverlayState,
+    ) -> Result<StingerWatch, PipelineError> {
+        let variant = take.plan.variant;
+        let gpu = pads.matte.is_some();
         self.reset_take_fx(block_instance_id);
         let (cw, ch) = self.dist_canvas_size(block_instance_id);
         self.reset_classic_take_pads(
             block_instance_id,
             mixer,
-            Some(&state),
+            Some(state),
             Some(take.from_input),
             state.num_inputs,
             cw,
@@ -382,13 +445,13 @@ impl PipelineManager {
                 if take.mix_ns == 0 {
                     b.set_property("zorder", DIST_PGM_ZORDER);
                     keyframes(
-                        &a,
+                        a,
                         "alpha",
                         InterpolationMode::None,
                         &[(0, 1.0), (step(cut), 0.0)],
                     )?;
                     keyframes(
-                        &b,
+                        b,
                         "alpha",
                         InterpolationMode::None,
                         &[(0, 0.0), (step(cut), 1.0)],
@@ -398,13 +461,13 @@ impl PipelineManager {
                     let done = cut + take.mix_ns;
                     b.set_property("zorder", DIST_PGM_ZORDER + 1);
                     keyframes(
-                        &b,
+                        b,
                         "alpha",
                         InterpolationMode::Linear,
                         &[(0, 0.0), (cut, 0.0), (done, 1.0)],
                     )?;
                     keyframes(
-                        &a,
+                        a,
                         "alpha",
                         InterpolationMode::None,
                         &[(0, 1.0), (step(done), 0.0)],
@@ -432,13 +495,13 @@ impl PipelineManager {
                     &[(0, 0.0), (start, 1.0), (end, 0.0)],
                 )?;
                 keyframes(
-                    &b,
+                    b,
                     "alpha",
                     InterpolationMode::None,
                     &[(0, 0.0), (start, 1.0)],
                 )?;
                 zorder_keyframes(
-                    &b,
+                    b,
                     &[
                         (0, DIST_PGM_ZORDER),
                         (start, DIST_STINGER_INCOMING_ZORDER),
@@ -446,7 +509,7 @@ impl PipelineManager {
                     ],
                 )?;
                 enum_keyframes(
-                    &b,
+                    b,
                     "blend-function-src-rgb",
                     &[
                         (0, "src-alpha"),
@@ -455,7 +518,7 @@ impl PipelineManager {
                     ],
                 )?;
                 enum_keyframes(
-                    &b,
+                    b,
                     "blend-function-dst-rgb",
                     &[
                         (0, "one-minus-src-alpha"),
@@ -463,14 +526,19 @@ impl PipelineManager {
                         (end, "one-minus-src-alpha"),
                     ],
                 )?;
-                keyframes(
-                    &a,
-                    "alpha",
-                    InterpolationMode::None,
-                    &[(0, 1.0), (end, 0.0)],
-                )?;
+                keyframes(a, "alpha", InterpolationMode::None, &[(0, 1.0), (end, 0.0)])?;
             }
             (_, None) => unreachable!("checked above"),
+        }
+
+        if FAIL_PROGRAMMING
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&self.flow_id)
+        {
+            return Err(PipelineError::TransitionError(
+                "stinger programming failed on purpose (test)".to_string(),
+            ));
         }
 
         // Count the clip's frames as they reach the graphic pad.
@@ -559,7 +627,7 @@ impl PipelineManager {
                 .map(|c| format!(", cut at {:.3}s", c as f64 / 1e9))
                 .unwrap_or_default()
         );
-        Ok((StingerWatch { probes, stats }, ftb_cancelled))
+        Ok(StingerWatch { probes, stats })
     }
 
     /// After the take's last frame: replace its keyframes with the state they

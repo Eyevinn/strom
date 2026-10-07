@@ -610,6 +610,18 @@ impl AppState {
                 .is_some_and(|p| Arc::ptr_eq(&p, &ctx.player))
     }
 
+    /// Tell clients a take ended a fade-to-black, for a take that failed
+    /// after it had: the success path reports it with the rest of the take.
+    fn broadcast_ftb_ended(&self, flow_id: &FlowId, block: &str) {
+        self.inner
+            .events
+            .broadcast(StromEvent::VisionMixerFtbChanged {
+                flow_id: *flow_id,
+                block_id: block.to_string(),
+                active: false,
+            });
+    }
+
     /// Take a stinger from PGM to PVW, playing clip `index` or the cued one.
     pub async fn stinger_take(
         &self,
@@ -791,9 +803,17 @@ impl AppState {
                     .map(|i| 1_000_000_000 * i.framerate_den as u64 / i.framerate_num as u64)
                     .unwrap_or(frame_ns),
             };
-            let (watch, ftb_cancelled) = manager
-                .program_stinger(block, &take)
-                .map_err(|e| (e.to_string(), false))?;
+            // A failure part way through has already put the old source
+            // back alone on air; a fade-to-black it ended stays ended.
+            let (watch, ftb_cancelled) = match manager.program_stinger(block, &take) {
+                Ok(programmed) => programmed,
+                Err(e) => {
+                    if e.ftb_cancelled {
+                        self.broadcast_ftb_ended(flow_id, block);
+                    }
+                    return Err((e.error.to_string(), false));
+                }
+            };
             (take, watch, now, now_at, ftb_cancelled)
         };
 
@@ -805,9 +825,10 @@ impl AppState {
         // move a clip frame into its neighbour's output frame.
         let player = Arc::clone(&ctx.player);
         let start_at = (take.start + take.frame_ns / 2) as i64;
-        let played = tokio::task::spawn_blocking(move || player.play_at(start_at))
-            .await
-            .map_err(|e| (e.to_string(), false))?;
+        let played = match tokio::task::spawn_blocking(move || player.play_at(start_at)).await {
+            Ok(played) => played,
+            Err(e) => Err(format!("the clip start did not complete: {}", e)),
+        };
         if let Err(e) = played {
             drop(watch);
             let pipelines = self.inner.pipelines.read().await;
@@ -816,6 +837,9 @@ impl AppState {
             }
             if let Some(manager) = pipelines.get(flow_id) {
                 manager.abort_stinger(block, &take);
+            }
+            if ftb_cancelled {
+                self.broadcast_ftb_ended(flow_id, block);
             }
             return Err((format!("clip {} could not play ({})", index, e), true));
         }

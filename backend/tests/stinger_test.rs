@@ -416,6 +416,75 @@ async fn a_late_cut_frame_is_reported() {
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
 
+/// A take whose programming fails part way through, after it ended a
+/// fade-to-black and keyed the pads, puts the old source back alone on air,
+/// tells clients the fade-to-black ended, and leaves the mixer ready for the
+/// next take.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_take_that_fails_to_program_leaves_the_old_source_on_air() {
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let r = start("halfprog", "cpu").await;
+    r.state
+        .stinger_set_clip_settings(
+            &r.flow_id,
+            &r.mixer(),
+            0,
+            None,
+            strom_types::stinger::StingerClipSettings {
+                cut_point_ms: Some(500),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(r
+        .state
+        .fade_to_black(&r.flow_id, &r.mixer(), 0)
+        .await
+        .unwrap());
+    let mut events = r.state.events().subscribe();
+
+    strom::state::fail_stinger_programming_for_tests(r.flow_id, true);
+    r.drain().await;
+    let err = r
+        .state
+        .stinger_take(&r.flow_id, &r.mixer(), Some(0), None)
+        .await
+        .expect_err("programming fails");
+    strom::state::fail_stinger_programming_for_tests(r.flow_id, false);
+    assert!(err.to_string().contains("on purpose"), "{err}");
+
+    // Past where the clip and its cut would have aired: the old source alone,
+    // out of black, with no graphic and no cut.
+    let frames = r.collect(1800).await;
+    for (t, f) in &frames {
+        assert_eq!(
+            colour(px(f, 3 * W / 4, H / 2)),
+            Colour::Red,
+            "frame at {t}: the old source must stay on air"
+        );
+        assert_eq!(
+            colour(px(f, W / 4, H / 2)),
+            Colour::Red,
+            "frame at {t}: no graphic after a failed take"
+        );
+    }
+    let mut ftb_ended = false;
+    while let Ok(event) = events.try_recv() {
+        if let strom_types::StromEvent::VisionMixerFtbChanged { active: false, .. } = event {
+            ftb_ended = true;
+        }
+    }
+    assert!(ftb_ended, "clients were not told the fade-to-black ended");
+
+    // The next take runs as usual.
+    r.wait_until_parked().await;
+    classic_take(&r).await;
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}
+
 /// A clip that will not load costs the graphic, not the change: the take
 /// fails, says so, and the program cuts to PVW anyway.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
