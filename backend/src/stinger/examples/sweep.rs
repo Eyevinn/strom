@@ -3,12 +3,14 @@
 use super::draw::*;
 use super::{H, W};
 
-pub(super) const NAVY: u32 = 0x050a26;
-pub(super) const ROYAL: u32 = 0x0d2f9e;
-pub(super) const ELECTRIC: u32 = 0x1f6bff;
-pub(super) const CYAN: u32 = 0x22d3ee;
-pub(super) const PINK: u32 = 0xff2e88;
-pub(super) const ORANGE: u32 = 0xff7a1a;
+// Ink and graphite with one ultraviolet family, a hot magenta and a single
+// acid volt accent: saturated and dark, never pastel.
+pub(super) const INK: u32 = 0x07070d;
+pub(super) const GRAPHITE: u32 = 0x17141f;
+pub(super) const INDIGO: u32 = 0x24106b;
+pub(super) const ULTRAVIOLET: u32 = 0x6a2cff;
+pub(super) const MAGENTA: u32 = 0xff1f6d;
+pub(super) const VOLT: u32 = 0xd7ff1e;
 
 /// Slant of the sweep's edges: the top of an edge sits this far right of its
 /// bottom.
@@ -125,7 +127,10 @@ pub(super) fn render_sweep(cr: &cairo::Context, t: f64) {
         .collect();
 
     // Accent panels.
-    let accents = [(hex(PINK), hex(ORANGE)), (hex(CYAN), hex(ELECTRIC))];
+    let accents = [
+        (hex(ULTRAVIOLET), hex(MAGENTA)),
+        (hex(INDIGO), hex(ULTRAVIOLET)),
+    ];
     for (i, (a, b)) in accents.iter().enumerate() {
         let (lead, trail) = edges[i];
         if lead <= trail {
@@ -163,15 +168,15 @@ pub(super) fn render_sweep(cr: &cairo::Context, t: f64) {
         slanted_band(cr, trail, lead);
         cr.clip();
         let g = cairo::LinearGradient::new(0.0, h, w * 0.75, -h * 0.2);
-        stop(&g, 0.0, hex(NAVY), 1.0);
-        stop(&g, 0.55, hex(ROYAL), 1.0);
-        stop(&g, 1.0, hex(ELECTRIC), 1.0);
+        stop(&g, 0.0, hex(INK), 1.0);
+        stop(&g, 0.55, hex(GRAPHITE), 1.0);
+        stop(&g, 1.0, hex(INDIGO), 1.0);
         let _ = cr.set_source(&g);
         let _ = cr.paint();
         // A pool of light behind the name.
         let pool = cairo::RadialGradient::new(w * 0.5, h * 0.46, 0.0, w * 0.5, h * 0.46, w * 0.55);
-        stop(&pool, 0.0, (0.35, 0.6, 1.0), 0.45);
-        stop(&pool, 1.0, (0.35, 0.6, 1.0), 0.0);
+        stop(&pool, 0.0, hex(ULTRAVIOLET), 0.4);
+        stop(&pool, 1.0, hex(ULTRAVIOLET), 0.0);
         let _ = cr.set_source(&pool);
         let _ = cr.paint();
         // Fine pinstripes along the slant.
@@ -190,7 +195,7 @@ pub(super) fn render_sweep(cr: &cairo::Context, t: f64) {
             .enumerate()
         {
             let bx = -300.0 + k as f64 * 640.0 + 700.0 * smooth(span(t, 0.1, 0.8));
-            cr.set_source_rgba(0.6, 0.8, 1.0, *a);
+            cr.set_source_rgba(1.0, 1.0, 1.0, *a * 0.7);
             cr.rectangle(bx, 0.0, *bw, h);
             let _ = cr.fill();
         }
@@ -198,7 +203,7 @@ pub(super) fn render_sweep(cr: &cairo::Context, t: f64) {
         let sx = -SWEEP_SLANT + (w + 2.0 * SWEEP_SLANT) * smooth(span(t, 0.28, 0.5));
         let g = cairo::LinearGradient::new(sx - 260.0, 0.0, sx + 260.0, 0.0);
         g.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.0);
-        g.add_color_stop_rgba(0.5, 0.8, 0.9, 1.0, 0.16);
+        g.add_color_stop_rgba(0.5, 1.0, 1.0, 1.0, 0.12);
         g.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0);
         let _ = cr.set_source(&g);
         cr.rectangle(sx - 260.0, 0.0, 520.0, h);
@@ -209,7 +214,7 @@ pub(super) fn render_sweep(cr: &cairo::Context, t: f64) {
     }
 
     // Edge lines with glow.
-    let edge_colours = [hex(PINK), hex(CYAN), (0.6, 0.85, 1.0)];
+    let edge_colours = [hex(MAGENTA), hex(VOLT), (1.0, 1.0, 1.0)];
     for (i, &(lead, trail)) in edges.iter().enumerate() {
         if lead <= trail {
             continue;
@@ -309,7 +314,7 @@ pub(super) fn draw_wordmark(cr: &cairo::Context, t: f64) {
                 let depth = 16;
                 for d in (1..=depth).rev() {
                     let k = d as f64 / depth as f64;
-                    let col = mix(hex(0x123a9c), hex(0x02040f), k);
+                    let col = mix(hex(INDIGO), hex(INK), k);
                     let _ = cr.save();
                     cr.translate(d as f64 * 1.1, d as f64 * 1.5);
                     cr.append_path(p);
@@ -321,7 +326,7 @@ pub(super) fn draw_wordmark(cr: &cairo::Context, t: f64) {
                 cr.set_line_join(cairo::LineJoin::Round);
                 for (lw, a) in [(46.0, 0.05), (26.0, 0.09), (12.0, 0.16)] {
                     cr.append_path(p);
-                    cr.set_source_rgba(0.35, 0.8, 1.0, a);
+                    cr.set_source_rgba(0.42, 0.17, 1.0, a);
                     cr.set_line_width(lw);
                     let _ = cr.stroke();
                 }
@@ -330,8 +335,8 @@ pub(super) fn draw_wordmark(cr: &cairo::Context, t: f64) {
                 let top = baseline + all.y_bearing();
                 let g = cairo::LinearGradient::new(0.0, top, 0.0, baseline);
                 g.add_color_stop_rgb(0.0, 1.0, 1.0, 1.0);
-                g.add_color_stop_rgb(0.55, 0.88, 0.95, 1.0);
-                g.add_color_stop_rgb(1.0, 0.62, 0.82, 1.0);
+                g.add_color_stop_rgb(0.6, 0.95, 0.94, 0.98);
+                g.add_color_stop_rgb(1.0, 0.78, 0.76, 0.86);
                 let _ = cr.set_source(&g);
                 let _ = cr.fill_preserve();
                 cr.set_source_rgba(1.0, 1.0, 1.0, 0.7);
@@ -351,7 +356,7 @@ pub(super) fn draw_wordmark(cr: &cairo::Context, t: f64) {
     if right > left + 1.0 {
         let y = baseline + h * 0.06;
         for (pad, a) in [(18.0, 0.12), (8.0, 0.25)] {
-            cr.set_source_rgba(1.0, 0.3, 0.55, a);
+            cr.set_source_rgba(1.0, 0.12, 0.43, a);
             cr.rectangle(
                 left - pad,
                 y - pad,
@@ -361,8 +366,8 @@ pub(super) fn draw_wordmark(cr: &cairo::Context, t: f64) {
             let _ = cr.fill();
         }
         let g = cairo::LinearGradient::new(left, 0.0, right, 0.0);
-        stop(&g, 0.0, hex(PINK), 1.0);
-        stop(&g, 1.0, hex(ORANGE), 1.0);
+        stop(&g, 0.0, hex(MAGENTA), 1.0);
+        stop(&g, 1.0, hex(VOLT), 1.0);
         let _ = cr.set_source(&g);
         cr.rectangle(left, y, right - left, 12.0);
         let _ = cr.fill();

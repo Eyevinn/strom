@@ -29,13 +29,15 @@ pub(super) const RIBBON_BAND_HALF: f64 = RIBBON_HALF_V / (RIBBON_COUNT - 1) as f
 pub(super) const RIBBON_BAND_SOFT: f64 = 70.0;
 
 pub(super) const RIBBON_COLOURS: [(u32, u32); RIBBON_COUNT] = [
-    (0x8a3ffc, 0xd06bff),
-    (0x2f6bff, 0x22d3ee),
-    (0xff2e88, 0xff7ab8),
-    (0xff7a1a, 0xffc93c),
-    (0x18d2b5, 0x9cff6b),
-    (0xff4d4d, 0xff9a3c),
-    (0x22d3ee, 0xb8f4ff),
+    // One ultraviolet-to-magenta family on graphite, with a single acid volt
+    // stroke: deep at the tail, saturated at the head, never pastel.
+    (0x2a0f8a, 0x6a2cff),
+    (0x0b1f6b, 0x3355ff),
+    (0x7a0634, 0xff1f6d),
+    (0x17141f, 0x433c5c),
+    (0x4b12b5, 0xa04bff),
+    (0x4d6600, 0xd7ff1e),
+    (0x14104a, 0x5b4bff),
 ];
 
 pub(super) struct Ribbon {
@@ -216,7 +218,7 @@ pub(super) fn render_ribbons(cr: &cairo::Context, t: f64) {
         if fade_from > tail + 4.0 {
             let span_v = RIBBON_HALF + RIBBON_WAVE;
             let g = cairo::LinearGradient::new(0.0, r.v - span_v, 0.0, r.v + span_v);
-            g.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.35);
+            g.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.2);
             g.add_color_stop_rgba(0.35, 1.0, 1.0, 1.0, 0.0);
             g.add_color_stop_rgba(0.7, 0.0, 0.0, 0.0, 0.0);
             g.add_color_stop_rgba(1.0, 0.0, 0.0, 0.1, 0.4);
