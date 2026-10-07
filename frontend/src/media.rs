@@ -307,14 +307,14 @@ impl MediaPage {
         tx: &std::sync::mpsc::Sender<crate::state::AppMessage>,
     ) {
         let folder = format!("media/{}", self.current_path);
+        let can_start = !self.download_pending && !self.download_url.trim().is_empty();
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.download_url)
+                .hint_text("Download from URL: https://...")
+                .desired_width(DOWNLOAD_FIELD_WIDTH),
+        );
+        let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.horizontal(|ui| {
-            let can_start = !self.download_pending && !self.download_url.trim().is_empty();
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.download_url)
-                    .hint_text("Download from URL: https://...")
-                    .desired_width(DOWNLOAD_FIELD_WIDTH),
-            );
-            let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let clicked = ui
                 .add_enabled(
                     can_start,
