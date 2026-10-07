@@ -1361,6 +1361,13 @@ impl eframe::App for StromApp {
                         self.media_page.apply_download(job);
                     }
                 }
+                #[cfg(target_arch = "wasm32")]
+                AppMessage::MediaUpload(update) => {
+                    if self.media_page.apply_upload(update) {
+                        self.media_page
+                            .refresh(&self.api, ui.ctx(), &self.channels.sender());
+                    }
+                }
             }
         }
 

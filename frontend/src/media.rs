@@ -57,6 +57,9 @@ pub struct MediaPage {
     download_error: Option<String>,
     /// URL downloads seen in this session, oldest first
     downloads: Vec<MediaDownloadJob>,
+    /// Uploads from the browser's file picker
+    #[cfg(target_arch = "wasm32")]
+    uploads: crate::media_upload::Uploads,
 }
 
 impl MediaPage {
@@ -85,6 +88,8 @@ impl MediaPage {
             download_pending: false,
             download_error: None,
             downloads: Vec::new(),
+            #[cfg(target_arch = "wasm32")]
+            uploads: crate::media_upload::Uploads::new(),
         }
     }
 
@@ -121,6 +126,14 @@ impl MediaPage {
     pub fn download_failed(&mut self, message: String) {
         self.download_pending = false;
         self.download_error = Some(message);
+    }
+
+    /// Apply an upload's latest state. Returns true when an upload just
+    /// finished into the folder being shown, so the listing should be
+    /// refreshed.
+    #[cfg(target_arch = "wasm32")]
+    pub fn apply_upload(&mut self, update: crate::media_upload::UploadUpdate) -> bool {
+        self.uploads.apply(update, &self.current_path)
     }
 
     /// Request focus on the search box.
@@ -267,7 +280,7 @@ impl MediaPage {
                 .button(format!("{} Upload", egui_phosphor::regular::UPLOAD_SIMPLE))
                 .clicked()
             {
-                self.trigger_file_upload(api, ctx, tx);
+                self.uploads.pick_files(api, ctx, tx, &self.current_path);
             }
         });
 
@@ -351,66 +364,27 @@ impl MediaPage {
         let mut cancel: Option<String> = None;
         let mut dismiss: Option<String> = None;
         for job in &self.downloads {
-            ui.horizontal(|ui| {
-                match job.state {
-                    MediaDownloadState::Downloading => {
-                        let (fraction, text) = match job.total {
-                            Some(total) if total > 0 => {
-                                let fraction = job.bytes as f32 / total as f32;
-                                (
-                                    fraction,
-                                    format!(
-                                        "{}  {} / {} ({:.0}%)",
-                                        job.filename,
-                                        format_size(job.bytes),
-                                        format_size(total),
-                                        fraction * 100.0
-                                    ),
-                                )
-                            }
-                            _ => (0.0, format!("{}  {}", job.filename, format_size(job.bytes))),
-                        };
-                        ui.add(
-                            egui::ProgressBar::new(fraction)
-                                .text(text)
-                                .animate(job.total.is_none())
-                                .desired_width(DOWNLOAD_FIELD_WIDTH),
-                        )
-                        .on_hover_text(&job.url);
-                        if ui
-                            .small_button(egui_phosphor::regular::X)
-                            .on_hover_text("Cancel download")
-                            .clicked()
-                        {
-                            cancel = Some(job.job_id.clone());
-                        }
-                    }
-                    MediaDownloadState::Done => {
-                        ui.colored_label(Color32::GREEN, egui_phosphor::regular::CHECK_CIRCLE);
-                        ui.label(format!("{} ({})", job.path, format_size(job.bytes)))
-                            .on_hover_text(&job.url);
-                    }
-                    MediaDownloadState::Failed => {
-                        ui.colored_label(Color32::RED, egui_phosphor::regular::WARNING);
-                        let error = job.error.as_deref().unwrap_or("failed");
-                        ui.colored_label(Color32::RED, format!("{}: {}", job.filename, error))
-                            .on_hover_text(&job.url);
-                    }
-                    MediaDownloadState::Cancelled => {
-                        ui.colored_label(Color32::GRAY, egui_phosphor::regular::PROHIBIT);
-                        ui.colored_label(Color32::GRAY, format!("{}: cancelled", job.filename));
-                    }
-                }
-                if job.state.is_finished()
-                    && ui
-                        .small_button(egui_phosphor::regular::X)
-                        .on_hover_text("Dismiss")
-                        .clicked()
-                {
-                    dismiss = Some(job.job_id.clone());
-                }
-            });
+            let action = transfer_row(
+                ui,
+                TransferRow {
+                    name: &job.filename,
+                    done_label: &job.path,
+                    bytes: job.bytes,
+                    total: job.total,
+                    state: job.state,
+                    error: job.error.as_deref(),
+                    hover: &job.url,
+                    cancel_hint: "Cancel download",
+                },
+            );
+            match action {
+                RowAction::Cancel => cancel = Some(job.job_id.clone()),
+                RowAction::Dismiss => dismiss = Some(job.job_id.clone()),
+                RowAction::None => {}
+            }
         }
+        #[cfg(target_arch = "wasm32")]
+        self.uploads.render_rows(ui);
         if let Some(job_id) = cancel {
             self.cancel_download(&job_id, api, ctx, tx);
         }
@@ -924,115 +898,6 @@ impl MediaPage {
             }
         });
     }
-
-    /// Trigger file upload via browser file picker (WASM only).
-    #[cfg(target_arch = "wasm32")]
-    fn trigger_file_upload(
-        &self,
-        api: &crate::api::ApiClient,
-        ctx: &Context,
-        tx: &std::sync::mpsc::Sender<crate::state::AppMessage>,
-    ) {
-        use wasm_bindgen::prelude::*;
-        use wasm_bindgen::JsCast;
-        use web_sys::{FileReader, HtmlInputElement};
-
-        let document = web_sys::window()
-            .and_then(|w| w.document())
-            .expect("No document");
-
-        // Create hidden file input
-        let input: HtmlInputElement = document
-            .create_element("input")
-            .expect("Failed to create input")
-            .dyn_into()
-            .expect("Not an input element");
-
-        input.set_type("file");
-        input.set_attribute("multiple", "").ok();
-        input.style().set_property("display", "none").ok();
-
-        // Add to document temporarily
-        document.body().unwrap().append_child(&input).ok();
-
-        let api = api.clone();
-        let ctx = ctx.clone();
-        let tx = tx.clone();
-        let current_path = self.current_path.clone();
-
-        // Set up change handler
-        let input_clone = input.clone();
-        let closure = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-            let files = input_clone.files();
-            if let Some(files) = files {
-                for i in 0..files.length() {
-                    if let Some(file) = files.get(i) {
-                        let api = api.clone();
-                        let ctx = ctx.clone();
-                        let tx = tx.clone();
-                        let path = current_path.clone();
-                        let filename = file.name();
-
-                        // Read file content
-                        let reader = FileReader::new().expect("Failed to create FileReader");
-                        let reader_clone = reader.clone();
-
-                        let onload = Closure::wrap(Box::new(move |_: web_sys::Event| {
-                            if let Ok(result) = reader_clone.result() {
-                                if let Some(array_buffer) = result.dyn_ref::<js_sys::ArrayBuffer>()
-                                {
-                                    let uint8_array = js_sys::Uint8Array::new(array_buffer);
-                                    let data = uint8_array.to_vec();
-
-                                    let api = api.clone();
-                                    let ctx = ctx.clone();
-                                    let tx = tx.clone();
-                                    let path = path.clone();
-                                    let filename = filename.clone();
-
-                                    wasm_bindgen_futures::spawn_local(async move {
-                                        match api.upload_media(&path, &filename, data).await {
-                                            Ok(result) => {
-                                                let _ = tx.send(
-                                                    crate::state::AppMessage::MediaSuccess(
-                                                        result.message,
-                                                    ),
-                                                );
-                                                let _ =
-                                                    tx.send(crate::state::AppMessage::MediaRefresh);
-                                                ctx.request_repaint();
-                                            }
-                                            Err(e) => {
-                                                let _ =
-                                                    tx.send(crate::state::AppMessage::MediaError(
-                                                        e.to_string(),
-                                                    ));
-                                                ctx.request_repaint();
-                                            }
-                                        }
-                                    });
-                                }
-                            }
-                        }) as Box<dyn FnMut(_)>);
-
-                        reader.set_onload(Some(onload.as_ref().unchecked_ref()));
-                        onload.forget();
-
-                        reader.read_as_array_buffer(&file).ok();
-                    }
-                }
-            }
-        }) as Box<dyn FnMut(_)>);
-
-        input.set_onchange(Some(closure.as_ref().unchecked_ref()));
-        closure.forget();
-
-        // Trigger file picker
-        input.click();
-
-        // Clean up (will be done after selection)
-        // Note: In a real app, we'd want to remove the input element after use
-    }
 }
 
 impl Default for MediaPage {
@@ -1055,6 +920,113 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+/// What the operator clicked on a transfer row.
+pub(crate) enum RowAction {
+    None,
+    Cancel,
+    Dismiss,
+}
+
+/// A URL download or a browser upload, as one row in the Media panel.
+pub(crate) struct TransferRow<'a> {
+    pub name: &'a str,
+    /// Shown with the size once the file is in place.
+    pub done_label: &'a str,
+    pub bytes: u64,
+    pub total: Option<u64>,
+    pub state: MediaDownloadState,
+    pub error: Option<&'a str>,
+    pub hover: &'a str,
+    pub cancel_hint: &'a str,
+}
+
+/// Render one transfer: a progress bar with a cancel button while it runs,
+/// then its outcome with a dismiss button.
+pub(crate) fn transfer_row(ui: &mut Ui, row: TransferRow<'_>) -> RowAction {
+    let mut action = RowAction::None;
+    ui.horizontal(|ui| {
+        match row.state {
+            MediaDownloadState::Downloading => {
+                let (fraction, text) = match row.total {
+                    Some(total) if total > 0 => {
+                        let fraction = (row.bytes as f32 / total as f32).min(1.0);
+                        (
+                            fraction,
+                            format!(
+                                "{}  {} / {} ({:.0}%)",
+                                row.name,
+                                format_size(row.bytes),
+                                format_size(total),
+                                fraction * 100.0
+                            ),
+                        )
+                    }
+                    _ => (0.0, format!("{}  {}", row.name, format_size(row.bytes))),
+                };
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .text(text)
+                        .animate(row.total.is_none())
+                        .desired_width(DOWNLOAD_FIELD_WIDTH),
+                )
+                .on_hover_text(row.hover);
+                if ui
+                    .small_button(egui_phosphor::regular::X)
+                    .on_hover_text(row.cancel_hint)
+                    .clicked()
+                {
+                    action = RowAction::Cancel;
+                }
+            }
+            MediaDownloadState::Done => {
+                ui.colored_label(Color32::GREEN, egui_phosphor::regular::CHECK_CIRCLE);
+                ui.label(format!("{} ({})", row.done_label, format_size(row.bytes)))
+                    .on_hover_text(row.hover);
+            }
+            MediaDownloadState::Failed => {
+                ui.colored_label(Color32::RED, egui_phosphor::regular::WARNING);
+                let error = row.error.unwrap_or("failed");
+                ui.colored_label(Color32::RED, format!("{}: {}", row.name, error))
+                    .on_hover_text(row.hover);
+            }
+            MediaDownloadState::Cancelled => {
+                ui.colored_label(Color32::GRAY, egui_phosphor::regular::PROHIBIT);
+                ui.colored_label(Color32::GRAY, format!("{}: cancelled", row.name));
+            }
+        }
+        if row.state.is_finished()
+            && ui
+                .small_button(egui_phosphor::regular::X)
+                .on_hover_text("Dismiss")
+                .clicked()
+        {
+            action = RowAction::Dismiss;
+        }
+    });
+    action
+}
+
+/// Read the upload endpoint's answer: the server's message on success, or
+/// what went wrong.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn upload_outcome(status: u16, body: &str) -> Result<String, String> {
+    if (200..300).contains(&status) {
+        return match serde_json::from_str::<strom_types::api::MediaOperationResponse>(body) {
+            Ok(response) if response.success => Ok(response.message),
+            Ok(response) => Err(response.message),
+            Err(e) => Err(format!("Unexpected response from the server: {}", e)),
+        };
+    }
+    let reason = serde_json::from_str::<strom_types::api::ErrorResponse>(body)
+        .map(|e| e.error)
+        .unwrap_or_else(|_| body.trim().to_string());
+    if reason.is_empty() {
+        Err(format!("HTTP {} error", status))
+    } else {
+        Err(format!("HTTP {} error: {}", status, reason))
     }
 }
 
@@ -1095,5 +1067,37 @@ fn format_timestamp(timestamp: u64) -> String {
         format!("{} hours ago", diff / 3600)
     } else {
         format!("{} days ago", diff / 86400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upload_outcome;
+
+    #[test]
+    fn upload_success_carries_the_server_message() {
+        let body = r#"{"success":true,"message":"Uploaded 1 file(s)"}"#;
+        assert_eq!(upload_outcome(200, body), Ok("Uploaded 1 file(s)".into()));
+    }
+
+    #[test]
+    fn upload_error_shows_status_and_server_reason() {
+        let body = r#"{"error":"Target directory does not exist"}"#;
+        assert_eq!(
+            upload_outcome(400, body),
+            Err("HTTP 400 error: Target directory does not exist".into())
+        );
+        assert_eq!(
+            upload_outcome(413, "length limit exceeded"),
+            Err("HTTP 413 error: length limit exceeded".into())
+        );
+        assert_eq!(upload_outcome(502, ""), Err("HTTP 502 error".into()));
+    }
+
+    #[test]
+    fn upload_with_unreadable_or_unsuccessful_answer_fails() {
+        assert!(upload_outcome(200, "<html>").is_err());
+        let body = r#"{"success":false,"message":"nothing stored"}"#;
+        assert_eq!(upload_outcome(200, body), Err("nothing stored".into()));
     }
 }

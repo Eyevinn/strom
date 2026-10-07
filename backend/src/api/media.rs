@@ -336,6 +336,44 @@ pub async fn download_file(
     Ok(response)
 }
 
+/// The temporary file an upload is written to. Removed on drop unless the
+/// upload completed and was renamed into place.
+struct TempUpload {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl TempUpload {
+    fn new(path: PathBuf) -> Self {
+        Self { path, keep: false }
+    }
+
+    fn path(&self) -> &StdPath {
+        &self.path
+    }
+
+    /// The file was renamed into place; nothing to remove.
+    fn keep(&mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for TempUpload {
+    fn drop(&mut self) {
+        if !self.keep {
+            if let Err(e) = std::fs::remove_file(&self.path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!(
+                        "Could not remove unfinished upload {}: {}",
+                        self.path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Upload files to a directory.
 #[utoipa::path(
     post,
@@ -347,6 +385,7 @@ pub async fn download_file(
     responses(
         (status = 200, description = "Upload successful", body = MediaOperationResponse),
         (status = 400, description = "Invalid path or upload", body = ErrorResponse),
+        (status = 413, description = "Upload larger than the server accepts", body = ErrorResponse),
         (status = 500, description = "Upload failed", body = ErrorResponse)
     )
 )]
@@ -367,7 +406,7 @@ pub async fn upload_files(
 
     let mut uploaded_count = 0;
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| {
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| {
         error!("Failed to read multipart field: {}", e);
         (
             StatusCode::BAD_REQUEST,
@@ -397,15 +436,18 @@ pub async fn upload_files(
             }
         }
 
-        let data = field.bytes().await.map_err(|e| {
-            error!("Failed to read file data: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to read file data")),
-            )
-        })?;
-
-        let mut file = fs::File::create(&file_path).await.map_err(|e| {
+        // Stream the field into a hidden temporary file and rename it into
+        // place once the whole file has arrived. An upload that is cancelled
+        // or cut off never shows up under its final name, and the guard
+        // removes the temporary file on every early return, including when
+        // the client disconnects and this future is dropped.
+        let mut temp = TempUpload::new(target_dir.join(format!(
+            "{}{}{}",
+            crate::media_download::filename::TEMP_PREFIX,
+            uuid::Uuid::new_v4().simple(),
+            crate::media_download::filename::TEMP_SUFFIX
+        )));
+        let mut file = fs::File::create(temp.path()).await.map_err(|e| {
             error!("Failed to create file: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -413,13 +455,43 @@ pub async fn upload_files(
             )
         })?;
 
-        file.write_all(&data).await.map_err(|e| {
+        while let Some(chunk) = field.chunk().await.map_err(|e| {
+            warn!("Upload of {} stopped: {}", filename, e);
+            // Most often the client cancelled or went away; that is not a
+            // server error. A body over the size limit keeps its 413.
+            let status = match e.status() {
+                StatusCode::PAYLOAD_TOO_LARGE => StatusCode::PAYLOAD_TOO_LARGE,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            (status, Json(ErrorResponse::new(e.body_text())))
+        })? {
+            file.write_all(&chunk).await.map_err(|e| {
+                error!("Failed to write file: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Failed to write file")),
+                )
+            })?;
+        }
+
+        file.flush().await.map_err(|e| {
             error!("Failed to write file: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Failed to write file")),
             )
         })?;
+        drop(file);
+
+        // An upload replaces a file of the same name, as it always has.
+        fs::rename(temp.path(), &file_path).await.map_err(|e| {
+            error!("Failed to move upload into place: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Failed to write file")),
+            )
+        })?;
+        temp.keep();
 
         info!("Uploaded file: {}", file_path.display());
         uploaded_count += 1;

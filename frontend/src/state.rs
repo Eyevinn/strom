@@ -146,6 +146,9 @@ pub enum AppMessage {
     MediaDownloadFailed(String),
     /// Active URL downloads listed by the server (catch-up after a reload)
     MediaDownloadsLoaded(Vec<strom_types::media_download::MediaDownloadJob>),
+    /// A browser upload started, progressed or ended
+    #[cfg(target_arch = "wasm32")]
+    MediaUpload(crate::media_upload::UploadUpdate),
 
     /// Log level loaded from API
     LogLevelLoaded { current: String, default: String },

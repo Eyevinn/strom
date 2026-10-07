@@ -4390,6 +4390,16 @@
               }
             }
           },
+          "413": {
+            "description": "Upload larger than the server accepts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Upload failed",
             "content": {

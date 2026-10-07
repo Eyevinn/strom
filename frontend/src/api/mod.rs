@@ -79,11 +79,20 @@ impl ApiClient {
 
     /// Helper to add auth header to a request builder
     pub(super) fn with_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if let Some(ref token) = self.auth_token {
-            builder.header("Authorization", format!("Bearer {}", token))
+        if let Some(value) = self.authorization() {
+            builder.header("Authorization", value)
         } else {
             builder
         }
+    }
+
+    /// The `Authorization` header value every request carries, if any. For
+    /// requests made outside reqwest (the browser upload uses
+    /// `XMLHttpRequest`).
+    pub fn authorization(&self) -> Option<String> {
+        self.auth_token
+            .as_ref()
+            .map(|token| format!("Bearer {}", token))
     }
 
     /// Get the base URL for the API.

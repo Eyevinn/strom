@@ -9,12 +9,12 @@ pub const MAX_FILENAME_BYTES: usize = 200;
 /// Name used when neither the response nor the URL offers one.
 pub const FALLBACK_FILENAME: &str = "download";
 
-/// Prefix and suffix of the temporary file a download is written to before it
-/// is renamed into place. The media listing hides these.
+/// Prefix and suffix of the temporary file a download or an upload is written
+/// to before it is renamed into place. The media listing hides these.
 pub const TEMP_PREFIX: &str = ".download-";
 pub const TEMP_SUFFIX: &str = ".part";
 
-/// Whether `name` is a download's temporary file.
+/// Whether `name` is a download's or an upload's temporary file.
 pub fn is_temp_file(name: &str) -> bool {
     name.starts_with(TEMP_PREFIX) && name.ends_with(TEMP_SUFFIX)
 }
