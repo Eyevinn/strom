@@ -53,13 +53,14 @@ impl Decoder {
 }
 
 /// Set while any [`hold_bridge_for_tests`] hold waits, so the bridge looks
-/// up holds only then: one relaxed load per sample otherwise.
+/// up holds only then. Only a stinger source's bridge reads it: one relaxed
+/// load per sample there, nothing for an ordinary player.
 static BRIDGE_HOLDS_ARMED: AtomicBool = AtomicBool::new(false);
 /// Pending holds, by player block id and media type, in ms.
 static BRIDGE_HOLDS: LazyLock<Mutex<HashMap<(String, String), u64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Hold the next sample of player `block_id`'s `media_type` stream ("video"
+/// Hold the next sample of stinger player `block_id`'s `media_type` stream ("video"
 /// or "audio") for `ms` at the bridge, before it is placed. Lets a test
 /// decide which stream of a take reaches the shared timing first; streams
 /// let go at the same moment otherwise race.
@@ -604,17 +605,16 @@ fn link_pad_through_clocksync(
     }
 
     // A stinger clip source tells a cue when the clip's first frame is parked
-    // here, and a take where that frame is in the clip. Per buffer, but two
-    // atomic writes; the flags are shared, so the probe holds no player state.
-    if state.stinger.enabled && media_type == "video" {
+    // here, and a take where that frame is in the clip. The first buffer into
+    // a new chain is the loaded clip's first frame, so a new chain always
+    // gets the one-shot park probe: a cue that loaded the clip found no chain
+    // to arm, and one that comes later rewinds and arms its own. Never on a
+    // relinked chain above: that is an HLS stream carrying on, not a clip.
+    if state.stinger.enabled
+        && clocksync_name == super::state::StingerPlayback::park_clocksync_name(&state.block_id)
+    {
         if let Some(sink) = clocksync.static_pad("sink") {
-            let park = Arc::clone(&state.stinger.park);
-            sink.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
-                if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_ref() {
-                    park.on_buffer(buffer.pts());
-                }
-                gst::PadProbeReturn::Ok
-            });
+            state.stinger.arm_park_probe(&sink);
         }
     }
 
@@ -630,6 +630,9 @@ fn link_pad_through_clocksync(
         .next()
         .unwrap_or_default()
         .to_string();
+    // Only a stinger source's bridge looks for test holds; an ordinary
+    // player's never touches the flag.
+    let test_holds = state.stinger.enabled;
     let mut pushed: u64 = 0;
     let mut dropped_unstamped: u64 = 0;
     // The main pipeline's clock and base time, read once instead of per buffer.
@@ -686,7 +689,7 @@ fn link_pad_through_clocksync(
                 let Some((clock, base)) = main_clock.as_ref() else {
                     return Ok(gst::FlowSuccess::Ok);
                 };
-                if BRIDGE_HOLDS_ARMED.load(Ordering::Relaxed) {
+                if test_holds && BRIDGE_HOLDS_ARMED.load(Ordering::Relaxed) {
                     wait_out_test_hold(&instance, &media_type_owned);
                 }
                 let now = clock.time().saturating_sub(*base).nseconds() as i64;

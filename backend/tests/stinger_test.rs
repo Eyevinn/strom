@@ -221,6 +221,49 @@ async fn cpu_stingers_play_classic() {
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
 
+/// The park probe on a stinger clip's video path catches the one frame that
+/// parks and takes itself off. Left on, it ran for every frame of every take;
+/// it shows as the parked-frame count moving once per frame of the clip.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_take_plays_with_no_park_probe_on_its_path() {
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let tag = "oneshot";
+    let r = start(tag, "cpu").await;
+    let player = strom::blocks::builtin::mediaplayer::MEDIA_PLAYER_REGISTRY
+        .get(&strom::blocks::builtin::mediaplayer::MediaPlayerKey {
+            flow_id: r.flow_id,
+            block_id: format!("sting-{tag}"),
+        })
+        .unwrap();
+    let parked = || {
+        player
+            .stinger
+            .park
+            .seen
+            .load(std::sync::atomic::Ordering::Acquire)
+    };
+    let before = parked();
+    r.state
+        .stinger_take(&r.flow_id, &r.mixer(), Some(0), None)
+        .await
+        .expect("take");
+    let report = r.wait_for_report(0).await;
+    let n = r.clip_frames(0).await;
+    assert_eq!(report.frames_arrived, n, "{report:?}");
+    r.wait_until_parked().await;
+    // The take plays the clip's frames, then the next clip is cued: at most
+    // a frame parked for each cue, none for the frames that played.
+    let moved = parked() - before;
+    assert!(
+        moved <= 2,
+        "the park probe saw {moved} frames over a take of {n}: it stayed on the clip's path"
+    );
+
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}
+
 /// A flow stopped in the middle of a take releases its pipeline, and the
 /// take left waiting for its clip's end does not touch the next run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
