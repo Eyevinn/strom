@@ -254,6 +254,33 @@ pub fn suppress_latency_query(queue: &gst::Element) {
     });
 }
 
+/// Answer ALLOCATION queries arriving at the sink pad of the queue that feeds
+/// PGM into the multiview compositor, so the PGM compositor never waits on the
+/// multiview to allocate.
+///
+/// `tee_pgm` asks every branch when the PGM compositor negotiates, and on this
+/// branch the query waits until mv_comp's own streaming thread takes it. That
+/// thread can itself be waiting in its ALLOCATION query behind the multiview
+/// sink, which holds a prerolled frame until the pipeline reaches PLAYING — and
+/// the pipeline only gets there once PGM has output. A late input renegotiates
+/// both compositors mid-start, and the flow then never starts. Answered here,
+/// the branch proposes nothing and `tee_pgm` takes its allocation from the PGM
+/// output branch. Software backend only: on the GPU backend the query also
+/// carries the GL context and pools. A QUERY probe, never per buffer.
+pub fn answer_allocation_query(queue: &gst::Element) {
+    let pad = queue
+        .static_pad("sink")
+        .expect("queue must have a sink pad");
+    pad.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, |_pad, info| {
+        if let Some(query) = info.query() {
+            if let gst::QueryView::Allocation(_) = query.view() {
+                return gst::PadProbeReturn::Handled;
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
+}
+
 fn backend_name(backend: CompositorBackend) -> &'static str {
     match backend {
         CompositorBackend::OpenGL => "OpenGL",
