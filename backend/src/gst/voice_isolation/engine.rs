@@ -4,13 +4,12 @@
 //! samples, hop 480, rfft -> model (one frame plus a recurrent state vector)
 //! -> irfft * window -> overlap-add. Output lags input by `MODEL_DELAY`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use ort::session::builder::GraphOptimizationLevel;
-use ort::session::Session;
-use ort::value::TensorRef;
 use realfft::num_complex::Complex32;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
+use tract_onnx::prelude::*;
 
 pub(super) const SAMPLE_RATE: i32 = 48_000;
 pub(super) const HOP: usize = 480;
@@ -24,10 +23,11 @@ pub(super) const MODEL_DELAY: usize = HOP + MODEL_DELAY_FRAMES * HOP;
 static MODEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dpdfnet2_48khz_hr.onnx"));
 
 pub(super) struct Engine {
-    session: Session,
-    init_state: Vec<f32>,
-    state: Vec<f32>,
-    state_next: Vec<f32>,
+    /// Reused across hops so a run allocates no plan state of its own.
+    runner: TypedSimpleState,
+    init_state: Tensor,
+    /// The model's recurrent state, fed back in on every hop.
+    state: Tensor,
     fwd: Arc<dyn RealToComplex<f32>>,
     inv: Arc<dyn ComplexToReal<f32>>,
     window: Vec<f32>,
@@ -49,21 +49,31 @@ pub(super) struct Engine {
 }
 
 impl Engine {
-    /// Build an ONNX Runtime session for the embedded model. Takes tens of
-    /// milliseconds, so callers run it off the streaming thread.
+    /// Parse and optimise the embedded model. Takes most of a second, so
+    /// callers run it off the streaming thread.
     pub(super) fn load() -> Result<Self, String> {
-        let err = |e: ort::Error<_>| e.to_string();
-        let session = Session::builder()
-            .map_err(|e| e.to_string())?
-            .with_optimization_level(GraphOptimizationLevel::All)
+        let err = |e: TractError| format!("{e:#}");
+        let onnx = tract_onnx::onnx();
+        let proto = onnx.proto_model_for_read(&mut &MODEL[..]).map_err(err)?;
+        let metadata: HashMap<&str, &str> = proto
+            .metadata_props
+            .iter()
+            .map(|p| (p.key.as_str(), p.value.as_str()))
+            .collect();
+        let init_state = tensor1(&initial_state(&metadata)?);
+        let runner = onnx
+            .model_for_proto_model(&proto)
             .map_err(err)?
-            .with_intra_threads(1)
+            .with_input_fact(0, f32::fact([1, 1, BINS, 2]).into())
             .map_err(err)?
-            .with_inter_threads(1)
+            .with_input_fact(1, f32::fact([init_state.len()]).into())
             .map_err(err)?
-            .commit_from_memory(MODEL)
-            .map_err(|e| e.to_string())?;
-        let init_state = initial_state(&session)?;
+            .into_optimized()
+            .map_err(err)?
+            .into_runnable()
+            .map_err(err)?
+            .spawn()
+            .map_err(err)?;
 
         let mut planner = RealFftPlanner::<f32>::new();
         let fwd = planner.plan_fft_forward(WIN);
@@ -76,9 +86,8 @@ impl Engine {
             .collect();
         Ok(Self {
             state: init_state.clone(),
-            state_next: init_state.clone(),
             init_state,
-            session,
+            runner,
             time_buf: fwd.make_input_vec(),
             freq_buf: fwd.make_output_vec(),
             scratch_fwd: fwd.make_scratch_vec(),
@@ -98,7 +107,7 @@ impl Engine {
 
     /// Forget everything heard so far.
     pub(super) fn reset(&mut self) {
-        self.state.copy_from_slice(&self.init_state);
+        self.state = self.init_state.clone();
         self.hist.fill(0.0);
         self.ola.fill(0.0);
         for n in &mut self.noisy {
@@ -134,24 +143,17 @@ impl Engine {
             self.spec[2 * k + 1] = c.im;
         }
 
-        {
-            let outputs = self
-                .session
-                .run(ort::inputs![
-                    "spec" => TensorRef::from_array_view(([1usize, 1, BINS, 2], &self.spec[..])).map_err(|e| e.to_string())?,
-                    "state_in" => TensorRef::from_array_view(([self.state.len()], &self.state[..])).map_err(|e| e.to_string())?,
-                ])
-                .map_err(|e| e.to_string())?;
-            let (_, spec_e) = outputs["spec_e"]
-                .try_extract_tensor::<f32>()
-                .map_err(|e| e.to_string())?;
-            self.spec_out.copy_from_slice(spec_e);
-            let (_, state) = outputs["state_out"]
-                .try_extract_tensor::<f32>()
-                .map_err(|e| e.to_string())?;
-            self.state_next.copy_from_slice(state);
-        }
-        std::mem::swap(&mut self.state, &mut self.state_next);
+        let err = |e: TractError| format!("{e:#}");
+        let spec = Tensor::from_shape(&[1, 1, BINS, 2], &self.spec).map_err(err)?;
+        let state = std::mem::take(&mut self.state);
+        let mut outputs = self
+            .runner
+            .run(tvec!(spec.into(), state.into()))
+            .map_err(err)?;
+        self.state = outputs.remove(1).into_tensor();
+        let spec_e = outputs[0].try_as_plain_ram().map_err(err)?;
+        self.spec_out
+            .copy_from_slice(spec_e.as_slice::<f32>().map_err(err)?);
 
         // The model's output lags its input by MODEL_DELAY_FRAMES, so the
         // limit blends in the input spectrum from that many hops ago.
@@ -191,10 +193,11 @@ impl Engine {
 
 /// The recurrent state vector starts at zero except for two normalisation
 /// blocks whose starting values the export stores in the model metadata.
-fn initial_state(session: &Session) -> Result<Vec<f32>, String> {
-    let md = session.metadata().map_err(|e| e.to_string())?;
+fn initial_state(metadata: &HashMap<&str, &str>) -> Result<Vec<f32>, String> {
     let get = |k: &str| {
-        md.custom(k)
+        metadata
+            .get(k)
+            .copied()
             .ok_or_else(|| format!("model metadata lacks {k}"))
     };
     let floats = |k: &str| -> Result<Vec<f32>, String> {
