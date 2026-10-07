@@ -592,6 +592,9 @@ pub struct BlockHealth {
 /// A block can carry several at once: a WHIP Input block has one seat per
 /// slot, and each can lose a medium on its own. Clients should ignore a
 /// `kind` they do not know; this type reads one as [`BlockHealthCause::Unknown`].
+/// An older client cannot read a known `kind` that lacks a field or carries a
+/// medium or fault value it does not know, so those changes ship as a new
+/// `kind` instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
