@@ -846,6 +846,7 @@ impl eframe::App for StromApp {
                             flow_id,
                             block_id,
                             filename,
+                            ..
                         } => {
                             let key = (flow_id, block_id);
                             self.recorder_start_times
