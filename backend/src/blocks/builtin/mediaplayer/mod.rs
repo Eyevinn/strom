@@ -90,6 +90,26 @@ pub(super) fn file_uri(path: &Path) -> String {
         .unwrap_or_else(|_| format!("file://{}", path.display()))
 }
 
+/// A local file's modification time (nanoseconds since the epoch) and length,
+/// as it is on disk now. `None` for a URI that is not a local file, or a file
+/// that is not there.
+///
+/// A file rewritten in place, or replaced by another under the same name,
+/// gets a new stamp: what a stinger clip source compares to tell that the
+/// clip it holds is no longer the file's content, and what the clip analysis
+/// is cached under.
+pub fn file_stamp(uri: &str) -> Option<(u64, u64)> {
+    let (path, _) = gstreamer::glib::filename_from_uri(uri).ok()?;
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    Some((mtime, meta.len()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

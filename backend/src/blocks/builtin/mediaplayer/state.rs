@@ -120,14 +120,32 @@ pub struct StingerPlayback {
     pub enabled: bool,
     /// Set when the cued clip's first frame waits in its clocksync.
     pub park: Arc<ParkFlags>,
-    /// The playlist entry the internal pipeline holds. A playlist edit can
-    /// put another file at the parked index; this is what tells a cue that
-    /// the parked frame is not the new entry's.
-    pub loaded_file: Mutex<Option<String>>,
+    /// The playlist entry the internal pipeline holds, with its file's stamp
+    /// when loaded. A playlist edit can put another file at the parked index,
+    /// and a file can be rewritten on disk under the same name; this is what
+    /// tells a cue that the parked frame is not the entry's current content.
+    pub loaded_file: Mutex<Option<LoadedClip>>,
     /// The one-shot probe waiting for the next parked frame (see
     /// [`StingerPlayback::arm_park_probe`]), with the parked-frame count it
     /// was armed at. Taken once per cue or bridge chain, never by the probe.
     pub(super) park_probe: Mutex<Option<(gst::glib::WeakRef<gst::Pad>, gst::PadProbeId, u64)>>,
+}
+
+/// The file a stinger clip source's internal pipeline was loaded from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedClip {
+    /// The playlist entry.
+    pub file: String,
+    /// [`super::file_stamp`] of its file when it was loaded; `None` for a
+    /// source that is not a local file.
+    pub stamp: Option<(u64, u64)>,
+}
+
+impl LoadedClip {
+    pub fn new(file: String, media_path: &std::path::Path) -> Self {
+        let stamp = super::file_stamp(&normalize_uri(&file, media_path));
+        Self { file, stamp }
+    }
 }
 
 impl StingerPlayback {
@@ -616,7 +634,8 @@ impl MediaPlayerState {
             .stinger
             .loaded_file
             .lock()
-            .unwrap_or_else(|p| p.into_inner()) = Some(file_path);
+            .unwrap_or_else(|p| p.into_inner()) =
+            Some(LoadedClip::new(file_path, &self.media_path));
 
         // The old stream went at READY: an EOS posted from here on is the new
         // file's, a clip so short it ends while starting included, and must
@@ -909,7 +928,8 @@ impl MediaPlayerState {
 
     /// Whether playlist entry `index` is loaded and parked on its first frame.
     /// The loaded file is compared, not only the index: a playlist edit can
-    /// leave another file at the parked index.
+    /// leave another file at the parked index, and the file can have been
+    /// rewritten on disk since it was loaded (see `holds_file`).
     pub fn is_parked_on(&self, index: usize) -> bool {
         if !self.stinger.park.parked.load(Ordering::Acquire)
             || !self.is_paused.load(Ordering::SeqCst)
@@ -922,14 +942,26 @@ impl MediaPlayerState {
         pl.current_index == index && pl.files.get(index).is_some_and(|f| self.holds_file(f))
     }
 
-    /// Whether the internal pipeline holds playlist entry `file`.
+    /// Whether the internal pipeline holds playlist entry `file` as it is on
+    /// disk now. A file rewritten since it was loaded (a new modification
+    /// time or length) is not held: the parked frame and the rest of the clip
+    /// the decoder would read are the old content, or a mix of old and new.
+    /// A file gone from disk since counts as held, so the clip that is parked
+    /// still plays.
     fn holds_file(&self, file: &str) -> bool {
-        self.stinger
+        let loaded = self
+            .stinger
             .loaded_file
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .as_deref()
-            == Some(file)
+            .clone();
+        let Some(loaded) = loaded.filter(|l| l.file == file) else {
+            return false;
+        };
+        match super::file_stamp(&normalize_uri(file, &self.media_path)) {
+            Some(now) => loaded.stamp == Some(now),
+            None => true,
+        }
     }
 
     /// Play the parked clip so that its first frame lands at main-pipeline

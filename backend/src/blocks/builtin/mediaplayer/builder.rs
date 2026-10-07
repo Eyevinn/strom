@@ -347,7 +347,9 @@ fn build_media_player(
         .stinger
         .loaded_file
         .lock()
-        .unwrap_or_else(|p| p.into_inner()) = initial_playlist.first().cloned();
+        .unwrap_or_else(|p| p.into_inner()) = initial_playlist
+        .first()
+        .map(|f| super::state::LoadedClip::new(f.clone(), &media_path));
 
     // --- Create internal pipeline ---
     let internal_pipeline = if decode {

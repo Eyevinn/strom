@@ -186,6 +186,10 @@ pub struct StingerClip {
     pub downgraded_from: Option<StingerVariant>,
     /// Effective cut point for a classic take.
     pub cut_point_ms: Option<u64>,
+    /// The clip's file is not on disk (deleted or renamed since it was
+    /// added). Only a local file can be missing.
+    #[serde(default)]
+    pub missing: bool,
 }
 
 /// A finished take, with what was measured.

@@ -101,6 +101,40 @@ pub async fn cue_stinger(
         .map_err(bad_request("Failed to read stinger state"))
 }
 
+/// Reload the stinger library from disk: analyse clips whose files changed,
+/// load and park the cued clip again when its file changed since it was
+/// loaded, and report clips whose files are gone (`missing`). Analyses run in
+/// the background; poll the stinger state for them. Refused while a stinger
+/// is on air.
+#[utoipa::path(
+    post,
+    path = "/api/flows/{flow_id}/blocks/{block_id}/stinger/reload",
+    tag = "flows",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("block_id" = String, Path, description = "Vision mixer block instance ID")
+    ),
+    responses(
+        (status = 200, description = "Library reloaded; the stinger state after the reload", body = StingerState),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 409, description = "A stinger is on air", body = ErrorResponse),
+    )
+)]
+pub async fn reload_stinger(
+    State(state): State<AppState>,
+    Path((flow_id, block_id)): Path<(FlowId, String)>,
+) -> Result<Json<StingerState>, ApiError> {
+    info!(
+        "Reloading stinger library on vision mixer {} in flow {}",
+        block_id, flow_id
+    );
+    state
+        .stinger_reload(&flow_id, &block_id)
+        .await
+        .map(Json)
+        .map_err(bad_request("Failed to reload stinger library"))
+}
+
 /// Take a stinger from PGM to PVW.
 #[utoipa::path(
     post,

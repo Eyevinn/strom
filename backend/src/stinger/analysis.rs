@@ -50,19 +50,7 @@ static CACHE: LazyLock<Mutex<HashMap<CacheKey, StingerClipInfo>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn cache_key(uri: &str) -> CacheKey {
-    let (mtime, len) = gst::glib::filename_from_uri(uri)
-        .ok()
-        .and_then(|(path, _)| std::fs::metadata(path).ok())
-        .map(|m| {
-            let mtime = m
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            (mtime, m.len())
-        })
-        .unwrap_or((0, 0));
+    let (mtime, len) = crate::blocks::builtin::mediaplayer::file_stamp(uri).unwrap_or((0, 0));
     (uri.to_string(), mtime, len)
 }
 

@@ -285,16 +285,32 @@
         .stinger-panel { display: flex; flex-direction: column; gap: 4px; position: relative; }
         .stinger-panel.hidden { display: none; }
         .stinger-clips {
+            position: relative;
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            /* Four clips a row at the usual panel width, fewer when narrow. */
+            grid-template-columns: repeat(auto-fill, minmax(68px, 1fr));
+            grid-auto-rows: 34px;
             gap: 4px;
-            /* Two rows of clips; a longer library scrolls. */
-            max-height: 80px;
+            /* Two rows of clips; a longer library scrolls, with a scrollbar
+               that stays visible (macOS hides overlay scrollbars). */
+            max-height: 72px;
             overflow-y: auto;
+            padding-right: 2px;
         }
+        /* Chrome and Safari draw a styled ::-webkit-scrollbar as a classic,
+           always-visible one. Chrome ignores it once scrollbar-width or
+           scrollbar-color is set, and keeps the overlay, so those are for
+           Firefox only. */
+        @supports not selector(::-webkit-scrollbar) {
+            .stinger-clips { scrollbar-width: thin; scrollbar-color: #777 #1e1e1e; }
+        }
+        .stinger-clips::-webkit-scrollbar { width: 6px; }
+        .stinger-clips::-webkit-scrollbar-track { background: #1e1e1e; border-radius: 3px; }
+        .stinger-clips::-webkit-scrollbar-thumb { background: #777; border-radius: 3px; }
+        .stinger-clips::-webkit-scrollbar-thumb:hover { background: #999; }
         .stinger-clip {
             position: relative;
-            min-height: 36px;
+            min-width: 0;
             border: 1px solid #444;
             border-radius: 3px;
             background: #2a2a2a;
@@ -302,18 +318,19 @@
             font-size: 10px;
             font-weight: 600;
             cursor: pointer;
-            padding: 3px 4px;
+            padding: 2px 4px;
             text-align: left;
             overflow: hidden;
         }
         .stinger-clip:hover { border-color: #666; }
         .stinger-clip:focus { outline: none; }
-        .stinger-clip .name {
+        .stinger-clip .name, .stinger-clip .badges {
             display: block;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
+        .stinger-clip .name { padding-right: 8px; }
         .stinger-clip .badge {
             display: inline-block;
             margin-top: 2px;
@@ -326,6 +343,8 @@
         .stinger-clip .badge.matte { background: #1d3d55; color: #8cc8ff; }
         .stinger-clip .badge.mask { background: #3b2d55; color: #c8a8ff; }
         .stinger-clip .badge.down { background: #553a1d; color: #ffc27a; }
+        .stinger-clip .badge.missing { background: #551d1d; color: #ff8a8a; }
+        .stinger-clip.missing .name { color: #888; text-decoration: line-through; }
         .stinger-clip.cued { border-color: #ff9900; color: #fff; background: #3a2a10; }
         .stinger-clip.cued.ready::after {
             content: '';
@@ -346,8 +365,15 @@
         }
         .stinger-status .warn { color: #ffb347; }
         .stinger-status .bad { color: #ff6b6b; }
-        .stinger-tools { display: flex; gap: 4px; }
+        .stinger-tools { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
         .stinger-tools .type-btn { flex: 0 0 auto; padding: 0 8px; }
+        .stinger-tools .type-btn:disabled { opacity: 0.5; cursor: default; }
+        .stinger-count {
+            margin-left: auto;
+            font-size: 10px;
+            color: #888;
+            white-space: nowrap;
+        }
         /* Clip settings open above the panel instead of pushing it down,
            so the controls keep their height and their buttons. */
         .stinger-settings {
@@ -1293,6 +1319,8 @@
                 <div class="stinger-tools">
                     <button class="type-btn" id="stingerEditBtn" onclick="toggleStingerSettings()" title="Settings of the cued clip">SETTINGS</button>
                     <button class="type-btn" onclick="createExampleStingers()" title="Render Strom's example stingers (classic, track matte, mask) into the media directory and add them">EXAMPLES</button>
+                    <button class="type-btn" id="stingerReloadBtn" onclick="reloadStingers()" title="Look at the clip files again: analyse changed files, load the cued clip again if its file changed, and flag files that are gone">RELOAD</button>
+                    <span class="stinger-count" id="stingerCount"></span>
                 </div>
             </div>
             <div class="type-row dir-row hidden" id="dirRow" title="Direction of motion">
@@ -1357,7 +1385,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.44-stinger | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.45-stinger | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1907,7 +1935,8 @@
             return file.split('/').pop().replace(/\.[^.]+$/, '');
         }
         function variantBadge(c) {
-            if (!c.variant) return '<span class="badge">...</span>';
+            if (c.missing) return '<span class="badge missing" title="The file is not on disk">MISSING</span>';
+            if (!c.info || !c.variant) return '<span class="badge" title="Analysing the clip">...</span>';
             const label = { classic: 'CLASSIC', track_matte: 'MATTE', mask_only: 'MASK' }[c.variant];
             const cls = { classic: '', track_matte: 'matte', mask_only: 'mask' }[c.variant];
             let html = '<span class="badge ' + cls + '">' + label + '</span>';
@@ -1930,29 +1959,56 @@
                 if (!resp.ok) return;
                 stingerState = await resp.json();
                 renderStingers();
-                // Analysis runs in the background; look again until it is in.
-                if (stingerState.clips.some(c => !c.info)) {
-                    clearTimeout(fetchStingerState._t);
-                    fetchStingerState._t = setTimeout(fetchStingerState, 1000);
-                }
+                pollWhileAnalysing();
             } catch {}
+        }
+
+        // Analysis runs in the background; look again until it is in. A
+        // missing file has none coming.
+        function pollWhileAnalysing() {
+            if (stingerState && stingerState.clips.some(c => !c.info && !c.missing)) {
+                clearTimeout(fetchStingerState._t);
+                fetchStingerState._t = setTimeout(fetchStingerState, 1000);
+            }
         }
 
         function renderStingers() {
             const s = stingerState;
             if (!s) return;
             const clips = document.getElementById('stingerClips');
+            const scrollTop = clips.scrollTop;
             clips.innerHTML = s.clips.map(c => {
                 const cued = c.index === s.cued_index;
                 const cls = ['stinger-clip', cued ? 'cued' : '', cued && s.ready ? 'ready' : '',
-                    stingerOnAir === c.index ? 'on-air' : ''].join(' ');
-                const info = c.info
-                    ? (c.info.duration_ms / 1000).toFixed(1) + 's ' + c.info.width + 'x' + c.info.height
+                    stingerOnAir === c.index ? 'on-air' : '', c.missing ? 'missing' : ''].join(' ');
+                const info = c.missing ? 'file missing'
+                    : c.info ? (c.info.duration_ms / 1000).toFixed(1) + 's ' + c.info.width + 'x' + c.info.height
                     : 'analysing...';
                 return '<button class="' + cls + '" onclick="cueStinger(' + c.index + ')" title="'
                     + escapeHtml(c.file + ' - ' + info) + '"><span class="name">' + escapeHtml(clipName(c.file))
-                    + '</span>' + variantBadge(c) + '</button>';
+                    + '</span><span class="badges">' + variantBadge(c) + '</span></button>';
             }).join('');
+            clips.scrollTop = scrollTop;
+            // Bring the cued clip into view when the cue or the library
+            // changes, not on every poll, so browsing the list is not undone.
+            // Scrolls only the list, never the page. A hidden panel has no
+            // layout yet; it scrolls when it is first rendered shown.
+            const view = s.cued_index + ':' + s.clips.length;
+            const tile = clips.querySelector('.stinger-clip.cued');
+            if (clips.clientHeight > 0 && renderStingers._view !== view) {
+                if (tile && tile.offsetTop < clips.scrollTop) {
+                    clips.scrollTop = tile.offsetTop;
+                } else if (tile && tile.offsetTop + tile.offsetHeight > clips.scrollTop + clips.clientHeight) {
+                    clips.scrollTop = tile.offsetTop + tile.offsetHeight - clips.clientHeight;
+                }
+                renderStingers._view = view;
+            }
+            const missing = s.clips.filter(c => c.missing).length;
+            const more = clips.scrollHeight > clips.clientHeight + 1;
+            document.getElementById('stingerCount').textContent = s.clips.length
+                ? s.clips.length + (s.clips.length === 1 ? ' clip' : ' clips')
+                    + (missing ? ', ' + missing + ' missing' : '') + (more ? ' \u2195' : '')
+                : '';
 
             const status = document.getElementById('stingerStatus');
             let html = '';
@@ -2052,6 +2108,29 @@
             apiPut('/stinger/clips/' + index + guard, settings)
                 .then(() => { setStatus('Stinger settings saved'); document.activeElement.blur(); fetchStingerState(); })
                 .catch(e => setStatus('Stinger settings error: ' + e.message));
+        }
+
+        function reloadStingers() {
+            if (stingerState && stingerState.running) {
+                setStatus('A stinger is on air; reload when it has finished');
+                return;
+            }
+            const btn = document.getElementById('stingerReloadBtn');
+            btn.disabled = true;
+            setStatus('Reloading stingers...');
+            apiPost('/stinger/reload', {})
+                .then(st => {
+                    stingerState = st;
+                    renderStingers();
+                    pollWhileAnalysing();
+                    const analysing = st.clips.filter(c => !c.info && !c.missing).length;
+                    const missing = st.clips.filter(c => c.missing).length;
+                    setStatus('Stingers reloaded: ' + st.clips.length + ' clips'
+                        + (analysing ? ', ' + analysing + ' analysing' : '')
+                        + (missing ? ', ' + missing + ' missing' : ''));
+                })
+                .catch(e => { setStatus('Stinger reload error: ' + e.message); fetchStingerState(); })
+                .finally(() => { btn.disabled = false; });
         }
 
         function createExampleStingers() {

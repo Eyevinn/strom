@@ -2565,6 +2565,67 @@
         }
       }
     },
+    "/api/flows/{flow_id}/blocks/{block_id}/stinger/reload": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Reload the stinger library from disk: analyse clips whose files changed,\nload and park the cued clip again when its file changed since it was\nloaded, and report clips whose files are gone (`missing`). Analyses run in\nthe background; poll the stinger state for them. Refused while a stinger\nis on air.",
+        "operationId": "reload_stinger",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Library reloaded; the stinger state after the reload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StingerState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A stinger is on air",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/flows/{flow_id}/blocks/{block_id}/stinger/take": {
       "post": {
         "tags": [
@@ -10297,6 +10358,10 @@
                 "description": "Analysis, once it has run."
               }
             ]
+          },
+          "missing": {
+            "type": "boolean",
+            "description": "The clip's file is not on disk (deleted or renamed since it was\nadded). Only a local file can be missing."
           },
           "settings": {
             "$ref": "#/components/schemas/StingerClipSettings",

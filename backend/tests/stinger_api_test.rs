@@ -299,6 +299,141 @@ async fn a_playlist_put_over_the_parked_index_recues_it() {
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
 
+/// Replace `path` with the side-by-side clip, as an operator re-exporting a
+/// clip under the same name does: written next to it and renamed over it, so
+/// the parked player still holds the old file. The new file gets an mtime a
+/// minute on, so the change shows on any filesystem's timestamp resolution.
+fn overwrite_with_sbs(path: &str) {
+    let path = std::path::Path::new(path);
+    let tmp = path.with_file_name("rewrite.tmp.mov");
+    sbs_clip(&tmp);
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    std::fs::File::options()
+        .write(true)
+        .open(&tmp)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    std::fs::rename(&tmp, path).unwrap();
+}
+
+/// Wait for clip `index`'s analysis of its file as it is now.
+async fn wait_for_layout(
+    r: &Running,
+    index: usize,
+    layout: strom_types::stinger::StingerLayout,
+) -> strom_types::stinger::StingerClipInfo {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
+        if let Some(info) = s.clips[index].info.clone() {
+            if info.detected_layout == layout {
+                return info;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "clip {index} never analysed as {layout:?}: {:?}",
+            s.clips[index].info
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// A clip rewritten on disk under the same name: reload analyses the new file
+/// and parks it again, so the next take plays the new content, not the frames
+/// the player loaded before. Reload reports a deleted file per clip instead of
+/// failing, and is refused while a stinger is on air.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reload_picks_up_a_clip_rewritten_on_disk() {
+    use strom_types::stinger::StingerLayout;
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let r = start("api-reload", "cpu").await;
+    let app = strom::create_app_with_state(r.state.clone()).await;
+    let base = format!("/api/flows/{}/blocks/{}/stinger", r.flow_id, r.mixer());
+    let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
+    assert_eq!(s.cued_index, Some(0));
+    assert_eq!(
+        s.clips[0].info.as_ref().unwrap().detected_layout,
+        StingerLayout::Classic
+    );
+    let classic = s.clips[0].file.clone();
+    let mask = s.clips[2].file.clone();
+
+    overwrite_with_sbs(&classic);
+    std::fs::remove_file(&mask).unwrap();
+    let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
+    assert!(
+        !s.ready,
+        "the parked clip's file changed on disk, so it is not ready as it is"
+    );
+
+    let (status, state) = call(&app, "POST", &format!("{base}/reload"), None).await;
+    assert_eq!(status, StatusCode::OK, "{state}");
+    assert_eq!(state["clips"].as_array().unwrap().len(), 3);
+    assert_eq!(state["clips"][0]["missing"], false);
+    assert_eq!(state["clips"][1]["missing"], false);
+    assert_eq!(state["clips"][2]["missing"], true, "{state}");
+    assert_eq!(state["ready"], true, "reload parks the new file: {state}");
+
+    let info = wait_for_layout(&r, 0, StingerLayout::SideBySide).await;
+    assert_eq!(info.width, 2 * W);
+    let (file, marker, green) = take_cued_and_watch(&r).await;
+    assert_eq!(file, classic);
+    assert!(marker, "the rewritten clip's graphic never aired");
+    assert!(!green, "the clip loaded before the rewrite aired");
+
+    // On air: refused.
+    r.wait_until_parked().await;
+    let take = r
+        .state
+        .stinger_take(&r.flow_id, &r.mixer(), None, None)
+        .await
+        .expect("take");
+    let (status, body) = call(&app, "POST", &format!("{base}/reload"), None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    r.wait_for_report(take.index).await;
+
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}
+
+/// A plain cue of a clip whose file was rewritten since it was parked loads
+/// the new file, with no reload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cue_loads_a_parked_clip_rewritten_on_disk() {
+    use strom_types::stinger::StingerLayout;
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let r = start("api-recue", "cpu").await;
+    let app = strom::create_app_with_state(r.state.clone()).await;
+    let base = format!("/api/flows/{}/blocks/{}/stinger", r.flow_id, r.mixer());
+    let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
+    assert_eq!(s.cued_index, Some(0));
+    let classic = s.clips[0].file.clone();
+
+    overwrite_with_sbs(&classic);
+    let (status, state) = call(
+        &app,
+        "POST",
+        &format!("{base}/cue"),
+        Some(json!({"index": 0, "file": classic})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{state}");
+    assert_eq!(state["ready"], true, "{state}");
+
+    wait_for_layout(&r, 0, StingerLayout::SideBySide).await;
+    let (file, marker, green) = take_cued_and_watch(&r).await;
+    assert_eq!(file, classic);
+    assert!(marker, "the rewritten clip's graphic never aired");
+    assert!(!green, "the clip parked before the rewrite aired");
+
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}
+
 /// Percent-encode a query value.
 fn urlencoding(s: &str) -> String {
     s.bytes()

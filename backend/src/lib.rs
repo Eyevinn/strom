@@ -245,6 +245,10 @@ pub async fn create_app_with_config(
             post(api::stinger::cue_stinger),
         )
         .route(
+            "/flows/{flow_id}/blocks/{block_id}/stinger/reload",
+            post(api::stinger::reload_stinger),
+        )
+        .route(
             "/flows/{flow_id}/blocks/{block_id}/stinger/take",
             post(api::stinger::take_stinger),
         )

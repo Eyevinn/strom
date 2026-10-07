@@ -257,6 +257,12 @@ next take is just as quick. Taking a clip that is not cued cues it first,
 which adds the time that takes (usually tens of milliseconds for a local
 file).
 
+**Changing clip files.** Replaced a clip's file under the same name? Press
+**RELOAD**: changed files are analysed again, the cued clip is loaded again
+if its file changed, and clips whose files are gone are marked MISSING. A
+cue of a clip whose file changed also loads the new file. RELOAD is refused
+while a stinger is on air.
+
 **Clip settings** (SETTINGS, for the cued clip):
 
 - **Layout**: detected from the clip alone. Two standard frames (16:9, 4:3
@@ -551,6 +557,7 @@ action.
 | **Take stinger** | Take from PGM to PVW under the cued (or named) stinger clip. Same as Take with type `stinger`. | Optional playlist index |
 | **Stinger clip settings** | Layout, cut point, cut/mix beneath, premultiplied alpha, matte inversion, per clip. Stored with the flow. | Playlist index + settings |
 | **Example stingers** | Render Strom's example clips into the media directory and add them to the library. | — |
+| **Reload stingers** | Look at the library's files again: analyse changed files, load the cued clip again if its file changed, flag missing files. | — |
 | **Set multiview overlay alpha** | Fade the multiview overlay (borders, labels, clock, VU meters). | `alpha`: 0.0 – 1.0 |
 | **Get state** | Snapshot of current PVW/PGM/DSK/FTB/PiP state. Useful when reconnecting to the mixer mid-show. | — |
 

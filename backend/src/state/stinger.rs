@@ -150,6 +150,11 @@ fn release(flow: FlowId, block: &str, token: u64) {
     });
 }
 
+/// Whether `uri` names a local file that is not on disk.
+fn is_missing(uri: &str) -> bool {
+    gstreamer::glib::filename_from_uri(uri).is_ok_and(|(path, _)| !path.is_file())
+}
+
 fn err(reason: impl Into<String>) -> PipelineError {
     PipelineError::TransitionError(reason.into())
 }
@@ -300,8 +305,9 @@ impl AppState {
     fn describe_clip(ctx: &Context, index: usize, file: &str) -> StingerClip {
         let settings = ctx.settings_for(file);
         let uri = ctx.uri(file);
+        let missing = is_missing(&uri);
         let info = analysis::cached(&uri);
-        if info.is_none() {
+        if info.is_none() && !missing {
             Self::analyse_in_background(uri);
         }
         let plan = plan_clip(&settings, info.as_ref(), ctx.matte_supported, None).ok();
@@ -313,6 +319,7 @@ impl AppState {
             variant: plan.as_ref().map(|p| p.variant),
             downgraded_from: plan.as_ref().and_then(|p| p.downgraded_from),
             cut_point_ms: plan.and_then(|p| p.cut_point_ms),
+            missing,
         }
     }
 
@@ -399,6 +406,61 @@ impl AppState {
             cue_ms,
         });
         result.map(|_| cue_ms).map_err(err)
+    }
+
+    /// Look at every library file again, for files changed on disk: start
+    /// analysing each clip whose file has no analysis for its current content
+    /// (a changed file misses the analysis cache), and load and park the cued
+    /// clip again when its file changed since it was loaded, so the next take
+    /// plays the new content. Files no longer on disk are reported per clip
+    /// (`missing`), not as a failure. Refused while a stinger is on air.
+    pub async fn stinger_reload(
+        &self,
+        flow_id: &FlowId,
+        block: &str,
+    ) -> Result<StingerState, PipelineError> {
+        if is_running(flow_id, block) {
+            return Err(PipelineError::Conflict(
+                "a stinger is on air; reload the library when it has finished".to_string(),
+            ));
+        }
+        let ctx = self.stinger_context(flow_id, block).await.map_err(err)?;
+        let files = ctx.player.playlist_files();
+        let (mut missing, mut analysing) = (0, 0);
+        for file in &files {
+            let uri = ctx.uri(file);
+            if is_missing(&uri) {
+                missing += 1;
+            } else if analysis::cached(&uri).is_none() {
+                analysing += 1;
+                Self::analyse_in_background(uri);
+            }
+        }
+        // The cue is a no-op for a clip parked from its file as it is now;
+        // `is_parked_on` is false for one whose file changed since it was
+        // loaded, and the cue then loads it again.
+        let cued = ctx.player.current_index();
+        let mut recued = false;
+        if let Some(file) = files.get(cued) {
+            if !ctx.player.is_parked_on(cued) && !is_missing(&ctx.uri(file)) {
+                recued = true;
+                if let Err(e) = self.stinger_cue(flow_id, block, cued, Some(file)).await {
+                    warn!(
+                        "Stinger on {}: reload could not cue clip {} again: {}",
+                        block, cued, e
+                    );
+                }
+            }
+        }
+        info!(
+            "Stinger library on {} reloaded: {} clips, {} to analyse, {} missing, cued clip {}",
+            block,
+            files.len(),
+            analysing,
+            missing,
+            if recued { "loaded again" } else { "unchanged" }
+        );
+        self.stinger_state(flow_id, block).await
     }
 
     /// Store a clip's settings on the stinger source block.

@@ -79,6 +79,7 @@ use utoipa::OpenApi;
         crate::api::flows::toggle_dsk,
         crate::api::stinger::get_stinger_state,
         crate::api::stinger::cue_stinger,
+        crate::api::stinger::reload_stinger,
         crate::api::stinger::take_stinger,
         crate::api::stinger::set_stinger_clip_settings,
         crate::api::stinger::write_stinger_examples,
