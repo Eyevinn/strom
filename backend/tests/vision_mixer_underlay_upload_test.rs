@@ -348,7 +348,25 @@ async fn static_underlays_are_not_reuploaded_gpu() {
     if !common::gl_available(GL_ELEMENTS) {
         return;
     }
-    run("vmunderlay_gpu", "gpu");
+    run("vmunderlay_gpu", "gpu", None);
+}
+
+/// The same flow with the PGM mixer rendering below real time (held about
+/// 60 ms per output frame, as a loaded or software-GL host does): it falls
+/// further behind the clock every second. A border configured while it is
+/// behind must still be on the cut frame that reveals it, and a colour change
+/// must still reach PGM. A restarted underlay frame stamped with the clock's
+/// running time lies in such a mixer's future and shows up seconds late.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn borders_keep_up_with_a_mixer_behind_the_clock_gpu() {
+    if !common::gl_available(GL_ELEMENTS) {
+        return;
+    }
+    run(
+        "vmunderlay_gpu_slow",
+        "gpu",
+        Some(Duration::from_millis(60)),
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -357,10 +375,10 @@ async fn static_underlays_are_not_repushed_cpu() {
     // The CPU mixer's converters ask for the detected GPU mode, which
     // panics if nothing has probed for it — `main` does this at startup.
     strom::gpu::detect_gpu_capabilities();
-    run("vmunderlay_cpu", "cpu");
+    run("vmunderlay_cpu", "cpu", None);
 }
 
-fn run(block_id: &str, backend: &str) {
+fn run(block_id: &str, backend: &str, mixer_frame_delay: Option<Duration>) {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let main_loop = gstreamer::glib::MainLoop::new(None, false);
     let main_loop_thread = {
@@ -404,6 +422,19 @@ fn run(block_id: &str, backend: &str) {
     let expected = NUM_INPUTS * (2 + NUM_PIPS);
     assert_eq!(underlays, expected, "underlay sources in the pipeline");
 
+    // Test-only: hold every PGM output frame to put the mixer behind the clock.
+    if let Some(delay) = mixer_frame_delay {
+        manager
+            .pipeline()
+            .by_name(&format!("{block_id}:mixer"))
+            .expect("mixer in pipeline")
+            .static_pad("src")
+            .expect("mixer src pad")
+            .add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+                std::thread::sleep(delay);
+                gstreamer::PadProbeReturn::Ok
+            });
+    }
     manager.start().expect("start GPU vision mixer pipeline");
     let appsink = manager
         .pipeline()
