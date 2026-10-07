@@ -136,6 +136,7 @@ pub(super) fn build_cpu_pipeline(
     queue_pgm_mv.set_property_from_str("leaky", "upstream");
     queue_pgm_mv.set_property("max-size-buffers", 1u32);
     elements::suppress_latency_query(&queue_pgm_mv);
+    elements::answer_allocation_query(&queue_pgm_mv);
     let cf_pgm_mv_id = p.id("capsfilter_pgm_mv");
     let capsfilter_pgm_mv = gst::ElementFactory::make("capsfilter")
         .name(&cf_pgm_mv_id)

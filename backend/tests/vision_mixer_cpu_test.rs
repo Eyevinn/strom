@@ -511,6 +511,93 @@ mod keyed_alpha {
             m.mv_bright
         );
     }
+
+    /// The PGM compositor must not wait on the multiview to allocate.
+    ///
+    /// `tee_pgm` feeds PGM to the outputs and, through a queue, to the
+    /// multiview's PGM tile. An ALLOCATION query on that branch waits until the
+    /// multiview compositor's streaming thread takes it, and that thread can be
+    /// stuck: at start it waits in its own ALLOCATION query behind the multiview
+    /// sink, which holds a prerolled frame until the pipeline reaches PLAYING.
+    /// PGM then never outputs and the flow never starts (1 in 30-60 runs of the
+    /// keyed tests on the macOS runner). Here the multiview's streaming thread
+    /// is held, the PGM compositor renegotiates, and PGM must keep running.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pgm_allocation_does_not_wait_on_a_stalled_multiview() {
+        use gstreamer::prelude::*;
+        let block_id = "vmk_alloc";
+        let (mut manager, _registry_file) = build_cpu_manager(&build_flow(block_id, ""));
+        manager.start().expect("start CPU pipeline");
+        let pgm_sink = manager
+            .pipeline()
+            .by_name("pgmsink")
+            .expect("pgmsink in pipeline")
+            .downcast::<gstreamer_app::AppSink>()
+            .expect("appsink type");
+        let pull = |within: std::time::Duration| {
+            let deadline = std::time::Instant::now() + within;
+            while std::time::Instant::now() < deadline {
+                if let Some(s) = pgm_sink.try_pull_sample(gstreamer::ClockTime::from_mseconds(100))
+                {
+                    return Some(s);
+                }
+            }
+            None
+        };
+        pull(std::time::Duration::from_secs(20)).expect("PGM running before the stall");
+
+        // Hold the multiview compositor's streaming thread on its next push.
+        let mv_src = manager
+            .pipeline()
+            .by_name(&format!("{}:mv_comp", block_id))
+            .expect("mv_comp in pipeline")
+            .static_pad("src")
+            .expect("mv_comp src pad");
+        let held = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = {
+            let held = std::sync::Arc::clone(&held);
+            mv_src
+                .add_probe(
+                    gstreamer::PadProbeType::BLOCK | gstreamer::PadProbeType::BUFFER,
+                    move |_, _| {
+                        held.store(true, std::sync::atomic::Ordering::Relaxed);
+                        gstreamer::PadProbeReturn::Ok
+                    },
+                )
+                .expect("blocking probe")
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !held.load(std::sync::atomic::Ordering::Relaxed) {
+            assert!(std::time::Instant::now() < deadline, "multiview never held");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Renegotiate the PGM compositor: its next output runs an ALLOCATION
+        // query through tee_pgm, including the branch into the held multiview.
+        manager
+            .pipeline()
+            .by_name(&format!("{}:mixer", block_id))
+            .expect("mixer in pipeline")
+            .static_pad("src")
+            .expect("mixer src pad")
+            .mark_reconfigure();
+        // Drain what was already produced, then PGM must keep coming.
+        let mut frames = 0;
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < until {
+            if pull(std::time::Duration::from_millis(500)).is_some() {
+                frames += 1;
+            }
+        }
+        mv_src.remove_probe(probe);
+        manager.stop().expect("stop");
+        drop(manager);
+        assert!(
+            frames > 10,
+            "PGM stalled while the multiview was held: {} frames in 2 s",
+            frames
+        );
+    }
 }
 
 /// Regression tests: the `/pip` write path must reject a zone whose source
