@@ -107,18 +107,26 @@ fn energy(samples: &[f32]) -> f64 {
 }
 
 /// Off, the element must leave audio alone for as long as it runs, not only
-/// until a model would have finished loading.
+/// until a model would have finished loading. An enabled element fed the
+/// same audio shows when a load would have finished on this host, however
+/// slow it is; the check runs until then and one second past it.
 #[test]
 fn disabled_passes_audio_through_unchanged() {
     let mut h = Harness::new(false);
+    let mut on = Harness::new(true);
     let mut rng = 1;
-    let until = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut until = None;
     let mut i = 0;
-    while Instant::now() < until {
+    while until.is_none_or(|t| Instant::now() < t) {
         let input = noise(&mut rng, BUF);
         let (output, pts) = h.process(&input);
         assert_eq!(output, input, "buffer {i} changed while disabled");
         assert_eq!(pts, Some(gst::ClockTime::from_mseconds(10 * i)));
+        if until.is_none() && on.process(&input).0 != input {
+            until = Some(Instant::now() + Duration::from_secs(1));
+        }
+        assert!(Instant::now() < deadline, "the enabled element never ran");
         i += 1;
         std::thread::sleep(Duration::from_millis(5));
     }
