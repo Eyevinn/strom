@@ -256,6 +256,12 @@ struct TrackActivity {
     /// `retired` this is not final: the track is recorded again, in a new file,
     /// once its input carries data.
     ended: AtomicBool,
+    /// Set when the watchdog ended this track but neither its chain nor its
+    /// splitmuxsink pad took the EOS, so the muxer is still waiting on that pad.
+    /// The watchdog retries the pad while it is set. See `end_stalled_track`.
+    eos_pending: AtomicBool,
+    /// Whether that refusal has been reported, so a retry every poll logs once.
+    eos_refusal_logged: AtomicBool,
     /// Set once the input is cut off from its chain and the park probe is in
     /// place. See `park_input`.
     parked: AtomicBool,
@@ -274,6 +280,8 @@ impl TrackActivity {
             running_time_offset_ns: AtomicI64::new(0),
             retired: AtomicBool::new(false),
             ended: AtomicBool::new(false),
+            eos_pending: AtomicBool::new(false),
+            eos_refusal_logged: AtomicBool::new(false),
             parked: AtomicBool::new(false),
             resumed: AtomicBool::new(false),
             stash: Mutex::new(Stash::default()),
@@ -556,11 +564,32 @@ fn add_muxer_intake_probe(pad: &gst::Pad, activity: &Arc<TrackActivity>, epoch: 
 /// The EOS goes into the track's parser, not out of the block's input: the input
 /// is parked first (see `park_input`), so it never carries EOS itself and can be
 /// linked into a new chain when data returns.
-fn end_stalled_track(input: &gst::Element, activity: &Arc<TrackActivity>) {
+///
+/// The parser can refuse it. `gst_pad_send_event` answers a refusal with a bare
+/// `false`: the pad is flushing or no longer active, already at EOS, or out of
+/// its parent, all signs the chain is being taken down. A busy downstream does
+/// not refuse, it blocks. A refused EOS leaves the muxer waiting on this track
+/// for good, so it goes to `muxer_pad`, the splitmuxsink pad itself, instead:
+/// that is the pad the muxer waits on, and the watchdog picks only a track whose
+/// queue has drained, so nothing is pushing into it. If that pad refuses too,
+/// `eos_pending` is set and the watchdog retries it every poll (see
+/// `retry_pending_eos`). The track stays ended either way: its input is parked,
+/// and a new file takes it back when data returns.
+fn end_stalled_track(
+    input: &gst::Element,
+    muxer_pad: Option<&gst::glib::WeakRef<gst::Pad>>,
+    activity: &Arc<TrackActivity>,
+) {
     if activity.ended.swap(true, Ordering::SeqCst) {
         return;
     }
-    park_input(input, activity);
+    park_input(input, activity, muxer_pad);
+}
+
+/// Send EOS to a splitmuxsink sink pad. A pad that already carries one has
+/// taken it.
+fn end_muxer_pad(pad: &gst::Pad) -> bool {
+    pad.pad_flags().contains(gst::PadFlags::EOS) || pad.send_event(gst::event::Eos::new())
 }
 
 /// Cut a track's input off from its chain and end the chain, as soon as the
@@ -570,28 +599,63 @@ fn end_stalled_track(input: &gst::Element, activity: &Arc<TrackActivity>) {
 /// muxer stops waiting for that pad and can finish the file. The input itself
 /// stays clean: unlinked, with the park probe keeping it quiet.
 ///
+/// With `muxer_pad`, an EOS the parser refuses, or one with no parser to go to,
+/// goes to that pad, and `eos_pending` records whether either took it. Only the
+/// watchdog passes it: it ends a track whose queue is empty, whereas a file
+/// switch parks tracks still recording, and an EOS sent past their queue would
+/// overtake the data in it.
+///
 /// The watchdog only picks a track whose queue has drained, so nothing is being
 /// pushed through its input and the IDLE probe normally runs at once, on the
 /// calling thread. Otherwise it runs when the push in flight returns.
-fn park_input(input: &gst::Element, activity: &Arc<TrackActivity>) {
+fn park_input(
+    input: &gst::Element,
+    activity: &Arc<TrackActivity>,
+    muxer_pad: Option<&gst::glib::WeakRef<gst::Pad>>,
+) {
     let Some(src) = input.static_pad("src") else {
         return;
     };
     let activity = Arc::clone(activity);
+    let muxer_pad = muxer_pad.cloned();
     src.add_probe(gst::PadProbeType::IDLE, move |pad, _info| {
         // A cut at a keyframe and the fallback cut can both get here.
         if activity.parked.swap(true, Ordering::SeqCst) {
             return gst::PadProbeReturn::Remove;
         }
         add_park_probe(pad, &activity);
-        if let Some(peer) = pad.peer() {
-            let _ = pad.unlink(&peer);
-            // The parser drains its last frame and passes the EOS on, through
-            // the queue, to the splitmuxsink pad.
-            peer.send_event(gst::event::Eos::new());
+        let peer = pad.peer();
+        if let Some(peer) = peer.as_ref() {
+            let _ = pad.unlink(peer);
+        }
+        // The parser drains its last frame and passes the EOS on, through the
+        // queue, to the splitmuxsink pad.
+        let delivered = peer.is_some_and(|peer| peer.send_event(gst::event::Eos::new()));
+        if let Some(muxer_pad) = muxer_pad.as_ref() {
+            let delivered = delivered || muxer_pad.upgrade().is_some_and(|pad| end_muxer_pad(&pad));
+            activity.eos_pending.store(!delivered, Ordering::SeqCst);
         }
         gst::PadProbeReturn::Remove
     });
+}
+
+/// Retry an EOS that neither route took when the watchdog ended this track.
+/// Returns `Some(true)` once the muxer pad has taken it, `Some(false)` while it
+/// still refuses, and `None` when nothing is pending. A track whose pad was
+/// handed back in a file switch has nothing left to end.
+fn retry_pending_eos(track: &WatchedTrack) -> Option<bool> {
+    if !track.activity.eos_pending.load(Ordering::SeqCst) {
+        return None;
+    }
+    let Some(pad) = track.muxer_pad.as_ref().and_then(|p| p.upgrade()) else {
+        track.activity.eos_pending.store(false, Ordering::SeqCst);
+        return None;
+    };
+    let delivered = end_muxer_pad(&pad);
+    if delivered {
+        track.activity.eos_pending.store(false, Ordering::SeqCst);
+    }
+    Some(delivered)
 }
 
 /// Where a cut at a keyframe stands. See `park_at_next_keyframe`.
@@ -642,7 +706,7 @@ fn park_at_next_keyframe(input: &gst::Element, activity: &Arc<TrackActivity>, cu
             if state == CUT_WAITING {
                 probe_cut.store(CUT_AT_KEYFRAME, Ordering::SeqCst);
                 if let Some(input) = input_weak.upgrade() {
-                    park_input(&input, &activity);
+                    park_input(&input, &activity, None);
                 }
             }
             gst::PadProbeReturn::Drop
@@ -1119,7 +1183,7 @@ fn start_next_file(
             park_at_next_keyframe(&input, &track.activity, &cut);
             cuts.push((index, cut));
         } else {
-            park_input(&input, &track.activity);
+            park_input(&input, &track.activity, None);
         }
     }
     let all_parked = |record: &[usize]| {
@@ -1154,7 +1218,7 @@ fn start_next_file(
             );
             track.activity.ended.store(true, Ordering::SeqCst);
             if let Some(input) = track.input.upgrade() {
-                park_input(&input, &track.activity);
+                park_input(&input, &track.activity, None);
             }
             record.retain(|i| i != index);
             release.push(*index);
@@ -1260,6 +1324,10 @@ fn start_next_file(
         if let Some(pad) = tracks[index].muxer_pad.take().and_then(|p| p.upgrade()) {
             splitmuxsink.release_request_pad(&pad);
         }
+        // An EOS still owed to that pad is owed to nothing now.
+        let activity = &tracks[index].activity;
+        activity.eos_pending.store(false, Ordering::SeqCst);
+        activity.eos_refusal_logged.store(false, Ordering::Relaxed);
     }
 
     let mut recorded = Vec::with_capacity(record.len());
@@ -1581,6 +1649,25 @@ impl StallCheck {
     ) {
         let timeout_ms = track_stall_timeout().as_millis() as u64;
         let now_ms = epoch.elapsed().as_millis() as u64;
+
+        for track in tracks {
+            match retry_pending_eos(track) {
+                Some(true) => {
+                    warn!(
+                        "Recorder {}: {} took the EOS that ends its track on a retry — the rest of the recording continues",
+                        block_id, track.label
+                    );
+                    track
+                        .activity
+                        .eos_refusal_logged
+                        .store(false, Ordering::Relaxed);
+                    self.last_end_ms = Some(now_ms);
+                }
+                Some(false) => log_eos_refusal(block_id, track),
+                None => {}
+            }
+        }
+
         let mut live = Vec::with_capacity(tracks.len());
 
         for (track, state) in tracks.iter().zip(states) {
@@ -1652,8 +1739,27 @@ impl StallCheck {
             track.label,
             running_ms
         );
-        end_stalled_track(&input, &track.activity);
+        end_stalled_track(&input, track.muxer_pad.as_ref(), &track.activity);
         self.last_end_ms = Some(now_ms);
+        if track.activity.eos_pending.load(Ordering::SeqCst) {
+            log_eos_refusal(block_id, track);
+        }
+    }
+}
+
+/// Report, once per refusal, that neither route took a track's EOS.
+fn log_eos_refusal(block_id: &str, track: &WatchedTrack) {
+    if !track
+        .activity
+        .eos_refusal_logged
+        .swap(true, Ordering::Relaxed)
+    {
+        warn!(
+            "Recorder {}: neither {}'s chain nor its muxer pad took the EOS that ends the track — the recording stays stalled; retrying every {}ms",
+            block_id,
+            track.label,
+            TRACK_STALL_POLL.as_millis()
+        );
     }
 }
 
@@ -3061,7 +3167,7 @@ mod tests {
             "the branch takes buffers while the track is live"
         );
 
-        end_stalled_track(&input, &activity);
+        end_stalled_track(&input, None, &activity);
         assert!(
             activity.parked.load(Ordering::SeqCst),
             "an idle input is parked at once"
@@ -3109,5 +3215,168 @@ mod tests {
         );
 
         let _ = pipeline.set_state(gst::State::Null);
+    }
+
+    /// A playing pipeline with a track input, the parser it feeds, and a sink
+    /// standing in for the splitmuxsink pad. The parser is linked to nothing:
+    /// these tests only look at which pad the EOS reaches.
+    struct EndRig {
+        pipeline: gst::Pipeline,
+        input: gst::Element,
+        parser_sink: gst::Pad,
+        muxer_pad: gst::Pad,
+    }
+
+    impl EndRig {
+        fn new(linked: bool) -> Self {
+            gst::init().expect("gstreamer init");
+            let pipeline = gst::Pipeline::new();
+            let make = |factory: &str| {
+                gst::ElementFactory::make(factory)
+                    .property("silent", true)
+                    .build()
+                    .unwrap_or_else(|_| panic!("{} is part of gstreamer core", factory))
+            };
+            let input = make("identity");
+            let parser = make("identity");
+            let muxer = gst::ElementFactory::make("fakesink")
+                .property("async", false)
+                .build()
+                .expect("fakesink is part of gstreamer core");
+            pipeline
+                .add_many([&input, &parser, &muxer])
+                .expect("add elements");
+            if linked {
+                input.link(&parser).expect("link input to parser");
+            }
+            pipeline
+                .set_state(gst::State::Playing)
+                .expect("pipeline accepts PLAYING");
+            let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+            Self {
+                pipeline,
+                input,
+                parser_sink: parser.static_pad("sink").expect("parser sink pad"),
+                muxer_pad: muxer.static_pad("sink").expect("muxer stand-in sink pad"),
+            }
+        }
+
+        fn watched(&self, activity: &Arc<TrackActivity>) -> WatchedTrack {
+            WatchedTrack {
+                label: "audio 0".into(),
+                key: "audio_0".into(),
+                is_video: false,
+                input: self.input.downgrade(),
+                muxer_pad: Some(self.muxer_pad.downgrade()),
+                activity: Arc::clone(activity),
+            }
+        }
+
+        fn has_eos(pad: &gst::Pad) -> bool {
+            pad.pad_flags().contains(gst::PadFlags::EOS)
+        }
+    }
+
+    impl Drop for EndRig {
+        fn drop(&mut self) {
+            let _ = self.pipeline.set_state(gst::State::Null);
+        }
+    }
+
+    /// A parser that is no longer active refuses the EOS, as a chain being taken
+    /// down does. The muxer would then wait on this track for good, so the EOS
+    /// goes to the splitmuxsink pad instead.
+    #[test]
+    fn an_eos_the_chain_refuses_goes_to_the_muxer_pad() {
+        let rig = EndRig::new(true);
+        rig.parser_sink
+            .set_active(false)
+            .expect("deactivate the parser's sink pad");
+        let activity = Arc::new(TrackActivity::new());
+
+        end_stalled_track(&rig.input, Some(&rig.muxer_pad.downgrade()), &activity);
+
+        assert!(
+            activity.parked.load(Ordering::SeqCst),
+            "the input is parked"
+        );
+        assert!(
+            !EndRig::has_eos(&rig.parser_sink),
+            "the parser took the EOS after all, so this test proves nothing"
+        );
+        assert!(
+            EndRig::has_eos(&rig.muxer_pad),
+            "the parser refused the EOS and nothing else got it, so the muxer still waits on this track"
+        );
+        assert!(!activity.eos_pending.load(Ordering::SeqCst));
+    }
+
+    /// An input with no chain behind it has no parser to take the EOS; the
+    /// splitmuxsink pad still has to get one.
+    #[test]
+    fn an_input_with_no_chain_still_ends_the_muxer_pad() {
+        let rig = EndRig::new(false);
+        let activity = Arc::new(TrackActivity::new());
+
+        end_stalled_track(&rig.input, Some(&rig.muxer_pad.downgrade()), &activity);
+
+        assert!(
+            EndRig::has_eos(&rig.muxer_pad),
+            "an unlinked input sent its EOS nowhere, so the muxer still waits on this track"
+        );
+        assert!(!activity.eos_pending.load(Ordering::SeqCst));
+    }
+
+    /// When the muxer pad refuses as well, the track is still ended (its input
+    /// is parked), but the EOS is owed and the watchdog retries it until the
+    /// pad takes it.
+    #[test]
+    fn an_eos_nothing_took_is_retried_until_the_muxer_pad_takes_it() {
+        let rig = EndRig::new(true);
+        rig.parser_sink
+            .set_active(false)
+            .expect("deactivate the parser's sink pad");
+        rig.muxer_pad
+            .set_active(false)
+            .expect("deactivate the muxer stand-in's sink pad");
+        let activity = Arc::new(TrackActivity::new());
+        let track = rig.watched(&activity);
+
+        end_stalled_track(&rig.input, track.muxer_pad.as_ref(), &activity);
+        assert!(activity.ended.load(Ordering::SeqCst));
+        assert!(
+            activity.eos_pending.load(Ordering::SeqCst),
+            "no pad took the EOS, yet nothing records that it is still owed"
+        );
+        assert_eq!(retry_pending_eos(&track), Some(false));
+
+        rig.muxer_pad
+            .set_active(true)
+            .expect("reactivate the muxer stand-in's sink pad");
+        assert_eq!(
+            retry_pending_eos(&track),
+            Some(true),
+            "the muxer pad takes the EOS once it can"
+        );
+        assert!(EndRig::has_eos(&rig.muxer_pad));
+        assert_eq!(retry_pending_eos(&track), None, "nothing is owed any more");
+    }
+
+    /// A file switch parks tracks that are still recording, with data in their
+    /// queues. An EOS sent straight to their muxer pad would overtake it, so that
+    /// path sends it to the chain only.
+    #[test]
+    fn a_park_for_a_file_switch_leaves_the_muxer_pad_alone() {
+        let rig = EndRig::new(true);
+        rig.parser_sink
+            .set_active(false)
+            .expect("deactivate the parser's sink pad");
+        let activity = Arc::new(TrackActivity::new());
+
+        park_input(&rig.input, &activity, None);
+
+        assert!(activity.parked.load(Ordering::SeqCst));
+        assert!(!EndRig::has_eos(&rig.muxer_pad));
+        assert!(!activity.eos_pending.load(Ordering::SeqCst));
     }
 }

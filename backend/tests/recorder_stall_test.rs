@@ -304,4 +304,62 @@ mod stalled_track {
             WINDOW
         );
     }
+
+    /// The same stall, with the stopped track's chain already coming apart: its
+    /// parser no longer active, so it refuses the EOS that would end the track,
+    /// as a pad that is flushing, inactive or out of its parent does. The
+    /// recording must still get out of the muxer's wait.
+    ///
+    /// Without the fallback to the splitmuxsink pad, the refused EOS leaves the
+    /// muxer waiting on the audio track for good and the counted video stays at
+    /// zero.
+    #[test]
+    fn a_stalled_track_whose_chain_refuses_the_eos_still_ends() {
+        if !plugins_available() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let media_root = tmp.path();
+        let pipeline = gst::Pipeline::new();
+        start_recorder(&pipeline, "rec_refuse", media_root, 43); // ~1 s at 1024 samples / 44.1 kHz
+        let video_into_muxer = count_into_muxer(&pipeline, "rec_refuse", "video");
+
+        // Audio has stopped by now, and the watchdog cannot have ended it yet:
+        // every track has to be quiet at the muxer for a stall timeout first.
+        std::thread::sleep(Duration::from_millis(1300));
+        let parser_sink = pipeline
+            .by_name("rec_refuse:audio_0_parser")
+            .expect("the audio parser is in the pipeline")
+            .static_pad("sink")
+            .expect("parser sink pad");
+        assert!(
+            !parser_sink.pad_flags().contains(gst::PadFlags::EOS),
+            "the watchdog ended the audio track before its chain was broken, so this test proves nothing"
+        );
+        parser_sink
+            .set_active(false)
+            .expect("deactivate the audio parser's sink pad");
+
+        // Past the stall timeout with room for a poll or two, then measure the
+        // window after it: this is about recovery, not about the stall.
+        std::thread::sleep(STALL_TIMEOUT * 4);
+        let buffers_before = video_into_muxer.load(Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < deadline
+            && video_into_muxer.load(Ordering::Relaxed) - buffers_before < MIN_IN_WINDOW
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let buffers_after = video_into_muxer.load(Ordering::Relaxed);
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline to NULL");
+
+        assert!(
+            buffers_after - buffers_before >= MIN_IN_WINDOW,
+            "the recording stayed frozen on a track whose chain refused the EOS: {} video buffers reached the muxer within 20 s",
+            buffers_after - buffers_before
+        );
+    }
 }
