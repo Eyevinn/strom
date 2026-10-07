@@ -24,6 +24,7 @@ pub(crate) mod underlay;
 pub mod video_adapt;
 pub mod video_frame;
 pub mod video_input_bridge;
+pub mod video_memory_front;
 pub mod volume_ramp;
 pub mod whep_probe;
 
