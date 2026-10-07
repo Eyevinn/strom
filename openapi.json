@@ -6445,9 +6445,24 @@
                 "minimum": 0
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "A `kind` this build does not know, from a newer server. Never sent.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "unknown"
+                ]
+              }
+            }
           }
         ],
-        "description": "One structured reason a block reported failed.\n\nA block can carry several at once: a WHIP Input block has one seat per\nslot, and each can lose a medium on its own. Clients should ignore a\n`kind` they do not know."
+        "description": "One structured reason a block reported failed.\n\nA block can carry several at once: a WHIP Input block has one seat per\nslot, and each can lose a medium on its own. Clients should ignore a\n`kind` they do not know; this type reads one as [`BlockHealthCause::Unknown`]."
       },
       "BlockHealthStatus": {
         "type": "string",
