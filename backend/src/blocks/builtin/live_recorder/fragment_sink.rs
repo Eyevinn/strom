@@ -1,20 +1,31 @@
-//! A file sink for fragmented MP4 that starts a new file at a fragment boundary.
+//! A file sink that starts a new file at a point where the stream can begin.
 //!
-//! `isofmp4mux` emits its init segment (`ftyp` + `moov`) once, flagged
-//! `DISCONT | HEADER`, and then one `moof` + `mdat` per fragment. Each fragment
-//! header is flagged `HEADER` without `DELTA_UNIT`; everything else is
-//! `DELTA_UNIT`. A fragment carries the index of its own samples, so a file that
-//! starts with the init segment and continues at any fragment header is a
-//! complete, playable fragmented MP4. That is all a split needs: close the file,
-//! open the next, write the init segment again, carry on.
+//! Each container the Live Recorder writes can be cut at known places, and a
+//! file that starts with the container's header and continues from such a
+//! place plays on its own:
+//!
+//! - Fragmented MP4 (`isofmp4mux`): the init segment (`ftyp` + `moov`) arrives
+//!   once, flagged `DISCONT | HEADER`. Each fragment header (`moof`) is flagged
+//!   `HEADER` without `DELTA_UNIT`.
+//! - Matroska (`matroskamux streamable=true`): the header is the caps'
+//!   `streamheader`. A cluster that starts on a keyframe is neither `HEADER` nor
+//!   `DELTA_UNIT`.
+//! - MPEG-TS (`mpegtsmux`): PAT and PMT are the caps' `streamheader`. The packet
+//!   that starts a keyframe is `HEADER` without `DELTA_UNIT`.
+//!
+//! A split closes the file, opens the next, writes the header, and carries on
+//! from the next cut point. MP4 and Matroska carry absolute times, so the sink
+//! moves each file's times back to start at zero; MPEG-TS players expect a
+//! running PTS.
 //!
 //! The sink is not async and does not sync to the clock. It never prerolls, so a
 //! recording whose first data arrives late does not take the pipeline out of
-//! PLAYING, and it writes each buffer as it arrives, so a crash loses at most
-//! the fragment the muxer has not handed over yet.
+//! PLAYING. It flushes at every cut point, so a crash loses at most what came
+//! after the last one.
 
-use super::mp4_boxes;
+use super::{mkv_cluster, mp4_boxes};
 use gst::glib;
+use gst::prelude::*;
 use gst::subclass::prelude::*;
 use gst_base::prelude::*;
 use gst_base::subclass::prelude::*;
@@ -22,24 +33,56 @@ use gstreamer as gst;
 use gstreamer_base as gst_base;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long a stop waits for the muxer to hand over what it holds.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Longest the sink keeps written data in its buffer. Cut points flush too, but
+/// while the video is stalled there are none, and the audio still has to reach
+/// the disk.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Called with the index and path of every file the sink opens.
 pub type FileOpenedFn = Arc<dyn Fn(u32, &std::path::Path) + Send + Sync>;
 
 /// When the sink starts a new file. Both limits apply; whichever is reached
-/// first splits, at the next fragment.
+/// first splits, at the next cut point.
 #[derive(Clone, Debug, Default)]
 pub struct SplitPolicy {
     pub max_duration: Option<gst::ClockTime>,
     pub max_bytes: Option<u64>,
+}
+
+/// The container the sink is writing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Format {
+    #[default]
+    FragmentedMp4,
+    Matroska,
+    MpegTs,
+}
+
+impl Format {
+    fn is_cut_point(self, flags: gst::BufferFlags) -> bool {
+        let header = flags.contains(gst::BufferFlags::HEADER);
+        let delta = flags.contains(gst::BufferFlags::DELTA_UNIT);
+        let discont = flags.contains(gst::BufferFlags::DISCONT);
+        match self {
+            Format::FragmentedMp4 => header && !delta && !discont,
+            Format::Matroska => !header && !delta,
+            Format::MpegTs => header && !delta,
+        }
+    }
+
+    /// Its header comes in the caps' `streamheader`, not as a buffer.
+    fn header_in_caps(self) -> bool {
+        self != Format::FragmentedMp4
+    }
 }
 
 glib::wrapper! {
@@ -49,16 +92,17 @@ glib::wrapper! {
 
 impl FragmentFileSink {
     /// `location` holds one `%05d`, replaced by the file index.
-    pub fn new(name: &str, location: &str, policy: SplitPolicy) -> Self {
+    pub fn new(name: &str, location: &str, format: Format, policy: SplitPolicy) -> Self {
         let sink: Self = glib::Object::builder().property("name", name).build();
         let mut settings = sink.imp().settings.lock().unwrap();
         settings.location = location.to_string();
+        settings.format = format;
         settings.policy = policy;
         drop(settings);
         sink
     }
 
-    /// Start a new file at the next fragment.
+    /// Start a new file at the next cut point.
     pub fn split_now(&self) {
         self.imp().split_requested.store(true, Ordering::SeqCst);
     }
@@ -83,35 +127,44 @@ mod imp {
         gst::DebugCategory::new(
             "stromfragmentsink",
             gst::DebugColorFlags::empty(),
-            Some("Strom fragmented MP4 file sink"),
+            Some("Strom splitting file sink"),
         )
     });
 
     #[derive(Default)]
     pub struct Settings {
         pub location: String,
+        pub format: Format,
         pub policy: SplitPolicy,
     }
 
     #[derive(Default)]
     struct State {
-        file: Option<File>,
+        file: Option<BufWriter<File>>,
         /// Index the next file opened gets.
         next_index: u32,
-        /// The init segment, written at the start of every file.
-        init_segment: Option<Vec<u8>>,
-        /// PTS of the first fragment in the current file.
+        /// The container header, written at the start of every file.
+        header: Option<Vec<u8>>,
+        /// PTS of the first cut point in the current file.
         file_start: Option<gst::ClockTime>,
         bytes_in_file: u64,
-        /// The fragment a split is due at, held back until the next fragment
-        /// starts. If the stream ends first, it is the muxer's tail and goes at
-        /// the end of the current file rather than alone into a new one.
-        held: Option<(Option<gst::ClockTime>, Vec<u8>)>,
-        /// Track id → timescale, from the init segment.
+        /// The cut point a split is due at, and what followed it, held back
+        /// until the next cut point. If the stream ends first, it is the
+        /// muxer's tail and goes at the end of the current file rather than
+        /// alone into a new one.
+        held: Option<(Option<gst::ClockTime>, Vec<Chunk>)>,
+        /// MP4: track id → timescale, from the init segment.
         timescales: HashMap<u32, u32>,
-        /// Decode time the current file starts at, taken from its first
-        /// fragment and subtracted from every fragment in it.
-        file_base_ns: Option<u64>,
+        /// MP4: decode time (ns) the current file starts at.
+        /// Matroska: cluster timestamp the current file starts at.
+        file_base: Option<u64>,
+        last_flush: Option<Instant>,
+    }
+
+    /// One buffer's bytes, and whether the muxer flagged it as a header.
+    struct Chunk {
+        header: bool,
+        bytes: Vec<u8>,
     }
 
     #[derive(Default)]
@@ -147,13 +200,20 @@ mod imp {
     impl ElementImpl for FragmentFileSink {
         fn pad_templates() -> &'static [gst::PadTemplate] {
             static TEMPLATES: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
+                let caps = gst::Caps::builder_full()
+                    .structure(
+                        gst::Structure::builder("video/quicktime")
+                            .field("variant", "iso-fragmented")
+                            .build(),
+                    )
+                    .structure(gst::Structure::new_empty("video/x-matroska"))
+                    .structure(gst::Structure::new_empty("video/mpegts"))
+                    .build();
                 vec![gst::PadTemplate::new(
                     "sink",
                     gst::PadDirection::Sink,
                     gst::PadPresence::Always,
-                    &gst::Caps::builder("video/quicktime")
-                        .field("variant", "iso-fragmented")
-                        .build(),
+                    &caps,
                 )
                 .unwrap()]
             });
@@ -166,8 +226,8 @@ mod imp {
         ) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
             // Sinks change state first, so here everything upstream is still
             // PLAYING, and this sink still renders: in PAUSED it would hold the
-            // muxer's last fragment waiting for PLAYING. Only on the way down
-            // to READY or NULL; a pause must not end the file.
+            // muxer's last data waiting for PLAYING. Only on the way down to
+            // READY or NULL; a pause must not end the file.
             if transition == gst::StateChange::PlayingToPaused && self.stopping() {
                 self.drain();
             }
@@ -176,13 +236,17 @@ mod imp {
     }
 
     impl FragmentFileSink {
+        fn format(&self) -> Format {
+            self.settings.lock().unwrap().format
+        }
+
         fn path_for(&self, index: u32) -> PathBuf {
             let settings = self.settings.lock().unwrap();
             PathBuf::from(settings.location.replace("%05d", &format!("{:05}", index)))
         }
 
-        /// Close the current file, if any, and open the next one with the init
-        /// segment at its start.
+        /// Close the current file, if any, and open the next one with the
+        /// container header at its start.
         fn open_next_file(&self, state: &mut State) -> Result<(u32, PathBuf), gst::ErrorMessage> {
             if let Some(mut file) = state.file.take() {
                 let _ = file.flush();
@@ -192,33 +256,34 @@ mod imp {
             if let Some(dir) = path.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
-            let mut file = File::create(&path).map_err(|e| {
+            let file = File::create(&path).map_err(|e| {
                 gst::error_msg!(
                     gst::ResourceError::OpenWrite,
                     ["Could not create {}: {}", path.display(), e]
                 )
             })?;
+            let mut file = BufWriter::with_capacity(256 * 1024, file);
             let mut written = 0u64;
-            if let Some(init) = &state.init_segment {
-                file.write_all(init).map_err(|e| {
+            if let Some(header) = &state.header {
+                file.write_all(header).map_err(|e| {
                     gst::error_msg!(
                         gst::ResourceError::Write,
                         ["Could not write to {}: {}", path.display(), e]
                     )
                 })?;
-                written = init.len() as u64;
+                written = header.len() as u64;
             }
             state.file = Some(file);
             state.next_index += 1;
             state.file_start = None;
-            state.file_base_ns = None;
+            state.file_base = None;
             state.bytes_in_file = written;
             Ok((index, path))
         }
 
-        fn split_due(&self, state: &State, fragment_pts: Option<gst::ClockTime>) -> bool {
+        fn split_due(&self, state: &State, pts: Option<gst::ClockTime>) -> bool {
             let policy = self.settings.lock().unwrap().policy.clone();
-            let by_time = match (policy.max_duration, state.file_start, fragment_pts) {
+            let by_time = match (policy.max_duration, state.file_start, pts) {
                 (Some(max), Some(start), Some(pts)) => pts.saturating_sub(start) >= max,
                 _ => false,
             };
@@ -242,30 +307,66 @@ mod imp {
             Ok(())
         }
 
-        /// Write a fragment, from its header on, with its decode times moved so
+        /// Write data that may hold the container's absolute times, moved so
         /// the file starts at zero.
-        fn write_fragment(&self, state: &mut State, bytes: &[u8]) -> Result<(), gst::ErrorMessage> {
-            let mut bytes = bytes.to_vec();
-            if state.file_base_ns.is_none() {
-                state.file_base_ns = mp4_boxes::fragment_start_ns(&bytes, &state.timescales);
+        fn write_timed(
+            &self,
+            state: &mut State,
+            header: bool,
+            bytes: &[u8],
+        ) -> Result<(), gst::ErrorMessage> {
+            match self.format() {
+                // Only a fragment header holds decode times; media is never parsed.
+                Format::FragmentedMp4 if header => {
+                    let mut bytes = bytes.to_vec();
+                    if state.file_base.is_none() {
+                        state.file_base = mp4_boxes::fragment_start_ns(&bytes, &state.timescales);
+                    }
+                    if let Some(base) = state.file_base {
+                        mp4_boxes::shift_decode_times(&mut bytes, &state.timescales, base);
+                    }
+                    self.write(state, &bytes)
+                }
+                Format::Matroska => {
+                    let Some(ts) = mkv_cluster::cluster_timestamp(bytes) else {
+                        return self.write(state, bytes);
+                    };
+                    let base = *state.file_base.get_or_insert(ts);
+                    let mut bytes = bytes.to_vec();
+                    mkv_cluster::shift_cluster_timestamp(&mut bytes, base);
+                    self.write(state, &bytes)
+                }
+                Format::FragmentedMp4 | Format::MpegTs => self.write(state, bytes),
             }
-            if let Some(base) = state.file_base_ns {
-                mp4_boxes::shift_decode_times(&mut bytes, &state.timescales, base);
-            }
-            self.write(state, &bytes)
         }
 
-        /// Put a held fragment at the end of the current file: the stream ended
-        /// before another fragment came to start the next file with.
-        fn flush_held(&self, state: &mut State) {
-            if let Some((_, bytes)) = state.held.take() {
-                if let Err(msg) = self.write_fragment(state, &bytes) {
-                    gst::warning!(CAT, imp = self, "{:?}", msg);
-                }
-            }
+        fn flush_file(state: &mut State) {
             if let Some(file) = state.file.as_mut() {
                 let _ = file.flush();
             }
+            state.last_flush = Some(Instant::now());
+        }
+
+        /// Put held data at the end of the current file: the stream ended
+        /// before another cut point came to start the next file with.
+        fn flush_held(&self, state: &mut State) {
+            if let Some((_, chunks)) = state.held.take() {
+                if let Err(msg) = self.write_chunks(state, &chunks) {
+                    gst::warning!(CAT, imp = self, "{:?}", msg);
+                }
+            }
+            Self::flush_file(state);
+        }
+
+        fn write_chunks(
+            &self,
+            state: &mut State,
+            chunks: &[Chunk],
+        ) -> Result<(), gst::ErrorMessage> {
+            for chunk in chunks {
+                self.write_timed(state, chunk.header, &chunk.bytes)?;
+            }
+            Ok(())
         }
 
         /// Whether the pipeline this sink is in is on its way below PAUSED.
@@ -277,8 +378,8 @@ mod imp {
             matches!(top.pending_state(), gst::State::Ready | gst::State::Null)
         }
 
-        /// Finish the file on a stop: without EOS the muxer keeps its last
-        /// fragment, and the recording ends up to a fragment short.
+        /// Finish the file on a stop: without EOS the muxer keeps what it has
+        /// not handed over, and the recording ends that much short.
         fn drain(&self) {
             if self.state.lock().unwrap().file.is_none() || *self.eos.lock().unwrap() {
                 return;
@@ -305,7 +406,7 @@ mod imp {
                 gst::warning!(
                     CAT,
                     imp = self,
-                    "The muxer did not finish within {:?}; the file may end up to a fragment short",
+                    "The muxer did not finish within {:?}; the file may end short",
                     DRAIN_TIMEOUT
                 );
             }
@@ -320,6 +421,83 @@ mod imp {
             if let Some(callback) = callback {
                 callback(index, &path);
             }
+        }
+
+        fn handle(
+            &self,
+            buffer: &gst::Buffer,
+            bytes: &[u8],
+        ) -> Result<Option<(u32, PathBuf)>, gst::ErrorMessage> {
+            let format = self.format();
+            let flags = buffer.flags();
+            let header = flags.contains(gst::BufferFlags::HEADER);
+            let mut state = self.state.lock().unwrap();
+            let mut opened = None;
+
+            if format == Format::FragmentedMp4
+                && flags.contains(gst::BufferFlags::HEADER | gst::BufferFlags::DISCONT)
+            {
+                // A new init segment means a new stream configuration, or the
+                // first one. It starts a file.
+                self.flush_held(&mut state);
+                state.header = Some(bytes.to_vec());
+                state.timescales = mp4_boxes::track_timescales(bytes);
+                opened = Some(self.open_next_file(&mut state)?);
+                return Ok(opened);
+            }
+
+            if format.is_cut_point(flags) {
+                if let Some((pts, held)) = state.held.take() {
+                    // The cut point the split was due at was not the last one:
+                    // it starts the next file.
+                    opened = Some(self.open_next_file(&mut state)?);
+                    state.file_start = pts;
+                    self.write_chunks(&mut state, &held)?;
+                }
+                if state.file.is_none() {
+                    opened = Some(self.open_next_file(&mut state)?);
+                } else if self.split_requested.swap(false, Ordering::SeqCst)
+                    || self.split_due(&state, buffer.pts())
+                {
+                    Self::flush_file(&mut state);
+                    state.held = Some((
+                        buffer.pts(),
+                        vec![Chunk {
+                            header,
+                            bytes: bytes.to_vec(),
+                        }],
+                    ));
+                    return Ok(opened);
+                }
+                if state.file_start.is_none() {
+                    state.file_start = buffer.pts();
+                }
+                // Everything before this point is on disk if the process dies.
+                Self::flush_file(&mut state);
+                self.write_timed(&mut state, header, bytes)?;
+                return Ok(opened);
+            }
+
+            if let Some((_, held)) = state.held.as_mut() {
+                held.push(Chunk {
+                    header,
+                    bytes: bytes.to_vec(),
+                });
+                return Ok(opened);
+            }
+            if state.file.is_none() {
+                // Matroska and MPEG-TS: what comes before the first cut point
+                // cannot start a file, and its header is in the caps.
+                return Ok(opened);
+            }
+            self.write_timed(&mut state, header, bytes)?;
+            if state
+                .last_flush
+                .is_none_or(|t| t.elapsed() >= FLUSH_INTERVAL)
+            {
+                Self::flush_file(&mut state);
+            }
+            Ok(opened)
         }
     }
 
@@ -339,70 +517,15 @@ mod imp {
         }
 
         fn render(&self, buffer: &gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
-            let flags = buffer.flags();
-            let is_header = flags.contains(gst::BufferFlags::HEADER);
-            let init_segment = is_header && flags.contains(gst::BufferFlags::DISCONT);
-            let fragment_start =
-                is_header && !init_segment && !flags.contains(gst::BufferFlags::DELTA_UNIT);
-
             let map = buffer.map_readable().map_err(|_| {
                 gst::element_imp_error!(self, gst::ResourceError::Read, ["Could not map buffer"]);
                 gst::FlowError::Error
             })?;
-            let bytes = map.as_slice();
-
-            let mut opened = None;
-            let result = (|| -> Result<(), gst::ErrorMessage> {
-                let mut state = self.state.lock().unwrap();
-
-                if init_segment {
-                    // A new init segment means a new stream configuration, or the
-                    // first one. It starts a file.
-                    self.flush_held(&mut state);
-                    state.init_segment = Some(bytes.to_vec());
-                    state.timescales = mp4_boxes::track_timescales(bytes);
-                    opened = Some(self.open_next_file(&mut state)?);
-                    return Ok(());
+            match self.handle(buffer, map.as_slice()) {
+                Ok(opened) => {
+                    self.report_opened(opened);
+                    Ok(gst::FlowSuccess::Ok)
                 }
-
-                if fragment_start {
-                    if let Some((pts, held)) = state.held.take() {
-                        // The fragment the split was due at was not the last one:
-                        // it starts the next file.
-                        opened = Some(self.open_next_file(&mut state)?);
-                        state.file_start = pts;
-                        self.write_fragment(&mut state, &held)?;
-                    }
-                    if state.file.is_none() {
-                        opened = Some(self.open_next_file(&mut state)?);
-                    } else if self.split_requested.swap(false, Ordering::SeqCst)
-                        || self.split_due(&state, buffer.pts())
-                    {
-                        state.held = Some((buffer.pts(), bytes.to_vec()));
-                        return Ok(());
-                    }
-                    if state.file_start.is_none() {
-                        state.file_start = buffer.pts();
-                    }
-                }
-
-                if let Some((_, held)) = state.held.as_mut() {
-                    held.extend_from_slice(bytes);
-                    return Ok(());
-                }
-                if state.file.is_none() {
-                    opened = Some(self.open_next_file(&mut state)?);
-                }
-                if fragment_start {
-                    self.write_fragment(&mut state, bytes)
-                } else {
-                    self.write(&mut state, bytes)
-                }
-            })();
-
-            self.report_opened(opened);
-            match result {
-                Ok(()) => Ok(gst::FlowSuccess::Ok),
                 Err(msg) => {
                     self.post_error_message(msg);
                     Err(gst::FlowError::Error)
@@ -411,10 +534,32 @@ mod imp {
         }
 
         fn event(&self, event: gst::Event) -> bool {
-            if let gst::EventView::Eos(_) = event.view() {
-                self.flush_held(&mut self.state.lock().unwrap());
-                *self.eos.lock().unwrap() = true;
-                self.eos_cond.notify_all();
+            match event.view() {
+                gst::EventView::Caps(caps) if self.format().header_in_caps() => {
+                    let header = caps
+                        .caps()
+                        .structure(0)
+                        .and_then(|s| s.get::<gst::ArrayRef>("streamheader").ok())
+                        .map(|array| {
+                            array
+                                .iter()
+                                .filter_map(|v| v.get::<gst::Buffer>().ok())
+                                .filter_map(|b| {
+                                    b.map_readable().ok().map(|m| m.as_slice().to_vec())
+                                })
+                                .flatten()
+                                .collect::<Vec<u8>>()
+                        });
+                    if let Some(header) = header.filter(|h| !h.is_empty()) {
+                        self.state.lock().unwrap().header = Some(header);
+                    }
+                }
+                gst::EventView::Eos(_) => {
+                    self.flush_held(&mut self.state.lock().unwrap());
+                    *self.eos.lock().unwrap() = true;
+                    self.eos_cond.notify_all();
+                }
+                _ => {}
             }
             self.parent_event(event)
         }

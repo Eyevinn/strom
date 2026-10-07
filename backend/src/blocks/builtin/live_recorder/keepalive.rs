@@ -134,7 +134,7 @@ impl Track {
 
     /// Request a muxer pad for this track and link its queue to it, if the
     /// track's input is linked. Called once, before the flow leaves NULL.
-    pub fn connect_to_muxer(&self, block_id: &str, mux: &gst::Element) {
+    pub fn connect_to_muxer(&self, block_id: &str, mux: &gst::Element, template: &str) {
         let linked = self
             .input
             .upgrade()
@@ -150,7 +150,7 @@ impl Track {
         let Some(queue_src) = self.queue.upgrade().and_then(|q| q.static_pad("src")) else {
             return;
         };
-        let Some(pad) = mux.request_pad_simple("sink_%u") else {
+        let Some(pad) = mux.request_pad_simple(template) else {
             error_no_pad(block_id, &self.label);
             return;
         };

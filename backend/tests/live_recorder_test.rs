@@ -24,6 +24,10 @@ use gstreamer::prelude::*;
 const REQUIRED: &[&str] = &[
     "isofmp4mux",
     "qtdemux",
+    "matroskamux",
+    "matroskademux",
+    "mpegtsmux",
+    "tsdemux",
     "x264enc",
     "h264parse",
     "avenc_aac",
@@ -173,9 +177,15 @@ fn finish(pipeline: &gst::Pipeline) {
 
 /// PTS of every sample per stream, by caps name, from demuxing `path`.
 fn demux(path: &Path) -> HashMap<String, Vec<gst::ClockTime>> {
+    let demuxer = match path.extension().and_then(|e| e.to_str()) {
+        Some("mkv") => "matroskademux",
+        Some("ts") => "tsdemux",
+        _ => "qtdemux",
+    };
     let pipeline = gst::parse::launch(&format!(
-        "filesrc location=\"{}\" ! qtdemux name=d",
-        path.display()
+        "filesrc location=\"{}\" ! {} name=d",
+        path.display(),
+        demuxer
     ))
     .unwrap()
     .downcast::<gst::Pipeline>()
@@ -188,20 +198,28 @@ fn demux(path: &Path) -> HashMap<String, Vec<gst::ClockTime>> {
         let Some(pipeline) = pipeline_weak.upgrade() else {
             return;
         };
-        let kind = pad
-            .current_caps()
-            .and_then(|c| c.structure(0).map(|s| s.name().to_string()))
-            .unwrap_or_default();
+        // Not async: a demuxer with one streaming thread would otherwise park
+        // on the first sink's preroll while the second waits for data.
         let sink = gst::ElementFactory::make("fakesink")
             .property("sync", false)
+            .property("async", false)
             .build()
             .unwrap();
         pipeline.add(&sink).unwrap();
         sink.sync_state_with_parent().unwrap();
         pad.link(&sink.static_pad("sink").unwrap()).unwrap();
         let samples = Arc::clone(&samples_for_pads);
-        pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+        pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            // Some demuxers set caps after pad-added, so read them here.
+            let kind = pad
+                .current_caps()
+                .and_then(|c| c.structure(0).map(|s| s.name().to_string()))
+                .unwrap_or_default();
             if let Some(gst::PadProbeData::Buffer(b)) = info.data.as_ref() {
+                // matroskademux fills a gap with empty GAP buffers of its own.
+                if b.flags().contains(gst::BufferFlags::GAP) || b.size() == 0 {
+                    return gst::PadProbeReturn::Ok;
+                }
                 if let Some(pts) = b.pts() {
                     samples
                         .lock()
@@ -539,7 +557,9 @@ fn a_stopped_pipeline_is_freed() {
 
 mod fragment_sink {
     use super::*;
-    use strom::blocks::builtin::live_recorder::fragment_sink::{FragmentFileSink, SplitPolicy};
+    use strom::blocks::builtin::live_recorder::fragment_sink::{
+        Format, FragmentFileSink, SplitPolicy,
+    };
 
     /// What `isofmp4mux` emits, reduced to the flags the sink reads.
     enum Piece {
@@ -568,6 +588,7 @@ mod fragment_sink {
         let sink = FragmentFileSink::new(
             "sink",
             location.to_str().unwrap(),
+            Format::FragmentedMp4,
             SplitPolicy {
                 max_duration: Some(gst::ClockTime::from_seconds(2)),
                 max_bytes: None,
@@ -726,4 +747,206 @@ fn a_pause_does_not_end_the_file() {
         "the file ended at {} — the pause finished it",
         last
     );
+}
+
+/// The same guarantees in Matroska and MPEG-TS, whose muxers are live
+/// aggregators too but whose files the sink cuts differently.
+mod containers {
+    use super::*;
+
+    /// Audio stalls, then video stalls, then the flow stops with no EOS.
+    fn stalls_and_stop(container: &str) {
+        init();
+        let dir = tempfile::tempdir().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let (_rec, venc, aenc) = av_recorder(
+            &pipeline,
+            "rec",
+            dir.path(),
+            &[("container", PropertyValue::String(container.into()))],
+        );
+        let start = Instant::now();
+        stall(
+            &aenc,
+            start,
+            Duration::from_secs(2),
+            Duration::from_millis(4500),
+        );
+        stall(
+            &venc,
+            start,
+            Duration::from_secs(6),
+            Duration::from_secs(10),
+        );
+
+        pipeline.set_state(gst::State::Playing).unwrap();
+        std::thread::sleep(Duration::from_millis(6800));
+        let at_7s = file_size(&recorder::recordings(dir.path(), "rec"));
+        std::thread::sleep(Duration::from_secs(3));
+        let at_10s = file_size(&recorder::recordings(dir.path(), "rec"));
+        std::thread::sleep(Duration::from_secs(3));
+        no_errors(&pipeline);
+        let ran = start.elapsed();
+        pipeline.set_state(gst::State::Null).unwrap();
+
+        assert!(
+            at_10s >= at_7s + 20_000,
+            "{}: nothing reached the file while the video was stalled: {} then {} bytes",
+            container,
+            at_7s,
+            at_10s
+        );
+        let files = recorder::recordings(dir.path(), "rec");
+        assert_eq!(files.len(), 1, "{}: {:?}", container, files);
+        let samples = demux(&files[0]);
+        let audio = &samples["audio/mpeg"];
+        let video = &samples["video/x-h264"];
+        if container == "mpegts" {
+            // tsdemux re-stamps across a PTS jump, so the gaps do not show in
+            // what it outputs (ffprobe sees them in the file). Count instead:
+            // each track carried on after its stall and up to the stop.
+            let expect_video = (ran.as_secs_f64() - 4.0 - 1.0) * 30.0;
+            let expect_audio = (ran.as_secs_f64() - 2.5 - 1.0) * 43.0;
+            assert!(
+                video.len() as f64 >= expect_video && audio.len() as f64 >= expect_audio,
+                "mpegts: {} video and {} audio samples in a {:?} run, expected at least {:.0} and {:.0}",
+                video.len(),
+                audio.len(),
+                ran,
+                expect_video,
+                expect_audio
+            );
+            return;
+        }
+        let (audio_gap, _) = largest_gap(audio);
+        let (video_gap, _) = largest_gap(video);
+        assert!(
+            audio_gap >= gst::ClockTime::from_seconds(2)
+                && audio_gap < gst::ClockTime::from_seconds(4),
+            "{}: the audio stall should be the audio's only gap, largest {}",
+            container,
+            audio_gap
+        );
+        assert!(
+            video_gap >= gst::ClockTime::from_mseconds(3500),
+            "{}: the video stall should show as a gap, largest {}",
+            container,
+            video_gap
+        );
+        // The stop wrote what the muxer still held: the file runs to the end.
+        let first = *audio.first().unwrap();
+        let last = *audio.last().unwrap();
+        assert!(
+            (last - first).nseconds() as u128 + 1_000_000_000 >= ran.as_nanos(),
+            "{}: audio covers {} of a {:?} run",
+            container,
+            last - first,
+            ran
+        );
+    }
+
+    /// Each split file plays on its own; Matroska files start at zero.
+    fn split(container: &str) {
+        init();
+        let dir = tempfile::tempdir().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let _ = av_recorder(
+            &pipeline,
+            "rec",
+            dir.path(),
+            &[
+                ("container", PropertyValue::String(container.into())),
+                ("max_size_time_secs", PropertyValue::UInt(2)),
+            ],
+        );
+        pipeline.set_state(gst::State::Playing).unwrap();
+        std::thread::sleep(Duration::from_secs(7));
+        no_errors(&pipeline);
+        finish(&pipeline);
+
+        let files = recorder::recordings(dir.path(), "rec");
+        assert!(
+            files.len() >= 3,
+            "{}: expected a file per 2s, got {:?}",
+            container,
+            files
+        );
+        for file in &files {
+            let samples = demux(file);
+            assert!(
+                samples.get("video/x-h264").is_some_and(|v| !v.is_empty())
+                    && samples.get("audio/mpeg").is_some_and(|a| !a.is_empty()),
+                "{} does not play on its own: {:?}",
+                file.display(),
+                samples
+                    .iter()
+                    .map(|(k, v)| (k, v.len()))
+                    .collect::<Vec<_>>()
+            );
+            if container == "mkv" {
+                let first = samples
+                    .values()
+                    .filter_map(|v| v.first())
+                    .min()
+                    .copied()
+                    .unwrap();
+                assert!(
+                    first < gst::ClockTime::from_mseconds(500),
+                    "{} starts at {}",
+                    file.display(),
+                    first
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mkv_stalls_and_stop() {
+        stalls_and_stop("mkv");
+    }
+
+    #[test]
+    fn mpegts_stalls_and_stop() {
+        stalls_and_stop("mpegts");
+    }
+
+    #[test]
+    fn mkv_split() {
+        split("mkv");
+    }
+
+    #[test]
+    fn mpegts_split() {
+        split("mpegts");
+    }
+}
+
+/// `ts_passthrough` writes the incoming MPEG-TS as it is, through one `ts_in`
+/// pad, the way the Recorder does.
+#[test]
+fn ts_passthrough_takes_one_ts_input() {
+    init();
+    let props: HashMap<String, PropertyValue> = [(
+        "container".to_string(),
+        PropertyValue::String("ts_passthrough".into()),
+    )]
+    .into();
+    let pads = LiveRecorderBuilder.get_external_pads(&props).unwrap();
+    assert_eq!(
+        pads.inputs
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ts_in"]
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let pipeline = gst::Pipeline::new();
+    let rec = add_live_recorder(
+        &pipeline,
+        "rec",
+        dir.path(),
+        &[("container", PropertyValue::String("ts_passthrough".into()))],
+    );
+    assert!(rec.elements.contains_key("rec:ts_input"));
+    assert!(rec.elements.contains_key("rec:multifilesink"));
 }

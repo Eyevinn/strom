@@ -1,14 +1,15 @@
-//! Live Recorder block: records live tracks to fragmented MP4 without letting one
-//! track hold up the others.
+//! Live Recorder block: records live tracks without letting one track hold up
+//! the others.
 //!
 //! ```text
-//! video_input_N (identity) --[caps probe]--> parser --> queue --> isofmp4mux --> fragment sink
-//! audio_input_N (identity) --[caps probe]--> parser --> queue -->     ^
+//! video_input_N (identity) --[caps probe]--> parser --> queue --> muxer --> fragment sink
+//! audio_input_N (identity) --[caps probe]--> parser --> queue -->   ^
 //! ```
 //!
-//! `isofmp4mux` is a live aggregator: a track that goes quiet does not stop the
-//! others, and when it comes back it continues in the same file, with a gap
-//! where it was missing. Two things keep that true for every track:
+//! The muxer is a live aggregator (`isofmp4mux`, `matroskamux` or `mpegtsmux`):
+//! a track that goes quiet does not stop the others, and when it comes back it
+//! continues in the same file, with a gap where it was missing. Two things keep
+//! that true for every track:
 //!
 //! - A track that is quiet gets GAP events (see [`keepalive`]). The muxer cuts
 //!   fragments on the video's keyframes, so without them a stalled video would
@@ -17,21 +18,23 @@
 //!   running for a while is released from the muxer, which cannot write a header
 //!   until every one of its pads has caps.
 //!
-//! [`fragment_sink`] writes the muxer's output and starts a new file at a
-//! fragment boundary when a split is due.
+//! [`fragment_sink`] writes the muxer's output and starts a new file where the
+//! container can start one when a split is due. `ts_passthrough` writes the
+//! incoming MPEG-TS as it is, the same way the Recorder does.
 //!
 //! Only pre-encoded video is accepted. Raw audio is encoded to AAC here; encoded
 //! audio is passed through.
 //!
-//! Output files: {media_path}/{output_dir}/{filename_prefix}_{timestamp}_%05d.mp4
+//! Output files: {media_path}/{output_dir}/{filename_prefix}_{timestamp}_%05d.{mp4,mkv,ts}
 
 pub mod fragment_sink;
 mod keepalive;
+mod mkv_cluster;
 mod mp4_boxes;
 
 use super::refusal::{audio_refusal, refuse_input, video_refusal};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
-use fragment_sink::{FragmentFileSink, SplitPolicy};
+use fragment_sink::{Format, FragmentFileSink, SplitPolicy};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 pub use keepalive::NO_DATA_TIMEOUT;
@@ -64,6 +67,44 @@ const TRACK_QUEUE_TIME: gst::ClockTime = gst::ClockTime::from_seconds(30);
 /// Memory cap on that wait: 30 s of a 50 Mbit/s video.
 const TRACK_QUEUE_BYTES: u32 = 200 * 1024 * 1024;
 
+/// The container a Live Recorder writes, from its `container` property.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Container {
+    Mp4,
+    Mkv,
+    MpegTs,
+    TsPassthrough,
+}
+
+impl Container {
+    fn from_properties(properties: &HashMap<String, PropertyValue>) -> Self {
+        match string_property(properties, "container", "mp4").as_str() {
+            "mkv" => Container::Mkv,
+            "mpegts" | "ts" => Container::MpegTs,
+            "ts_passthrough" => Container::TsPassthrough,
+            _ => Container::Mp4,
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            Container::Mp4 => "mp4",
+            Container::Mkv => "mkv",
+            Container::MpegTs | Container::TsPassthrough => "ts",
+        }
+    }
+
+    /// The muxer's request pad template for a track.
+    fn pad_template(self, kind: TrackKind) -> &'static str {
+        match (self, kind) {
+            (Container::Mkv, TrackKind::Video) => "video_%u",
+            (Container::Mkv, TrackKind::Audio) => "audio_%u",
+            (Container::MpegTs, _) => "sink_%d",
+            _ => "sink_%u",
+        }
+    }
+}
+
 fn uint_property(properties: &HashMap<String, PropertyValue>, name: &str, default: u64) -> u64 {
     properties
         .get(name)
@@ -91,6 +132,18 @@ impl BlockBuilder for LiveRecorderBuilder {
         &self,
         properties: &HashMap<String, PropertyValue>,
     ) -> Option<ExternalPads> {
+        if Container::from_properties(properties) == Container::TsPassthrough {
+            return Some(ExternalPads {
+                inputs: vec![ExternalPad {
+                    label: Some("TS".to_string()),
+                    name: "ts_in".to_string(),
+                    media_type: MediaType::Video,
+                    internal_element_id: "ts_input".to_string(),
+                    internal_pad_name: "sink".to_string(),
+                }],
+                outputs: vec![],
+            });
+        }
         let num_video = uint_property(properties, "num_video_tracks", 1);
         let num_audio = uint_property(properties, "num_audio_tracks", 1);
         Some(external_pads(num_video as usize, num_audio as usize))
@@ -111,6 +164,7 @@ impl BlockBuilder for LiveRecorderBuilder {
         let max_duration_mins = uint_property(properties, "max_duration_mins", 0);
         let num_video = uint_property(properties, "num_video_tracks", 1) as usize;
         let num_audio = uint_property(properties, "num_audio_tracks", 1) as usize;
+        let container = Container::from_properties(properties);
 
         if num_video == 0 && num_audio == 0 {
             return Err(BlockBuildError::InvalidProperty(
@@ -128,24 +182,59 @@ impl BlockBuilder for LiveRecorderBuilder {
             );
         }
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let ext = container.extension();
         let location = format!(
-            "{}/{}_{}_%05d.mp4",
+            "{}/{}_{}_%05d.{}",
             output_path.to_string_lossy(),
             filename_prefix,
-            timestamp
+            timestamp,
+            ext
         );
-        let relative_location =
-            format!("{}/{}_{}_%05d.mp4", output_dir, filename_prefix, timestamp);
+        let relative_location = format!(
+            "{}/{}_{}_%05d.{}",
+            output_dir, filename_prefix, timestamp, ext
+        );
+
+        if container == Container::TsPassthrough {
+            // One stream, nothing to mux and no track to wait for: the Recorder's
+            // passthrough has none of the problems this block exists for.
+            return super::recorder::build_ts_passthrough(
+                instance_id,
+                &location,
+                max_size_time_secs,
+                max_size_mb * 1024 * 1024,
+            );
+        }
 
         let mux_id = format!("{}:mux", instance_id);
-        let mux = gst::ElementFactory::make("isofmp4mux")
-            .name(&mux_id)
-            .property("fragment-duration", FRAGMENT_DURATION)
-            // The encoder's GOP is the operator's choice; the muxer must not
-            // ask for a keyframe at every fragment.
-            .property("send-force-keyunit", false)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("isofmp4mux: {}", e)))?;
+        let (mux, format) = match container {
+            Container::Mkv => (
+                gst::ElementFactory::make("matroskamux")
+                    .name(&mux_id)
+                    // The sink cannot seek back to write an index, and a split
+                    // file must start with a header of its own.
+                    .property("streamable", true)
+                    .build(),
+                Format::Matroska,
+            ),
+            Container::MpegTs => (
+                // Default alignment: one packet per buffer, with the keyframe's
+                // first packet flagged, which is where a file can start.
+                gst::ElementFactory::make("mpegtsmux").name(&mux_id).build(),
+                Format::MpegTs,
+            ),
+            _ => (
+                gst::ElementFactory::make("isofmp4mux")
+                    .name(&mux_id)
+                    .property("fragment-duration", FRAGMENT_DURATION)
+                    // The encoder's GOP is the operator's choice; the muxer must
+                    // not ask for a keyframe at every fragment.
+                    .property("send-force-keyunit", false)
+                    .build(),
+                Format::FragmentedMp4,
+            ),
+        };
+        let mux = mux.map_err(|e| BlockBuildError::ElementCreation(format!("muxer: {}", e)))?;
 
         let sink_id = format!("{}:{}", instance_id, FRAGMENT_SINK_SUFFIX);
         let policy = SplitPolicy {
@@ -153,7 +242,7 @@ impl BlockBuilder for LiveRecorderBuilder {
                 .then(|| gst::ClockTime::from_seconds(max_size_time_secs)),
             max_bytes: (max_size_mb > 0).then(|| max_size_mb * 1024 * 1024),
         };
-        let sink = FragmentFileSink::new(&sink_id, &location, policy);
+        let sink = FragmentFileSink::new(&sink_id, &location, format, policy);
 
         let mut elements: Vec<(String, gst::Element)> = vec![
             (mux_id.clone(), mux.clone()),
@@ -163,7 +252,7 @@ impl BlockBuilder for LiveRecorderBuilder {
         let mut tracks: Vec<Arc<Track>> = Vec::new();
         for (kind, count) in [(TrackKind::Video, num_video), (TrackKind::Audio, num_audio)] {
             for index in 0..count {
-                let (input, queue, track) = build_track(instance_id, kind, index, &mux)?;
+                let (input, queue, track) = build_track(instance_id, container, kind, index, &mux)?;
                 elements.push((input.name().to_string(), input));
                 elements.push((queue.name().to_string(), queue));
                 tracks.push(track);
@@ -188,7 +277,7 @@ impl BlockBuilder for LiveRecorderBuilder {
                 // takes no new pads once it has started, so every connected track
                 // gets its pad here.
                 for track in &tracks {
-                    track.connect_to_muxer(&block_id, &mux);
+                    track.connect_to_muxer(&block_id, &mux, container.pad_template(track.kind));
                 }
                 sink.set_drain_pads(tracks.iter().filter_map(|t| t.queue_sink_pad()).collect());
 
@@ -248,6 +337,7 @@ impl BlockBuilder for LiveRecorderBuilder {
 /// the caps probe that puts the right parser between them.
 fn build_track(
     instance_id: &str,
+    container: Container,
     kind: TrackKind,
     index: usize,
     mux: &gst::Element,
@@ -314,7 +404,7 @@ fn build_track(
             );
             return gst::PadProbeReturn::Ok;
         }
-        match chain_for(&caps, probe_track.kind) {
+        match chain_for(&caps, container, probe_track.kind) {
             Ok(factories) => {
                 if let Err(e) = insert_chain(pad, &queue, &block_id, &probe_track.label, &factories) {
                     error!("Live Recorder {}: {} could not be linked: {}", block_id, probe_track.label, e);
@@ -346,11 +436,18 @@ fn build_track(
 
 /// The elements a track's caps need before the muxer, or the reason it cannot be
 /// recorded.
-fn chain_for(caps: &gst::Caps, kind: TrackKind) -> Result<Vec<&'static str>, String> {
+fn chain_for(
+    caps: &gst::Caps,
+    container: Container,
+    kind: TrackKind,
+) -> Result<Vec<&'static str>, String> {
     let Some(s) = caps.structure(0) else {
         return Err(format!("{} got caps with no structure", BLOCK_NAME));
     };
     let name = s.name().as_str();
+    // Fragmented MP4 cannot carry MP3 or DTS; Matroska and MPEG-TS can.
+    let mp4 = container == Container::Mp4;
+    let mp3 = name == "audio/mpeg" && s.get::<i32>("mpegversion").unwrap_or(0) == 1;
     match kind {
         TrackKind::Video => match name {
             "video/x-h264" => Ok(vec!["h264parse"]),
@@ -358,20 +455,25 @@ fn chain_for(caps: &gst::Caps, kind: TrackKind) -> Result<Vec<&'static str>, Str
             other => Err(video_refusal(BLOCK_NAME, "H.264 or H.265", other)),
         },
         TrackKind::Audio => match name {
-            "audio/mpeg" if s.get::<i32>("mpegversion").unwrap_or(0) != 1 => Ok(vec!["aacparse"]),
-            "audio/x-ac3" => Ok(vec!["ac3parse"]),
-            "audio/x-eac3" => Ok(vec!["ac3parse"]),
+            "audio/mpeg" if mp3 && !mp4 => Ok(vec!["mpegaudioparse"]),
+            "audio/mpeg" if !mp3 => Ok(vec!["aacparse"]),
+            "audio/x-ac3" | "audio/x-eac3" => Ok(vec!["ac3parse"]),
+            "audio/x-dts" if !mp4 => Ok(vec!["dcaparse"]),
             "audio/x-opus" => Ok(vec!["opusparse"]),
-            "audio/x-flac" => Ok(vec!["flacparse"]),
+            "audio/x-flac" if container != Container::MpegTs => Ok(vec!["flacparse"]),
             "audio/x-raw" => Ok(vec![
                 "audioconvert",
                 "audioresample",
                 "avenc_aac",
                 "aacparse",
             ]),
+            other if mp4 => Err(format!(
+                "{}. MP3 and DTS need the mkv or mpegts container",
+                audio_refusal(BLOCK_NAME, "AAC, AC-3, E-AC-3, Opus or FLAC", other)
+            )),
             other => Err(audio_refusal(
                 BLOCK_NAME,
-                "AAC, AC-3, E-AC-3, Opus or FLAC",
+                "AAC, MP3, AC-3, E-AC-3, DTS or Opus",
                 other,
             )),
         },
@@ -496,6 +598,27 @@ fn definition() -> BlockDefinition {
         exposed_properties: vec![
             int_property("num_video_tracks", "Video Tracks", "Number of video input tracks (0 = audio only)", 1),
             int_property("num_audio_tracks", "Audio Tracks", "Number of audio input tracks (0 = video only)", 1),
+            ExposedProperty {
+                name: "container".to_string(),
+                label: "Container Format".to_string(),
+                description: "Output container format".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue { value: "mp4".to_string(), label: Some("MP4 (fragmented)".to_string()) },
+                        EnumValue { value: "mkv".to_string(), label: Some("MKV (Matroska)".to_string()) },
+                        EnumValue { value: "mpegts".to_string(), label: Some("MPEG-TS (remux)".to_string()) },
+                        EnumValue { value: "ts_passthrough".to_string(), label: Some("MPEG-TS (passthrough)".to_string()) },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("mp4".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "container".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
             string_prop("output_dir", "Output Directory", "Subdirectory within the media folder where recordings are saved", DEFAULT_OUTPUT_DIR),
             string_prop("filename_prefix", "Filename Prefix", "Prefix for output filenames", DEFAULT_FILENAME_PREFIX),
             int_property("max_size_time_secs", "Max Segment Duration (s)", "Start a new file after this many seconds, at the next fragment. 0 = no splitting.", 0),
