@@ -932,6 +932,11 @@ fn assert_late_input_is_heard(input_rate: i32, mixer_rate: Option<u32>) {
         )
         .build()
         .unwrap();
+    // Locked until fully linked, then started downstream first: a running
+    // pipeline can start a newly added element itself, and a source started
+    // before its capsfilter has a peer fails the flow with not-linked.
+    src.set_locked_state(true);
+    decoded.set_locked_state(true);
     m.pipeline.add_many([&src, &decoded]).unwrap();
     src.link(&decoded).unwrap();
     decoded
@@ -939,8 +944,10 @@ fn assert_late_input_is_heard(input_rate: i32, mixer_rate: Option<u32>) {
         .unwrap()
         .link(&m.element("convert_0").static_pad("sink").unwrap())
         .expect("a late input must link into a running mixer");
-    src.sync_state_with_parent().unwrap();
+    src.set_locked_state(false);
+    decoded.set_locked_state(false);
     decoded.sync_state_with_parent().unwrap();
+    src.sync_state_with_parent().unwrap();
 
     // The buses are live and emit silence with no input, so buffers alone
     // prove nothing: wait for the tone's level on main and on aux1.
