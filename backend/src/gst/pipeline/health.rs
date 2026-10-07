@@ -49,7 +49,7 @@ fn first_stalled_pad(element: &gst::Element) -> Option<StalledPad> {
 
 /// Find the first paused pad task on `element` itself.
 ///
-/// Three kinds of legitimately paused task are excluded.
+/// Four kinds of legitimately paused task are excluded.
 ///
 /// An element held below `PLAYING` - a webrtcbin added for a newly connected
 /// WHEP consumer, say - pauses its tasks as part of that transition.
@@ -71,17 +71,32 @@ fn first_stalled_pad(element: &gst::Element) -> Option<StalledPad> {
 /// branches are unconnected, so the task that parks is the one feeding the tee,
 /// on a pad that does have a peer. A raw `tee` element in a user flow does
 /// exactly that, and the element upstream of it is reported as failed.
+///
+/// A task on an element that has never been fed is idle, not stalled, as long
+/// as its own pushes have not failed. `vtenc` parks its output task on reaching
+/// `PLAYING` and starts it on the first frame, so a Video Encoder on an empty
+/// seat would otherwise read as failed for as long as the seat stays empty. A
+/// segment must precede the first buffer, so an element with no segment on any
+/// sink pad has never received data. A failed push still counts, fed or not.
+/// The last flow return cannot stand alone: an aggregator that fails to
+/// renegotiate pauses without pushing, so its last flow stays `Ok`.
 fn stalled_pad_on(element: &gst::Element) -> Option<StalledPad> {
     if element.current_state() != gst::State::Playing {
         return None;
     }
-    element
-        .pads()
-        .into_iter()
+    let pads = element.pads();
+    let sink_pads = || {
+        pads.iter()
+            .filter(|pad| pad.direction() == gst::PadDirection::Sink)
+    };
+    let never_fed = sink_pads().next().is_some()
+        && sink_pads().all(|pad| pad.sticky_event::<gst::event::Segment>(0).is_none());
+    pads.iter()
         .find(|pad| {
             pad.task_state() == gst::TaskState::Paused
                 && !pad.pad_flags().contains(gst::PadFlags::EOS)
                 && pad.peer().is_some()
+                && !(never_fed && pad.last_flow_result().is_ok())
         })
         .map(|pad| StalledPad {
             element: element.name().to_string(),
@@ -382,6 +397,75 @@ mod tests {
         flow
     }
 
+    /// Live source -> identity -> fakesink.
+    ///
+    /// Unfed, the source is an appsrc that never pushes and stands in for an
+    /// empty WHIP seat: nothing reaches the identity, not even a segment. Fed,
+    /// it is a live videotestsrc.
+    fn identity_flow(fed: bool) -> Flow {
+        let mut flow = Flow::new("identity health test");
+        let src = if fed {
+            element(
+                "src",
+                "videotestsrc",
+                &[("is-live", PropertyValue::Bool(true))],
+            )
+        } else {
+            element(
+                "src",
+                "appsrc",
+                &[
+                    ("is-live", PropertyValue::Bool(true)),
+                    ("format", PropertyValue::String("time".to_string())),
+                ],
+            )
+        };
+        flow.elements = vec![
+            src,
+            element("mid", "identity", &[]),
+            element(
+                "sink",
+                "fakesink",
+                &[
+                    ("sync", PropertyValue::Bool(false)),
+                    ("async", PropertyValue::Bool(false)),
+                ],
+            ),
+        ];
+        flow.links = vec![
+            Link {
+                from: "src".to_string(),
+                to: "mid".to_string(),
+            },
+            Link {
+                from: "mid".to_string(),
+                to: "sink".to_string(),
+            },
+        ];
+        flow
+    }
+
+    /// Give `pad` a task that pauses itself, as `vtenc` parks its output task.
+    ///
+    /// The pause has to come from inside the task: `gst_pad_pause_task` from
+    /// another thread waits on the stream lock.
+    fn park_task(pad: &gst::Pad) {
+        let weak_pad = pad.downgrade();
+        pad.start_task(move || {
+            if let Some(pad) = weak_pad.upgrade() {
+                let _ = pad.pause_task();
+            }
+        })
+        .expect("task should start");
+        assert!(
+            wait_for(
+                || pad.task_state() == gst::TaskState::Paused,
+                Duration::from_secs(5)
+            ),
+            "task never paused"
+        );
+    }
+
     fn wait_for(condition: impl Fn() -> bool, timeout: Duration) -> bool {
         let start = Instant::now();
         while start.elapsed() < timeout {
@@ -493,6 +577,201 @@ mod tests {
         assert!(
             !manager.get_block_health().is_empty(),
             "health scan never produced a snapshot"
+        );
+
+        manager.stop().expect("pipeline should stop");
+    }
+
+    /// `vtenc` parks its output task as soon as it reaches `PLAYING` and only
+    /// starts it on the first frame, so a Video Encoder on an empty seat sits
+    /// paused with nothing wrong. No element available on Linux CI parks a task
+    /// before data, so this parks one on an unfed `identity`, producing the
+    /// same pad state: task paused, last push `Ok`, no segment on the input.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_element_that_was_never_fed_is_not_reported_as_failed() {
+        gst::init().unwrap();
+
+        let mut manager = PipelineManager::new(
+            &identity_flow(false),
+            EventBroadcaster::default(),
+            &BlockRegistry::new("test_blocks.json"),
+            vec!["stun:stun.l.google.com:19302".to_string()],
+            "all".to_string(),
+            None,
+            std::path::PathBuf::from("./media"),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        )
+        .expect("pipeline should build");
+
+        manager.start().expect("pipeline should start");
+        assert!(
+            wait_for(
+                || manager.get_state() == strom_types::PipelineState::Playing,
+                Duration::from_secs(10)
+            ),
+            "pipeline never reached Playing"
+        );
+
+        let mid_src = manager.elements["mid"].static_pad("src").unwrap();
+        park_task(&mid_src);
+
+        let went_failed = wait_for(
+            || {
+                manager
+                    .get_block_health()
+                    .iter()
+                    .any(|h| h.status == BlockHealthStatus::Failed)
+            },
+            HEALTH_POLL_INTERVAL * (CONFIRMATIONS_BEFORE_FAILED + 3),
+        );
+        assert!(
+            !went_failed,
+            "an element that never received data must not read as failed: {:?}",
+            manager.get_block_health()
+        );
+        assert!(
+            !manager.get_block_health().is_empty(),
+            "health scan never produced a snapshot"
+        );
+
+        mid_src.stop_task().expect("task should stop");
+        manager.stop().expect("pipeline should stop");
+    }
+
+    /// The same parked task on an element that has received data is still
+    /// reported, even though its last push succeeded. The scan reads only pad
+    /// state, so the identity passing buffers on the upstream thread does not
+    /// matter here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_parked_task_on_an_element_that_was_fed_is_reported() {
+        gst::init().unwrap();
+
+        let mut manager = PipelineManager::new(
+            &identity_flow(true),
+            EventBroadcaster::default(),
+            &BlockRegistry::new("test_blocks.json"),
+            vec!["stun:stun.l.google.com:19302".to_string()],
+            "all".to_string(),
+            None,
+            std::path::PathBuf::from("./media"),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        )
+        .expect("pipeline should build");
+
+        manager.start().expect("pipeline should start");
+        let mid = manager.elements["mid"].clone();
+        assert!(
+            wait_for(
+                || mid
+                    .static_pad("sink")
+                    .unwrap()
+                    .sticky_event::<gst::event::Segment>(0)
+                    .is_some(),
+                Duration::from_secs(10)
+            ),
+            "identity never received data"
+        );
+
+        let mid_src = mid.static_pad("src").unwrap();
+        park_task(&mid_src);
+        assert!(mid_src.last_flow_result().is_ok());
+
+        assert!(
+            wait_for(
+                || manager
+                    .get_block_health()
+                    .iter()
+                    .any(|h| h.block_id == "mid" && h.status == BlockHealthStatus::Failed),
+                Duration::from_secs(15)
+            ),
+            "a parked task on a fed element was not reported: {:?}",
+            manager.get_block_health()
+        );
+
+        mid_src.stop_task().expect("task should stop");
+        manager.stop().expect("pipeline should stop");
+    }
+
+    /// The case from the field: a Video Encoder block on a seat with no guest.
+    /// On macOS it selects `vtenc`, whose output task is paused until the first
+    /// frame arrives.
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_idle_video_encoder_is_not_reported_as_failed() {
+        gst::init().unwrap();
+
+        crate::gpu::detect_gpu_capabilities();
+
+        let mut flow = identity_flow(false);
+        flow.elements.retain(|e| e.id != "mid");
+        flow.blocks.push(strom_types::BlockInstance {
+            id: "venc".to_string(),
+            block_definition_id: "builtin.videoenc".to_string(),
+            name: None,
+            properties: HashMap::from([(
+                "codec".to_string(),
+                PropertyValue::String("h264".to_string()),
+            )]),
+            position: strom_types::block::Position { x: 0.0, y: 0.0 },
+            runtime_data: None,
+            computed_external_pads: None,
+        });
+        flow.links = vec![
+            Link {
+                from: "src".to_string(),
+                to: "venc:video_in".to_string(),
+            },
+            Link {
+                from: "venc:encoded_out".to_string(),
+                to: "sink".to_string(),
+            },
+        ];
+
+        let mut manager = PipelineManager::new(
+            &flow,
+            EventBroadcaster::default(),
+            &BlockRegistry::new("test_blocks.json"),
+            vec!["stun:stun.l.google.com:19302".to_string()],
+            "all".to_string(),
+            None,
+            std::path::PathBuf::from("./media"),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        )
+        .expect("pipeline should build");
+
+        manager.start().expect("pipeline should start");
+        assert!(
+            wait_for(
+                || manager.get_state() == strom_types::PipelineState::Playing,
+                Duration::from_secs(10)
+            ),
+            "pipeline never reached Playing"
+        );
+
+        // The premise: the idle encoder really does sit with a paused task.
+        let encoder = manager.elements.get("venc:encoder").unwrap().clone();
+        assert!(
+            wait_for(
+                || encoder.static_pad("src").unwrap().task_state() == gst::TaskState::Paused,
+                Duration::from_secs(5)
+            ),
+            "expected {} to park its output task before data",
+            encoder.factory().unwrap().name()
+        );
+
+        let went_failed = wait_for(
+            || {
+                manager
+                    .get_block_health()
+                    .iter()
+                    .any(|h| h.status == BlockHealthStatus::Failed)
+            },
+            HEALTH_POLL_INTERVAL * (CONFIRMATIONS_BEFORE_FAILED + 3),
+        );
+        assert!(
+            !went_failed,
+            "an idle Video Encoder must not read as failed: {:?}",
+            manager.get_block_health()
         );
 
         manager.stop().expect("pipeline should stop");
