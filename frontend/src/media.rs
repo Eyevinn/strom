@@ -304,15 +304,17 @@ impl MediaPage {
         tx: &std::sync::mpsc::Sender<crate::state::AppMessage>,
     ) {
         let folder = format!("media/{}", self.current_path);
-        ui.horizontal(|ui| {
+        // Right to left: the controls take their own width first and the URL
+        // field gets exactly what is left. A width computed as
+        // "available minus a guess" overshoots when the guess is short, and
+        // the panel then grows by the difference on every frame.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let can_start = !self.download_pending && !self.download_url.trim().is_empty();
-            let field_width = (ui.available_width() - 150.0).max(80.0);
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.download_url)
-                    .hint_text("Download from URL: https://...")
-                    .desired_width(field_width),
-            );
-            let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if self.download_pending {
+                ui.spinner();
+            }
+            ui.checkbox(&mut self.download_overwrite, "Replace")
+                .on_hover_text("Replace a file with the same name in this folder");
             let clicked = ui
                 .add_enabled(
                     can_start,
@@ -323,11 +325,12 @@ impl MediaPage {
                 )
                 .on_hover_text(format!("Save the file into {}", folder))
                 .clicked();
-            ui.checkbox(&mut self.download_overwrite, "Replace")
-                .on_hover_text("Replace a file with the same name in this folder");
-            if self.download_pending {
-                ui.spinner();
-            }
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.download_url)
+                    .hint_text("Download from URL: https://...")
+                    .desired_width(ui.available_width()),
+            );
+            let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if can_start && (clicked || enter) {
                 self.start_download(api, ctx, tx);
             }
@@ -368,20 +371,24 @@ impl MediaPage {
                             }
                             _ => (0.0, format!("{}  {}", job.filename, format_size(job.bytes))),
                         };
-                        ui.add(
-                            egui::ProgressBar::new(fraction)
-                                .text(text)
-                                .animate(job.total.is_none())
-                                .desired_width((ui.available_width() - 30.0).max(80.0)),
-                        )
-                        .on_hover_text(&job.url);
-                        if ui
-                            .small_button(egui_phosphor::regular::X)
-                            .on_hover_text("Cancel download")
-                            .clicked()
-                        {
-                            cancel = Some(job.job_id.clone());
-                        }
+                        // Cancel first, right to left, so the bar takes
+                        // exactly the width that is left (see the URL row).
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button(egui_phosphor::regular::X)
+                                .on_hover_text("Cancel download")
+                                .clicked()
+                            {
+                                cancel = Some(job.job_id.clone());
+                            }
+                            ui.add(
+                                egui::ProgressBar::new(fraction)
+                                    .text(text)
+                                    .animate(job.total.is_none())
+                                    .desired_width(ui.available_width()),
+                            )
+                            .on_hover_text(&job.url);
+                        });
                     }
                     MediaDownloadState::Done => {
                         ui.colored_label(Color32::GREEN, egui_phosphor::regular::CHECK_CIRCLE);
