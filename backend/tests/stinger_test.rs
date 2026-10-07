@@ -304,7 +304,8 @@ async fn a_clip_that_will_not_play_still_changes_the_program() {
         .expect_err("a missing clip cannot play");
     assert!(err.to_string().contains("cut instead"), "{err}");
     let overlay =
-        strom::blocks::builtin::vision_mixer::overlay::get_overlay_state(&r.mixer()).unwrap();
+        strom::blocks::builtin::vision_mixer::overlay::get_overlay_state(&r.flow_id, &r.mixer())
+            .unwrap();
     assert_eq!(overlay.pgm_input(), Some(1), "the program cut to PVW");
     assert!(
         !r.state

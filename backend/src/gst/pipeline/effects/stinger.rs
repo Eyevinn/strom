@@ -255,9 +255,10 @@ impl PipelineManager {
                 "a matte stinger needs the GPU mixer".to_string(),
             ));
         }
-        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
-            PipelineError::ElementNotFound(format!("overlay state of {}", block_instance_id))
-        })?;
+        let state =
+            overlay::get_overlay_state(&self.flow_id, block_instance_id).ok_or_else(|| {
+                PipelineError::ElementNotFound(format!("overlay state of {}", block_instance_id))
+            })?;
         let pad = |idx: usize| {
             mixer
                 .static_pad(&format!("sink_{}", idx))

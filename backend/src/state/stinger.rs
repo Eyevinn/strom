@@ -551,8 +551,9 @@ impl AppState {
     ) -> Result<StingerTakeResponse, PipelineError> {
         let requested = Instant::now();
         let ctx = self.stinger_context(flow_id, block).await.map_err(err)?;
-        let state = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block)
-            .ok_or_else(|| err("the vision mixer is not running"))?;
+        let state =
+            crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(flow_id, block)
+                .ok_or_else(|| err("the vision mixer is not running"))?;
         let (Some(from), Some(to)) = (state.pgm_input(), state.pvw_input()) else {
             return Err(err(
                 "a stinger takes one input to another; PGM or PVW is a PiP",
