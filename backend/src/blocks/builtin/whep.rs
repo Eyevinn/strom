@@ -13,8 +13,8 @@ use crate::blocks::{
     set_ice_transport_policy, BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder,
 };
 use crate::gst::ice_preflight;
-use crate::gst::video_input_bridge;
 use crate::gst::whep_probe::{self, WhepProbeRegistry};
+use crate::gst::{audio_input_bridge, video_input_bridge};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -1595,6 +1595,13 @@ fn build_whepserversink(
                     gst::PadProbeReturn::Pass
                 },
             );
+
+            // Raw audio is pinned to one format before the sink, so a mixer
+            // that renegotiates right after start does not hand webrtcsink a
+            // second set of caps while its codec discovery runs; that fails
+            // the discovery and the flow. Encoded audio passes through.
+            let audio_queue_src = audio_queue.static_pad("src").expect("queue has src pad");
+            audio_input_bridge::install_audio_input_bridge(&audio_queue_src, &audio_queue_id);
 
             // Audio link: queue -> whepserversink (audio_<slot> request pad)
             internal_links.push((
