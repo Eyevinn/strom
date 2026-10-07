@@ -456,9 +456,11 @@ mod imp {
                 }
                 if state.file.is_none() {
                     opened = Some(self.open_next_file(&mut state)?);
-                } else if self.split_requested.swap(false, Ordering::SeqCst)
-                    || self.split_due(&state, buffer.pts())
-                {
+                } else if self.split_requested.swap(false, Ordering::SeqCst) {
+                    // Asked for by the operator: start the next file here, so the
+                    // new file name shows at once rather than a fragment later.
+                    opened = Some(self.open_next_file(&mut state)?);
+                } else if self.split_due(&state, buffer.pts()) {
                     Self::flush_file(&mut state);
                     state.held = Some((
                         buffer.pts(),

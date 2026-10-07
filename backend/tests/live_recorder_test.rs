@@ -566,6 +566,8 @@ mod fragment_sink {
         Init,
         Fragment(u64),
         Data,
+        /// The operator presses split now.
+        SplitNow,
     }
 
     /// Push `pieces` through a sink that splits every 2 s, end with EOS, and
@@ -601,6 +603,12 @@ mod fragment_sink {
         let appsrc = src.downcast_ref::<gstreamer_app::AppSrc>().unwrap();
         let mut last_pts = 0;
         for piece in pieces {
+            if let Piece::SplitNow = piece {
+                // Let what was pushed so far reach the sink first.
+                std::thread::sleep(Duration::from_millis(100));
+                sink.split_now();
+                continue;
+            }
             let (bytes, flags, pts): (&[u8], _, u64) = match piece {
                 Piece::Init => (
                     b"INIT;",
@@ -612,6 +620,7 @@ mod fragment_sink {
                     (b"FRAG;", gst::BufferFlags::HEADER, *s)
                 }
                 Piece::Data => (b"data;", gst::BufferFlags::DELTA_UNIT, last_pts),
+                Piece::SplitNow => unreachable!(),
             };
             let mut buffer = gst::Buffer::from_slice(bytes.to_vec());
             {
@@ -680,6 +689,15 @@ mod fragment_sink {
             Data,
         ]);
         assert_eq!(text(&files), vec!["INIT;FRAG;data;FRAG;data;FRAG;data;"]);
+    }
+
+    /// Split now starts the next file at the next fragment, not one later,
+    /// so the new file name shows as soon as the muxer allows.
+    #[test]
+    fn split_now_starts_the_next_file_at_the_next_fragment() {
+        use Piece::*;
+        let files = write(&[Init, Fragment(0), Data, SplitNow, Fragment(1), Data]);
+        assert_eq!(text(&files), vec!["INIT;FRAG;data;", "INIT;FRAG;data;"]);
     }
 }
 
