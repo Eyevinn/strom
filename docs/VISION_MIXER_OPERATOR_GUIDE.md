@@ -242,8 +242,10 @@ across the matte's movement for a mask). The panel marks such clips **CPU**.
    `audio_out` carries the clip's sound, if you want it: wire it into your
    audio mix.
 3. Put clips in that playlist, or press **EXAMPLES** in the stinger panel
-   to render Strom's three example clips (one of each kind) into the media
-   directory and add them.
+   to render Strom's four example clips into the media directory and add
+   them: `strom-sweep` (classic), `strom-blade` (track matte, side by
+   side), `strom-ribbons` (track matte, stacked) and `strom-shards` (mask
+   only).
 
 **Operating.** Select **STING** as the transition type. The panel lists the
 clips; click one to *cue* it (load it and park it on its first frame; a
