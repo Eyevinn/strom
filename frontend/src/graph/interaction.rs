@@ -13,8 +13,8 @@ impl GraphEditor {
         is_hovered: bool,
     ) {
         // Parse IDs and pad names from link
-        let (from_id, from_pad) = parse_pad_ref(&link.from).unwrap_or_default();
-        let (to_id, to_pad) = parse_pad_ref(&link.to).unwrap_or_default();
+        let (from_id, from_pad) = self.resolve_link_endpoint(&link.from, false);
+        let (to_id, to_pad) = self.resolve_link_endpoint(&link.to, true);
 
         // Get from pad position
         let from_pos = self.get_pad_position(&from_id, &from_pad, false);
@@ -47,6 +47,42 @@ impl GraphEditor {
                 Stroke::new(width, color),
             ));
         }
+    }
+
+    /// Resolve one end of a link to the (node_id, pad_name) the editor draws it at.
+    ///
+    /// A link end without a pad (`"id"`, `"id::"`) is an element-level link:
+    /// GStreamer picks the pad at runtime. The editor draws it at the node's
+    /// first pad in the link's direction (an output pad for `from`, an input
+    /// pad for `to`). If the node has no known pad in that direction, the pad
+    /// name is left empty and `get_pad_position` falls back to the node edge.
+    /// Explicit pads are returned as parsed.
+    pub(super) fn resolve_link_endpoint(&self, pad_ref: &str, is_input: bool) -> (String, String) {
+        let (node_id, pad) = parse_link_endpoint(pad_ref);
+        if let Some(pad) = pad {
+            return (node_id, pad);
+        }
+        let first_pad = self.first_pad_name(&node_id, is_input).unwrap_or_default();
+        (node_id, first_pad)
+    }
+
+    /// Name of the first pad in one direction on an element or block, as rendered.
+    fn first_pad_name(&self, node_id: &str, is_input: bool) -> Option<String> {
+        if let Some(element) = self.elements.iter().find(|e| e.id == node_id) {
+            let element_info = self.element_info_map.get(&element.element_type);
+            let (sink_pads, src_pads) = self.get_pads_to_render(element, element_info);
+            let pads = if is_input { sink_pads } else { src_pads };
+            return pads.into_iter().next().map(|p| p.name);
+        }
+        let block = self.blocks.iter().find(|b| b.id == node_id)?;
+        let definition = self.block_definition_map.get(&block.block_definition_id);
+        let external_pads = self.get_block_external_pads(block, definition)?;
+        let pads = if is_input {
+            &external_pads.inputs
+        } else {
+            &external_pads.outputs
+        };
+        pads.first().map(|p| p.name.clone())
     }
 
     /// Get the world position of a specific pad on an element or block.
@@ -163,8 +199,8 @@ impl GraphEditor {
         to_screen: &impl Fn(Pos2) -> Pos2,
     ) -> bool {
         // Parse IDs and pad names from link
-        let (from_id, from_pad) = parse_pad_ref(&link.from).unwrap_or_default();
-        let (to_id, to_pad) = parse_pad_ref(&link.to).unwrap_or_default();
+        let (from_id, from_pad) = self.resolve_link_endpoint(&link.from, false);
+        let (to_id, to_pad) = self.resolve_link_endpoint(&link.to, true);
 
         // Get from pad position
         let from_pos = self.get_pad_position(&from_id, &from_pad, false);
@@ -494,5 +530,180 @@ impl GraphEditor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use strom_types::block::{ExternalPad, ExternalPads, Position};
+    use strom_types::element::{MediaType, PadInfo, PadPresence};
+
+    fn pad_info(name: &str) -> PadInfo {
+        PadInfo {
+            name: name.to_string(),
+            caps: String::new(),
+            presence: PadPresence::Always,
+            media_type: MediaType::Video,
+            properties: Vec::new(),
+        }
+    }
+
+    fn element_info(name: &str, sinks: &[&str], srcs: &[&str]) -> ElementInfo {
+        ElementInfo {
+            name: name.to_string(),
+            description: String::new(),
+            category: String::new(),
+            src_pads: srcs.iter().map(|p| pad_info(p)).collect(),
+            sink_pads: sinks.iter().map(|p| pad_info(p)).collect(),
+            properties: Vec::new(),
+        }
+    }
+
+    fn element(id: &str, element_type: &str, x: f32) -> Element {
+        Element {
+            id: id.to_string(),
+            element_type: element_type.to_string(),
+            properties: HashMap::new(),
+            pad_properties: HashMap::new(),
+            position: (x, 0.0),
+        }
+    }
+
+    fn external_pad(name: &str) -> ExternalPad {
+        ExternalPad {
+            name: name.to_string(),
+            label: None,
+            media_type: MediaType::Video,
+            internal_element_id: "inner".to_string(),
+            internal_pad_name: "sink".to_string(),
+        }
+    }
+
+    fn link(from: &str, to: &str) -> Link {
+        Link {
+            from: from.to_string(),
+            to: to.to_string(),
+        }
+    }
+
+    /// The repro flow: element-level links next to explicit-pad links.
+    fn editor(links: Vec<Link>) -> GraphEditor {
+        let mut editor = GraphEditor::new();
+        editor.set_element_info(
+            "videotestsrc".to_string(),
+            element_info("videotestsrc", &[], &["src"]),
+        );
+        editor.set_element_info(
+            "capsfilter".to_string(),
+            element_info("capsfilter", &["sink"], &["src"]),
+        );
+        editor.set_element_info(
+            "valve".to_string(),
+            element_info("valve", &["sink"], &["src"]),
+        );
+        editor.load(
+            vec![
+                element("vsrc", "videotestsrc", 0.0),
+                element("vcaps", "capsfilter", 300.0),
+                element("vvalve", "valve", 600.0),
+                // No element info: pads come from links only
+                element("dec", "decodebin", 900.0),
+            ],
+            links,
+        );
+        editor.load_blocks(vec![BlockInstance {
+            id: "rec".to_string(),
+            block_definition_id: "builtin.recorder".to_string(),
+            name: None,
+            properties: HashMap::new(),
+            position: Position { x: 1200.0, y: 0.0 },
+            runtime_data: None,
+            computed_external_pads: Some(ExternalPads {
+                inputs: vec![external_pad("video_in_0"), external_pad("audio_in_0")],
+                outputs: vec![external_pad("out")],
+            }),
+        }]);
+        editor
+    }
+
+    fn resolved(editor: &GraphEditor, pad_ref: &str, is_input: bool) -> (String, String) {
+        editor.resolve_link_endpoint(pad_ref, is_input)
+    }
+
+    fn pair(a: &str, b: &str) -> (String, String) {
+        (a.to_string(), b.to_string())
+    }
+
+    #[test]
+    fn padless_link_ends_resolve_to_the_first_pad_in_the_link_direction() {
+        let editor = editor(vec![
+            link("vsrc", "vcaps"),
+            link("vcaps::", "vvalve::"),
+            link("vvalve", "rec:video_in_0"),
+            link("rec", "rec"),
+            link("vsrc:src", "dec::"),
+        ]);
+
+        // Padless from: the element's (only) output pad
+        assert_eq!(resolved(&editor, "vsrc", false), pair("vsrc", "src"));
+        // Padless to: the element's (only) input pad
+        assert_eq!(resolved(&editor, "vcaps", true), pair("vcaps", "sink"));
+        // "id::" form, both ends
+        assert_eq!(resolved(&editor, "vcaps::", false), pair("vcaps", "src"));
+        assert_eq!(resolved(&editor, "vvalve::", true), pair("vvalve", "sink"));
+        // Blocks: first external pad of the right direction
+        assert_eq!(resolved(&editor, "rec", true), pair("rec", "video_in_0"));
+        assert_eq!(resolved(&editor, "rec::", false), pair("rec", "out"));
+        // No known pad in that direction: empty pad name, node-edge fallback
+        assert_eq!(resolved(&editor, "dec::", true), pair("dec", ""));
+        assert_eq!(resolved(&editor, "vsrc", true), pair("vsrc", ""));
+
+        // Every link resolves to a drawable position at both ends
+        for l in &editor.links {
+            let (from_id, from_pad) = resolved(&editor, &l.from, false);
+            let (to_id, to_pad) = resolved(&editor, &l.to, true);
+            assert!(
+                editor
+                    .get_pad_position(&from_id, &from_pad, false)
+                    .is_some(),
+                "no from position for {l:?}"
+            );
+            assert!(
+                editor.get_pad_position(&to_id, &to_pad, true).is_some(),
+                "no to position for {l:?}"
+            );
+        }
+
+        // A padless end is drawn at the same spot as its first pad
+        assert_eq!(
+            editor.get_pad_position("rec", &resolved(&editor, "rec", true).1, true),
+            editor.get_pad_position("rec", "video_in_0", true),
+        );
+        assert_ne!(
+            editor.get_pad_position("rec", "video_in_0", true),
+            editor.get_pad_position("rec", "audio_in_0", true),
+        );
+    }
+
+    #[test]
+    fn explicit_pad_link_ends_are_unchanged() {
+        let editor = editor(vec![link("vsrc:src", "vcaps:sink")]);
+        assert_eq!(resolved(&editor, "vsrc:src", false), pair("vsrc", "src"));
+        assert_eq!(resolved(&editor, "vcaps:sink", true), pair("vcaps", "sink"));
+        assert_eq!(
+            resolved(&editor, "rec:audio_in_0", true),
+            pair("rec", "audio_in_0")
+        );
+        // Same first-colon split as parse_pad_ref, including namespaced ids
+        assert_eq!(resolved(&editor, "a:b:c", true), pair("a", "b:c"));
+    }
+
+    #[test]
+    fn padless_link_ends_add_no_pad_to_an_element_without_pad_info() {
+        let editor = editor(vec![link("vsrc", "dec::"), link("dec", "vcaps")]);
+        assert!(editor.get_actual_input_pads("dec").is_empty());
+        assert!(editor.get_actual_output_pads("dec").is_empty());
     }
 }

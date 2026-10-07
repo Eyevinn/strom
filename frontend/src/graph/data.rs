@@ -469,7 +469,8 @@ impl GraphEditor {
 
         for link in &self.links {
             // Extract element ID and pad name from link.to
-            if let Some((to_elem_id, pad_name)) = parse_pad_ref(&link.to) {
+            // Padless (element-level) ends name no pad to render
+            if let (to_elem_id, Some(pad_name)) = parse_link_endpoint(&link.to) {
                 if to_elem_id == element_id {
                     pads.insert(pad_name);
                 }
@@ -487,7 +488,8 @@ impl GraphEditor {
 
         for link in &self.links {
             // Extract element ID and pad name from link.from
-            if let Some((from_elem_id, pad_name)) = parse_pad_ref(&link.from) {
+            // Padless (element-level) ends name no pad to render
+            if let (from_elem_id, Some(pad_name)) = parse_link_endpoint(&link.from) {
                 if from_elem_id == element_id {
                     pads.insert(pad_name);
                 }
