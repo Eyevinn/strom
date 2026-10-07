@@ -29,6 +29,7 @@
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_base as gst_base;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use tracing::warn;
 
@@ -340,6 +341,42 @@ pub(crate) fn quiesce_underlay_restarts(pipeline: &gst::Element) {
     }
 }
 
+/// Slack past the compositor's output position for a restarted frame. A held
+/// pad drops a frame that ends before its current one, and the current one
+/// may have been taken up to an output frame ahead of the position.
+const FRAME_STAMP_MARGIN: gst::ClockTime = gst::ClockTime::from_mseconds(50);
+
+/// The compositor an underlay source feeds: downstream past its short chain
+/// (capsfilter / glupload / videoconvert).
+fn downstream_compositor(src: &gst::Element) -> Option<gst_base::Aggregator> {
+    let mut el = src.static_pad("src")?.peer()?.parent_element()?;
+    for _ in 0..6 {
+        if let Some(aggregator) = el.downcast_ref::<gst_base::Aggregator>() {
+            return Some(aggregator.clone());
+        }
+        el = el.static_pad("src")?.peer()?.parent_element()?;
+    }
+    None
+}
+
+/// Running time to stamp a restarted underlay frame with, so the compositor
+/// shows it on its next output frame.
+///
+/// Not the clock's running time alone: a compositor that renders slower than
+/// real time falls further behind the clock every second, and a frame stamped
+/// "now" then lies in its future. A configured border would be missing from
+/// the cut frame that reveals it, for as long as the compositor is behind.
+/// Stamped at the compositor's own output position instead, the frame is due
+/// at once; a held pad keeps a frame from its past. Never later than the
+/// clock's running time, which is where a compositor that keeps up is.
+fn frame_time(src: &gst::Element, running: u64) -> u64 {
+    downstream_compositor(src)
+        .and_then(|c| c.query_position::<gst::ClockTime>())
+        .map_or(running, |position| {
+            (position + FRAME_STAMP_MARGIN).nseconds().min(running)
+        })
+}
+
 /// Make a started underlay source push one frame in its current color.
 /// Returns false when there is nothing to restart: the pipeline has not
 /// started, or the flow is being torn down.
@@ -363,10 +400,10 @@ fn restart_underlay_src(src: &gst::Element) -> bool {
         );
         return true;
     }
-    // Now, after any wait for the streaming thread, so the frame is not
-    // late. Read off the parent: a stopped source may have lost its clock.
-    let offset = parent.current_running_time().map_or(0, |t| t.nseconds());
-    src.set_property("timestamp-offset", offset as i64);
+    // Now, after any wait for the streaming thread. Read off the parent: a
+    // stopped source may have lost its clock.
+    let running = parent.current_running_time().map_or(0, |t| t.nseconds());
+    src.set_property("timestamp-offset", frame_time(src, running) as i64);
     if src.sync_state_with_parent().is_err() {
         warn!(
             "Underlay source {} did not restart for a color change",
