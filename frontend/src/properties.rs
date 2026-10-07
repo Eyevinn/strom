@@ -1145,7 +1145,9 @@ impl PropertyInspector {
                     }
 
                     // Show recording status, duration counter, and split button for recorder blocks
-                    if definition.id == "builtin.recorder" {
+                    if definition.id == "builtin.recorder"
+                        || definition.id == "builtin.liverecorder"
+                    {
                         ui.separator();
                         if let Some(start) = recorder_start_time {
                             let elapsed = start.elapsed();
