@@ -143,6 +143,30 @@ port = 8080
 # probe_before_handout = true
 
 # ============================================================================
+# Media library: download from URL
+# ============================================================================
+[media]
+# Let "Download from URL" (POST /api/media/download) fetch from loopback,
+# private (10/8, 172.16/12, 192.168/16, fc00::/7), link-local and
+# carrier-grade NAT addresses. For a lab or single-user setup with a local
+# file server. On a Strom others can reach, this lets anyone who can call the
+# API make the server fetch from its own network, so leave it off there.
+# Cloud metadata and unroutable addresses stay refused either way.
+# Default: false
+# Env: STROM_MEDIA_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES=true
+# download_allow_private_addresses = false
+
+# Largest file a URL download may write, in bytes.
+# Default: 2147483648 (2 GiB)
+# Env: STROM_MEDIA_DOWNLOAD_MAX_BYTES
+# download_max_bytes = 2147483648
+
+# Time allowed for one whole URL download, in seconds.
+# Default: 7200
+# Env: STROM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS
+# download_timeout_seconds = 7200
+
+# ============================================================================
 # Logging Configuration
 # ============================================================================
 [logging]

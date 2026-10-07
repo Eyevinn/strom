@@ -114,7 +114,7 @@ Configure via CLI arguments, environment variables, or a config file (highest pr
 --database-url postgresql://...   # or STROM_DATABASE_URL=... (production)
 ```
 
-Copy `.strom.toml.example` to `.strom.toml` for all options. Key topics have dedicated guides: [storage](docs/POSTGRESQL.md), [authentication](docs/AUTHENTICATION.md), and HTTPS/TLS (built-in `--tls-cert`/`--tls-key` with hot-reload, or a reverse proxy). `strom --help` lists every CLI option; [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) covers the common ones.
+Copy `.strom.toml.example` to `.strom.toml` for all options. Key topics have dedicated guides: [storage](docs/POSTGRESQL.md), [authentication](docs/AUTHENTICATION.md), [media library](docs/MEDIA_LIBRARY.md), and HTTPS/TLS (built-in `--tls-cert`/`--tls-key` with hot-reload, or a reverse proxy). `strom --help` lists every CLI option; [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) covers the common ones.
 
 ## API & MCP
 
