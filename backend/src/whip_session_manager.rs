@@ -256,8 +256,12 @@ impl SlotInputWork {
 /// codec before the new publisher's caps arrive.
 fn flush_slot_appsrc(appsrc: &gst_app::AppSrc, src: &gst::Pad, slot: usize) {
     let queued = appsrc.current_level_buffers();
+    // `Handled`, not `Drop`: after `Drop`, GStreamer before 1.26 unrefs the
+    // event gstreamer-rs already freed and logs a critical (see
+    // `drop_upstream_qos_events`). The pad is set flushing before its probes
+    // run, so the flush still wakes the streaming thread.
     let contain = src.add_probe(gst::PadProbeType::EVENT_FLUSH, |_, _| {
-        gst::PadProbeReturn::Drop
+        gst::PadProbeReturn::Handled
     });
     appsrc.send_event(gst::event::FlushStart::new());
     appsrc.send_event(gst::event::FlushStop::new(false));

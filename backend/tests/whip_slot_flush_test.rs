@@ -232,6 +232,22 @@ fn a_new_session_gets_none_of_the_frames_its_predecessor_left_queued() {
             feature.set_rank(gst::Rank::NONE);
         }
     }
+    // Count GStreamer criticals from here on: dropping the flush events at the
+    // appsrc's pad with `Drop` logged one per event on GStreamer before 1.26.
+    let criticals = Arc::new(AtomicUsize::new(0));
+    let handler = {
+        let criticals = Arc::clone(&criticals);
+        gst::glib::log_set_handler(
+            Some("GStreamer"),
+            gst::glib::LogLevels::LEVEL_CRITICAL,
+            false,
+            false,
+            move |_domain, _level, message| {
+                eprintln!("GStreamer critical: {message}");
+                criticals.fetch_add(1, Ordering::Relaxed);
+            },
+        )
+    };
     let slot = start_slot("whip_flush");
     let config = &slot.config;
 
@@ -295,6 +311,12 @@ fn a_new_session_gets_none_of_the_frames_its_predecessor_left_queued() {
         "{} of the previous session's frames (of {} queued) came out as the new session's output",
         leaked,
         queued
+    );
+    gst::glib::log_remove_handler(Some("GStreamer"), handler);
+    assert_eq!(
+        criticals.load(Ordering::Relaxed),
+        0,
+        "GStreamer logged criticals while the slot was flushed"
     );
     // Set, it stops the new session's keyframe requester before its own
     // publisher has sent anything.
