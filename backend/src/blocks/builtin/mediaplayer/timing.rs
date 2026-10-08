@@ -65,6 +65,9 @@ pub struct Timing {
     /// How far ahead of its time each buffer leaves the clocksync (ns). Zero
     /// for an ordinary player.
     release_ahead: i64,
+    /// A stinger clip source: its first frame parks until a take pins where
+    /// it goes, so it needs no offset of its own and must never be dropped.
+    parks: bool,
 }
 
 /// Where a buffer goes in the main pipeline.
@@ -85,6 +88,7 @@ impl Timing {
             delay: (playout_delay_ms.min(MAX_PLAYOUT_DELAY_MS) * 1_000_000) as i64,
             start_at: AtomicI64::new(UNSET),
             release_ahead: 0,
+            parks: false,
         }
     }
 
@@ -94,6 +98,7 @@ impl Timing {
     pub fn for_stinger(release_ahead_ms: u64) -> Self {
         Self {
             release_ahead: (release_ahead_ms * 1_000_000) as i64,
+            parks: true,
             ..Self::new(0)
         }
     }
@@ -290,12 +295,22 @@ pub fn arm(
         // it there is no offset to take, and a buffer let through on the old
         // one could wait out a live stream's whole timeline - SVT's is over a
         // thousand hours. Drop it and take the offset from the next.
+        //
+        // Except a stinger clip's first frame: a stinger source parks its
+        // first clip while the flow is still starting, and dropping frames
+        // until the flow runs parks a later one, so every take of that clip
+        // starts frames in. The parked frame needs no offset: the take sets
+        // the clocksyncs and pins the clip's start from that frame.
         let Some(now) = main
             .upgrade()
             .and_then(|p| p.current_running_time())
             .map(|t| t.nseconds() as i64)
         else {
-            return gst::PadProbeReturn::Drop;
+            return if timing.parks {
+                gst::PadProbeReturn::Remove
+            } else {
+                gst::PadProbeReturn::Drop
+            };
         };
         let offset = timing.take_sync_offset(rt.nseconds() as i64, now);
         let ts_offset = offset - timing.release_ahead;
@@ -460,6 +475,48 @@ mod tests {
 
         let _ = internal.set_state(gst::State::Null);
         let _ = main.set_state(gst::State::Null);
+    }
+
+    /// A stinger source parks its first clip while the flow is still
+    /// starting. Its first frame has to reach the park, not be dropped for
+    /// want of a flow running time: a dropped head parks a later frame, and
+    /// every take of the clip then starts that many frames in.
+    #[test]
+    fn a_stinger_clip_keeps_its_first_frame_before_the_flow_runs() {
+        let _ = gst::init();
+        let internal = gst::Pipeline::new();
+        let src = gstreamer_app::AppSrc::builder()
+            .format(gst::Format::Time)
+            .caps(&gst::Caps::builder("video/x-raw").build())
+            .build();
+        let clocksync = gst::ElementFactory::make("clocksync")
+            .property("sync", false)
+            .build()
+            .unwrap();
+        let sink = gstreamer_app::AppSink::builder().sync(false).build();
+        internal
+            .add_many([src.upcast_ref(), &clocksync, sink.upcast_ref()])
+            .unwrap();
+        gst::Element::link_many([src.upcast_ref(), &clocksync, sink.upcast_ref()]).unwrap();
+
+        // The flow exists but is not playing: no running time.
+        let main = gst::Pipeline::new();
+        let main_weak = main.downgrade();
+        let timing = Arc::new(Timing::for_stinger(STINGER_RELEASE_AHEAD_MS));
+        arm(&clocksync, &timing, &main_weak);
+        internal.set_state(gst::State::Playing).unwrap();
+
+        let mut buf = gst::Buffer::new();
+        buf.get_mut().unwrap().set_pts(gst::ClockTime::ZERO);
+        src.push_buffer(buf).unwrap();
+        let first = sink
+            .try_pull_sample(gst::ClockTime::from_seconds(2))
+            .expect("the clip's first frame was dropped");
+        assert_eq!(first.buffer().unwrap().pts(), Some(gst::ClockTime::ZERO));
+        // The take pins the start; nothing is taken from the flow here.
+        assert_eq!(timing.sync_offset(), None);
+
+        let _ = internal.set_state(gst::State::Null);
     }
 
     /// A stinger take programs the mixer for the frame its clip lands on
