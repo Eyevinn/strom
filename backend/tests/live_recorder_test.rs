@@ -182,14 +182,16 @@ fn demux(path: &Path) -> HashMap<String, Vec<gst::ClockTime>> {
         Some("ts") => "tsdemux",
         _ => "qtdemux",
     };
-    let pipeline = gst::parse::launch(&format!(
-        "filesrc location=\"{}\" ! {} name=d",
-        path.display(),
-        demuxer
-    ))
-    .unwrap()
-    .downcast::<gst::Pipeline>()
-    .unwrap();
+    let pipeline = gst::parse::launch(&format!("filesrc name=src ! {demuxer} name=d"))
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+    // `location` as a property, not in the launch string: the parser reads a
+    // Windows path's backslashes as escapes.
+    pipeline
+        .by_name("src")
+        .unwrap()
+        .set_property("location", path.to_str().unwrap());
     let samples: Arc<Mutex<HashMap<String, Vec<gst::ClockTime>>>> = Arc::default();
     let demux = pipeline.by_name("d").unwrap();
     let pipeline_weak = pipeline.downgrade();
@@ -1050,13 +1052,18 @@ fn long_gop_video_source(pipeline: &gst::Pipeline) -> gst::Element {
 
 /// Each video sample's PTS and whether it is a keyframe, in file order.
 fn video_keyframes(path: &Path) -> Vec<(gst::ClockTime, bool)> {
-    let pipeline = gst::parse::launch(&format!(
-        "filesrc location=\"{}\" ! qtdemux ! video/x-h264 ! fakesink name=s sync=false async=false",
-        path.display()
-    ))
+    let pipeline = gst::parse::launch(
+        "filesrc name=src ! qtdemux ! video/x-h264 ! fakesink name=s sync=false async=false",
+    )
     .unwrap()
     .downcast::<gst::Pipeline>()
     .unwrap();
+    // `location` as a property, not in the launch string: the parser reads a
+    // Windows path's backslashes as escapes.
+    pipeline
+        .by_name("src")
+        .unwrap()
+        .set_property("location", path.to_str().unwrap());
     let frames: Arc<Mutex<Vec<(gst::ClockTime, bool)>>> = Arc::default();
     let sink_frames = Arc::clone(&frames);
     pipeline
