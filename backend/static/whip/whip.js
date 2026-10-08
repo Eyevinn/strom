@@ -373,9 +373,18 @@ class WhipClient {
             // Full SDP answer logging commented out for autotest - re-enable when needed
             // this._logDebug('=== REMOTE SDP ANSWER ===\n' + answerSdp);
 
-            // Guard: peerConnection may have been nulled by cleanup() during the fetch
+            // Guard: peerConnection may have been nulled by cleanup() during the
+            // fetch. disconnect() had no resource URL to DELETE then, so end the
+            // session the server just created.
             if (!this.peerConnection) {
-                this._logAlways('PeerConnection closed during negotiation, aborting', 'warning');
+                this._logAlways('PeerConnection closed during negotiation, ending the server session', 'warning');
+                const orphan = this.resourceUrl;
+                this.resourceUrl = null;
+                if (orphan) {
+                    fetch(orphan, { method: 'DELETE' }).catch((e) => {
+                        this._logAlways('Failed to send DELETE: ' + e.message, 'error');
+                    });
+                }
                 return;
             }
 
