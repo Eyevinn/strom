@@ -81,9 +81,11 @@ pub async fn expand_blocks(
 
     // Canonicalize media_path once so all blocks get an absolute path,
     // even if the config uses a relative path like "./strom-data/media".
-    let canonical_media = media_path
-        .canonicalize()
-        .unwrap_or_else(|_| media_path.to_path_buf());
+    // `dunce` keeps Windows paths out of the verbatim `\\?\` form, where `/`
+    // is not a separator: blocks join file names onto this with `/`, and
+    // filesink then refuses the location (#835).
+    let canonical_media =
+        dunce::canonicalize(media_path).unwrap_or_else(|_| media_path.to_path_buf());
     let canonical_media_str = canonical_media.to_string_lossy().to_string();
 
     for block_instance in blocks {

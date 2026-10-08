@@ -6675,6 +6675,7 @@ dependencies = [
  "crossterm",
  "directories",
  "dotenvy",
+ "dunce",
  "eframe",
  "figment",
  "flate2",

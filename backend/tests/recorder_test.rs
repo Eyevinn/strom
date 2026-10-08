@@ -635,16 +635,11 @@ mod unfed_track {
     /// linking pass fails this deterministically; moving it after
     /// `set_state(Playing)` does not, because `set_state` returns before the
     /// encoders negotiate caps. Nothing guards that second direction.
+    ///
+    /// On Windows it also guards #835: `PipelineManager` hands the block a
+    /// canonicalized media path, and a verbatim `\\?\` path there made
+    /// `filesink` refuse the recorder's location, so the flow never reached EOS.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    // On Windows this flow never reaches EOS, so splitmuxsink never finalizes
-    // the file and the wait below always elapses — raising the ceiling from 30s
-    // to 180s changes nothing. That is a defect in its own right, tracked in
-    // #835. Ignored rather than cfg'd out so it stays visible in the Windows
-    // run, and so the other tests in this file keep running there.
-    #[cfg_attr(
-        target_os = "windows",
-        ignore = "never reaches EOS on Windows — see #835"
-    )]
     async fn recorder_records_when_driven_through_pipeline_start() {
         if !plugins_available() || !container_available("mp4") {
             return;
