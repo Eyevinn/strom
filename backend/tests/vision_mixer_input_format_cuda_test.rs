@@ -356,7 +356,7 @@ async fn cuda_after_a_converted_format_bypasses_the_converter() {
         );
         if feed == Feed::Cuda {
             // The stand-in hands glupload the frames as they are.
-            assert_eq!(running.upload_format().as_deref(), Some("NV12"));
+            running.wait_for_upload_format("NV12", &format!("{feed:?}"));
             assert!(
                 running.spliced_converters().is_empty(),
                 "a removed converter is still in the pipeline: {:?}",

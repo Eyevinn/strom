@@ -372,9 +372,12 @@ async fn partial_download_never_appears_under_the_final_name() {
     let media = app.media();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
+            // `std::fs::metadata`, not `DirEntry::metadata`: on Windows the
+            // latter is the size in the directory listing, which NTFS does
+            // not update while the writer holds the file open.
             let half_written = std::fs::read_dir(&media).unwrap().any(|entry| {
                 entry
-                    .and_then(|e| e.metadata())
+                    .and_then(|e| std::fs::metadata(e.path()))
                     .map(|m| m.is_file() && m.len() >= (BODY_LEN / 2) as u64)
                     .unwrap_or(false)
             });

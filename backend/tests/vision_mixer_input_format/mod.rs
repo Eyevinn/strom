@@ -295,6 +295,22 @@ impl Running {
         }
     }
 
+    /// Wait until glupload's sink has negotiated `format`. A splice changes
+    /// the adapters before the new CAPS event reaches glupload, and PGM can
+    /// stay white on frames from before a switch, so neither proves that
+    /// glupload already sees the new frames.
+    pub fn wait_for_upload_format(&self, format: &str, what: &str) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while self.upload_format().as_deref() != Some(format) {
+            assert!(
+                Instant::now() < deadline,
+                "{what}: glupload never received {format}, it receives {:?}",
+                self.upload_format()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Pull PGM until `frames` consecutive white frames have arrived, or fail
     /// after 30 s.
     pub fn wait_for_white_pgm(&self, what: &str, frames: usize) {

@@ -167,10 +167,9 @@ async fn gpu_converter_comes_out_when_the_format_switches_back() {
                 "{format}: a removed converter is still in the pipeline: {:?}",
                 running.spliced_converters()
             );
-            assert_eq!(
-                running.upload_format().as_deref(),
-                Some(format),
-                "{format}: glupload does not receive the source's frames as they are"
+            running.wait_for_upload_format(
+                format,
+                &format!("{format}: glupload does not receive the source's frames as they are"),
             );
         }
     }

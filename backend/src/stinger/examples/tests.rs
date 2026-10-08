@@ -376,12 +376,17 @@ fn write_png(path: &std::path::Path, mut s: cairo::ImageSurface) {
     }
     let pipeline = gst::parse::launch(&format!(
         "appsrc name=src caps=video/x-raw,format=BGRA,width={w},height={h},framerate=0/1 \
-         ! videoconvert ! pngenc ! filesink location={}",
-        path.display()
+         ! videoconvert ! pngenc ! filesink name=sink"
     ))
     .unwrap()
     .downcast::<gst::Pipeline>()
     .unwrap();
+    // `location` as a property, not in the launch string: the parser reads a
+    // Windows path's backslashes as escapes.
+    pipeline
+        .by_name("sink")
+        .unwrap()
+        .set_property("location", path.to_str().unwrap());
     let src = pipeline
         .by_name("src")
         .unwrap()
