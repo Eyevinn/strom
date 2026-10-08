@@ -74,7 +74,23 @@ impl PipelineManager {
     /// Emits the `split-now` signal on the splitmuxsink element, which triggers
     /// a file split at the next keyframe boundary.
     pub fn recorder_split_now(&self, block_instance_id: &str) -> Result<(), PipelineError> {
+        use crate::blocks::builtin::live_recorder::{
+            fragment_sink::FragmentFileSink, FRAGMENT_SINK_SUFFIX,
+        };
         use crate::blocks::builtin::recorder::SPLITMUXSINK_SUFFIX;
+        let fragment_sink_id = format!("{}:{}", block_instance_id, FRAGMENT_SINK_SUFFIX);
+        if let Some(sink) = self
+            .elements
+            .get(&fragment_sink_id)
+            .and_then(|e| e.downcast_ref::<FragmentFileSink>())
+        {
+            sink.split_now();
+            info!(
+                "Requested a new file on live recorder block {}",
+                block_instance_id
+            );
+            return Ok(());
+        }
         let element_id = format!("{}:{}", block_instance_id, SPLITMUXSINK_SUFFIX);
         let element = self.elements.get(&element_id).ok_or_else(|| {
             PipelineError::ElementNotFound(format!(

@@ -17,6 +17,7 @@ pub mod efpsrt_input;
 pub mod html_input;
 pub mod inter;
 pub mod latency;
+pub mod live_recorder;
 pub mod liveaudiorouter;
 pub mod loudness;
 pub mod mediaplayer;
@@ -113,6 +114,7 @@ pub fn get_all_builtin_blocks() -> Vec<BlockDefinition> {
 
     // Add Recorder blocks
     blocks.extend(recorder::get_blocks());
+    blocks.extend(live_recorder::get_blocks());
 
     // Add Spectrum blocks
     blocks.extend(spectrum::get_blocks());
@@ -185,6 +187,7 @@ pub fn get_builder(block_definition_id: &str) -> Option<Arc<dyn BlockBuilder>> {
         "builtin.ndi_input" => Some(Arc::new(ndi::NDIInputBuilder)),
         "builtin.ndi_output" => Some(Arc::new(ndi::NDIOutputBuilder)),
         "builtin.recorder" => Some(Arc::new(recorder::RecorderBuilder)),
+        "builtin.liverecorder" => Some(Arc::new(live_recorder::LiveRecorderBuilder)),
         "builtin.rtmp_output" => Some(Arc::new(rtmp::RtmpOutputBuilder)),
         "builtin.spectrum" => Some(Arc::new(spectrum::SpectrumBuilder)),
         "builtin.tams_output" => Some(Arc::new(tams_output::TamsOutputBuilder)),

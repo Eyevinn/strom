@@ -1447,7 +1447,7 @@ fn input_is_connected(input: &gst::glib::WeakRef<gst::Element>) -> bool {
 ///
 /// The raw MPEG-TS bitstream is written directly to file without any demux/remux.
 /// Uses multifilesink for optional size/time-based file rotation.
-fn build_ts_passthrough(
+pub(crate) fn build_ts_passthrough(
     instance_id: &str,
     location: &str,
     max_size_time_secs: u64,
