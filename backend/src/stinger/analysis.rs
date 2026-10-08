@@ -54,11 +54,47 @@ fn cache_key(uri: &str) -> CacheKey {
     (uri.to_string(), mtime, len)
 }
 
+/// Analyses that failed, by cache key: a clip no decoder here can play
+/// fails the same way every time, and decoding it again on every state read
+/// cost a decoder per read.
+static FAILED: LazyLock<Mutex<HashMap<CacheKey, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Clips whose video has to be decoded in software, by cache key: the
+/// encoded format to stop the player's decoder at (see
+/// [`crate::gst::software_decoder`]).
+static SOFTWARE: LazyLock<Mutex<HashMap<CacheKey, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The encoded video format of `uri` to decode in software, when its analysis
+/// found that the hardware decoder an autoplugger picks for it cannot decode
+/// it, and the file has not changed since.
+pub fn software_only(uri: &str) -> Option<String> {
+    let key = cache_key(uri);
+    SOFTWARE.lock().ok()?.get(&key).cloned()
+}
+
 /// The analysis of `uri`, if it has run and the
 /// file has not changed since.
 pub fn cached(uri: &str) -> Option<StingerClipInfo> {
     let key = cache_key(uri);
     CACHE.lock().ok()?.get(&key).cloned()
+}
+
+/// Why the analysis of `uri` failed, if it did and the file has not changed
+/// since.
+pub fn failed(uri: &str) -> Option<String> {
+    let key = cache_key(uri);
+    FAILED.lock().ok()?.get(&key).cloned()
+}
+
+/// Forget a failed analysis of `uri`, so the next request runs it again.
+pub fn forget_failure(uri: &str) {
+    let key = cache_key(uri);
+    FAILED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&key);
 }
 
 /// The result of one analysis run, shared with every caller that asked for
@@ -127,6 +163,9 @@ pub fn analyze_cached(uri: &str) -> Result<StingerClipInfo, String> {
                 if let Some(info) = CACHE.lock().ok().and_then(|c| c.get(&key).cloned()) {
                     return Ok(info);
                 }
+                if let Some(e) = FAILED.lock().ok().and_then(|f| f.get(&key).cloned()) {
+                    return Err(e);
+                }
                 let flight = Flight::default();
                 in_flight.insert(key.clone(), Arc::clone(&flight));
                 Ok(FlightGuard {
@@ -152,28 +191,104 @@ pub fn analyze_cached(uri: &str) -> Result<StingerClipInfo, String> {
         .unwrap_or_else(|p| p.into_inner())
         .entry(uri.to_string())
         .or_default() += 1;
-    let result = analyze(uri);
-    if let Ok(info) = &result {
-        if let Ok(mut cache) = CACHE.lock() {
-            cache.insert(key, info.clone());
+    let result = analyze_deciding(uri);
+    match &result {
+        Ok((info, software)) => {
+            if let Some(encoded) = software {
+                if let Ok(mut map) = SOFTWARE.lock() {
+                    map.insert(key.clone(), encoded.clone());
+                }
+            }
+            if let Ok(mut cache) = CACHE.lock() {
+                cache.insert(key, info.clone());
+            }
+        }
+        Err(e) => {
+            if let Ok(mut failed) = FAILED.lock() {
+                failed.insert(key, e.clone());
+            }
         }
     }
+    let result = result.map(|(info, _)| info);
     guard.finish(result.clone());
     result
 }
 
 /// Decode `uri` and measure it. Blocks while decoding.
 pub fn analyze(uri: &str) -> Result<StingerClipInfo, String> {
+    analyze_deciding(uri).map(|(info, _)| info)
+}
+
+/// [`analyze`], and whether the clip has to be decoded in software: the
+/// encoded video format to stop the player's decoder at, when the decoder an
+/// autoplugger picks for it is a hardware one that cannot decode it.
+fn analyze_deciding(uri: &str) -> Result<(StingerClipInfo, Option<String>), String> {
+    let first = run(uri, false);
+    let hardware = match first {
+        Ok(run) => return Ok((run.info, None)),
+        Err(failure) => match failure.hardware {
+            Some(factory) => (factory, failure.error),
+            None => return Err(failure.error),
+        },
+    };
+    let (factory, error) = hardware;
+    match run(uri, true) {
+        Ok(Run {
+            info,
+            encoded: Some(encoded),
+            ..
+        }) => {
+            info!(
+                "Stinger clip {}: the hardware decoder {} failed ({}); it decodes in software",
+                uri, factory, error
+            );
+            Ok((info, Some(encoded)))
+        }
+        // No hardware decoder was skipped: the software run used the same
+        // decoders, so its result says nothing new.
+        Ok(_) => Err(error),
+        Err(software) => Err(format!(
+            "{} (hardware decoder {}); in software: {}",
+            error, factory, software.error
+        )),
+    }
+}
+
+struct Run {
+    info: StingerClipInfo,
+    /// The encoded video format a hardware decoder was skipped for.
+    encoded: Option<String>,
+}
+
+struct RunFailure {
+    error: String,
+    /// The hardware decoder the run used, if it used one.
+    hardware: Option<String>,
+}
+
+/// One decode of `uri`. With `software`, every hardware decoder is skipped,
+/// through the classic `uridecodebin`'s `autoplug-select`; `uridecodebin3`
+/// has no such hook.
+fn run(uri: &str, software: bool) -> Result<Run, RunFailure> {
     let started = Instant::now();
+    let fail = |error: String| RunFailure {
+        error,
+        hardware: None,
+    };
     let pipeline = gst::Pipeline::new();
-    let decodebin = gst::ElementFactory::make("uridecodebin3")
+    let decoder = if software {
+        "uridecodebin"
+    } else {
+        "uridecodebin3"
+    };
+    let decodebin = gst::ElementFactory::make(decoder)
         .property("uri", uri)
         .property("caps", gst::Caps::builder("video/x-raw").build())
         .build()
-        .map_err(|e| format!("uridecodebin3: {e}"))?;
+        .map_err(|e| fail(format!("{decoder}: {e}")))?;
     let convert = gst::ElementFactory::make("videoconvert")
         .build()
-        .map_err(|e| format!("videoconvert: {e}"))?;
+        .map_err(|e| fail(format!("videoconvert: {e}")))?;
     let appsink = gst_app::AppSink::builder()
         .caps(
             &gst::Caps::builder("video/x-raw")
@@ -185,8 +300,50 @@ pub fn analyze(uri: &str) -> Result<StingerClipInfo, String> {
         .build();
     pipeline
         .add_many([&decodebin, &convert, appsink.upcast_ref()])
-        .map_err(|e| format!("add: {e}"))?;
-    convert.link(&appsink).map_err(|e| format!("link: {e}"))?;
+        .map_err(|e| fail(format!("add: {e}")))?;
+    convert
+        .link(&appsink)
+        .map_err(|e| fail(format!("link: {e}")))?;
+
+    // The hardware decoder this run uses, if any; with `software`, the
+    // encoded format one was skipped for.
+    let hardware: std::sync::Arc<Mutex<Option<String>>> = Default::default();
+    let skipped_for: std::sync::Arc<Mutex<Option<String>>> = Default::default();
+    if software {
+        // A `Value` cannot cross threads; the type can, and the value is
+        // built per call.
+        let select_result = gst::glib::Type::from_name("GstAutoplugSelectResult");
+        let skipped_for = skipped_for.clone();
+        decodebin.connect("autoplug-select", false, move |args| {
+            // Every call must answer: GStreamer aborts on a missing value.
+            let factory = args[3].get::<gst::ElementFactory>().ok();
+            let hardware = factory
+                .as_ref()
+                .is_some_and(crate::gst::software_decoder::is_hardware);
+            if hardware {
+                let caps = args[2].get::<gst::Caps>().ok();
+                if let Some(name) = caps.and_then(|c| c.structure(0).map(|s| s.name().to_string()))
+                {
+                    *skipped_for.lock().unwrap_or_else(|p| p.into_inner()) = Some(name);
+                }
+            }
+            let nick = if hardware { "skip" } else { "try" };
+            let class =
+                gst::glib::EnumClass::with_type(select_result.expect("uridecodebin's type"))
+                    .expect("an enum");
+            class.to_value_by_nick(nick)
+        });
+    } else {
+        let hardware = hardware.clone();
+        pipeline.connect_deep_element_added(move |_, _, element| {
+            if let Some(factory) = element.factory() {
+                if crate::gst::software_decoder::is_hardware(&factory) {
+                    *hardware.lock().unwrap_or_else(|p| p.into_inner()) =
+                        Some(factory.name().to_string());
+                }
+            }
+        });
+    }
 
     // The decoder's own output format says whether the clip carries alpha;
     // after the converter every frame is RGBA either way.
@@ -231,16 +388,17 @@ pub fn analyze(uri: &str) -> Result<StingerClipInfo, String> {
         }
     }
     let pipeline = ShutDown(pipeline);
-    pipeline
+    let result = pipeline
         .0
         .set_state(gst::State::Playing)
-        .map_err(|e| format!("start analysis: {e:?}"))?;
-
-    let result = collect(&appsink, &pipeline.0, started);
+        .map_err(|e| format!("start analysis: {e:?}"))
+        .and_then(|_| collect(&appsink, &pipeline.0, started));
     drop(pipeline);
-    let (frames, width, height, fps) = result?;
+    let hardware = hardware.lock().unwrap_or_else(|p| p.into_inner()).take();
+    let (frames, width, height, fps) = result.map_err(|error| RunFailure { error, hardware })?;
     let has_alpha = decoded_alpha.lock().ok().and_then(|a| *a).unwrap_or(false);
-    let info = summarize(&frames, width, height, fps, has_alpha, started.elapsed())?;
+    let info =
+        summarize(&frames, width, height, fps, has_alpha, started.elapsed()).map_err(fail)?;
     info!(
         "Stinger clip {}: {}x{}, {} frames, {} ms, alpha={}, layout={:?}, analysed in {} ms",
         uri,
@@ -252,7 +410,8 @@ pub fn analyze(uri: &str) -> Result<StingerClipInfo, String> {
         info.detected_layout,
         info.analysis_ms
     );
-    Ok(info)
+    let encoded = skipped_for.lock().unwrap_or_else(|p| p.into_inner()).take();
+    Ok(Run { info, encoded })
 }
 
 type Collected = (Vec<FrameStats>, u32, u32, (i32, i32));

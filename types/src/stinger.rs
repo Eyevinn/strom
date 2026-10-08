@@ -190,6 +190,10 @@ pub struct StingerClip {
     /// added). Only a local file can be missing.
     #[serde(default)]
     pub missing: bool,
+    /// Why the clip's analysis failed, when it did. It is not retried until
+    /// the file changes or the library is reloaded.
+    #[serde(default)]
+    pub analysis_error: Option<String>,
 }
 
 /// A finished take, with what was measured.

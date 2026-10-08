@@ -1385,7 +1385,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.45-stinger | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.46-stinger | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1936,6 +1936,7 @@
         }
         function variantBadge(c) {
             if (c.missing) return '<span class="badge missing" title="The file is not on disk">MISSING</span>';
+            if (c.analysis_error) return '<span class="badge missing" title="' + escapeHtml('The clip could not be analysed: ' + c.analysis_error + '. Reload the library to try again.') + '">ERROR</span>';
             if (!c.info || !c.variant) return '<span class="badge" title="Analysing the clip">...</span>';
             const label = { classic: 'CLASSIC', track_matte: 'MATTE', mask_only: 'MASK' }[c.variant];
             const cls = { classic: '', track_matte: 'matte', mask_only: 'mask' }[c.variant];
@@ -1964,9 +1965,9 @@
         }
 
         // Analysis runs in the background; look again until it is in. A
-        // missing file has none coming.
+        // missing file has none coming, nor does a clip whose analysis failed.
         function pollWhileAnalysing() {
-            if (stingerState && stingerState.clips.some(c => !c.info && !c.missing)) {
+            if (stingerState && stingerState.clips.some(c => !c.info && !c.missing && !c.analysis_error)) {
                 clearTimeout(fetchStingerState._t);
                 fetchStingerState._t = setTimeout(fetchStingerState, 1000);
             }

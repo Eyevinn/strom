@@ -762,3 +762,72 @@ async fn a_clip_taken_straight_after_it_was_added_is_analysed_once() {
 
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
+
+/// A clip whose analysis fails is not decoded again on every state read:
+/// the panel polls the state, and a clip no decoder here can play (ProRes
+/// on a Mac whose VideoToolbox has no ProRes decoder) started a decode on
+/// each poll, about twenty a second, without ever saying why. The failure
+/// is on the clip, and a reload tries again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
+async fn a_failed_analysis_is_kept_and_shown_until_a_reload() {
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("classic.mov");
+    let broken = dir.path().join("broken.mov");
+    classic_clip(&first);
+    std::fs::write(&broken, vec![0x5au8; 64 * 1024]).unwrap();
+    let r = start_with("failedanalysis", "cpu", dir, vec![first]).await;
+    let uri = strom::blocks::builtin::mediaplayer::normalize_uri(
+        &broken.to_string_lossy(),
+        std::path::Path::new("/"),
+    );
+
+    let clip = r
+        .state
+        .stinger_add_clip(&r.flow_id, &r.mixer(), &broken.to_string_lossy(), None)
+        .await
+        .expect("add");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let error = loop {
+        let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
+        if let Some(e) = s.clips[clip.index].analysis_error.clone() {
+            break e;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the failed analysis never showed on the clip: {:?}",
+            s.clips[clip.index]
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert!(!error.is_empty());
+
+    // The panel keeps polling; none of it decodes the clip again.
+    for _ in 0..20 {
+        r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        strom::stinger::analysis::analysis_runs_for_tests(&uri),
+        1,
+        "a failed analysis ran again on a state read"
+    );
+
+    r.state
+        .stinger_reload(&r.flow_id, &r.mixer())
+        .await
+        .expect("reload");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while strom::stinger::analysis::analysis_runs_for_tests(&uri) < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a reload did not analyse the failed clip again"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}

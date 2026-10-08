@@ -119,6 +119,9 @@ pub fn create_decode_pipeline(
     }
 
     if let Some(uri) = initial_uri {
+        if state.stinger.enabled {
+            apply_stinger_decoding(&source, uri);
+        }
         source.set_property("uri", uri);
     }
 
@@ -149,6 +152,14 @@ pub fn create_decode_pipeline(
             None => return,
         };
 
+        // A stinger clip decoded in software reaches here still encoded;
+        // the decoder goes in front of the bridge chain.
+        let decoded = state
+            .stinger
+            .enabled
+            .then(|| decode_in_software(&pipeline, pad, &instance_id_owned))
+            .flatten();
+        let pad = decoded.as_ref().unwrap_or(pad);
         let kind = TrackKind::of_pad(pad);
         route_pad(&pipeline, pad, &state, &instance_id_owned, sync, kind, "");
         state.mark_source_ready();
@@ -392,6 +403,113 @@ fn select_stream(
 /// A file can carry more tracks than the block has outputs for - a second
 /// audio language, subtitles - and a stream pad left unlinked stops the whole
 /// source with `not-linked`, so every pad is either bridged or discarded.
+/// Make `source` (a `uridecodebin3` or `uridecodebin`) stop at the encoded
+/// video of `uri` when the stinger analysis found that the hardware decoder
+/// it would pick cannot decode it, and decode everything as usual otherwise.
+/// [`decode_in_software`] then decodes the encoded stream.
+pub(super) fn apply_stinger_decoding(source: &gst::Element, uri: &str) {
+    let Some(default) = source.factory().and_then(|f| default_caps(&f)) else {
+        return;
+    };
+    let caps = match crate::stinger::analysis::software_only(uri) {
+        Some(encoded) => crate::gst::software_decoder::stop_at(&default, &encoded),
+        None => default,
+    };
+    source.set_property("caps", &caps);
+    // `uridecodebin3` hands its caps to the `decodebin3` inside it when it
+    // builds it, not on a later change, so a clip loaded again has to set
+    // them there too.
+    if let Some(bin) = source.downcast_ref::<gst::Bin>() {
+        for child in bin.iterate_elements().into_iter().flatten() {
+            if child.factory().is_some_and(|f| f.name() == "decodebin3") {
+                child.set_property("caps", &caps);
+            }
+        }
+    }
+}
+
+/// The `caps` a fresh element of `factory` starts with. The property's
+/// declared default is empty; the element sets its own in its constructor.
+fn default_caps(factory: &gst::ElementFactory) -> Option<gst::Caps> {
+    static DEFAULTS: LazyLock<Mutex<HashMap<String, Option<gst::Caps>>>> =
+        LazyLock::new(Default::default);
+    let mut defaults = DEFAULTS.lock().unwrap_or_else(|p| p.into_inner());
+    defaults
+        .entry(factory.name().to_string())
+        .or_insert_with(|| {
+            factory
+                .create()
+                .build()
+                .ok()
+                .and_then(|e| e.property::<Option<gst::Caps>>("caps"))
+        })
+        .clone()
+}
+
+/// Decode encoded video on `pad` with the best software decoder for it, and
+/// return the decoder's source pad. `None` for a pad that is not encoded
+/// video, which is every pad unless [`apply_stinger_decoding`] stopped the
+/// source at one.
+fn decode_in_software(
+    pipeline: &gst::Pipeline,
+    pad: &gst::Pad,
+    instance_id: &str,
+) -> Option<gst::Pad> {
+    // The stream's caps are its encoded format, also on a pad the source
+    // decodes; the pad carries that format only when the source was told to
+    // stop at it. Its caps are not set yet when the pad is added.
+    let caps = pad.stream().and_then(|s| s.caps())?;
+    if !crate::gst::software_decoder::is_encoded_picture(&caps) {
+        return None;
+    }
+    let name = caps.structure(0)?.name().to_string();
+    if !pad
+        .query_caps(None)
+        .iter()
+        .any(|s| s.name() == name.as_str())
+    {
+        return None;
+    }
+    let Some(factory) = crate::gst::software_decoder::best_for(&caps) else {
+        warn!(
+            "Media Player {}: no software decoder for {}",
+            instance_id, name
+        );
+        return None;
+    };
+    let decoder = match factory.create().build() {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("Media Player {}: {}: {}", instance_id, factory.name(), e);
+            return None;
+        }
+    };
+    if pipeline.add(&decoder).is_err() || decoder.sync_state_with_parent().is_err() {
+        let _ = pipeline.remove(&decoder);
+        return None;
+    }
+    let sink = decoder.static_pad("sink")?;
+    if let Err(e) = pad.link(&sink) {
+        warn!(
+            "Media Player {}: link {} to {}: {:?}",
+            instance_id,
+            name,
+            factory.name(),
+            e
+        );
+        let _ = decoder.set_state(gst::State::Null);
+        let _ = pipeline.remove(&decoder);
+        return None;
+    }
+    info!(
+        "Media Player {}: decoding {} in software with {}",
+        instance_id,
+        name,
+        factory.name()
+    );
+    decoder.static_pad("src")
+}
+
 fn route_pad(
     pipeline: &gst::Pipeline,
     pad: &gst::Pad,
