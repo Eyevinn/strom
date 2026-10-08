@@ -108,7 +108,7 @@ pub struct StingerStats {
     epoch_rt: i64,
     /// Classic: the clip timestamps `[lo, hi)` of the frame on air when the
     /// program changes beneath the graphic. `hi == 0` when nothing changes
-    /// beneath it (the matte variants).
+    /// beneath it (the matte variants) or there is no graphic (a mask).
     cut_frame_lo: u64,
     cut_frame_hi: u64,
     /// Graphic frames that arrived in time to go on air.
@@ -149,7 +149,7 @@ impl StingerWatch {
 
     /// Classic: whether the graphic frame due at the cut point arrived in
     /// time, so the program changed under the graphic. `None` when nothing
-    /// changes beneath the graphic.
+    /// changes beneath a graphic.
     pub fn cut_covered(&self) -> Option<bool> {
         (self.stats.cut_frame_hi != 0)
             .then(|| self.stats.cut_frame.load(Ordering::Acquire) & CUT_FRAME_ON_TIME != 0)
@@ -432,7 +432,10 @@ impl PipelineManager {
         // timestamp can be a nanosecond either side of the grid's: a key
         // placed exactly on it would act on that frame or the next by chance.
         let step = |t: u64| t.saturating_sub(take.frame_ns / 2);
-        let fill_keys: &[(u64, f64)] = if variant == StingerVariant::MaskOnly {
+        // A mask-only clip has no graphic, also when the CPU mixer plays it
+        // as a classic mix: its grey frames would cover the program.
+        let has_graphic = take.plan.layout != StingerLayout::MaskOnly;
+        let fill_keys: &[(u64, f64)] = if !has_graphic {
             &[(0, 0.0)]
         } else {
             &[(0, 0.0), (step(take.start), 1.0), (step(take.end), 0.0)]
@@ -548,7 +551,7 @@ impl PipelineManager {
             .unwrap_or(0);
         // The clip frame on air at the cut's output frame is the newest that
         // starts before that output frame ends.
-        let (cut_frame_lo, cut_frame_hi) = if variant == StingerVariant::Classic {
+        let (cut_frame_lo, cut_frame_hi) = if variant == StingerVariant::Classic && has_graphic {
             let hi = take.cut_at.unwrap_or(take.start) + take.frame_ns;
             (hi.saturating_sub(take.clip_frame_ns.max(1)), hi)
         } else {

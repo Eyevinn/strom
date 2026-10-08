@@ -221,6 +221,90 @@ async fn cpu_stingers_play_classic() {
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
 
+/// A mask-only clip on the CPU mixer plays as a classic mix across the
+/// matte's movement. It has no graphic: its grey frames never go on air.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_downgraded_mask_never_shows_its_matte() {
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let r = start("cpu-mask", "cpu").await;
+    r.drain().await;
+    let take = r
+        .state
+        .stinger_take(&r.flow_id, &r.mixer(), Some(2), None)
+        .await
+        .expect("mask take");
+    assert_eq!(take.variant, StingerVariant::Classic);
+    assert_eq!(take.downgraded_from, Some(StingerVariant::MaskOnly));
+    let frames = r.collect(take.take_to_air_ms as u64 + 1600).await;
+    // Red, blue or a mix of the two; the mask's white or black is neither.
+    for (t, f) in &frames {
+        for x in (0..W).step_by(8) {
+            let [red, green, blue, _] = px(f, x, H / 2);
+            assert!(
+                green < 80 && red.max(blue) > 100,
+                "the mask is on air at {t} ns, x {x}: {:?}\n{}",
+                [red, green, blue],
+                r.mixer_pads().await
+            );
+        }
+    }
+    assert_eq!(
+        colour(px(&frames.last().unwrap().1, W / 2, H / 2)),
+        Colour::Blue,
+        "the take ends on the new source"
+    );
+    let report = r.wait_for_report(2).await;
+    assert_eq!(report.warning, None, "{report:?}");
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}
+
+/// While a stinger is on air the take owns the program: fade-to-black is
+/// refused rather than wiping the take's pads, and the program the take
+/// ends on is on air with no fade-to-black flagged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fade_to_black_waits_for_a_stinger() {
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let r = start("ftb", "cpu").await;
+    r.state
+        .stinger_take(&r.flow_id, &r.mixer(), Some(0), None)
+        .await
+        .expect("take");
+    let err = r
+        .state
+        .fade_to_black(&r.flow_id, &r.mixer(), 0)
+        .await
+        .expect_err("fade-to-black during a stinger");
+    assert!(err.to_string().contains("stinger"), "{err}");
+    r.wait_for_report(0).await;
+    let overlay =
+        strom::blocks::builtin::vision_mixer::overlay::get_overlay_state(&r.flow_id, &r.mixer())
+            .unwrap();
+    assert!(
+        !overlay
+            .ftb_active
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "fade-to-black flagged over a program on air"
+    );
+    r.drain().await;
+    let frames = r.collect(200).await;
+    assert_eq!(
+        colour(px(&frames.last().unwrap().1, 3 * W / 4, H / 2)),
+        Colour::Blue,
+        "the take's new source is on air"
+    );
+    // Once the take is over, fade-to-black works.
+    assert!(r
+        .state
+        .fade_to_black(&r.flow_id, &r.mixer(), 0)
+        .await
+        .unwrap());
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}
+
 /// The park probe on a stinger clip's video path catches the one frame that
 /// parks and takes itself off. Left on, it ran for every frame of every take;
 /// it shows as the parked-frame count moving once per frame of the clip.

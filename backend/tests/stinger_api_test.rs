@@ -270,6 +270,104 @@ async fn removing_the_cued_clip_parks_its_successor() {
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
 
+/// A take owns its clip source until the clip has played out: playlist
+/// edits, transport calls and library additions wait, and the clip on air
+/// is not rewound under the mixer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_take_owns_its_clip_source() {
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let r = start("api-owned", "cpu").await;
+    let app = strom::create_app_with_state(r.state.clone()).await;
+    let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
+    let files: Vec<String> = s.clips.iter().map(|c| c.file.clone()).collect();
+    let extra = std::path::Path::new(&files[2]).with_file_name("extra.mov");
+    std::fs::copy(&files[2], &extra).unwrap();
+    let player = format!("/api/flows/{}/blocks/sting-api-owned/player", r.flow_id);
+
+    r.state
+        .stinger_take(&r.flow_id, &r.mixer(), Some(0), None)
+        .await
+        .expect("take");
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("{player}/playlist"),
+        Some(json!({"files": [files[1], files[0], files[2]]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "playlist edit: {body}");
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("{player}/control"),
+        Some(json!({"action": "pause"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "transport: {body}");
+    let err = r
+        .state
+        .stinger_add_clip(&r.flow_id, &r.mixer(), &extra.to_string_lossy(), None)
+        .await
+        .expect_err("library addition during a take");
+    assert!(err.to_string().contains("on air"), "{err}");
+
+    let report = r.wait_for_report(0).await;
+    assert_eq!(report.frames_arrived, r.clip_frames(0).await, "{report:?}");
+    let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
+    let after: Vec<String> = s.clips.iter().map(|c| c.file.clone()).collect();
+    assert_eq!(after, files, "the library changed during the take");
+
+    // Once it is over, the edits go through.
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("{player}/playlist"),
+        Some(json!({"files": files})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}
+
+/// Clips added at the same moment all land in the library: each addition
+/// reads the playlist, extends it and writes it back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn clips_added_together_all_land() {
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let r = start("api-adds", "cpu").await;
+    let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
+    let mask = s.clips[2].file.clone();
+    let extras: Vec<String> = (0..6)
+        .map(|i| {
+            let p = std::path::Path::new(&mask).with_file_name(format!("extra{i}.mov"));
+            std::fs::copy(&mask, &p).unwrap();
+            p.to_string_lossy().to_string()
+        })
+        .collect();
+    let adds: Vec<_> = extras
+        .iter()
+        .cloned()
+        .map(|f| {
+            let (state, flow, mixer) = (r.state.clone(), r.flow_id, r.mixer());
+            tokio::spawn(async move { state.stinger_add_clip(&flow, &mixer, &f, None).await })
+        })
+        .collect();
+    for add in adds {
+        add.await.unwrap().expect("add");
+    }
+    let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
+    let files: Vec<String> = s.clips.iter().map(|c| c.file.clone()).collect();
+    for f in &extras {
+        assert!(files.contains(f), "{f} was lost: {files:?}");
+    }
+    assert_eq!(files.len(), 3 + extras.len(), "{files:?}");
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}
+
 /// A playlist PUT that puts another file at the parked index re-cues it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_playlist_put_over_the_parked_index_recues_it() {

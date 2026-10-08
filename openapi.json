@@ -1586,6 +1586,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "The player is playing a stinger take",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1650,6 +1660,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "The player is playing a stinger take",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1697,6 +1717,16 @@
           },
           "404": {
             "description": "Flow or block not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The player is playing a stinger take",
             "content": {
               "application/json": {
                 "schema": {
@@ -1761,6 +1791,16 @@
           },
           "404": {
             "description": "Player not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The player is playing a stinger take",
             "content": {
               "application/json": {
                 "schema": {

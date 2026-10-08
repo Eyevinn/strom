@@ -194,6 +194,41 @@ impl FrameGrid {
     }
 }
 
+/// When a take's changes land, as running times on the mixer's output grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TakeTimes {
+    /// The clip's first frame on air.
+    pub start: u64,
+    /// The first output frame after the clip.
+    pub end: u64,
+    /// Classic: where the program starts to change.
+    pub cut_at: Option<u64>,
+    /// Classic: how long the change takes (0 = cut).
+    pub mix_ns: u64,
+}
+
+/// Place a take of `plan` on `grid`: the clip, `clip_ns` long, starts on the
+/// first output frame at or after `earliest`.
+pub fn take_times(grid: &FrameGrid, earliest: u64, clip_ns: u64, plan: &ClipPlan) -> TakeTimes {
+    let start = grid.at_or_after(earliest);
+    let end = grid.at_or_after(start + clip_ns);
+    let cut_at = plan.cut_point_ms.map(|c| {
+        grid.at_or_after(start + c * 1_000_000)
+            .min(end.saturating_sub(grid.frame_ns()))
+    });
+    // The cut point moved up to the output grid; the mix still ends with the
+    // clip, before the graphic comes down.
+    let mix_ns = cut_at.map_or(0, |cut| {
+        (plan.mix_ms * 1_000_000).min(end.saturating_sub(cut))
+    });
+    TakeTimes {
+        start,
+        end,
+        cut_at,
+        mix_ns,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,5 +408,30 @@ mod tests {
         assert_eq!(ntsc.pts(1), 33_366_667);
         assert_eq!(ntsc.at_or_after(ntsc.pts(1000)), ntsc.pts(1000));
         assert!(FrameGrid::new(0, 1).is_none());
+    }
+
+    #[test]
+    fn a_mix_ends_with_the_clip_when_the_cut_point_moves_to_the_grid() {
+        // On a 25 fps grid a 1520 ms clip ends on an output frame, but its
+        // cut point at 990 ms moves up 10 ms to the next one. The mix,
+        // planned to end with the clip from the unmoved cut point, would then
+        // run 10 ms past the clip.
+        let settings = StingerClipSettings {
+            cut_point_ms: Some(990),
+            beneath: StingerBeneath::Mix,
+            mix_ms: 1000,
+            ..Default::default()
+        };
+        let plan = plan_clip(&settings, None, true, Some(1520)).unwrap();
+        assert_eq!(plan.mix_ms, 530);
+        let grid = FrameGrid::new(25, 1).unwrap();
+        let t = take_times(&grid, 13_000_000, 1_520_000_000, &plan);
+        let cut = t.cut_at.unwrap();
+        assert!(cut > t.start + 990_000_000, "the cut moved up: {t:?}");
+        assert!(
+            cut + t.mix_ns <= t.end,
+            "the mix must end before the graphic comes down: {t:?}"
+        );
+        assert!(t.mix_ns > 0, "{t:?}");
     }
 }

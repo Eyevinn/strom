@@ -35,8 +35,12 @@ const FINISH_GRACE: Duration = Duration::from_secs(5);
 /// Per-mixer stinger bookkeeping, kept outside the flow definition.
 #[derive(Default)]
 struct MixerStinger {
-    /// The token of the take on air.
+    /// The token of the take on air, or of a classic take or fade-to-black
+    /// programming the pads now (see [`claim_for_classic`]).
     running: Option<u64>,
+    /// The clip source of the stinger take on air; `None` for a classic
+    /// claim.
+    source: Option<String>,
     last_take: Option<StingerTakeReport>,
     last_cue_ms: Option<u64>,
 }
@@ -66,6 +70,50 @@ pub fn is_running(flow: &FlowId, block: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether stinger clip source `source_block` is playing a take now. Its
+/// playlist and transport belong to the take until it has finished.
+pub fn source_on_air(flow: &FlowId, source_block: &str) -> bool {
+    MIXERS.lock().ok().is_some_and(|m| {
+        m.iter().any(|((f, _), s)| {
+            f == flow && s.running.is_some() && s.source.as_deref() == Some(source_block)
+        })
+    })
+}
+
+/// A classic take's or a fade-to-black's hold on a mixer while it programs
+/// the pads, so a stinger cannot program them at the same moment. Released
+/// on drop.
+pub struct ClassicClaim {
+    flow: FlowId,
+    block: String,
+    token: u64,
+}
+
+impl Drop for ClassicClaim {
+    fn drop(&mut self) {
+        release(self.flow, &self.block, self.token);
+    }
+}
+
+/// Claim the mixer for a classic take or a fade-to-black, or `None` while a
+/// stinger is on air. A stinger take claims the mixer before it cues its
+/// clip, so one that is cueing already counts as on air.
+pub fn claim_for_classic(flow: &FlowId, block: &str) -> Option<ClassicClaim> {
+    let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
+    with_mixer(*flow, block, |s| {
+        if s.running.is_some() {
+            return None;
+        }
+        s.running = Some(token);
+        s.source = None;
+        Some(ClassicClaim {
+            flow: *flow,
+            block: block.to_string(),
+            token,
+        })
+    })
+}
+
 /// Drop a stopped flow's takes: a take still waiting for its clip's end sees
 /// its token gone and leaves the next pipeline alone.
 pub fn forget_flow(flow: &FlowId) {
@@ -73,6 +121,7 @@ pub fn forget_flow(flow: &FlowId) {
         for ((f, _), s) in map.iter_mut() {
             if f == flow {
                 s.running = None;
+                s.source = None;
             }
         }
     }
@@ -146,9 +195,17 @@ fn release(flow: FlowId, block: &str, token: u64) {
     with_mixer(flow, block, |s| {
         if s.running == Some(token) {
             s.running = None;
+            s.source = None;
         }
     });
 }
+
+/// Serialises edits of stinger libraries: each reads the playlist, changes
+/// it and writes it back.
+static LIBRARY_EDIT: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+const ON_AIR_EDIT: &str = "a stinger is on air; edit the library when it has finished";
 
 /// Whether `uri` names a local file that is not on disk.
 fn is_missing(uri: &str) -> bool {
@@ -515,6 +572,13 @@ impl AppState {
             .await
             .map_err(|e| err(e.to_string()))?
             .map_err(err)?;
+        let edit = LIBRARY_EDIT.lock().await;
+        if is_running(flow_id, block) {
+            return Err(PipelineError::Conflict(format!(
+                "{}; the examples are written but not added",
+                ON_AIR_EDIT
+            )));
+        }
         let mut playlist = ctx.player.playlist_files();
         for f in &files {
             if !playlist.contains(f) {
@@ -523,6 +587,7 @@ impl AppState {
         }
         let was_empty = ctx.player.playlist_len() == 0;
         self.set_stinger_library(flow_id, &ctx, playlist).await;
+        drop(edit);
         for f in &files {
             Self::analyse_in_background(ctx.uri(f));
         }
@@ -577,14 +642,19 @@ impl AppState {
                 return Err(err(format!("no such file: {}", file)));
             }
         }
+        let edit = LIBRARY_EDIT.lock().await;
         let mut playlist = ctx.player.playlist_files();
         let index = match playlist.iter().position(|f| f == file) {
             Some(index) => index,
             None => {
+                if is_running(flow_id, block) {
+                    return Err(PipelineError::Conflict(ON_AIR_EDIT.to_string()));
+                }
                 playlist.push(file.to_string());
                 let was_empty = playlist.len() == 1;
                 self.set_stinger_library(flow_id, &ctx, playlist.clone())
                     .await;
+                drop(edit);
                 if was_empty {
                     let _ = self.stinger_cue(flow_id, block, 0, None).await;
                 }
@@ -613,12 +683,11 @@ impl AppState {
         index: usize,
         expected_file: Option<&str>,
     ) -> Result<(), PipelineError> {
-        if is_running(flow_id, block) {
-            return Err(err(
-                "a stinger is on air; edit the library when it has finished",
-            ));
-        }
         let ctx = self.stinger_context(flow_id, block).await.map_err(err)?;
+        let edit = LIBRARY_EDIT.lock().await;
+        if is_running(flow_id, block) {
+            return Err(err(ON_AIR_EDIT));
+        }
         let file = ctx.clip_at(index, expected_file)?;
         let cued = ctx.player.current_index();
         let mut playlist = ctx.player.playlist_files();
@@ -646,6 +715,7 @@ impl AppState {
                 }
             }
         }
+        drop(edit);
         // Keep the same clip cued, or the one that took the removed one's
         // place.
         if !playlist.is_empty() {
@@ -714,6 +784,7 @@ impl AppState {
                 false
             } else {
                 s.running = Some(token);
+                s.source = Some(ctx.source_block_id.clone());
                 true
             }
         });
@@ -836,7 +907,6 @@ impl AppState {
                 .running_time_ns()
                 .ok_or_else(|| ("the flow has no running time".to_string(), false))?;
             let now_at = Instant::now();
-            let start = grid.at_or_after(now + ctx.preroll_ms * 1_000_000);
             let clip_ns = info
                 .as_ref()
                 .filter(|i| i.framerate_num > 0)
@@ -845,19 +915,16 @@ impl AppState {
                         / i.framerate_num as u64
                 })
                 .unwrap_or(plan.duration_ms * 1_000_000);
-            let end = grid.at_or_after(start + clip_ns);
-            let cut_at = plan.cut_point_ms.map(|c| {
-                grid.at_or_after(start + c * 1_000_000)
-                    .min(end.saturating_sub(frame_ns))
-            });
+            let times =
+                crate::stinger::take_times(&grid, now + ctx.preroll_ms * 1_000_000, clip_ns, &plan);
             let take = StingerTake {
                 frame_ns,
                 from_input: from,
                 to_input: to,
-                start,
-                end,
-                cut_at,
-                mix_ns: plan.mix_ms * 1_000_000,
+                start: times.start,
+                end: times.end,
+                cut_at: times.cut_at,
+                mix_ns: times.mix_ns,
                 plan: plan.clone(),
                 clip_size: info.as_ref().map(|i| (i.width, i.height)),
                 clip_frame_ns: info
@@ -1078,6 +1145,7 @@ impl AppState {
         with_mixer(flow, &mixer, |s| {
             if s.running == Some(token) {
                 s.running = None;
+                s.source = None;
             }
             s.last_take = Some(report.clone());
             if ready {

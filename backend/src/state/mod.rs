@@ -2294,12 +2294,14 @@ impl AppState {
             transition_type, block_instance_id, flow_id, from_input, to_input, duration_ms
         );
 
-        // A stinger owns the program until its clip has played out.
-        if stinger::is_running(flow_id, block_instance_id) {
+        // A stinger owns the program until its clip has played out. The
+        // claim also keeps a stinger from programming the pads while this
+        // take does.
+        let Some(claim) = stinger::claim_for_classic(flow_id, block_instance_id) else {
             return Err(PipelineError::TransitionError(
                 "a stinger is on air; take again when it has finished".to_string(),
             ));
-        }
+        };
 
         let pipelines = self.inner.pipelines.read().await;
 
@@ -2316,6 +2318,7 @@ impl AppState {
         )?;
 
         drop(pipelines);
+        drop(claim);
 
         self.after_vision_mixer_take(
             flow_id,
@@ -2631,12 +2634,20 @@ impl AppState {
         block_instance_id: &str,
         duration_ms: u64,
     ) -> Result<bool, PipelineError> {
+        // A fade rewrites the program pads a stinger take has programmed,
+        // and the take's end would bring the program back up under it.
+        let Some(claim) = stinger::claim_for_classic(flow_id, block_instance_id) else {
+            return Err(PipelineError::TransitionError(
+                "a stinger is on air; fade to black when it has finished".to_string(),
+            ));
+        };
         let pipelines = self.inner.pipelines.read().await;
         let manager = pipelines.get(flow_id).ok_or_else(|| {
             PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
         })?;
         let active = manager.fade_to_black(block_instance_id, duration_ms)?;
         drop(pipelines);
+        drop(claim);
 
         self.inner
             .events

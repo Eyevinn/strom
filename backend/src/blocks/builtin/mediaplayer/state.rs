@@ -129,6 +129,10 @@ pub struct StingerPlayback {
     /// [`StingerPlayback::arm_park_probe`]), with the parked-frame count it
     /// was armed at. Taken once per cue or bridge chain, never by the probe.
     pub(super) park_probe: Mutex<Option<(gst::glib::WeakRef<gst::Pad>, gst::PadProbeId, u64)>>,
+    /// The format the consumer last took a warm-up frame in (see
+    /// `MediaPlayerState::warm_up_consumer`). A cue in the same format sends
+    /// none: the consumer is set up for it already.
+    pub(super) warmed_caps: Mutex<Option<gst::Caps>>,
 }
 
 /// The file a stinger clip source's internal pipeline was loaded from.
@@ -854,7 +858,14 @@ impl MediaPlayerState {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         self.stinger.park.parked.store(true, Ordering::Release);
-        self.restart_stopped_outputs();
+        if self.restart_stopped_outputs() {
+            // A restarted output negotiates afresh.
+            *self
+                .stinger
+                .warmed_caps
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = None;
+        }
         self.warm_up_consumer();
         Ok(started.elapsed())
     }
@@ -867,15 +878,18 @@ impl MediaPlayerState {
     /// starts it again; that clip then negotiates afresh. The flush is local
     /// to this output's branches: a mixer takes a flush on one sink pad
     /// without passing it on. A healthy output is left alone; this player
-    /// never ends its outputs itself, so one at EOS has stopped.
-    fn restart_stopped_outputs(&self) {
+    /// never ends its outputs itself, so one at EOS has stopped. An output
+    /// that is not linked is left alone too: a flush cannot link it. Returns
+    /// whether it restarted any.
+    fn restart_stopped_outputs(&self) -> bool {
+        let mut restarted = false;
         for appsrc in self.video_appsrcs.iter().chain(&self.audio_appsrcs) {
             let Some(src) = appsrc.static_pad("src") else {
                 continue;
             };
             let stopped = !matches!(
                 src.last_flow_result(),
-                Ok(_) | Err(gst::FlowError::Flushing)
+                Ok(_) | Err(gst::FlowError::Flushing) | Err(gst::FlowError::NotLinked)
             );
             if !stopped {
                 continue;
@@ -888,14 +902,17 @@ impl MediaPlayerState {
             );
             appsrc.send_event(gst::event::FlushStart::new());
             appsrc.send_event(gst::event::FlushStop::new(false));
+            restarted = true;
         }
+        restarted
     }
 
     /// Send the consumer one blank frame in the cued clip's format, so that
     /// whatever it sets up for a new format (a GL upload, a shader compiled
     /// for the new size) happens now and not on the take's first frames. A
     /// vision mixer keeps its stinger pads hidden between takes, so the frame
-    /// never shows. Skipped while the flow is not playing.
+    /// never shows. Skipped while the flow is not playing, and when the
+    /// consumer last took one in the same format.
     fn warm_up_consumer(&self) {
         let Some(appsrc) = self.video_appsrcs.first() else {
             return;
@@ -910,6 +927,14 @@ impl MediaPlayerState {
         let Some(caps) = caps else {
             return;
         };
+        let mut warmed = self
+            .stinger
+            .warmed_caps
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if warmed.as_ref() == Some(&caps) {
+            return;
+        }
         let Ok(info) = gstreamer_video::VideoInfo::from_caps(&caps) else {
             return;
         };
@@ -925,11 +950,12 @@ impl MediaPlayerState {
             b.set_pts(now);
         }
         let sample = gst::Sample::builder().buffer(&buffer).caps(&caps).build();
-        if let Err(e) = appsrc.push_sample(&sample) {
-            debug!(
+        match appsrc.push_sample(&sample) {
+            Ok(_) => *warmed = Some(caps),
+            Err(e) => debug!(
                 "Media Player {}: stinger warm-up frame not taken: {:?}",
                 self.block_id, e
-            );
+            ),
         }
     }
 
