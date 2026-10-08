@@ -12,6 +12,7 @@ use rig::*;
 /// A ProRes 4444 graphic keeps its alpha on the way to the GPU mixer: the
 /// program shows through its transparent half, and every frame arrives.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn prores_4444_keeps_its_alpha() {
     if !common::gl_available(GL_ELEMENTS)
         || !common::plugins_available(&["avenc_prores_ks", "avdec_prores", "qtmux", "qtdemux"])
@@ -37,6 +38,7 @@ async fn prores_4444_keeps_its_alpha() {
 /// does not take ProRes's format as it is; that input adapts, and each clip's
 /// graphic airs with every frame, whichever came before it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn a_prores_clip_after_another_format_still_airs() {
     if !common::gl_available(GL_ELEMENTS)
         || !common::plugins_available(CODEC_ELEMENTS)
@@ -69,6 +71,7 @@ async fn a_prores_clip_after_another_format_still_airs() {
 /// [`a_prores_clip_after_another_format_still_airs`] the other way round:
 /// ProRes first, then the PNG clip, then ProRes again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn another_format_after_a_prores_clip_still_airs() {
     if !common::gl_available(GL_ELEMENTS)
         || !common::plugins_available(CODEC_ELEMENTS)
@@ -102,6 +105,7 @@ async fn another_format_after_a_prores_clip_still_airs() {
 /// output. The next cue of a clip it can take starts the output again: that
 /// clip airs with every frame, not only after a flow restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn the_stinger_source_recovers_after_a_clip_a_consumer_refused() {
     if !common::gl_available(GL_ELEMENTS)
         || !common::plugins_available(CODEC_ELEMENTS)

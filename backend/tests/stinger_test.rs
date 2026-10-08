@@ -17,6 +17,7 @@ use rig::*;
 use strom_types::stinger::{StingerLayout, StingerVariant};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn gpu_stingers_land_frame_accurately() {
     if !common::gl_available(GL_ELEMENTS) || !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -168,6 +169,7 @@ async fn gpu_stingers_land_frame_accurately() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn cpu_stingers_play_classic() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -224,6 +226,7 @@ async fn cpu_stingers_play_classic() {
 /// A mask-only clip on the CPU mixer plays as a classic mix across the
 /// matte's movement. It has no graphic: its grey frames never go on air.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn a_downgraded_mask_never_shows_its_matte() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -264,6 +267,7 @@ async fn a_downgraded_mask_never_shows_its_matte() {
 /// refused rather than wiping the take's pads, and the program the take
 /// ends on is on air with no fade-to-black flagged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn fade_to_black_waits_for_a_stinger() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -309,6 +313,7 @@ async fn fade_to_black_waits_for_a_stinger() {
 /// parks and takes itself off. Left on, it ran for every frame of every take;
 /// it shows as the parked-frame count moving once per frame of the clip.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn a_take_plays_with_no_park_probe_on_its_path() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -351,6 +356,7 @@ async fn a_take_plays_with_no_park_probe_on_its_path() {
 /// A flow stopped in the middle of a take releases its pipeline, and the
 /// take left waiting for its clip's end does not touch the next run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn stopping_mid_take_releases_the_pipeline() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -410,6 +416,7 @@ async fn stopping_mid_take_releases_the_pipeline() {
 /// without touching the new run: it neither programs the new mixer nor cuts
 /// its program, and the next take on the new run lands as usual.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn a_take_outlived_by_a_restart_leaves_the_new_run_alone() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -473,6 +480,7 @@ async fn a_take_outlived_by_a_restart_leaves_the_new_run_alone() {
 /// the clip plays), but its report says so, and counts only the frames that
 /// arrived in time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn a_late_cut_frame_is_reported() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -548,6 +556,7 @@ async fn a_late_cut_frame_is_reported() {
 /// tells clients the fade-to-black ended, and leaves the mixer ready for the
 /// next take.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn a_take_that_fails_to_program_leaves_the_old_source_on_air() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -615,6 +624,7 @@ async fn a_take_that_fails_to_program_leaves_the_old_source_on_air() {
 /// A clip that will not load costs the graphic, not the change: the take
 /// fails, says so, and the program cuts to PVW anyway.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn a_clip_that_will_not_play_still_changes_the_program() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -657,6 +667,7 @@ async fn a_clip_that_will_not_play_still_changes_the_program() {
 /// 200 ms (six frames) after the frame the mixer was programmed for, cutting
 /// its last frames, and the cut beneath it came early.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn a_clip_with_early_audio_lands_its_first_video_frame_on_the_take() {
     if !common::plugins_available(CODEC_ELEMENTS)
         || !common::plugins_available(&["audiotestsrc", "fakesink"])
@@ -716,6 +727,7 @@ async fn a_clip_with_early_audio_lands_its_first_video_frame_on_the_take() {
 /// started instead of decoding the clip a second time: on a 4K ProRes clip
 /// that second decode cost the take most of a second.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn a_clip_taken_straight_after_it_was_added_is_analysed_once() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
