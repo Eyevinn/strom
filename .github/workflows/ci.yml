@@ -131,12 +131,16 @@ jobs:
       # created. gst-libav then fails to load ("libblas.so.3: cannot open shared
       # object file"), avenc_aac goes missing, and every test requiring it skips
       # green. Reinstalling runs postinst; ldconfig then picks the links up.
+      # The GSettings schemas are compiled by a trigger too: without
+      # org.gnome.system.proxy in gschemas.compiled, GIO aborts any test
+      # process whose souphttpsrc looks up the system proxy (SIGTRAP).
       # Only needed here: the build jobs never load a plugin.
       - name: Repair alternatives for cached libraries
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --reinstall libblas3 liblapack3
           sudo ldconfig
+          sudo glib-compile-schemas /usr/share/glib-2.0/schemas
 
       # save-if main: PR runs restore the main-branch cache (GHA cache scoping
       # falls back to the base branch) but don't save their own per-branch
