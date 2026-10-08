@@ -92,8 +92,173 @@ impl ThreadPriorityState {
 /// core placement, that is the one worth having, and macOS does not call the
 /// priority API at all.
 ///
+/// GStreamer's streaming threads come from a shared pool and are reused, so an
+/// elevation must not outlive the flow that asked for it. Before the first
+/// elevation the thread's own scheduling is saved, and
+/// [`restore_current_thread_priority`] puts it back. `Normal` means "do not
+/// touch this thread's scheduling": it undoes an elevation this module left on
+/// the thread, and leaves any other thread as it is.
+///
 /// Returns Ok(()) if the thread was configured, Err with description otherwise.
 pub fn set_current_thread_priority(priority: ThreadPriority) -> Result<(), String> {
+    if matches!(priority, ThreadPriority::Normal) {
+        return restore_current_thread_priority();
+    }
+
+    // Refuse to elevate a thread whose scheduling we could not save: it would
+    // go back to the pool elevated with nothing to restore it from.
+    BASELINE.with(|baseline| {
+        let mut baseline = baseline.borrow_mut();
+        if baseline.is_none() {
+            *baseline = Some(current_scheduling()?);
+        }
+        Ok::<(), String>(())
+    })?;
+
+    elevate_current_thread(priority)
+}
+
+/// Undo the elevation [`set_current_thread_priority`] applied to the calling
+/// thread, restoring the scheduling it had before. A thread this module never
+/// elevated is left alone.
+pub fn restore_current_thread_priority() -> Result<(), String> {
+    let Some(saved) = BASELINE.with(|baseline| baseline.borrow_mut().take()) else {
+        return Ok(());
+    };
+    match apply_scheduling(&saved) {
+        Ok(()) => {
+            debug!("Thread scheduling restored to {:?}", saved);
+            Ok(())
+        }
+        Err(e) => {
+            // Keep it, so the next Leave or Normal flow on this thread retries.
+            BASELINE.with(|baseline| *baseline.borrow_mut() = Some(saved));
+            Err(e)
+        }
+    }
+}
+
+thread_local! {
+    /// The calling thread's scheduling from before this module first elevated
+    /// it. `None` means this module has not changed the thread.
+    static BASELINE: std::cell::RefCell<Option<Scheduling>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A thread's scheduling, as far as [`set_current_thread_priority`] changes it.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Scheduling {
+    class: QosClass,
+    relative: i32,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Scheduling {
+    policy: libc::c_int,
+    sched_priority: libc::c_int,
+    nice: libc::c_int,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Scheduling(thread_priority::ThreadPriority);
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Scheduling;
+
+#[cfg(target_os = "macos")]
+fn current_scheduling() -> Result<Scheduling, String> {
+    current_thread_qos().map(|(class, relative)| Scheduling { class, relative })
+}
+
+#[cfg(target_os = "macos")]
+fn apply_scheduling(saved: &Scheduling) -> Result<(), String> {
+    let rc = unsafe { pthread_set_qos_class_self_np(saved.class as u32, saved.relative) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "pthread_set_qos_class_self_np({:?}, {}) failed: errno {}",
+            saved.class, saved.relative, rc
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn current_scheduling() -> Result<Scheduling, String> {
+    unsafe {
+        let mut policy: libc::c_int = 0;
+        let mut param: libc::sched_param = std::mem::zeroed();
+        let rc = libc::pthread_getschedparam(libc::pthread_self(), &mut policy, &mut param);
+        if rc != 0 {
+            return Err(format!("pthread_getschedparam failed: errno {}", rc));
+        }
+        // getpriority can legitimately return -1, so errno is the only signal.
+        *libc::__errno_location() = 0;
+        let nice = libc::getpriority(libc::PRIO_PROCESS, 0);
+        let errno = *libc::__errno_location();
+        if nice == -1 && errno != 0 {
+            return Err(format!("getpriority failed: errno {}", errno));
+        }
+        Ok(Scheduling {
+            policy,
+            sched_priority: param.sched_priority,
+            nice,
+        })
+    }
+}
+
+/// Lowering a thread's scheduling needs no privilege, so this succeeds
+/// wherever the elevation it undoes did.
+#[cfg(target_os = "linux")]
+fn apply_scheduling(saved: &Scheduling) -> Result<(), String> {
+    unsafe {
+        let mut param: libc::sched_param = std::mem::zeroed();
+        param.sched_priority = saved.sched_priority;
+        let rc = libc::pthread_setschedparam(libc::pthread_self(), saved.policy, &param);
+        if rc != 0 {
+            return Err(format!("pthread_setschedparam failed: errno {}", rc));
+        }
+        // On Linux PRIO_PROCESS with 0 is the calling thread, not the process.
+        if libc::setpriority(libc::PRIO_PROCESS, 0, saved.nice) != 0 {
+            return Err(format!(
+                "setpriority({}) failed: errno {}",
+                saved.nice,
+                *libc::__errno_location()
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn current_scheduling() -> Result<Scheduling, String> {
+    thread_priority::get_current_thread_priority()
+        .map(Scheduling)
+        .map_err(|e| format!("GetThreadPriority failed: {:?}", e))
+}
+
+#[cfg(target_os = "windows")]
+fn apply_scheduling(saved: &Scheduling) -> Result<(), String> {
+    thread_priority::set_current_thread_priority(saved.0)
+        .map_err(|e| format!("SetThreadPriority failed: {:?}", e))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn current_scheduling() -> Result<Scheduling, String> {
+    Ok(Scheduling)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn apply_scheduling(_saved: &Scheduling) -> Result<(), String> {
+    Ok(())
+}
+
+/// Apply an elevated priority to the calling thread, without saving what it
+/// had. Only [`set_current_thread_priority`] calls this.
+fn elevate_current_thread(priority: ThreadPriority) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         set_current_thread_qos(priority)
@@ -474,8 +639,17 @@ pub fn setup_thread_priority_handler(
                         thread_id, owner, flow_name
                     );
 
-                    // Set thread priority (if not Normal)
-                    if !matches!(state_clone.requested, ThreadPriority::Normal) {
+                    if matches!(state_clone.requested, ThreadPriority::Normal) {
+                        // A pooled thread can arrive still elevated by a WebRTC
+                        // session, whose threads never reach our Leave arm.
+                        if let Err(e) = restore_current_thread_priority() {
+                            warn!(
+                                "Failed to restore scheduling of streaming thread {} (element: {}, pipeline: {}): {}",
+                                thread_id, owner, flow_name, e
+                            );
+                        }
+                        state_clone.record_success();
+                    } else {
                         match set_current_thread_priority(state_clone.requested) {
                             Ok(()) => {
                                 info!(
@@ -499,9 +673,6 @@ pub fn setup_thread_priority_handler(
                                 }
                             }
                         }
-                    } else {
-                        // For Normal priority, still count as success for status reporting
-                        state_clone.record_success();
                     }
 
                     // Set CPU affinity (if configured) — track actual result
@@ -544,6 +715,15 @@ pub fn setup_thread_priority_handler(
                         "Thread {} leaving streaming loop for element '{}' in pipeline '{}'",
                         thread_id, owner, flow_name
                     );
+
+                    // The thread goes back to GStreamer's shared pool next, and
+                    // must not take this flow's priority to whoever gets it.
+                    if let Err(e) = restore_current_thread_priority() {
+                        warn!(
+                            "Failed to restore scheduling of thread {} leaving element '{}' in pipeline '{}': {}",
+                            thread_id, owner, flow_name, e
+                        );
+                    }
 
                     // Unregister thread from the registry
                     if let Some(ref registry) = thread_registry {
@@ -658,9 +838,9 @@ impl SessionThreadConfig {
     /// Call this from the `consumer-pipeline-created` signal handler, which
     /// fires before webrtcsink sets its own bus sync handler. We connect to
     /// `deep-element-added` on the pipeline so that every element that is
-    /// added gets a one-shot `EVENT_DOWNSTREAM` probe on its sink pad. The
-    /// probe fires on the streaming thread — we set priority, CPU affinity,
-    /// and register the thread, then remove the probe.
+    /// added gets an `EVENT_DOWNSTREAM` probe on its sink pad. On
+    /// `STREAM_START`, which arrives on the streaming thread, we set priority,
+    /// CPU affinity, and register the thread, then remove the probe.
     pub fn install_on_session_pipeline(&self, pipeline: &gst::Pipeline, session_id: &str) {
         let Some(config) = self.0.get() else {
             warn!(
@@ -715,7 +895,15 @@ impl SessionThreadConfig {
             let configured = configured_threads.clone();
             let element_name = added.name().to_string();
 
-            sink_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, _info| {
+            sink_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+                // Only a streaming thread pushes STREAM_START. Any other first
+                // event can come from an application thread (an EOS sent on
+                // teardown before any data), which must keep its scheduling.
+                // Wait for STREAM_START instead.
+                if !matches!(info.event(), Some(e) if e.type_() == gst::EventType::StreamStart) {
+                    return gst::PadProbeReturn::Ok;
+                }
+
                 // Captured on the streaming thread itself. These threads never
                 // send a Leave message, so the handle lives until the flow's
                 // entries are dropped by unregister_flow.
@@ -731,8 +919,17 @@ impl SessionThreadConfig {
                     }
                 }
 
-                // Set thread priority
-                if !matches!(priority, ThreadPriority::Normal) {
+                // Set thread priority. These threads never send us a Leave, so
+                // an elevation here goes back to the pool with the thread; the
+                // next flow's Enter, or Normal session, restores it.
+                if matches!(priority, ThreadPriority::Normal) {
+                    if let Err(e) = restore_current_thread_priority() {
+                        warn!(
+                            "Failed to restore scheduling of session thread {} (element: {}, pipeline: {}): {}",
+                            thread_id, element_name, pipeline_name, e
+                        );
+                    }
+                } else {
                     match set_current_thread_priority(priority) {
                         Ok(()) => {
                             info!(
@@ -855,11 +1052,142 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    /// Each case runs on its own thread: a QoS class sticks to the thread that
+    /// Each case runs on its own thread: scheduling sticks to the thread that
     /// set it, and libtest reuses its worker threads between tests.
-    #[cfg(target_os = "macos")]
     fn on_fresh_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
         std::thread::spawn(f).join().expect("test thread panicked")
+    }
+
+    /// Whether `High` takes effect without privileges. On Linux it needs
+    /// CAP_SYS_NICE, so an unprivileged run cannot see an elevation to undo.
+    const HIGH_NEEDS_NO_PRIVILEGE: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+
+    /// `Normal` undoes an elevation left on the thread, so a pooled thread
+    /// does not carry one flow's priority into the next.
+    #[test]
+    fn normal_after_elevation_restores_scheduling() {
+        let (baseline, elevated, after) = on_fresh_thread(|| {
+            let baseline = current_scheduling().unwrap();
+            let _ = set_current_thread_priority(ThreadPriority::High);
+            let elevated = current_scheduling().unwrap();
+            set_current_thread_priority(ThreadPriority::Normal).expect("restore should succeed");
+            (baseline, elevated, current_scheduling().unwrap())
+        });
+        if HIGH_NEEDS_NO_PRIVILEGE {
+            assert_ne!(elevated, baseline, "High should change the thread");
+        }
+        assert_eq!(after, baseline);
+    }
+
+    fn post_stream_status(bus: &gst::Bus, kind: gst::StreamStatusType, owner: &gst::Element) {
+        bus.post(gst::message::StreamStatus::new(kind, owner))
+            .expect("post stream status");
+    }
+
+    /// A pipeline with one element and the flow's bus handler installed.
+    fn flow_pipeline(priority: ThreadPriority) -> (gst::Pipeline, gst::Element, gst::Bus) {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let owner = gst::ElementFactory::make("identity").build().unwrap();
+        pipeline.add(&owner).unwrap();
+        setup_thread_priority_handler(
+            &pipeline,
+            priority,
+            None,
+            FlowId::new_v4(),
+            Some(ThreadRegistry::new()),
+        );
+        let bus = pipeline.bus().unwrap();
+        (pipeline, owner, bus)
+    }
+
+    /// A streaming thread leaving a `High` flow goes back to the pool with
+    /// the scheduling it had before the flow (#880).
+    #[test]
+    fn leave_restores_streaming_thread_scheduling() {
+        let (_pipeline, owner, bus) = flow_pipeline(ThreadPriority::High);
+        let (baseline, elevated, after) = on_fresh_thread(move || {
+            let baseline = current_scheduling().unwrap();
+            post_stream_status(&bus, gst::StreamStatusType::Enter, &owner);
+            let elevated = current_scheduling().unwrap();
+            post_stream_status(&bus, gst::StreamStatusType::Leave, &owner);
+            (baseline, elevated, current_scheduling().unwrap())
+        });
+        if HIGH_NEEDS_NO_PRIVILEGE {
+            assert_ne!(elevated, baseline, "Enter should elevate the thread");
+        }
+        assert_eq!(after, baseline, "Leave should restore the thread");
+    }
+
+    /// A thread elevated without a Leave (a WebRTC session thread) is reset
+    /// when a `Normal` flow picks it up from the pool.
+    #[test]
+    fn normal_flow_resets_thread_left_elevated() {
+        let (_high, high_owner, high_bus) = flow_pipeline(ThreadPriority::High);
+        let (_normal, normal_owner, normal_bus) = flow_pipeline(ThreadPriority::Normal);
+        let (baseline, elevated, after) = on_fresh_thread(move || {
+            let baseline = current_scheduling().unwrap();
+            post_stream_status(&high_bus, gst::StreamStatusType::Enter, &high_owner);
+            let elevated = current_scheduling().unwrap();
+            post_stream_status(&normal_bus, gst::StreamStatusType::Enter, &normal_owner);
+            (baseline, elevated, current_scheduling().unwrap())
+        });
+        if HIGH_NEEDS_NO_PRIVILEGE {
+            assert_ne!(elevated, baseline, "Enter should elevate the thread");
+        }
+        assert_eq!(after, baseline, "a Normal flow should reset the thread");
+    }
+
+    /// The session probe acts only on STREAM_START: an application thread
+    /// that sends the first event (an EOS on teardown) keeps its scheduling
+    /// and is not registered as a session thread (#880).
+    #[test]
+    fn session_probe_skips_application_thread() {
+        gst::init().unwrap();
+        let registry = ThreadRegistry::new();
+        let config = SessionThreadConfig::new();
+        config.populate(
+            ThreadPriority::High,
+            None,
+            FlowId::new_v4(),
+            Some(registry.clone()),
+        );
+
+        let pipeline = gst::Pipeline::new();
+        config.install_on_session_pipeline(&pipeline, "test-session");
+        let element = gst::ElementFactory::make("identity").build().unwrap();
+        pipeline.add(&element).unwrap();
+        pipeline.set_state(gst::State::Paused).unwrap();
+        let sink_pad = element.static_pad("sink").unwrap();
+
+        let pad = sink_pad.clone();
+        let (baseline, after_eos) = on_fresh_thread(move || {
+            let baseline = current_scheduling().unwrap();
+            pad.send_event(gst::event::Eos::new());
+            (baseline, current_scheduling().unwrap())
+        });
+        assert_eq!(
+            after_eos, baseline,
+            "EOS must not elevate the sending thread"
+        );
+        assert_eq!(registry.len(), 0, "EOS sender must not be registered");
+
+        let pad = sink_pad.clone();
+        let (baseline, after_start) = on_fresh_thread(move || {
+            let baseline = current_scheduling().unwrap();
+            pad.send_event(gst::event::StreamStart::new("test-stream"));
+            (baseline, current_scheduling().unwrap())
+        });
+        if HIGH_NEEDS_NO_PRIVILEGE {
+            assert_ne!(after_start, baseline, "STREAM_START should elevate");
+        }
+        assert_eq!(
+            registry.len(),
+            1,
+            "STREAM_START thread should be registered"
+        );
+
+        pipeline.set_state(gst::State::Null).unwrap();
     }
 
     /// `High` must leave the thread in `USER_INITIATED`.
