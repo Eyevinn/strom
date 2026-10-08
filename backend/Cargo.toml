@@ -34,6 +34,9 @@ serde_json.workspace = true
 # Date/time
 chrono = "0.4"
 
+# Canonical paths without the Windows verbatim prefix
+dunce = "1.0"
+
 # URL encoding
 url = "2.5"
 urlencoding = "2.1"
