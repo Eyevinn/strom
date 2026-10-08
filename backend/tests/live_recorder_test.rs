@@ -847,23 +847,6 @@ mod containers {
         let samples = demux(&files[0]);
         let audio = &samples["audio/mpeg"];
         let video = &samples["video/x-h264"];
-        if container == "mpegts" {
-            // tsdemux re-stamps across a PTS jump, so the gaps do not show in
-            // what it outputs (ffprobe sees them in the file). Count instead:
-            // each track carried on after its stall and up to the stop.
-            let expect_video = (ran.as_secs_f64() - 4.0 - 1.0) * 30.0;
-            let expect_audio = (ran.as_secs_f64() - 2.5 - 1.0) * 43.0;
-            assert!(
-                video.len() as f64 >= expect_video && audio.len() as f64 >= expect_audio,
-                "mpegts: {} video and {} audio samples in a {:?} run, expected at least {:.0} and {:.0}",
-                video.len(),
-                audio.len(),
-                ran,
-                expect_video,
-                expect_audio
-            );
-            return;
-        }
         let (audio_gap, _) = largest_gap(audio);
         let (video_gap, _) = largest_gap(video);
         assert!(

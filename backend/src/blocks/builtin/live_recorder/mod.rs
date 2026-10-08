@@ -59,6 +59,9 @@ pub const FRAGMENT_SINK_SUFFIX: &str = "fragmentsink";
 /// crash can lose.
 const FRAGMENT_DURATION: gst::ClockTime = gst::ClockTime::from_seconds(1);
 
+/// The MPEG-TS PID that carries only the PCR. Stream PIDs start at 0x41.
+const TS_PCR_PID: i32 = 0x100;
+
 /// How long each track's queue may hold data while the muxer waits for a late
 /// track. Above the keepalive's `NO_DATA_TIMEOUT`, so the wait never blocks
 /// upstream.
@@ -228,9 +231,23 @@ impl BlockBuilder for LiveRecorderBuilder {
                 Format::Matroska,
             ),
             Container::MpegTs => (
-                // Default alignment: one packet per buffer, with the keyframe's
-                // first packet flagged, which is where a file can start.
-                gst::ElementFactory::make("mpegtsmux").name(&mux_id).build(),
+                gst::ElementFactory::make("mpegtsmux")
+                    .name(&mux_id)
+                    // The PCR goes on a PID of its own. By default it rides on
+                    // the video, so a video stall left a hole in the clock
+                    // reference and tsdemux rebased across it: a 10 s
+                    // recording read as 7.4 s, audio included. On its own PID
+                    // it keeps coming whatever the tracks do.
+                    .property(
+                        "prog-map",
+                        gst::Structure::builder("program_map")
+                            .field("PCR_1", TS_PCR_PID)
+                            .build(),
+                    )
+                    // Default alignment: one packet per buffer, with the
+                    // keyframe's first packet flagged, which is where a file
+                    // can start.
+                    .build(),
                 Format::MpegTs,
             ),
             _ => (
