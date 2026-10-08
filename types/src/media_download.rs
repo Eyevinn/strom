@@ -11,6 +11,9 @@ use utoipa::ToSchema;
 /// Default largest file a URL download may write: 2 GiB.
 pub const DEFAULT_MEDIA_DOWNLOAD_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
+/// Longest file name a download is saved under, in bytes.
+pub const MEDIA_DOWNLOAD_MAX_FILENAME_BYTES: usize = 200;
+
 /// Redirects followed before a download is refused.
 pub const MEDIA_DOWNLOAD_MAX_REDIRECTS: usize = 5;
 
@@ -31,8 +34,9 @@ pub struct MediaDownloadRequest {
     pub path: String,
     /// File name to save as. When absent, the name comes from the response's
     /// `Content-Disposition` header, then from the URL's last path segment.
+    /// At most 200 bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "validation", garde(length(min = 1, max = 255)))]
+    #[cfg_attr(feature = "validation", garde(length(min = 1, max = MEDIA_DOWNLOAD_MAX_FILENAME_BYTES)))]
     pub filename: Option<String>,
     /// Replace an existing file of the same name. Without it, an existing file
     /// makes the request fail with 409 Conflict.

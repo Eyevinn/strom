@@ -4109,6 +4109,16 @@
               }
             }
           },
+          "422": {
+            "description": "The request failed validation (URL or file name too long)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "502": {
             "description": "The remote server failed or answered with an error",
             "content": {
@@ -4193,7 +4203,7 @@
             }
           },
           "409": {
-            "description": "The download has already ended",
+            "description": "The download has already ended, or is complete and being saved",
             "content": {
               "application/json": {
                 "schema": {
@@ -7989,7 +7999,7 @@
               "string",
               "null"
             ],
-            "description": "File name to save as. When absent, the name comes from the response's\n`Content-Disposition` header, then from the URL's last path segment."
+            "description": "File name to save as. When absent, the name comes from the response's\n`Content-Disposition` header, then from the URL's last path segment.\nAt most 200 bytes."
           },
           "overwrite": {
             "type": "boolean",

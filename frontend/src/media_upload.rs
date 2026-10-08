@@ -369,7 +369,10 @@ fn send(
                 0
             };
             let now = js_sys::Date::now();
-            if sent < total && now - last_sent_at < PROGRESS_INTERVAL_MS {
+            // Always pass the final event on; throttle the rest, including
+            // when the browser cannot tell the total.
+            let complete = total > 0 && sent >= total;
+            if !complete && now - last_sent_at < PROGRESS_INTERVAL_MS {
                 return;
             }
             last_sent_at = now;

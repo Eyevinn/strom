@@ -687,3 +687,70 @@ async fn existing_file_needs_overwrite() {
     assert_eq!(events.last().unwrap().state, MediaDownloadState::Done);
     assert_eq!(std::fs::read(&target).unwrap(), body_bytes(BODY_LEN));
 }
+
+// ---------------------------------------------------------------------------
+// Review fixes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn failed_request_does_not_show_the_url_query() {
+    // A port nothing listens on: the connect fails, which is where reqwest's
+    // message used to carry the full URL.
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let app = TestApp::new(lab_settings()).await;
+    let (status, json) = app
+        .download(serde_json::json!({
+            "url": format!("http://media.example.com:{port}/clip.bin?sig=SECRET123"),
+        }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
+    assert!(!json.to_string().contains("SECRET123"), "{json}");
+}
+
+#[tokio::test]
+async fn file_name_over_the_limit_names_the_limit() {
+    let app = TestApp::new(lab_settings()).await;
+    let name = format!("{}.bin", "a".repeat(226));
+    let (status, json) = app
+        .download(serde_json::json!({
+            "url": "http://media.example.com/clip.bin",
+            "filename": name,
+        }))
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{json}");
+    let limit = strom_types::media_download::MEDIA_DOWNLOAD_MAX_FILENAME_BYTES.to_string();
+    assert!(json.to_string().contains(&limit), "{json}");
+}
+
+#[test]
+fn left_over_temporary_files_are_swept() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("stingers")).unwrap();
+    for name in [
+        ".download-a.part",
+        "stingers/.download-b.part",
+        "clip.part",
+        "clip.mp4",
+    ] {
+        std::fs::write(root.join(name), b"x").unwrap();
+    }
+
+    // Recently written files may belong to a running transfer.
+    assert_eq!(
+        strom::media_download::remove_orphan_temp_files(root, Duration::from_secs(3600)),
+        0
+    );
+
+    assert_eq!(
+        strom::media_download::remove_orphan_temp_files(root, Duration::ZERO),
+        2
+    );
+    assert!(!root.join(".download-a.part").exists());
+    assert!(!root.join("stingers/.download-b.part").exists());
+    assert!(root.join("clip.part").exists());
+    assert!(root.join("clip.mp4").exists());
+}

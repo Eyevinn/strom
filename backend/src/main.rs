@@ -584,6 +584,7 @@ fn run_with_gui(
         state
             .media_downloads()
             .configure(config.media_download_settings());
+        strom::media_download::spawn_temp_file_sweeper(state.media_path().clone());
         state
             .load_from_storage()
             .await
@@ -842,6 +843,7 @@ async fn run_headless(
     state
         .media_downloads()
         .configure(config.media_download_settings());
+    strom::media_download::spawn_temp_file_sweeper(state.media_path().clone());
     state.load_from_storage().await?;
 
     // Store the log reload handle so log levels can be changed at runtime

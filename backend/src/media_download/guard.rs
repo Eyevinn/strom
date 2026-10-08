@@ -286,8 +286,11 @@ pub(crate) async fn open(
                 return Err(DownloadError::Upstream(format!(
                     "Request to {} failed: {}",
                     super::filename::display_url(&current),
-                    error_chain(&e)
-                )))
+                    // reqwest puts the full URL, query and all, in its
+                    // message; a signed URL's secret must not reach the
+                    // operator or the log.
+                    error_chain(&e.without_url())
+                )));
             }
             Err(_) => {
                 return Err(DownloadError::Timeout(format!(

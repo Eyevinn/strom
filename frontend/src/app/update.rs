@@ -1356,9 +1356,10 @@ impl eframe::App for StromApp {
                 AppMessage::MediaDownloadFailed(message) => {
                     self.media_page.download_failed(message);
                 }
-                AppMessage::MediaDownloadsLoaded(jobs) => {
-                    for job in jobs.into_iter().filter(|j| !j.state.is_finished()) {
-                        self.media_page.apply_download(job);
+                AppMessage::MediaDownloadsLoaded { jobs, asked_for } => {
+                    if self.media_page.downloads_loaded(jobs, &asked_for) {
+                        self.media_page
+                            .refresh(&self.api, ui.ctx(), &self.channels.sender());
                     }
                 }
                 #[cfg(target_arch = "wasm32")]

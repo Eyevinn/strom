@@ -4,7 +4,8 @@
 use url::Url;
 
 /// Longest file name a download is saved under, in bytes.
-pub const MAX_FILENAME_BYTES: usize = 200;
+pub const MAX_FILENAME_BYTES: usize =
+    strom_types::media_download::MEDIA_DOWNLOAD_MAX_FILENAME_BYTES;
 
 /// Name used when neither the response nor the URL offers one.
 pub const FALLBACK_FILENAME: &str = "download";

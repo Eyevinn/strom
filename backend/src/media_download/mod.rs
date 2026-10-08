@@ -128,6 +128,124 @@ struct JobEntry {
     final_path: PathBuf,
     cancel: CancellationToken,
     finished_at: Option<Instant>,
+    /// The body is complete and the file is being moved into place; too late
+    /// to cancel.
+    placing: bool,
+}
+
+/// A hidden temporary file in the media library that a download or an upload
+/// writes into. Removed on drop, including when the writing future is
+/// dropped, unless it was moved into place.
+pub struct TempFile {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl TempFile {
+    /// A new temporary file name in `dir`. Nothing is created yet.
+    pub fn new_in(dir: &Path) -> Self {
+        Self {
+            path: dir.join(format!(
+                "{}{}{}",
+                filename::TEMP_PREFIX,
+                uuid::Uuid::new_v4().simple(),
+                filename::TEMP_SUFFIX
+            )),
+            keep: false,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The file was moved into place; nothing to remove.
+    pub fn keep(&mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if !self.keep {
+            if let Err(e) = std::fs::remove_file(&self.path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!(
+                        "Could not remove unfinished file {}: {}",
+                        self.path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Temporary files untouched for this long are left over from a transfer
+/// that will never finish (Strom stopped or crashed while writing them).
+/// Running transfers write far more often: a download gives up after
+/// `read_timeout` without data.
+const TEMP_FILE_ORPHAN_AGE: Duration = Duration::from_secs(15 * 60);
+/// How often the media library is swept for left-over temporary files.
+const TEMP_FILE_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// Remove left-over temporary files under `media_root` now and then every
+/// [`TEMP_FILE_SWEEP_INTERVAL`]. The listing hides them, so nobody else can.
+pub fn spawn_temp_file_sweeper(media_root: PathBuf) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(TEMP_FILE_SWEEP_INTERVAL);
+        loop {
+            interval.tick().await;
+            let root = media_root.clone();
+            let removed = tokio::task::spawn_blocking(move || {
+                remove_orphan_temp_files(&root, TEMP_FILE_ORPHAN_AGE)
+            })
+            .await
+            .unwrap_or(0);
+            if removed > 0 {
+                info!(
+                    "Removed {} unfinished transfer file(s) from the media library",
+                    removed
+                );
+            }
+        }
+    });
+}
+
+/// Remove temporary files under `dir` not modified for `min_age`. Returns how
+/// many were removed. Does not follow symbolic links.
+pub fn remove_orphan_temp_files(dir: &Path, min_age: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if file_type.is_dir() {
+            removed += remove_orphan_temp_files(&path, min_age);
+            continue;
+        }
+        if !file_type.is_file() || !filename::is_temp_file(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= min_age);
+        if !stale {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => warn!("Could not remove {}: {}", path.display(), e),
+        }
+    }
+    removed
 }
 
 /// The URL downloads of one Strom: settings, resolver and jobs.
@@ -192,6 +310,11 @@ impl MediaDownloads {
                 "Download {job_id} has already ended"
             )));
         }
+        if entry.placing {
+            return Err(DownloadError::Conflict(format!(
+                "Download {job_id} is complete and being saved"
+            )));
+        }
         entry.cancel.cancel();
         Ok(())
     }
@@ -211,6 +334,7 @@ impl MediaDownloads {
     ) -> Result<MediaDownloadJob, DownloadError> {
         let settings = self.settings();
         let resolver = self.resolver.read().clone();
+        let started = Instant::now();
 
         let url = Url::parse(request.url.trim())
             .map_err(|e| DownloadError::BadRequest(format!("Invalid URL: {e}")))?;
@@ -225,6 +349,13 @@ impl MediaDownloads {
         // An explicit name must already be a plain file name: refuse rather
         // than silently save under something else.
         let requested_name = match request.filename.as_deref().map(str::trim) {
+            Some(name) if name.len() > filename::MAX_FILENAME_BYTES => {
+                return Err(DownloadError::BadRequest(format!(
+                    "File name is {} bytes; the limit is {}",
+                    name.len(),
+                    filename::MAX_FILENAME_BYTES
+                )))
+            }
             Some(name) => match filename::sanitize_filename(name) {
                 Some(clean) if clean == name => Some(clean),
                 _ => {
@@ -236,7 +367,9 @@ impl MediaDownloads {
             None => None,
         };
         if let Some(name) = &requested_name {
-            self.check_target(&target_dir.join(name), name, request.overwrite)?;
+            let path = target_dir.join(name);
+            check_jobs_locked(&self.jobs.lock(), &path, name)?;
+            check_existing(&path, name, request.overwrite).await?;
         }
 
         let (mut response, final_url) = guard::open(url, &settings, resolver.as_ref()).await?;
@@ -280,12 +413,6 @@ impl MediaDownloads {
 
         let final_path = target_dir.join(&name);
         let job_id = uuid::Uuid::new_v4().simple().to_string();
-        let temp_path = target_dir.join(format!(
-            "{}{}{}",
-            filename::TEMP_PREFIX,
-            job_id,
-            filename::TEMP_SUFFIX
-        ));
         let relative_path = if directory.is_empty() {
             name.clone()
         } else {
@@ -304,27 +431,34 @@ impl MediaDownloads {
         };
         let cancel = CancellationToken::new();
 
+        // The filesystem is touched outside the jobs lock: on a slow share a
+        // stat or open must not hold up the listing and progress updates.
+        // A file that appears after this check is caught by `place`.
+        check_existing(&final_path, &name, request.overwrite).await?;
+        let mut temp = TempFile::new_in(&target_dir);
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(temp.path())
+            .await
+            .map_err(|e| {
+                DownloadError::Internal(format!("Could not create a temporary file: {e}"))
+            })?;
+
         // Check and register under one lock, so two downloads cannot both
         // claim the same name.
-        let file = {
+        {
             let mut jobs = self.jobs.lock();
-            check_target_locked(&jobs, &final_path, &name, request.overwrite)?;
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp_path)
-                .map_err(|e| {
-                    DownloadError::Internal(format!("Could not create a temporary file: {e}"))
-                })?;
+            check_jobs_locked(&jobs, &final_path, &name)?;
             prune(&mut jobs);
             jobs.push(JobEntry {
                 job: job.clone(),
                 final_path: final_path.clone(),
                 cancel: cancel.clone(),
                 finished_at: None,
+                placing: false,
             });
-            file
-        };
+        }
 
         info!(
             "Media download {} started: {} -> {}",
@@ -339,25 +473,51 @@ impl MediaDownloads {
         let overwrite = request.overwrite;
         tokio::spawn(async move {
             let mut job = task_job;
+            let limits = BodyLimits {
+                max_bytes: settings.max_bytes,
+                started,
+                total_timeout: settings.total_timeout,
+            };
             let outcome = tokio::select! {
                 _ = cancel.cancelled() => Err(None),
                 result = stream_body(
                     &this,
                     &events,
                     &mut response,
-                    tokio::fs::File::from_std(file),
+                    file,
                     &mut job,
-                    settings.max_bytes,
+                    &limits,
                 ) => result.map_err(Some),
             };
             drop(response);
 
+            // A cancel that arrived as the last chunk did still wins; after
+            // this point `cancel` refuses.
+            let outcome = outcome.and_then(|()| {
+                if this.start_placing(&job.job_id, &cancel) {
+                    Ok(())
+                } else {
+                    Err(None)
+                }
+            });
             let outcome = match outcome {
-                Ok(()) => place(&temp_path, &final_path, overwrite).map_err(Some),
+                Ok(()) => {
+                    let temp_path = temp.path().to_path_buf();
+                    let final_path = final_path.clone();
+                    tokio::task::spawn_blocking(move || place(&temp_path, &final_path, overwrite))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(DownloadError::Internal(format!(
+                                "Could not move the file into place: {e}"
+                            )))
+                        })
+                        .map_err(Some)
+                }
                 Err(e) => Err(e),
             };
             match outcome {
                 Ok(()) => {
+                    temp.keep();
                     job.state = MediaDownloadState::Done;
                     info!(
                         "Media download {} done: {} bytes to {}",
@@ -367,15 +527,7 @@ impl MediaDownloads {
                     );
                 }
                 Err(error) => {
-                    if let Err(e) = tokio::fs::remove_file(&temp_path).await {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            warn!(
-                                "Could not remove {} after a failed download: {}",
-                                temp_path.display(),
-                                e
-                            );
-                        }
-                    }
+                    drop(temp);
                     match error {
                         None => {
                             job.state = MediaDownloadState::Cancelled;
@@ -396,15 +548,18 @@ impl MediaDownloads {
         Ok(job)
     }
 
-    /// Refuse a target that exists (unless overwriting a file) or that another
-    /// download is writing.
-    fn check_target(
-        &self,
-        final_path: &Path,
-        name: &str,
-        overwrite: bool,
-    ) -> Result<(), DownloadError> {
-        check_target_locked(&self.jobs.lock(), final_path, name, overwrite)
+    /// Mark the job as being moved into place, unless it was cancelled.
+    /// Checked under the jobs lock, which `cancel` takes too, so a cancel
+    /// either wins here or is refused.
+    fn start_placing(&self, job_id: &str, cancel: &CancellationToken) -> bool {
+        let mut jobs = self.jobs.lock();
+        if cancel.is_cancelled() {
+            return false;
+        }
+        if let Some(entry) = jobs.iter_mut().find(|e| e.job.job_id == job_id) {
+            entry.placing = true;
+        }
+        true
     }
 
     fn update(&self, job: &MediaDownloadJob, finished: bool) {
@@ -418,11 +573,11 @@ impl MediaDownloads {
     }
 }
 
-fn check_target_locked(
+/// Refuse a target that another download is writing.
+fn check_jobs_locked(
     jobs: &[JobEntry],
     final_path: &Path,
     name: &str,
-    overwrite: bool,
 ) -> Result<(), DownloadError> {
     if jobs
         .iter()
@@ -432,7 +587,16 @@ fn check_target_locked(
             "Another download is already writing {name}"
         )));
     }
-    match std::fs::symlink_metadata(final_path) {
+    Ok(())
+}
+
+/// Refuse a target that exists, unless overwriting a file.
+async fn check_existing(
+    final_path: &Path,
+    name: &str,
+    overwrite: bool,
+) -> Result<(), DownloadError> {
+    match tokio::fs::symlink_metadata(final_path).await {
         Ok(meta) if meta.is_dir() => Err(DownloadError::Conflict(format!("{name} is a directory"))),
         Ok(_) if !overwrite => Err(DownloadError::Conflict(format!(
             "{name} already exists; choose another name or overwrite it"
@@ -459,6 +623,14 @@ fn prune(jobs: &mut Vec<JobEntry>) {
     });
 }
 
+/// What a body may take.
+struct BodyLimits {
+    max_bytes: u64,
+    /// When the request was started; the total timeout counts from about here.
+    started: Instant,
+    total_timeout: Duration,
+}
+
 /// Read the body into `file`, counting against the size limit and reporting
 /// progress at most every `MEDIA_DOWNLOAD_PROGRESS_INTERVAL_MS`.
 async fn stream_body(
@@ -467,17 +639,22 @@ async fn stream_body(
     response: &mut reqwest::Response,
     mut file: tokio::fs::File,
     job: &mut MediaDownloadJob,
-    max_bytes: u64,
+    limits: &BodyLimits,
 ) -> Result<(), DownloadError> {
+    let max_bytes = limits.max_bytes;
     let interval = Duration::from_millis(MEDIA_DOWNLOAD_PROGRESS_INTERVAL_MS);
     let mut last_report = Instant::now();
 
     loop {
         let chunk = response.chunk().await.map_err(|e| {
             if e.is_timeout() {
-                DownloadError::Timeout("The server stopped sending data".to_string())
+                DownloadError::Timeout(timeout_message(limits))
             } else {
-                DownloadError::Upstream(format!("Download interrupted: {}", guard::error_chain(&e)))
+                // Without the URL: a signed URL's secret must not be shown.
+                DownloadError::Upstream(format!(
+                    "Download interrupted: {}",
+                    guard::error_chain(&e.without_url())
+                ))
             }
         })?;
         let Some(chunk) = chunk else { break };
@@ -514,6 +691,23 @@ async fn stream_body(
     Ok(())
 }
 
+/// Why a read of the body timed out: the whole download ran out of time, or
+/// the server went quiet.
+fn timeout_message(limits: &BodyLimits) -> String {
+    timeout_message_at(limits.started.elapsed(), limits.total_timeout)
+}
+
+fn timeout_message_at(elapsed: Duration, total_timeout: Duration) -> String {
+    if elapsed >= total_timeout {
+        format!(
+            "The download did not finish within {} seconds; raise media.download_timeout_seconds for larger files",
+            total_timeout.as_secs()
+        )
+    } else {
+        "The server stopped sending data".to_string()
+    }
+}
+
 /// Move the finished temporary file to its final name in one step. Without
 /// `overwrite`, never replace a file that appeared meanwhile.
 fn place(temp: &Path, final_path: &Path, overwrite: bool) -> Result<(), DownloadError> {
@@ -547,5 +741,63 @@ fn place(temp: &Path, final_path: &Path, overwrite: bool) -> Result<(), Download
                 std::fs::rename(temp, final_path).map_err(io_error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registered(downloads: &MediaDownloads) -> CancellationToken {
+        let cancel = CancellationToken::new();
+        downloads.jobs.lock().push(JobEntry {
+            job: MediaDownloadJob {
+                job_id: "job".to_string(),
+                url: "https://example.com/clip.mp4".to_string(),
+                directory: String::new(),
+                filename: "clip.mp4".to_string(),
+                path: "clip.mp4".to_string(),
+                bytes: 0,
+                total: None,
+                state: MediaDownloadState::Downloading,
+                error: None,
+            },
+            final_path: PathBuf::from("clip.mp4"),
+            cancel: cancel.clone(),
+            finished_at: None,
+            placing: false,
+        });
+        cancel
+    }
+
+    #[test]
+    fn cancel_after_the_body_is_complete_is_refused() {
+        let downloads = MediaDownloads::new();
+        let cancel = registered(&downloads);
+        assert!(downloads.start_placing("job", &cancel));
+        assert!(matches!(
+            downloads.cancel("job"),
+            Err(DownloadError::Conflict(_))
+        ));
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[test]
+    fn cancel_before_placing_wins() {
+        let downloads = MediaDownloads::new();
+        let cancel = registered(&downloads);
+        downloads.cancel("job").unwrap();
+        assert!(!downloads.start_placing("job", &cancel));
+    }
+
+    #[test]
+    fn total_timeout_is_told_apart_from_a_quiet_server() {
+        let total = Duration::from_secs(7200);
+        assert!(timeout_message_at(Duration::from_secs(7200), total)
+            .contains("download_timeout_seconds"));
+        assert_eq!(
+            timeout_message_at(Duration::from_secs(60), total),
+            "The server stopped sending data"
+        );
     }
 }

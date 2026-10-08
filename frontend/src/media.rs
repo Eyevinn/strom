@@ -8,6 +8,8 @@ use crate::list_navigator::{list_navigator, ListItem};
 
 /// Width of the download URL field and of a download's progress bar.
 const DOWNLOAD_FIELD_WIDTH: f32 = 320.0;
+/// How often the server's download list is asked for while a download runs.
+const DOWNLOAD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Media page state.
 pub struct MediaPage {
@@ -53,10 +55,14 @@ pub struct MediaPage {
     download_overwrite: bool,
     /// A download request is waiting for the server's answer
     download_pending: bool,
+    /// The URL that request was sent for
+    download_submitted: String,
     /// Why the last download request was refused
     download_error: Option<String>,
     /// URL downloads seen in this session, oldest first
     downloads: Vec<MediaDownloadJob>,
+    /// When the server's download list was last asked for
+    last_downloads_fetch: instant::Instant,
     /// Uploads from the browser's file picker
     #[cfg(target_arch = "wasm32")]
     uploads: crate::media_upload::Uploads,
@@ -86,8 +92,10 @@ impl MediaPage {
             download_url: String::new(),
             download_overwrite: false,
             download_pending: false,
+            download_submitted: String::new(),
             download_error: None,
             downloads: Vec::new(),
+            last_downloads_fetch: instant::Instant::now(),
             #[cfg(target_arch = "wasm32")]
             uploads: crate::media_upload::Uploads::new(),
         }
@@ -115,11 +123,43 @@ impl MediaPage {
     pub fn download_started(&mut self, job: MediaDownloadJob) {
         self.download_pending = false;
         self.download_error = None;
-        self.download_url.clear();
+        // Keep anything typed into the field while the request was waiting.
+        if self.download_url.trim() == self.download_submitted {
+            self.download_url.clear();
+        }
         // Events may already have reported a later state; keep that.
         if !self.downloads.iter().any(|j| j.job_id == job.job_id) {
             self.downloads.push(job);
         }
+    }
+
+    /// The server's list of downloads. Starts tracking downloads that are
+    /// still running (after a page reload), and settles rows whose final
+    /// event never arrived: the WebSocket drops events when a client lags,
+    /// and loses them while it reconnects. Returns true when one of them
+    /// finished into the folder being shown.
+    ///
+    /// `asked_for` are the running downloads the page tracked when it asked;
+    /// one started since may not be in the list yet.
+    pub fn downloads_loaded(&mut self, jobs: Vec<MediaDownloadJob>, asked_for: &[String]) -> bool {
+        let mut finished_here = false;
+        for row in self.downloads.iter_mut() {
+            if !row.state.is_finished()
+                && asked_for.contains(&row.job_id)
+                && !jobs.iter().any(|j| j.job_id == row.job_id)
+            {
+                // The server no longer knows it, so it restarted meanwhile.
+                row.state = MediaDownloadState::Failed;
+                row.error = Some("The server restarted during the download".to_string());
+            }
+        }
+        for job in jobs {
+            let known = self.downloads.iter().any(|j| j.job_id == job.job_id);
+            if known || !job.state.is_finished() {
+                finished_here |= self.apply_download(job);
+            }
+        }
+        finished_here
     }
 
     /// The server refused a download request.
@@ -167,6 +207,14 @@ impl MediaPage {
         // Auto-refresh every 3 seconds
         if self.last_fetch.elapsed().as_secs() > 3 && !self.loading {
             self.refresh(api, ctx, tx);
+        }
+
+        // Progress comes as WebSocket events, which can be lost; while a
+        // download runs, ask the server now and then as well.
+        if self.downloads.iter().any(|j| !j.state.is_finished())
+            && self.last_downloads_fetch.elapsed() >= DOWNLOAD_POLL_INTERVAL
+        {
+            self.fetch_downloads(api, ctx, tx);
         }
 
         // Handle dialogs
@@ -838,6 +886,7 @@ impl MediaPage {
         let ctx = ctx.clone();
         let tx = tx.clone();
         let url = self.download_url.trim().to_string();
+        self.download_submitted = url.clone();
         let path = self.current_path.clone();
         let overwrite = self.download_overwrite;
 
@@ -875,9 +924,10 @@ impl MediaPage {
         });
     }
 
-    /// Pick up downloads that are still running (after a page reload).
+    /// Ask the server for its downloads: picks up downloads still running
+    /// after a page reload, and final states whose event was lost.
     fn fetch_downloads(
-        &self,
+        &mut self,
         api: &crate::api::ApiClient,
         ctx: &Context,
         tx: &std::sync::mpsc::Sender<crate::state::AppMessage>,
@@ -885,13 +935,21 @@ impl MediaPage {
         let api = api.clone();
         let ctx = ctx.clone();
         let tx = tx.clone();
+        self.last_downloads_fetch = instant::Instant::now();
+        let asked_for: Vec<String> = self
+            .downloads
+            .iter()
+            .filter(|j| !j.state.is_finished())
+            .map(|j| j.job_id.clone())
+            .collect();
 
         crate::app::spawn_task(async move {
             match api.list_media_downloads().await {
                 Ok(list) => {
-                    let _ = tx.send(crate::state::AppMessage::MediaDownloadsLoaded(
-                        list.downloads,
-                    ));
+                    let _ = tx.send(crate::state::AppMessage::MediaDownloadsLoaded {
+                        jobs: list.downloads,
+                        asked_for,
+                    });
                     ctx.request_repaint();
                 }
                 Err(e) => tracing::debug!("Could not list media downloads: {}", e),
