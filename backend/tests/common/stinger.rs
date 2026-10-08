@@ -32,6 +32,9 @@ pub const GL_ELEMENTS: &[&str] = &[
 /// last frame now and then, which makes frame counts flaky.
 pub const CODEC_ELEMENTS: &[&str] = &["pngenc", "pngdec", "qtmux", "qtdemux"];
 
+/// The stinger preroll the tests run with: see where the mixer is built.
+pub const TEST_PREROLL_MS: u64 = 250;
+
 /// Where clip frame `i`'s matte edge is: white (new source) left of it.
 pub fn matte_edge(i: usize) -> u32 {
     (i as u32 * W) / (N as u32 - 1)
@@ -305,6 +308,17 @@ pub fn build_flow(tag: &str, backend: &str, clips: &[std::path::PathBuf]) -> Flo
             ("multiview_resolution", PV::String(format!("{W}x{H}"))),
             ("pgm_framerate", PV::String("30/1".into())),
             ("enable_stinger", PV::Bool(true)),
+            // The clip starts this far ahead of its first output frame. The
+            // default (80 ms) is enough on a real machine; the macOS CI
+            // runner, a virtual M1 on three cores, needs about 150 ms, and
+            // its frames then arrive late and are dropped. The tests guard
+            // that a take is frame-exact given the preroll it needs, which
+            // is the operator's to set; `stinger_bench` measures how low it
+            // can go.
+            (
+                strom_types::stinger::STINGER_PREROLL_PROPERTY,
+                PV::UInt(TEST_PREROLL_MS),
+            ),
         ]),
         position: strom_types::block::Position { x: 0.0, y: 0.0 },
         runtime_data: None,
