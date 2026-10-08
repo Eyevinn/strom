@@ -818,8 +818,41 @@ impl MediaPlayerState {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         self.stinger.park.parked.store(true, Ordering::Release);
+        self.restart_stopped_outputs();
         self.warm_up_consumer();
         Ok(started.elapsed())
+    }
+
+    /// Restart an output whose streaming stopped on an error. A consumer that
+    /// refused the last clip's format (`not-negotiated`) stops the output's
+    /// `appsrc`, which then sends EOS downstream, and it would stay stopped,
+    /// every later clip queued and never sent, until the flow restarts. The
+    /// cue of the next clip flushes it instead, which clears the EOS and
+    /// starts it again; that clip then negotiates afresh. The flush is local
+    /// to this output's branches: a mixer takes a flush on one sink pad
+    /// without passing it on. A healthy output is left alone; this player
+    /// never ends its outputs itself, so one at EOS has stopped.
+    fn restart_stopped_outputs(&self) {
+        for appsrc in self.video_appsrcs.iter().chain(&self.audio_appsrcs) {
+            let Some(src) = appsrc.static_pad("src") else {
+                continue;
+            };
+            let stopped = !matches!(
+                src.last_flow_result(),
+                Ok(_) | Err(gst::FlowError::Flushing)
+            );
+            if !stopped {
+                continue;
+            }
+            info!(
+                "Media Player {}: {} stopped on {:?}; restarting it for the cued clip",
+                self.block_id,
+                appsrc.name(),
+                src.last_flow_result()
+            );
+            appsrc.send_event(gst::event::FlushStart::new());
+            appsrc.send_event(gst::event::FlushStop::new(false));
+        }
     }
 
     /// Send the consumer one blank frame in the cued clip's format, so that

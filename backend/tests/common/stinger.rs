@@ -381,6 +381,32 @@ pub fn build_flow(tag: &str, backend: &str, clips: &[std::path::PathBuf]) -> Flo
     flow
 }
 
+/// Also feed the stinger source to an ordinary mixer input, `video_in_2`, as
+/// an operator does to see it on the multiview: the source's output then goes
+/// through a tee to two consumers, and a format either refuses fails both.
+pub fn stinger_also_on_an_input(flow: &mut Flow) {
+    let mixer = flow
+        .blocks
+        .iter_mut()
+        .find(|b| b.block_definition_id == "builtin.vision_mixer")
+        .expect("a vision mixer");
+    mixer
+        .properties
+        .insert("num_inputs".to_string(), PV::UInt(3));
+    let mixer_id = mixer.id.clone();
+    let sting = flow
+        .blocks
+        .iter()
+        .find(|b| b.block_definition_id == "builtin.media_player")
+        .expect("a stinger source")
+        .id
+        .clone();
+    flow.links.push(Link {
+        from: format!("{sting}:video_out"),
+        to: format!("{mixer_id}:video_in_2"),
+    });
+}
+
 pub struct Running {
     pub tag: String,
     pub state: AppState,
@@ -636,11 +662,17 @@ pub fn frame_index(pts: u64, start: u64) -> i64 {
 /// Classic: the graphic is on air for exactly the clip's frames, and the
 /// program cuts beneath it on the cut point's frame.
 pub async fn classic_take(r: &Running) {
+    classic_take_of(r, 0, Colour::Red, Colour::Blue).await
+}
+
+/// [`classic_take`] with clip `index`, from the `old` program colour to the
+/// `new` one. The clip must be a classic green-left-half clip.
+pub async fn classic_take_of(r: &Running, index: usize, old: Colour, new: Colour) {
     r.state
         .stinger_set_clip_settings(
             &r.flow_id,
             &r.mixer(),
-            0,
+            index,
             None,
             StingerClipSettings {
                 cut_point_ms: Some(500),
@@ -652,11 +684,11 @@ pub async fn classic_take(r: &Running) {
     r.drain().await;
     let take = r
         .state
-        .stinger_take(&r.flow_id, &r.mixer(), Some(0), None)
+        .stinger_take(&r.flow_id, &r.mixer(), Some(index), None)
         .await
         .expect("take");
     assert_eq!(take.variant, StingerVariant::Classic);
-    let n = r.clip_frames(0).await;
+    let n = r.clip_frames(index).await;
     let frames = r.collect(take.take_to_air_ms as u64 + 1600).await;
 
     let green: Vec<u64> = frames
@@ -664,7 +696,9 @@ pub async fn classic_take(r: &Running) {
         .filter(|(_, f)| colour(px(f, W / 4, H / 2)) == Colour::Green)
         .map(|(t, _)| *t)
         .collect();
-    let start = *green.first().expect("the graphic never went on air");
+    let start = *green
+        .first()
+        .unwrap_or_else(|| panic!("clip {index}: the graphic never went on air"));
     let indices: Vec<i64> = green.iter().map(|t| frame_index(*t, start)).collect();
     assert_eq!(
         indices,
@@ -674,7 +708,7 @@ pub async fn classic_take(r: &Running) {
     );
     let cut = frames
         .iter()
-        .find(|(t, f)| *t >= start && colour(px(f, 3 * W / 4, H / 2)) == Colour::Blue)
+        .find(|(t, f)| *t >= start && colour(px(f, 3 * W / 4, H / 2)) == new)
         .map(|(t, _)| frame_index(*t, start))
         .expect("the program never cut");
     assert_eq!(cut, 15, "the cut lands on the cut point's frame (500 ms)");
@@ -683,16 +717,16 @@ pub async fn classic_take(r: &Running) {
         let k = frame_index(*t, start);
         let right = colour(px(f, 3 * W / 4, H / 2));
         if k < 15 {
-            assert_eq!(right, Colour::Red, "frame {k}: old source before the cut");
+            assert_eq!(right, old, "frame {k}: old source before the cut");
         } else {
-            assert_eq!(right, Colour::Blue, "frame {k}: new source after the cut");
+            assert_eq!(right, new, "frame {k}: new source after the cut");
         }
         if k >= n as i64 {
-            assert_eq!(colour(px(f, W / 4, H / 2)), Colour::Blue, "frame {k}");
+            assert_eq!(colour(px(f, W / 4, H / 2)), new, "frame {k}");
         }
     }
 
-    let report = r.wait_for_report(0).await;
+    let report = r.wait_for_report(index).await;
     assert_eq!(report.frames_expected, n);
     assert_eq!(report.frames_arrived, n, "{report:?}");
     assert_eq!(report.warning, None, "{report:?}");
