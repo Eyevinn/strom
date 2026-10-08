@@ -54,11 +54,33 @@ fn cache_key(uri: &str) -> CacheKey {
     (uri.to_string(), mtime, len)
 }
 
+/// Analyses that failed, by cache key: a clip no decoder here can play
+/// fails the same way every time, and decoding it again on every state read
+/// cost a decoder per read.
+static FAILED: LazyLock<Mutex<HashMap<CacheKey, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// The analysis of `uri`, if it has run and the
 /// file has not changed since.
 pub fn cached(uri: &str) -> Option<StingerClipInfo> {
     let key = cache_key(uri);
     CACHE.lock().ok()?.get(&key).cloned()
+}
+
+/// Why the analysis of `uri` failed, if it did and the file has not changed
+/// since.
+pub fn failed(uri: &str) -> Option<String> {
+    let key = cache_key(uri);
+    FAILED.lock().ok()?.get(&key).cloned()
+}
+
+/// Forget a failed analysis of `uri`, so the next request runs it again.
+pub fn forget_failure(uri: &str) {
+    let key = cache_key(uri);
+    FAILED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&key);
 }
 
 /// The result of one analysis run, shared with every caller that asked for
@@ -127,6 +149,9 @@ pub fn analyze_cached(uri: &str) -> Result<StingerClipInfo, String> {
                 if let Some(info) = CACHE.lock().ok().and_then(|c| c.get(&key).cloned()) {
                     return Ok(info);
                 }
+                if let Some(e) = FAILED.lock().ok().and_then(|f| f.get(&key).cloned()) {
+                    return Err(e);
+                }
                 let flight = Flight::default();
                 in_flight.insert(key.clone(), Arc::clone(&flight));
                 Ok(FlightGuard {
@@ -153,9 +178,16 @@ pub fn analyze_cached(uri: &str) -> Result<StingerClipInfo, String> {
         .entry(uri.to_string())
         .or_default() += 1;
     let result = analyze(uri);
-    if let Ok(info) = &result {
-        if let Ok(mut cache) = CACHE.lock() {
-            cache.insert(key, info.clone());
+    match &result {
+        Ok(info) => {
+            if let Ok(mut cache) = CACHE.lock() {
+                cache.insert(key, info.clone());
+            }
+        }
+        Err(e) => {
+            if let Ok(mut failed) = FAILED.lock() {
+                failed.insert(key, e.clone());
+            }
         }
     }
     guard.finish(result.clone());

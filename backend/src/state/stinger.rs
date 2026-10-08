@@ -339,7 +339,7 @@ impl AppState {
 
     /// Analyse a clip off the request path, once at a time per clip.
     fn analyse_in_background(uri: String) {
-        if analysis::cached(&uri).is_some() {
+        if analysis::cached(&uri).is_some() || analysis::failed(&uri).is_some() {
             return;
         }
         {
@@ -364,9 +364,15 @@ impl AppState {
         let uri = ctx.uri(file);
         let missing = is_missing(&uri);
         let info = analysis::cached(&uri);
-        if info.is_none() && !missing {
-            Self::analyse_in_background(uri);
-        }
+        let analysis_error = if info.is_none() && !missing {
+            let failed = analysis::failed(&uri);
+            if failed.is_none() {
+                Self::analyse_in_background(uri);
+            }
+            failed
+        } else {
+            None
+        };
         let plan = plan_clip(&settings, info.as_ref(), ctx.matte_supported, None).ok();
         StingerClip {
             index,
@@ -377,6 +383,7 @@ impl AppState {
             downgraded_from: plan.as_ref().and_then(|p| p.downgraded_from),
             cut_point_ms: plan.and_then(|p| p.cut_point_ms),
             missing,
+            analysis_error,
         }
     }
 
@@ -489,6 +496,8 @@ impl AppState {
             if is_missing(&uri) {
                 missing += 1;
             } else if analysis::cached(&uri).is_none() {
+                // A reload is the operator's way to try again.
+                analysis::forget_failure(&uri);
                 analysing += 1;
                 Self::analyse_in_background(uri);
             }

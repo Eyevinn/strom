@@ -10669,6 +10669,13 @@
           "settings"
         ],
         "properties": {
+          "analysis_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the clip's analysis failed, when it did. It is not retried until\nthe file changes or the library is reloaded."
+          },
           "cut_point_ms": {
             "type": [
               "integer",
