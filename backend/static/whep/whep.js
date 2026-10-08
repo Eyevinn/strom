@@ -10,6 +10,19 @@ let whepDebugMode = false;
 // whose tracks the player has already let go of.
 const ICE_DISCONNECT_GRACE_MS = 4000;
 
+// Reconnect backoff for the player page, in ms. Attempts past the end of the list
+// reuse the last delay. The grace period above already filters out drops that
+// recover on their own, and the dead session is DELETEd before the retry, so
+// nothing on the server stands in the way of an early first attempt.
+const WHEP_RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000];
+const WHEP_MAX_RECONNECT_ATTEMPTS = 15;
+
+// Delay before reconnect attempt `attempt`, which is 1-based: the first retry is
+// attempt 1. Lives here rather than in the page so CI can exercise it.
+function whepReconnectDelay(attempt) {
+    return WHEP_RECONNECT_DELAYS[Math.min(attempt, WHEP_RECONNECT_DELAYS.length) - 1];
+}
+
 function setWhepDebugMode(enabled) {
     whepDebugMode = enabled;
     console.log('[WHEP] Debug mode ' + (enabled ? 'enabled' : 'disabled'));

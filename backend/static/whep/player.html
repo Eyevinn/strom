@@ -121,8 +121,6 @@
         // otherwise, so both are kept in step with these.
         let earMuted = true;
         let earVolume = 1;
-        const MAX_RECONNECT_ATTEMPTS = 15;
-        const RECONNECT_DELAY = 10000;
 
         // Device management (audio output selection)
         const deviceManager = new DeviceManager({
@@ -273,8 +271,8 @@
             if (!wantConnected || reconnectTimer) return;
 
             // Check max attempts
-            if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
-                log('Max reconnection attempts (' + MAX_RECONNECT_ATTEMPTS + ') reached. Giving up.', 'error');
+            if (reconnectAttempt >= WHEP_MAX_RECONNECT_ATTEMPTS) {
+                log('Max reconnection attempts (' + WHEP_MAX_RECONNECT_ATTEMPTS + ') reached. Giving up.', 'error');
                 setStatus('status', 'Connection failed - click Connect to retry', 'error');
                 wantConnected = false;
                 document.getElementById('connectBtn').disabled = false;
@@ -282,9 +280,9 @@
                 return;
             }
 
-            const delay = RECONNECT_DELAY;
             reconnectAttempt++;
-            log('Reconnecting in ' + (delay/1000) + 's (attempt ' + reconnectAttempt + '/' + MAX_RECONNECT_ATTEMPTS + ')... Reason: ' + reason, 'warning');
+            const delay = whepReconnectDelay(reconnectAttempt);
+            log('Reconnecting in ' + (delay/1000) + 's (attempt ' + reconnectAttempt + '/' + WHEP_MAX_RECONNECT_ATTEMPTS + ')... Reason: ' + reason, 'warning');
             setStatus('status', 'Reconnecting in ' + (delay/1000) + 's (attempt ' + reconnectAttempt + ')...', 'connecting');
 
             reconnectTimer = setTimeout(() => {

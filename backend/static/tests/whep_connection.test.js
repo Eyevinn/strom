@@ -159,3 +159,57 @@ test('Disconnect before the PeerConnection exists sends no POST', async () => {
     assert.equal(page.peerConnections.length, 0, 'a PeerConnection was built after close()');
     assert.equal(page.requests.filter((r) => r.method === 'POST').length, 0);
 });
+
+// Reconnect backoff, read from the page context so the tests follow the
+// production constants.
+function backoff() {
+    const context = vm.createContext({});
+    vm.runInContext(fs.readFileSync(path.join(STATIC, 'whep/whep.js'), 'utf8'), context);
+    return {
+        delay: vm.runInContext('whepReconnectDelay', context),
+        delays: JSON.parse(vm.runInContext('JSON.stringify(WHEP_RECONNECT_DELAYS)', context)),
+        maxAttempts: vm.runInContext('WHEP_MAX_RECONNECT_ATTEMPTS', context),
+    };
+}
+
+test('every reconnect attempt has a delay, clamped past the end of the list', () => {
+    const { delay, delays, maxAttempts } = backoff();
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const d = delay(attempt);
+        assert.ok(Number.isFinite(d) && d > 0, `attempt ${attempt} -> ${d}`);
+    }
+    assert.equal(delay(delays.length + 5), delays[delays.length - 1]);
+});
+
+test('the first reconnect is early and the backoff grows', () => {
+    // The grace period already rode out drops that recover, so a slow first
+    // retry only adds black screen to a drop that did not.
+    const { delay, maxAttempts } = backoff();
+    assert.ok(delay(1) <= 2000, `first retry after ${delay(1)}ms`);
+    for (let attempt = 2; attempt <= maxAttempts; attempt++) {
+        assert.ok(delay(attempt) >= delay(attempt - 1), `attempt ${attempt} is shorter than ${attempt - 1}`);
+    }
+    assert.ok(delay(maxAttempts) > delay(1), 'the schedule is flat');
+});
+
+test('the retry budget covers a long outage', () => {
+    const { delay, maxAttempts } = backoff();
+    let total = 0;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) total += delay(attempt);
+    assert.ok(total >= 300000, `retries span only ${total / 1000}s`);
+});
+
+test('player.html schedules reconnects from the shared backoff', () => {
+    // whep.js and the inline script share one global lexical scope: a second
+    // declaration is a parse error that takes the page down, and a local fixed
+    // delay would quietly bypass the backoff.
+    const html = fs.readFileSync(path.join(STATIC, 'whep', 'player.html'), 'utf8');
+    for (const name of ['WHEP_RECONNECT_DELAYS', 'WHEP_MAX_RECONNECT_ATTEMPTS', 'whepReconnectDelay']) {
+        assert.ok(
+            !new RegExp(`(?:const|let|var|function)\\s+${name}\\b`).test(html),
+            `${name} is declared in player.html as well as whep.js`,
+        );
+    }
+    assert.match(html, /whepReconnectDelay\(reconnectAttempt\)/);
+    assert.doesNotMatch(html, /RECONNECT_DELAY\s*=/);
+});
