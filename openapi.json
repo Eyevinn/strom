@@ -1586,6 +1586,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "The player is playing a stinger take",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1650,6 +1660,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "The player is playing a stinger take",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1697,6 +1717,16 @@
           },
           "404": {
             "description": "Flow or block not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The player is playing a stinger take",
             "content": {
               "application/json": {
                 "schema": {
@@ -1761,6 +1791,16 @@
           },
           "404": {
             "description": "Player not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The player is playing a stinger take",
             "content": {
               "application/json": {
                 "schema": {
@@ -2159,6 +2199,533 @@
           },
           "404": {
             "description": "Block has no live state (pipeline not running)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/flows/{flow_id}/blocks/{block_id}/stinger": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Stinger state of a vision mixer: its source, clips (with analysis and how\neach plays here), the cued clip, and the last take's measurements.",
+        "operationId": "get_stinger_state",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stinger state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StingerState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/flows/{flow_id}/blocks/{block_id}/stinger/clips": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Add a clip to the stinger library (the stinger source's playlist). Adding\na file already in the library returns it unchanged. Upload the file first\nwith the media API when it is not on the server yet.",
+        "operationId": "add_stinger_clip",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StingerAddClipRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The clip, as it plays here",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StingerClip"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request, or no such file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/flows/{flow_id}/blocks/{block_id}/stinger/clips/{index}": {
+      "put": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Store a stinger clip's settings (layout, cut point, mix, premultiplied\nalpha, matte inversion) on the stinger source block.",
+        "operationId": "set_stinger_clip_settings",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "description": "Playlist index on the stinger source",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "file",
+            "in": "query",
+            "description": "The file expected at `index`; 409 when the library has changed",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StingerClipSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Settings stored; the clip as it now plays",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StingerClip"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The library changed: `file` is no longer at `index`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Remove a clip from the stinger library, with its settings. The file stays\nin the media directory. Refused while a stinger is on air.",
+        "operationId": "remove_stinger_clip",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "description": "Playlist index on the stinger source",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "file",
+            "in": "query",
+            "description": "The file expected at `index`; 409 when the library has changed",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The library changed: `file` is no longer at `index`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/flows/{flow_id}/blocks/{block_id}/stinger/cue": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Cue a stinger clip: load it and park it on its first frame, so a take\nstarts it without delay.",
+        "operationId": "cue_stinger",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StingerCueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Clip cued; the stinger state after the cue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StingerState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The clip could not be cued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The library changed: `file` is no longer at `index`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/flows/{flow_id}/blocks/{block_id}/stinger/examples": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Render Strom's example stingers (classic, track matte, mask only) into the\nmedia directory and add them to the stinger source's playlist.",
+        "operationId": "write_stinger_examples",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Examples written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StingerExamplesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/flows/{flow_id}/blocks/{block_id}/stinger/reload": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Reload the stinger library from disk: analyse clips whose files changed,\nload and park the cued clip again when its file changed since it was\nloaded, and report clips whose files are gone (`missing`). Analyses run in\nthe background; poll the stinger state for them. Refused while a stinger\nis on air.",
+        "operationId": "reload_stinger",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Library reloaded; the stinger state after the reload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StingerState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A stinger is on air",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/flows/{flow_id}/blocks/{block_id}/stinger/take": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Take a stinger from PGM to PVW.",
+        "operationId": "take_stinger",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StingerTakeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Take started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StingerTakeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The take could not start",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The library changed: `file` is not the clip that would play",
             "content": {
               "application/json": {
                 "schema": {
@@ -10061,6 +10628,575 @@
           }
         }
       },
+      "StingerAddClipRequest": {
+        "type": "object",
+        "description": "Add a clip to the stinger library.",
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Path relative to the media directory (as the media API names files),\nan absolute path, or a URI."
+          },
+          "settings": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StingerClipSettings",
+                "description": "Settings to store with it. Defaults detect everything."
+              }
+            ]
+          }
+        }
+      },
+      "StingerBeneath": {
+        "type": "string",
+        "description": "What a classic stinger does to the program at its cut point.",
+        "enum": [
+          "cut",
+          "mix"
+        ]
+      },
+      "StingerClip": {
+        "type": "object",
+        "description": "One playlist entry of the stinger source, as the mixer sees it.",
+        "required": [
+          "index",
+          "file",
+          "settings"
+        ],
+        "properties": {
+          "cut_point_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Effective cut point for a classic take.",
+            "minimum": 0
+          },
+          "downgraded_from": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StingerVariant",
+                "description": "Set when the variant the clip asks for cannot run here."
+              }
+            ]
+          },
+          "file": {
+            "type": "string",
+            "description": "Playlist entry (path or URI)."
+          },
+          "index": {
+            "type": "integer",
+            "description": "Playlist index on the stinger source.",
+            "minimum": 0
+          },
+          "info": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StingerClipInfo",
+                "description": "Analysis, once it has run."
+              }
+            ]
+          },
+          "missing": {
+            "type": "boolean",
+            "description": "The clip's file is not on disk (deleted or renamed since it was\nadded). Only a local file can be missing."
+          },
+          "settings": {
+            "$ref": "#/components/schemas/StingerClipSettings",
+            "description": "Settings as stored."
+          },
+          "variant": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StingerVariant",
+                "description": "How this clip plays on this mixer, after detection and any downgrade."
+              }
+            ]
+          }
+        }
+      },
+      "StingerClipInfo": {
+        "type": "object",
+        "description": "What analysing a clip found.",
+        "required": [
+          "width",
+          "height",
+          "framerate_num",
+          "framerate_den",
+          "frames",
+          "duration_ms",
+          "has_alpha",
+          "detected_layout",
+          "cover_peak",
+          "analysis_ms"
+        ],
+        "properties": {
+          "analysis_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long the analysis took.",
+            "minimum": 0
+          },
+          "cover_peak": {
+            "type": "number",
+            "format": "float"
+          },
+          "cover_peak_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Where the graphic covers the largest part of the frame, and how much\n(0..1). Taken from the graphic's alpha.",
+            "minimum": 0
+          },
+          "detected_layout": {
+            "$ref": "#/components/schemas/StingerLayout",
+            "description": "Layout read from the clip's shape and alpha. Never `auto`."
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Length of the clip.",
+            "minimum": 0
+          },
+          "framerate_den": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "framerate_num": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Frame rate as a fraction."
+          },
+          "frames": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of decoded frames.",
+            "minimum": 0
+          },
+          "has_alpha": {
+            "type": "boolean",
+            "description": "Whether the decoded frames carry an alpha channel."
+          },
+          "height": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "matte_end_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "matte_midpoint_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Where the matte first shows more of the new source than the old.",
+            "minimum": 0
+          },
+          "matte_start_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Where the matte starts and finishes moving: the first frame with any\nof the new source, and the first with all of it.",
+            "minimum": 0
+          },
+          "width": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Decoded frame size of the whole clip.",
+            "minimum": 0
+          }
+        }
+      },
+      "StingerClipSettings": {
+        "type": "object",
+        "description": "Per-clip stinger settings, stored on the clip's Media Player.",
+        "properties": {
+          "beneath": {
+            "$ref": "#/components/schemas/StingerBeneath",
+            "description": "Classic: cut or mix at the cut point."
+          },
+          "cut_point_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Classic: how far into the clip the program changes. `None` takes it\nfrom the clip: the frame where the graphic covers most, or where the\nmatte crosses half way.",
+            "minimum": 0
+          },
+          "invert_matte": {
+            "type": "boolean",
+            "description": "Swap black and white in the matte."
+          },
+          "layout": {
+            "$ref": "#/components/schemas/StingerLayout",
+            "description": "Clip layout. `auto` detects it."
+          },
+          "mix_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Classic: length of the mix beneath, when `beneath` is `mix`.",
+            "minimum": 0
+          },
+          "premultiplied": {
+            "type": "boolean",
+            "description": "The graphic's colour is premultiplied by its alpha (After Effects'\n\"Premultiplied (Matted)\" export)."
+          }
+        }
+      },
+      "StingerCueRequest": {
+        "type": "object",
+        "description": "Cue a stinger clip.",
+        "required": [
+          "index"
+        ],
+        "properties": {
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When set, the playlist entry at `index` must be this file; a library\nchanged by someone else since the client read it fails with 409."
+          },
+          "index": {
+            "type": "integer",
+            "description": "Playlist index on the stinger source.",
+            "minimum": 0
+          }
+        }
+      },
+      "StingerExamplesResponse": {
+        "type": "object",
+        "description": "Example stinger clips written to the media directory.",
+        "required": [
+          "files",
+          "added_to_playlist"
+        ],
+        "properties": {
+          "added_to_playlist": {
+            "type": "boolean",
+            "description": "Whether they were added to the stinger source's playlist."
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths relative to the media directory, one per variant."
+          }
+        }
+      },
+      "StingerLayout": {
+        "type": "string",
+        "description": "How a stinger clip lays out its graphic and matte.",
+        "enum": [
+          "auto",
+          "classic",
+          "side_by_side",
+          "stacked",
+          "mask_only"
+        ]
+      },
+      "StingerState": {
+        "type": "object",
+        "description": "Stinger state of one vision mixer.",
+        "required": [
+          "matte_supported",
+          "preroll_ms",
+          "clips",
+          "ready",
+          "running"
+        ],
+        "properties": {
+          "clips": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StingerClip"
+            }
+          },
+          "cued_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The clip a take plays when it names none.",
+            "minimum": 0
+          },
+          "last_cue_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How long the last cue took.",
+            "minimum": 0
+          },
+          "last_take": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StingerTakeReport"
+              }
+            ]
+          },
+          "matte_supported": {
+            "type": "boolean",
+            "description": "Whether the matte variants run here (GPU mixer)."
+          },
+          "preroll_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Take-to-air delay.",
+            "minimum": 0
+          },
+          "problem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why stingers cannot run, when they cannot."
+          },
+          "ready": {
+            "type": "boolean",
+            "description": "The cued clip is loaded and parked on its first frame."
+          },
+          "running": {
+            "type": "boolean",
+            "description": "A take is on air."
+          },
+          "source_block_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Media Player wired to the stinger input."
+          }
+        }
+      },
+      "StingerTakeReport": {
+        "type": "object",
+        "description": "A finished take, with what was measured.",
+        "required": [
+          "take_id",
+          "index",
+          "file",
+          "variant",
+          "from_input",
+          "to_input",
+          "take_to_air_ms",
+          "duration_ms",
+          "frames_expected",
+          "frames_arrived",
+          "frames_late"
+        ],
+        "properties": {
+          "cue_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Time spent loading the clip, when the take had to cue it first.",
+            "minimum": 0
+          },
+          "cut_point_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Classic: where the program changed, into the clip.",
+            "minimum": 0
+          },
+          "downgraded_from": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StingerVariant"
+              }
+            ]
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Clip length.",
+            "minimum": 0
+          },
+          "file": {
+            "type": "string"
+          },
+          "frames_arrived": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Clip frames that reached it in time to go on air. A frame that\narrives after its output frame is not counted: the mixer has already\ncomposited that frame without it.",
+            "minimum": 0
+          },
+          "frames_expected": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Clip frames that should have reached the mixer.",
+            "minimum": 0
+          },
+          "frames_late": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Clip frames, on the graphic or the matte pad, that reached the mixer\nafter their time on air had begun.",
+            "minimum": 0
+          },
+          "from_input": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "take_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The take this reports on, as returned by the take request.",
+            "minimum": 0
+          },
+          "take_to_air_ms": {
+            "type": "number",
+            "format": "double",
+            "description": "Time from the take request to the clip's first frame on air."
+          },
+          "to_input": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "variant": {
+            "$ref": "#/components/schemas/StingerVariant"
+          },
+          "warning": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when the take ran but did not go as planned, such as a classic\nclip whose frame at the cut point arrived late, so the program changed\nwith no graphic over it. `None` is a clean take."
+          },
+          "worst_margin_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Smallest lead a clip frame had on its time on air; negative is late."
+          }
+        }
+      },
+      "StingerTakeRequest": {
+        "type": "object",
+        "description": "Take a stinger from PGM to PVW.",
+        "properties": {
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When set, the clip played must be this file (the entry at `index`,\nor the cued one); otherwise the take fails with 409."
+          },
+          "index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Playlist index to play. Defaults to the cued clip.",
+            "minimum": 0
+          }
+        }
+      },
+      "StingerTakeResponse": {
+        "type": "object",
+        "description": "Result of a take request.",
+        "required": [
+          "take_id",
+          "index",
+          "file",
+          "variant",
+          "take_to_air_ms",
+          "duration_ms"
+        ],
+        "properties": {
+          "downgraded_from": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StingerVariant"
+              }
+            ]
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "file": {
+            "type": "string",
+            "description": "The clip played."
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "take_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Identifies this take in `StingerStarted`, `StingerCompleted` and\n`StingerFailed`.",
+            "minimum": 0
+          },
+          "take_to_air_ms": {
+            "type": "number",
+            "format": "double",
+            "description": "Time from the request to the clip's first frame on air."
+          },
+          "variant": {
+            "$ref": "#/components/schemas/StingerVariant"
+          }
+        }
+      },
+      "StingerVariant": {
+        "type": "string",
+        "description": "How a stinger switches the program beneath the clip.",
+        "enum": [
+          "classic",
+          "track_matte",
+          "mask_only"
+        ]
+      },
       "String": {
         "type": "string"
       },
@@ -11953,6 +13089,229 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "A stinger clip was cued on a vision mixer, or failed to load.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A stinger clip was cued on a vision mixer, or failed to load.",
+                "required": [
+                  "flow_id",
+                  "block_id",
+                  "index",
+                  "ready",
+                  "cue_ms"
+                ],
+                "properties": {
+                  "block_id": {
+                    "type": "string"
+                  },
+                  "cue_ms": {
+                    "type": "integer",
+                    "format": "int64",
+                    "description": "How long loading took.",
+                    "minimum": 0
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "index": {
+                    "type": "integer",
+                    "description": "Playlist index on the stinger source.",
+                    "minimum": 0
+                  },
+                  "ready": {
+                    "type": "boolean",
+                    "description": "Loaded and parked on its first frame."
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "StingerCued"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A stinger take started: its first frame goes on air `take_to_air_ms`\nafter the request.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A stinger take started: its first frame goes on air `take_to_air_ms`\nafter the request.",
+                "required": [
+                  "flow_id",
+                  "block_id",
+                  "take_id",
+                  "index",
+                  "file",
+                  "variant",
+                  "from_input",
+                  "to_input",
+                  "take_to_air_ms",
+                  "duration_ms"
+                ],
+                "properties": {
+                  "block_id": {
+                    "type": "string"
+                  },
+                  "downgraded_from": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/StingerVariant"
+                      }
+                    ]
+                  },
+                  "duration_ms": {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": 0
+                  },
+                  "file": {
+                    "type": "string"
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "from_input": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "take_id": {
+                    "type": "integer",
+                    "format": "int64",
+                    "description": "As returned by the take request.",
+                    "minimum": 0
+                  },
+                  "take_to_air_ms": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "to_input": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "variant": {
+                    "$ref": "#/components/schemas/StingerVariant"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "StingerStarted"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A stinger take finished, with what was measured.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A stinger take finished, with what was measured.",
+                "required": [
+                  "flow_id",
+                  "block_id",
+                  "report"
+                ],
+                "properties": {
+                  "block_id": {
+                    "type": "string"
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "report": {
+                    "$ref": "#/components/schemas/StingerTakeReport"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "StingerCompleted"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A stinger take could not play its clip.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A stinger take could not play its clip.",
+                "required": [
+                  "flow_id",
+                  "block_id",
+                  "reason",
+                  "program_changed"
+                ],
+                "properties": {
+                  "block_id": {
+                    "type": "string"
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "program_changed": {
+                    "type": "boolean",
+                    "description": "The program still changed, without the clip."
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "take_id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64",
+                    "description": "The failed take, when it got as far as being given an id.",
+                    "minimum": 0
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "StingerFailed"
+                ]
+              }
+            }
           }
         ],
         "description": "Event types that can be broadcast to all connected clients.",
@@ -12335,10 +13694,6 @@
       "TriggerTransitionRequest": {
         "type": "object",
         "description": "Request to trigger a transition on a compositor block.",
-        "required": [
-          "from_input",
-          "to_input"
-        ],
         "properties": {
           "duration_ms": {
             "type": "integer",
@@ -12347,13 +13702,27 @@
             "minimum": 0
           },
           "from_input": {
-            "type": "integer",
-            "description": "Index of the currently active input (0-based)",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Index of the currently active input (0-based). Required, except for a\n\"stinger\", which always takes the vision mixer's PGM to its PVW.",
+            "minimum": 0
+          },
+          "stinger_clip": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Stinger only (`transition_type` \"stinger\"): playlist index of the clip\nto play on the stinger source. Defaults to the cued clip. A stinger's\nlength is the clip's, so `duration_ms` is ignored for it.",
             "minimum": 0
           },
           "to_input": {
-            "type": "integer",
-            "description": "Index of the input to transition to (0-based)",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Index of the input to transition to (0-based). Required, except for a\n\"stinger\".",
             "minimum": 0
           },
           "transition_type": {

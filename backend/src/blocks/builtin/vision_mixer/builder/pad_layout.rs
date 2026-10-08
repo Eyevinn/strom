@@ -167,6 +167,54 @@ pub(super) fn build_pad_properties(
         );
     }
 
+    // --- Stinger pads: graphic, and on the GPU the matte. Both hidden, full
+    // canvas; a take crops and reveals them (see `effects::stinger`). The
+    // matte pad keeps the colour already drawn and subtracts the matte from
+    // its alpha, which the incoming source of a track-matte take blends by.
+    if p.enable_stinger {
+        let base = p.stinger_pad_base();
+        let gpu = matches!(p.backend, super::super::elements::CompositorBackend::OpenGL);
+        let mut pads = vec![(base, vision_mixer::DIST_STINGER_FILL_ZORDER)];
+        if gpu {
+            pads.push((base + 1, vision_mixer::DIST_STINGER_MATTE_ZORDER));
+        }
+        for (idx, zorder) in pads {
+            let props = dist_pads.entry(format!("sink_{}", idx)).or_default();
+            props.insert("xpos".to_string(), PropertyValue::Int(0));
+            props.insert("ypos".to_string(), PropertyValue::Int(0));
+            props.insert("width".to_string(), PropertyValue::Int(p.pgm_w as i64));
+            props.insert("height".to_string(), PropertyValue::Int(p.pgm_h as i64));
+            props.insert("alpha".to_string(), PropertyValue::Float(0.0));
+            props.insert("zorder".to_string(), PropertyValue::UInt(zorder as u64));
+            props.insert(
+                "sizing-policy".to_string(),
+                PropertyValue::String("none".to_string()),
+            );
+            // A finished clip's last frame expires after two output frames
+            // instead of staying current. Otherwise a take whose first frame
+            // arrives late would show the previous clip's last graphic and
+            // matte (often all white: the new source) until it does.
+            let frame_ns = 1_000_000_000u64 * p.pgm_framerate.1.max(1) as u64
+                / p.pgm_framerate.0.max(1) as u64;
+            props.insert(
+                "max-last-buffer-repeat".to_string(),
+                PropertyValue::UInt(2 * frame_ns),
+            );
+        }
+        if gpu {
+            let props = dist_pads.entry(format!("sink_{}", base + 1)).or_default();
+            for (k, v) in [
+                ("blend-function-src-rgb", "zero"),
+                ("blend-function-dst-rgb", "one"),
+                ("blend-equation-alpha", "reverse-subtract"),
+                ("blend-function-src-alpha", "one"),
+                ("blend-function-dst-alpha", "one"),
+            ] {
+                props.insert(k.to_string(), PropertyValue::String(v.to_string()));
+            }
+        }
+    }
+
     // --- Dist border underlay pads: sink_{N + DSK + i} ---
     // Only present when PiPs are configured (see the pipeline builders).
     // Hidden at build — zones are runtime-only.

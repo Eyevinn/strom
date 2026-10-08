@@ -281,6 +281,140 @@
         /* Standard/More tiers: the broadcast-staple shapes are always visible;
            novelty shapes sit behind a MORE toggle so the default picker reads
            like a production switcher, not an effects demo. */
+        /* Stinger library: one button per clip on the stinger source. */
+        .stinger-panel { display: flex; flex-direction: column; gap: 4px; position: relative; }
+        .stinger-panel.hidden { display: none; }
+        .stinger-clips {
+            position: relative;
+            display: grid;
+            /* Four clips a row at the usual panel width, fewer when narrow. */
+            grid-template-columns: repeat(auto-fill, minmax(68px, 1fr));
+            grid-auto-rows: 34px;
+            gap: 4px;
+            /* Two rows of clips; a longer library scrolls, with a scrollbar
+               that stays visible (macOS hides overlay scrollbars). */
+            max-height: 72px;
+            overflow-y: auto;
+            padding-right: 2px;
+        }
+        /* Chrome and Safari draw a styled ::-webkit-scrollbar as a classic,
+           always-visible one. Chrome ignores it once scrollbar-width or
+           scrollbar-color is set, and keeps the overlay, so those are for
+           Firefox only. */
+        @supports not selector(::-webkit-scrollbar) {
+            .stinger-clips { scrollbar-width: thin; scrollbar-color: #777 #1e1e1e; }
+        }
+        .stinger-clips::-webkit-scrollbar { width: 6px; }
+        .stinger-clips::-webkit-scrollbar-track { background: #1e1e1e; border-radius: 3px; }
+        .stinger-clips::-webkit-scrollbar-thumb { background: #777; border-radius: 3px; }
+        .stinger-clips::-webkit-scrollbar-thumb:hover { background: #999; }
+        .stinger-clip {
+            position: relative;
+            min-width: 0;
+            border: 1px solid #444;
+            border-radius: 3px;
+            background: #2a2a2a;
+            color: #bbb;
+            font-size: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            padding: 2px 4px;
+            text-align: left;
+            overflow: hidden;
+        }
+        .stinger-clip:hover { border-color: #666; }
+        .stinger-clip:focus { outline: none; }
+        .stinger-clip .name, .stinger-clip .badges {
+            display: block;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .stinger-clip .name { padding-right: 8px; }
+        .stinger-clip .badge {
+            display: inline-block;
+            margin-top: 2px;
+            padding: 0 3px;
+            border-radius: 2px;
+            font-size: 9px;
+            background: #3a3a3a;
+            color: #999;
+        }
+        .stinger-clip .badge.matte { background: #1d3d55; color: #8cc8ff; }
+        .stinger-clip .badge.mask { background: #3b2d55; color: #c8a8ff; }
+        .stinger-clip .badge.down { background: #553a1d; color: #ffc27a; }
+        .stinger-clip .badge.missing { background: #551d1d; color: #ff8a8a; }
+        .stinger-clip.missing .name { color: #888; text-decoration: line-through; }
+        .stinger-clip.cued { border-color: #ff9900; color: #fff; background: #3a2a10; }
+        .stinger-clip.cued.ready::after {
+            content: '';
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #33cc33;
+        }
+        .stinger-clip.on-air { border-color: #ff3333; background: #551010; }
+        .stinger-status {
+            font-size: 10px;
+            color: #999;
+            line-height: 1.35;
+            min-height: 14px;
+        }
+        .stinger-status .warn { color: #ffb347; }
+        .stinger-status .bad { color: #ff6b6b; }
+        .stinger-tools { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+        .stinger-tools .type-btn { flex: 0 0 auto; padding: 0 8px; }
+        .stinger-tools .type-btn:disabled { opacity: 0.5; cursor: default; }
+        .stinger-count {
+            margin-left: auto;
+            font-size: 10px;
+            color: #888;
+            white-space: nowrap;
+        }
+        /* Clip settings open above the panel instead of pushing it down,
+           so the controls keep their height and their buttons. */
+        .stinger-settings {
+            /* Fixed, placed over the panel in JS: the controls bar clips
+               anything that overflows it. */
+            position: fixed;
+            width: 300px;
+            z-index: 500;
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 3px 6px;
+            align-items: center;
+            font-size: 10px;
+            color: #aaa;
+            background: #1e1e1e;
+            border: 1px solid #666;
+            border-radius: 4px;
+            padding: 8px;
+            box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.6);
+            max-height: 60vh;
+            overflow-y: auto;
+        }
+        .stinger-settings .close {
+            justify-self: end;
+            cursor: pointer;
+            color: #888;
+            font-size: 13px;
+            line-height: 1;
+        }
+        .stinger-settings .close:hover { color: #fff; }
+        .stinger-settings.hidden { display: none; }
+        .stinger-settings select, .stinger-settings input[type=number] {
+            background: #2a2a2a;
+            color: #ddd;
+            border: 1px solid #444;
+            border-radius: 2px;
+            font-size: 10px;
+            height: 20px;
+        }
+        .stinger-settings .hint { grid-column: 1 / -1; color: #777; }
+
         .wipe-grid .novelty, .fx-grid .novelty { display: none; }
         .wipe-grid.expanded .novelty, .fx-grid.expanded .novelty { display: flex; }
         .more-btn { color: #666; border-style: dashed; }
@@ -1176,6 +1310,18 @@
                 <button class="type-btn" data-type="slide" onclick="setTransitionType('slide')" title="Slide — new picture slides in over the old">SLIDE</button>
                 <button class="type-btn fx-only" data-type="wipe" onclick="setTransitionType('wipe')" title="Shader wipe (GPU FX engine)">WIPE</button>
                 <button class="type-btn fx-only" data-type="fx" onclick="setTransitionType('fx')" title="Master FX take (GPU FX engine)">FX</button>
+                <button class="type-btn stinger-only" data-type="stinger" onclick="setTransitionType('stinger')" title="Stinger: a clip over the program while the source changes beneath it" style="display:none;">STING</button>
+            </div>
+            <div class="stinger-panel hidden" id="stingerPanel">
+                <div class="stinger-clips" id="stingerClips"></div>
+                <div class="stinger-settings hidden" id="stingerSettings"></div>
+                <div class="stinger-status" id="stingerStatus">Loading stingers...</div>
+                <div class="stinger-tools">
+                    <button class="type-btn" id="stingerEditBtn" onclick="toggleStingerSettings()" title="Settings of the cued clip">SETTINGS</button>
+                    <button class="type-btn" onclick="createExampleStingers()" title="Render Strom's example stingers (classic, track matte, mask) into the media directory and add them">EXAMPLES</button>
+                    <button class="type-btn" id="stingerReloadBtn" onclick="reloadStingers()" title="Look at the clip files again: analyse changed files, load the cued clip again if its file changed, and flag files that are gone">RELOAD</button>
+                    <span class="stinger-count" id="stingerCount"></span>
+                </div>
             </div>
             <div class="type-row dir-row hidden" id="dirRow" title="Direction of motion">
                 <button class="type-btn dir-btn active" data-dir="left" onclick="setTransitionDir('left')">&#8592;</button>
@@ -1219,7 +1365,7 @@
                 <button class="type-btn fxk-btn novelty" data-fx="negative_flash" onclick="setFxKind('negative_flash')" title="Frame inverts through the crossfade">NEG</button>
                 <button class="type-btn fxk-btn novelty" data-fx="ripple" onclick="setFxKind('ripple')" title="Water ring ripples both pictures through a crossfade">RIPPLE</button>
             </div>
-            <div class="duration-row">
+            <div class="duration-row" id="durationRow">
                 <label>Duration:</label>
                 <button class="duration-preset" onclick="setDuration(0.5)">0.5s</button>
                 <button class="duration-preset active" onclick="setDuration(1.0)">1.0s</button>
@@ -1239,7 +1385,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.40-zone-capacity | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.45-stinger | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1343,6 +1489,7 @@
             if (transitionBase === 'fx') return fxKind;
             return transitionBase;
         }
+        const STINGER_ENABLED = !!_cfg.stinger_enabled;
         // Shader FX engine availability (GPU backend with Shader FX enabled).
         // Resolved from the /state endpoint; gates the WIPE/FX/LOOKS UI.
         let FX_AVAILABLE = false;
@@ -1441,12 +1588,18 @@
             currentPvwPip = fromPip;
             updateButtons();
 
-            apiPost('/transition', {
+            const body = {
                 from_input: fromPgm ?? 0,
                 to_input: fromPvw ?? 0,
                 transition_type: type,
                 duration_ms: durationMs
-            }).then(r => {
+            };
+            if (type === 'stinger' && stingerState && stingerState.cued_index != null) {
+                body.stinger_clip = stingerState.cued_index;
+            }
+            apiPost('/transition', body).then(r => {
+                // A stinger lasts as long as its clip, plus the take-to-air delay.
+                if (type === 'stinger') durationMs = (r.duration_ms || 0) + 300;
                 // Bus state is reconciled via the VisionMixerStateChanged WS event
                 // broadcast right after the take.
                 const actual = r.actual_transition_type;
@@ -1763,6 +1916,228 @@
                 .classList.toggle('hidden', base !== 'push' && base !== 'slide');
             document.getElementById('wipeRow').classList.toggle('hidden', base !== 'wipe');
             document.getElementById('fxRow').classList.toggle('hidden', base !== 'fx');
+            document.getElementById('stingerPanel').classList.toggle('hidden', base !== 'stinger');
+            if (base !== 'stinger' && stingerSettingsOpen) toggleStingerSettings();
+            // A stinger's length is its clip's.
+            document.getElementById('durationRow').style.display = base === 'stinger' ? 'none' : '';
+            if (base === 'stinger') fetchStingerState();
+        }
+
+        // ---- Stingers ----
+        // The library is the playlist of the Media Player wired to the
+        // mixer's stinger input. Clicking a clip cues it (loads it and parks
+        // it on its first frame); AUTO with STING selected takes it.
+        let stingerState = null;
+        let stingerSettingsOpen = false;
+        let stingerOnAir = null;
+
+        function clipName(file) {
+            return file.split('/').pop().replace(/\.[^.]+$/, '');
+        }
+        function variantBadge(c) {
+            if (c.missing) return '<span class="badge missing" title="The file is not on disk">MISSING</span>';
+            if (!c.info || !c.variant) return '<span class="badge" title="Analysing the clip">...</span>';
+            const label = { classic: 'CLASSIC', track_matte: 'MATTE', mask_only: 'MASK' }[c.variant];
+            const cls = { classic: '', track_matte: 'matte', mask_only: 'mask' }[c.variant];
+            let html = '<span class="badge ' + cls + '">' + label + '</span>';
+            if (c.info && !c.info.has_alpha && c.variant !== 'mask_only') {
+                html += ' <span class="badge down" title="The graphic has no alpha channel: it covers the whole picture. Use WebM VP9 with alpha, ProRes 4444 or FFV1.">NO ALPHA</span>';
+            }
+            if (c.downgraded_from) {
+                html += ' <span class="badge down" title="Needs the GPU mixer; plays as classic here">CPU</span>';
+            }
+            return html;
+        }
+        function escapeHtml(t) {
+            return String(t).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+        }
+
+        async function fetchStingerState() {
+            if (!STINGER_ENABLED) return;
+            try {
+                const resp = await fetch(API_BASE + '/stinger');
+                if (!resp.ok) return;
+                stingerState = await resp.json();
+                renderStingers();
+                pollWhileAnalysing();
+            } catch {}
+        }
+
+        // Analysis runs in the background; look again until it is in. A
+        // missing file has none coming.
+        function pollWhileAnalysing() {
+            if (stingerState && stingerState.clips.some(c => !c.info && !c.missing)) {
+                clearTimeout(fetchStingerState._t);
+                fetchStingerState._t = setTimeout(fetchStingerState, 1000);
+            }
+        }
+
+        function renderStingers() {
+            const s = stingerState;
+            if (!s) return;
+            const clips = document.getElementById('stingerClips');
+            const scrollTop = clips.scrollTop;
+            clips.innerHTML = s.clips.map(c => {
+                const cued = c.index === s.cued_index;
+                const cls = ['stinger-clip', cued ? 'cued' : '', cued && s.ready ? 'ready' : '',
+                    stingerOnAir === c.index ? 'on-air' : '', c.missing ? 'missing' : ''].join(' ');
+                const info = c.missing ? 'file missing'
+                    : c.info ? (c.info.duration_ms / 1000).toFixed(1) + 's ' + c.info.width + 'x' + c.info.height
+                    : 'analysing...';
+                return '<button class="' + cls + '" onclick="cueStinger(' + c.index + ')" title="'
+                    + escapeHtml(c.file + ' - ' + info) + '"><span class="name">' + escapeHtml(clipName(c.file))
+                    + '</span><span class="badges">' + variantBadge(c) + '</span></button>';
+            }).join('');
+            clips.scrollTop = scrollTop;
+            // Bring the cued clip into view when the cue or the library
+            // changes, not on every poll, so browsing the list is not undone.
+            // Scrolls only the list, never the page. A hidden panel has no
+            // layout yet; it scrolls when it is first rendered shown.
+            const view = s.cued_index + ':' + s.clips.length;
+            const tile = clips.querySelector('.stinger-clip.cued');
+            if (clips.clientHeight > 0 && renderStingers._view !== view) {
+                if (tile && tile.offsetTop < clips.scrollTop) {
+                    clips.scrollTop = tile.offsetTop;
+                } else if (tile && tile.offsetTop + tile.offsetHeight > clips.scrollTop + clips.clientHeight) {
+                    clips.scrollTop = tile.offsetTop + tile.offsetHeight - clips.clientHeight;
+                }
+                renderStingers._view = view;
+            }
+            const missing = s.clips.filter(c => c.missing).length;
+            const more = clips.scrollHeight > clips.clientHeight + 1;
+            document.getElementById('stingerCount').textContent = s.clips.length
+                ? s.clips.length + (s.clips.length === 1 ? ' clip' : ' clips')
+                    + (missing ? ', ' + missing + ' missing' : '') + (more ? ' \u2195' : '')
+                : '';
+
+            const status = document.getElementById('stingerStatus');
+            let html = '';
+            if (s.problem) {
+                html = '<span class="warn">' + escapeHtml(s.problem) + '</span>';
+            } else if (s.running) {
+                html = 'On air...';
+            } else if (s.cued_index != null) {
+                html = s.ready
+                    ? 'Ready: on air ' + s.preroll_ms + ' ms after AUTO'
+                    : 'Loading clip ' + (s.cued_index + 1) + '...';
+                if (s.last_cue_ms != null) html += ' (cued in ' + s.last_cue_ms + ' ms)';
+            }
+            const t = s.last_take;
+            if (t) {
+                const late = t.frames_late > 0 || t.frames_arrived < t.frames_expected;
+                html += '<br>Last: ' + escapeHtml(clipName(t.file)) + ', '
+                    + '<span class="' + (late ? 'bad' : '') + '">' + t.frames_arrived + '/' + t.frames_expected
+                    + ' frames' + (t.frames_late ? ', ' + t.frames_late + ' late' : '') + '</span>'
+                    + (t.worst_margin_ms != null ? ', margin ' + Math.round(t.worst_margin_ms) + ' ms' : '')
+                    + ', on air ' + Math.round(t.take_to_air_ms) + ' ms after the take';
+            }
+            if (!s.matte_supported && s.source_block_id) {
+                html += '<br><span class="warn">Software mixer: matte stingers play as classic.</span>';
+            }
+            status.innerHTML = html;
+            if (stingerSettingsOpen) renderStingerSettings();
+        }
+
+        function cueStinger(index) {
+            if (!stingerState || stingerState.running) return;
+            stingerState.cued_index = index;
+            stingerState.ready = false;
+            renderStingers();
+            const clip = stingerState.clips.find(c => c.index === index);
+            apiPost('/stinger/cue', { index, file: clip ? clip.file : null })
+                .then(st => { stingerState = st; renderStingers(); })
+                .catch(e => { setStatus('Stinger cue error: ' + e.message); fetchStingerState(); });
+        }
+
+        function placeStingerSettings() {
+            const panel = document.getElementById('stingerPanel').getBoundingClientRect();
+            const el = document.getElementById('stingerSettings');
+            el.style.left = Math.max(8, Math.min(panel.left, window.innerWidth - 308)) + 'px';
+            el.style.bottom = (window.innerHeight - panel.top + 6) + 'px';
+        }
+        window.addEventListener('resize', () => { if (stingerSettingsOpen) placeStingerSettings(); });
+
+        function toggleStingerSettings() {
+            stingerSettingsOpen = !stingerSettingsOpen;
+            if (stingerSettingsOpen) placeStingerSettings();
+            document.getElementById('stingerSettings').classList.toggle('hidden', !stingerSettingsOpen);
+            document.getElementById('stingerEditBtn').classList.toggle('active', stingerSettingsOpen);
+            if (stingerSettingsOpen) renderStingerSettings();
+        }
+
+        function renderStingerSettings() {
+            const el = document.getElementById('stingerSettings');
+            const s = stingerState;
+            const c = s && s.clips.find(x => x.index === s.cued_index);
+            if (!c) { el.innerHTML = '<span class="hint">Cue a clip to edit its settings.</span>'; return; }
+            if (el.contains(document.activeElement)) return;
+            const st = c.settings;
+            const opt = (v, label, cur) => '<option value="' + v + '"' + (v === cur ? ' selected' : '') + '>' + label + '</option>';
+            const detected = c.info ? c.info.detected_layout.replace(/_/g, ' ') : 'not analysed yet';
+            const autoCut = c.cut_point_ms != null ? c.cut_point_ms + ' ms' : 'n/a';
+            el.innerHTML =
+                '<span class="hint" style="grid-column:auto;color:#ddd;font-weight:600;">' + escapeHtml(clipName(c.file)) + '</span>'
+                + '<span class="close" onclick="toggleStingerSettings()" title="Close">&#10005;</span>'
+                + '<label>Layout</label><select id="stLayout">'
+                + opt('auto', 'Auto (' + detected + ')', st.layout)
+                + opt('classic', 'Classic (alpha)', st.layout)
+                + opt('side_by_side', 'Track matte, side by side', st.layout)
+                + opt('stacked', 'Track matte, stacked', st.layout)
+                + opt('mask_only', 'Mask only', st.layout) + '</select>'
+                + '<label>Cut point</label><input type="number" id="stCut" min="0" step="10" placeholder="auto: ' + autoCut + '" value="' + (st.cut_point_ms ?? '') + '">'
+                + '<label>Beneath</label><select id="stBeneath">' + opt('cut', 'Cut', st.beneath) + opt('mix', 'Mix', st.beneath) + '</select>'
+                + '<label>Mix (ms)</label><input type="number" id="stMix" min="0" step="10" value="' + (st.mix_ms || 0) + '">'
+                + '<label>Premultiplied</label><input type="checkbox" id="stPremul"' + (st.premultiplied ? ' checked' : '') + '>'
+                + '<label>Invert matte</label><input type="checkbox" id="stInvert"' + (st.invert_matte ? ' checked' : '') + '>'
+                + '<span class="hint">Cut point and beneath apply to classic stingers; a matte decides the switch itself.</span>'
+                + '<span></span><button class="type-btn" onclick="saveStingerSettings(' + c.index + ')">SAVE</button>';
+        }
+
+        function saveStingerSettings(index) {
+            const cut = document.getElementById('stCut').value;
+            const settings = {
+                layout: document.getElementById('stLayout').value,
+                cut_point_ms: cut === '' ? null : parseInt(cut, 10),
+                beneath: document.getElementById('stBeneath').value,
+                mix_ms: parseInt(document.getElementById('stMix').value || '0', 10),
+                premultiplied: document.getElementById('stPremul').checked,
+                invert_matte: document.getElementById('stInvert').checked,
+            };
+            const clip = stingerState.clips.find(c => c.index === index);
+            const guard = clip ? '?file=' + encodeURIComponent(clip.file) : '';
+            apiPut('/stinger/clips/' + index + guard, settings)
+                .then(() => { setStatus('Stinger settings saved'); document.activeElement.blur(); fetchStingerState(); })
+                .catch(e => setStatus('Stinger settings error: ' + e.message));
+        }
+
+        function reloadStingers() {
+            if (stingerState && stingerState.running) {
+                setStatus('A stinger is on air; reload when it has finished');
+                return;
+            }
+            const btn = document.getElementById('stingerReloadBtn');
+            btn.disabled = true;
+            setStatus('Reloading stingers...');
+            apiPost('/stinger/reload', {})
+                .then(st => {
+                    stingerState = st;
+                    renderStingers();
+                    pollWhileAnalysing();
+                    const analysing = st.clips.filter(c => !c.info && !c.missing).length;
+                    const missing = st.clips.filter(c => c.missing).length;
+                    setStatus('Stingers reloaded: ' + st.clips.length + ' clips'
+                        + (analysing ? ', ' + analysing + ' analysing' : '')
+                        + (missing ? ', ' + missing + ' missing' : ''));
+                })
+                .catch(e => { setStatus('Stinger reload error: ' + e.message); fetchStingerState(); })
+                .finally(() => { btn.disabled = false; });
+        }
+
+        function createExampleStingers() {
+            setStatus('Rendering example stingers...');
+            apiPost('/stinger/examples', {})
+                .then(r => { setStatus('Example stingers added: ' + r.files.map(clipName).join(', ')); fetchStingerState(); })
+                .catch(e => setStatus('Example stingers error: ' + e.message));
         }
 
         function setWipeShape(shape) {
@@ -1809,6 +2184,9 @@
         function updateFxAvailabilityUi() {
             document.querySelectorAll('.fx-only').forEach(b => {
                 b.style.display = FX_AVAILABLE ? '' : 'none';
+            });
+            document.querySelectorAll('.stinger-only').forEach(b => {
+                b.style.display = STINGER_ENABLED ? '' : 'none';
             });
             if (!FX_AVAILABLE && (transitionBase === 'wipe' || transitionBase === 'fx')) {
                 setTransitionType('fade');
@@ -3583,6 +3961,7 @@
                 updateDskButtons();
                 updateOverlayAlphaUi();
                 fetchFxState();
+                fetchStingerState();
                 setStatus('Reconnected - state synced');
             } catch (e) {
                 setStatus('Resync failed: ' + e.message);
@@ -3636,6 +4015,23 @@
                             }
                         }
                     }
+                    if (event.type && event.type.startsWith('Stinger') && event.data) {
+                        const d = event.data;
+                        if (d.flow_id === FLOW_ID && d.block_id === BLOCK_ID) {
+                            if (event.type === 'StingerStarted') {
+                                stingerOnAir = d.index;
+                                setStatus('Stinger ' + clipName(d.file) + ' (' + d.variant.replace('_', ' ')
+                                    + (d.downgraded_from ? ', as classic' : '') + ') on air in '
+                                    + Math.round(d.take_to_air_ms) + ' ms');
+                            } else if (event.type === 'StingerCompleted') {
+                                stingerOnAir = null;
+                            } else if (event.type === 'StingerFailed') {
+                                stingerOnAir = null;
+                                setStatus('Stinger failed: ' + d.reason);
+                            }
+                            fetchStingerState();
+                        }
+                    }
                     if (event.type === 'VisionMixerOverlayAlphaChanged' && event.data) {
                         const d = event.data;
                         if (d.flow_id === FLOW_ID && d.block_id === BLOCK_ID && !overlayAlphaDragging) {
@@ -3664,6 +4060,7 @@
             updateFtbButton();
             updateFxAvailabilityUi();
             fetchFxState();
+            fetchStingerState();
             connectMultiview();
             connectWebSocket();
             if (controlsMinimized) document.body.classList.add('minimized');

@@ -158,6 +158,11 @@ pub enum PipelineError {
 
     #[error("Endpoint conflict: {0}")]
     EndpointConflict(String),
+
+    /// The request was made against state that has changed since the client
+    /// read it (a stinger library edited by someone else).
+    #[error("{0}")]
+    Conflict(String),
 }
 
 /// Manages a single GStreamer pipeline for a flow.

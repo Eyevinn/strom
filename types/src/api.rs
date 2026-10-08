@@ -101,12 +101,16 @@ pub struct UpdatePropertyRequest {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "validation", derive(garde::Validate))]
 pub struct TriggerTransitionRequest {
-    /// Index of the currently active input (0-based)
+    /// Index of the currently active input (0-based). Required, except for a
+    /// "stinger", which always takes the vision mixer's PGM to its PVW.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "validation", garde(skip))]
-    pub from_input: usize,
-    /// Index of the input to transition to (0-based)
+    pub from_input: Option<usize>,
+    /// Index of the input to transition to (0-based). Required, except for a
+    /// "stinger".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "validation", garde(skip))]
-    pub to_input: usize,
+    pub to_input: Option<usize>,
     /// Type of transition: "cut", "fade", "slide_left", "slide_right", "slide_up", "slide_down"
     #[serde(default = "default_transition_type")]
     #[cfg_attr(feature = "validation", garde(length(min = 1, max = 50)))]
@@ -115,6 +119,12 @@ pub struct TriggerTransitionRequest {
     #[serde(default = "default_transition_duration")]
     #[cfg_attr(feature = "validation", garde(range(max = 60000)))]
     pub duration_ms: u64,
+    /// Stinger only (`transition_type` "stinger"): playlist index of the clip
+    /// to play on the stinger source. Defaults to the cued clip. A stinger's
+    /// length is the clip's, so `duration_ms` is ignored for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "validation", garde(skip))]
+    pub stinger_clip: Option<usize>,
 }
 
 fn default_transition_type() -> String {

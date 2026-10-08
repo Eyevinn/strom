@@ -188,6 +188,11 @@ async fn render_vision_mixer_page(
         "initial_pgm": initial_pgm,
         "initial_pvw": initial_pvw,
         "num_dsk_inputs": num_dsk_inputs,
+        "stinger_enabled": vm_props::parse_bool(
+            &vm_block.properties,
+            strom_types::stinger::ENABLE_STINGER_PROPERTY,
+            false,
+        ),
         "ftb_active": ftb_active,
         "dsk_states": dsk_states,
         "overlay_alpha": overlay_alpha,

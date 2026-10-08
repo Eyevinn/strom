@@ -49,6 +49,7 @@ pub mod server_hardening;
 pub mod sharing;
 pub mod state;
 pub mod stats;
+pub mod stinger;
 pub mod storage;
 pub mod system_clock;
 pub mod system_monitor;
@@ -234,6 +235,34 @@ pub async fn create_app_with_config(
         .route(
             "/flows/{flow_id}/blocks/{block_id}/dsk",
             post(api::flows::toggle_dsk),
+        )
+        .route(
+            "/flows/{flow_id}/blocks/{block_id}/stinger",
+            get(api::stinger::get_stinger_state),
+        )
+        .route(
+            "/flows/{flow_id}/blocks/{block_id}/stinger/cue",
+            post(api::stinger::cue_stinger),
+        )
+        .route(
+            "/flows/{flow_id}/blocks/{block_id}/stinger/reload",
+            post(api::stinger::reload_stinger),
+        )
+        .route(
+            "/flows/{flow_id}/blocks/{block_id}/stinger/take",
+            post(api::stinger::take_stinger),
+        )
+        .route(
+            "/flows/{flow_id}/blocks/{block_id}/stinger/clips",
+            post(api::stinger::add_stinger_clip),
+        )
+        .route(
+            "/flows/{flow_id}/blocks/{block_id}/stinger/clips/{index}",
+            put(api::stinger::set_stinger_clip_settings).delete(api::stinger::remove_stinger_clip),
+        )
+        .route(
+            "/flows/{flow_id}/blocks/{block_id}/stinger/examples",
+            post(api::stinger::write_stinger_examples),
         )
         .route(
             "/flows/{flow_id}/blocks/{block_id}/ftb",

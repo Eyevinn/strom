@@ -42,6 +42,12 @@ struct RegisteredEndpoints {
     whip: Vec<String>,
 }
 
+pub(crate) mod stinger;
+#[doc(hidden)]
+pub use crate::gst::pipeline::effects::stinger::fail_stinger_programming_for_tests;
+#[doc(hidden)]
+pub use stinger::{hold_takes_for_tests, takes_held_for_tests};
+
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
@@ -1615,6 +1621,10 @@ impl AppState {
             state.remove(id);
         }
 
+        // A stinger waiting for its clip's end must leave the next pipeline
+        // alone.
+        stinger::forget_flow(id);
+
         // Get and remove the pipeline
         let manager = {
             let mut pipelines = self.inner.pipelines.write().await;
@@ -2284,6 +2294,15 @@ impl AppState {
             transition_type, block_instance_id, flow_id, from_input, to_input, duration_ms
         );
 
+        // A stinger owns the program until its clip has played out. The
+        // claim also keeps a stinger from programming the pads while this
+        // take does.
+        let Some(claim) = stinger::claim_for_classic(flow_id, block_instance_id) else {
+            return Err(PipelineError::TransitionError(
+                "a stinger is on air; take again when it has finished".to_string(),
+            ));
+        };
+
         let pipelines = self.inner.pipelines.read().await;
 
         let manager = pipelines.get(flow_id).ok_or_else(|| {
@@ -2299,7 +2318,39 @@ impl AppState {
         )?;
 
         drop(pipelines);
+        drop(claim);
 
+        self.after_vision_mixer_take(
+            flow_id,
+            block_instance_id,
+            from_input,
+            to_input,
+            transition_type,
+            duration_ms,
+            ftb_cancelled,
+            old_pgm,
+            new_pgm,
+        )
+        .await;
+
+        Ok(actual_kind)
+    }
+
+    /// What every take does once the mixer has been told: persist which
+    /// input is on air, swap the multiview's PVW/PGM, and tell clients.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn after_vision_mixer_take(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        from_input: usize,
+        to_input: usize,
+        transition_type: &str,
+        duration_ms: u64,
+        ftb_cancelled: bool,
+        old_pgm: Option<usize>,
+        new_pgm: Option<usize>,
+    ) {
         // Broadcast FTB cancelled event so clients update their UI
         if ftb_cancelled {
             self.inner
@@ -2402,8 +2453,6 @@ impl AppState {
                 transition_type: transition_type.to_string(),
                 duration_ms,
             });
-
-        Ok(actual_kind)
     }
 
     /// Select a preview input on a vision mixer block.
@@ -2585,12 +2634,20 @@ impl AppState {
         block_instance_id: &str,
         duration_ms: u64,
     ) -> Result<bool, PipelineError> {
+        // A fade rewrites the program pads a stinger take has programmed,
+        // and the take's end would bring the program back up under it.
+        let Some(claim) = stinger::claim_for_classic(flow_id, block_instance_id) else {
+            return Err(PipelineError::TransitionError(
+                "a stinger is on air; fade to black when it has finished".to_string(),
+            ));
+        };
         let pipelines = self.inner.pipelines.read().await;
         let manager = pipelines.get(flow_id).ok_or_else(|| {
             PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
         })?;
         let active = manager.fade_to_black(block_instance_id, duration_ms)?;
         drop(pipelines);
+        drop(claim);
 
         self.inner
             .events

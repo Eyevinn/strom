@@ -12,7 +12,9 @@ use crate::gst::rtp_hdrext;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use strom_types::{FlowId, StromEvent};
 use tracing::{debug, error, info, warn};
 
@@ -47,6 +49,39 @@ impl Decoder {
             Decoder::Classic => "uridecodebin",
             Decoder::Decodebin3 => "uridecodebin3",
         }
+    }
+}
+
+/// Set while any [`hold_bridge_for_tests`] hold waits, so the bridge looks
+/// up holds only then. Only a stinger source's bridge reads it: one relaxed
+/// load per sample there, nothing for an ordinary player.
+static BRIDGE_HOLDS_ARMED: AtomicBool = AtomicBool::new(false);
+/// Pending holds, by player block id and media type, in ms.
+static BRIDGE_HOLDS: LazyLock<Mutex<HashMap<(String, String), u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Hold the next sample of stinger player `block_id`'s `media_type` stream ("video"
+/// or "audio") for `ms` at the bridge, before it is placed. Lets a test
+/// decide which stream of a take reaches the shared timing first; streams
+/// let go at the same moment otherwise race.
+#[doc(hidden)]
+pub fn hold_bridge_for_tests(block_id: &str, media_type: &str, ms: u64) {
+    let mut holds = BRIDGE_HOLDS.lock().unwrap_or_else(|p| p.into_inner());
+    holds.insert((block_id.to_string(), media_type.to_string()), ms);
+    BRIDGE_HOLDS_ARMED.store(true, Ordering::Release);
+}
+
+fn wait_out_test_hold(block_id: &str, media_type: &str) {
+    let ms = {
+        let mut holds = BRIDGE_HOLDS.lock().unwrap_or_else(|p| p.into_inner());
+        let ms = holds.remove(&(block_id.to_string(), media_type.to_string()));
+        if holds.is_empty() {
+            BRIDGE_HOLDS_ARMED.store(false, Ordering::Release);
+        }
+        ms
+    };
+    if let Some(ms) = ms {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
     }
 }
 
@@ -527,6 +562,17 @@ fn link_pad_through_clocksync(
         .name(appsink_name)
         .sync(false)
         .build();
+    // A stinger clip's frames in system memory. A hardware decoder left to
+    // choose keeps them in GL memory, and VideoToolbox does that in NV12,
+    // dropping ProRes 4444's alpha; asked for system memory it gives AYUV64,
+    // alpha and all. The mixer's stinger input adapts the pixel format.
+    if state.stinger.enabled && media_type == "video" {
+        appsink.set_caps(Some(
+            &gst::Caps::builder("video/x-raw")
+                .features([gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY])
+                .build(),
+        ));
+    }
 
     let appsink_element = appsink.upcast_ref::<gst::Element>();
 
@@ -558,6 +604,20 @@ fn link_pad_through_clocksync(
         timing::arm(&clocksync, &state.timing, &state.main_pipeline);
     }
 
+    // A stinger clip source tells a cue when the clip's first frame is parked
+    // here, and a take where that frame is in the clip. The first buffer into
+    // a new chain is the loaded clip's first frame, so a new chain always
+    // gets the one-shot park probe: a cue that loaded the clip found no chain
+    // to arm, and one that comes later rewinds and arms its own. Never on a
+    // relinked chain above: that is an HLS stream carrying on, not a clip.
+    if state.stinger.enabled
+        && clocksync_name == super::state::StingerPlayback::park_clocksync_name(&state.block_id)
+    {
+        if let Some(sink) = clocksync.static_pad("sink") {
+            state.stinger.arm_park_probe(&sink);
+        }
+    }
+
     // Set up bridge callback: appsink -> appsrc, restamped into the main
     // pipeline's running time.
     let appsrc_weak = appsrc.downgrade();
@@ -570,6 +630,9 @@ fn link_pad_through_clocksync(
         .next()
         .unwrap_or_default()
         .to_string();
+    // Only a stinger source's bridge looks for test holds; an ordinary
+    // player's never touches the flag.
+    let test_holds = state.stinger.enabled;
     let mut pushed: u64 = 0;
     let mut dropped_unstamped: u64 = 0;
     // The main pipeline's clock and base time, read once instead of per buffer.
@@ -626,12 +689,15 @@ fn link_pad_through_clocksync(
                 let Some((clock, base)) = main_clock.as_ref() else {
                     return Ok(gst::FlowSuccess::Ok);
                 };
+                if test_holds && BRIDGE_HOLDS_ARMED.load(Ordering::Relaxed) {
+                    wait_out_test_hold(&instance, &media_type_owned);
+                }
                 let now = clock.time().saturating_sub(*base).nseconds() as i64;
                 let placed = timing.place(rt.nseconds() as i64, now, sync);
                 if let Some(lateness) = placed.resynced_after {
                     timing::log_resync(&instance, &media_type_owned, lateness, &timing);
                     if let (Some(internal), Some(offset)) =
-                        (internal_pipeline_weak.upgrade(), timing.sync_offset())
+                        (internal_pipeline_weak.upgrade(), timing.clocksync_offset())
                     {
                         timing::apply_sync_offset(&internal, offset);
                     }
@@ -893,6 +959,7 @@ mod tests {
             timing: Arc::new(super::super::timing::Timing::new(0)),
             main_pipeline: gst::glib::WeakRef::new(),
             bus_watch: Mutex::new(None),
+            stinger: Default::default(),
         })
     }
 

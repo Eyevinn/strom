@@ -183,6 +183,80 @@ pub(super) fn build_gpu_pipeline(
         // NOTE: link to mixer is added later, after video input links, to ensure correct pad order
     }
 
+    // --- Stinger input ---
+    // queue → glupload → glcolorconvert → tee, feeding two dist mixer pads:
+    // the graphic, and the matte through a shader that turns it into alpha.
+    // The matte pad subtracts that alpha from what is already drawn, and the
+    // incoming source of a track-matte take blends by it (see
+    // `effects::stinger`). Links to the mixer come after the underlays.
+    if p.enable_stinger {
+        let q_id = p.id("queue_stinger");
+        let vc_id = p.id("videoconvert_stinger");
+        let up_id = p.id("glupload_stinger");
+        let cc_id = p.id("glcolorconvert_stinger");
+        let tee_id = p.id("tee_stinger");
+        let q_fill_id = p.id("queue_stinger_fill");
+        let q_matte_id = p.id("queue_stinger_matte");
+        let matte_id = p.id("stinger_matte");
+
+        // No GL input front here: the stinger source decodes in software to
+        // system memory, and the videoconvert below adapts its pixel format.
+        let queue = elements::make_queue(&q_id)?;
+        let glupload = elements::make_element("glupload", &up_id)?;
+        let matte = elements::make_glshader(&matte_id)?;
+        matte.set_property("fragment", crate::gst::shaders::stinger_matte_fragment());
+        matte.set_property(
+            "uniforms",
+            crate::gst::shaders::stinger_matte_uniforms(
+                strom_types::stinger::StingerLayout::MaskOnly,
+                false,
+            ),
+        );
+        elements::keep_input_size(&matte);
+        // Not an FX slot: the matte always renders. In passthrough the clip
+        // reaches the mixer as it is, and its own alpha becomes the matte.
+        crate::gst::shaders::request_passthrough(&matte, false);
+
+        elems.push((q_id.clone(), queue));
+        // Passes through what glupload takes and converts the rest: clips
+        // decode to whatever their codec gives (10-bit 4:4:4 with alpha for
+        // ProRes 4444), and each clip may differ from the last.
+        elems.push((
+            vc_id.clone(),
+            elements::make_element("videoconvert", &vc_id)?,
+        ));
+        elems.push((up_id.clone(), glupload));
+        elems.push((
+            cc_id.clone(),
+            elements::make_element("glcolorconvert", &cc_id)?,
+        ));
+        elems.push((tee_id.clone(), elements::make_tee(&tee_id)?));
+        elems.push((q_fill_id.clone(), elements::make_queue(&q_fill_id)?));
+        elems.push((q_matte_id.clone(), elements::make_queue(&q_matte_id)?));
+        elems.push((matte_id.clone(), matte));
+
+        for (from, to) in [
+            (&q_id, &vc_id),
+            (&vc_id, &up_id),
+            (&up_id, &cc_id),
+            (&cc_id, &tee_id),
+            (&q_matte_id, &matte_id),
+        ] {
+            links.push((
+                ElementPadRef::pad(from, "src"),
+                ElementPadRef::pad(to, "sink"),
+            ));
+        }
+        links.push((
+            ElementPadRef::pad(&tee_id, "src_0"),
+            ElementPadRef::pad(&q_fill_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&tee_id, "src_1"),
+            ElementPadRef::pad(&q_matte_id, "sink"),
+        ));
+    }
+
     // --- Multiview output chain ---
     // queue_post_mv decouples the compositor from downstream processing.
     // With gl_download=true:  mv_comp → queue_post_mv → gldownload → capsfilter → tee_mv → queue_mv_out
@@ -467,6 +541,20 @@ pub(super) fn build_gpu_pipeline(
                 ),
             ));
         }
+    }
+
+    // Stinger pads — after the underlays: graphic at the base index, matte
+    // at the next.
+    if p.enable_stinger {
+        let base = p.stinger_pad_base();
+        links.push((
+            ElementPadRef::pad(p.id("queue_stinger_fill"), "src"),
+            ElementPadRef::pad(&mixer_id, format!("sink_{}", base)),
+        ));
+        links.push((
+            ElementPadRef::pad(p.id("stinger_matte"), "src"),
+            ElementPadRef::pad(&mixer_id, format!("sink_{}", base + 1)),
+        ));
     }
 
     // Multiview compositor thumbnails: tee_i.src_1 → queue → mv_comp
