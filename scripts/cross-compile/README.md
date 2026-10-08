@@ -58,8 +58,9 @@ Builds Strom for ARM64 targeting a specific glibc version.
 **Common glibc versions:**
 - `2.17` - CentOS 7, Amazon Linux 2 (max compatibility)
 - `2.31` - Ubuntu 20.04, Debian 11
-- `2.36` - Ubuntu 22.04, Debian 12, Raspberry Pi OS 12
-- `2.38` - Ubuntu 24.04
+- `2.35` - Ubuntu 22.04
+- `2.36` - Debian 12, Raspberry Pi OS 12
+- `2.39` - Ubuntu 24.04
 
 ### Traditional Scripts
 

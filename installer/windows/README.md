@@ -9,7 +9,7 @@ The MSI installer bundles:
 | Component | Description | Size (approx) |
 |-----------|-------------|---------------|
 | **strom.exe** | Main Strom application | ~15 MB |
-| **GStreamer Runtime** | Multimedia framework (all plugins) | ~300 MB |
+| **GStreamer Runtime** | Multimedia framework (all plugins in the released MSI; a local build defaults to the essential ones, `-FullGStreamer` for all) | ~300 MB |
 | **Graphviz** | Graph visualization for debug graphs | ~30 MB |
 
 Total installer size: **~350 MB**
@@ -45,7 +45,7 @@ Total installer size: **~350 MB**
 2. **Run the build script**:
    ```powershell
    cd installer/windows
-   .\Build-Installer.ps1 -Version "0.3.10" `
+   .\Build-Installer.ps1 -Version "0.7.0" `
        -StromExe "..\..\target\release\strom.exe"
    ```
 
@@ -55,10 +55,10 @@ Total installer size: **~350 MB**
 
 ```powershell
 # Full GStreamer (all plugins, larger bundle)
-.\Build-Installer.ps1 -Version "0.3.10" -StromExe "..." -FullGStreamer
+.\Build-Installer.ps1 -Version "0.7.0" -StromExe "..." -FullGStreamer
 
 # Skip downloading dependencies (use existing bundles)
-.\Build-Installer.ps1 -Version "0.3.10" -StromExe "..." -SkipDependencies
+.\Build-Installer.ps1 -Version "0.7.0" -StromExe "..." -SkipDependencies
 ```
 
 ## Automated Builds

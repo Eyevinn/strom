@@ -16,7 +16,7 @@ docker pull eyevinntechnology/strom:latest        # base image
 docker pull eyevinntechnology/strom-full:latest   # + CEF/Chromium for HTML rendering
 ```
 
-Pin a specific version with a tag, e.g. `eyevinntechnology/strom:0.6.11`.
+Pin a specific version with a tag, e.g. `eyevinntechnology/strom:0.7.0` (tags `X.Y.Z`, `X.Y`, `X` and `latest` are published).
 
 ## Quick start
 
@@ -38,8 +38,9 @@ For GPU acceleration add `--gpus all` and `-e NVIDIA_DRIVER_CAPABILITIES=all` â€
 
 ## Configuration
 
-Strom is configured via environment variables. `strom --help` lists every option with its
-environment variable; the common ones:
+Strom is configured via environment variables. `strom --help` lists the command-line
+options; every other setting, with its environment variable, is in `.strom.toml.example`.
+The common ones:
 
 | Variable | Purpose |
 |----------|---------|
@@ -51,10 +52,17 @@ environment variable; the common ones:
 | `STROM_SERVER_ICE_TRANSPORT_POLICY` | `all` (default) or `relay` to force WebRTC through TURN |
 | `STROM_PORTS` | Port numbers the pool hands out to callers (unset = pool off) â€” see [PORT_POOL.md](PORT_POOL.md) |
 | `STROM_TLS_CERT` / `STROM_TLS_KEY` | Built-in TLS (PEM) |
+| `STROM_MEDIA_PATH` | Media library directory (default `media/` under the data directory) |
+| `STROM_LOGGING_STDOUT_LOG_FORMAT` | `json` for container log collectors |
 | `RUST_LOG` | Logging level (default `info`) |
 
-Volumes: mount `./data:/data` for persistent storage. The `/data` volume is the only state
-Strom keeps by default.
+Volumes: mount `./data:/data` for persistent storage. The `/data` volume holds all of
+Strom's own state.
+
+In `strom-full`, the browser profiles of HTML sources (cookies, logins) live in the CEF cache
+at `/tmp/cef-cache`. It survives a container restart but not a replaced container. To keep
+logins across an image upgrade, mount a volume there (or point `GST_CEF_CACHE_LOCATION` at
+one), one per running container.
 
 ## Docker Compose
 
@@ -125,7 +133,7 @@ logging:
 
 ### Backup
 
-The entire state lives under `/data`:
+Strom's state lives under `/data` (plus the CEF cache in `strom-full`, see Configuration):
 
 ```bash
 docker cp strom:/data ./backup/

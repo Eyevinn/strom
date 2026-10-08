@@ -175,7 +175,8 @@ So the choice between editing on air and preview-then-take is editorial, not tec
 
 ## 4. What each take actually looks like
 
-`transition_type` accepts `cut`, `fade`, `dip_to_black`, `slide_*`, `push_*` and, on the
+`transition_type` accepts `cut`, `fade`, `dip_to_black`, `slide_*`, `push_*`, `stinger`
+(which plays the cued stinger clip, see §3.6 of the guide below) and, on the
 GPU backend with Shader FX, the shader transitions (see the
 [Vision Mixer Operator Guide](VISION_MIXER_OPERATOR_GUIDE.md) §3.1). What you get depends
 on whether a PiP is involved.
@@ -251,7 +252,7 @@ These all return HTTP 400 with a readable reason, before anything reaches the pi
 | Zone source index ≥ number of inputs | `Zone source 5 out of range (num_inputs=5)` |
 | A zone source that is also the background | `Zone source 1 duplicates bg` |
 | The same source in two zones of one PiP | `Zone source 1 appears in more than one zone` |
-| Border colour that is not `#RRGGBB`/`#RRGGBBAA` | `Invalid border color "red"` |
+| Border colour that is not `#RRGGBB`/`#RRGGBBAA` | `Invalid border color "red" (expected #RRGGBB or #RRGGBBAA)` |
 | PiP index ≥ `num_pips` | `PiP index 7 out of range (configured: 2)` |
 | Preview to an input or PiP that does not exist | `Input 9 out of range (max 4)` |
 

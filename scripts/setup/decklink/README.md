@@ -186,6 +186,7 @@ docker run -d \
   -v /usr/lib/libDeckLinkPreviewAPI.so:/lib/libDeckLinkPreviewAPI.so:ro \
   -v /usr/lib/blackmagic:/lib/blackmagic:ro \
   -v ./media:/media \
+  -e STROM_MEDIA_PATH=/media \
   -v ./data:/data \
   --network host \
   --name strom \
@@ -383,4 +384,4 @@ shows the connector mapping per sub-device — see "Configure the Card" above).
 - [Blackmagic Design Support](https://www.blackmagicdesign.com/support)
 - [Desktop Video Downloads](https://www.blackmagicdesign.com/support/family/capture-and-playback)
 - [GStreamer DeckLink Plugin](https://gstreamer.freedesktop.org/documentation/decklink/)
-- [Strom Docker Guide](../../docs/DOCKER.md)
+- [Strom Docker Guide](../../../docs/DOCKER.md)

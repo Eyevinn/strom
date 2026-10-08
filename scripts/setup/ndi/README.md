@@ -280,7 +280,7 @@ The scripts automatically detect your architecture and install the appropriate l
 - [NDI SDK Download](https://ndi.video/for-developers/ndi-sdk/download/)
 - [GStreamer NDI Plugin (teltek)](https://github.com/teltek/gst-plugin-ndi)
 - [GStreamer Documentation](https://gstreamer.freedesktop.org/documentation/)
-- [Strom Documentation](../../README.md)
+- [Strom Documentation](../../../README.md)
 
 ## License
 

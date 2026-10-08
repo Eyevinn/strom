@@ -7,6 +7,18 @@ The **Media** tab manages the files under Strom's media directory (`--media-path
 You can browse folders, create and delete them, rename and delete files, download a file to
 your computer, and upload files from the browser.
 
+## Upload
+
+Uploading from the browser shows progress per file. One upload request is limited to 500 MB.
+An upload replaces a file with the same name without asking.
+
+## Media Player
+
+The Media Player block plays a playlist of library files, and also any URL GStreamer has a
+source for: `http(s)` (including HLS and DASH), `rtsp://`, `srt://`, `udp://`, `rtmp://`.
+**Video Tracks** and **Audio Tracks** (default 1, 0 discards that kind) set how many tracks of a file get an
+output: `video_out`, `video_out_1`, … and `audio_out`, `audio_out_1`, ….
+
 ## Download from a URL
 
 Clips that live on a web server, such as stingers, can be copied into the library once instead
@@ -20,7 +32,7 @@ Tick **Replace** to overwrite a file with the same name. Without it, Strom refus
 downloading anything.
 
 The same is available over the API: `POST /api/media/download` with
-`{"url": "https://example.com/clips/intro.mov", "path": "stingers"}` answers `202` with a job,
+`{"url": "https://example.com/clips/intro.mov", "path": "stingers"}` (optionally `filename`, and `overwrite` to replace) answers `202` with a job,
 `GET /api/media/downloads` lists running and recent jobs, and
 `DELETE /api/media/downloads/{job_id}` cancels one. Progress arrives as `MediaDownloadProgress`
 events on `/api/ws`. The OpenAPI page (`/swagger-ui`) has the full shapes.

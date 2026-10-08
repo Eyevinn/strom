@@ -1,7 +1,7 @@
 # HTML Rendering with CEF (Chromium Embedded Framework)
 
-> **Code is the source of truth.** This guide describes intended behaviour and may have
-> drifted from the current implementation. When in doubt, read the code and check the in-app UI.
+> **Code is the source of truth** — this may have drifted; read the code for the current
+> implementation, and check the in-app UI.
 
 Strom supports rendering HTML content as video sources using the `cefsrc` GStreamer element from [gstcefsrc](https://github.com/centricular/gstcefsrc). This enables:
 
@@ -21,7 +21,7 @@ HTML rendering requires Chromium Embedded Framework (CEF), which adds significan
 | `strom-full` | amd64 | ~820 MB | ~2.7 GB | Full functionality including HTML rendering |
 | `strom-full` | arm64 | ~930 MB | ~3.5 GB | |
 
-*Note: Compressed size is what you download via `docker pull`. Uncompressed size is disk usage after extraction. Sizes measured from v0.3.12 (2026-01-22).*
+*Note: Compressed size is what you download via `docker pull`. Uncompressed size is disk usage after extraction. Sizes are approximate and grow between releases.*
 
 ### Quick Start
 
@@ -252,9 +252,9 @@ The build uses Ubuntu Questing to match the strom base image's glibc version.
 ## HTML Input block
 
 An HTML source is a block: set the URL, the viewport size and the framerate,
-and pick whether the page's audio comes out as a second pad. Internally it is
-`cefsrc` feeding `cefdemux`, with `cefdemux` built only when audio is asked
-for. Raw `cefsrc` pipelines still work — the block just spares you the caps.
+and choose with Stream Mode whether it outputs Video (the default), Audio +
+Video, or Audio only. Raw `cefsrc` pipelines still work — the block just spares
+you the caps.
 
 ## Which pages work
 
