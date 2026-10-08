@@ -3,6 +3,13 @@
 // Global debug mode flag - toggle via UI or setWhepDebugMode(true/false)
 let whepDebugMode = false;
 
+// How long ICE 'disconnected' is given to recover before the session is treated
+// as dead. It fires on a few missed consent checks and often recovers on the same
+// PeerConnection, so the media stays attached meanwhile. Once it expires the
+// PeerConnection is closed, so a late recovery cannot leave a "connected" session
+// whose tracks the player has already let go of.
+const ICE_DISCONNECT_GRACE_MS = 4000;
+
 function setWhepDebugMode(enabled) {
     whepDebugMode = enabled;
     console.log('[WHEP] Debug mode ' + (enabled ? 'enabled' : 'disabled'));
@@ -85,6 +92,11 @@ class WhepConnection {
         this.numVideoTracks = Math.max(1, options.numVideoTracks || 1);
         this.peerConnection = null;
         this.resourceUrl = null;
+        // Set by close(). connect() checks it after each await, so a Disconnect
+        // that lands mid-negotiation neither builds a PeerConnection nor leaves
+        // the server session behind.
+        this._closed = false;
+        this._disconnectTimer = null;
         this.hasAudio = false;
         this.hasVideo = false;
         // Slot-indexed audio/video tracks: index N corresponds to transceiver N
@@ -143,6 +155,7 @@ class WhepConnection {
     }
 
     async connect() {
+        this._closed = false;
         this.hasAudio = false;
         this.hasVideo = false;
         this.audioTracks = new Array(this.numAudioTracks).fill(null);
@@ -188,6 +201,8 @@ class WhepConnection {
                 if (server.credential) this._log('    credential: ***');
             }
             this._log('=========================');
+
+            if (this._closed) return false;
 
             // Create RTCPeerConnection with configured transport policy
             this._log('Creating RTCPeerConnection with iceTransportPolicy=' + iceTransportPolicy);
@@ -312,6 +327,11 @@ class WhepConnection {
                 }
 
                 if (state === 'connected' || state === 'completed') {
+                    if (this._disconnectTimer) {
+                        clearTimeout(this._disconnectTimer);
+                        this._disconnectTimer = null;
+                        this._logAlways('ICE recovered from disconnected state');
+                    }
                     this._logConnectionStats();
                     if (this.callbacks.onConnected) {
                         this.callbacks.onConnected();
@@ -322,15 +342,32 @@ class WhepConnection {
                     // Start video health monitor for freeze/artifact recovery
                     this._startVideoHealthMonitor();
                 } else if (state === 'failed') {
+                    if (this._disconnectTimer) {
+                        clearTimeout(this._disconnectTimer);
+                        this._disconnectTimer = null;
+                    }
                     this._logAlways('ICE connection failed', 'error');
                     this._logDebugSummary();
                     if (this.callbacks.onError) {
                         this.callbacks.onError('ICE connection failed - check TURN server');
                     }
                 } else if (state === 'disconnected') {
-                    this._logAlways('ICE disconnected', 'warning');
-                    if (this.callbacks.onDisconnected) {
-                        this.callbacks.onDisconnected();
+                    // Transient: it can return to 'connected' on its own.
+                    this._logAlways('ICE disconnected (waiting ' + (ICE_DISCONNECT_GRACE_MS / 1000) +
+                        's for recovery...)', 'warning');
+                    if (!this._disconnectTimer) {
+                        this._disconnectTimer = setTimeout(() => {
+                            this._disconnectTimer = null;
+                            if (this.peerConnection &&
+                                this.peerConnection.iceConnectionState === 'disconnected') {
+                                this._logAlways('ICE did not recover, disconnecting', 'error');
+                                this._deleteResource(this.resourceUrl);
+                                this.close();
+                                if (this.callbacks.onDisconnected) {
+                                    this.callbacks.onDisconnected();
+                                }
+                            }
+                        }, ICE_DISCONNECT_GRACE_MS);
                     }
                 }
             };
@@ -410,8 +447,17 @@ class WhepConnection {
                 throw new Error('WHEP request failed: ' + response.status + ' ' + (errorText || response.statusText));
             }
 
-            this.resourceUrl = resolveResourceUrl(response.headers.get('Location'), this.endpoint);
+            const resourceUrl = resolveResourceUrl(response.headers.get('Location'), this.endpoint);
             const answerSdp = await response.text();
+
+            // Closed while the POST was in flight: disconnect() had no resource
+            // URL to DELETE yet, so end the session the server just created.
+            if (this._closed) {
+                this._logAlways('Closed during negotiation, ending the server session', 'warning');
+                this._deleteResource(resourceUrl);
+                return false;
+            }
+            this.resourceUrl = resourceUrl;
 
             this._log('Received SDP answer', 'success');
             this._logDebug('=== REMOTE SDP ANSWER ===\n' + answerSdp);
@@ -436,6 +482,9 @@ class WhepConnection {
 
             return true;
         } catch (error) {
+            // close() nulls the PeerConnection under a pending await; that is
+            // the abort, not a connection error.
+            if (this._closed) return false;
             this._logAlways('Connection error: ' + error.message, 'error');
             this._logDebugSummary();
             if (this.callbacks.onError) {
@@ -911,7 +960,20 @@ class WhepConnection {
         }
     }
 
+    // Fire-and-forget DELETE of a session resource.
+    _deleteResource(url) {
+        if (!url) return;
+        fetch(url, { method: 'DELETE' }).catch((e) => {
+            console.error('Failed to DELETE resource:', e);
+        });
+    }
+
     close() {
+        this._closed = true;
+        if (this._disconnectTimer) {
+            clearTimeout(this._disconnectTimer);
+            this._disconnectTimer = null;
+        }
         if (this.statsInterval) {
             clearInterval(this.statsInterval);
             this.statsInterval = null;
