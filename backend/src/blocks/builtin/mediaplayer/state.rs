@@ -143,12 +143,21 @@ pub struct LoadedClip {
     /// [`super::file_stamp`] of its file when it was loaded; `None` for a
     /// source that is not a local file.
     pub stamp: Option<(u64, u64)>,
+    /// Loaded to decode its video in software (see
+    /// [`crate::stinger::analysis::software_only`]).
+    pub software: bool,
 }
 
 impl LoadedClip {
     pub fn new(file: String, media_path: &std::path::Path) -> Self {
-        let stamp = super::file_stamp(&normalize_uri(&file, media_path));
-        Self { file, stamp }
+        let uri = normalize_uri(&file, media_path);
+        let stamp = super::file_stamp(&uri);
+        let software = crate::stinger::analysis::software_only(&uri).is_some();
+        Self {
+            file,
+            stamp,
+            software,
+        }
     }
 }
 
@@ -633,6 +642,9 @@ impl MediaPlayerState {
         self.timing.reset(None, &self.main_pipeline);
 
         // Set the new URI on source element
+        if self.stinger.enabled {
+            super::bridge::apply_stinger_decoding(&source_element, &uri);
+        }
         source_element.set_property("uri", &uri);
         *self
             .stinger
@@ -969,6 +981,15 @@ impl MediaPlayerState {
             .static_pad("sink")
     }
 
+    /// The clip the internal pipeline was last loaded from.
+    pub fn loaded_clip(&self) -> Option<LoadedClip> {
+        self.stinger
+            .loaded_file
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
     /// Whether playlist entry `index` is loaded and parked on its first frame.
     /// The loaded file is compared, not only the index: a playlist edit can
     /// leave another file at the parked index, and the file can have been
@@ -990,7 +1011,9 @@ impl MediaPlayerState {
     /// time or length) is not held: the parked frame and the rest of the clip
     /// the decoder would read are the old content, or a mix of old and new.
     /// A file gone from disk since counts as held, so the clip that is parked
-    /// still plays.
+    /// still plays. Nor is a clip held that was loaded to decode in hardware
+    /// after its analysis found it has to decode in software, or the other
+    /// way round.
     fn holds_file(&self, file: &str) -> bool {
         let loaded = self
             .stinger
@@ -1001,7 +1024,11 @@ impl MediaPlayerState {
         let Some(loaded) = loaded.filter(|l| l.file == file) else {
             return false;
         };
-        match super::file_stamp(&normalize_uri(file, &self.media_path)) {
+        let uri = normalize_uri(file, &self.media_path);
+        if loaded.software != crate::stinger::analysis::software_only(&uri).is_some() {
+            return false;
+        }
+        match super::file_stamp(&uri) {
             Some(now) => loaded.stamp == Some(now),
             None => true,
         }

@@ -53,6 +53,11 @@ static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 /// Clips being analysed now, so a listing does not start a second run.
 static ANALYSING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
+/// Mixers whose cued clip is being loaded again in the background, because
+/// its analysis found it has to decode in software (see `stinger_state`).
+static RELOADING: LazyLock<Mutex<HashSet<(FlowId, String)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
 fn with_mixer<T>(flow: FlowId, block: &str, f: impl FnOnce(&mut MixerStinger) -> T) -> T {
     let mut map = MIXERS.lock().unwrap_or_else(|p| p.into_inner());
     f(map.entry((flow, block.to_string())).or_default())
@@ -421,6 +426,11 @@ impl AppState {
             .map(|(i, f)| Self::describe_clip(&ctx, i, f))
             .collect();
         let cued = (!files.is_empty()).then(|| ctx.player.current_index());
+        if let Some(file) = cued.and_then(|i| files.get(i)) {
+            if running.is_none() && Self::loaded_in_hardware_but_needs_software(&ctx, file) {
+                self.reload_cued_in_background(flow_id, block);
+            }
+        }
         Ok(StingerState {
             source_block_id: Some(ctx.source_block_id.clone()),
             problem: files
@@ -435,6 +445,57 @@ impl AppState {
             running: running.is_some(),
             last_take,
         })
+    }
+
+    /// Whether `file` is the clip the stinger source loaded, loaded to decode
+    /// in hardware, while its analysis has since found that the hardware
+    /// decoder cannot decode it. Such a clip never parks: it has to be
+    /// loaded again, which then decodes it in software.
+    fn loaded_in_hardware_but_needs_software(ctx: &Context, file: &str) -> bool {
+        analysis::software_only(&ctx.uri(file)).is_some()
+            && ctx
+                .player
+                .loaded_clip()
+                .is_some_and(|l| l.file == file && !l.software)
+    }
+
+    /// Cue the cued clip again, off the request path, once at a time per
+    /// mixer. A clip the source loaded when the flow started, before its
+    /// analysis was in, parks only this way.
+    fn reload_cued_in_background(&self, flow_id: &FlowId, block: &str) {
+        let key = (*flow_id, block.to_string());
+        if !RELOADING
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key.clone())
+        {
+            return;
+        }
+        let state = self.clone();
+        tokio::spawn(async move {
+            let (flow_id, block) = &key;
+            let cued = match state.stinger_context(flow_id, block).await {
+                Ok(ctx) => ctx.player.current_index(),
+                Err(_) => {
+                    RELOADING
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .remove(&key);
+                    return;
+                }
+            };
+            info!(
+                "Stinger on {}: clip {} decodes in software; loading it again",
+                block, cued
+            );
+            if let Err(e) = state.stinger_cue(flow_id, block, cued, None).await {
+                warn!("Stinger on {}: clip {} did not park: {}", block, cued, e);
+            }
+            RELOADING
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&key);
+        });
     }
 
     /// Load a clip and park it on its first frame. Returns how long it took.
@@ -452,9 +513,26 @@ impl AppState {
         let file = ctx.clip_at(index, expected_file)?;
         Self::analyse_in_background(ctx.uri(&file));
         let player = Arc::clone(&ctx.player);
-        let result = tokio::task::spawn_blocking(move || player.cue(index))
+        let mut result = tokio::task::spawn_blocking(move || player.cue(index))
             .await
             .map_err(|e| err(e.to_string()))?;
+        // A clip whose hardware decoder cannot decode it does not park. Its
+        // analysis (started above, or before) then finds it has to decode in
+        // software, and a second cue loads it that way.
+        if result.is_err() {
+            let uri = ctx.uri(&file);
+            let _ = tokio::task::spawn_blocking(move || analysis::analyze_cached(&uri)).await;
+            if Self::loaded_in_hardware_but_needs_software(&ctx, &file) {
+                info!(
+                    "Stinger on {}: clip {} decodes in software; loading it again",
+                    block, index
+                );
+                let player = Arc::clone(&ctx.player);
+                result = tokio::task::spawn_blocking(move || player.cue(index))
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+            }
+        }
         let (ready, cue_ms) = match &result {
             Ok(took) => (true, took.as_millis() as u64),
             Err(_) => (false, 0),
