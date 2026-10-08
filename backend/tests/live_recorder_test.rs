@@ -1620,7 +1620,10 @@ mod file_start_time {
         let early = add_live_recorder(&pipeline, "early", dir.path(), &props(container, 1, 0, 1));
         let late = add_live_recorder(&pipeline, "late", dir.path(), &props(container, 1, 0, 2));
 
-        let (camera, flashes) = flashing_video(&pipeline, 150);
+        // 8 s, so the late recorder gets two whole 2 s splits: with less, its
+        // last fragment can land alone after the split, where the sink keeps it
+        // in the current file rather than open a file for it.
+        let (camera, flashes) = flashing_video(&pipeline, 240);
         let tee = gst::ElementFactory::make("tee").build().unwrap();
         pipeline.add(&tee).unwrap();
         camera.link(&tee).unwrap();
