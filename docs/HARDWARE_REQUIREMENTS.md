@@ -89,7 +89,7 @@ carries 4 tracks per output. Cheap per instance, unmeasured in total — a good 
 
 | | Minimum | Recommended | Notes |
 |---|---|---|---|
-| OS | Ubuntu 22.04+ or equivalent | Ubuntu 24.04+ | Images are built on Ubuntu 25.10 with GStreamer 1.26 |
+| OS | Ubuntu 24.04+ or equivalent (GStreamer ≥ 1.22) for native installs; any Docker-capable Linux for the images | Ubuntu 24.04+ | Images are built on Ubuntu 25.10 with GStreamer 1.26 |
 | Arch | x86-64 | x86-64 | `arm64` images are published; see [CROSS_COMPILE_ARM64.md](CROSS_COMPILE_ARM64.md) |
 | CPU | 4 cores | 8–16 cores | Add headroom per HTML/CEF source, for 4:2:2 or software encode, and for Opus (tracks x viewers) |
 | RAM | 8 GB | 16–32 GB | Scale with concurrent flows; CEF spawns several processes per source |

@@ -299,10 +299,10 @@ Add to the `environment:` block in section 5:
 
 ### Verifying
 
-The configured list is exposed at `GET /api/ice-servers` (subject to auth if enabled):
+The configured list is exposed at `GET /api/ice-servers`. It needs no authentication, because the browser player and ingest pages call it:
 
 ```bash
-curl -H "Authorization: Bearer $STROM_API_KEY" http://<host>:8080/api/ice-servers
+curl http://<host>:8080/api/ice-servers
 ```
 
 The same list is what the WHEP player and WHIP blocks hand to their `webrtcbin` instances at flow start.
@@ -340,7 +340,7 @@ STROM_API_KEY='a-long-random-string'        # used by Open Live and other API cl
 Once these are set:
 
 - The web UI requires login at `/login`.
-- All API endpoints (except `/health`, `/api/login`, `/api/logout`, `/api/auth/status`) require either a valid session cookie or `Authorization: Bearer <STROM_API_KEY>`.
+- All API endpoints require either a valid session cookie or `Authorization: Bearer <STROM_API_KEY>`, except the login flow, the health check and the endpoints the browser player and ingest pages use. See [Authentication](AUTHENTICATION.md) for the full list.
 
 Generate a strong API key, for example:
 

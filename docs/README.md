@@ -19,6 +19,7 @@ Common questions are answered in the [FAQ](FAQ.md).
 - [VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md) — broadcast PVW/PGM switcher: transitions, DSK, PiP, multiview.
 - [PRODUCER_SWITCHING_API_GUIDE.md](PRODUCER_SWITCHING_API_GUIDE.md) — driving the vision mixer over HTTP: PiP layout recipes, on-air edits, failure modes.
 - [AUDIO_MIXER_OPERATOR_GUIDE.md](AUDIO_MIXER_OPERATOR_GUIDE.md) — audio mixing console signal flow and operation.
+- [MEDIA_LIBRARY.md](MEDIA_LIBRARY.md) — the media library: upload, download from a URL, and the Media Player.
 - [HTML_RENDER.md](HTML_RENDER.md) — render web pages as video sources (CEF / `strom-full`).
 - [STREAM_SYNCHRONIZATION.md](STREAM_SYNCHRONIZATION.md) — aligning multiple inputs with PTP/NTP clocks.
 - [DSK_TEST_URLS.md](DSK_TEST_URLS.md) — ready-made HTML graphics for testing DSK overlays.
@@ -46,6 +47,7 @@ Ready-to-run scripts for preparing a host, under [`scripts/setup/`](../scripts/s
 
 - [DEVELOPMENT.md](DEVELOPMENT.md) — build, run, and develop locally.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contribution guidelines.
+- [BLOCK_GUIDELINES.md](BLOCK_GUIDELINES.md) — the rules every block follows: what it emits, what it accepts, and how it adapts.
 - [CROSS_COMPILE_ARM64.md](CROSS_COMPILE_ARM64.md) — cross-compiling for ARM64 (Raspberry Pi etc.).
 - [DEBUGGING_SEGFAULTS_WSL2.md](DEBUGGING_SEGFAULTS_WSL2.md) — debugging segfaults (especially on WSL2).
 

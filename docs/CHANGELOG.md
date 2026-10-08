@@ -2,6 +2,46 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.7.0] - 2026-10-08
+
+### Added
+- Vision Mixer: stinger transitions — classic, track matte and mask only — with a clip library, cue and take (#1010)
+- Live Recorder: a new recorder block, `builtin.liverecorder`, where a quiet track holds nothing up (#1034)
+- Media: download a file from a URL into the media library, and stream uploads with progress (#1043)
+- Vision Mixer: change input labels while the flow runs (#1014)
+
+### Fixed
+- Vision Mixer: adapt GPU inputs to any pixel format, converting only while needed (#1033)
+- Vision Mixer: multiview tally follows a cut on the same frame (#1009)
+- Vision Mixer: the PGM compositor no longer waits on the multiview to allocate (CPU) (#1029)
+- Vision Mixer: key overlay registries by flow and block id (#1015)
+- Vision Mixer: a restarted border frame is due on the mixer's next output, and no border underlay restart holds a source while the flow stops (#1031, #1038)
+- WHIP Input: give a POST's session back on every error path (#987)
+- WHIP Input: flush a released slot's `appsrc` so a new session gets none of the old one's frames (#1028)
+- WHEP player: recover from a brief ICE drop and end the session on an early Disconnect (#1047)
+- Media Player: hold typefind until a start from READY has returned (#996)
+- Pipeline: drop sink QoS events with `Handled`, not `Drop` (#1011)
+- GStreamer: restore a streaming thread's priority when it leaves the flow (#1046)
+- Windows: give blocks a media path without the verbatim `\\?\` prefix, so the Recorder can write files (#1045)
+- Frontend: draw cables for links without a pad name (#1035)
+- Docker: install `gsettings-desktop-schemas` explicitly (#1048)
+
+### Performance
+- Vision Mixer: run idle FX slots in passthrough (#1007)
+- Vision Mixer: static border underlays, no frame for unconfigured borders (#1005)
+- Vision Mixer: stop re-uploading an unchanged overlay, cap meter redraws at 4 fps (#1004)
+- Vision Mixer: meter audio without a queue thread or a sink (#1006)
+- Mixer: stop bus mixers re-querying latency while a channel is unfed (#1003)
+
+### CI
+- Run every macOS/Windows test binary with `--no-fail-fast` (#1016)
+- Tests: stop waiting out fixed windows the tests do not need, and stabilise the mixer, vision mixer, recorder and Monitor queue tests (#995, #1000, #1008, #1012, #1018, #1026, #1027, #1039, #1041)
+
+### Documentation
+- Catch up with the code, and add `AGENTS.md` (#1019)
+
+---
+
 ## [0.7.0-alpha2] - 2026-10-05
 
 ### Fixed

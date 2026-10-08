@@ -82,7 +82,8 @@ curl -H "Authorization: Bearer your-secret-api-key-here" \
 ```
 
 Where a header cannot be set (a WebSocket from a browser), pass the key as an
-`?auth_token=` query parameter instead. The MCP endpoint (`/api/mcp`) also accepts
+`?auth_token=` query parameter instead. Percent-encode the key (base64 keys contain
+`+`, `/` and `=`); an unencoded key is also accepted. The MCP endpoint (`/api/mcp`) also accepts
 it as an `X-API-Key` header; the rest of the API does not.
 
 ## Using Both Methods

@@ -96,7 +96,7 @@ with our patched build, picking the right architecture automatically:
 ```Dockerfile
 ARG TARGETARCH
 ARG PATCHED_PLUGINS_TAG=patched-plugins-v1.0-gst1.22.12
-ARG PATCHED_PLUGINS_REPO=eyevinntechnology/strom
+ARG PATCHED_PLUGINS_REPO=Eyevinn/strom
 
 RUN curl -fsSL \
         "https://github.com/${PATCHED_PLUGINS_REPO}/releases/download/${PATCHED_PLUGINS_TAG}/libgstdecklink-linux-${TARGETARCH}.so" \

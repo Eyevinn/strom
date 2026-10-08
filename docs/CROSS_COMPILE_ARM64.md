@@ -9,7 +9,7 @@ How to build an ARM64 (aarch64) Strom binary on an x86_64 Linux machine. The scr
 
 - Ubuntu 24.04 (or a compatible Debian-based distribution)
 - Rust toolchain installed via rustup
-- Trunk for the frontend: `cargo install trunk`
+- Trunk for the frontend: `cargo install trunk --locked`
 - sudo access for installing system packages
 
 ## Zig-based build (recommended)
@@ -19,7 +19,7 @@ on systems older than your build machine.
 
 ```bash
 # One-time setup - run BOTH scripts, in this order:
-./scripts/cross-compile/setup-zig-cross.sh       # 1. Install Zig and cargo-zigbuild
+./scripts/cross-compile/setup-zig-cross.sh       # 1. Install Zig and cargo-zigbuild (needs >= 0.23; an older one is kept, upgrade it yourself)
 ./scripts/cross-compile/setup-arm64-cross.sh     # 2. Install ARM64 GStreamer libraries (required)
 
 # Build for ARM64, targeting a glibc version

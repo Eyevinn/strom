@@ -1,7 +1,7 @@
 # Vision Mixer — Operator Guide
 
-> **Code is the source of truth.** This guide describes intended behaviour and may have
-> drifted from the current implementation. When in doubt, read the code and check the in-app UI.
+> **Code is the source of truth** — this may have drifted; read the code for the current
+> implementation, and check the in-app UI.
 
 A reference to the production switcher block in strom: the PVW/PGM
 workflow, transitions, Picture-in-Picture, downstream keying, and the
@@ -114,6 +114,7 @@ A PiP can be put on PVW *or* on PGM, just like any other source.
 | `slide_left/right/up/down` | New picture slides in **over** the old one, which stays in place until covered. The direction names the motion. | Yes. |
 | `push_left/right/up/down` | Old and new picture move **together** — the new one pushes the old out of frame. | Yes. |
 | `dip_to_black` | Fade out to black over the first half, fade the new picture in over the second. | Yes. |
+| `stinger` | Plays the cued stinger clip over the program while the source changes beneath it (§3.6). | No (the clip sets the length). |
 
 **Shader transitions** (GPU backend with Shader FX enabled — see §3.4).
 On the operator page the production staples (directional wipes, iris,
@@ -500,9 +501,10 @@ The multiview is the operator's monitor. Default resolution 1280×720 @
 | **Thumbnail grid** | Bottom half | One tile per input, then one tile per configured PiP. Grid columns/rows are chosen automatically based on slot count and source aspect (16:9). |
 | **PVW border** | Around the PVW display **and** around the source tile currently routed to PVW | **Green.** |
 | **PGM border** | Around the PGM display **and** around the source tile currently routed to PGM | **Red.** |
+| **Via-PiP border** | Source tiles not routed to PVW/PGM themselves but visible there inside a PiP | **Dark green** (in a PiP on PVW) / **dark red** (in a PiP on PGM). |
 | **Idle thumbnail border** | Tiles not currently on PVW or PGM | **Gray.** |
 | **"PVW" / "PGM" labels** | Bottom-center of each big display | Colored badge matching the border. |
-| **Tile labels** | Centered below each thumbnail | Uses the operator-set `Input N Label` (defaults to `In 1`, `In 2`, …). PiP tiles label as `PiP 1`, `PiP 2`, etc. |
+| **Tile labels** | Centered below each thumbnail | Uses the operator-set `Input N Label` (defaults to `In 1`, `In 2`, …). Labels can be changed while the flow runs, for example to name a guest who joins mid-show. PiP tiles label as `PiP 1`, `PiP 2`, etc. |
 | **Clock** | Top center of canvas | Local wall-clock time in `HH:MM:SS TZ` (e.g. `14:35:42 CEST`). Auto-tracks DST changes. |
 | **VU meters** | Thin vertical bar bottom-left of each thumbnail, plus one on PVW and one on PGM | See §6.2. Can be globally disabled with the **Show VU Meters** block property. |
 | **FTB badge** | Centered on PGM display | Appears when Fade-to-Black is engaged. |
@@ -549,7 +551,7 @@ action.
 | **Select PVW source** | Route a regular Input or PiP onto the PVW bus. Updates the multiview PVW display immediately. Never touches the on-air feed. | Source: `input:N` or `pip:N` |
 | **Take (Auto)** | Animate the transition from PGM to PVW using the currently selected type/duration. Old PGM becomes the new PVW. | Implicit (uses current PVW + selected transition) |
 | **Cut** | Take with `cut` (zero duration). Instant. | — |
-| **Set transition type** | Select which animation Auto will use. | One of `cut`, `fade`, `dip_to_black`, `slide_left/right/up/down`, `push_left/right/up/down`, or a shader transition (§3.1) |
+| **Set transition type** | Select which animation Auto will use. | One of `cut`, `fade`, `dip_to_black`, `slide_left/right/up/down`, `push_left/right/up/down`, `stinger`, or a shader transition (§3.1) |
 | **Set transition duration** | Set the length of fade/slide takes. | 0 – 60 000 ms (default 300) |
 | **Fade-to-Black** | Toggle FTB on PGM (first press fades to black, second press fades back). | Duration in ms (0 = instant). |
 | **DSK on/off** | Toggle one DSK channel on or off. | DSK number (1 – 4) + `enabled: true/false` |
@@ -559,6 +561,7 @@ action.
 | **Cue stinger** | Load a clip from the stinger library and park it on its first frame. | Playlist index |
 | **Take stinger** | Take from PGM to PVW under the cued (or named) stinger clip. Same as Take with type `stinger`. | Optional playlist index |
 | **Stinger clip settings** | Layout, cut point, cut/mix beneath, premultiplied alpha, matte inversion, per clip. Stored with the flow. | Playlist index + settings |
+| **Add / remove stinger clip** | Add a file to the stinger library, or remove one. Upload or download the file into the media library first. | `file` (media path, absolute path or URI) / playlist index |
 | **Example stingers** | Render Strom's example clips into the media directory and add them to the library. | — |
 | **Reload stingers** | Look at the library's files again: analyse changed files, load the cued clip again if its file changed, flag missing files. | — |
 | **Set multiview overlay alpha** | Fade the multiview overlay (borders, labels, clock, VU meters). | `alpha`: 0.0 – 1.0 |
@@ -566,6 +569,18 @@ action.
 
 All state-changing actions broadcast a `VisionMixerStateChanged`
 WebSocket event so multiple operator panels stay in sync in real time.
+Stinger takes also emit `StingerCued`, `StingerStarted`,
+`StingerCompleted` and `StingerFailed`.
+
+### 7.1 Keyboard shortcuts (operator page)
+
+| Key | Action |
+|---|---|
+| `1`–`9`, `0` | Select PVW source. Keys past the input count select PiPs (with 8 inputs, `9` is PiP 1 and `0` is PiP 2). |
+| `Space` / `Enter` | Take (Auto) |
+| `X` | Cut |
+| `F` | Fade-to-Black |
+| `M` | Minimize the controls |
 
 ---
 
@@ -575,7 +590,7 @@ WebSocket event so multiple operator panels stay in sync in real time.
 
 | Property | Default |
 |---|---|
-| Compositor backend | Auto (GPU first, fall back to CPU) |
+| Backend | Auto (GPU first, fall back to CPU) |
 | Number of inputs | 4 |
 | Number of DSK inputs | 0 |
 | Number of PiPs | 0 |
@@ -591,7 +606,7 @@ WebSocket event so multiple operator panels stay in sync in real time.
 | Initial PGM / PVW source | Empty (use the initial input). Set `input:N` or `pip:N` to start on a PiP. |
 | Swap PVW/PGM positions on multiview | Off (PVW left, PGM right) |
 | Shader FX | **On** (GPU backend only) |
-| Compositor latency | 20 ms |
+| Latency (ms) | 20 ms |
 | Min upstream latency | 20 ms |
 
 ### Transition defaults
@@ -628,7 +643,8 @@ WebSocket event so multiple operator panels stay in sync in real time.
 Input, DSK and PiP counts, resolutions, framerates, backend and Shader FX
 are **construction-time** properties — changing them requires restarting
 the flow. Everything else (PVW/PGM
-selection, transitions, DSK toggles, PiP configuration, overlay alpha)
+selection, transitions, DSK toggles, PiP configuration, overlay alpha,
+input labels)
 is live and takes effect immediately.
 
 ---

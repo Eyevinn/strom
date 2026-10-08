@@ -27,11 +27,11 @@ Run this service in the cloud with a single click.
 - **Visual Pipeline Editor** - Node-based graph editor in your browser
 - **Real-time Control** - Start, stop, and monitor pipelines via REST API or WebSocket
 - **Element Discovery** - Browse and configure any installed GStreamer element
-- **Reusable Blocks** - Pre-built inputs, outputs, and processing blocks (mixers, encoders, WebRTC, RTMP, AES67, SRT, NDI, DeckLink, TAMS, …)
-- **Vision Mixer** - Broadcast-style PVW/PGM video switcher with web control UI and a GPU shader FX engine (GLSL looks, wipes, and master FX takes)
+- **Reusable Blocks** - Pre-built inputs, outputs, and processing blocks (mixers, encoders, media player, recorders, WebRTC, RTMP, AES67, SRT, NDI, DeckLink, TAMS, …)
+- **Vision Mixer** - Broadcast-style PVW/PGM video switcher with web control UI and a GPU shader FX engine (GLSL looks, wipes, and master FX takes) and stinger transitions
 - **Audio Mixer** - Digital mixing console with channel processing, aux sends, groups, and metering
 - **WebRTC / RTMP / AES67 / SRT / NDI / DeckLink** - Wide protocol and hardware I/O coverage
-- **HTML Rendering** - Render web pages as video sources using CEF (via `strom-full` Docker image)
+- **HTML Rendering** - Render web pages as video and audio sources with the HTML Input block, and drive the page remotely, using CEF (via `strom-full` Docker image)
 - **gst-launch Import/Export** - Import existing `gst-launch-1.0` commands or export flows
 - **System Monitoring** - Real-time CPU, memory, and GPU usage graphs
 - **Authentication** - Optional session login or API keys

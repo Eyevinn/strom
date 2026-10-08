@@ -38,7 +38,9 @@ ports = ["47100-47199", 47250, "47300-47399"]
 lease_ttl_seconds = 600
 ```
 
-or `STROM_PORTS=47100-47199,47250` — same grammar, comma-separated. Each entry is a range or a
+or `STROM_PORTS=47100-47199,47250` — same grammar, comma-separated. The lease TTL
+(1–86400 s, default 600) is `STROM_PORT_LEASE_TTL`, and `STROM_PORT_PROBE_BEFORE_HANDOUT`
+(`probe_before_handout`, default on) sets whether a port is checked for being free before it is handed out. Each entry is a range or a
 single port; both expand into one set, so a hole is expressed by listing the pieces around it.
 Open every port inbound on the firewall and publish it into the container:
 
