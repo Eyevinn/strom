@@ -2,8 +2,14 @@
 
 use egui::{Color32, Context, RichText, Ui};
 use strom_types::api::{ListMediaResponse, MediaFileEntry};
+use strom_types::media_download::{MediaDownloadJob, MediaDownloadState};
 
 use crate::list_navigator::{list_navigator, ListItem};
+
+/// Width of the download URL field and of a download's progress bar.
+const DOWNLOAD_FIELD_WIDTH: f32 = 320.0;
+/// How often the server's download list is asked for while a download runs.
+const DOWNLOAD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Media page state.
 pub struct MediaPage {
@@ -43,6 +49,23 @@ pub struct MediaPage {
     last_click_path: Option<String>,
     /// Time of last click (for double-click detection)
     last_click_time: instant::Instant,
+    /// URL typed into "Download from URL"
+    download_url: String,
+    /// Replace a file of the same name when downloading
+    download_overwrite: bool,
+    /// A download request is waiting for the server's answer
+    download_pending: bool,
+    /// The URL that request was sent for
+    download_submitted: String,
+    /// Why the last download request was refused
+    download_error: Option<String>,
+    /// URL downloads seen in this session, oldest first
+    downloads: Vec<MediaDownloadJob>,
+    /// When the server's download list was last asked for
+    last_downloads_fetch: instant::Instant,
+    /// Uploads from the browser's file picker
+    #[cfg(target_arch = "wasm32")]
+    uploads: crate::media_upload::Uploads,
 }
 
 impl MediaPage {
@@ -66,7 +89,91 @@ impl MediaPage {
             initial_fetch_done: false,
             last_click_path: None,
             last_click_time: instant::Instant::now(),
+            download_url: String::new(),
+            download_overwrite: false,
+            download_pending: false,
+            download_submitted: String::new(),
+            download_error: None,
+            downloads: Vec::new(),
+            last_downloads_fetch: instant::Instant::now(),
+            #[cfg(target_arch = "wasm32")]
+            uploads: crate::media_upload::Uploads::new(),
         }
+    }
+
+    /// Apply a download's latest state (from the WebSocket or the server's
+    /// list). Returns true when a download just finished into the folder
+    /// being shown, so the listing should be refreshed.
+    pub fn apply_download(&mut self, job: MediaDownloadJob) -> bool {
+        let finished_here =
+            job.state == MediaDownloadState::Done && job.directory == self.current_path;
+        match self.downloads.iter_mut().find(|j| j.job_id == job.job_id) {
+            Some(existing) => {
+                // A late progress tick must not undo a final state.
+                if !existing.state.is_finished() {
+                    *existing = job;
+                }
+            }
+            None => self.downloads.push(job),
+        }
+        finished_here
+    }
+
+    /// The server accepted a download request.
+    pub fn download_started(&mut self, job: MediaDownloadJob) {
+        self.download_pending = false;
+        self.download_error = None;
+        // Keep anything typed into the field while the request was waiting.
+        if self.download_url.trim() == self.download_submitted {
+            self.download_url.clear();
+        }
+        // Events may already have reported a later state; keep that.
+        if !self.downloads.iter().any(|j| j.job_id == job.job_id) {
+            self.downloads.push(job);
+        }
+    }
+
+    /// The server's list of downloads. Starts tracking downloads that are
+    /// still running (after a page reload), and settles rows whose final
+    /// event never arrived: the WebSocket drops events when a client lags,
+    /// and loses them while it reconnects. Returns true when one of them
+    /// finished into the folder being shown.
+    ///
+    /// `asked_for` are the running downloads the page tracked when it asked;
+    /// one started since may not be in the list yet.
+    pub fn downloads_loaded(&mut self, jobs: Vec<MediaDownloadJob>, asked_for: &[String]) -> bool {
+        let mut finished_here = false;
+        for row in self.downloads.iter_mut() {
+            if !row.state.is_finished()
+                && asked_for.contains(&row.job_id)
+                && !jobs.iter().any(|j| j.job_id == row.job_id)
+            {
+                // The server no longer knows it, so it restarted meanwhile.
+                row.state = MediaDownloadState::Failed;
+                row.error = Some("The server restarted during the download".to_string());
+            }
+        }
+        for job in jobs {
+            let known = self.downloads.iter().any(|j| j.job_id == job.job_id);
+            if known || !job.state.is_finished() {
+                finished_here |= self.apply_download(job);
+            }
+        }
+        finished_here
+    }
+
+    /// The server refused a download request.
+    pub fn download_failed(&mut self, message: String) {
+        self.download_pending = false;
+        self.download_error = Some(message);
+    }
+
+    /// Apply an upload's latest state. Returns true when an upload just
+    /// finished into the folder being shown, so the listing should be
+    /// refreshed.
+    #[cfg(target_arch = "wasm32")]
+    pub fn apply_upload(&mut self, update: crate::media_upload::UploadUpdate) -> bool {
+        self.uploads.apply(update, &self.current_path)
     }
 
     /// Request focus on the search box.
@@ -94,11 +201,20 @@ impl MediaPage {
         if !self.initial_fetch_done && !self.loading {
             self.initial_fetch_done = true;
             self.refresh(api, ctx, tx);
+            self.fetch_downloads(api, ctx, tx);
         }
 
         // Auto-refresh every 3 seconds
         if self.last_fetch.elapsed().as_secs() > 3 && !self.loading {
             self.refresh(api, ctx, tx);
+        }
+
+        // Progress comes as WebSocket events, which can be lost; while a
+        // download runs, ask the server now and then as well.
+        if self.downloads.iter().any(|j| !j.state.is_finished())
+            && self.last_downloads_fetch.elapsed() >= DOWNLOAD_POLL_INTERVAL
+        {
+            self.fetch_downloads(api, ctx, tx);
         }
 
         // Handle dialogs
@@ -120,6 +236,8 @@ impl MediaPage {
             .resizable(true)
             .show_inside(ui, |ui| {
                 self.render_toolbar(ui, api, ctx, tx);
+                ui.separator();
+                self.render_download_bar(ui, api, ctx, tx);
                 ui.separator();
                 self.render_file_list(ui, api, ctx, tx);
             });
@@ -210,7 +328,7 @@ impl MediaPage {
                 .button(format!("{} Upload", egui_phosphor::regular::UPLOAD_SIMPLE))
                 .clicked()
             {
-                self.trigger_file_upload(api, ctx, tx);
+                self.uploads.pick_files(api, ctx, tx, &self.current_path);
             }
         });
 
@@ -238,6 +356,89 @@ impl MediaPage {
                 self.search_filter.clear();
             }
         });
+    }
+
+    /// "Download from URL": a URL field that saves into the current folder,
+    /// and one row per download with its progress or outcome.
+    fn render_download_bar(
+        &mut self,
+        ui: &mut Ui,
+        api: &crate::api::ApiClient,
+        ctx: &Context,
+        tx: &std::sync::mpsc::Sender<crate::state::AppMessage>,
+    ) {
+        let folder = format!("media/{}", self.current_path);
+        let can_start = !self.download_pending && !self.download_url.trim().is_empty();
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.download_url)
+                .hint_text("Download from URL: https://...")
+                .desired_width(DOWNLOAD_FIELD_WIDTH),
+        );
+        let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        ui.horizontal(|ui| {
+            let clicked = ui
+                .add_enabled(
+                    can_start,
+                    egui::Button::new(format!(
+                        "{} Download",
+                        egui_phosphor::regular::DOWNLOAD_SIMPLE
+                    )),
+                )
+                .on_hover_text(format!("Save the file into {}", folder))
+                .clicked();
+            ui.checkbox(&mut self.download_overwrite, "Replace")
+                .on_hover_text("Replace a file with the same name in this folder");
+            if self.download_pending {
+                ui.spinner();
+            }
+            if can_start && (clicked || enter) {
+                self.start_download(api, ctx, tx);
+            }
+        });
+
+        if let Some(error) = self.download_error.clone() {
+            ui.horizontal(|ui| {
+                ui.colored_label(Color32::RED, error);
+                if ui
+                    .small_button(egui_phosphor::regular::X)
+                    .on_hover_text("Dismiss")
+                    .clicked()
+                {
+                    self.download_error = None;
+                }
+            });
+        }
+
+        let mut cancel: Option<String> = None;
+        let mut dismiss: Option<String> = None;
+        for job in &self.downloads {
+            let action = transfer_row(
+                ui,
+                TransferRow {
+                    name: &job.filename,
+                    done_label: &job.path,
+                    bytes: job.bytes,
+                    total: job.total,
+                    state: job.state,
+                    error: job.error.as_deref(),
+                    hover: &job.url,
+                    cancel_hint: "Cancel download",
+                },
+            );
+            match action {
+                RowAction::Cancel => cancel = Some(job.job_id.clone()),
+                RowAction::Dismiss => dismiss = Some(job.job_id.clone()),
+                RowAction::None => {}
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.uploads.render_rows(ui);
+        if let Some(job_id) = cancel {
+            self.cancel_download(&job_id, api, ctx, tx);
+        }
+        if let Some(job_id) = dismiss {
+            self.downloads.retain(|j| j.job_id != job_id);
+        }
     }
 
     fn render_file_list(
@@ -671,113 +872,89 @@ impl MediaPage {
         });
     }
 
-    /// Trigger file upload via browser file picker (WASM only).
-    #[cfg(target_arch = "wasm32")]
-    fn trigger_file_upload(
-        &self,
+    /// Ask the server to download the typed URL into the current folder.
+    fn start_download(
+        &mut self,
         api: &crate::api::ApiClient,
         ctx: &Context,
         tx: &std::sync::mpsc::Sender<crate::state::AppMessage>,
     ) {
-        use wasm_bindgen::prelude::*;
-        use wasm_bindgen::JsCast;
-        use web_sys::{FileReader, HtmlInputElement};
-
-        let document = web_sys::window()
-            .and_then(|w| w.document())
-            .expect("No document");
-
-        // Create hidden file input
-        let input: HtmlInputElement = document
-            .create_element("input")
-            .expect("Failed to create input")
-            .dyn_into()
-            .expect("Not an input element");
-
-        input.set_type("file");
-        input.set_attribute("multiple", "").ok();
-        input.style().set_property("display", "none").ok();
-
-        // Add to document temporarily
-        document.body().unwrap().append_child(&input).ok();
+        self.download_pending = true;
+        self.download_error = None;
 
         let api = api.clone();
         let ctx = ctx.clone();
         let tx = tx.clone();
-        let current_path = self.current_path.clone();
+        let url = self.download_url.trim().to_string();
+        self.download_submitted = url.clone();
+        let path = self.current_path.clone();
+        let overwrite = self.download_overwrite;
 
-        // Set up change handler
-        let input_clone = input.clone();
-        let closure = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-            let files = input_clone.files();
-            if let Some(files) = files {
-                for i in 0..files.length() {
-                    if let Some(file) = files.get(i) {
-                        let api = api.clone();
-                        let ctx = ctx.clone();
-                        let tx = tx.clone();
-                        let path = current_path.clone();
-                        let filename = file.name();
-
-                        // Read file content
-                        let reader = FileReader::new().expect("Failed to create FileReader");
-                        let reader_clone = reader.clone();
-
-                        let onload = Closure::wrap(Box::new(move |_: web_sys::Event| {
-                            if let Ok(result) = reader_clone.result() {
-                                if let Some(array_buffer) = result.dyn_ref::<js_sys::ArrayBuffer>()
-                                {
-                                    let uint8_array = js_sys::Uint8Array::new(array_buffer);
-                                    let data = uint8_array.to_vec();
-
-                                    let api = api.clone();
-                                    let ctx = ctx.clone();
-                                    let tx = tx.clone();
-                                    let path = path.clone();
-                                    let filename = filename.clone();
-
-                                    wasm_bindgen_futures::spawn_local(async move {
-                                        match api.upload_media(&path, &filename, data).await {
-                                            Ok(result) => {
-                                                let _ = tx.send(
-                                                    crate::state::AppMessage::MediaSuccess(
-                                                        result.message,
-                                                    ),
-                                                );
-                                                let _ =
-                                                    tx.send(crate::state::AppMessage::MediaRefresh);
-                                                ctx.request_repaint();
-                                            }
-                                            Err(e) => {
-                                                let _ =
-                                                    tx.send(crate::state::AppMessage::MediaError(
-                                                        e.to_string(),
-                                                    ));
-                                                ctx.request_repaint();
-                                            }
-                                        }
-                                    });
-                                }
-                            }
-                        }) as Box<dyn FnMut(_)>);
-
-                        reader.set_onload(Some(onload.as_ref().unchecked_ref()));
-                        onload.forget();
-
-                        reader.read_as_array_buffer(&file).ok();
-                    }
+        crate::app::spawn_task(async move {
+            let message = match api.download_media_url(&url, &path, overwrite).await {
+                Ok(job) => crate::state::AppMessage::MediaDownloadStarted(job),
+                Err(crate::api::ApiError::Http(_, message)) => {
+                    crate::state::AppMessage::MediaDownloadFailed(message)
                 }
+                Err(e) => crate::state::AppMessage::MediaDownloadFailed(e.to_string()),
+            };
+            let _ = tx.send(message);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Ask the server to stop a running download.
+    fn cancel_download(
+        &self,
+        job_id: &str,
+        api: &crate::api::ApiClient,
+        ctx: &Context,
+        tx: &std::sync::mpsc::Sender<crate::state::AppMessage>,
+    ) {
+        let api = api.clone();
+        let ctx = ctx.clone();
+        let tx = tx.clone();
+        let job_id = job_id.to_string();
+
+        crate::app::spawn_task(async move {
+            if let Err(e) = api.cancel_media_download(&job_id).await {
+                let _ = tx.send(crate::state::AppMessage::MediaDownloadFailed(e.to_string()));
+                ctx.request_repaint();
             }
-        }) as Box<dyn FnMut(_)>);
+        });
+    }
 
-        input.set_onchange(Some(closure.as_ref().unchecked_ref()));
-        closure.forget();
+    /// Ask the server for its downloads: picks up downloads still running
+    /// after a page reload, and final states whose event was lost.
+    fn fetch_downloads(
+        &mut self,
+        api: &crate::api::ApiClient,
+        ctx: &Context,
+        tx: &std::sync::mpsc::Sender<crate::state::AppMessage>,
+    ) {
+        let api = api.clone();
+        let ctx = ctx.clone();
+        let tx = tx.clone();
+        self.last_downloads_fetch = instant::Instant::now();
+        let asked_for: Vec<String> = self
+            .downloads
+            .iter()
+            .filter(|j| !j.state.is_finished())
+            .map(|j| j.job_id.clone())
+            .collect();
 
-        // Trigger file picker
-        input.click();
-
-        // Clean up (will be done after selection)
-        // Note: In a real app, we'd want to remove the input element after use
+        crate::app::spawn_task(async move {
+            match api.list_media_downloads().await {
+                Ok(list) => {
+                    let _ = tx.send(crate::state::AppMessage::MediaDownloadsLoaded {
+                        jobs: list.downloads,
+                        asked_for,
+                    });
+                    ctx.request_repaint();
+                }
+                Err(e) => tracing::debug!("Could not list media downloads: {}", e),
+            }
+        });
     }
 }
 
@@ -801,6 +978,113 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+/// What the operator clicked on a transfer row.
+pub(crate) enum RowAction {
+    None,
+    Cancel,
+    Dismiss,
+}
+
+/// A URL download or a browser upload, as one row in the Media panel.
+pub(crate) struct TransferRow<'a> {
+    pub name: &'a str,
+    /// Shown with the size once the file is in place.
+    pub done_label: &'a str,
+    pub bytes: u64,
+    pub total: Option<u64>,
+    pub state: MediaDownloadState,
+    pub error: Option<&'a str>,
+    pub hover: &'a str,
+    pub cancel_hint: &'a str,
+}
+
+/// Render one transfer: a progress bar with a cancel button while it runs,
+/// then its outcome with a dismiss button.
+pub(crate) fn transfer_row(ui: &mut Ui, row: TransferRow<'_>) -> RowAction {
+    let mut action = RowAction::None;
+    ui.horizontal(|ui| {
+        match row.state {
+            MediaDownloadState::Downloading => {
+                let (fraction, text) = match row.total {
+                    Some(total) if total > 0 => {
+                        let fraction = (row.bytes as f32 / total as f32).min(1.0);
+                        (
+                            fraction,
+                            format!(
+                                "{}  {} / {} ({:.0}%)",
+                                row.name,
+                                format_size(row.bytes),
+                                format_size(total),
+                                fraction * 100.0
+                            ),
+                        )
+                    }
+                    _ => (0.0, format!("{}  {}", row.name, format_size(row.bytes))),
+                };
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .text(text)
+                        .animate(row.total.is_none())
+                        .desired_width(DOWNLOAD_FIELD_WIDTH),
+                )
+                .on_hover_text(row.hover);
+                if ui
+                    .small_button(egui_phosphor::regular::X)
+                    .on_hover_text(row.cancel_hint)
+                    .clicked()
+                {
+                    action = RowAction::Cancel;
+                }
+            }
+            MediaDownloadState::Done => {
+                ui.colored_label(Color32::GREEN, egui_phosphor::regular::CHECK_CIRCLE);
+                ui.label(format!("{} ({})", row.done_label, format_size(row.bytes)))
+                    .on_hover_text(row.hover);
+            }
+            MediaDownloadState::Failed => {
+                ui.colored_label(Color32::RED, egui_phosphor::regular::WARNING);
+                let error = row.error.unwrap_or("failed");
+                ui.colored_label(Color32::RED, format!("{}: {}", row.name, error))
+                    .on_hover_text(row.hover);
+            }
+            MediaDownloadState::Cancelled => {
+                ui.colored_label(Color32::GRAY, egui_phosphor::regular::PROHIBIT);
+                ui.colored_label(Color32::GRAY, format!("{}: cancelled", row.name));
+            }
+        }
+        if row.state.is_finished()
+            && ui
+                .small_button(egui_phosphor::regular::X)
+                .on_hover_text("Dismiss")
+                .clicked()
+        {
+            action = RowAction::Dismiss;
+        }
+    });
+    action
+}
+
+/// Read the upload endpoint's answer: the server's message on success, or
+/// what went wrong.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn upload_outcome(status: u16, body: &str) -> Result<String, String> {
+    if (200..300).contains(&status) {
+        return match serde_json::from_str::<strom_types::api::MediaOperationResponse>(body) {
+            Ok(response) if response.success => Ok(response.message),
+            Ok(response) => Err(response.message),
+            Err(e) => Err(format!("Unexpected response from the server: {}", e)),
+        };
+    }
+    let reason = serde_json::from_str::<strom_types::api::ErrorResponse>(body)
+        .map(|e| e.error)
+        .unwrap_or_else(|_| body.trim().to_string());
+    if reason.is_empty() {
+        Err(format!("HTTP {} error", status))
+    } else {
+        Err(format!("HTTP {} error: {}", status, reason))
     }
 }
 
@@ -841,5 +1125,37 @@ fn format_timestamp(timestamp: u64) -> String {
         format!("{} hours ago", diff / 3600)
     } else {
         format!("{} days ago", diff / 86400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upload_outcome;
+
+    #[test]
+    fn upload_success_carries_the_server_message() {
+        let body = r#"{"success":true,"message":"Uploaded 1 file(s)"}"#;
+        assert_eq!(upload_outcome(200, body), Ok("Uploaded 1 file(s)".into()));
+    }
+
+    #[test]
+    fn upload_error_shows_status_and_server_reason() {
+        let body = r#"{"error":"Target directory does not exist"}"#;
+        assert_eq!(
+            upload_outcome(400, body),
+            Err("HTTP 400 error: Target directory does not exist".into())
+        );
+        assert_eq!(
+            upload_outcome(413, "length limit exceeded"),
+            Err("HTTP 413 error: length limit exceeded".into())
+        );
+        assert_eq!(upload_outcome(502, ""), Err("HTTP 502 error".into()));
+    }
+
+    #[test]
+    fn upload_with_unreadable_or_unsuccessful_answer_fails() {
+        assert!(upload_outcome(200, "<html>").is_err());
+        let body = r#"{"success":false,"message":"nothing stored"}"#;
+        assert_eq!(upload_outcome(200, body), Err("nothing stored".into()));
     }
 }

@@ -4030,6 +4030,191 @@
         }
       }
     },
+    "/api/media/download": {
+      "post": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "Download a file from a URL into a media directory.",
+        "description": "Checks the URL and waits for the remote server's response headers, then\nanswers 202 with the job while the body downloads in the background.\nProgress and the outcome arrive as `MediaDownloadProgress` WebSocket events.",
+        "operationId": "download_url",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MediaDownloadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Download started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaDownloadJob"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid URL, path or file name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The URL leads to an address downloads may not connect to",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Target directory not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The file exists and overwrite is not set, or another download is writing it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The file is larger than the configured limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request failed validation (URL or file name too long)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The remote server failed or answered with an error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The remote server did not answer in time",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/downloads": {
+      "get": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "List active and recently finished URL downloads.",
+        "operationId": "list_downloads",
+        "responses": {
+          "200": {
+            "description": "Downloads, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaDownloadListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/downloads/{job_id}": {
+      "delete": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "Cancel a running URL download. Nothing is left behind.",
+        "operationId": "cancel_download",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "description": "Download job ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancellation requested",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaOperationResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such download",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The download has already ended, or is complete and being saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/media/file/{path}": {
       "get": {
         "tags": [
@@ -4207,6 +4392,16 @@
           },
           "400": {
             "description": "Invalid path or upload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Upload larger than the server accepts",
             "content": {
               "application/json": {
                 "schema": {
@@ -7714,6 +7909,121 @@
             "description": "Whether the login was successful"
           }
         }
+      },
+      "MediaDownloadJob": {
+        "type": "object",
+        "description": "One URL download into the media library.\n\nCarried by `POST /api/media/download`, `GET /api/media/downloads` and the\n`MediaDownloadProgress` WebSocket event.",
+        "required": [
+          "job_id",
+          "url",
+          "directory",
+          "filename",
+          "path",
+          "bytes",
+          "state"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes received so far.",
+            "minimum": 0
+          },
+          "directory": {
+            "type": "string",
+            "description": "Directory the file is saved into, relative to the media root."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the download failed, when it did."
+          },
+          "filename": {
+            "type": "string",
+            "description": "File name the download is saved as."
+          },
+          "job_id": {
+            "type": "string",
+            "description": "Job identifier, used to cancel the download."
+          },
+          "path": {
+            "type": "string",
+            "description": "Path of the finished file, relative to the media root."
+          },
+          "state": {
+            "$ref": "#/components/schemas/MediaDownloadState",
+            "description": "Current state."
+          },
+          "total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Total size, when the server announced one.",
+            "minimum": 0
+          },
+          "url": {
+            "type": "string",
+            "description": "The requested URL without user info, query or fragment, for display."
+          }
+        }
+      },
+      "MediaDownloadListResponse": {
+        "type": "object",
+        "description": "Response listing active and recently finished URL downloads.",
+        "required": [
+          "downloads"
+        ],
+        "properties": {
+          "downloads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MediaDownloadJob"
+            },
+            "description": "Downloads, oldest first."
+          }
+        }
+      },
+      "MediaDownloadRequest": {
+        "type": "object",
+        "description": "Request to download a file from a URL into the media library.",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "filename": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "File name to save as. When absent, the name comes from the response's\n`Content-Disposition` header, then from the URL's last path segment.\nAt most 200 bytes."
+          },
+          "overwrite": {
+            "type": "boolean",
+            "description": "Replace an existing file of the same name. Without it, an existing file\nmakes the request fail with 409 Conflict."
+          },
+          "path": {
+            "type": "string",
+            "description": "Directory to save into, relative to the media root. Empty means the root."
+          },
+          "url": {
+            "type": "string",
+            "description": "The http or https URL to fetch."
+          }
+        }
+      },
+      "MediaDownloadState": {
+        "type": "string",
+        "description": "Where a URL download is in its life.",
+        "enum": [
+          "downloading",
+          "done",
+          "failed",
+          "cancelled"
+        ]
       },
       "MediaFileEntry": {
         "type": "object",
@@ -11620,6 +11930,26 @@
                 "type": "string",
                 "enum": [
                   "VisionMixerEffectChanged"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A URL download into the media library started, progressed, or ended.\nProgress is throttled per job; the final state (done, failed or\ncancelled) is always sent.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/MediaDownloadJob",
+                "description": "A URL download into the media library started, progressed, or ended.\nProgress is throttled per job; the final state (done, failed or\ncancelled) is always sent."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "MediaDownloadProgress"
                 ]
               }
             }

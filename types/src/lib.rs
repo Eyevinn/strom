@@ -21,6 +21,7 @@ pub mod element;
 pub mod env;
 pub mod events;
 pub mod flow;
+pub mod media_download;
 pub mod mediaplayer;
 pub mod mixer;
 pub mod network;

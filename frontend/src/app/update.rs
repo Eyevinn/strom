@@ -906,6 +906,15 @@ impl eframe::App for StromApp {
                         StromEvent::BufferAgeProbeDeactivated { probe_id, .. } => {
                             self.buffer_age_data.probe_deactivated(&probe_id);
                         }
+                        StromEvent::MediaDownloadProgress(job) => {
+                            if self.media_page.apply_download(job) {
+                                self.media_page.refresh(
+                                    &self.api,
+                                    ui.ctx(),
+                                    &self.channels.sender(),
+                                );
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1340,6 +1349,25 @@ impl eframe::App for StromApp {
                     tracing::debug!("Media refresh requested");
                     self.media_page
                         .refresh(&self.api, ui.ctx(), &self.channels.sender());
+                }
+                AppMessage::MediaDownloadStarted(job) => {
+                    self.media_page.download_started(job);
+                }
+                AppMessage::MediaDownloadFailed(message) => {
+                    self.media_page.download_failed(message);
+                }
+                AppMessage::MediaDownloadsLoaded { jobs, asked_for } => {
+                    if self.media_page.downloads_loaded(jobs, &asked_for) {
+                        self.media_page
+                            .refresh(&self.api, ui.ctx(), &self.channels.sender());
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                AppMessage::MediaUpload(update) => {
+                    if self.media_page.apply_upload(update) {
+                        self.media_page
+                            .refresh(&self.api, ui.ctx(), &self.channels.sender());
+                    }
                 }
             }
         }

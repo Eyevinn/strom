@@ -14,6 +14,9 @@ use strom_types::api::{
     CreateDirectoryRequest, ErrorResponse, ListMediaResponse, MediaFileEntry,
     MediaOperationResponse, RenameMediaRequest,
 };
+use strom_types::media_download::{
+    MediaDownloadJob, MediaDownloadListResponse, MediaDownloadRequest,
+};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
@@ -193,6 +196,11 @@ pub async fn list_media(
         let name = entry.file_name().to_string_lossy().to_string();
         let is_directory = metadata.is_dir();
 
+        // A URL download in progress is not a file yet.
+        if !is_directory && crate::media_download::filename::is_temp_file(&name) {
+            continue;
+        }
+
         // Calculate relative path from media root
         let relative_path = path
             .strip_prefix(&canonical_root)
@@ -339,6 +347,7 @@ pub async fn download_file(
     responses(
         (status = 200, description = "Upload successful", body = MediaOperationResponse),
         (status = 400, description = "Invalid path or upload", body = ErrorResponse),
+        (status = 413, description = "Upload larger than the server accepts", body = ErrorResponse),
         (status = 500, description = "Upload failed", body = ErrorResponse)
     )
 )]
@@ -359,7 +368,7 @@ pub async fn upload_files(
 
     let mut uploaded_count = 0;
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| {
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| {
         error!("Failed to read multipart field: {}", e);
         (
             StatusCode::BAD_REQUEST,
@@ -389,15 +398,13 @@ pub async fn upload_files(
             }
         }
 
-        let data = field.bytes().await.map_err(|e| {
-            error!("Failed to read file data: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to read file data")),
-            )
-        })?;
-
-        let mut file = fs::File::create(&file_path).await.map_err(|e| {
+        // Stream the field into a hidden temporary file and rename it into
+        // place once the whole file has arrived. An upload that is cancelled
+        // or cut off never shows up under its final name, and the guard
+        // removes the temporary file on every early return, including when
+        // the client disconnects and this future is dropped.
+        let mut temp = crate::media_download::TempFile::new_in(&target_dir);
+        let mut file = fs::File::create(temp.path()).await.map_err(|e| {
             error!("Failed to create file: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -405,13 +412,43 @@ pub async fn upload_files(
             )
         })?;
 
-        file.write_all(&data).await.map_err(|e| {
+        while let Some(chunk) = field.chunk().await.map_err(|e| {
+            warn!("Upload of {} stopped: {}", filename, e);
+            // Most often the client cancelled or went away; that is not a
+            // server error. A body over the size limit keeps its 413.
+            let status = match e.status() {
+                StatusCode::PAYLOAD_TOO_LARGE => StatusCode::PAYLOAD_TOO_LARGE,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            (status, Json(ErrorResponse::new(e.body_text())))
+        })? {
+            file.write_all(&chunk).await.map_err(|e| {
+                error!("Failed to write file: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Failed to write file")),
+                )
+            })?;
+        }
+
+        file.flush().await.map_err(|e| {
             error!("Failed to write file: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Failed to write file")),
             )
         })?;
+        drop(file);
+
+        // An upload replaces a file of the same name, as it always has.
+        fs::rename(temp.path(), &file_path).await.map_err(|e| {
+            error!("Failed to move upload into place: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Failed to write file")),
+            )
+        })?;
+        temp.keep();
 
         info!("Uploaded file: {}", file_path.display());
         uploaded_count += 1;
@@ -659,4 +696,97 @@ pub async fn delete_directory(
         "Deleted directory {}",
         dirname
     ))))
+}
+
+/// Download a file from a URL into a media directory.
+///
+/// Checks the URL and waits for the remote server's response headers, then
+/// answers 202 with the job while the body downloads in the background.
+/// Progress and the outcome arrive as `MediaDownloadProgress` WebSocket events.
+#[utoipa::path(
+    post,
+    path = "/api/media/download",
+    tag = "Media",
+    request_body = MediaDownloadRequest,
+    responses(
+        (status = 202, description = "Download started", body = MediaDownloadJob),
+        (status = 400, description = "Invalid URL, path or file name", body = ErrorResponse),
+        (status = 403, description = "The URL leads to an address downloads may not connect to", body = ErrorResponse),
+        (status = 404, description = "Target directory not found", body = ErrorResponse),
+        (status = 409, description = "The file exists and overwrite is not set, or another download is writing it", body = ErrorResponse),
+        (status = 413, description = "The file is larger than the configured limit", body = ErrorResponse),
+        (status = 422, description = "The request failed validation (URL or file name too long)", body = ErrorResponse),
+        (status = 502, description = "The remote server failed or answered with an error", body = ErrorResponse),
+        (status = 504, description = "The remote server did not answer in time", body = ErrorResponse)
+    )
+)]
+pub async fn download_url(
+    State(state): State<AppState>,
+    ValidatedJson(request): ValidatedJson<MediaDownloadRequest>,
+) -> Result<(StatusCode, Json<MediaDownloadJob>), (StatusCode, Json<ErrorResponse>)> {
+    let media_root = state.media_path();
+    let target_dir = validate_path(media_root, &request.path)?;
+
+    if !target_dir.is_dir() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new("Target directory does not exist")),
+        ));
+    }
+
+    let canonical_root = media_root
+        .canonicalize()
+        .unwrap_or_else(|_| media_root.to_path_buf());
+    let directory = target_dir
+        .strip_prefix(&canonical_root)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let events = state.events().clone();
+    state
+        .media_downloads()
+        .start(events, target_dir, directory, request)
+        .await
+        .map(|job| (StatusCode::ACCEPTED, Json(job)))
+        .map_err(|e| (e.status(), Json(ErrorResponse::new(e.message()))))
+}
+
+/// List active and recently finished URL downloads.
+#[utoipa::path(
+    get,
+    path = "/api/media/downloads",
+    tag = "Media",
+    responses(
+        (status = 200, description = "Downloads, oldest first", body = MediaDownloadListResponse)
+    )
+)]
+pub async fn list_downloads(State(state): State<AppState>) -> Json<MediaDownloadListResponse> {
+    Json(MediaDownloadListResponse {
+        downloads: state.media_downloads().list(),
+    })
+}
+
+/// Cancel a running URL download. Nothing is left behind.
+#[utoipa::path(
+    delete,
+    path = "/api/media/downloads/{job_id}",
+    tag = "Media",
+    params(
+        ("job_id" = String, Path, description = "Download job ID")
+    ),
+    responses(
+        (status = 200, description = "Cancellation requested", body = MediaOperationResponse),
+        (status = 404, description = "No such download", body = ErrorResponse),
+        (status = 409, description = "The download has already ended, or is complete and being saved", body = ErrorResponse)
+    )
+)]
+pub async fn cancel_download(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<MediaOperationResponse>, (StatusCode, Json<ErrorResponse>)> {
+    state
+        .media_downloads()
+        .cancel(&job_id)
+        .map(|()| Json(MediaOperationResponse::success("Cancelling download")))
+        .map_err(|e| (e.status(), Json(ErrorResponse::new(e.message()))))
 }

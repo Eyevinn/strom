@@ -582,6 +582,10 @@ fn run_with_gui(
             .await
             .expect("failed to configure port pool");
         state
+            .media_downloads()
+            .configure(config.media_download_settings());
+        strom::media_download::spawn_temp_file_sweeper(state.media_path().clone());
+        state
             .load_from_storage()
             .await
             .expect("Failed to load storage");
@@ -836,6 +840,10 @@ async fn run_headless(
             config.probe_before_handout,
         )
         .await?;
+    state
+        .media_downloads()
+        .configure(config.media_download_settings());
+    strom::media_download::spawn_temp_file_sweeper(state.media_path().clone());
     state.load_from_storage().await?;
 
     // Store the log reload handle so log levels can be changed at runtime

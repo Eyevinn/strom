@@ -79,6 +79,8 @@ struct AppStateInner {
     ptp_monitor: PtpMonitor,
     /// Media files directory path
     media_path: PathBuf,
+    /// URL downloads into the media library
+    media_downloads: Arc<crate::media_download::MediaDownloads>,
     /// WHEP endpoint registry (maps endpoint IDs to internal ports)
     whep_registry: WhepRegistry,
     /// WHIP endpoint registry (maps endpoint IDs to internal ports)
@@ -164,6 +166,7 @@ impl AppState {
                 discovery: DiscoveryService::new(events, sap_multicast_addresses.clone()),
                 ptp_monitor: PtpMonitor::new(),
                 media_path: media_path.into(),
+                media_downloads: Arc::new(crate::media_download::MediaDownloads::new()),
                 whep_registry: WhepRegistry::new(),
                 whip_registry: WhipRegistry::new(),
                 whip_session_manager: Arc::new(WhipSessionManager::new()),
@@ -322,6 +325,11 @@ impl AppState {
     /// Get the media files directory path.
     pub fn media_path(&self) -> &PathBuf {
         &self.inner.media_path
+    }
+
+    /// Get the URL downloads into the media library.
+    pub fn media_downloads(&self) -> &Arc<crate::media_download::MediaDownloads> {
+        &self.inner.media_downloads
     }
 
     /// Get the configured ICE servers for WebRTC.

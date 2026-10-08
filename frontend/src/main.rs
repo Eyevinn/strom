@@ -23,6 +23,8 @@ mod links;
 mod list_navigator;
 mod loudness;
 mod media;
+#[cfg(target_arch = "wasm32")]
+mod media_upload;
 mod mediaplayer;
 mod meter;
 mod mixer;

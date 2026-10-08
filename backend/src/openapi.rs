@@ -34,6 +34,9 @@ use strom_types::discovery::{
 };
 use strom_types::events::StromEvent;
 use strom_types::flow::{FlowProperties, GStreamerClockType};
+use strom_types::media_download::{
+    MediaDownloadJob, MediaDownloadListResponse, MediaDownloadRequest, MediaDownloadState,
+};
 use strom_types::mediaplayer::{
     GotoRequest, PlayerAction, PlayerControlRequest, PlayerStateResponse, SeekRequest,
     SetPlaylistRequest,
@@ -129,6 +132,9 @@ use utoipa::OpenApi;
         crate::api::media::delete_file,
         crate::api::media::create_directory,
         crate::api::media::delete_directory,
+        crate::api::media::download_url,
+        crate::api::media::list_downloads,
+        crate::api::media::cancel_download,
         // Auth endpoints
         crate::auth::login_handler,
         crate::auth::logout_handler,
@@ -250,6 +256,10 @@ use utoipa::OpenApi;
             RenameMediaRequest,
             CreateDirectoryRequest,
             MediaOperationResponse,
+            MediaDownloadRequest,
+            MediaDownloadJob,
+            MediaDownloadState,
+            MediaDownloadListResponse,
             // Flow dynamic pads
             DynamicPadsResponse,
             // Flow additional types

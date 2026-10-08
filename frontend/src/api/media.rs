@@ -36,56 +36,6 @@ impl ApiClient {
         format!("{}/media/file/{}", self.base_url, urlencoding::encode(path))
     }
 
-    /// Upload a file to the media directory (WASM only).
-    #[cfg(target_arch = "wasm32")]
-    pub async fn upload_media(
-        &self,
-        target_path: &str,
-        filename: &str,
-        data: Vec<u8>,
-    ) -> ApiResult<strom_types::api::MediaOperationResponse> {
-        use tracing::info;
-
-        let url = format!(
-            "{}/media/upload?path={}",
-            self.base_url,
-            urlencoding::encode(target_path)
-        );
-        info!("Uploading file {} to: {}", filename, url);
-
-        let part = reqwest::multipart::Part::bytes(data)
-            .file_name(filename.to_string())
-            .mime_str("application/octet-stream")
-            .map_err(|e| ApiError::Network(e.to_string()))?;
-
-        let form = reqwest::multipart::Form::new().part("file", part);
-
-        let response = self
-            .with_auth(self.client.post(&url).multipart(form))
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!("Network error uploading file: {}", e);
-                ApiError::Network(e.to_string())
-            })?;
-
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let text = response.text().await.unwrap_or_default();
-            tracing::error!("HTTP error {}: {}", status, text);
-            return Err(ApiError::Http(status, text));
-        }
-
-        let result: strom_types::api::MediaOperationResponse =
-            response.json().await.map_err(|e| {
-                tracing::error!("Failed to parse upload response: {}", e);
-                ApiError::Decode(e.to_string())
-            })?;
-
-        info!("Upload result: {}", result.message);
-        Ok(result)
-    }
-
     /// Rename a file or directory.
     pub async fn rename_media(
         &self,
@@ -242,5 +192,102 @@ impl ApiClient {
 
         info!("Delete directory result: {}", result.message);
         Ok(result)
+    }
+
+    /// Start downloading a URL into a media directory. Returns once the
+    /// server has the response headers; progress arrives over the WebSocket.
+    pub async fn download_media_url(
+        &self,
+        url: &str,
+        target_path: &str,
+        overwrite: bool,
+    ) -> ApiResult<strom_types::media_download::MediaDownloadJob> {
+        let endpoint = format!("{}/media/download", self.base_url);
+        tracing::info!("Requesting media download into '{}'", target_path);
+
+        let request = strom_types::media_download::MediaDownloadRequest {
+            url: url.to_string(),
+            path: target_path.to_string(),
+            filename: None,
+            overwrite,
+        };
+
+        let response = self
+            .with_auth(self.client.post(&endpoint).json(&request))
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Network error starting media download: {}", e);
+                ApiError::Network(e.to_string())
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            tracing::warn!("Media download refused ({}): {}", status, text);
+            // Show the server's own explanation rather than raw JSON.
+            let message = serde_json::from_str::<strom_types::api::ErrorResponse>(&text)
+                .map(|e| e.error)
+                .unwrap_or(text);
+            return Err(ApiError::Http(status, message));
+        }
+
+        response.json().await.map_err(|e| {
+            tracing::error!("Failed to parse media download response: {}", e);
+            ApiError::Decode(e.to_string())
+        })
+    }
+
+    /// List active and recently finished URL downloads.
+    pub async fn list_media_downloads(
+        &self,
+    ) -> ApiResult<strom_types::media_download::MediaDownloadListResponse> {
+        let url = format!("{}/media/downloads", self.base_url);
+
+        let response = self
+            .with_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http(status, text));
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| ApiError::Decode(e.to_string()))
+    }
+
+    /// Cancel a running URL download.
+    pub async fn cancel_media_download(
+        &self,
+        job_id: &str,
+    ) -> ApiResult<strom_types::api::MediaOperationResponse> {
+        let url = format!(
+            "{}/media/downloads/{}",
+            self.base_url,
+            urlencoding::encode(job_id)
+        );
+
+        let response = self
+            .with_auth(self.client.delete(&url))
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http(status, text));
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| ApiError::Decode(e.to_string()))
     }
 }

@@ -140,6 +140,20 @@ pub enum AppMessage {
     MediaError(String),
     /// Request media page refresh
     MediaRefresh,
+    /// A URL download was accepted by the server
+    MediaDownloadStarted(strom_types::media_download::MediaDownloadJob),
+    /// A URL download could not start
+    MediaDownloadFailed(String),
+    /// URL downloads listed by the server (catch-up after a reload or lost
+    /// events), with the ids of the running downloads the page tracked when
+    /// it asked
+    MediaDownloadsLoaded {
+        jobs: Vec<strom_types::media_download::MediaDownloadJob>,
+        asked_for: Vec<String>,
+    },
+    /// A browser upload started, progressed or ended
+    #[cfg(target_arch = "wasm32")]
+    MediaUpload(crate::media_upload::UploadUpdate),
 
     /// Log level loaded from API
     LogLevelLoaded { current: String, default: String },
