@@ -4,8 +4,8 @@
 //! block adapts its own input. Several places learn only at runtime what a
 //! producer delivers, each at its own moment: a CAPS-event probe on the WHEP
 //! Output input ([`crate::gst::video_input_bridge`]), a link the linker retries
-//! after it was refused ([`crate::gst::gl_link`]), and a query probe on a GL
-//! consumer's input ([`crate::gst::gl_input_front`]). They keep their own
+//! after it was refused ([`crate::gst::gl_link`]), and query and CAPS-event
+//! probes on a GL consumer's input ([`crate::gst::gl_input_front`]). They keep their own
 //! timing, and ask [`decide`] what to insert. The thumbnail tap
 //! ([`crate::gst::thumbnail_tap`]) asks too, from the caps already on its tee,
 //! before it attaches a branch that reads frames on the CPU.
@@ -13,6 +13,7 @@
 //! | Consumer | Producer caps | Adapters |
 //! |---|---|---|
 //! | [`Consumer::GlUpload`] | raw video in CUDA memory only | [`Adapter::CudaDownload`], or [`Refusal::MissingFactory`] when `cudadownload` is not installed |
+//! | [`Consumer::GlUpload`] | raw video in system memory only, in no pixel format `glupload` uploads | [`Adapter::VideoConvert`] |
 //! | [`Consumer::GlUpload`] | anything else | none |
 //! | [`Consumer::Accepts`] | raw video in GL memory only, consumer takes system-memory raw video | [`Adapter::GlDownload`] |
 //! | [`Consumer::SystemMemory`] | raw video in system memory | none |
@@ -34,6 +35,9 @@ pub const GL_MEMORY_FEATURE: &str = "memory:GLMemory";
 /// The caps feature that marks a buffer as living in CUDA memory.
 pub const CUDA_MEMORY_FEATURE: &str = "memory:CUDAMemory";
 
+/// The element that converts raw video in system memory between pixel formats.
+pub const VIDEO_CONVERT_FACTORY: &str = "videoconvert";
+
 /// The element that downloads GL memory to system memory.
 pub const GL_DOWNLOAD_FACTORY: &str = "gldownload";
 
@@ -46,9 +50,13 @@ pub const CUDA_DOWNLOAD_FACTORY: &str = "cudadownload";
 #[derive(Debug, Clone, Copy)]
 pub enum Consumer<'a> {
     /// A GL consumer's `glupload`. It takes system memory, GL memory and
-    /// DMABuf, but not CUDA memory. The producer caps are what an ACCEPT_CAPS
-    /// query or a filtered CAPS query offers.
-    GlUpload,
+    /// DMABuf, but not CUDA memory, and in system memory only the pixel
+    /// formats it can upload: these caps, its sink template's system-memory
+    /// entries ([`gl_upload_system_caps`]). Which formats those are depends on
+    /// the GStreamer version (10-bit 4:4:4 with alpha is missing from older
+    /// ones, `AYUV64` from all of them so far). The producer caps are what an
+    /// ACCEPT_CAPS query or a filtered CAPS query offers.
+    GlUpload(&'a gst::CapsRef),
     /// A consumer that takes these caps: what its sink pad answers to a caps
     /// query (for a link that was refused), or what it can really process
     /// where it advertises more. The producer caps are the producer's answer
@@ -67,6 +75,9 @@ pub enum Adapter {
     GlDownload,
     /// `cudadownload`: CUDA memory to GL or system memory.
     CudaDownload,
+    /// `videoconvert`: a system-memory pixel format the consumer cannot take
+    /// to one it can.
+    VideoConvert,
 }
 
 /// Why the consumer cannot be adapted to take the producer.
@@ -106,11 +117,21 @@ pub fn decide(
     available: impl Fn(&str) -> bool,
 ) -> Result<Vec<Adapter>, Refusal> {
     match consumer {
-        Consumer::GlUpload => {
-            if !offers_only_cuda_memory(producer) {
-                return Ok(Vec::new());
+        Consumer::GlUpload(uploads) => {
+            if offers_only_cuda_memory(producer) {
+                return cuda_download(available);
             }
-            cuda_download(available)
+            // Compared by structure: a meta feature next to system memory
+            // does not change which pixel formats can be uploaded.
+            if !uploads.is_any()
+                && offers_only_system_memory_raw_video(producer)
+                && !producer
+                    .iter()
+                    .any(|offered| uploads.iter().any(|taken| offered.can_intersect(taken)))
+            {
+                return Ok(vec![Adapter::VideoConvert]);
+            }
+            Ok(Vec::new())
         }
         Consumer::Accepts(accepted) => {
             if offers_only_gl_memory(producer) && accepts_system_memory_raw_video(accepted) {
@@ -216,6 +237,9 @@ pub fn build_elements(
             Adapter::CudaDownload => {
                 elements.push(make(CUDA_DOWNLOAD_FACTORY, name_prefix, "cudadownload")?)
             }
+            Adapter::VideoConvert => {
+                elements.push(make(VIDEO_CONVERT_FACTORY, name_prefix, "videoconvert")?)
+            }
         }
     }
     Ok(elements)
@@ -226,6 +250,43 @@ fn make(factory: &str, name_prefix: &str, suffix: &str) -> Result<gst::Element, 
         .name(format!("{}_{}", name_prefix, suffix))
         .build()
         .map_err(|e| format!("{} could not be created: {}", factory, e))
+}
+
+/// What `glupload` takes in system memory: the system-memory raw video
+/// entries of its sink template, with their features dropped so they match
+/// producer caps written either way. `None` when `glupload` is not installed.
+/// Read once: the registry does not change under a running process.
+pub fn gl_upload_system_caps() -> Option<&'static gst::Caps> {
+    static CAPS: std::sync::OnceLock<Option<gst::Caps>> = std::sync::OnceLock::new();
+    CAPS.get_or_init(|| {
+        let factory = gst::ElementFactory::find("glupload")?;
+        let template = factory
+            .static_pad_templates()
+            .into_iter()
+            .find(|t| t.direction() == gst::PadDirection::Sink)?
+            .caps();
+        let mut system = gst::Caps::new_empty();
+        {
+            let system = system.get_mut().expect("new caps are writable");
+            for (structure, features) in template.iter_with_features() {
+                if structure.name() == "video/x-raw" && is_system_memory(features) {
+                    system.append_structure(structure.to_owned());
+                }
+            }
+        }
+        (!system.is_empty()).then_some(system)
+    })
+    .as_ref()
+}
+
+/// True when every structure in `caps` is raw video in system memory.
+fn offers_only_system_memory_raw_video(caps: &gst::CapsRef) -> bool {
+    if caps.is_any() || caps.is_empty() {
+        return false;
+    }
+    caps.iter_with_features().all(|(structure, features)| {
+        structure.name() == "video/x-raw" && !features.is_any() && is_system_memory(features)
+    })
 }
 
 /// True when every structure in `caps` is raw video in CUDA memory.
@@ -321,10 +382,64 @@ mod tests {
 
     // --- Consumer::GlUpload ---------------------------------------------
 
+    /// Stands in for `glupload`'s system-memory formats, which differ between
+    /// GStreamer versions.
+    fn uploads() -> gst::Caps {
+        caps("video/x-raw, format=(string){ RGBA, BGRA, NV12, I420 }")
+    }
+
+    /// ProRes 4444 decodes to 10- or 16-bit 4:4:4 with alpha (`A444_10LE`
+    /// from `avdec_prores`, `AYUV64` from VideoToolbox in system memory),
+    /// which `glupload` does not upload: a converter goes in front.
+    #[test]
+    fn gl_upload_a_format_it_cannot_upload_gets_videoconvert() {
+        for c in [
+            "video/x-raw, format=AYUV64, width=1920, height=1080",
+            "video/x-raw(memory:SystemMemory), format=A444_10LE, width=320, height=180",
+            "video/x-raw(memory:SystemMemory, meta:GstVideoOverlayComposition), format=AYUV64",
+        ] {
+            assert_eq!(
+                decide(&caps(c), Consumer::GlUpload(&uploads()), none),
+                Ok(vec![Adapter::VideoConvert]),
+                "{c}"
+            );
+        }
+    }
+
+    /// A query that offers several formats, one of which uploads, settles on
+    /// that one; a format in GPU memory is not converted on the CPU.
+    #[test]
+    fn gl_upload_an_offer_with_an_uploadable_format_needs_nothing() {
+        for c in [
+            "video/x-raw, format={ AYUV64, RGBA }",
+            "video/x-raw, format=AYUV64; video/x-raw, format=NV12",
+            "video/x-raw(memory:SystemMemory, meta:GstVideoOverlayComposition), format=NV12",
+            "video/x-raw(memory:GLMemory), format=AYUV64",
+            "video/x-raw, format=AYUV64; video/x-raw(memory:GLMemory), format=RGBA",
+        ] {
+            assert_eq!(
+                decide(&caps(c), Consumer::GlUpload(&uploads()), none),
+                Ok(vec![]),
+                "{c}"
+            );
+        }
+    }
+
+    /// The real `glupload` takes the common 8-bit formats and not `AYUV64`.
+    #[test]
+    fn gl_upload_system_caps_come_from_the_registry() {
+        let _ = gst::init();
+        let Some(uploads) = gl_upload_system_caps() else {
+            return;
+        };
+        assert!(caps("video/x-raw, format=RGBA").can_intersect(uploads));
+        assert!(!caps("video/x-raw, format=AYUV64").can_intersect(uploads));
+    }
+
     #[test]
     fn gl_upload_cuda_memory_gets_cudadownload() {
         assert_eq!(
-            decide(&caps(CUDA), Consumer::GlUpload, all),
+            decide(&caps(CUDA), Consumer::GlUpload(&uploads()), all),
             Ok(vec![Adapter::CudaDownload])
         );
     }
@@ -332,7 +447,7 @@ mod tests {
     #[test]
     fn gl_upload_cuda_memory_without_cudadownload_is_missing() {
         assert_eq!(
-            decide(&caps(CUDA), Consumer::GlUpload, none),
+            decide(&caps(CUDA), Consumer::GlUpload(&uploads()), none),
             Err(Refusal::MissingFactory {
                 factory: CUDA_DOWNLOAD_FACTORY
             })
@@ -349,9 +464,13 @@ mod tests {
             "video/x-raw(memory:DMABuf), format=DMA_DRM",
             "video/x-raw(ANY)",
         ] {
-            assert_eq!(decide(&caps(c), Consumer::GlUpload, all), Ok(vec![]), "{c}");
             assert_eq!(
-                decide(&caps(c), Consumer::GlUpload, none),
+                decide(&caps(c), Consumer::GlUpload(&uploads()), all),
+                Ok(vec![]),
+                "{c}"
+            );
+            assert_eq!(
+                decide(&caps(c), Consumer::GlUpload(&uploads()), none),
                 Ok(vec![]),
                 "{c}"
             );
@@ -366,8 +485,14 @@ mod tests {
             "{}; video/x-raw(memory:GLMemory), format=NV12; video/x-raw, format=NV12",
             CUDA
         ));
-        assert_eq!(decide(&offer, Consumer::GlUpload, all), Ok(vec![]));
-        assert_eq!(decide(&offer, Consumer::GlUpload, none), Ok(vec![]));
+        assert_eq!(
+            decide(&offer, Consumer::GlUpload(&uploads()), all),
+            Ok(vec![])
+        );
+        assert_eq!(
+            decide(&offer, Consumer::GlUpload(&uploads()), none),
+            Ok(vec![])
+        );
     }
 
     /// Extra features next to CUDA memory (an overlay meta) do not change what
@@ -377,7 +502,7 @@ mod tests {
         let c =
             caps("video/x-raw(memory:CUDAMemory, meta:GstVideoOverlayComposition), format=NV12");
         assert_eq!(
-            decide(&c, Consumer::GlUpload, all),
+            decide(&c, Consumer::GlUpload(&uploads()), all),
             Ok(vec![Adapter::CudaDownload])
         );
     }
@@ -386,7 +511,7 @@ mod tests {
     fn gl_upload_not_raw_video_needs_nothing() {
         for c in NOT_RAW_VIDEO {
             assert_eq!(
-                decide(&caps(c), Consumer::GlUpload, none),
+                decide(&caps(c), Consumer::GlUpload(&uploads()), none),
                 Ok(vec![]),
                 "{c}"
             );
