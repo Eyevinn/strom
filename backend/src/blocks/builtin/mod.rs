@@ -36,6 +36,7 @@ pub mod time_offset;
 pub mod videoenc;
 pub mod videoformat;
 pub mod vision_mixer;
+pub(crate) mod webrtc_props;
 pub mod whep;
 pub mod whip;
 
