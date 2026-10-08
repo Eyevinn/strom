@@ -452,6 +452,10 @@ async fn wait_for_layout(
 /// failing, and is refused while a stinger is on air.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
+#[cfg_attr(
+    windows,
+    ignore = "Windows refuses to replace a file another handle holds open, and the parked player holds the clip open"
+)]
 async fn reload_picks_up_a_clip_rewritten_on_disk() {
     use strom_types::stinger::StingerLayout;
     if !common::plugins_available(CODEC_ELEMENTS) {
@@ -510,6 +514,10 @@ async fn reload_picks_up_a_clip_rewritten_on_disk() {
 /// the new file, with no reload.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
+#[cfg_attr(
+    windows,
+    ignore = "Windows refuses to replace a file another handle holds open, and the parked player holds the clip open"
+)]
 async fn a_cue_loads_a_parked_clip_rewritten_on_disk() {
     use strom_types::stinger::StingerLayout;
     if !common::plugins_available(CODEC_ELEMENTS) {
