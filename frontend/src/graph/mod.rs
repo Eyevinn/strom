@@ -277,6 +277,22 @@ pub(super) fn parse_pad_ref(pad_ref: &str) -> Option<(String, String)> {
     }
 }
 
+/// Parse one end of a link into (node_id, optional pad_name).
+///
+/// Accepts the forms documented on `Link`: `"id:pad"`, and the element-level
+/// forms `"id"` and `"id::"` (also `"id:"`), which carry no pad name and
+/// return `None`. Explicit pads split exactly like [`parse_pad_ref`].
+pub(super) fn parse_link_endpoint(pad_ref: &str) -> (String, Option<String>) {
+    if let Some(id) = pad_ref.strip_suffix("::") {
+        return (id.to_string(), None);
+    }
+    match parse_pad_ref(pad_ref) {
+        Some((id, pad)) if !pad.is_empty() => (id, Some(pad)),
+        Some((id, _)) => (id, None),
+        None => (pad_ref.to_string(), None),
+    }
+}
+
 /// Check if a pad is a request pad (dynamic pad with template like "sink_%u").
 pub(super) fn is_request_pad(pad_info: &PadInfo) -> bool {
     use strom_types::element::PadPresence;
@@ -318,7 +334,7 @@ pub(super) fn get_connected_request_pad_names(
     for link in links {
         let pad_ref = if is_sink { &link.to } else { &link.from };
 
-        if let Some((elem_id, pad_name)) = parse_pad_ref(pad_ref) {
+        if let (elem_id, Some(pad_name)) = parse_link_endpoint(pad_ref) {
             if elem_id == element_id && pad_name.starts_with(&pattern) {
                 pad_names.insert(pad_name);
             }
