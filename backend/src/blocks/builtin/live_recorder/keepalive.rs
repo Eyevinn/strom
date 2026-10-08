@@ -13,6 +13,7 @@
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_video as gst_video;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -69,6 +70,8 @@ pub struct Track {
     retired: AtomicBool,
     /// Milliseconds since `epoch` when the queue last took a buffer. 0 = never.
     last_buffer_ms: AtomicU64,
+    /// Milliseconds since `epoch` when a buffer last arrived, kept or dropped.
+    last_seen_ms: AtomicU64,
     /// End of the last buffer, in the track's segment time (ns).
     last_end_ns: AtomicU64,
     /// End of the GAPs sent so far, in segment time (ns). A buffer that starts
@@ -97,6 +100,7 @@ impl Track {
             has_caps: AtomicBool::new(false),
             retired: AtomicBool::new(false),
             last_buffer_ms: AtomicU64::new(0),
+            last_seen_ms: AtomicU64::new(0),
             last_end_ns: AtomicU64::new(NONE),
             gap_until_ns: AtomicU64::new(0),
             wait_keyframe: AtomicBool::new(false),
@@ -249,6 +253,10 @@ impl Track {
             };
             let pts = pts.nseconds();
             let keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
+            track.last_seen_ms.store(
+                track.epoch.elapsed().as_millis().max(1) as u64,
+                Ordering::Relaxed,
+            );
 
             // Its time was already declared empty by a GAP.
             if pts < track.gap_until_ns.load(Ordering::Relaxed) {
@@ -272,6 +280,26 @@ impl Track {
             );
             gst::PadProbeReturn::Ok
         });
+    }
+
+    /// The video has gone quiet. What comes back may be delta frames against
+    /// frames that never reached the file, so drop until a keyframe, and ask
+    /// upstream for one now: an encoder in the flow then answers with its next
+    /// frame instead of the next scheduled keyframe, up to a GOP later.
+    fn wait_for_keyframe(&self) {
+        self.wait_keyframe.store(true, Ordering::Relaxed);
+        self.request_keyframe();
+    }
+
+    /// Ask upstream for a keyframe.
+    fn request_keyframe(&self) {
+        if let Some(pad) = self.queue.upgrade().and_then(|q| q.static_pad("sink")) {
+            pad.push_event(
+                gst_video::UpstreamForceKeyUnitEvent::builder()
+                    .all_headers(true)
+                    .build(),
+            );
+        }
     }
 
     /// Send a GAP from where the track stands to `running_time` (less the
@@ -348,6 +376,7 @@ pub fn spawn(block_id: &str, mux: &gst::Element, tracks: Vec<Arc<Track>>) {
 fn run(block_id: &str, mux: gst::glib::WeakRef<gst::Element>, tracks: &[Arc<Track>]) {
     let mut first_data: Option<Instant> = None;
     let mut quiet_reported = vec![false; tracks.len()];
+    let mut asked_on_return = vec![false; tracks.len()];
 
     loop {
         std::thread::sleep(POLL);
@@ -359,7 +388,11 @@ fn run(block_id: &str, mux: gst::glib::WeakRef<gst::Element>, tracks: &[Arc<Trac
         }
         let running_time = mux.current_running_time();
 
-        for (track, reported) in tracks.iter().zip(quiet_reported.iter_mut()) {
+        for ((track, reported), asked_on_return) in tracks
+            .iter()
+            .zip(quiet_reported.iter_mut())
+            .zip(asked_on_return.iter_mut())
+        {
             if !track.is_connected() || track.is_retired() {
                 continue;
             }
@@ -384,12 +417,28 @@ fn run(block_id: &str, mux: gst::glib::WeakRef<gst::Element>, tracks: &[Arc<Trac
                     info!("Live Recorder {}: {} is back", block_id, track.label);
                     *reported = false;
                 }
+                *asked_on_return = false;
                 continue;
             }
             let Some(running_time) = running_time else {
                 continue;
             };
+            // Video is arriving again but everything so far was a delta, dropped
+            // while waiting for a keyframe. An encoder that went on encoding
+            // through the stall used up the first request, so ask once more.
+            let seen_ms = now_ms.saturating_sub(track.last_seen_ms.load(Ordering::Relaxed));
+            if *reported
+                && !*asked_on_return
+                && seen_ms < QUIET.as_millis() as u64
+                && track.wait_keyframe.load(Ordering::Relaxed)
+            {
+                track.request_keyframe();
+                *asked_on_return = true;
+            }
             if track.fill_gap(running_time) && !*reported {
+                if track.kind == TrackKind::Video {
+                    track.wait_for_keyframe();
+                }
                 info!(
                     "Live Recorder {}: {} has been quiet for {}ms — recording the other tracks past it",
                     block_id, track.label, quiet_ms

@@ -18,19 +18,20 @@
 //! moves each file's times back to start at zero; MPEG-TS players expect a
 //! running PTS.
 //!
-//! The sink is not async and does not sync to the clock. It never prerolls, so a
-//! recording whose first data arrives late does not take the pipeline out of
-//! PLAYING. It flushes at every cut point, so a crash loses at most what came
+//! It is a plain element with a sink pad, not a `BaseSink`: it does not sync to
+//! the clock and has nothing to preroll. A `BaseSink` that has not had a buffer
+//! by PLAYING still counts as not prerolled, and a first buffer arriving while
+//! the pipeline heads for PAUSED, as at a stop, waits in preroll for a PLAYING
+//! that never comes. Without that machinery, a recording whose first data
+//! arrives late changes no state, and the stop drain always gets its data
+//! through. It flushes at every cut point, so a crash loses at most what came
 //! after the last one.
 
 use super::{mkv_cluster, mp4_boxes};
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
-use gst_base::prelude::*;
-use gst_base::subclass::prelude::*;
 use gstreamer as gst;
-use gstreamer_base as gst_base;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -87,7 +88,7 @@ impl Format {
 
 glib::wrapper! {
     pub struct FragmentFileSink(ObjectSubclass<imp::FragmentFileSink>)
-        @extends gst_base::BaseSink, gst::Element, gst::Object;
+        @extends gst::Element, gst::Object;
 }
 
 impl FragmentFileSink {
@@ -167,8 +168,8 @@ mod imp {
         bytes: Vec<u8>,
     }
 
-    #[derive(Default)]
     pub struct FragmentFileSink {
+        sinkpad: gst::Pad,
         pub(super) settings: Mutex<Settings>,
         pub(super) split_requested: AtomicBool,
         pub(super) on_file_opened: Mutex<Option<FileOpenedFn>>,
@@ -183,15 +184,46 @@ mod imp {
     impl ObjectSubclass for FragmentFileSink {
         const NAME: &'static str = "StromFragmentFileSink";
         type Type = super::FragmentFileSink;
-        type ParentType = gst_base::BaseSink;
+        type ParentType = gst::Element;
+
+        fn with_class(klass: &Self::Class) -> Self {
+            let templ = klass.pad_template("sink").unwrap();
+            let sinkpad = gst::Pad::builder_from_template(&templ)
+                .chain_function(|_pad, parent, buffer| {
+                    FragmentFileSink::catch_panic_pad_function(
+                        parent,
+                        || Err(gst::FlowError::Error),
+                        |imp| imp.chain(buffer),
+                    )
+                })
+                .event_function(|_pad, parent, event| {
+                    FragmentFileSink::catch_panic_pad_function(
+                        parent,
+                        || false,
+                        |imp| imp.sink_event(event),
+                    )
+                })
+                .build();
+            Self {
+                sinkpad,
+                settings: Mutex::default(),
+                split_requested: AtomicBool::default(),
+                on_file_opened: Mutex::default(),
+                drain_pads: Mutex::default(),
+                state: Mutex::default(),
+                eos: Mutex::default(),
+                eos_cond: Condvar::default(),
+            }
+        }
     }
 
     impl ObjectImpl for FragmentFileSink {
         fn constructed(&self) {
             self.parent_constructed();
             let obj = self.obj();
-            obj.set_sync(false);
-            obj.set_async(false);
+            obj.add_pad(&self.sinkpad).unwrap();
+            // A sink to the bin: counted for EOS and asked for latency.
+            obj.set_element_flags(gst::ElementFlags::SINK);
         }
     }
 
@@ -230,10 +262,22 @@ mod imp {
             // PLAYING, and this sink still renders: in PAUSED it would hold the
             // muxer's last data waiting for PLAYING. Only on the way down to
             // READY or NULL; a pause must not end the file.
-            if transition == gst::StateChange::PlayingToPaused && self.stopping() {
-                self.drain();
+            match transition {
+                gst::StateChange::ReadyToPaused => {
+                    *self.state.lock().unwrap() = State::default();
+                    *self.eos.lock().unwrap() = false;
+                    self.split_requested.store(false, Ordering::SeqCst);
+                }
+                gst::StateChange::PlayingToPaused if self.stopping() => self.drain(),
+                _ => {}
             }
-            self.parent_change_state(transition)
+            let result = self.parent_change_state(transition)?;
+            if transition == gst::StateChange::PausedToReady {
+                let mut state = self.state.lock().unwrap();
+                self.flush_held(&mut state);
+                state.file = None;
+            }
+            Ok(result)
         }
     }
 
@@ -383,9 +427,12 @@ mod imp {
         /// Finish the file on a stop: without EOS the muxer keeps what it has
         /// not handed over, and the recording ends that much short.
         fn drain(&self) {
-            if self.state.lock().unwrap().file.is_none() || *self.eos.lock().unwrap() {
+            if *self.eos.lock().unwrap() {
                 return;
             }
+            // No file yet does not mean no data: a connected track that never
+            // carried anything keeps the muxer from writing its header, and the
+            // others wait in their queues. EOS on that track ends the wait.
             let pads: Vec<gst::Pad> = self
                 .drain_pads
                 .lock()
@@ -505,27 +552,13 @@ mod imp {
         }
     }
 
-    impl BaseSinkImpl for FragmentFileSink {
-        fn start(&self) -> Result<(), gst::ErrorMessage> {
-            *self.state.lock().unwrap() = State::default();
-            *self.eos.lock().unwrap() = false;
-            self.split_requested.store(false, Ordering::SeqCst);
-            Ok(())
-        }
-
-        fn stop(&self) -> Result<(), gst::ErrorMessage> {
-            let mut state = self.state.lock().unwrap();
-            self.flush_held(&mut state);
-            state.file = None;
-            Ok(())
-        }
-
-        fn render(&self, buffer: &gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
+    impl FragmentFileSink {
+        fn chain(&self, buffer: gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
             let map = buffer.map_readable().map_err(|_| {
                 gst::element_imp_error!(self, gst::ResourceError::Read, ["Could not map buffer"]);
                 gst::FlowError::Error
             })?;
-            match self.handle(buffer, map.as_slice()) {
+            match self.handle(&buffer, map.as_slice()) {
                 Ok(opened) => {
                     self.report_opened(opened);
                     Ok(gst::FlowSuccess::Ok)
@@ -537,7 +570,7 @@ mod imp {
             }
         }
 
-        fn event(&self, event: gst::Event) -> bool {
+        fn sink_event(&self, event: gst::Event) -> bool {
             match event.view() {
                 gst::EventView::Caps(caps) if self.format().header_in_caps() => {
                     let header = caps
@@ -562,10 +595,14 @@ mod imp {
                     self.flush_held(&mut self.state.lock().unwrap());
                     *self.eos.lock().unwrap() = true;
                     self.eos_cond.notify_all();
+                    // The bin counts a sink's EOS message to post its own.
+                    let obj = self.obj();
+                    let _ = obj.post_message(gst::message::Eos::builder().src(&*obj).build());
                 }
                 _ => {}
             }
-            self.parent_event(event)
+            // A sink consumes every event that reaches it.
+            true
         }
     }
 }

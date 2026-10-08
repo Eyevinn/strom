@@ -1037,3 +1037,167 @@ fn ts_passthrough_takes_one_ts_input() {
     assert!(rec.elements.contains_key("rec:ts_input"));
     assert!(rec.elements.contains_key("rec:multifilesink"));
 }
+
+/// 320x240@30 H.264 with a keyframe only every 10 s, unless asked for one.
+fn long_gop_video_source(pipeline: &gst::Pipeline) -> gst::Element {
+    let src = gst::ElementFactory::make("videotestsrc")
+        .property("is-live", true)
+        .build()
+        .unwrap();
+    let caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("width", 320i32)
+                .field("height", 240i32)
+                .field("framerate", gst::Fraction::new(30, 1))
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let enc = gst::ElementFactory::make("x264enc")
+        .property("key-int-max", 300u32)
+        .property_from_str("tune", "zerolatency")
+        .build()
+        .unwrap();
+    pipeline.add_many([&src, &caps, &enc]).unwrap();
+    gst::Element::link_many([&src, &caps, &enc]).unwrap();
+    enc
+}
+
+/// Each video sample's PTS and whether it is a keyframe, in file order.
+fn video_keyframes(path: &Path) -> Vec<(gst::ClockTime, bool)> {
+    let pipeline = gst::parse::launch(&format!(
+        "filesrc location=\"{}\" ! qtdemux ! video/x-h264 ! fakesink name=s sync=false async=false",
+        path.display()
+    ))
+    .unwrap()
+    .downcast::<gst::Pipeline>()
+    .unwrap();
+    let frames: Arc<Mutex<Vec<(gst::ClockTime, bool)>>> = Arc::default();
+    let sink_frames = Arc::clone(&frames);
+    pipeline
+        .by_name("s")
+        .unwrap()
+        .static_pad("sink")
+        .unwrap()
+        .add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+            if let Some(gst::PadProbeData::Buffer(b)) = info.data.as_ref() {
+                if let Some(pts) = b.pts() {
+                    sink_frames
+                        .lock()
+                        .unwrap()
+                        .push((pts, !b.flags().contains(gst::BufferFlags::DELTA_UNIT)));
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+    pipeline.set_state(gst::State::Playing).unwrap();
+    pipeline.bus().unwrap().timed_pop_filtered(
+        gst::ClockTime::from_seconds(10),
+        &[gst::MessageType::Eos, gst::MessageType::Error],
+    );
+    pipeline.set_state(gst::State::Null).unwrap();
+    let mut v = frames.lock().unwrap().clone();
+    v.sort();
+    v
+}
+
+/// Frames lost after the encoder leave deltas whose references never reached
+/// the file. After a stall the recording must resume on a keyframe, and soon:
+/// the recorder asks the encoder for one rather than wait out a 10 s GOP.
+#[test]
+fn a_video_that_comes_back_resumes_on_a_keyframe_without_waiting_a_gop() {
+    init();
+    let dir = tempfile::tempdir().unwrap();
+    let pipeline = gst::Pipeline::new();
+    let rec = add_live_recorder(
+        &pipeline,
+        "rec",
+        dir.path(),
+        &[
+            ("num_video_tracks", PropertyValue::UInt(1)),
+            ("num_audio_tracks", PropertyValue::UInt(1)),
+        ],
+    );
+    let venc = long_gop_video_source(&pipeline);
+    let aenc = recorder::audio_source(&pipeline, -1, true);
+    venc.link(&rec.input("video_input_0")).unwrap();
+    aenc.link(&rec.input("audio_input_0")).unwrap();
+    rec.run_setups();
+    let start = Instant::now();
+    // The encoder goes on encoding; its frames are lost from 2 s to 5 s.
+    stall(&venc, start, Duration::from_secs(2), Duration::from_secs(5));
+
+    pipeline.set_state(gst::State::Playing).unwrap();
+    std::thread::sleep(Duration::from_secs(9));
+    no_errors(&pipeline);
+    finish(&pipeline);
+
+    let files = recorder::recordings(dir.path(), "rec");
+    assert_eq!(files.len(), 1, "{:?}", files);
+    let frames = video_keyframes(&files[0]);
+    // The stall ends at 5 s. The first frame kept after it must be a keyframe,
+    // and it must come within a second, not at the encoder's next scheduled
+    // keyframe at 10 s.
+    let back = frames
+        .iter()
+        .find(|(pts, _)| *pts > gst::ClockTime::from_mseconds(4500));
+    let Some(&(pts, keyframe)) = back else {
+        panic!("no video after the stall: the recorder waited for the encoder's own keyframe");
+    };
+    assert!(
+        keyframe,
+        "the first video frame after the stall is a delta frame, at {}",
+        pts
+    );
+    assert!(
+        pts < gst::ClockTime::from_seconds(6),
+        "the video came back only at {}: the recorder waited for the encoder's own keyframe",
+        pts
+    );
+}
+
+/// A stop while a connected track has never carried data, before the
+/// keepalive would release it, still writes what the other track recorded.
+#[test]
+fn a_stop_before_a_dataless_track_is_released_still_writes_the_file() {
+    init();
+    let dir = tempfile::tempdir().unwrap();
+    let pipeline = gst::Pipeline::new();
+    let rec = add_live_recorder(
+        &pipeline,
+        "rec",
+        dir.path(),
+        &[
+            ("num_video_tracks", PropertyValue::UInt(1)),
+            ("num_audio_tracks", PropertyValue::UInt(1)),
+        ],
+    );
+    recorder::video_source(&pipeline, -1, true)
+        .link(&rec.input("video_input_0"))
+        .unwrap();
+    let silent = gst::ElementFactory::make("appsrc")
+        .property("is-live", true)
+        .property_from_str("format", "time")
+        .build()
+        .unwrap();
+    pipeline.add(&silent).unwrap();
+    silent.link(&rec.input("audio_input_0")).unwrap();
+    rec.run_setups();
+
+    pipeline.set_state(gst::State::Playing).unwrap();
+    std::thread::sleep(Duration::from_secs(4));
+    no_errors(&pipeline);
+    pipeline.set_state(gst::State::Null).unwrap();
+
+    let files = recorder::recordings(dir.path(), "rec");
+    assert_eq!(files.len(), 1, "the stop wrote no file: {:?}", files);
+    let samples = demux(&files[0]);
+    let (_, span) = largest_gap(&samples["video/x-h264"]);
+    assert!(
+        span >= gst::ClockTime::from_seconds(3),
+        "video spans only {}",
+        span
+    );
+}
