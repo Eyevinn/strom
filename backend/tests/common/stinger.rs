@@ -139,6 +139,15 @@ pub fn big_classic_clip(path: &std::path::Path) {
     });
 }
 
+/// Point `pipeline`'s `sink` at `path`. Set as a property, not in the launch
+/// string: the launch parser reads a Windows path's backslashes as escapes.
+pub fn set_sink_location(pipeline: &gst::Pipeline, path: &std::path::Path) {
+    pipeline
+        .by_name("sink")
+        .unwrap()
+        .set_property("location", path.to_str().unwrap());
+}
+
 /// [`classic_clip`] with a stereo PCM track that starts `video_delay_ns`
 /// before the video: the video's first frame is stamped that late, so the
 /// file carries an edit list and the demuxer hands video out at that running
@@ -149,13 +158,13 @@ pub fn classic_clip_with_early_audio(path: &std::path::Path, video_delay_ns: u64
            ! videoconvert ! video/x-raw,format=RGBA ! pngenc compression-level=1 ! queue ! mux. \
          audiotestsrc num-buffers={} samplesperbuffer=480 \
            ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! queue ! mux. \
-         qtmux name=mux ! filesink location=\"{}\"",
+         qtmux name=mux ! filesink name=sink",
         (video_delay_ns / 10_000_000) as usize + N * 4,
-        path.display()
     ))
     .unwrap()
     .downcast::<gst::Pipeline>()
     .unwrap();
+    set_sink_location(&pipeline, path);
     let appsrc = pipeline
         .by_name("v")
         .unwrap()
@@ -226,13 +235,13 @@ pub fn mask_clip(path: &std::path::Path) {
 /// upload does not take as it is, and which a hardware decoder (VideoToolbox)
 /// would decode without its alpha.
 pub fn prores_classic_clip(path: &std::path::Path) {
-    let pipeline = gst::parse::launch(&format!(
-        "appsrc name=src ! videoconvert ! video/x-raw,format=A444_10LE ! avenc_prores_ks profile=4444 ! qtmux ! filesink location=\"{}\"",
-        path.display()
-    ))
+    let pipeline = gst::parse::launch(
+        "appsrc name=src ! videoconvert ! video/x-raw,format=A444_10LE ! avenc_prores_ks profile=4444 ! qtmux ! filesink name=sink",
+    )
     .unwrap()
     .downcast::<gst::Pipeline>()
     .unwrap();
+    set_sink_location(&pipeline, path);
     let appsrc = pipeline
         .by_name("src")
         .unwrap()

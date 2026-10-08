@@ -16,6 +16,7 @@ fn require(elements: &[&str]) {
 }
 
 #[test]
+#[serial_test::serial(stinger)]
 fn examples_encode_and_analyse_as_their_own_variants() {
     require(&["avenc_ffv1", "avdec_ffv1", "matroskamux", "matroskademux"]);
     let dir = tempfile::tempdir().unwrap();
@@ -97,6 +98,7 @@ fn examples_encode_and_analyse_as_their_own_variants() {
 }
 
 #[test]
+#[serial_test::serial(stinger)]
 fn analysis_is_cached_until_the_file_changes() {
     require(&["avenc_ffv1", "avdec_ffv1", "matroskamux", "matroskademux"]);
     let dir = tempfile::tempdir().unwrap();
@@ -117,6 +119,7 @@ fn analysis_is_cached_until_the_file_changes() {
 }
 
 #[test]
+#[serial_test::serial(stinger)]
 fn a_missing_clip_is_an_error_not_a_hang() {
     gstreamer::init().unwrap();
     let err = analysis::analyze("file:///nonexistent/strom-stinger.mkv").unwrap_err();
@@ -125,6 +128,7 @@ fn a_missing_clip_is_an_error_not_a_hang() {
 
 /// Writes the examples to `STROM_STINGER_EXAMPLES_DIR` for a look by eye.
 #[test]
+#[serial_test::serial(stinger)]
 #[ignore]
 fn write_examples_for_inspection() {
     require(&["avenc_ffv1", "matroskamux"]);

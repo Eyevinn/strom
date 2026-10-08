@@ -41,6 +41,7 @@ async fn call(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn the_library_is_edited_on_the_mixer_and_guarded_by_file() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -145,6 +146,7 @@ async fn the_library_is_edited_on_the_mixer_and_guarded_by_file() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn a_take_is_followed_by_its_id() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -243,6 +245,7 @@ async fn take_cued_and_watch(r: &Running) -> (String, bool, bool) {
 /// Removing the cued clip cues the one that takes its place: the next take
 /// plays that clip, not the removed one still parked in the player.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn removing_the_cued_clip_parks_its_successor() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -274,6 +277,7 @@ async fn removing_the_cued_clip_parks_its_successor() {
 /// edits, transport calls and library additions wait, and the clip on air
 /// is not rewound under the mixer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn a_take_owns_its_clip_source() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -334,6 +338,7 @@ async fn a_take_owns_its_clip_source() {
 /// Clips added at the same moment all land in the library: each addition
 /// reads the playlist, extends it and writes it back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn clips_added_together_all_land() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -370,6 +375,7 @@ async fn clips_added_together_all_land() {
 
 /// A playlist PUT that puts another file at the parked index re-cues it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn a_playlist_put_over_the_parked_index_recues_it() {
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
@@ -445,6 +451,7 @@ async fn wait_for_layout(
 /// the player loaded before. Reload reports a deleted file per clip instead of
 /// failing, and is refused while a stinger is on air.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn reload_picks_up_a_clip_rewritten_on_disk() {
     use strom_types::stinger::StingerLayout;
     if !common::plugins_available(CODEC_ELEMENTS) {
@@ -502,6 +509,7 @@ async fn reload_picks_up_a_clip_rewritten_on_disk() {
 /// A plain cue of a clip whose file was rewritten since it was parked loads
 /// the new file, with no reload.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn a_cue_loads_a_parked_clip_rewritten_on_disk() {
     use strom_types::stinger::StingerLayout;
     if !common::plugins_available(CODEC_ELEMENTS) {
@@ -538,6 +546,7 @@ async fn a_cue_loads_a_parked_clip_rewritten_on_disk() {
 /// re-park after a take cannot rewind it, so it is loaded again instead of
 /// staying unparked, and the next cue or take failing with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
 async fn a_clip_that_cannot_seek_plays_on_every_take() {
     let mut needed = CODEC_ELEMENTS.to_vec();
     needed.extend(["souphttpsrc", "matroskamux", "matroskademux"]);
@@ -552,13 +561,18 @@ async fn a_clip_that_cannot_seek_plays_on_every_take() {
     let mov = dir.path().join("classic.mov");
     let mkv = dir.path().join("classic.mkv");
     classic_clip(&mov);
-    let remux = gstreamer::parse::launch(&format!(
-        "filesrc location=\"{}\" ! qtdemux ! pngdec ! videoconvert ! video/x-raw,format=AYUV ! matroskamux ! filesink location=\"{}\"",
-        mov.display(),
-        mkv.display()
-    ))
+    let remux = gstreamer::parse::launch(
+        "filesrc name=src ! qtdemux ! pngdec ! videoconvert ! video/x-raw,format=AYUV ! matroskamux ! filesink name=sink",
+    )
+    .unwrap()
+    .downcast::<gstreamer::Pipeline>()
     .unwrap();
     use gstreamer::prelude::*;
+    remux
+        .by_name("src")
+        .unwrap()
+        .set_property("location", mov.to_str().unwrap());
+    set_sink_location(&remux, &mkv);
     remux.set_state(gstreamer::State::Playing).unwrap();
     let msg = remux.bus().unwrap().timed_pop_filtered(
         gstreamer::ClockTime::from_seconds(30),

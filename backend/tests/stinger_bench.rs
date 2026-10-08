@@ -29,13 +29,18 @@ const FRAMES: usize = 45;
 fn synthetic(path: &Path, w: u32, h: u32, sbs: bool, encoder: &str, muxer: &str, format: &str) {
     let full_w = if sbs { 2 * w } else { w };
     let desc = format!(
-        "appsrc name=src ! videoconvert ! video/x-raw,format={format} ! {encoder} ! {muxer} ! filesink location=\"{}\"",
-        path.display()
+        "appsrc name=src ! videoconvert ! video/x-raw,format={format} ! {encoder} ! {muxer} ! filesink name=sink"
     );
     let pipeline = gst::parse::launch(&desc)
         .unwrap()
         .downcast::<gst::Pipeline>()
         .unwrap();
+    // A property, not the launch string: the parser reads a Windows path's
+    // backslashes as escapes.
+    pipeline
+        .by_name("sink")
+        .unwrap()
+        .set_property("location", path.to_str().unwrap());
     let src = pipeline
         .by_name("src")
         .unwrap()
