@@ -624,6 +624,32 @@ pub fn parse_common_audio_sample_rate(value: &PropertyValue) -> Option<u32> {
         .then_some(rate)
 }
 
+/// An audio channel choice as audio channel properties store it: `"N"` for a
+/// channel count, or `"N:0xMASK"` for a count with an explicit GStreamer
+/// `channel-mask` (`0x0` = unpositioned, `0x3f` = 5.1, ...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioChannelConfig {
+    pub channels: u32,
+    pub channel_mask: Option<u64>,
+}
+
+/// Parse `"N"` or `"N:0xMASK"` into an [`AudioChannelConfig`]. Returns `None`
+/// for an empty or malformed value, or a zero channel count.
+pub fn parse_audio_channel_config(value: &str) -> Option<AudioChannelConfig> {
+    let (channels, mask) = match value.trim().split_once(':') {
+        Some((channels, mask)) => {
+            let hex = mask.trim().strip_prefix("0x")?;
+            (channels, Some(u64::from_str_radix(hex, 16).ok()?))
+        }
+        None => (value.trim(), None),
+    };
+    let channels = channels.trim().parse::<u32>().ok().filter(|c| *c > 0)?;
+    Some(AudioChannelConfig {
+        channels,
+        channel_mask: mask,
+    })
+}
+
 /// Pixel formats accepted by `decklinkvideosrc` and `decklinkvideosink`'s
 /// `video-format` property. These are GstDecklinkVideoFormat enum nicks, not
 /// GStreamer caps `format=` strings — see `COMMON_VIDEO_PIXEL_FORMATS` for the
@@ -680,6 +706,27 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_channel_config_parses_count_and_mask() {
+        type Expected = Option<(u32, Option<u64>)>;
+        let cases: &[(&str, Expected)] = &[
+            ("2", Some((2, None))),
+            ("6", Some((6, None))),
+            ("4:0x0", Some((4, Some(0)))),
+            ("6:0x3f", Some((6, Some(0x3f)))),
+            ("8:0xc3f", Some((8, Some(0xc3f)))),
+            ("", None),
+            ("0", None),
+            ("six", None),
+            ("6:3f", None),
+            ("6:0xzz", None),
+        ];
+        for (value, expected) in cases {
+            let parsed = parse_audio_channel_config(value).map(|c| (c.channels, c.channel_mask));
+            assert_eq!(parsed, *expected, "{:?}", value);
+        }
+    }
 
     #[test]
     fn parse_common_audio_sample_rate_accepts_listed_rates_only() {

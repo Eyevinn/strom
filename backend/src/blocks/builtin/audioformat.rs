@@ -62,14 +62,10 @@ impl BlockBuilder for AudioFormatBuilder {
 
         // Add channels if specified
         // Format: "N" for channels only, or "N:0xMASK" for channels with channel-mask
-        if let Some(ch_config) = channels {
-            if let Some((ch, mask)) = ch_config.split_once(':') {
-                // Format: "N:0xMASK" - includes channel mask
-                caps_fields.push(format!("channels={}", ch));
-                caps_fields.push(format!("channel-mask=(bitmask){}", mask));
-            } else {
-                // Format: "N" - just channel count (for mono/stereo)
-                caps_fields.push(format!("channels={}", ch_config));
+        if let Some(config) = channels.and_then(parse_audio_channel_config) {
+            caps_fields.push(format!("channels={}", config.channels));
+            if let Some(mask) = config.channel_mask {
+                caps_fields.push(format!("channel-mask=(bitmask)0x{:x}", mask));
             }
         }
 
