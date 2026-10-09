@@ -709,22 +709,6 @@ fn local_input_definition() -> BlockDefinition {
                 persist: None,
             },
             ExposedProperty {
-                name: "audio_device".to_string(),
-                label: "Audio Source".to_string(),
-                description: "Local Audio/Source device to capture from (built-in inputs, professional audio interfaces, USB grabbers, virtual sources, ...). Picked from the live device list — leave empty to use the OS default (autoaudiosrc).".to_string(),
-                property_type: PropertyType::Device {
-                    category: strom_types::discovery::DeviceCategory::AudioSource,
-                },
-                default_value: Some(PropertyValue::String(String::new())),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "audio_device".to_string(),
-                    transform: None,
-                },
-                live: false,
-                persist: None,
-            },
-            ExposedProperty {
                 name: "video_resolution".to_string(),
                 label: "Video Resolution".to_string(),
                 description: "Resolution to request from the video source. The platform plugin (AVFoundation/v4l2/Media Foundation) picks the closest matching capture mode. Empty leaves it to the device default — often the highest mode the camera supports, which can be expensive.".to_string(),
@@ -751,6 +735,22 @@ fn local_input_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "video_framerate".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "audio_device".to_string(),
+                label: "Audio Source".to_string(),
+                description: "Local Audio/Source device to capture from (built-in inputs, professional audio interfaces, USB grabbers, virtual sources, ...). Picked from the live device list — leave empty to use the OS default (autoaudiosrc).".to_string(),
+                property_type: PropertyType::Device {
+                    category: strom_types::discovery::DeviceCategory::AudioSource,
+                },
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "audio_device".to_string(),
                     transform: None,
                 },
                 live: false,
