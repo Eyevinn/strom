@@ -424,9 +424,12 @@ impl BlockBuilder for DeckLinkOutputBuilder {
 
         if stream_mode.has_audio() {
             let audiosink_id = format!("{}:decklinkaudiosink", instance_id);
+            // Don't wait for a first buffer to start: an input with no data
+            // yet would keep the flow from reaching PLAYING.
             let audiosink = gst::ElementFactory::make("decklinkaudiosink")
                 .name(&audiosink_id)
                 .property("device-number", device_number)
+                .property("async", false)
                 .build()
                 .map_err(|e| {
                     BlockBuildError::ElementCreation(format!("decklinkaudiosink: {}", e))
