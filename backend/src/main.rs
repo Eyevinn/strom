@@ -550,6 +550,7 @@ fn run_with_gui(
         gstrsaudiofx::plugin_register_static().expect("Could not register audiofx plugins");
         gstisobmff::plugin_register_static().expect("Could not register isobmff plugins");
         gst_plugins_lsp::plugin_register_static().expect("Could not register lsp-dsp-rs plugins");
+        strom::gst::audio_bridge::register().expect("Could not register audio bridge elements");
         #[cfg(feature = "efp")]
         gst_plugin_efp::plugin_register_static().expect("Could not register efp mux/demux plugins");
 
@@ -834,6 +835,7 @@ async fn run_headless(
     gstrsaudiofx::plugin_register_static().expect("Could not register audiofx plugins");
     gstisobmff::plugin_register_static().expect("Could not register isobmff plugins");
     gst_plugins_lsp::plugin_register_static().expect("Could not register lsp-dsp-rs plugins");
+    strom::gst::audio_bridge::register().expect("Could not register audio bridge elements");
     #[cfg(feature = "efp")]
     gst_plugin_efp::plugin_register_static().expect("Could not register efp mux/demux plugins");
 
