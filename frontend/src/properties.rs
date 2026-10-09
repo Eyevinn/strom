@@ -971,6 +971,13 @@ impl PropertyInspector {
                                         continue;
                                     }
                                 }
+                                // Local Input lists its video settings first, then
+                                // its audio settings; a separator divides the two.
+                                if definition.id == "builtin.local_input"
+                                    && exposed_prop.name == "audio_device"
+                                {
+                                    ui.separator();
+                                }
                                 let changed = Self::show_exposed_property(
                                     ui,
                                     block,

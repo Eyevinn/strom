@@ -53,7 +53,7 @@
 //! # Multichannel audio
 //!
 //! The block can request any channel count supported by the chosen device
-//! via the `audio_channels` property (1/2/4/6/8/16/default). What you
+//! via the `audio_channels` property (1/2/4/6/8/16/default, or a surround layout). What you
 //! actually get depends on how the OS exposes the device:
 //!
 //! - **macOS CoreAudio:** native multichannel works directly; aggregate
@@ -69,10 +69,16 @@
 //! - **Windows WASAPI:** most pro audio drivers expose a multichannel card
 //!   as separate stereo *devices* (1/2, 3/4, 5/6, ...). Pick the pair you
 //!   want and keep `audio_channels=2`. For true multichannel you need
-//!   either WASAPI exclusive mode (`wasapi_exclusive_mode=true`) or a
-//!   third-party ASIO GStreamer plugin (`gstasio` / equivalent) — once
-//!   loaded, ASIO devices appear automatically in the picker just like
-//!   any other `GstDevice`.
+//!   either WASAPI exclusive mode (`wasapi_exclusive_mode=true`) or
+//!   the ASIO plugin (`asiosrc`) — once loaded, ASIO devices appear
+//!   automatically in the picker just like any other `GstDevice`. For an
+//!   ASIO device, `audio_channels` selects inputs 1..N (`input-channels`).
+//!
+//! In Strom, more than two channels means N parallel channels with no
+//! speaker layout, not surround. Unless `audio_channels` names a surround
+//! layout (`"6:0x3f"`, the Audio Format block's value form), the block
+//! marks 3+ channels as unpositioned (`channel-mask=0`) whatever the
+//! source reports, so a consumer never downmixes them as 5.1/7.1.
 //!
 //! The design is plugin-agnostic: any provider registered with
 //! `GstDeviceMonitor` (PipeWire, third-party ASIO, ...) is picked up
@@ -90,7 +96,7 @@ use strom_types::{
         parse_resolution_string, StreamMode, *,
     },
     element::ElementPadRef,
-    MediaType, PropertyValue,
+    parse_audio_channel_config, AudioChannelConfig, MediaType, PropertyValue,
 };
 use tracing::{info, warn};
 
@@ -249,8 +255,14 @@ impl BlockBuilder for LocalInputBuilder {
         if stream_mode.has_audio() {
             let audio_device_id = read_string(properties, "audio_device").unwrap_or_default();
             let rate = read_string(properties, "audio_rate").and_then(|s| s.parse::<i32>().ok());
-            let channels =
-                read_string(properties, "audio_channels").and_then(|s| s.parse::<i32>().ok());
+            let channels = read_string(properties, "audio_channels")
+                .and_then(|s| parse_audio_channel_config(&s));
+            if let Some(c) = channels.filter(|c| c.channels > MAX_AUDIO_CHANNELS) {
+                return Err(BlockBuildError::InvalidConfiguration(format!(
+                    "audio_channels {} is more than the {} channels GStreamer can convert",
+                    c.channels, MAX_AUDIO_CHANNELS
+                )));
+            }
             let wasapi_exclusive = read_bool(properties, "wasapi_exclusive_mode");
 
             let audiosrc_id = format!("{}:audiosrc", instance_id);
@@ -288,23 +300,50 @@ impl BlockBuilder for LocalInputBuilder {
                 }
             }
 
+            let is_asio = audiosrc
+                .factory()
+                .is_some_and(|f| f.name() == ASIO_SOURCE_FACTORY);
+            if is_asio {
+                // Device default on a device wider than GStreamer's channel
+                // limit: take the first MAX_AUDIO_CHANNELS inputs instead of
+                // every input.
+                let inputs = channels.map(|c| c.channels).or_else(|| {
+                    let max = ctx
+                        .local_device(&audio_device_id)
+                        .and_then(|d| d.caps())
+                        .and_then(|caps| max_channels(&caps))?;
+                    (max > MAX_AUDIO_CHANNELS).then(|| {
+                        warn!(
+                            "Local Input: ASIO device has {} inputs, capturing the first {}",
+                            max, MAX_AUDIO_CHANNELS
+                        );
+                        MAX_AUDIO_CHANNELS
+                    })
+                });
+                if let Some(inputs) = inputs {
+                    let list = asio_input_channels(inputs);
+                    info!(
+                        "Local Input: capturing ASIO inputs {} on {}",
+                        list, audiosrc_id
+                    );
+                    audiosrc.set_property("input-channels", list);
+                }
+            }
+
             // Pre-convert capsfilter: lets the source negotiate the requested
             // sample rate / channel count directly. Sample-rate conversion
             // and channel mixing still go through audioresample/audioconvert
             // downstream, but only when the device truly can't deliver the
             // requested format.
-            let mut audio_src_caps = gst::Caps::builder("audio/x-raw");
-            if let Some(r) = rate {
-                audio_src_caps = audio_src_caps.field("rate", r);
-            }
-            if let Some(c) = channels {
-                audio_src_caps = audio_src_caps.field("channels", c);
-            }
+            let layout = audio_source_layout(rate, channels);
             let audiosrc_caps = gst::ElementFactory::make("capsfilter")
                 .name(&audiosrc_caps_id)
-                .property("caps", audio_src_caps.build())
+                .property("caps", &layout.caps)
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("audiosrc_caps: {}", e)))?;
+            if let Some(pad) = audiosrc_caps.static_pad("src") {
+                install_layout_probe(&pad, layout.mask);
+            }
 
             let audioconvert = gst::ElementFactory::make("audioconvert")
                 .name(&audioconvert_id)
@@ -430,6 +469,137 @@ fn make_source(
     Ok(element)
 }
 
+/// Factory name of GStreamer's ASIO capture element (gst-plugins-bad, Windows).
+const ASIO_SOURCE_FACTORY: &str = "asiosrc";
+
+/// Widest channel count GStreamer's channel mixer takes. `audioconvert`
+/// segfaults above it on GStreamer 1.24 (`gst_audio_channel_mixer_new`
+/// asserts `in_channels <= 64`), so the block never negotiates more.
+const MAX_AUDIO_CHANNELS: u32 = 64;
+
+/// Highest channel count a device's caps offer.
+fn max_channels(caps: &gst::Caps) -> Option<u32> {
+    caps.iter()
+        .filter_map(|s| {
+            s.get::<gst::IntRange<i32>>("channels")
+                .map(|r| r.max())
+                .or_else(|_| s.get::<i32>("channels"))
+                .ok()
+        })
+        .max()
+        .and_then(|c| u32::try_from(c).ok())
+}
+
+/// `input-channels` value that captures the first `channels` ASIO inputs.
+fn asio_input_channels(channels: u32) -> String {
+    (0..channels)
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The channel layout the block delivers, and the caps for the capsfilter
+/// right after the audio source.
+///
+/// Strom treats 3+ channels as N parallel channels with no speaker layout
+/// (`channel-mask=0`) unless `audio_channels` names a surround layout
+/// (`"6:0x3f"`). The filter offers the wanted layout first, with a fallback
+/// for sources that only offer another one; [`install_layout_probe`] then
+/// relabels what they deliver. Offering a mask is also what lets `asiosrc`
+/// negotiate: it advertises `channels=N` with no mask, which GStreamer only
+/// accepts for 1-2 channels.
+struct AudioSourceLayout {
+    caps: gst::Caps,
+    /// Mask that 3+ channels leave the filter with.
+    mask: u64,
+}
+
+fn audio_source_layout(rate: Option<i32>, config: Option<AudioChannelConfig>) -> AudioSourceLayout {
+    let structure = |channels: Option<gst::glib::SendValue>, mask: Option<u64>| {
+        let mut s = gst::Structure::builder("audio/x-raw");
+        if let Some(r) = rate {
+            s = s.field("rate", r);
+        }
+        if let Some(c) = channels {
+            s = s.field("channels", c);
+        }
+        if let Some(m) = mask {
+            s = s.field("channel-mask", gst::Bitmask::new(m));
+        }
+        s.build()
+    };
+
+    let mask = config.and_then(|c| c.channel_mask).unwrap_or(0);
+    let mut caps = gst::Caps::new_empty();
+    let caps_mut = caps.get_mut().expect("new caps are writable");
+    match config {
+        Some(c) if c.channels > 2 || mask != 0 => {
+            let channels = c.channels as i32;
+            caps_mut.append_structure(structure(Some(channels.to_send_value()), Some(mask)));
+            caps_mut.append_structure(structure(Some(channels.to_send_value()), None));
+        }
+        Some(c) => {
+            caps_mut.append_structure(structure(Some((c.channels as i32).to_send_value()), None))
+        }
+        // Device default: the count is unknown until the source opens.
+        None => {
+            caps_mut.append_structure(structure(
+                Some(gst::IntRange::new(1, 2).to_send_value()),
+                None,
+            ));
+            let max = MAX_AUDIO_CHANNELS as i32;
+            caps_mut.append_structure(structure(
+                Some(gst::IntRange::new(3, max).to_send_value()),
+                Some(0),
+            ));
+            caps_mut.append_structure(structure(
+                Some(gst::IntRange::new(1, max).to_send_value()),
+                None,
+            ));
+        }
+    }
+    AudioSourceLayout { caps, mask }
+}
+
+/// `caps` relabelled to `mask` when they carry 3+ channels and exactly one
+/// side is unpositioned, or `None` when they need no change.
+///
+/// `audioconvert` will not turn a positioned layout into an unpositioned
+/// one of the same width, or back, so the block rewrites the caps event
+/// instead: the samples stay as they are, only the layout label changes.
+/// A source with a different positioned layout keeps it.
+fn relabel_caps(caps: &gst::CapsRef, mask: u64) -> Option<gst::Caps> {
+    let s = caps.structure(0)?;
+    let channels = s.get::<i32>("channels").ok()?;
+    let current = s.get::<gst::Bitmask>("channel-mask").ok()?.0;
+    if channels <= 2 || current == mask || (current != 0 && mask != 0) {
+        return None;
+    }
+    let mut caps = caps.to_owned();
+    caps.get_mut()?
+        .structure_mut(0)?
+        .set("channel-mask", gst::Bitmask::new(mask));
+    Some(caps)
+}
+
+/// Relabel 3+ channels to `mask` on `pad`'s caps events (see
+/// [`relabel_caps`]). An event probe: it fires once per caps change, not
+/// per buffer.
+fn install_layout_probe(pad: &gst::Pad, mask: u64) {
+    pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+        let Some(gst::PadProbeData::Event(ref event)) = info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::EventView::Caps(caps_event) = event.view() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if let Some(caps) = relabel_caps(caps_event.caps(), mask) {
+            info.data = Some(gst::PadProbeData::Event(gst::event::Caps::new(&caps)));
+        }
+        gst::PadProbeReturn::Ok
+    });
+}
+
 fn read_stream_mode(properties: &HashMap<String, PropertyValue>) -> StreamMode {
     // StreamMode::parse falls back to Video on unknown strings (legacy
     // WHEP behaviour). Local Input has no historical "video-only" default
@@ -539,22 +709,6 @@ fn local_input_definition() -> BlockDefinition {
                 persist: None,
             },
             ExposedProperty {
-                name: "audio_device".to_string(),
-                label: "Audio Source".to_string(),
-                description: "Local Audio/Source device to capture from (built-in inputs, professional audio interfaces, USB grabbers, virtual sources, ...). Picked from the live device list — leave empty to use the OS default (autoaudiosrc).".to_string(),
-                property_type: PropertyType::Device {
-                    category: strom_types::discovery::DeviceCategory::AudioSource,
-                },
-                default_value: Some(PropertyValue::String(String::new())),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "audio_device".to_string(),
-                    transform: None,
-                },
-                live: false,
-                persist: None,
-            },
-            ExposedProperty {
                 name: "video_resolution".to_string(),
                 label: "Video Resolution".to_string(),
                 description: "Resolution to request from the video source. The platform plugin (AVFoundation/v4l2/Media Foundation) picks the closest matching capture mode. Empty leaves it to the device default — often the highest mode the camera supports, which can be expensive.".to_string(),
@@ -581,6 +735,22 @@ fn local_input_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "video_framerate".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "audio_device".to_string(),
+                label: "Audio Source".to_string(),
+                description: "Local Audio/Source device to capture from (built-in inputs, professional audio interfaces, USB grabbers, virtual sources, ...). Picked from the live device list — leave empty to use the OS default (autoaudiosrc).".to_string(),
+                property_type: PropertyType::Device {
+                    category: strom_types::discovery::DeviceCategory::AudioSource,
+                },
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "audio_device".to_string(),
                     transform: None,
                 },
                 live: false,
@@ -638,7 +808,7 @@ fn local_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "audio_channels".to_string(),
                 label: "Audio Channels".to_string(),
-                description: "Number of channels requested from the audio source. Empty = device default. Pro audio cards / ASIO / PipeWire / CoreAudio can expose 4/6/8/16-channel multichannel streams in one go; many WASAPI drivers instead split a multichannel card into separate stereo devices (1/2, 3/4, ...) — in that case pick the right device and keep this at 2.".to_string(),
+                description: "Number of channels requested from the audio source. Empty = device default. Pro audio cards / ASIO / PipeWire / CoreAudio can expose 4/6/8/16-channel multichannel streams in one go; Plain counts of 3 or more are parallel channels with no speaker layout (channel-mask 0x0); the Surround choices carry a speaker layout. On an ASIO device this captures inputs 1..N, and empty captures every input; many WASAPI drivers instead split a multichannel card into separate stereo devices (1/2, 3/4, ...) — in that case pick the right device and keep this at 2.".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
                         EnumValue {
@@ -655,19 +825,31 @@ fn local_input_definition() -> BlockDefinition {
                         },
                         EnumValue {
                             value: "4".to_string(),
-                            label: Some("4 (Quad)".to_string()),
+                            label: Some("4 (multichannel)".to_string()),
                         },
                         EnumValue {
                             value: "6".to_string(),
-                            label: Some("6 (5.1)".to_string()),
+                            label: Some("6 (multichannel)".to_string()),
                         },
                         EnumValue {
                             value: "8".to_string(),
-                            label: Some("8 (7.1)".to_string()),
+                            label: Some("8 (multichannel)".to_string()),
                         },
                         EnumValue {
                             value: "16".to_string(),
-                            label: Some("16".to_string()),
+                            label: Some("16 (multichannel)".to_string()),
+                        },
+                        EnumValue {
+                            value: "4:0x33".to_string(),
+                            label: Some("4 - Quad Surround".to_string()),
+                        },
+                        EnumValue {
+                            value: "6:0x3f".to_string(),
+                            label: Some("6 - 5.1 Surround".to_string()),
+                        },
+                        EnumValue {
+                            value: "8:0xc3f".to_string(),
+                            label: Some("8 - 7.1 Surround".to_string()),
                         },
                     ],
                 },
@@ -845,6 +1027,246 @@ mod tests {
         assert_eq!(parse_fraction_string("30"), None);
         assert_eq!(parse_fraction_string("30/"), None);
         assert_eq!(parse_fraction_string("/1"), None);
+    }
+
+    // --- ASIO multichannel ---
+
+    /// Caps as `asiosrc` advertises them once its channels are configured:
+    /// a fixed channel count and no `channel-mask`.
+    fn asio_source_caps(channels: i32) -> gst::Caps {
+        gst::init().unwrap();
+        gst::Caps::builder("audio/x-raw")
+            .field("layout", "interleaved")
+            .field("format", "F32LE")
+            .field("rate", 48000)
+            .field("channels", channels)
+            .build()
+    }
+
+    /// Negotiate `source` against `filter` the way a base source does
+    /// (intersect with the downstream caps, then fixate), and return the
+    /// fixated caps.
+    fn negotiate(source: &gst::Caps, filter: &gst::Caps) -> gst::Caps {
+        let mut caps = source.intersect_with_mode(filter, gst::CapsIntersectMode::First);
+        assert!(!caps.is_empty(), "{} does not intersect {}", source, filter);
+        caps.fixate();
+        caps
+    }
+
+    /// Push one buffer with `caps` into `audioconvert` and report whether
+    /// the caps were accepted.
+    fn audioconvert_accepts(caps: &gst::Caps) -> Result<(), String> {
+        let s = caps.structure(0).unwrap();
+        let channels = s.get::<i32>("channels").unwrap() as usize;
+
+        let pipeline = gst::Pipeline::new();
+        let src = gstreamer_app::AppSrc::builder()
+            .caps(caps)
+            .format(gst::Format::Time)
+            .build();
+        let convert = gst::ElementFactory::make("audioconvert").build().unwrap();
+        let sink = gst::ElementFactory::make("fakesink").build().unwrap();
+        pipeline
+            .add_many([src.upcast_ref(), &convert, &sink])
+            .unwrap();
+        gst::Element::link_many([src.upcast_ref(), &convert, &sink]).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let mut buffer = gst::Buffer::from_mut_slice(vec![0u8; 480 * channels * 4]);
+        buffer.get_mut().unwrap().set_pts(gst::ClockTime::ZERO);
+        let _ = src.push_buffer(buffer);
+        let _ = src.end_of_stream();
+
+        let bus = pipeline.bus().unwrap();
+        let result = match bus.timed_pop_filtered(
+            gst::ClockTime::from_seconds(5),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        ) {
+            Some(msg) => match msg.view() {
+                gst::MessageView::Eos(_) => Ok(()),
+                gst::MessageView::Error(e) => Err(format!("{} ({:?})", e.error(), e.debug())),
+                _ => unreachable!(),
+            },
+            None => Err("no EOS or error within 5 s".to_string()),
+        };
+        pipeline.set_state(gst::State::Null).unwrap();
+        result
+    }
+
+    #[test]
+    fn asio_without_channel_mask_fails_above_two_channels() {
+        // Negative control: the failure from issue #1040. If this starts
+        // passing, GStreamer no longer needs the mask and the ASIO caps
+        // below can go.
+        assert!(audioconvert_accepts(&asio_source_caps(2)).is_ok());
+        assert!(audioconvert_accepts(&asio_source_caps(3)).is_err());
+    }
+
+    #[test]
+    fn asio_multichannel_negotiates_through_the_block_filter() {
+        for channels in [3, 4, 16] {
+            let source = asio_source_caps(channels);
+            let filter = audio_source_layout(None, channel_config(&channels.to_string())).caps;
+            let caps = negotiate(&source, &filter);
+            audioconvert_accepts(&caps)
+                .unwrap_or_else(|e| panic!("{} channels, caps {}: {}", channels, caps, e));
+        }
+    }
+
+    #[test]
+    fn asio_device_default_negotiates_any_channel_count() {
+        // audio_channels empty: asiosrc opens every input on the device.
+        for channels in [1, 2, 3, 64] {
+            let source = asio_source_caps(channels);
+            let filter = audio_source_layout(Some(48000), None).caps;
+            let caps = negotiate(&source, &filter);
+            let positioned = caps.structure(0).unwrap().has_field("channel-mask");
+            assert_eq!(positioned, channels > 2, "{} channels: {}", channels, caps);
+            audioconvert_accepts(&caps)
+                .unwrap_or_else(|e| panic!("{} channels, caps {}: {}", channels, caps, e));
+        }
+    }
+
+    #[test]
+    fn device_default_refuses_more_channels_than_audioconvert_takes() {
+        // 65+ channels segfault audioconvert on GStreamer 1.24: they must
+        // fail negotiation at the filter instead of reaching it.
+        gst::init().unwrap();
+        let filter = audio_source_layout(None, None).caps;
+        assert!(asio_source_caps(65).intersect(&filter).is_empty());
+        assert!(asio_source_caps(128).intersect(&filter).is_empty());
+        let positioned_wide: gst::Caps = "audio/x-raw,channels=65".parse().unwrap();
+        assert!(positioned_wide.intersect(&filter).is_empty());
+    }
+
+    #[test]
+    fn max_channels_reads_a_device_range() {
+        gst::init().unwrap();
+        let caps: gst::Caps = "audio/x-raw,channels=[1,128]".parse().unwrap();
+        assert_eq!(max_channels(&caps), Some(128));
+        let caps: gst::Caps = "audio/x-raw,channels=10".parse().unwrap();
+        assert_eq!(max_channels(&caps), Some(10));
+    }
+
+    fn channel_config(audio_channels: &str) -> Option<AudioChannelConfig> {
+        parse_audio_channel_config(audio_channels)
+    }
+
+    #[test]
+    fn asio_surround_choice_negotiates_its_layout() {
+        let source = asio_source_caps(6);
+        let filter = audio_source_layout(None, channel_config("6:0x3f")).caps;
+        let caps = negotiate(&source, &filter);
+        assert_eq!(channel_mask(&caps), Some(0x3f), "{}", caps);
+        audioconvert_accepts(&caps).unwrap_or_else(|e| panic!("caps {}: {}", caps, e));
+    }
+
+    /// Run `audiotestsrc` constrained to `source_caps` through the block's
+    /// audio chain for `audio_channels` (source capsfilter with its probe,
+    /// then `audioconvert`), and return the caps that reach the sink.
+    fn caps_after_block_chain(source_caps: &str, audio_channels: &str) -> gst::Caps {
+        gst::init().unwrap();
+        let layout = audio_source_layout(None, channel_config(audio_channels));
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("audiotestsrc")
+            .property("num-buffers", 3)
+            .build()
+            .unwrap();
+        let source_filter = gst::ElementFactory::make("capsfilter")
+            .property("caps", source_caps.parse::<gst::Caps>().unwrap())
+            .build()
+            .unwrap();
+        let block_filter = gst::ElementFactory::make("capsfilter")
+            .property("caps", &layout.caps)
+            .build()
+            .unwrap();
+        install_layout_probe(&block_filter.static_pad("src").unwrap(), layout.mask);
+        let convert = gst::ElementFactory::make("audioconvert").build().unwrap();
+        let sink = gst::ElementFactory::make("fakesink").build().unwrap();
+        let chain = [&src, &source_filter, &block_filter, &convert, &sink];
+        pipeline.add_many(chain).unwrap();
+        gst::Element::link_many(chain).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let msg = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(5),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .expect("no EOS or error within 5 s");
+        let caps = sink.static_pad("sink").unwrap().current_caps();
+        pipeline.set_state(gst::State::Null).unwrap();
+        if let gst::MessageView::Error(e) = msg.view() {
+            panic!(
+                "{} with audio_channels {:?}: {} ({:?})",
+                source_caps,
+                audio_channels,
+                e.error(),
+                e.debug()
+            );
+        }
+        caps.expect("sink has caps")
+    }
+
+    fn channel_mask(caps: &gst::Caps) -> Option<u64> {
+        caps.structure(0)
+            .unwrap()
+            .get::<gst::Bitmask>("channel-mask")
+            .ok()
+            .map(|m| m.0)
+    }
+
+    const SOURCE_5_1: &str = "audio/x-raw,channels=6,channel-mask=(bitmask)0x3f";
+    const SOURCE_6_UNPOSITIONED: &str = "audio/x-raw,channels=6,channel-mask=(bitmask)0x0";
+
+    #[test]
+    fn multichannel_choice_unpositions_any_source() {
+        // A source that only offers a 5.1 layout (wasapisrc, pulsesrc), and
+        // one that offers no layout.
+        for source in [SOURCE_5_1, SOURCE_6_UNPOSITIONED] {
+            for audio_channels in ["", "6", "6:0x0"] {
+                let caps = caps_after_block_chain(source, audio_channels);
+                assert_eq!(
+                    channel_mask(&caps),
+                    Some(0),
+                    "{} / {:?}: {}",
+                    source,
+                    audio_channels,
+                    caps
+                );
+                assert_eq!(caps.structure(0).unwrap().get::<i32>("channels"), Ok(6));
+            }
+        }
+    }
+
+    #[test]
+    fn surround_choice_delivers_its_layout() {
+        for source in [SOURCE_5_1, SOURCE_6_UNPOSITIONED] {
+            let caps = caps_after_block_chain(source, "6:0x3f");
+            assert_eq!(channel_mask(&caps), Some(0x3f), "{}: {}", source, caps);
+        }
+    }
+
+    #[test]
+    fn stereo_sources_keep_their_layout() {
+        for audio_channels in ["", "2"] {
+            let caps = caps_after_block_chain("audio/x-raw,channels=2", audio_channels);
+            assert_ne!(
+                channel_mask(&caps),
+                Some(0),
+                "{:?}: {}",
+                audio_channels,
+                caps
+            );
+        }
+    }
+
+    #[test]
+    fn asio_input_channels_lists_the_first_inputs() {
+        assert_eq!(asio_input_channels(1), "0");
+        assert_eq!(asio_input_channels(4), "0,1,2,3");
     }
 
     // --- get_external_pads ---
