@@ -1385,7 +1385,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.46-stinger | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.47-stinger | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1966,27 +1966,44 @@
 
         // Analysis runs in the background; look again until it is in. A
         // missing file has none coming, nor does a clip whose analysis failed.
+        // A page is not analysed.
         function pollWhileAnalysing() {
-            if (stingerState && stingerState.clips.some(c => !c.info && !c.missing && !c.analysis_error)) {
+            if (stingerState && !isStingerPage()
+                && stingerState.clips.some(c => !c.info && !c.missing && !c.analysis_error)) {
                 clearTimeout(fetchStingerState._t);
                 fetchStingerState._t = setTimeout(fetchStingerState, 1000);
             }
         }
 
+        // A stinger page (an HTML Input) is the one entry of its library; its
+        // settings are properties of that block.
+        function isStingerPage() {
+            return !!stingerState && stingerState.source_kind === 'page';
+        }
+        function stingerName(file) {
+            if (!isStingerPage()) return clipName(file);
+            try { return 'Page ' + (new URL(file).hostname || 'data'); } catch { return 'Page'; }
+        }
+
         function renderStingers() {
             const s = stingerState;
             if (!s) return;
+            const page = isStingerPage();
+            document.querySelectorAll('.stinger-tools .type-btn').forEach(b => { b.style.display = page ? 'none' : ''; });
+            if (page && stingerSettingsOpen) toggleStingerSettings();
             const clips = document.getElementById('stingerClips');
             const scrollTop = clips.scrollTop;
             clips.innerHTML = s.clips.map(c => {
                 const cued = c.index === s.cued_index;
                 const cls = ['stinger-clip', cued ? 'cued' : '', cued && s.ready ? 'ready' : '',
                     stingerOnAir === c.index ? 'on-air' : '', c.missing ? 'missing' : ''].join(' ');
-                const info = c.missing ? 'file missing'
+                const info = page
+                    ? 'cut at ' + (c.cut_point_ms != null ? c.cut_point_ms + ' ms' : '?')
+                    : c.missing ? 'file missing'
                     : c.info ? (c.info.duration_ms / 1000).toFixed(1) + 's ' + c.info.width + 'x' + c.info.height
                     : 'analysing...';
                 return '<button class="' + cls + '" onclick="cueStinger(' + c.index + ')" title="'
-                    + escapeHtml(c.file + ' - ' + info) + '"><span class="name">' + escapeHtml(clipName(c.file))
+                    + escapeHtml(c.file + ' - ' + info) + '"><span class="name">' + escapeHtml(stingerName(c.file))
                     + '</span><span class="badges">' + variantBadge(c) + '</span></button>';
             }).join('');
             clips.scrollTop = scrollTop;
@@ -2006,7 +2023,7 @@
             }
             const missing = s.clips.filter(c => c.missing).length;
             const more = clips.scrollHeight > clips.clientHeight + 1;
-            document.getElementById('stingerCount').textContent = s.clips.length
+            document.getElementById('stingerCount').textContent = !page && s.clips.length
                 ? s.clips.length + (s.clips.length === 1 ? ' clip' : ' clips')
                     + (missing ? ', ' + missing + ' missing' : '') + (more ? ' \u2195' : '')
                 : '';
@@ -2018,7 +2035,9 @@
             } else if (s.running) {
                 html = 'On air...';
             } else if (s.cued_index != null) {
-                html = s.ready
+                html = page
+                    ? 'Ready: AUTO triggers the page; settings are on HTML Input ' + escapeHtml(s.source_block_id)
+                    : s.ready
                     ? 'Ready: on air ' + s.preroll_ms + ' ms after AUTO'
                     : 'Loading clip ' + (s.cued_index + 1) + '...';
                 if (s.last_cue_ms != null) html += ' (cued in ' + s.last_cue_ms + ' ms)';
@@ -2026,13 +2045,13 @@
             const t = s.last_take;
             if (t) {
                 const late = t.frames_late > 0 || t.frames_arrived < t.frames_expected;
-                html += '<br>Last: ' + escapeHtml(clipName(t.file)) + ', '
+                html += '<br>Last: ' + escapeHtml(stingerName(t.file)) + ', '
                     + '<span class="' + (late ? 'bad' : '') + '">' + t.frames_arrived + '/' + t.frames_expected
                     + ' frames' + (t.frames_late ? ', ' + t.frames_late + ' late' : '') + '</span>'
                     + (t.worst_margin_ms != null ? ', margin ' + Math.round(t.worst_margin_ms) + ' ms' : '')
                     + ', on air ' + Math.round(t.take_to_air_ms) + ' ms after the take';
             }
-            if (!s.matte_supported && s.source_block_id) {
+            if (!s.matte_supported && s.source_block_id && !page) {
                 html += '<br><span class="warn">Software mixer: matte stingers play as classic.</span>';
             }
             status.innerHTML = html;
@@ -4021,7 +4040,7 @@
                         if (d.flow_id === FLOW_ID && d.block_id === BLOCK_ID) {
                             if (event.type === 'StingerStarted') {
                                 stingerOnAir = d.index;
-                                setStatus('Stinger ' + clipName(d.file) + ' (' + d.variant.replace('_', ' ')
+                                setStatus('Stinger ' + stingerName(d.file) + ' (' + d.variant.replace('_', ' ')
                                     + (d.downgraded_from ? ', as classic' : '') + ') on air in '
                                     + Math.round(d.take_to_air_ms) + ' ms');
                             } else if (event.type === 'StingerCompleted') {
