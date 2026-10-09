@@ -40,6 +40,20 @@ static VIDEO_CONVERT_MODE: OnceLock<VideoConvertMode> = OnceLock::new();
 /// Global GL renderer info, probed once at startup.
 static GL_RENDERER_INFO: OnceLock<Option<GlRendererInfo>> = OnceLock::new();
 
+/// Pipeline that the CUDA-GL interop probe runs, in `gst-launch-1.0` syntax.
+#[cfg(not(target_os = "macos"))]
+const INTEROP_PROBE_PIPELINE: &str = "videotestsrc num-buffers=1 \
+    ! video/x-raw,width=160,height=64 ! glupload ! glcolorconvert \
+    ! video/x-raw(memory:GLMemory),format=NV12 ! nvh264enc ! fakesink";
+
+/// Hidden `strom` subcommand that runs [`INTEROP_PROBE_PIPELINE`] and exits.
+#[cfg(not(target_os = "macos"))]
+pub const INTEROP_PROBE_SUBCOMMAND: &str = "gpu-interop-probe";
+
+/// Executable that runs the interop probe instead of `gst-launch-1.0`.
+#[cfg(not(target_os = "macos"))]
+static INTEROP_PROBE_EXE: OnceLock<std::path::PathBuf> = OnceLock::new();
+
 /// Get the detected video conversion mode.
 /// Panics if called before `detect_gpu_capabilities()`.
 pub fn video_convert_mode() -> VideoConvertMode {
@@ -275,6 +289,8 @@ fn detect_convert_mode() -> VideoConvertMode {
         return VideoConvertMode::Software;
     }
 
+    warn_if_gl_is_not_on_nvidia();
+
     debug!("Testing CUDA-GL interop (this may take a moment on first run)...");
 
     match test_cuda_gl_interop() {
@@ -498,8 +514,88 @@ pub fn configure_video_convert(element: &gst::Element) {
     }
 }
 
+/// Run the interop probe in this executable rather than `gst-launch-1.0`.
+///
+/// The probe has to see the GPU this process renders GL on. On a Windows laptop
+/// with two GPUs that choice is per executable: `strom.exe` asks for the
+/// discrete GPU, `gst-launch-1.0.exe` does not, so a probe in `gst-launch` runs
+/// GL on the integrated GPU, fails interop, and turns GPU conversion off for a
+/// process whose own GL is on the NVIDIA card. Only the `strom` binary calls
+/// this, since only it has [`INTEROP_PROBE_SUBCOMMAND`]; anything else keeps
+/// `gst-launch-1.0`.
+#[cfg(not(target_os = "macos"))]
+pub fn run_interop_probe_in_this_executable() {
+    match std::env::current_exe() {
+        Ok(exe) => {
+            let _ = INTEROP_PROBE_EXE.set(exe);
+        }
+        Err(e) => warn!(
+            "Cannot locate the Strom executable ({}) - probing CUDA-GL interop with gst-launch-1.0",
+            e
+        ),
+    }
+}
+
+/// Body of [`INTEROP_PROBE_SUBCOMMAND`]: run [`INTEROP_PROBE_PIPELINE`] to the
+/// end, as `gst-launch-1.0` would. The parent reads the verdict from the
+/// GStreamer warnings on stderr and from the exit code.
+#[cfg(not(target_os = "macos"))]
+pub fn run_interop_probe() -> Result<(), String> {
+    gst::init().map_err(|e| format!("GStreamer init failed: {}", e))?;
+
+    let pipeline = gst::parse::launch(INTEROP_PROBE_PIPELINE)
+        .map_err(|e| format!("Failed to create probe pipeline: {}", e))?;
+    let bus = pipeline.bus().ok_or("Probe pipeline has no bus")?;
+
+    let result = pipeline
+        .set_state(gst::State::Playing)
+        .map_err(|e| format!("Failed to start probe pipeline: {}", e))
+        .and_then(|_| {
+            match bus.timed_pop_filtered(
+                gst::ClockTime::from_seconds(30),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            ) {
+                Some(msg) => match msg.view() {
+                    gst::MessageView::Error(err) => Err(format!(
+                        "Probe pipeline error from {:?}: {}",
+                        err.src().map(|s| s.path_string()),
+                        err.error()
+                    )),
+                    _ => Ok(()),
+                },
+                None => Err("Probe pipeline did not finish within 30 s".to_string()),
+            }
+        });
+
+    let _ = pipeline.set_state(gst::State::Null);
+    result
+}
+
+/// Warn when NVENC is present but OpenGL renders on another GPU.
+///
+/// GL frames then have to cross from that GPU to the NVIDIA card before every
+/// encode, and the GL mixer runs on the slower GPU. The usual cause is a laptop
+/// with an integrated GPU that the driver picked for this process.
+#[cfg(not(target_os = "macos"))]
+fn warn_if_gl_is_not_on_nvidia() {
+    let Some(info) = gl_renderer_info() else {
+        return;
+    };
+    let on_nvidia = [&info.vendor, &info.renderer]
+        .iter()
+        .any(|s| s.to_lowercase().contains("nvidia"));
+    if !on_nvidia {
+        warn!(
+            "NVENC is available but OpenGL runs on {} ({}), not the NVIDIA GPU - GL frames are copied between GPUs. \
+             On a machine with two GPUs, set Strom to use the high-performance GPU in the graphics settings",
+            info.renderer, info.vendor
+        );
+    }
+}
+
 /// Test if true zero-copy GL-CUDA interop works with nvh264enc.
-/// Runs gst-launch-1.0 with GST_DEBUG to capture interop warnings.
+/// Runs the probe pipeline in a child process with GST_DEBUG to capture interop
+/// warnings: `strom` itself when available, otherwise `gst-launch-1.0`.
 /// Returns Ok if zero-copy works, Err if fallback copy is used.
 #[cfg(not(target_os = "macos"))]
 fn test_cuda_gl_interop() -> Result<(), String> {
@@ -514,14 +610,24 @@ fn test_cuda_gl_interop() -> Result<(), String> {
         gl_window, gl_platform
     );
 
-    // Run gst-launch-1.0 with GST_DEBUG to capture warnings
-    // Pipeline: videotestsrc ! glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),format=NV12 ! nvh264enc ! fakesink
-    let gst_launch = if cfg!(windows) {
-        "gst-launch-1.0.exe"
-    } else {
-        "gst-launch-1.0"
+    // Run the probe pipeline in a child process with GST_DEBUG to capture warnings
+    let mut cmd = match INTEROP_PROBE_EXE.get() {
+        Some(exe) => {
+            let mut cmd = Command::new(exe);
+            cmd.arg(INTEROP_PROBE_SUBCOMMAND);
+            cmd
+        }
+        None => {
+            let gst_launch = if cfg!(windows) {
+                "gst-launch-1.0.exe"
+            } else {
+                "gst-launch-1.0"
+            };
+            let mut cmd = Command::new(gst_launch);
+            cmd.args(INTEROP_PROBE_PIPELINE.split_whitespace());
+            cmd
+        }
     };
-    let mut cmd = Command::new(gst_launch);
     cmd.env("GST_DEBUG", "nvenc:3,nvencoder:3,cudautils:3");
 
     // Pass through GL environment variables for headless support
@@ -532,23 +638,13 @@ fn test_cuda_gl_interop() -> Result<(), String> {
         cmd.env("GST_GL_PLATFORM", &gl_platform);
     }
 
-    let output = cmd
-        .arg("videotestsrc")
-        .arg("num-buffers=1")
-        .arg("!")
-        .arg("video/x-raw,width=160,height=64")
-        .arg("!")
-        .arg("glupload")
-        .arg("!")
-        .arg("glcolorconvert")
-        .arg("!")
-        .arg("video/x-raw(memory:GLMemory),format=NV12")
-        .arg("!")
-        .arg("nvh264enc")
-        .arg("!")
-        .arg("fakesink")
-        .output()
-        .map_err(|e| format!("Failed to run gst-launch-1.0: {}", e))?;
+    let output = cmd.output().map_err(|e| {
+        format!(
+            "Failed to run the interop probe {:?}: {}",
+            cmd.get_program(),
+            e
+        )
+    })?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
 
