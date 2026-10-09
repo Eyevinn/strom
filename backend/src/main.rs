@@ -706,48 +706,66 @@ fn run_headless_entry(
 
     #[cfg(target_os = "macos")]
     {
+        // `gst_macos_main` does not run this closure on the process main
+        // thread -- it takes that thread for the CFRunLoop and calls us on a
+        // thread it creates itself, which gets the raw pthread default stack
+        // (512 KB on macOS) rather than the main thread's 8 MB.
         gstreamer::macos_main(move || {
-            // `gst_macos_main` does not run this closure on the process main
-            // thread -- it takes that thread for the CFRunLoop and calls us on a
-            // thread it creates itself, which gets the raw pthread default stack
-            // (512 KB on macOS) rather than the main thread's 8 MB.
-            // `create_app_with_config` builds the OpenAPI spec, and utoipa's
-            // generated `openapi_spec()` is one deeply nested expression covering
-            // every `StromEvent` variant; it overflows that stack and kills the
-            // process with exit 132 and no panic message, before the HTTP server
-            // ever binds.
-            //
-            // Spawning a Rust thread is what fixes it, not the size below:
-            // `std::thread` defaults to a 2 MiB stack, and that is already
-            // enough today (measured -- it starts and binds normally without an
-            // explicit size). The 8 MB is headroom for the spec continuing to
-            // grow, so keep it, but do not remove the indirection: calling
-            // `run_headless` directly here dies with exit 132.
-            std::thread::Builder::new()
-                .name("strom-headless".into())
-                .stack_size(8 * 1024 * 1024)
-                .spawn(move || {
-                    run_headless(
-                        config,
-                        no_auto_restart,
-                        log_reload_handle,
-                        default_log_filter,
-                    )
-                })
-                .expect("failed to spawn headless thread")
-                .join()
-                .expect("headless thread panicked")
+            run_headless_on_own_thread(
+                config,
+                no_auto_restart,
+                log_reload_handle,
+                default_log_filter,
+            )
         })
     }
     #[cfg(not(target_os = "macos"))]
     {
-        run_headless(
+        // Windows gives the main thread a 1 MB stack, which a debug build
+        // overflows the same way.
+        run_headless_on_own_thread(
             config,
             no_auto_restart,
             log_reload_handle,
             default_log_filter,
         )
     }
+}
+
+/// Run [`run_headless`] on a thread with a known, large stack.
+///
+/// `create_app_with_config` builds the OpenAPI spec, and utoipa's generated
+/// `openapi_spec()` is one deeply nested expression covering every
+/// `StromEvent` variant. On a small stack it overflows and kills the process
+/// before the HTTP server ever binds: on macOS (the `gst_macos_main` thread,
+/// 512 KB) with exit 132 and no panic message, and on Windows (main thread,
+/// 1 MB) in a debug build with "thread 'main' has overflowed its stack".
+///
+/// Spawning a Rust thread is what fixes it, not the size below:
+/// `std::thread` defaults to a 2 MiB stack, and that is already enough today
+/// (measured on macOS -- it starts and binds normally without an explicit
+/// size). The 8 MB is headroom for the spec continuing to grow, so keep it,
+/// but do not remove the indirection.
+fn run_headless_on_own_thread(
+    config: Config,
+    no_auto_restart: bool,
+    log_reload_handle: strom::state::LogReloadHandle,
+    default_log_filter: String,
+) -> anyhow::Result<()> {
+    std::thread::Builder::new()
+        .name("strom-headless".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            run_headless(
+                config,
+                no_auto_restart,
+                log_reload_handle,
+                default_log_filter,
+            )
+        })
+        .expect("failed to spawn headless thread")
+        .join()
+        .expect("headless thread panicked")
 }
 
 /// The DevTools proxy's view of the configuration.
