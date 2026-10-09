@@ -124,9 +124,17 @@ fn negotiate(codec: &str, input_format: &str, profile: Option<&str>) -> Negotiat
         .get(&format!("{}:capsfilter", INSTANCE))
         .expect("block builds a capsfilter")
         .clone();
-    let convert = by_id
-        .get(&format!("{}:videoconvert", INSTANCE))
-        .expect("block builds a converter")
+    // The block's declared input, not the element it points at today.
+    let input = strom::blocks::builtin::videoenc::get_blocks()
+        .into_iter()
+        .next()
+        .expect("videoenc definition")
+        .external_pads
+        .inputs
+        .remove(0);
+    let block_in = by_id
+        .get(&format!("{}:{}", INSTANCE, input.internal_element_id))
+        .expect("block builds its input element")
         .clone();
 
     // Source: the format under test, pushed at the block's input.
@@ -154,7 +162,9 @@ fn negotiate(codec: &str, input_format: &str, profile: Option<&str>) -> Negotiat
         .add_many([&src, &src_caps, &sink])
         .expect("add harness elements");
     gst::Element::link_many([&src, &src_caps]).expect("link source");
-    src_caps.link(&convert).expect("link source into the block");
+    src_caps
+        .link(&block_in)
+        .expect("link source into the block");
     capsfilter.link(&sink).expect("link block to fakesink");
 
     pipeline
