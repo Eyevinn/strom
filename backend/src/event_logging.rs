@@ -3,7 +3,7 @@
 //! Called inline from `EventBroadcaster::broadcast()` so events cannot be silently
 //! dropped under broadcast-channel lag. Gating is done by the caller.
 
-use strom_types::StromEvent;
+use strom_types::{BlockHealthStatus, StromEvent};
 use tracing::{error, info, warn};
 
 /// Emit a `StromEvent` as a structured tracing log record.
@@ -59,6 +59,21 @@ pub(crate) fn log_strom_event(event: &StromEvent) {
             strom.flow.id = %flow_id,
             error.message = %warning,
             error.source = source.as_deref().unwrap_or_default(),
+            "{}",
+            description
+        ),
+        StromEvent::BlockHealthChanged {
+            flow_id,
+            block_id,
+            status: BlockHealthStatus::Failed,
+            detail,
+            ..
+        } => error!(
+            event.domain = "strom",
+            event.name = %name,
+            strom.flow.id = %flow_id,
+            strom.block.id = %block_id,
+            error.message = detail.as_deref().unwrap_or_default(),
             "{}",
             description
         ),
@@ -126,6 +141,17 @@ mod tests {
             flow_id: FlowId::nil(),
             error: "boom".to_string(),
             source: None,
+        });
+    }
+
+    #[test]
+    fn logs_block_health_failure_without_panicking() {
+        log_strom_event(&StromEvent::BlockHealthChanged {
+            flow_id: FlowId::nil(),
+            block_id: "b0".to_string(),
+            status: BlockHealthStatus::Failed,
+            detail: None,
+            causes: Vec::new(),
         });
     }
 
