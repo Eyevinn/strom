@@ -54,6 +54,7 @@ flowchart LR
 | Groups (subgroups) | 0 – 32 (default 0) | Stereo. Each group has its own output **and** also feeds Main. |
 | Main output | 1 | Stereo. |
 | Monitor output | 1 | Stereo. Follows Main, switches to Solo bus on PFL/AFL. |
+| Direct outputs | one per channel, off by default | Stereo. Turned on by the `direct_outs` setting. See [3.1](#31-direct-outputs). |
 
 The mixer runs at one sample rate, set by the **Sample Rate** property (default 48 kHz,
 construction-time). Every input is resampled to it, so inputs at different rates can be
@@ -159,6 +160,39 @@ Every channel can be independently routed to **Main**, to any of the
   pre-fader when using it for stage monitors or IEMs. Pre/post is a
   construction-time setting: changing it rebuilds the mixer when the
   flow restarts, it does not switch live.
+
+### 3.1 Direct outputs
+
+With **Direct Outs** on (construction time), each channel gets an output
+pad `direct_out_N` carrying exactly what that channel sends to Main:
+after its fader, mute and **To Main** switch, before the Main sum and
+the Main processing. A mute or To Main change fades on the direct out
+with the same ramp as on Main.
+
+```
+[Channel post-fader] ──► ROUTING TEE ──► TO MAIN (on/off) ──┬──► MAIN
+                                                            └──► DIRECT OUT N
+```
+
+This is not the direct out of a hardware console, which taps the
+channel at a chosen point (input, pre-EQ, pre-fader, post-fader) and
+ignores the channel's bus assignments. Here the To Main switch applies:
+a channel routed only to a group reaches program through the group but
+is **silent on its direct out**.
+
+If nothing pulls from a direct out, its audio is dropped; Main is not
+held up. A consumer that stops and resumes first receives up to 3 s of
+old audio.
+
+A direct out carries nothing until its channel has input. (With Force
+Live on, the default, the other outputs carry silence instead.) An
+output that waits for its first audio before starting gets nothing
+until a source reaches that channel, and the flow reports itself as
+paused instead of playing until then. Main and the other outputs keep
+playing. The NDI, DeckLink audio and TAMS outputs wait like this, and so
+does a raw GStreamer sink with `async` left on (for example
+`interaudiosink`). The other Strom outputs, including Inter Output, do
+not.
 
 ### Quick routing matrix view
 

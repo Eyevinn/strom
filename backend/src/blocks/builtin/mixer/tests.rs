@@ -519,13 +519,14 @@ fn small_mixer_props(extra: &[(&str, PropertyValue)]) -> HashMap<String, Propert
 }
 
 struct Assembled {
+    instance: &'static str,
     pipeline: gst::Pipeline,
     result: BlockBuildResult,
 }
 
 impl Assembled {
     fn element(&self, id: &str) -> &gst::Element {
-        let full = format!("{INSTANCE}:{id}");
+        let full = format!("{}:{id}", self.instance);
         self.result
             .elements
             .iter()
@@ -535,13 +536,13 @@ impl Assembled {
     }
 
     fn has_element(&self, id: &str) -> bool {
-        let full = format!("{INSTANCE}:{id}");
+        let full = format!("{}:{id}", self.instance);
         self.result.elements.iter().any(|(k, _)| *k == full)
     }
 
     /// Every element reachable downstream of `id` through linked pads.
     fn downstream(&self, id: &str) -> HashSet<String> {
-        let prefix = format!("{INSTANCE}:");
+        let prefix = format!("{}:", self.instance);
         let mut seen = HashSet::new();
         let mut queue = VecDeque::from([self.element(id).clone()]);
         while let Some(element) = queue.pop_front() {
@@ -576,10 +577,14 @@ fn resolve_pad(element: &gst::Element, name: &str) -> gst::Pad {
 /// Build through the real builder and link the result the way the pipeline
 /// manager does: named pads pad-to-pad, element refs by `Element::link`.
 fn assemble(properties: &HashMap<String, PropertyValue>) -> Assembled {
+    assemble_as(INSTANCE, properties)
+}
+
+fn assemble_as(instance: &'static str, properties: &HashMap<String, PropertyValue>) -> Assembled {
     init_gst();
     let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
     let result = MixerBuilder
-        .build(INSTANCE, properties, &ctx)
+        .build(instance, properties, &ctx)
         .expect("mixer build");
 
     let pipeline = gst::Pipeline::new();
@@ -613,7 +618,11 @@ fn assemble(properties: &HashMap<String, PropertyValue>) -> Assembled {
                 .unwrap_or_else(|e| panic!("link {from:?} -> {to:?}: {e}")),
         };
     }
-    Assembled { pipeline, result }
+    Assembled {
+        instance,
+        pipeline,
+        result,
+    }
 }
 
 #[test]
@@ -1543,5 +1552,361 @@ fn test_channel_keeps_feeding_aux_while_monitor_waits_for_its_consumer() {
         "aux0_out_tee",
         2500,
         Duration::from_millis(4500),
+    );
+}
+
+// ---- Direct outs ----
+
+/// Feed `convert_{ch}` from a live tone at the buses' default rate in 10 ms
+/// buffers, so the channel's resampler passes it through unchanged. `wave` is
+/// an audiotestsrc wave nick: "sine" (0.5 peak) or "silence".
+fn feed_wave(m: &Assembled, ch: usize, wave: &str) {
+    let rate = strom_types::DEFAULT_AUDIO_SAMPLE_RATE as i32;
+    let src = gst::ElementFactory::make("audiotestsrc")
+        .property("is-live", true)
+        .property("samplesperbuffer", rate / 100)
+        .property("volume", 0.5f64)
+        .property_from_str("wave", wave)
+        .build()
+        .unwrap();
+    let caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("rate", rate)
+                .build(),
+        )
+        .build()
+        .unwrap();
+    m.pipeline.add_many([&src, &caps]).unwrap();
+    src.link(&caps).unwrap();
+    caps.link_pads(None, m.element(&format!("convert_{ch}")), Some("sink"))
+        .unwrap();
+}
+
+/// Peak absolute sample per 10 ms of running time, keyed by the time of each
+/// sample (buffer PTS plus its offset), so two outputs carrying the same
+/// audio in differently sized buffers produce the same buckets.
+type Envelope = Arc<std::sync::Mutex<std::collections::BTreeMap<u64, f32>>>;
+
+const BUCKET_NS: u64 = 10_000_000;
+
+/// Link a fakesink to an output tee and record its envelope.
+fn capture(m: &Assembled, tee: &str, sync: bool) -> Envelope {
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", sync)
+        .build()
+        .unwrap();
+    m.pipeline.add(&sink).unwrap();
+    m.element(tee)
+        .link_pads(Some("src_%u"), &sink, None)
+        .unwrap();
+    let env: Envelope = Default::default();
+    let out = env.clone();
+    sink.static_pad("sink")
+        .unwrap()
+        .add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            let Some(buffer) = info.buffer() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let (Some(pts), Some(caps)) = (buffer.pts(), pad.current_caps()) else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let s = caps.structure(0).unwrap();
+            assert_eq!(s.get::<&str>("format").unwrap(), "F32LE");
+            let rate = s.get::<i32>("rate").unwrap() as u64;
+            let channels = s.get::<i32>("channels").unwrap() as usize;
+            let map = buffer.map_readable().unwrap();
+            let mut env = out.lock().unwrap();
+            for (frame, samples) in map.chunks_exact(4 * channels).enumerate() {
+                let t = pts.nseconds() + frame as u64 * 1_000_000_000 / rate;
+                let peak = samples
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b).abs())
+                    .fold(0.0f32, f32::max);
+                let slot = env.entry(t / BUCKET_NS).or_insert(0.0);
+                *slot = slot.max(peak);
+            }
+            gst::PadProbeReturn::Ok
+        });
+    env
+}
+
+fn snapshot(env: &Envelope) -> std::collections::BTreeMap<u64, f32> {
+    env.lock().unwrap().clone()
+}
+
+fn play_until_flowing(m: &Assembled, envs: &[&Envelope]) {
+    m.pipeline.set_state(gst::State::Playing).unwrap();
+    let bus = m.pipeline.bus().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while envs.iter().any(|e| e.lock().unwrap().len() < 20) {
+        assert!(
+            Instant::now() < deadline,
+            "audio did not reach every output: {:?} buckets",
+            envs.iter()
+                .map(|e| e.lock().unwrap().len())
+                .collect::<Vec<_>>()
+        );
+        if let Some(msg) = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(20),
+            &[gst::MessageType::Error],
+        ) {
+            panic!("pipeline error: {msg:?}");
+        }
+    }
+}
+
+fn direct_props(extra: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
+    let mut p = small_mixer_props(&[("direct_outs", PropertyValue::Bool(true))]);
+    p.extend(props(extra));
+    p
+}
+
+#[test]
+fn test_direct_outs_exist_only_when_enabled() {
+    let names = |p: &HashMap<String, PropertyValue>| -> Vec<(String, Option<String>)> {
+        MixerBuilder
+            .get_external_pads(p)
+            .unwrap()
+            .outputs
+            .into_iter()
+            .filter(|o| o.name.starts_with("direct_out"))
+            .map(|o| (o.name, o.label))
+            .collect()
+    };
+    assert!(names(&small_mixer_props(&[])).is_empty());
+    assert!(names(&small_mixer_props(&[(
+        "direct_outs",
+        PropertyValue::Bool(false)
+    )]))
+    .is_empty());
+    assert_eq!(
+        names(&direct_props(&[])),
+        [
+            ("direct_out_1".to_string(), Some("D1".to_string())),
+            ("direct_out_2".to_string(), Some("D2".to_string())),
+        ]
+    );
+
+    // Off builds nothing extra; on builds the branch and every pad resolves.
+    let off = assemble_as("mx_direct_off", &small_mixer_props(&[]));
+    assert!(!off.has_element("direct_tee_0") && !off.has_element("direct_out_tee_0"));
+
+    let on = assemble_as("mx_direct_on", &direct_props(&[]));
+    for pad in MixerBuilder
+        .get_external_pads(&direct_props(&[]))
+        .unwrap()
+        .outputs
+    {
+        let element = on.element(&pad.internal_element_id);
+        assert!(
+            element.pad_template(&pad.internal_pad_name).is_some(),
+            "{}: {} has no pad {}",
+            pad.name,
+            pad.internal_element_id,
+            pad.internal_pad_name
+        );
+    }
+    // The tap is after the to-Main switch and still feeds Main.
+    let after_switch = on.downstream("to_main_vol_0");
+    assert!(after_switch.contains("direct_out_tee_0"));
+    assert!(after_switch.contains("main_out_tee"));
+    assert!(!on.downstream("convert_1").contains("direct_out_tee_0"));
+}
+
+/// A tone on input 1 and silence on input 2: each direct out carries only its
+/// own channel, and carries it at the level it reaches Main with.
+#[test]
+fn test_direct_out_carries_only_its_channel() {
+    let m = assemble_as("mx_direct_split", &direct_props(&[]));
+    feed_wave(&m, 0, "sine");
+    feed_wave(&m, 1, "silence");
+    // Resolve each output the way a flow link does, through the external pad.
+    let pads = MixerBuilder.get_external_pads(&direct_props(&[])).unwrap();
+    let tee_of = |name: &str| {
+        pads.outputs
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.internal_element_id.clone())
+            .unwrap()
+    };
+    let d1 = capture(&m, &tee_of("direct_out_1"), false);
+    let d2 = capture(&m, &tee_of("direct_out_2"), false);
+    play_until_flowing(&m, &[&d1, &d2]);
+
+    let d1 = snapshot(&d1);
+    let d2 = snapshot(&d2);
+    let loud = d1.values().filter(|&&p| p > 0.4).count();
+    assert!(loud * 10 >= d1.len() * 9, "tone missing on D1: {d1:?}");
+    assert!(d2.values().all(|&p| p < 1e-6), "D2 is not silent: {d2:?}");
+}
+
+/// Mute (fader strip) and the to-Main switch, changed on a running mixer
+/// through the ramp manager the property API uses, shape the direct out
+/// exactly as they shape this channel on Main.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_direct_out_follows_mute_and_to_main_ramps() {
+    use crate::gst::volume_ramp::VolumeRampManager;
+
+    let m = assemble_as("mx_direct_ramp", &direct_props(&[]));
+    feed_wave(&m, 0, "sine");
+    feed_wave(&m, 1, "silence");
+    let direct = capture(&m, "direct_out_tee_0", false);
+    let main = capture(&m, "main_out_tee", false);
+    play_until_flowing(&m, &[&direct, &main]);
+
+    const RAMP_MS: u32 = 300;
+    let settle = Duration::from_millis(RAMP_MS as u64 + 300);
+    let ramps = VolumeRampManager::new();
+    let fader = m.element("volume_0");
+    let to_main = m.element("to_main_vol_0");
+
+    assert!(ramps.apply_mute(fader, "volume_0", true, RAMP_MS));
+    tokio::time::sleep(settle).await;
+    assert!(fader.property::<bool>("mute"));
+    let muted_at = snapshot(&direct).keys().last().copied().unwrap();
+
+    assert!(ramps.apply_mute(fader, "volume_0", false, RAMP_MS));
+    tokio::time::sleep(settle).await;
+    let unmuted_at = snapshot(&direct).keys().last().copied().unwrap();
+
+    assert!(ramps.apply_volume_ramp(to_main, "to_main_vol_0", 0.0, RAMP_MS));
+    tokio::time::sleep(settle).await;
+
+    let direct = snapshot(&direct);
+    let main = snapshot(&main);
+    // Main runs behind the direct out by its aggregator latency; compare the
+    // buckets both have.
+    let shared: Vec<u64> = direct
+        .keys()
+        .filter(|k| main.contains_key(k))
+        .copied()
+        .collect();
+    assert!(shared.len() > 100, "too little overlap: {}", shared.len());
+    // A loaded host makes Main's aggregator miss a deadline now and then,
+    // which drops this channel from a bucket or two. A tap in the wrong place
+    // differs for the whole length of a mute or a to-Main change.
+    let mut run = 0;
+    let mut longest = 0;
+    for k in &shared {
+        run = if (direct[k] - main[k]).abs() > 0.05 {
+            run + 1
+        } else {
+            0
+        };
+        longest = longest.max(run);
+    }
+    assert!(
+        longest < 20,
+        "direct out differs from Main for {} ms in a row",
+        longest * 10
+    );
+
+    // Each change is a ramp, not a step, and the ramp is in the shared range.
+    let fading = |from: u64, to: u64| {
+        shared
+            .iter()
+            .filter(|&&k| k > from && k <= to)
+            .filter(|&&k| direct[&k] > 0.02 && direct[&k] < 0.4)
+            .count()
+    };
+    assert!(
+        fading(0, muted_at) >= 5,
+        "mute did not fade on the direct out"
+    );
+    assert!(
+        fading(muted_at, unmuted_at) >= 5,
+        "unmute did not fade on the direct out"
+    );
+    assert!(
+        fading(unmuted_at, u64::MAX) >= 5,
+        "to-Main off did not fade on the direct out"
+    );
+    // Silent while muted, and after the to-Main switch went off.
+    let tail: Vec<f32> = direct.values().rev().take(20).copied().collect();
+    assert!(tail.iter().all(|&p| p < 1e-4), "still audible: {tail:?}");
+    let mut run = 0;
+    let mut silent = 0;
+    for (_, &peak) in direct.range(..unmuted_at) {
+        run = if peak < 1e-4 { run + 1 } else { 0 };
+        silent = silent.max(run);
+    }
+    assert!(silent >= 10, "never silent while muted");
+}
+
+/// A direct-out consumer that stops pulling must not cost this channel any
+/// audio on Main.
+#[test]
+fn test_stalled_direct_out_consumer_does_not_starve_main() {
+    let m = assemble_as("mx_direct_blocked", &direct_props(&[]));
+    feed_wave(&m, 0, "sine");
+    feed_wave(&m, 1, "silence");
+    let main = capture(&m, "main_out_tee", false);
+    let consumer = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .unwrap();
+    m.pipeline.add(&consumer).unwrap();
+    m.element("direct_out_tee_0")
+        .link_pads(Some("src_%u"), &consumer, None)
+        .unwrap();
+    play_until_flowing(&m, &[&main]);
+    // Stop pulling once running: the consumer's streaming thread parks in the
+    // probe and never returns.
+    let consumer_pad = consumer.static_pad("sink").unwrap();
+    let block = consumer_pad
+        .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_, _| {
+            gst::PadProbeReturn::Ok
+        })
+        .unwrap();
+    // Long enough to fill the direct queue (3 s) and then some.
+    std::thread::sleep(Duration::from_millis(4500));
+    let main = snapshot(&main);
+    consumer_pad.remove_probe(block);
+
+    // Skip the start-up buckets. A blocked tee silences the channel on Main
+    // for good; a loaded host only drops scattered buckets, so judge by the
+    // longest run without the tone.
+    let steady: Vec<f32> = main.values().skip(30).copied().collect();
+    assert!(steady.len() > 150, "Main stopped: {} buckets", steady.len());
+    let mut run = 0;
+    let mut longest = 0;
+    for &peak in &steady {
+        run = if peak < 0.4 { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    assert!(
+        longest < 30,
+        "Main lost the tone for {} ms in a row",
+        longest * 10
+    );
+}
+
+/// A consumer that syncs to the clock (the Inter Output block's default)
+/// holds each buffer for the flow's latency. At 1.5 s the direct out must
+/// still deliver every buffer, not leak them while the consumer waits.
+#[test]
+fn test_direct_out_feeds_a_synced_consumer_at_high_latency() {
+    let m = assemble_as("mx_direct_synced", &direct_props(&[]));
+    feed_wave(&m, 0, "sine");
+    feed_wave(&m, 1, "silence");
+    let direct = capture(&m, "direct_out_tee_0", true);
+    m.pipeline
+        .set_latency(Some(gst::ClockTime::from_mseconds(1500)));
+    play_until_flowing(&m, &[&direct]);
+    std::thread::sleep(Duration::from_millis(4000));
+
+    // The envelope is keyed by sample time, so a dropped buffer is a missing
+    // bucket between the first and the last.
+    let keys: Vec<u64> = snapshot(&direct).keys().copied().skip(20).collect();
+    let span = (keys[keys.len() - 1] - keys[0] + 1) as usize;
+    assert!(span > 200, "direct out barely ran: {span} buckets");
+    let missing = span - keys.len();
+    assert!(
+        missing * 100 <= span,
+        "direct out lost {missing} of {span} 10 ms buckets"
     );
 }
