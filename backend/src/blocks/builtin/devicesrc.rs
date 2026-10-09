@@ -257,6 +257,12 @@ impl BlockBuilder for LocalInputBuilder {
             let rate = read_string(properties, "audio_rate").and_then(|s| s.parse::<i32>().ok());
             let channels = read_string(properties, "audio_channels")
                 .and_then(|s| parse_audio_channel_config(&s));
+            if let Some(c) = channels.filter(|c| c.channels > MAX_AUDIO_CHANNELS) {
+                return Err(BlockBuildError::InvalidConfiguration(format!(
+                    "audio_channels {} is more than the {} channels GStreamer can convert",
+                    c.channels, MAX_AUDIO_CHANNELS
+                )));
+            }
             let wasapi_exclusive = read_bool(properties, "wasapi_exclusive_mode");
 
             let audiosrc_id = format!("{}:audiosrc", instance_id);
@@ -298,8 +304,24 @@ impl BlockBuilder for LocalInputBuilder {
                 .factory()
                 .is_some_and(|f| f.name() == ASIO_SOURCE_FACTORY);
             if is_asio {
-                if let Some(c) = channels {
-                    let list = asio_input_channels(c.channels);
+                // Device default on a device wider than GStreamer's channel
+                // limit: take the first MAX_AUDIO_CHANNELS inputs instead of
+                // every input.
+                let inputs = channels.map(|c| c.channels).or_else(|| {
+                    let max = ctx
+                        .local_device(&audio_device_id)
+                        .and_then(|d| d.caps())
+                        .and_then(|caps| max_channels(&caps))?;
+                    (max > MAX_AUDIO_CHANNELS).then(|| {
+                        warn!(
+                            "Local Input: ASIO device has {} inputs, capturing the first {}",
+                            max, MAX_AUDIO_CHANNELS
+                        );
+                        MAX_AUDIO_CHANNELS
+                    })
+                });
+                if let Some(inputs) = inputs {
+                    let list = asio_input_channels(inputs);
                     info!(
                         "Local Input: capturing ASIO inputs {} on {}",
                         list, audiosrc_id
@@ -450,6 +472,24 @@ fn make_source(
 /// Factory name of GStreamer's ASIO capture element (gst-plugins-bad, Windows).
 const ASIO_SOURCE_FACTORY: &str = "asiosrc";
 
+/// Widest channel count GStreamer's channel mixer takes. `audioconvert`
+/// segfaults above it on GStreamer 1.24 (`gst_audio_channel_mixer_new`
+/// asserts `in_channels <= 64`), so the block never negotiates more.
+const MAX_AUDIO_CHANNELS: u32 = 64;
+
+/// Highest channel count a device's caps offer.
+fn max_channels(caps: &gst::Caps) -> Option<u32> {
+    caps.iter()
+        .filter_map(|s| {
+            s.get::<gst::IntRange<i32>>("channels")
+                .map(|r| r.max())
+                .or_else(|_| s.get::<i32>("channels"))
+                .ok()
+        })
+        .max()
+        .and_then(|c| u32::try_from(c).ok())
+}
+
 /// `input-channels` value that captures the first `channels` ASIO inputs.
 fn asio_input_channels(channels: u32) -> String {
     (0..channels)
@@ -507,11 +547,15 @@ fn audio_source_layout(rate: Option<i32>, config: Option<AudioChannelConfig>) ->
                 Some(gst::IntRange::new(1, 2).to_send_value()),
                 None,
             ));
+            let max = MAX_AUDIO_CHANNELS as i32;
             caps_mut.append_structure(structure(
-                Some(gst::IntRange::new(3, i32::MAX).to_send_value()),
+                Some(gst::IntRange::new(3, max).to_send_value()),
                 Some(0),
             ));
-            caps_mut.append_structure(structure(None, None));
+            caps_mut.append_structure(structure(
+                Some(gst::IntRange::new(1, max).to_send_value()),
+                None,
+            ));
         }
     }
     AudioSourceLayout { caps, mask }
@@ -1072,7 +1116,7 @@ mod tests {
     #[test]
     fn asio_device_default_negotiates_any_channel_count() {
         // audio_channels empty: asiosrc opens every input on the device.
-        for channels in [1, 2, 3, 128] {
+        for channels in [1, 2, 3, 64] {
             let source = asio_source_caps(channels);
             let filter = audio_source_layout(Some(48000), None).caps;
             let caps = negotiate(&source, &filter);
@@ -1081,6 +1125,27 @@ mod tests {
             audioconvert_accepts(&caps)
                 .unwrap_or_else(|e| panic!("{} channels, caps {}: {}", channels, caps, e));
         }
+    }
+
+    #[test]
+    fn device_default_refuses_more_channels_than_audioconvert_takes() {
+        // 65+ channels segfault audioconvert on GStreamer 1.24: they must
+        // fail negotiation at the filter instead of reaching it.
+        gst::init().unwrap();
+        let filter = audio_source_layout(None, None).caps;
+        assert!(asio_source_caps(65).intersect(&filter).is_empty());
+        assert!(asio_source_caps(128).intersect(&filter).is_empty());
+        let positioned_wide: gst::Caps = "audio/x-raw,channels=65".parse().unwrap();
+        assert!(positioned_wide.intersect(&filter).is_empty());
+    }
+
+    #[test]
+    fn max_channels_reads_a_device_range() {
+        gst::init().unwrap();
+        let caps: gst::Caps = "audio/x-raw,channels=[1,128]".parse().unwrap();
+        assert_eq!(max_channels(&caps), Some(128));
+        let caps: gst::Caps = "audio/x-raw,channels=10".parse().unwrap();
+        assert_eq!(max_channels(&caps), Some(10));
     }
 
     fn channel_config(audio_channels: &str) -> Option<AudioChannelConfig> {
