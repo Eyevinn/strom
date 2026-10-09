@@ -235,27 +235,6 @@ impl PipelineManager {
             .collect()
     }
 
-    /// Look up the strom element_id for a GStreamer element name.
-    ///
-    /// GStreamer element names are set by us to match element_ids during
-    /// construction, but some internal elements (auto-inserted tees, block
-    /// sub-elements) may differ. Returns `None` if there is no match.
-    pub fn element_id_for_gst_name<'a>(&'a self, gst_name: &'a str) -> Option<&'a str> {
-        // The elements map is keyed by element_id and the GStreamer element
-        // name is set to the element_id during construction, so a simple
-        // key lookup usually works.
-        if self.elements.contains_key(gst_name) {
-            return Some(gst_name);
-        }
-        // Fallback: linear scan comparing GStreamer element names
-        for (id, el) in &self.elements {
-            if el.name().as_str() == gst_name {
-                return Some(id.as_str());
-            }
-        }
-        None
-    }
-
     /// Set the thread registry for tracking streaming threads.
     ///
     /// This should be called before start() to enable thread CPU monitoring.

@@ -72,18 +72,6 @@ impl WhepRegistry {
         map.get(endpoint_id).map(|e| e.port)
     }
 
-    /// Look up endpoint info (port and mode) for an endpoint ID.
-    pub async fn get(&self, endpoint_id: &str) -> Option<WhepEndpointEntry> {
-        let map = self.inner.read().await;
-        map.get(endpoint_id).cloned()
-    }
-
-    /// Check if an endpoint ID is already registered.
-    pub async fn contains(&self, endpoint_id: &str) -> bool {
-        let map = self.inner.read().await;
-        map.contains_key(endpoint_id)
-    }
-
     /// Get all registered endpoints with their info.
     pub async fn list_all(&self) -> Vec<(String, WhepEndpointEntry)> {
         let map = self.inner.read().await;

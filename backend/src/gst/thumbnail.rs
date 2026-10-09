@@ -9,9 +9,6 @@ use thiserror::Error;
 /// Errors that can occur during thumbnail capture.
 #[derive(Debug, Error)]
 pub enum ThumbnailError {
-    #[error("Element not found: {0}")]
-    ElementNotFound(String),
-
     #[error("Pad not found: {0}")]
     PadNotFound(String),
 
@@ -29,7 +26,4 @@ pub enum ThumbnailError {
 
     #[error("Pipeline not running")]
     PipelineNotRunning,
-
-    #[error("Channel error: {0}")]
-    Channel(String),
 }

@@ -80,24 +80,6 @@ fn is_wsl() -> bool {
     false
 }
 
-// /// Deprioritize NVIDIA hardware decoders so decodebin3 prefers software decoders.
-// /// On WSL, nvh264dec/nvh265dec can cause QoS issues since CUDA-GL interop is broken.
-// fn deprioritize_nv_decoders() {
-//     let registry = gst::Registry::get();
-//     for name in &[
-//         "nvh264dec",
-//         "nvh265dec",
-//         "nvh264sldec",
-//         "nvh265sldec",
-//         "nvav1dec",
-//     ] {
-//         if let Some(feature) = registry.find_feature(name, gst::ElementFactory::static_type()) {
-//             feature.set_rank(gst::Rank::MARGINAL);
-//             info!("Deprioritized {} (set rank to MARGINAL) for WSL", name);
-//         }
-//     }
-// }
-
 /// Get the detected GL renderer info (None if detection failed or not yet run).
 pub fn gl_renderer_info() -> Option<GlRendererInfo> {
     GL_RENDERER_INFO.get().cloned().flatten()
@@ -274,7 +256,6 @@ fn detect_convert_mode() -> VideoConvertMode {
     // Fast path: WSL has broken CUDA-GL interop, skip expensive test
     if is_wsl() {
         info!("WSL detected - using software video conversion (CUDA-GL interop unsupported)");
-        // deprioritize_nv_decoders();
         return VideoConvertMode::Software;
     }
 
