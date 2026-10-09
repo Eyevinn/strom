@@ -15,6 +15,20 @@ fn main() {
     #[cfg(windows)]
     embed_windows_resources();
 
+    // Export the discrete-GPU request symbols defined in main.rs from strom.exe.
+    // A Rust binary exports nothing by default, and the GPU drivers only read
+    // the executable's export table.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        for symbol in [
+            "NvOptimusEnablement",
+            "AmdPowerXpressRequestHighPerformance",
+        ] {
+            println!("cargo:rustc-link-arg-bin=strom=/EXPORT:{symbol}");
+        }
+    }
+
     let frontend_dir = PathBuf::from("../frontend");
     let types_dir = PathBuf::from("../types");
     let dist_dir = PathBuf::from("dist");

@@ -17,6 +17,24 @@ use strom::{
     state::AppState,
 };
 
+// On a laptop with two GPUs (Intel or AMD integrated plus a discrete card) the
+// driver runs a program on the integrated GPU unless the program asks for the
+// discrete one. These two exports are how a program asks: the NVIDIA and AMD
+// drivers look them up in the executable at process start. Without them
+// GStreamer's OpenGL lands on the integrated GPU while NVENC/NVDEC run on the
+// NVIDIA card, so every GL frame crosses between the two. Machines with one GPU
+// ignore them. They must live in the executable itself, and `build.rs` passes
+// `/EXPORT:` for each, since a Rust binary exports nothing on its own.
+#[cfg(windows)]
+#[allow(non_upper_case_globals)]
+#[no_mangle]
+pub static NvOptimusEnablement: u32 = 1;
+
+#[cfg(windows)]
+#[allow(non_upper_case_globals)]
+#[no_mangle]
+pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
+
 /// Initialize logging with optional file output, configurable log level, and stdout format.
 /// Returns the reload handle and the initial filter string for runtime changes.
 ///
@@ -269,6 +287,10 @@ enum Commands {
         /// Password to hash (if not provided, will read from stdin)
         password: Option<String>,
     },
+    /// Run the CUDA-GL interop probe pipeline and exit (used by Strom itself)
+    #[cfg(not(target_os = "macos"))]
+    #[command(name = strom::gpu::INTEROP_PROBE_SUBCOMMAND, hide = true)]
+    GpuInteropProbe,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -305,6 +327,14 @@ fn main() -> anyhow::Result<()> {
         match command {
             Commands::HashPassword { password } => {
                 return handle_hash_password(password.as_deref());
+            }
+            #[cfg(not(target_os = "macos"))]
+            Commands::GpuInteropProbe => {
+                if let Err(e) = strom::gpu::run_interop_probe() {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                return Ok(());
             }
         }
     }
@@ -525,6 +555,8 @@ fn run_with_gui(
 
         // Detect GPU capabilities for video conversion mode selection
         // This tests CUDA-GL interop to determine if autovideoconvert works
+        #[cfg(not(target_os = "macos"))]
+        strom::gpu::run_interop_probe_in_this_executable();
         strom::gpu::detect_gpu_capabilities();
 
         // Report WebRTC ICE availability. WHIP/WHEP blocks refuse to build
@@ -789,6 +821,8 @@ async fn run_headless(
 
     // Detect GPU capabilities for video conversion mode selection
     // This tests CUDA-GL interop to determine if autovideoconvert works
+    #[cfg(not(target_os = "macos"))]
+    strom::gpu::run_interop_probe_in_this_executable();
     strom::gpu::detect_gpu_capabilities();
 
     // Report WebRTC ICE availability. WHIP/WHEP blocks refuse to build
