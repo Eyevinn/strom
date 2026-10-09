@@ -9,16 +9,14 @@
 //! left behind. GStreamer 1.26 checks for NULL there, so this test can only
 //! fail on an older GStreamer (the Linux CI runner has 1.24).
 
+pub mod common;
+
 use gstreamer as gst;
 use gstreamer::glib;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use strom::blocks::BlockRegistry;
-use strom::events::EventBroadcaster;
-use strom::gst::pipeline::PipelineManager;
 use strom_types::{Flow, PropertyValue as PV};
-use tempfile::NamedTempFile;
 
 fn elem(id: &str, ty: &str, props: Vec<(&str, PV)>) -> strom_types::Element {
     strom_types::Element {
@@ -77,19 +75,7 @@ async fn dropping_sink_qos_events_logs_no_criticals() {
         to: "sink:sink".into(),
     });
 
-    let registry_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(registry_file.path());
-    let mut manager = PipelineManager::new(
-        &flow,
-        EventBroadcaster::with_capacity(10),
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        std::env::temp_dir(),
-        Arc::new(std::sync::Mutex::new(HashMap::new())),
-    )
-    .expect("build pipeline");
+    let mut manager = common::manager::build(&flow).expect("build pipeline");
     manager.start().expect("start pipeline");
     std::thread::sleep(std::time::Duration::from_secs(1));
     manager.stop().expect("stop");

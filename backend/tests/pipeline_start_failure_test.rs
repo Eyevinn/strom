@@ -10,12 +10,11 @@
 //! whepserversink's signaller never opened its HTTP port and every WHEP offer
 //! against that flow answered 502 for as long as it "ran".
 
+pub mod common;
+
 use std::collections::HashMap;
-use strom::blocks::BlockRegistry;
 use strom::events::EventBroadcaster;
-use strom::gst::pipeline::PipelineManager;
 use strom_types::{Flow, Link};
-use tempfile::NamedTempFile;
 
 /// Build `audiotestsrc → identity error-after=1 → fakesink`.
 ///
@@ -76,24 +75,13 @@ fn build_failing_flow(name: &str) -> Flow {
 async fn test_start_fails_when_pipeline_cannot_reach_playing() {
     gstreamer::init().unwrap();
 
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
     let events = EventBroadcaster::with_capacity(10);
     let media_path = std::env::temp_dir();
 
     let flow = build_failing_flow("start_failure_test");
 
-    let mut manager = PipelineManager::new(
-        &flow,
-        events,
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        media_path,
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-    )
-    .expect("Failed to create PipelineManager");
+    let mut manager = common::manager::build_with(&flow, events, media_path)
+        .expect("Failed to create PipelineManager");
 
     let result = manager.start();
 
@@ -111,8 +99,6 @@ async fn test_start_fails_when_pipeline_cannot_reach_playing() {
 async fn test_start_succeeds_for_healthy_pipeline() {
     gstreamer::init().unwrap();
 
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
     let events = EventBroadcaster::with_capacity(10);
     let media_path = std::env::temp_dir();
 
@@ -123,17 +109,8 @@ async fn test_start_succeeds_for_healthy_pipeline() {
         strom_types::PropertyValue::Int(-1),
     );
 
-    let mut manager = PipelineManager::new(
-        &flow,
-        events,
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        media_path,
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-    )
-    .expect("Failed to create PipelineManager");
+    let mut manager = common::manager::build_with(&flow, events, media_path)
+        .expect("Failed to create PipelineManager");
 
     let state = manager.start().expect("Healthy pipeline failed to start");
     assert_eq!(state, strom_types::PipelineState::Playing);

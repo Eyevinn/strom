@@ -4,12 +4,11 @@
 //! state (`chN_pfl` / `chN_afl`) leaking back to disk via explicit flow saves,
 //! re-engaging on the next pipeline restart.
 
+pub mod common;
+
 use std::collections::HashMap;
-use strom::state::AppState;
-use strom::storage::JsonFileStorage;
 use strom_types::block::{BlockInstance, Position};
 use strom_types::{Flow, PropertyValue};
-use tempfile::NamedTempFile;
 
 fn mixer_flow_with_solo() -> Flow {
     let mut flow = Flow::new("persist-guard-test");
@@ -35,28 +34,12 @@ fn mixer_flow_with_solo() -> Flow {
     flow
 }
 
-fn new_state() -> AppState {
-    let storage_file = NamedTempFile::new().unwrap();
-    let blocks_file = NamedTempFile::new().unwrap();
-    let storage = JsonFileStorage::new(storage_file.path());
-    AppState::new(
-        storage,
-        blocks_file.path(),
-        std::env::temp_dir(),
-        vec![],
-        "all".to_string(),
-        vec![],
-        false,
-        false,
-    )
-}
-
 /// `upsert_flow` is the path the flow PATCH/PUT handlers use. It must strip
 /// `persist: false` properties before they reach the in-memory map or disk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upsert_flow_strips_transient_properties() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
     let flow = mixer_flow_with_solo();
     let flow_id = flow.id;
 
@@ -112,8 +95,7 @@ async fn upsert_flow_strips_transient_properties() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn load_from_storage_strips_transient_properties() {
     gstreamer::init().unwrap();
-    let storage_file = NamedTempFile::new().unwrap();
-    let blocks_file = NamedTempFile::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
 
     // Seed the storage file with a "legacy" flow JSON that includes transient
     // solo state — simulating a flow saved before this guard existed. The
@@ -124,20 +106,10 @@ async fn load_from_storage_strips_transient_properties() {
         "version": 1,
         "flows": [flow],
     });
-    std::fs::write(storage_file.path(), storage_json.to_string()).expect("write seed");
+    std::fs::write(dir.path().join("flows.json"), storage_json.to_string()).expect("write seed");
 
     // Now spin up a fresh AppState that loads from this storage file.
-    let storage = JsonFileStorage::new(storage_file.path());
-    let state = AppState::new(
-        storage,
-        blocks_file.path(),
-        std::env::temp_dir(),
-        vec![],
-        "all".to_string(),
-        vec![],
-        false,
-        false,
-    );
+    let state = common::state::in_dir(dir.path(), &std::env::temp_dir());
     state.load_from_storage().await.expect("load_from_storage");
 
     let loaded = state.get_flow(&flow_id).await.expect("flow loaded");
@@ -159,5 +131,35 @@ async fn load_from_storage_strips_transient_properties() {
         matches!(block.properties.get("ch1_fader"), Some(PropertyValue::Float(f)) if (*f - 0.8).abs() < 1e-9),
         "persistent values must survive load (got {:?})",
         block.properties.get("ch1_fader")
+    );
+}
+
+/// A clone of a fresh `TestState` must keep the storage dir alive: user block
+/// saves do not recreate it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cloned_test_state_keeps_its_storage() {
+    gstreamer::init().unwrap();
+    let state = common::state::new().clone();
+    let request = strom_types::block::CreateBlockRequest {
+        name: "clone-guard".into(),
+        description: String::new(),
+        category: "test".into(),
+        exposed_properties: vec![],
+        external_pads: strom_types::block::ExternalPads {
+            inputs: vec![],
+            outputs: vec![],
+        },
+        ui_metadata: None,
+    };
+    let app: &strom::state::AppState = &state;
+    let result = strom::api::blocks::create_block(
+        axum::extract::State(app.clone()),
+        strom::json_rejection::JsonBody(request),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "block save failed: {:?}",
+        result.err().map(|e| e.1 .0)
     );
 }

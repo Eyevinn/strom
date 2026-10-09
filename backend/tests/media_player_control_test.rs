@@ -5,32 +5,15 @@
 //! (issue #963): a call never returned, and stopping the flow then never
 //! returned either.
 
+pub mod common;
+
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::Duration;
 use strom::blocks::builtin::mediaplayer::{MediaPlayerKey, MEDIA_PLAYER_REGISTRY};
-use strom::state::AppState;
-use strom::storage::JsonFileStorage;
 use strom_types::{Flow, Link, PropertyValue};
-use tempfile::NamedTempFile;
 
 const BLOCK_ID: &str = "player";
-
-fn new_app_state() -> (AppState, [NamedTempFile; 2]) {
-    let storage_file = NamedTempFile::new().unwrap();
-    let blocks_file = NamedTempFile::new().unwrap();
-    let state = AppState::new(
-        JsonFileStorage::new(storage_file.path()),
-        blocks_file.path(),
-        std::env::temp_dir(),
-        vec![],
-        "all".to_string(),
-        vec![],
-        false,
-        false,
-    );
-    (state, [storage_file, blocks_file])
-}
 
 /// Run the default GLib main context, where the player's internal bus watch
 /// (EOS → next file) is dispatched, as Strom does in production.
@@ -153,7 +136,7 @@ async fn a_storm_of_jumps_and_pauses_never_hangs_the_player() {
         write_h264_clip(dir.path(), "b.mp4", 25),
     ];
 
-    let (state, _files) = new_app_state();
+    let state = common::state::new();
     let flow = build_player_flow("media_player_control_storm", &playlist);
     let flow_id = flow.id;
     state.upsert_flow(flow).await.expect("upsert_flow failed");

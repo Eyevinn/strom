@@ -20,12 +20,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use strom::blocks::BlockRegistry;
-use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
 use strom_types::vision_mixer::{NormRect, PipTransforms, Zone, ZoneBorder};
 use strom_types::{Flow, PropertyValue as PV};
-use tempfile::NamedTempFile;
 
 const GL_ELEMENTS: &[&str] = &["glvideomixerelement", "glshader", "gltestsrc"];
 const NUM_INPUTS: usize = 4;
@@ -385,20 +382,9 @@ fn run(block_id: &str, backend: &str, mixer_frame_delay: Option<Duration>) {
         let ml = main_loop.clone();
         std::thread::spawn(move || ml.run())
     };
-    let registry_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(registry_file.path());
     let threads_before_build = thread_count();
-    let mut manager = PipelineManager::new(
-        &build_flow(block_id, backend),
-        EventBroadcaster::with_capacity(10),
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        std::env::temp_dir(),
-        Arc::new(std::sync::Mutex::new(HashMap::new())),
-    )
-    .expect("build GPU vision mixer pipeline");
+    let mut manager = common::manager::build(&build_flow(block_id, backend))
+        .expect("build GPU vision mixer pipeline");
 
     // Count the frames every underlay source pushes (into its glupload on
     // the GPU backend).

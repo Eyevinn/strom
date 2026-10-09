@@ -3,6 +3,9 @@
 //! Include it as `pub mod common;`. The `pub` is what keeps the helpers a given
 //! test binary does not call from being reported as dead code.
 
+pub mod manager;
+pub mod state;
+
 use gstreamer as gst;
 
 /// The elements in `required` that this GStreamer install does not provide.

@@ -6,28 +6,11 @@
 //! otherwise refused as having no element to write to, so this guards the one
 //! case where storing the value *is* the write.
 
+pub mod common;
+
 use std::collections::HashMap;
-use strom::state::AppState;
-use strom::storage::JsonFileStorage;
 use strom_types::block::{BlockInstance, Position};
 use strom_types::{Flow, PropertyValue};
-use tempfile::NamedTempFile;
-
-fn new_state() -> AppState {
-    let storage_file = NamedTempFile::new().unwrap();
-    let blocks_file = NamedTempFile::new().unwrap();
-    let storage = JsonFileStorage::new(storage_file.path());
-    AppState::new(
-        storage,
-        blocks_file.path(),
-        std::env::temp_dir(),
-        vec![],
-        "all".to_string(),
-        vec![],
-        false,
-        false,
-    )
-}
 
 fn html_flow() -> Flow {
     let mut flow = Flow::new("html-remote-control-test");
@@ -53,7 +36,7 @@ fn html_flow() -> Flow {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_control_can_be_switched_on_without_a_restart() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
     let flow = html_flow();
     let flow_id = flow.id;
     state.upsert_flow(flow).await.expect("upsert_flow");
@@ -101,7 +84,7 @@ async fn remote_control_can_be_switched_on_without_a_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_viewport_still_needs_a_restart() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
     let flow = html_flow();
     let flow_id = flow.id;
     state.upsert_flow(flow).await.expect("upsert_flow");
@@ -132,7 +115,7 @@ async fn a_remote_control_value_that_is_not_a_bool_is_refused() {
     // then read back as "off" when a link is asked for - the operator flips it
     // on, is refused anyway, and nothing says why.
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
     let flow = html_flow();
     let flow_id = flow.id;
     state.upsert_flow(flow).await.expect("upsert_flow");
@@ -178,7 +161,7 @@ async fn a_url_outside_http_https_and_data_is_refused_on_air() {
     // has to hold here as well as when the flow is built - otherwise a page
     // changed on air could be pointed at the filesystem.
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
     let flow = html_flow();
     let flow_id = flow.id;
     state.upsert_flow(flow).await.expect("upsert_flow");

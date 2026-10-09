@@ -143,7 +143,7 @@ async fn cuda_memory_from_the_media_player_gets_cudadownload_before_glupload() {
         let queue = format!("{}:queue_{}", MIXER, suffix);
         let glupload = format!("{}:glupload_{}", MIXER, suffix);
 
-        let (manager, _registry) = build_manager(&player_into_mixer("cuda_into_vm", input));
+        let manager = build_manager(&player_into_mixer("cuda_into_vm", input));
         let pipeline = manager.pipeline();
         assert_eq!(
             feeder_of(pipeline, &glupload).map(|e| e.name().to_string()),
@@ -203,7 +203,7 @@ async fn system_memory_from_the_media_player_goes_straight_into_glupload() {
     common::require_elements(GL_ELEMENTS);
     stand_in::register();
 
-    let (manager, _registry) = build_manager(&player_into_mixer("system_into_vm", "video_in_0"));
+    let manager = build_manager(&player_into_mixer("system_into_vm", "video_in_0"));
     let pipeline = manager.pipeline();
     let outcome = push_from_player(pipeline, SYSTEM_CAPS);
 

@@ -11,11 +11,8 @@ pub mod common;
 
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use strom::blocks::BlockRegistry;
-use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
 use strom_types::{Flow, PropertyValue as PV};
-use tempfile::NamedTempFile;
 
 /// A take index for `trigger_transition`, which takes `usize` on main and
 /// `Option<usize>` once #806 lands. Either signature accepts this.
@@ -214,7 +211,6 @@ struct Running {
     appsink: gstreamer_app::AppSink,
     main_loop: gstreamer::glib::MainLoop,
     main_loop_thread: std::thread::JoinHandle<()>,
-    _registry_file: NamedTempFile,
 }
 
 impl Running {
@@ -224,20 +220,7 @@ impl Running {
             let ml = main_loop.clone();
             std::thread::spawn(move || ml.run())
         };
-        let registry_file = NamedTempFile::new().unwrap();
-        let registry = BlockRegistry::new(registry_file.path());
-        let events = EventBroadcaster::with_capacity(10);
-        let mut manager = PipelineManager::new(
-            &flow,
-            events,
-            &registry,
-            vec![],
-            "all".to_string(),
-            None,
-            std::env::temp_dir(),
-            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-        )
-        .expect("build GPU vision mixer pipeline");
+        let mut manager = common::manager::build(&flow).expect("build GPU vision mixer pipeline");
         manager.start().expect("start GPU vision mixer pipeline");
         let appsink = manager
             .pipeline()
@@ -250,7 +233,6 @@ impl Running {
             appsink,
             main_loop,
             main_loop_thread,
-            _registry_file: registry_file,
         }
     }
 
