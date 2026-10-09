@@ -9,7 +9,10 @@
 //! CI has no `cefsrc`, so a `videotestsrc` paints the premultiplied encoding
 //! of 50 % white, `(128, 128, 128, 128)`, into the real block.
 
+pub mod common;
+
 use gstreamer::prelude::*;
+use serial_test::serial;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use strom::blocks::BlockRegistry;
@@ -214,10 +217,16 @@ fn centre_red(sample: &gstreamer::Sample) -> f64 {
     sum as f64 / n as f64
 }
 
+/// A running flow and the glib main loop it needs: the media player starts
+/// its internal pipeline from a bus handler on the default main context when
+/// the flow reaches PLAYING, which only runs while a main loop does. The server
+/// has one.
 struct Running {
     manager: PipelineManager,
     block_id: String,
     sink: gstreamer_app::AppSink,
+    main_loop: gstreamer::glib::MainLoop,
+    main_loop_thread: std::thread::JoinHandle<()>,
 }
 
 impl Running {
@@ -227,6 +236,11 @@ impl Running {
         // GPU capabilities; without this the first lookup panics.
         strom::gpu::detect_gpu_capabilities();
 
+        let main_loop = gstreamer::glib::MainLoop::new(None, false);
+        let main_loop_thread = {
+            let ml = main_loop.clone();
+            std::thread::spawn(move || ml.run())
+        };
         let temp_file = NamedTempFile::new().unwrap();
         let registry = BlockRegistry::new(temp_file.path());
         let flow = build_flow(backend, block_id, alpha_mode, dsk);
@@ -255,6 +269,8 @@ impl Running {
             manager,
             block_id: block_id.to_string(),
             sink,
+            main_loop,
+            main_loop_thread,
         }
     }
 
@@ -293,6 +309,8 @@ impl Running {
 
     fn stop(mut self) {
         self.manager.stop().expect("stop");
+        self.main_loop.quit();
+        self.main_loop_thread.join().expect("main loop thread");
     }
 }
 
@@ -331,7 +349,11 @@ fn assert_correct_at_full_and_half_alpha(
     run.stop();
 }
 
+// Every case here renders a flow and probes program frames; the GPU ones render
+// through llvmpipe in CI, which costs whole cores. Serialised so a sibling test
+// cannot starve the pipeline under measurement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(gl)]
 async fn cpu_premultiplied_dsk_composites_correctly() {
     assert_correct_at_full_and_half_alpha(
         "cpu",
@@ -345,6 +367,7 @@ async fn cpu_premultiplied_dsk_composites_correctly() {
 /// mode set still composites as straight. Guards the default, so existing
 /// flows with straight graphics are not unpremultiplied behind their back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(gl)]
 async fn cpu_default_mode_leaves_the_source_alone() {
     let run = Running::start("cpu", "vmp_cpu_default", None, DskSource::TestPattern);
     run.manager
@@ -393,6 +416,7 @@ fn write_premultiplied_clip(path: &std::path::Path) -> Result<(), String> {
 /// A premultiplied clip through the media player: the decoder hands out A420,
 /// which the unpremultiply element cannot take directly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(gl)]
 async fn cpu_premultiplied_clip_through_media_player() {
     gstreamer::init().unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -412,46 +436,15 @@ async fn cpu_premultiplied_clip_through_media_player() {
     );
 }
 
-/// Probe whether this environment can actually render through GL: the plugins
-/// being installed is not enough — on headless runners the elements exist but
-/// no context can be created. Same probe as `vision_mixer_fx_test`.
-fn gl_environment_available() -> bool {
-    gstreamer::init().unwrap();
-    if gstreamer::ElementFactory::find("glvideomixerelement").is_none()
-        || gstreamer::ElementFactory::find("gltestsrc").is_none()
-    {
-        return false;
-    }
-    let Ok(pipeline) = gstreamer::parse::launch(
-        "gltestsrc num-buffers=3 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,framerate=30/1 ! fakesink sync=false",
-    ) else {
-        return false;
-    };
-    let Ok(pipeline) = pipeline.downcast::<gstreamer::Pipeline>() else {
-        return false;
-    };
-    if pipeline.set_state(gstreamer::State::Playing).is_err() {
-        return false;
-    }
-    let bus = pipeline.bus().expect("pipeline has a bus");
-    let ok = matches!(
-        bus.timed_pop_filtered(
-            gstreamer::ClockTime::from_seconds(20),
-            &[gstreamer::MessageType::Eos, gstreamer::MessageType::Error],
-        ),
-        Some(msg) if matches!(msg.view(), gstreamer::MessageView::Eos(_))
-    );
-    let _ = pipeline.set_state(gstreamer::State::Null);
-    ok
-}
+const GL_ELEMENTS: &[&str] = &["glvideomixerelement", "gltestsrc"];
 
 /// GL corrects the blend on the pad rather than converting the source, and
 /// the correction depends on a blend constant that has to track pad alpha.
 /// Half alpha is the case that catches a constant left behind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(gl)]
 async fn gpu_premultiplied_dsk_composites_correctly() {
-    if !gl_environment_available() {
-        eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
     assert_correct_at_full_and_half_alpha(
@@ -466,9 +459,9 @@ async fn gpu_premultiplied_dsk_composites_correctly() {
 /// not through `set_property` from Strom code. The blend constant has to
 /// follow that too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(gl)]
 async fn gpu_blend_constant_follows_fade_to_black() {
-    if !gl_environment_available() {
-        eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
     let block_id = "vmp_gpu_ftb";
