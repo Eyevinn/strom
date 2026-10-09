@@ -80,6 +80,10 @@ struct ChannelStrip {
     hpf_enabled: bool,
     /// HPF cutoff frequency (Hz)
     hpf_freq: f32,
+    /// Voice isolation enabled
+    voice_isolation: bool,
+    /// Voice isolation attenuation limit (dB, VOICE_ISOLATION_NO_LIMIT_DB = none)
+    voice_isolation_limit: f32,
     /// Gate enabled
     gate_enabled: bool,
     /// Gate threshold (dB)
@@ -151,6 +155,8 @@ impl ChannelStrip {
             aux_pre: DEFAULT_AUX_PRE,
             hpf_enabled: false,
             hpf_freq: DEFAULT_HPF_FREQ,
+            voice_isolation: false,
+            voice_isolation_limit: VOICE_ISOLATION_NO_LIMIT_DB,
             gate_enabled: false,
             gate_threshold: DEFAULT_GATE_THRESHOLD,
             gate_attack: DEFAULT_GATE_ATTACK,

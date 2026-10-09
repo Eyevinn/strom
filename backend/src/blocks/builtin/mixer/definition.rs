@@ -706,6 +706,46 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         });
 
         // ============================================================
+        // Voice isolation properties
+        // ============================================================
+        exposed_properties.push(ExposedProperty {
+            name: format!("ch{}_voice_isolation", ch),
+            label: format!("Ch {} Voice Isolation", ch),
+            description: format!(
+                "Keep speech and suppress everything else on channel {} (music, fans, typing). \
+                 Delays the channel 60 ms while on.",
+                ch
+            ),
+            property_type: PropertyType::Bool,
+            default_value: Some(PropertyValue::Bool(false)),
+            mapping: PropertyMapping {
+                element_id: format!("voiceiso_{}", ch - 1),
+                property_name: "enabled".to_string(),
+                transform: None,
+            },
+            live: true,
+            persist: None,
+        });
+
+        exposed_properties.push(ExposedProperty {
+            name: format!("ch{}_voice_isolation_limit", ch),
+            label: format!("Ch {} Voice Isolation Limit", ch),
+            description: format!(
+                "Most voice isolation may reduce channel {} at any frequency, in dB (0-100; 100 = no limit)",
+                ch
+            ),
+            property_type: PropertyType::Float,
+            default_value: Some(PropertyValue::Float(VOICE_ISOLATION_NO_LIMIT_DB as f64)),
+            mapping: PropertyMapping {
+                element_id: format!("voiceiso_{}", ch - 1),
+                property_name: "attenuation-limit".to_string(),
+                transform: None,
+            },
+            live: true,
+            persist: None,
+        });
+
+        // ============================================================
         // Gate properties
         // ============================================================
         exposed_properties.push(ExposedProperty {

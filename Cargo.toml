@@ -69,3 +69,24 @@ gloo-net = { version = "0.7", features = ["websocket"] }
 # (Ubuntu 24.04 LTS). Drop it once upstream no longer requires 1.26.
 [patch.crates-io]
 gst-plugin-isobmff = { git = "https://github.com/srperens/gst-plugin-isobmff", tag = "v0.15.4-strom1" }
+
+# Voice isolation runs a neural network in pure Rust; unoptimised it cannot
+# keep up with live audio, so debug builds and tests optimise these crates.
+[profile.dev.package.tract-core]
+opt-level = 3
+[profile.dev.package.tract-data]
+opt-level = 3
+[profile.dev.package.tract-linalg]
+opt-level = 3
+[profile.dev.package.tract-hir]
+opt-level = 3
+[profile.dev.package.tract-onnx]
+opt-level = 3
+[profile.dev.package.tract-onnx-opl]
+opt-level = 3
+[profile.dev.package.tract-nnef]
+opt-level = 3
+[profile.dev.package.rustfft]
+opt-level = 3
+[profile.dev.package.realfft]
+opt-level = 3
