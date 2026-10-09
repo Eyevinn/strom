@@ -606,6 +606,7 @@ pub(super) fn build_cpu_pipeline(
         let num_inputs = p.num_inputs;
         let num_pips = p.num_pips;
         let underlay_state = std::sync::Arc::clone(&overlay_state);
+        let activity_state = std::sync::Arc::clone(&overlay_state);
         ctx.register_element_setup(Box::new(move |_flow_id, _events| {
             let (Some(mixer), Some(mv_comp)) = (dist_weak.upgrade(), mv_weak.upgrade()) else {
                 return;
@@ -618,6 +619,12 @@ pub(super) fn build_cpu_pipeline(
             if num_pips > 0 {
                 super::super::underlays::watch(&underlay_state, &mixer, &mv_comp);
             }
+            super::super::activity::install_input_activity_probes(
+                &block_id,
+                &mixer,
+                &activity_state,
+                num_inputs,
+            );
         }));
     }
     let bus_message_handler = Some(audio_meter::build_meter_bus_handler(
