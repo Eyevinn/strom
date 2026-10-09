@@ -12,6 +12,8 @@
 //! and the format pin — so the conversion happens where the mixer's RGBA
 //! still exists, on the GPU, before the buffer crosses the bus.
 
+pub mod common;
+
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
@@ -51,35 +53,10 @@ fn require_gl_plugin() {
     );
 }
 
-/// Probe whether this environment can actually render through GL. The GL
-/// plugins being installed is not enough: on headless runners the elements
-/// exist but no context can be created. Same probe as `vision_mixer_fx_test`.
-fn gl_environment_available() -> bool {
-    if gstreamer::ElementFactory::find("gltestsrc").is_none() {
-        return false;
-    }
-    let Ok(pipeline) = gstreamer::parse::launch(
-        "gltestsrc num-buffers=3 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,framerate=30/1 ! fakesink sync=false",
-    ) else {
-        return false;
-    };
-    let Ok(pipeline) = pipeline.downcast::<gstreamer::Pipeline>() else {
-        return false;
-    };
-    if pipeline.set_state(gstreamer::State::Playing).is_err() {
-        return false;
-    }
-    let bus = pipeline.bus().expect("pipeline has a bus");
-    let ok = matches!(
-        bus.timed_pop_filtered(
-            gstreamer::ClockTime::from_seconds(20),
-            &[gstreamer::MessageType::Eos, gstreamer::MessageType::Error],
-        ),
-        Some(msg) if matches!(msg.view(), gstreamer::MessageView::Eos(_))
-    );
-    let _ = pipeline.set_state(gstreamer::State::Null);
-    ok
-}
+/// The GL elements the end-to-end tests need. `common::gl_available` skips, or
+/// fails under `STROM_REQUIRE_GL`, on a missing one or on a host with no GL
+/// context.
+const GL_ELEMENTS: &[&str] = &["glvideomixerelement", "glcolorconvert", "gltestsrc"];
 
 /// A vision mixer forced onto the GPU backend, one input fed, both outputs
 /// terminated in a sink. The DSK pad exists but is left unfed. `gl_download` selects between the two GPU
@@ -291,8 +268,7 @@ async fn gpu_output_format_links_without_gl_download() {
 /// context.
 async fn assert_negotiated_end_to_end(gl_download: bool) {
     gstreamer::init().unwrap();
-    if !gl_environment_available() {
-        eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
 
@@ -540,8 +516,7 @@ fn band_colors(sample: &gstreamer::Sample, x0: usize, x1: usize) -> (f64, f64) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn keyed_dsk_alpha_survives_nv12_on_gpu() {
     gstreamer::init().unwrap();
-    if !gl_environment_available() {
-        eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
     strom::gpu::detect_gpu_capabilities();
