@@ -272,6 +272,13 @@ impl GraphEditor {
         definition.map(|def| &def.external_pads)
     }
 
+    /// Whether a block has any input pads. A source block has none, so there
+    /// is nothing to measure buffer age on.
+    pub fn block_has_inputs(&self, block: &BlockInstance) -> bool {
+        self.get_block_external_pads(block, self.get_block_definition(block))
+            .is_some_and(|pads| !pads.inputs.is_empty())
+    }
+
     /// Get the list of pads to render for an element, expanding request pads into actual instances.
     /// For request pads, this returns all connected instances plus one empty pad.
     /// Also renders pads from links when element_info doesn't have pad information

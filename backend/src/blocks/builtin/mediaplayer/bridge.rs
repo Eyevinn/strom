@@ -654,21 +654,46 @@ fn link_pad_through_clocksync(
     sync: bool,
     media_type: &str,
 ) -> Result<(), String> {
+    // In passthrough a queue goes in front of the clocksync, so each output
+    // gets a streaming thread of its own. Without one, a source that carries
+    // audio and video in one stream (an HLS variant in MPEG-TS) feeds every
+    // output from the demuxer's single thread. The first video buffer then
+    // blocks that thread in the appsink's preroll, the audio appsink never
+    // gets a buffer, and the internal pipeline never reaches PLAYING (issue
+    // #1062). Decode mode has decodebin's multiqueue there already.
+    let queue_name = format!("{}_queue", clocksync_name);
+    let entry_name = if state.decode {
+        clocksync_name
+    } else {
+        queue_name.as_str()
+    };
+
     // The slot's chain is already there when an earlier pad held it - an HLS
     // variant switch replaces the stream pads mid-playback. The new pad takes
     // over the same chain, so the output carries on.
-    if let Some(existing) = pipeline.by_name(clocksync_name) {
+    if let Some(existing) = pipeline.by_name(entry_name) {
         let sink = existing
             .static_pad("sink")
-            .ok_or("clocksync has no sink pad")?;
+            .ok_or_else(|| format!("{} has no sink pad", entry_name))?;
         if sink.is_linked() {
-            return Err(format!("{} is still fed by another pad", clocksync_name));
+            return Err(format!("{} is still fed by another pad", entry_name));
         }
         return src_pad
             .link(&sink)
             .map(|_| ())
-            .map_err(|e| format!("relink pad to clocksync: {:?}", e));
+            .map_err(|e| format!("relink pad to {}: {:?}", entry_name, e));
     }
+
+    let queue = if state.decode {
+        None
+    } else {
+        Some(
+            gst::ElementFactory::make("queue")
+                .name(&queue_name)
+                .build()
+                .map_err(|e| format!("queue: {}", e))?,
+        )
+    };
 
     let clocksync = gst::ElementFactory::make("clocksync")
         .name(clocksync_name)
@@ -698,10 +723,18 @@ fn link_pad_through_clocksync(
         .add_many([&clocksync, appsink_element])
         .map_err(|e| format!("add elements: {}", e))?;
 
-    // Link downstream first: clocksync → appsink (no data flows yet)
+    // Link downstream first: [queue →] clocksync → appsink (no data flows yet)
     clocksync
         .link(appsink_element)
         .map_err(|e| format!("link clocksync to appsink: {:?}", e))?;
+    if let Some(queue) = queue.as_ref() {
+        pipeline
+            .add(queue)
+            .map_err(|e| format!("add queue: {}", e))?;
+        queue
+            .link(&clocksync)
+            .map_err(|e| format!("link queue to clocksync: {:?}", e))?;
+    }
 
     // Start elements BEFORE linking upstream. urisourcebin's internal
     // multiqueue pushes buffered data the instant the upstream pad is
@@ -717,6 +750,11 @@ fn link_pad_through_clocksync(
     appsink_element
         .sync_state_with_parent()
         .map_err(|e| format!("sync appsink state: {:?}", e))?;
+    if let Some(queue) = queue.as_ref() {
+        queue
+            .sync_state_with_parent()
+            .map_err(|e| format!("sync queue state: {:?}", e))?;
+    }
 
     if sync {
         timing::arm(&clocksync, &state.timing, &state.main_pipeline);
@@ -875,16 +913,19 @@ fn link_pad_through_clocksync(
     // Link upstream LAST: this triggers data flow from urisourcebin's
     // multiqueue. All downstream elements are now started and the
     // callback is installed, so the first buffer will be handled correctly.
-    let clocksync_sink = clocksync
+    let entry = queue.as_ref().unwrap_or(&clocksync);
+    let entry_sink = entry
         .static_pad("sink")
-        .ok_or("clocksync has no sink pad")?;
+        .ok_or_else(|| format!("{} has no sink pad", entry_name))?;
     src_pad
-        .link(&clocksync_sink)
-        .map_err(|e| format!("link pad to clocksync: {:?}", e))?;
+        .link(&entry_sink)
+        .map_err(|e| format!("link pad to {}: {:?}", entry_name, e))?;
 
     debug!(
-        "Media Player: Created {} bridge chain: clocksync(sync={}) -> appsink -> appsrc",
-        media_type, sync
+        "Media Player: Created {} bridge chain: {}clocksync(sync={}) -> appsink -> appsrc",
+        media_type,
+        if queue.is_some() { "queue -> " } else { "" },
+        sync
     );
 
     Ok(())

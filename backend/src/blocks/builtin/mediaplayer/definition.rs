@@ -23,7 +23,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 description: "Decode to raw video/audio (true) or pass through encoded streams (false). Passthrough is more efficient for transcoding."
                     .to_string(),
                 property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(false)),
+                default_value: Some(PropertyValue::Bool(true)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "decode".to_string(),

@@ -107,7 +107,7 @@ impl BlockBuilder for MediaPlayerBuilder {
                     PropertyValue::Bool(b) => Some(*b),
                     _ => None,
                 })
-                .unwrap_or(false);
+                .unwrap_or(true);
 
         let decoder =
             bridge::Decoder::from_property(properties.get("decoder").and_then(|v| match v {

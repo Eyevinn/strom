@@ -1327,8 +1327,13 @@ impl StromApp {
                     });
                     ui.separator();
 
-                    // Probe section
-                    if let Some(ref eid) = selected_id_for_probe {
+                    // Probe section. Buffer age is measured on a block's
+                    // inputs, so a source block gets no Probe button.
+                    let has_inputs = self
+                        .graph
+                        .get_selected_block()
+                        .is_some_and(|b| self.graph.block_has_inputs(b));
+                    if let Some(ref eid) = selected_id_for_probe.filter(|_| has_inputs) {
                         self.render_probe_button(ui, eid);
                         // render_probe_details adds its own separator when active
                         if !self.render_probe_details(ui, eid) {
