@@ -72,7 +72,7 @@ pub(crate) fn whip_input_definition() -> BlockDefinition {
                 label: "Jitterbuffer Latency (ms)".to_string(),
                 description: "How long to buffer incoming RTP before releasing/dropping it. Too low can cause an initial video keyframe's packet burst to be dropped locally on connect, stalling video entirely even though packets arrived fine. Increase if video never starts.".to_string(),
                 property_type: PropertyType::Int,
-                default_value: Some(PropertyValue::Int(400)),
+                default_value: Some(PropertyValue::Int(200)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "jitterbuffer_latency_ms".to_string(),
