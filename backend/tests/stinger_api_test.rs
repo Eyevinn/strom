@@ -148,7 +148,10 @@ async fn the_library_is_edited_on_the_mixer_and_guarded_by_file() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn a_take_is_followed_by_its_id() {
-    if common::skip_known_ci_failure(&["windows"], "fails on this CI runner, passes locally") {
+    if common::skip_known_ci_failure(
+        &["windows"],
+        "the stinger never parks on the Windows runner (issue #1069)",
+    ) {
         return;
     }
     if !common::plugins_available(CODEC_ELEMENTS) {
@@ -282,7 +285,7 @@ async fn removing_the_cued_clip_parks_its_successor() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn a_take_owns_its_clip_source() {
-    if common::skip_known_ci_failure(&["macos"], "fails on this CI runner, passes locally") {
+    if common::skip_known_ci_failure(&["macos"], "the stinger suite fails on the macOS runner") {
         return;
     }
     if !common::plugins_available(CODEC_ELEMENTS) {
@@ -566,7 +569,7 @@ async fn a_cue_loads_a_parked_clip_rewritten_on_disk() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn a_clip_that_cannot_seek_plays_on_every_take() {
-    if common::skip_known_ci_failure(&["macos"], "fails on this CI runner, passes locally") {
+    if common::skip_known_ci_failure(&["macos"], "the stinger suite fails on the macOS runner") {
         return;
     }
     let mut needed = CODEC_ELEMENTS.to_vec();

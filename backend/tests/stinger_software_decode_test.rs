@@ -117,7 +117,7 @@ mod stand_in {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn a_clip_its_hardware_decoder_refuses_plays_in_software() {
-    if common::skip_known_ci_failure(&["macos"], "fails on this CI runner, passes locally") {
+    if common::skip_known_ci_failure(&["macos"], "the stinger suite fails on the macOS runner") {
         return;
     }
     if !common::plugins_available(CODEC_ELEMENTS) {

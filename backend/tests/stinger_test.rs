@@ -19,7 +19,7 @@ use strom_types::stinger::{StingerLayout, StingerVariant};
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn gpu_stingers_land_frame_accurately() {
-    if common::skip_known_ci_failure(&["macos"], "fails on this CI runner, passes locally") {
+    if common::skip_known_ci_failure(&["macos"], "the stinger suite fails on the macOS runner") {
         return;
     }
     if !common::gl_available(GL_ELEMENTS) || !common::plugins_available(CODEC_ELEMENTS) {
@@ -176,7 +176,7 @@ async fn gpu_stingers_land_frame_accurately() {
 async fn cpu_stingers_play_classic() {
     if common::skip_known_ci_failure(
         &["macos", "windows"],
-        "fails on this CI runner, passes locally",
+        "the stinger never parks on the Windows runner (issue #1069)",
     ) {
         return;
     }
@@ -326,7 +326,7 @@ async fn fade_to_black_waits_for_a_stinger() {
 async fn a_take_plays_with_no_park_probe_on_its_path() {
     if common::skip_known_ci_failure(
         &["macos", "windows"],
-        "fails on this CI runner, passes locally",
+        "the stinger never parks on the Windows runner (issue #1069)",
     ) {
         return;
     }
@@ -375,7 +375,7 @@ async fn a_take_plays_with_no_park_probe_on_its_path() {
 async fn stopping_mid_take_releases_the_pipeline() {
     if common::skip_known_ci_failure(
         &["macos", "windows"],
-        "fails on this CI runner, passes locally",
+        "the stinger never parks on the Windows runner (issue #1069)",
     ) {
         return;
     }
@@ -441,7 +441,7 @@ async fn stopping_mid_take_releases_the_pipeline() {
 async fn a_take_outlived_by_a_restart_leaves_the_new_run_alone() {
     if common::skip_known_ci_failure(
         &["macos", "windows"],
-        "fails on this CI runner, passes locally",
+        "the stinger never parks on the Windows runner (issue #1069)",
     ) {
         return;
     }
@@ -585,7 +585,7 @@ async fn a_late_cut_frame_is_reported() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn a_take_that_fails_to_program_leaves_the_old_source_on_air() {
-    if common::skip_known_ci_failure(&["macos"], "fails on this CI runner, passes locally") {
+    if common::skip_known_ci_failure(&["macos"], "the stinger suite fails on the macOS runner") {
         return;
     }
     if !common::plugins_available(CODEC_ELEMENTS) {
@@ -701,7 +701,7 @@ async fn a_clip_that_will_not_play_still_changes_the_program() {
 async fn a_clip_with_early_audio_lands_its_first_video_frame_on_the_take() {
     if common::skip_known_ci_failure(
         &["macos", "windows"],
-        "fails on this CI runner, passes locally",
+        "the stinger never parks on the Windows runner (issue #1069)",
     ) {
         return;
     }
