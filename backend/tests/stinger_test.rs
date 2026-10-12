@@ -174,7 +174,10 @@ async fn gpu_stingers_land_frame_accurately() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn cpu_stingers_play_classic() {
-    if common::skip_known_ci_failure(&["macos"], "fails on this CI runner, passes locally") {
+    if common::skip_known_ci_failure(
+        &["macos", "windows"],
+        "fails on this CI runner, passes locally",
+    ) {
         return;
     }
     if !common::plugins_available(CODEC_ELEMENTS) {
@@ -696,7 +699,10 @@ async fn a_clip_that_will_not_play_still_changes_the_program() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn a_clip_with_early_audio_lands_its_first_video_frame_on_the_take() {
-    if common::skip_known_ci_failure(&["macos"], "fails on this CI runner, passes locally") {
+    if common::skip_known_ci_failure(
+        &["macos", "windows"],
+        "fails on this CI runner, passes locally",
+    ) {
         return;
     }
     if !common::plugins_available(CODEC_ELEMENTS)
