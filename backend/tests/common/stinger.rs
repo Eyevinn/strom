@@ -496,11 +496,55 @@ impl Running {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "stinger never ready: {:?}",
-                s.problem
+                "stinger never ready: {:?}; {}",
+                s.problem,
+                self.why_not_parked(&s)
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+
+    /// Each condition `ready` is made of, as it stands now. For the failure
+    /// message of a stinger that never parks.
+    fn why_not_parked(&self, s: &strom_types::stinger::StingerState) -> String {
+        use std::sync::atomic::Ordering;
+        use strom::blocks::builtin::mediaplayer::{
+            file_stamp, normalize_uri, MediaPlayerKey, MEDIA_PLAYER_REGISTRY,
+        };
+        let Some(source) = &s.source_block_id else {
+            return "no stinger source".to_string();
+        };
+        let Some(player) = MEDIA_PLAYER_REGISTRY.get(&MediaPlayerKey {
+            flow_id: self.flow_id,
+            block_id: source.clone(),
+        }) else {
+            return format!("media player {source} not registered");
+        };
+        let (current_index, files) = player
+            .playlist
+            .read()
+            .map(|p| (p.current_index, p.files.clone()))
+            .unwrap_or_default();
+        let cued_now = files.get(current_index).map(|f| {
+            let uri = normalize_uri(f, &player.media_path);
+            (
+                file_stamp(&uri),
+                strom::stinger::analysis::software_only(&uri),
+            )
+        });
+        format!(
+            "running {}, cued {:?}, parked {}, paused {}, current_index {}, files {:?}, \
+             loaded {:?}, cued file now (stamp, software_only) {:?}, clips {:?}",
+            s.running,
+            s.cued_index,
+            player.stinger.park.parked.load(Ordering::Acquire),
+            player.is_paused.load(Ordering::SeqCst),
+            current_index,
+            files,
+            player.loaded_clip(),
+            cued_now,
+            s.clips
+        )
     }
 
     /// Wait until the take finished and its report is in.

@@ -644,6 +644,20 @@ jobs:
           # common::skip_known_ci_failure(). Linux CI still runs them.
           STROM_SKIP_KNOWN_CI_FAILURES: 1
 
+      # DIAG (temporary, remove before merge): run the stinger tests without
+      # the skip list, three times, to catch "stinger never ready" with
+      # why_not_parked() and the media player's debug log.
+      - name: DIAG stinger park
+        continue-on-error: true
+        run: |
+          export PATH="/d/gstreamer/1.0/msvc_x86_64/bin:$PATH"
+          for i in 1 2 3; do
+            echo "=== DIAG round $i"
+            cargo test --package strom --test stinger_test --test stinger_api_test || true
+          done
+        env:
+          STINGER_TEST_LOG: "warn,strom::blocks::builtin::mediaplayer=debug,strom::state::stinger=debug,strom::stinger=debug"
+
       # A pull request asks this job to verify the platform code, which
       # clippy and the tests do. The release binary is only wanted from main
       # and dispatch, and building it is a second full compile of the tree.
