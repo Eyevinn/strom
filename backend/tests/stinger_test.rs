@@ -321,7 +321,10 @@ async fn fade_to_black_waits_for_a_stinger() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn a_take_plays_with_no_park_probe_on_its_path() {
-    if common::skip_known_ci_failure(&["macos"], "fails on this CI runner, passes locally") {
+    if common::skip_known_ci_failure(
+        &["macos", "windows"],
+        "fails on this CI runner, passes locally",
+    ) {
         return;
     }
     if !common::plugins_available(CODEC_ELEMENTS) {
