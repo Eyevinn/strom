@@ -459,7 +459,10 @@ async fn wait_for_layout(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn reload_picks_up_a_clip_rewritten_on_disk() {
-    if common::skip_known_ci_failure(&["windows"], "fails on this CI runner, passes locally") {
+    if common::skip_known_ci_failure(
+        &["windows"],
+        "Windows refuses to overwrite a clip the player holds open (Access is denied)",
+    ) {
         return;
     }
     use strom_types::stinger::StingerLayout;
@@ -520,7 +523,10 @@ async fn reload_picks_up_a_clip_rewritten_on_disk() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn a_cue_loads_a_parked_clip_rewritten_on_disk() {
-    if common::skip_known_ci_failure(&["windows"], "fails on this CI runner, passes locally") {
+    if common::skip_known_ci_failure(
+        &["windows"],
+        "Windows refuses to overwrite a clip the player holds open (Access is denied)",
+    ) {
         return;
     }
     use strom_types::stinger::StingerLayout;
