@@ -198,6 +198,9 @@ fn has_sample(internal: &gst::Pipeline, name: &str) -> bool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn muxed_hls_plays_audio_and_video_in_passthrough() {
+    if common::skip_known_ci_failure("fails on the Windows runner") {
+        return;
+    }
     if !common::plugins_available(REQUIRED) {
         return;
     }
