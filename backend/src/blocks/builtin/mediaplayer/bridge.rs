@@ -637,6 +637,41 @@ fn discard_pad(pipeline: &gst::Pipeline, pad: &gst::Pad, instance_id: &str, reas
     }
 }
 
+/// Link `[queue →] clocksync → appsink` and start the elements, before the
+/// upstream pad is linked: urisourcebin's internal multiqueue pushes buffered
+/// data the instant that link is made, and the elements must be ready for it.
+fn assemble_chain(
+    queue: Option<&gst::Element>,
+    clocksync: &gst::Element,
+    appsink: &gst::Element,
+) -> Result<(), String> {
+    clocksync
+        .link(appsink)
+        .map_err(|e| format!("link clocksync to appsink: {:?}", e))?;
+    if let Some(queue) = queue {
+        queue
+            .link(clocksync)
+            .map_err(|e| format!("link queue to clocksync: {:?}", e))?;
+    }
+
+    // clocksync must reach PLAYING explicitly: its internal flushing
+    // flag is only cleared during PAUSED→PLAYING. sync_state_with_parent
+    // would leave it in PAUSED (matching the pipeline during preroll),
+    // which silently drops all buffers via FLUSHING.
+    clocksync
+        .set_state(gst::State::Playing)
+        .map_err(|e| format!("set clocksync to Playing: {:?}", e))?;
+    appsink
+        .sync_state_with_parent()
+        .map_err(|e| format!("sync appsink state: {:?}", e))?;
+    if let Some(queue) = queue {
+        queue
+            .sync_state_with_parent()
+            .map_err(|e| format!("sync queue state: {:?}", e))?;
+    }
+    Ok(())
+}
+
 /// Link a dynamic pad through clocksync → appsink, with appsink bridging to the given appsrc.
 ///
 /// The bridge computes a timestamp offset from the first buffer:
@@ -661,12 +696,8 @@ fn link_pad_through_clocksync(
     // blocks that thread in the appsink's preroll, the audio appsink never
     // gets a buffer, and the internal pipeline never reaches PLAYING (issue
     // #1062). Decode mode has decodebin's multiqueue there already.
-    let queue_name = format!("{}_queue", clocksync_name);
-    let entry_name = if state.decode {
-        clocksync_name
-    } else {
-        queue_name.as_str()
-    };
+    let queue_name = (!state.decode).then(|| format!("{}_queue", clocksync_name));
+    let entry_name = queue_name.as_deref().unwrap_or(clocksync_name);
 
     // The slot's chain is already there when an earlier pad held it - an HLS
     // variant switch replaces the stream pads mid-playback. The new pad takes
@@ -684,16 +715,15 @@ fn link_pad_through_clocksync(
             .map_err(|e| format!("relink pad to {}: {:?}", entry_name, e));
     }
 
-    let queue = if state.decode {
-        None
-    } else {
-        Some(
+    let queue = queue_name
+        .as_deref()
+        .map(|name| {
             gst::ElementFactory::make("queue")
-                .name(&queue_name)
+                .name(name)
                 .build()
-                .map_err(|e| format!("queue: {}", e))?,
-        )
-    };
+                .map_err(|e| format!("queue: {}", e))
+        })
+        .transpose()?;
 
     let clocksync = gst::ElementFactory::make("clocksync")
         .name(clocksync_name)
@@ -719,41 +749,22 @@ fn link_pad_through_clocksync(
 
     let appsink_element = appsink.upcast_ref::<gst::Element>();
 
+    let chain: Vec<&gst::Element> = queue.iter().chain([&clocksync, appsink_element]).collect();
     pipeline
-        .add_many([&clocksync, appsink_element])
+        .add_many(chain.iter().copied())
         .map_err(|e| format!("add elements: {}", e))?;
 
-    // Link downstream first: [queue →] clocksync → appsink (no data flows yet)
-    clocksync
-        .link(appsink_element)
-        .map_err(|e| format!("link clocksync to appsink: {:?}", e))?;
-    if let Some(queue) = queue.as_ref() {
-        pipeline
-            .add(queue)
-            .map_err(|e| format!("add queue: {}", e))?;
-        queue
-            .link(&clocksync)
-            .map_err(|e| format!("link queue to clocksync: {:?}", e))?;
-    }
-
-    // Start elements BEFORE linking upstream. urisourcebin's internal
-    // multiqueue pushes buffered data the instant the upstream pad is
-    // linked — elements must be ready to accept it.
-    //
-    // clocksync must reach PLAYING explicitly: its internal flushing
-    // flag is only cleared during PAUSED→PLAYING. sync_state_with_parent
-    // would leave it in PAUSED (matching the pipeline during preroll),
-    // which silently drops all buffers via FLUSHING.
-    clocksync
-        .set_state(gst::State::Playing)
-        .map_err(|e| format!("set clocksync to Playing: {:?}", e))?;
-    appsink_element
-        .sync_state_with_parent()
-        .map_err(|e| format!("sync appsink state: {:?}", e))?;
-    if let Some(queue) = queue.as_ref() {
-        queue
-            .sync_state_with_parent()
-            .map_err(|e| format!("sync queue state: {:?}", e))?;
+    // A chain that fails half-built is taken out again. Left in, it would
+    // hold the slot's names: the next pad would find no entry to relink to,
+    // fail to add a new chain under the same names, and the output would
+    // stay dead until the next file.
+    let assembled = assemble_chain(queue.as_ref(), &clocksync, appsink_element);
+    if let Err(e) = assembled {
+        for element in &chain {
+            let _ = element.set_state(gst::State::Null);
+        }
+        let _ = pipeline.remove_many(chain.iter().copied());
+        return Err(e);
     }
 
     if sync {
@@ -1293,13 +1304,29 @@ mod tests {
     /// slots used to stay taken, so after the first quality switch the new
     /// video and audio were discarded as one too many and the outputs went
     /// silent. The pad that replaces one has to take over the same output.
+    ///
+    /// In passthrough the chain starts at a queue (issue #1062), so that is
+    /// what the replacing pad has to relink to; run both modes.
     #[test]
     fn a_stream_that_replaces_a_removed_one_takes_over_its_output() {
         let _ = gst::init();
+        for decode in [true, false] {
+            a_replacing_stream_takes_over_its_output(decode);
+        }
+    }
+
+    fn a_replacing_stream_takes_over_its_output(decode: bool) {
+        let (entry_factory, entry_name) = if decode {
+            ("clocksync", "test_clocksync_audio")
+        } else {
+            ("queue", "test_clocksync_audio_queue")
+        };
         let pipeline = gst::Pipeline::new();
         let source = gst::Bin::with_name("source");
         pipeline.add(&source).unwrap();
-        let state = state_with_slots(0, 1);
+        let mut state = Arc::try_unwrap(state_with_slots(0, 1)).ok().unwrap();
+        state.decode = decode;
+        let state = Arc::new(state);
         free_slot_on_pad_removed(source.upcast_ref(), &state, "test");
 
         let first = ghost_src(&source, "src_0");
@@ -1312,7 +1339,12 @@ mod tests {
             TrackKind::Audio,
             "",
         );
-        assert_eq!(peer_factory(&first).as_deref(), Some("clocksync"));
+        assert_eq!(
+            peer_factory(&first).as_deref(),
+            Some(entry_factory),
+            "decode: {}",
+            decode
+        );
 
         // The variant switch: the old pad goes, a new one comes.
         source.remove_pad(&first).unwrap();
@@ -1329,17 +1361,30 @@ mod tests {
 
         assert_eq!(
             peer_factory(&second).as_deref(),
-            Some("clocksync"),
-            "the replacing stream was discarded instead of taking the free output"
+            Some(entry_factory),
+            "the replacing stream was discarded instead of taking the free output \
+             (decode: {})",
+            decode
         );
+        let entry = second.peer().and_then(|p| p.parent_element());
         assert_eq!(
-            second
-                .peer()
-                .and_then(|p| p.parent_element())
-                .map(|e| e.name().to_string()),
-            Some("test_clocksync_audio".to_string()),
-            "it has to feed the same chain, so audio_out carries on"
+            entry.as_ref().map(|e| e.name().to_string()),
+            Some(entry_name.to_string()),
+            "it has to feed the same chain, so audio_out carries on (decode: {})",
+            decode
         );
+        if !decode {
+            let into = entry
+                .and_then(|queue| queue.static_pad("src"))
+                .and_then(|src| src.peer())
+                .and_then(|p| p.parent_element())
+                .map(|e| e.name().to_string());
+            assert_eq!(
+                into,
+                Some("test_clocksync_audio".to_string()),
+                "the queue has to feed the slot's clocksync"
+            );
+        }
         let _ = pipeline.set_state(gst::State::Null);
     }
 

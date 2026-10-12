@@ -43,7 +43,10 @@ fn captured() -> &'static Mutex<Vec<String>> {
 /// while still occupying an entry in the handler list the old remove count was
 /// read from. An empty playlist is enough — the block registers while the
 /// pipeline is built, which is all this test needs from it.
-fn build_flow_with_a_media_player(name: &str) -> Flow {
+///
+/// `decode` picks the player's internal pipeline, `uridecodebin3` or
+/// `urisourcebin`, so the test runs in both modes.
+fn build_flow_with_a_media_player(name: &str, decode: bool) -> Flow {
     let mut flow = Flow::new(name);
 
     flow.elements.push(strom_types::Element {
@@ -77,6 +80,7 @@ fn build_flow_with_a_media_player(name: &str) -> Flow {
                 "playlist".to_string(),
                 PropertyValue::String("[]".to_string()),
             );
+            p.insert("decode".to_string(), PropertyValue::Bool(decode));
             p
         },
         position: strom_types::block::Position { x: 100.0, y: 400.0 },
@@ -116,12 +120,14 @@ async fn stopping_a_flow_removes_no_more_bus_watches_than_it_added() {
         false,
     );
 
-    let flow = build_flow_with_a_media_player("bus_signal_watch_balance");
-    let flow_id = flow.id;
-    state.upsert_flow(flow).await.expect("upsert_flow failed");
+    for decode in [false, true] {
+        let flow = build_flow_with_a_media_player("bus_signal_watch_balance", decode);
+        let flow_id = flow.id;
+        state.upsert_flow(flow).await.expect("upsert_flow failed");
 
-    state.start_flow(&flow_id).await.expect("start_flow failed");
-    state.stop_flow(&flow_id).await.expect("stop_flow failed");
+        state.start_flow(&flow_id).await.expect("start_flow failed");
+        state.stop_flow(&flow_id).await.expect("stop_flow failed");
+    }
 
     let surplus: Vec<String> = captured()
         .lock()

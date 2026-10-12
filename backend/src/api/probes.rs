@@ -19,8 +19,8 @@ use crate::state::AppState;
     request_body = ActivateProbeRequest,
     responses(
         (status = 200, description = "Probe activated", body = ProbeResponse),
-        (status = 404, description = "Flow not found or not running"),
-        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Flow not found or not running, or no such element or block (or block definition)"),
+        (status = 400, description = "Invalid request, or a block with no inputs to probe"),
     ),
     tag = "probes"
 )]
@@ -48,7 +48,8 @@ pub async fn activate_probe(
     // along with each external pad's display label (so events can distinguish
     // inputs that share the same internal "sink" pad name).
     // For standalone elements: None (handled below with find_gst_element).
-    let block_input_element_ids: Option<Vec<(String, String)>> = {
+    // A block whose definition is not known: Some(Err(definition id)).
+    let block_input_element_ids: Option<Result<Vec<(String, String)>, String>> = {
         let flows = state.get_flows().await;
         let block_def_id = flows
             .iter()
@@ -72,7 +73,7 @@ pub async fn activate_probe(
 
         if let Some((def_id, computed)) = block_def_id {
             Some(if let Some(ids) = computed {
-                ids
+                Ok(ids)
             } else {
                 // Fallback to block definition
                 let def = state.blocks().get_by_id(&def_id).await;
@@ -88,25 +89,12 @@ pub async fn activate_probe(
                         })
                         .collect()
                 })
-                .unwrap_or_default()
+                .ok_or(def_id)
             })
         } else {
             None
         }
     };
-
-    // A source block (Media Player, SRT input, ...) has no inputs, and buffer
-    // age is measured on a block's inputs.
-    if block_input_element_ids.as_ref().is_some_and(Vec::is_empty) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!(ErrorResponse::new(format!(
-                "Block '{}' has no inputs to probe",
-                req.element_id
-            )))),
-        )
-            .into_response();
-    }
 
     let pipelines = state.pipelines_read().await;
     let manager = match pipelines.get(&flow_id) {
@@ -120,6 +108,33 @@ pub async fn activate_probe(
             )
                 .into_response();
         }
+    };
+
+    let block_input_element_ids = match block_input_element_ids {
+        Some(Err(def_id)) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!(ErrorResponse::new(format!(
+                    "Block definition '{}' of block '{}' not found",
+                    def_id, req.element_id
+                )))),
+            )
+                .into_response();
+        }
+        // A source block (Media Player, SRT input, ...) has no inputs, and
+        // buffer age is measured on a block's inputs.
+        Some(Ok(ids)) if ids.is_empty() => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!(ErrorResponse::new(format!(
+                    "Block '{}' has no inputs to probe",
+                    req.element_id
+                )))),
+            )
+                .into_response();
+        }
+        Some(Ok(ids)) => Some(ids),
+        None => None,
     };
 
     let pipeline = manager.pipeline().clone();

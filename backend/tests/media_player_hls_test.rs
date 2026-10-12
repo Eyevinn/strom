@@ -234,6 +234,13 @@ async fn muxed_hls_plays_audio_and_video_in_passthrough() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    let internal = player
+        .internal_pipeline
+        .read()
+        .unwrap()
+        .as_ref()
+        .expect("the Media Player built an internal pipeline")
+        .downgrade();
     drop(player);
     state.stop_flow(&flow_id).await.expect("stop_flow failed");
 
@@ -245,5 +252,19 @@ async fn muxed_hls_plays_audio_and_video_in_passthrough() {
         playing,
         video,
         audio
+    );
+
+    // The passthrough chain (queue, clocksync, appsink, bridged per pad) must
+    // not keep the internal pipeline alive. A queued bus message can hold the
+    // last reference for a moment; a reference kept by a signal handler never
+    // goes.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while internal.upgrade().is_some() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        internal.upgrade().is_none(),
+        "the Media Player's internal pipeline survived teardown after playing \
+         HLS in passthrough: something in its bridge chain still holds it"
     );
 }

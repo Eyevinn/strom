@@ -55,7 +55,11 @@ fn new_app_state() -> (AppState, [NamedTempFile; 2]) {
 /// attempt, so the start fails for a reason that has nothing to do with the
 /// Media Player — which is the point. The block registered itself while the
 /// pipeline was being built, and the failing start has to undo that.
-fn build_flow_that_cannot_start(name: &str) -> Flow {
+///
+/// `decode` picks the player's internal pipeline: `uridecodebin3` or, in
+/// passthrough, `urisourcebin`. Each has its own signal handlers, so each
+/// test runs in both modes.
+fn build_flow_that_cannot_start(name: &str, decode: bool) -> Flow {
     let mut flow = Flow::new(name);
 
     flow.elements.push(strom_types::Element {
@@ -98,6 +102,7 @@ fn build_flow_that_cannot_start(name: &str) -> Flow {
                 "playlist".to_string(),
                 PropertyValue::String("[]".to_string()),
             );
+            p.insert("decode".to_string(), PropertyValue::Bool(decode));
             p
         },
         position: strom_types::block::Position { x: 100.0, y: 400.0 },
@@ -109,8 +114,8 @@ fn build_flow_that_cannot_start(name: &str) -> Flow {
 }
 
 /// The same flow, minus the failing state change: this one reaches PLAYING.
-fn build_flow_that_starts(name: &str) -> Flow {
-    let mut flow = build_flow_that_cannot_start(name);
+fn build_flow_that_starts(name: &str, decode: bool) -> Flow {
+    let mut flow = build_flow_that_cannot_start(name, decode);
     for element in &mut flow.elements {
         if element.id == "sink" {
             element.properties.remove("state-error");
@@ -124,10 +129,15 @@ fn build_flow_that_starts(name: &str) -> Flow {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_start_unregisters_the_flows_media_players() {
     gstreamer::init().unwrap();
+    for decode in [false, true] {
+        failed_start_unregisters_the_media_player(decode).await;
+    }
+}
 
+async fn failed_start_unregisters_the_media_player(decode: bool) {
     let (state, _files) = new_app_state();
 
-    let flow = build_flow_that_cannot_start("failed_start_teardown");
+    let flow = build_flow_that_cannot_start("failed_start_teardown", decode);
     let flow_id = flow.id;
     state.upsert_flow(flow).await.expect("upsert_flow failed");
 
@@ -149,14 +159,16 @@ async fn failed_start_unregisters_the_flows_media_players() {
         "the flow's Media Player is still registered after a failed start. The \
          registry holds the only Arc whose Drop takes the block's internal \
          pipeline to NULL, so that pipeline and its file descriptors now run \
-         for the life of the process — once per start attempt."
+         for the life of the process — once per start attempt (decode: {}).",
+        decode
     );
 
     // Nothing was inserted into the live pipeline map either: a flow that
     // failed to start must not look startable-again-only-after-stop.
     assert!(
         !state.pipelines_read().await.contains_key(&flow_id),
-        "a flow that failed to start is still in the pipeline map"
+        "a flow that failed to start is still in the pipeline map (decode: {})",
+        decode
     );
 }
 
@@ -175,10 +187,15 @@ async fn failed_start_unregisters_the_flows_media_players() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn teardown_releases_the_media_players_internal_pipeline() {
     gstreamer::init().unwrap();
+    for decode in [false, true] {
+        teardown_releases_the_internal_pipeline(decode).await;
+    }
+}
 
+async fn teardown_releases_the_internal_pipeline(decode: bool) {
     let (state, _files) = new_app_state();
 
-    let flow = build_flow_that_starts("teardown_releases_internal_pipeline");
+    let flow = build_flow_that_starts("teardown_releases_internal_pipeline", decode);
     let flow_id = flow.id;
     state.upsert_flow(flow).await.expect("upsert_flow failed");
 
@@ -215,7 +232,8 @@ async fn teardown_releases_the_media_players_internal_pipeline() {
         "the Media Player's internal pipeline survived teardown. Its bus watch \
          still holds an Arc on the state that owns it, so the state is never \
          dropped and the pipeline decodes on — with its file descriptors — for \
-         the life of the process."
+         the life of the process (decode: {}).",
+        decode
     );
 }
 
