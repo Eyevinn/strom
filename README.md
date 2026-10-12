@@ -139,4 +139,4 @@ MIT OR Apache-2.0
 
 ---
 
-> The name **Strom** comes from "Ström" — Swedish for "stream".
+> The name Strom (rhymes with "from") comes from "Ström" — Swedish for "stream".
