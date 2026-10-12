@@ -352,7 +352,7 @@ fn desaturate() -> VideoEffect {
 /// cleared.
 #[test]
 fn idle_fx_slots_pass_buffers_through_and_effects_still_apply() {
-    if common::skip_known_ci_failure("GL frames arrive late on the macOS runner") {
+    if common::skip_known_ci_failure(&["macos"], "GL frames arrive late on the macOS runner") {
         return;
     }
     if !common::gl_available(GL_ELEMENTS) {

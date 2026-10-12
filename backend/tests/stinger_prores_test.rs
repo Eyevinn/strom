@@ -15,6 +15,7 @@ use rig::*;
 #[serial_test::serial(stinger)]
 async fn prores_4444_keeps_its_alpha() {
     if common::skip_known_ci_failure(
+        &["macos"],
         "ProRes decode fails on the macOS runner (no VideoToolbox ProRes)",
     ) {
         return;
@@ -46,6 +47,7 @@ async fn prores_4444_keeps_its_alpha() {
 #[serial_test::serial(stinger)]
 async fn a_prores_clip_after_another_format_still_airs() {
     if common::skip_known_ci_failure(
+        &["macos"],
         "ProRes decode fails on the macOS runner (no VideoToolbox ProRes)",
     ) {
         return;
@@ -84,6 +86,7 @@ async fn a_prores_clip_after_another_format_still_airs() {
 #[serial_test::serial(stinger)]
 async fn another_format_after_a_prores_clip_still_airs() {
     if common::skip_known_ci_failure(
+        &["macos"],
         "ProRes decode fails on the macOS runner (no VideoToolbox ProRes)",
     ) {
         return;
@@ -123,6 +126,7 @@ async fn another_format_after_a_prores_clip_still_airs() {
 #[serial_test::serial(stinger)]
 async fn the_stinger_source_recovers_after_a_clip_a_consumer_refused() {
     if common::skip_known_ci_failure(
+        &["macos"],
         "ProRes decode fails on the macOS runner (no VideoToolbox ProRes)",
     ) {
         return;

@@ -55,12 +55,16 @@ pub fn gl_elements_available(required: &[&str]) -> bool {
     require_or_skip(&missing)
 }
 
-/// True when this test should skip because it fails on a CI runner but passes
-/// on a developer machine. The macOS and Windows CI jobs set
+/// True when this test should skip because it fails on the CI runner for this
+/// platform but passes on a developer machine. The macOS and Windows CI jobs set
 /// `STROM_SKIP_KNOWN_CI_FAILURES=1`; Linux CI and local runs leave it unset, so
-/// there the test runs as normal. `reason` says what goes wrong on the runner.
-pub fn skip_known_ci_failure(reason: &str) -> bool {
-    if strom_types::env::var_opt("STROM_SKIP_KNOWN_CI_FAILURES").is_none() {
+/// there the test runs as normal. `platforms` lists the runners it fails on, as
+/// `std::env::consts::OS` names them ("macos", "windows"), so it still runs on
+/// the others. `reason` says what goes wrong on the runner.
+pub fn skip_known_ci_failure(platforms: &[&str], reason: &str) -> bool {
+    if strom_types::env::var_opt("STROM_SKIP_KNOWN_CI_FAILURES").is_none()
+        || !platforms.contains(&std::env::consts::OS)
+    {
         return false;
     }
     eprintln!("SKIP: known CI runner failure: {reason}");
