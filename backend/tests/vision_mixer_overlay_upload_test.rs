@@ -20,11 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strom::blocks::builtin::vision_mixer::overlay;
-use strom::blocks::BlockRegistry;
-use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
 use strom_types::{Flow, PropertyValue as PV};
-use tempfile::NamedTempFile;
 
 const GL_ELEMENTS: &[&str] = &["glvideomixerelement", "glshader", "gltestsrc"];
 const MV_W: i32 = 1280;
@@ -268,7 +265,6 @@ struct Running {
     fed: Arc<AtomicU64>,
     main_loop: gstreamer::glib::MainLoop,
     main_loop_thread: std::thread::JoinHandle<()>,
-    _registry_file: NamedTempFile,
 }
 
 /// What a steady-state window measured.
@@ -288,19 +284,8 @@ impl Running {
             let ml = main_loop.clone();
             std::thread::spawn(move || ml.run())
         };
-        let registry_file = NamedTempFile::new().unwrap();
-        let registry = BlockRegistry::new(registry_file.path());
-        let mut manager = PipelineManager::new(
-            &build_flow(block_id, inputs),
-            EventBroadcaster::with_capacity(10),
-            &registry,
-            vec![],
-            "all".to_string(),
-            None,
-            std::env::temp_dir(),
-            Arc::new(std::sync::Mutex::new(HashMap::new())),
-        )
-        .expect("build GPU vision mixer pipeline");
+        let mut manager = common::manager::build(&build_flow(block_id, inputs))
+            .expect("build GPU vision mixer pipeline");
 
         let glupload_overlay = manager
             .pipeline()
@@ -355,7 +340,6 @@ impl Running {
             fed,
             main_loop,
             main_loop_thread,
-            _registry_file: registry_file,
         };
 
         // Overlay up: input 0 on PGM, input 1 on PVW.
