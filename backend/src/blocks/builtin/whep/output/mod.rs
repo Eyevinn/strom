@@ -3,6 +3,7 @@
 //! `whepserversink` hosts the HTTP endpoint; clients connect via WHEP to receive.
 
 pub(crate) mod definition;
+mod profile_filter;
 mod whepserversink;
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
