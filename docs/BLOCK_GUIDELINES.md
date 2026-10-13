@@ -16,6 +16,11 @@ These are rules, not a description of the code. The code is the source of truth 
 - A consumer that cannot adapt fails the flow with an element error that says what arrived and what it needs. It never leaves a silent `not-negotiated` or `Internal data stream error`.
 - A guard test feeds the consumer something other than its preferred input, and fails if the adaptation is removed.
 
+## Reported Latency
+- A source reports the latency it can actually hold: its minimum is how late its data is, its maximum how long it can buffer before data is lost. A mixer takes the largest minimum and the smallest maximum among its inputs, so one input that understates its maximum fails the whole mixer as soon as another input has more latency. GStreamer then posts "Impossible to configure latency" on every aggregation cycle.
+- A block that hands media into a flow through an `appsrc` (a pipeline of its own, a callback, a network session) builds it with `blocks::live_bridge_appsrc`. A live `appsrc` at its defaults reports a maximum of 0, even though it queues seconds of data.
+- When a mixer fails its latency configuration, fix the input that reports the wrong latency. Do not raise queue sizes in front of the mixer to hide it.
+
 ## GStreamer Memory Formats
 - A block emits the memory type it naturally produces (system, GL, CUDA, ...). The **consuming** block adapts its own input. A producer does not know its consumer, so any producer-side download is wrong for half the graph and costs a GPU round trip per frame in the other half.
 - Adapt at build time where the input is known (`glupload` on a GL consumer's inputs). Where it depends on what `decodebin` autoplugged upstream, decide from the negotiated caps — `gst::video_input_bridge` does this for WHEP Output's video input.

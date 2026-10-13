@@ -5,8 +5,8 @@ use super::normalize_uri;
 use super::state::{MediaPlayerKey, MediaPlayerState, MEDIA_PLAYER_REGISTRY};
 use super::timing::{self, Timing};
 use crate::blocks::{
-    BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder, BusMessageConnectFn,
-    APPSRC_MAX_BYTES_AUDIO, APPSRC_MAX_BYTES_VIDEO, APPSRC_MAX_TIME,
+    live_bridge_appsrc, BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder,
+    BusMessageConnectFn, APPSRC_MAX_BYTES_AUDIO, APPSRC_MAX_BYTES_VIDEO,
 };
 use crate::events::EventBroadcaster;
 use gstreamer as gst;
@@ -255,13 +255,8 @@ fn build_media_player(
             let queue_id = format!("{}:queue_{}{}", instance_id, kind, sfx);
             let out_id = format!("{}:{}_out{}", instance_id, kind, sfx);
 
-            let appsrc = gst_app::AppSrc::builder()
+            let appsrc = live_bridge_appsrc(max_bytes)
                 .name(&appsrc_id)
-                .format(gst::Format::Time)
-                .is_live(true)
-                .automatic_eos(false)
-                .max_bytes(max_bytes)
-                .max_time(APPSRC_MAX_TIME)
                 .leaky_type(gst_app::AppLeakyType::Upstream)
                 .build();
             let queue = gst::ElementFactory::make("queue")
@@ -614,6 +609,39 @@ mod tests {
         {
             let id = format!("mp:{}", pad.internal_element_id);
             assert!(ids.contains(&id.as_str()), "{} has no element", id);
+        }
+    }
+
+    /// Each output's appsrc queues up to `APPSRC_MAX_TIME` of the player's
+    /// media, and has to report that as its maximum latency. At the appsrc
+    /// default of 0, a mixer that also takes an input with more latency than
+    /// the queue after the appsrc can absorb fails its latency configuration
+    /// on every cycle.
+    #[test]
+    fn every_output_appsrc_reports_the_latency_its_queue_can_hold() {
+        let props: HashMap<String, PropertyValue> =
+            [("num_audio_tracks".to_string(), PropertyValue::UInt(2))].into();
+        let _ = gst::init();
+        let built = MediaPlayerBuilder
+            .build(
+                "mp",
+                &props,
+                &crate::blocks::BlockBuildContext::new(Vec::new(), "all".to_string()),
+            )
+            .unwrap();
+        let appsrcs: Vec<gst_app::AppSrc> = built
+            .elements
+            .iter()
+            .filter_map(|(_, e)| e.clone().downcast::<gst_app::AppSrc>().ok())
+            .collect();
+        assert_eq!(appsrcs.len(), 3, "one video and two audio outputs");
+        for appsrc in appsrcs {
+            assert_eq!(
+                appsrc.latency().1,
+                Some(crate::blocks::APPSRC_MAX_TIME),
+                "{} reports a maximum latency its queue does not match",
+                appsrc.name()
+            );
         }
     }
 
