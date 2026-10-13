@@ -213,7 +213,7 @@ async fn a_take_is_followed_by_its_id() {
     assert_eq!(started, Some(id));
     assert_eq!(completed, Some(id));
 
-    // Any other transition still needs its inputs.
+    // A vision mixer takes PGM to PVW, so any other take needs no indices.
     let (status, _) = call(
         &app,
         "POST",
@@ -221,7 +221,7 @@ async fn a_take_is_followed_by_its_id() {
         Some(json!({"transition_type": "cut"})),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::OK);
 
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
