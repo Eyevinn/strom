@@ -173,7 +173,7 @@ impl GraphEditor {
     }
 
     /// Get the last known canvas rect (for hit testing pinch gestures, WASM only).
-    #[allow(dead_code)]
+    #[cfg(target_arch = "wasm32")]
     pub fn canvas_rect(&self) -> Option<egui::Rect> {
         self.last_canvas_rect
     }
@@ -314,7 +314,6 @@ impl GraphEditor {
                 for actual_name in &connected {
                     sink_pads_to_render.push(PadToRender {
                         name: actual_name.clone(),
-                        template_name: pad_info.name.clone(),
                         media_type: pad_info.media_type,
                         is_empty: false,
                     });
@@ -326,7 +325,6 @@ impl GraphEditor {
                 {
                     sink_pads_to_render.push(PadToRender {
                         name: next_name,
-                        template_name: pad_info.name.clone(),
                         media_type: pad_info.media_type,
                         is_empty: true,
                     });
@@ -335,7 +333,6 @@ impl GraphEditor {
                 // Static pad - render as-is
                 sink_pads_to_render.push(PadToRender {
                     name: pad_info.name.clone(),
-                    template_name: pad_info.name.clone(),
                     media_type: pad_info.media_type,
                     is_empty: false,
                 });
@@ -357,7 +354,6 @@ impl GraphEditor {
                 for actual_name in &connected {
                     src_pads_to_render.push(PadToRender {
                         name: actual_name.clone(),
-                        template_name: pad_info.name.clone(),
                         media_type: pad_info.media_type,
                         is_empty: false,
                     });
@@ -369,7 +365,6 @@ impl GraphEditor {
                 {
                     src_pads_to_render.push(PadToRender {
                         name: next_name,
-                        template_name: pad_info.name.clone(),
                         media_type: pad_info.media_type,
                         is_empty: true,
                     });
@@ -378,7 +373,6 @@ impl GraphEditor {
                 // Static pad - render as-is
                 src_pads_to_render.push(PadToRender {
                     name: pad_info.name.clone(),
-                    template_name: pad_info.name.clone(),
                     media_type: pad_info.media_type,
                     is_empty: false,
                 });
@@ -529,8 +523,7 @@ impl GraphEditor {
         let sink_pads_to_render: Vec<PadToRender> = sink_pads
             .into_iter()
             .map(|name| PadToRender {
-                name: name.clone(),
-                template_name: name,
+                name,
                 media_type: MediaType::Generic,
                 is_empty: false,
             })
@@ -539,8 +532,7 @@ impl GraphEditor {
         let src_pads_to_render: Vec<PadToRender> = src_pads
             .into_iter()
             .map(|name| PadToRender {
-                name: name.clone(),
-                template_name: name,
+                name,
                 media_type: MediaType::Generic,
                 is_empty: false,
             })

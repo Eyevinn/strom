@@ -59,25 +59,6 @@ impl JsonRpcResponse {
             }),
         }
     }
-
-    /// Create an error response with data.
-    pub fn error_with_data(
-        id: Option<Value>,
-        code: i32,
-        message: impl Into<String>,
-        data: Value,
-    ) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            result: None,
-            error: Some(JsonRpcError {
-                code,
-                message: message.into(),
-                data: Some(data),
-            }),
-        }
-    }
 }
 
 /// JSON-RPC 2.0 Error.

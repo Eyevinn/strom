@@ -35,7 +35,6 @@ use crate::state::{AppStateChannels, ConnectionState};
 use crate::system_monitor::SystemMonitorStore;
 use crate::thread_monitor::ThreadMonitorStore;
 use crate::webrtc_stats::WebRtcStatsStore;
-use crate::ws::WebSocketClient;
 
 // Local storage helpers (WASM only)
 #[cfg(target_arch = "wasm32")]
@@ -466,9 +465,6 @@ pub enum LogLevel {
 /// A log entry for pipeline messages
 #[derive(Debug, Clone)]
 pub struct LogEntry {
-    /// Timestamp when the message was received
-    #[allow(dead_code)]
-    pub timestamp: instant::Instant,
     /// Severity level
     pub level: LogLevel,
     /// The message content
@@ -488,7 +484,6 @@ impl LogEntry {
         flow_id: Option<strom_types::FlowId>,
     ) -> Self {
         Self {
-            timestamp: instant::Instant::now(),
             level,
             message,
             source,
@@ -559,8 +554,6 @@ pub struct StromApp {
     pending_flow_navigation: Option<strom_types::FlowId>,
     /// Flow ID to select on next frame (deferred to avoid accesskit focus issues)
     pending_flow_selection: Option<strom_types::FlowId>,
-    /// WebSocket client for real-time updates
-    ws_client: Option<WebSocketClient>,
     /// Connection state
     connection_state: ConnectionState,
     /// Channel-based state management

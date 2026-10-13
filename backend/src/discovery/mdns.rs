@@ -97,15 +97,3 @@ impl MdnsDiscovery {
         Ok(())
     }
 }
-
-/// Extract hostname and port from mDNS service info.
-pub fn extract_service_address(info: &ServiceInfo) -> Option<(String, u16)> {
-    let hostname = info.get_hostname().to_string();
-    let port = info.get_port();
-    Some((hostname, port))
-}
-
-/// Extract TXT record value by key.
-pub fn get_txt_property(info: &ServiceInfo, key: &str) -> Option<String> {
-    info.get_property_val_str(key).map(|s| s.to_string())
-}

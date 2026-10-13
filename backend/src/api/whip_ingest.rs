@@ -4,9 +4,7 @@
 //! PATCH/DELETE requests are routed to the correct session's port via the
 //! WhipSessionManager resource_id lookup.
 
-use crate::api::sdp_transform::{
-    add_goog_remb, fix_video_bitrate_hints, strip_cvo_extension, strip_redundancy_codecs,
-};
+use crate::api::sdp_transform::{add_goog_remb, fix_video_bitrate_hints, strip_cvo_extension};
 use crate::blocks::builtin::whip::{create_whipserversrc_for_session, CreatedSession};
 use crate::json_rejection::JsonBody;
 use crate::state::AppState;
@@ -24,10 +22,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 /// Serve the WHIP ingest page.
-pub async fn whip_ingest_page(State(state): State<AppState>) -> impl IntoResponse {
-    let endpoints = state.whip_registry().list_all().await;
-    let _ = endpoints; // Page fetches endpoints via JS
-
+pub async fn whip_ingest_page() -> impl IntoResponse {
     match crate::assets::WhipAssets::get("ingest.html") {
         Some(content) => {
             let html = std::str::from_utf8(content.data.as_ref()).unwrap_or("");
@@ -240,25 +235,6 @@ pub async fn whip_post(
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/sdp");
-
-    // Strip RED/RTX/ULPFEC from SDP offer. Disabled: decodebin3 handles these
-    // fine in current gst-plugins-rs. Re-enable if "No streams to output" errors return.
-    #[allow(unreachable_code)]
-    let body_bytes = if false {
-        if content_type.contains("sdp") {
-            if let Ok(sdp_str) = std::str::from_utf8(&body_bytes) {
-                let cleaned = strip_redundancy_codecs(sdp_str);
-                debug!("WHIP: SDP after stripping redundancy codecs:\n{}", cleaned);
-                axum::body::Bytes::from(cleaned)
-            } else {
-                body_bytes
-            }
-        } else {
-            body_bytes
-        }
-    } else {
-        body_bytes
-    };
 
     let auth_header = headers.get(header::AUTHORIZATION).cloned();
 

@@ -83,13 +83,6 @@ impl LatencyDataStore {
             }
         })
     }
-
-    /// Remove stale latency data entries (older than TTL).
-    #[allow(dead_code)]
-    pub fn expire_stale(&mut self) {
-        self.data
-            .retain(|_, v| v.updated_at.elapsed() < LATENCY_DATA_TTL);
-    }
 }
 
 /// Get color based on latency value (lower is better).

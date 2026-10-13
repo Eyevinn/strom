@@ -10,7 +10,7 @@
 //! - Tracks stats for all active domains
 //! - Broadcasts stats via the event system
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 
@@ -18,7 +18,6 @@ use gstreamer::glib;
 use gstreamer::prelude::ClockExt;
 use gstreamer_net as gst_net;
 
-use crate::events::EventBroadcaster;
 use strom_types::{FlowId, StromEvent};
 
 /// Statistics for a single PTP domain.
@@ -55,8 +54,6 @@ struct PtpMonitorInner {
     clocks: HashMap<u8, gst_net::PtpClock>,
     /// Flows interested in each domain (flow_id -> domain)
     flow_domains: HashMap<FlowId, u8>,
-    /// Event broadcaster for sending stats
-    event_broadcaster: Option<Arc<EventBroadcaster>>,
 }
 
 /// Centralized PTP clock monitoring service.
@@ -80,16 +77,9 @@ impl PtpMonitor {
                 domain_stats: HashMap::new(),
                 clocks: HashMap::new(),
                 flow_domains: HashMap::new(),
-                event_broadcaster: None,
             })),
             stats_callback: Arc::new(std::sync::Mutex::new(None)),
         }
-    }
-
-    /// Set the event broadcaster for sending PTP stats events.
-    pub fn set_event_broadcaster(&self, broadcaster: Arc<EventBroadcaster>) {
-        let mut inner = self.inner.write().unwrap();
-        inner.event_broadcaster = Some(broadcaster);
     }
 
     /// Initialize PTP if not already initialized.
@@ -301,27 +291,6 @@ impl PtpMonitor {
         stats
     }
 
-    /// Get stats for a specific domain.
-    pub fn get_domain_stats(&self, domain: u8) -> Option<PtpDomainStats> {
-        let inner = self.inner.read().unwrap();
-
-        inner.domain_stats.get(&domain).cloned().map(|mut stats| {
-            // Update sync status from clock
-            if let Some(clock) = inner.clocks.get(&domain) {
-                stats.synced = clock.is_synced();
-                stats.grandmaster_id = Some(clock.grandmaster_clock_id());
-                stats.master_id = Some(clock.master_clock_id());
-            }
-            stats
-        })
-    }
-
-    /// Get the set of domains that are currently being monitored.
-    pub fn get_monitored_domains(&self) -> HashSet<u8> {
-        let inner = self.inner.read().unwrap();
-        inner.flow_domains.values().copied().collect()
-    }
-
     /// Get which flows are using each domain.
     pub fn get_domain_flows(&self) -> HashMap<u8, Vec<FlowId>> {
         let inner = self.inner.read().unwrap();
@@ -378,12 +347,6 @@ impl PtpMonitor {
             .get(&domain)
             .map(|c| c.is_synced())
             .unwrap_or(false)
-    }
-
-    /// Get the PTP clock for a domain (for pipelines to use).
-    pub fn get_clock(&self, domain: u8) -> Option<gst_net::PtpClock> {
-        let inner = self.inner.read().unwrap();
-        inner.clocks.get(&domain).cloned()
     }
 }
 

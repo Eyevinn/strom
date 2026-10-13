@@ -62,8 +62,6 @@ wasm-bindgen = "0.2"
 
 # Native-specific dependencies
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# System hostname detection (for generating external URLs)
-hostname = "0.4"
 # Enable wgpu renderer for native (macOS Metal support) - not available for WASM.
 # accesskit/wayland/x11 were part of eframe's `default` set, which is disabled at
 # the workspace level to keep wgpu out of the WASM build; re-add them here.

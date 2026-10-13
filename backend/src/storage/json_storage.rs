@@ -120,13 +120,6 @@ impl JsonFileStorage {
 
         Ok(())
     }
-
-    /// Invalidate the cache.
-    pub async fn invalidate_cache(&self) {
-        let mut cache = self.cache.write().await;
-        *cache = None;
-        debug!("Cache invalidated");
-    }
 }
 
 #[async_trait]
