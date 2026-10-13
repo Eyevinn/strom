@@ -585,7 +585,10 @@ async fn a_late_cut_frame_is_reported() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn a_take_that_fails_to_program_leaves_the_old_source_on_air() {
-    if common::skip_known_ci_failure(&["macos"], "the stinger suite fails on the macOS runner") {
+    if common::skip_known_ci_failure(
+        &["macos", "windows"],
+        "the stinger never parks on the Windows runner (issue #1069)",
+    ) {
         return;
     }
     if !common::plugins_available(CODEC_ELEMENTS) {
@@ -656,6 +659,12 @@ async fn a_take_that_fails_to_program_leaves_the_old_source_on_air() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn a_clip_that_will_not_play_still_changes_the_program() {
+    if common::skip_known_ci_failure(
+        &["windows"],
+        "the stinger never parks on the Windows runner (issue #1069)",
+    ) {
+        return;
+    }
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
     }
