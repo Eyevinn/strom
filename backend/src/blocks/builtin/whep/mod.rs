@@ -3,6 +3,8 @@
 //! - [`input`]: WHEP Input receives a stream from an external WHEP server.
 //! - [`output`]: WHEP Output hosts a WHEP server that clients play from.
 
+mod profile_filter;
+
 pub mod input;
 pub mod output;
 
