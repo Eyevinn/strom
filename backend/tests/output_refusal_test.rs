@@ -17,12 +17,12 @@
 
 pub mod common;
 
+use common::bus::BusError;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use strom::blocks::builtin::mpegtssrt::MpegTsSrtOutputBuilder;
 use strom::blocks::builtin::recorder::RecorderBuilder;
-use strom::blocks::{BlockBuildContext, BlockBuilder};
-use strom::events::EventBroadcaster;
+use strom::blocks::BlockBuilder;
 use strom_types::PropertyValue;
 
 use gstreamer as gst;
@@ -43,25 +43,11 @@ const REQUIRED: &[&str] = &[
 /// The name every test source gets, so its errors can be told from the block's.
 const TEST_SOURCE: &str = "test_source";
 
-fn srt_port() -> u16 {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .and_then(|s| s.local_addr())
-        .map(|a| a.port())
-        .expect("no free UDP port for the SRT listener")
-}
-
 /// What to feed the block's input.
 #[derive(Clone, Copy)]
 enum Feed {
     RawVideo,
     RawAudio,
-}
-
-/// One error from the bus: the posting element's name and the error message.
-#[derive(Debug)]
-struct BusError {
-    source: String,
-    message: String,
 }
 
 /// Build `builder`'s block, feed `feed` into the element named `input`, run it
@@ -76,25 +62,11 @@ fn errors_after_feeding<B: BlockBuilder>(
     input: &str,
     feed: Feed,
 ) -> Vec<BusError> {
-    let ctx = BlockBuildContext::new(vec![], "all".to_string());
+    let ctx = common::block::context();
     let built = builder.build(instance, &props, &ctx).expect("block builds");
 
     let pipeline = gst::Pipeline::new();
-    let mut by_id: HashMap<String, gst::Element> = HashMap::new();
-    for (id, element) in &built.elements {
-        pipeline.add(element).expect("add block element");
-        by_id.insert(id.clone(), element.clone());
-    }
-    for (from, to) in &built.internal_links {
-        let src = &by_id[&from.element_id];
-        let sink = &by_id[&to.element_id];
-        match (&from.pad_name, &to.pad_name) {
-            (Some(src_pad), Some(sink_pad)) => src
-                .link_pads(Some(src_pad.as_str()), sink, Some(sink_pad.as_str()))
-                .expect("internal pad link"),
-            _ => src.link(sink).expect("internal element link"),
-        }
-    }
+    let by_id = common::block::install(&pipeline, &built);
 
     let input_id = format!("{}:{}", instance, input);
     let input_element = by_id
@@ -132,11 +104,7 @@ fn errors_after_feeding<B: BlockBuilder>(
     pipeline.add_many([&src, &filter]).expect("add source");
     gst::Element::link_many([&src, &filter, &input_element]).expect("link source to block");
 
-    let flow_id = strom_types::flow::FlowId::new_v4();
-    let events = EventBroadcaster::with_capacity(16);
-    for setup in ctx.take_element_setups() {
-        setup(flow_id, events.clone());
-    }
+    common::block::run_setups(&ctx);
 
     let bus = pipeline.bus().expect("pipeline bus");
     pipeline
@@ -145,22 +113,7 @@ fn errors_after_feeding<B: BlockBuilder>(
 
     // Long enough for the source to have run into an unlinked pad many times
     // over, if nothing stopped it: 60 buffers is under three seconds at 25 fps.
-    let mut errors = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(4);
-    while Instant::now() < deadline {
-        let Some(msg) = bus.timed_pop_filtered(
-            gst::ClockTime::from_mseconds(100),
-            &[gst::MessageType::Error],
-        ) else {
-            continue;
-        };
-        if let gst::MessageView::Error(err) = msg.view() {
-            errors.push(BusError {
-                source: msg.src().map(|s| s.name().to_string()).unwrap_or_default(),
-                message: err.error().to_string(),
-            });
-        }
-    }
+    let errors = common::bus::collect_errors(&bus, Duration::from_secs(4));
     let _ = pipeline.set_state(gst::State::Null);
     errors
 }
@@ -198,7 +151,10 @@ fn mpegtssrt_props() -> HashMap<String, PropertyValue> {
     // from blocking.
     props.insert(
         "srt_uri".to_string(),
-        PropertyValue::String(format!("srt://127.0.0.1:{}?mode=listener", srt_port())),
+        PropertyValue::String(format!(
+            "srt://127.0.0.1:{}?mode=listener",
+            common::free_udp_port()
+        )),
     );
     props.insert(
         "wait_for_connection".to_string(),

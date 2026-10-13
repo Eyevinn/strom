@@ -25,7 +25,7 @@ pub mod common;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use strom::blocks::builtin::mpegtssrt::MpegTsSrtOutputBuilder;
-use strom::blocks::{BlockBuildContext, BlockBuilder};
+use strom::blocks::BlockBuilder;
 use strom_types::PropertyValue;
 
 use gstreamer as gst;
@@ -45,16 +45,6 @@ const REQUIRED: &[&str] = &[
     "audioresample",
     "capsfilter",
 ];
-
-/// A free UDP port for the SRT listener. Binding one and dropping it races with
-/// anything else on the host, but the socket is never used — srtsink only has
-/// to reach PLAYING so the caps travel.
-fn srt_port() -> u16 {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .and_then(|s| s.local_addr())
-        .map(|a| a.port())
-        .expect("no free UDP port for the SRT listener")
-}
 
 /// Every caps `srtsink` was handed while the muxer ran.
 ///
@@ -87,51 +77,25 @@ fn caps_reaching_srtsink() -> CapsSeen {
     // from blocking in render while we wait for those caps.
     props.insert(
         "srt_uri".to_string(),
-        PropertyValue::String(format!("srt://127.0.0.1:{}?mode=listener", srt_port())),
+        PropertyValue::String(format!(
+            "srt://127.0.0.1:{}?mode=listener",
+            common::free_udp_port()
+        )),
     );
     props.insert(
         "wait_for_connection".to_string(),
         PropertyValue::Bool(false),
     );
 
-    let ctx = BlockBuildContext::new(vec![], "all".to_string());
+    let ctx = common::block::context();
     let built = MpegTsSrtOutputBuilder
         .build(instance_id, &props, &ctx)
         .expect("mpegts/srt output block builds");
 
     let pipeline = gst::Pipeline::new();
-    let mut by_id: HashMap<String, gst::Element> = HashMap::new();
-    for (id, element) in &built.elements {
-        pipeline.add(element).expect("add block element");
-        by_id.insert(id.clone(), element.clone());
-    }
-
     // The pipeline builder applies these; without them mpegtsmux:src never
     // reaches srtsink and the muxer stalls with not-linked.
-    for (from, to) in &built.internal_links {
-        let src = by_id
-            .get(&from.element_id)
-            .unwrap_or_else(|| panic!("internal link source {} missing", from.element_id));
-        let sink = by_id
-            .get(&to.element_id)
-            .unwrap_or_else(|| panic!("internal link target {} missing", to.element_id));
-        match (&from.pad_name, &to.pad_name) {
-            (Some(src_pad), Some(sink_pad)) => {
-                let src_pad = src
-                    .static_pad(src_pad)
-                    .unwrap_or_else(|| panic!("{} has no pad {}", from.element_id, src_pad));
-                let sink_pad = sink
-                    .static_pad(sink_pad)
-                    .unwrap_or_else(|| panic!("{} has no pad {}", to.element_id, sink_pad));
-                src_pad
-                    .link(&sink_pad)
-                    .unwrap_or_else(|e| panic!("internal pad link failed: {:?}", e));
-            }
-            _ => src
-                .link(sink)
-                .unwrap_or_else(|e| panic!("internal element link failed: {:?}", e)),
-        }
-    }
+    let by_id = common::block::install(&pipeline, &built);
 
     let video_src = gst::ElementFactory::make("videotestsrc")
         .property("num-buffers", 60i32)
@@ -190,12 +154,7 @@ fn caps_reaching_srtsink() -> CapsSeen {
         )
         .expect("link audio into the block");
 
-    for setup in ctx.take_element_setups() {
-        setup(
-            uuid::Uuid::new_v4(),
-            strom::events::EventBroadcaster::with_capacity(16),
-        );
-    }
+    common::block::run_setups(&ctx);
 
     let srtsink = by_id
         .get(&format!("{}:srtsink", instance_id))
@@ -234,7 +193,7 @@ fn caps_reaching_srtsink() -> CapsSeen {
         if let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(200)) {
             match msg.view() {
                 gst::MessageView::Error(err) => {
-                    // Name the element: srt_port() races with the host, so a
+                    // Name the element: common::free_udp_port() races with the host, so a
                     // failure to bind the listener must not read as the
                     // regression this test guards.
                     let src = err
