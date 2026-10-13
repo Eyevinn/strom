@@ -468,6 +468,11 @@ fn main() -> anyhow::Result<()> {
         info!("Starting Strom backend server (headless mode)...");
     }
 
+    // Both modes: without this macOS App-Naps the process into the background QoS
+    // band, headless ~32 s after launch and with a GUI whenever its window is
+    // hidden or covered. Pipelines then drop frames and audio in bursts.
+    strom::macos_app_nap::hold_activity_for_process_lifetime();
+
     #[cfg(not(feature = "no-gui"))]
     {
         if gui_enabled {
@@ -731,11 +736,6 @@ fn run_headless_entry(
     log_reload_handle: strom::state::LogReloadHandle,
     default_log_filter: String,
 ) -> anyhow::Result<()> {
-    // Before the CFRunLoop starts: without this the process is App-Napped into the
-    // background QoS band ~32 s in, and every pipeline after that runs on
-    // efficiency cores.
-    strom::macos_app_nap::hold_activity_for_process_lifetime();
-
     #[cfg(target_os = "macos")]
     {
         // `gst_macos_main` does not run this closure on the process main
