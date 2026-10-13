@@ -2,8 +2,8 @@
 
 use crate::blocks::builtin::webrtc_props::{parse_do_retransmission, parse_drop_on_latency};
 use crate::blocks::{
-    BlockBuildContext, BlockBuildError, BlockBuildResult, APPSRC_MAX_BYTES_AUDIO,
-    APPSRC_MAX_BYTES_VIDEO, APPSRC_MAX_TIME,
+    live_bridge_appsrc, BlockBuildContext, BlockBuildError, BlockBuildResult,
+    APPSRC_MAX_BYTES_AUDIO, APPSRC_MAX_BYTES_VIDEO,
 };
 use crate::gst::keyframe_request::VideoDamage;
 use crate::whip_session_manager::{
@@ -288,15 +288,10 @@ pub fn build_whipserversrc(
             let appsrc_id = format!("{}:appsrc_audio_{}", instance_id, slot);
             let audio_out_tee_id = format!("{}:audio_out_tee_{}", instance_id, slot);
 
-            let appsrc = gst_app::AppSrc::builder()
+            let appsrc = live_bridge_appsrc(APPSRC_MAX_BYTES_AUDIO)
                 .name(&appsrc_id)
-                .format(gst::Format::Time)
-                .is_live(true)
                 .handle_segment_change(true)
-                .max_bytes(APPSRC_MAX_BYTES_AUDIO)
-                .max_time(APPSRC_MAX_TIME)
                 .leaky_type(gst_app::AppLeakyType::Downstream)
-                .automatic_eos(false)
                 .build();
 
             let audio_out_tee = gst::ElementFactory::make("tee")
@@ -419,15 +414,10 @@ pub fn build_whipserversrc(
             let appsrc_id = format!("{}:appsrc_video_{}", instance_id, slot);
             let video_out_tee_id = format!("{}:video_out_tee_{}", instance_id, slot);
 
-            let appsrc = gst_app::AppSrc::builder()
+            let appsrc = live_bridge_appsrc(APPSRC_MAX_BYTES_VIDEO)
                 .name(&appsrc_id)
-                .format(gst::Format::Time)
-                .is_live(true)
                 .handle_segment_change(true)
-                .max_bytes(APPSRC_MAX_BYTES_VIDEO)
-                .max_time(APPSRC_MAX_TIME)
                 .leaky_type(gst_app::AppLeakyType::Downstream)
-                .automatic_eos(false)
                 .build();
 
             let video_out_tee = gst::ElementFactory::make("tee")
@@ -951,6 +941,39 @@ mod tests {
             let configs = ctx.take_whip_endpoint_configs();
             assert_eq!(configs.len(), 1, "expected exactly one endpoint config");
             assert_eq!(configs[0].1.drop_on_latency, expected);
+        }
+    }
+
+    /// A slot's appsrc hands a session's media into the flow and queues up to
+    /// `APPSRC_MAX_TIME` of it. It has to report that queue as its maximum
+    /// latency: at the appsrc default of 0, a mixer that also takes an input
+    /// with more latency than the queues after the slot can absorb fails its
+    /// latency configuration on every cycle.
+    #[test]
+    fn slot_appsrcs_report_the_latency_their_queue_can_hold() {
+        let _ = gst::init();
+        let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+        build_whipserversrc(
+            "whip-latency-test",
+            &props(&[("max_sessions", PropertyValue::Int(2))]),
+            &ctx,
+        )
+        .expect("build_whipserversrc failed");
+        let configs = ctx.take_whip_endpoint_configs();
+        let config = &configs[0].1;
+        let appsrcs: Vec<_> = config
+            .slot_audio_appsrcs
+            .iter()
+            .chain(&config.slot_video_appsrcs)
+            .collect();
+        assert_eq!(appsrcs.len(), 4, "audio and video for two slots");
+        for appsrc in appsrcs {
+            assert_eq!(
+                appsrc.latency().1,
+                Some(crate::blocks::APPSRC_MAX_TIME),
+                "{} reports a maximum latency its queue does not match",
+                appsrc.name()
+            );
         }
     }
 }

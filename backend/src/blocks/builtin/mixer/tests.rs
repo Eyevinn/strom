@@ -1545,3 +1545,105 @@ fn test_channel_keeps_feeding_aux_while_monitor_waits_for_its_consumer() {
         Duration::from_millis(4500),
     );
 }
+
+/// Run the mixer with channel 1 fed through `bridge` and channel 0 through an
+/// input that holds 2 s, as an SRT input at `latency: 2000` does. Returns how
+/// many "Impossible to configure latency" warnings the mixer posted.
+fn latency_warnings_next_to_a_two_second_input(bridge: gstreamer_app::AppSrc) -> usize {
+    let m = assemble(&small_mixer_props(&[
+        ("latency", PropertyValue::UInt(100)),
+        ("min_upstream_latency", PropertyValue::UInt(2000)),
+    ]));
+
+    let slow = gst::parse::bin_from_description(
+        "audiotestsrc is-live=true ! audioconvert ! rtpL16pay ! rtpjitterbuffer latency=2000 \
+         ! rtpL16depay",
+        true,
+    )
+    .unwrap();
+    bridge.set_caps(Some(
+        &"audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved"
+            .parse::<gst::Caps>()
+            .unwrap(),
+    ));
+    bridge.set_do_timestamp(true);
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", true)
+        .build()
+        .unwrap();
+    m.pipeline
+        .add_many([slow.upcast_ref(), bridge.upcast_ref(), &sink])
+        .unwrap();
+    slow.link_pads(None, m.element("convert_0"), Some("sink"))
+        .unwrap();
+    bridge
+        .link_pads(None, m.element("convert_1"), Some("sink"))
+        .unwrap();
+    m.element("main_out_tee")
+        .link_pads(Some("src_%u"), &sink, None)
+        .unwrap();
+
+    let feeding = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let feeder = {
+        let feeding = feeding.clone();
+        let bridge = bridge.clone();
+        std::thread::spawn(move || {
+            // 10 ms of silence at a time, the way a bridge forwards media.
+            while feeding.load(Ordering::Relaxed) {
+                let _ = bridge.push_buffer(gst::Buffer::from_slice(vec![0u8; 480 * 4]));
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        })
+    };
+
+    m.pipeline.set_state(gst::State::Playing).unwrap();
+    let bus = m.pipeline.bus().unwrap();
+    let mut warnings = 0;
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < deadline {
+        let Some(msg) = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(50),
+            &[gst::MessageType::Error, gst::MessageType::Warning],
+        ) else {
+            continue;
+        };
+        match msg.view() {
+            gst::MessageView::Error(e) => panic!("pipeline error: {e:?}"),
+            gst::MessageView::Warning(w)
+                if format!("{:?}", w.debug()).contains("Impossible to configure latency") =>
+            {
+                warnings += 1;
+            }
+            _ => {}
+        }
+    }
+    feeding.store(false, Ordering::Relaxed);
+    let _ = m.pipeline.set_state(gst::State::Null);
+    feeder.join().unwrap();
+    warnings
+}
+
+/// A WHIP Input or a Media Player hands its media into the flow through a
+/// live appsrc. Next to an input that holds 2 s, the mixer has to hold the
+/// bridge's media for 2 s too, which the appsrc's queue can. A live appsrc at
+/// its defaults reports that it can hold nothing, and the mixer then fails its
+/// latency configuration on every cycle, as it did on a production flow with
+/// an SRT input at 2000 ms and a WHIP guest.
+#[test]
+fn test_a_bridge_input_next_to_a_two_second_input_configures_latency() {
+    init_gst();
+    let bridge = crate::blocks::live_bridge_appsrc(crate::blocks::APPSRC_MAX_BYTES_AUDIO).build();
+    assert_eq!(latency_warnings_next_to_a_two_second_input(bridge), 0);
+
+    // The same input from an appsrc at its defaults, to show the setup above
+    // is one where the reported maximum decides.
+    let default = gstreamer_app::AppSrc::builder()
+        .format(gst::Format::Time)
+        .is_live(true)
+        .build();
+    assert!(
+        latency_warnings_next_to_a_two_second_input(default) > 0,
+        "a live appsrc at its defaults no longer fails the mixer's latency; \
+         this test no longer shows what it guards"
+    );
+}

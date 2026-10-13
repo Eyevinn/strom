@@ -1,6 +1,9 @@
+use super::warning_gate::{WarningGate, WARNING_REPEAT_INTERVAL};
 use super::PipelineManager;
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use std::sync::Mutex;
+use std::time::Instant;
 use strom_types::{PipelineState, StromEvent};
 use tracing::{debug, error, info, trace, warn};
 
@@ -62,6 +65,7 @@ impl PipelineManager {
         let events = self.events.clone();
         let cached_state = self.cached_state.clone();
         let qos_aggregator = self.qos_aggregator.clone();
+        let warning_gate = Mutex::new(WarningGate::default());
 
         let main_handler_id = bus.connect_message(None, move |_bus, msg| {
             use gst::MessageView;
@@ -119,6 +123,22 @@ impl PipelineManager {
                     let warning_msg = warn.error().to_string();
                     let debug_info = warn.debug();
                     let source = warn.src().map(|s| s.name().to_string());
+
+                    let key = format!("{:?}\n{}\n{:?}", source, warning_msg, debug_info);
+                    let Some(suppressed) = warning_gate.lock().unwrap().check(key, Instant::now())
+                    else {
+                        return;
+                    };
+                    let warning_msg = if suppressed > 0 {
+                        format!(
+                            "{} (repeated {} times in the last {} s)",
+                            warning_msg,
+                            suppressed,
+                            WARNING_REPEAT_INTERVAL.as_secs()
+                        )
+                    } else {
+                        warning_msg
+                    };
 
                     warn!(
                         "Pipeline warning in flow '{}': {} (debug: {:?}, source: {:?})",

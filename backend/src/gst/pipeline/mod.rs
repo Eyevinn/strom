@@ -8,6 +8,7 @@ mod linking;
 pub(crate) mod properties;
 mod srt;
 mod state;
+mod warning_gate;
 mod webrtc;
 
 use crate::events::EventBroadcaster;
