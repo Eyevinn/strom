@@ -567,3 +567,226 @@ async fn wipe_between_letterboxed_sources_animates() {
     main_loop.quit();
     main_loop_thread.join().expect("main loop thread");
 }
+
+/// A take index for `trigger_transition`, which takes `usize` on main and
+/// `Option<usize>` once #806 lands. Either signature accepts this.
+fn idx<T: From<usize>>(i: usize) -> T {
+    T::from(i)
+}
+
+/// A master-FX take out of a PiP runs the take through the PiP-aware path,
+/// which animates the pads and lays the full-frame envelope over them. The
+/// envelope is what lands on air, so the take must report the effect, as the
+/// plain-input path does — not the pad morph underneath it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn master_fx_take_out_of_a_pip_reports_the_effect() {
+    use gstreamer::prelude::*;
+    gstreamer::init().unwrap();
+
+    if !common::gl_available(GL_ELEMENTS) {
+        return;
+    }
+
+    // Its own block id, so this test never reads another test's mixer.
+    const PIP_BLOCK_ID: &str = "vmfx_pip";
+    let mut flow = build_vm_flow();
+    flow.blocks[0].id = PIP_BLOCK_ID.to_string();
+    for (k, v) in [
+        ("num_pips", "1"),
+        ("initial_pgm_source", "pip:0"),
+        ("initial_pvw_source", "input:1"),
+    ] {
+        flow.blocks[0].properties.insert(
+            k.to_string(),
+            strom_types::PropertyValue::String(v.to_string()),
+        );
+    }
+
+    let temp_file = NamedTempFile::new().unwrap();
+    let registry = BlockRegistry::new(temp_file.path());
+    let mut manager = PipelineManager::new(
+        &flow,
+        EventBroadcaster::new(10, false, false),
+        &registry,
+        vec![],
+        "all".to_string(),
+        None,
+        std::env::temp_dir(),
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+    )
+    .expect("build GPU pipeline");
+    manager.start().expect("start GPU pipeline");
+
+    let mixer = manager
+        .pipeline()
+        .by_name(&format!("{}:mixer", PIP_BLOCK_ID))
+        .expect("mixer in pipeline");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while mixer.query_position::<gstreamer::ClockTime>().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "mixer never produced output (position query still failing after 30s)"
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        manager.vision_mixer_fx_available(PIP_BLOCK_ID),
+        "FX slots missing from GPU pipeline"
+    );
+
+    // PiP 0: input 1 full frame, punched in 2x.
+    let mut crop = strom_types::vision_mixer::PipTransforms::new();
+    crop.insert(
+        1,
+        strom_types::vision_mixer::SourceCrop {
+            left: 0.25,
+            top: 0.25,
+            right: 0.25,
+            bottom: 0.25,
+        },
+    );
+    manager
+        .apply_vision_mixer_pip_config(PIP_BLOCK_ID, 0, Some(1), vec![], crop)
+        .expect("pip config");
+
+    let result = manager.trigger_transition(PIP_BLOCK_ID, idx(0), idx(1), "glitch_cut", 200);
+
+    manager.stop().expect("stop");
+    strom::blocks::builtin::vision_mixer::overlay::unregister_flow(&flow.id);
+    drop(manager);
+
+    let (_, _, _, kind) = result.expect("glitch take out of a PiP");
+    assert_eq!(kind, "glitch_cut");
+}
+
+/// The GPU builder must install the per-input media-age probes, as the CPU
+/// builder does: a live input reads young, one that stalls without EOS reads
+/// old, and an unlinked one reads null. The CPU flavour of this test lives in
+/// `vision_mixer_signals_test`; it cannot see the GPU builder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gpu_mixer_reports_media_age_per_input() {
+    use gstreamer::prelude::*;
+    use strom_types::PropertyValue as PV;
+    gstreamer::init().unwrap();
+
+    if !common::gl_available(GL_ELEMENTS) {
+        return;
+    }
+
+    // Its own block id, so this test never reads another test's mixer.
+    const AGE_BLOCK_ID: &str = "vmfx_age";
+    let mut flow = build_vm_flow();
+    flow.blocks[0].id = AGE_BLOCK_ID.to_string();
+    flow.blocks[0]
+        .properties
+        .insert("num_inputs".to_string(), PV::UInt(3));
+    let elem = |id: &str, ty: &str, props: Vec<(&str, PV)>| strom_types::Element {
+        id: id.to_string(),
+        element_type: ty.to_string(),
+        properties: props.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        position: [0.0, 0.0].into(),
+        pad_properties: HashMap::new(),
+    };
+    // Input 0 live, input 1 live behind a valve, input 2 unlinked.
+    for i in 0..2 {
+        flow.elements.push(elem(
+            &format!("src{}", i),
+            "videotestsrc",
+            vec![("is-live", PV::Bool(true))],
+        ));
+        flow.elements.push(elem(
+            &format!("caps{}", i),
+            "capsfilter",
+            vec![(
+                "caps",
+                PV::String("video/x-raw,width=320,height=180,framerate=30/1".into()),
+            )],
+        ));
+        flow.links.push(strom_types::Link {
+            from: format!("caps{}:src", i),
+            to: format!("{}:video_in_{}", AGE_BLOCK_ID, i),
+        });
+    }
+    flow.elements.push(elem("valve1", "valve", vec![]));
+    for (from, to) in [
+        ("src0:src", "caps0:sink"),
+        ("src1:src", "valve1:sink"),
+        ("valve1:src", "caps1:sink"),
+    ] {
+        flow.links.push(strom_types::Link {
+            from: from.to_string(),
+            to: to.to_string(),
+        });
+    }
+    for block in &mut flow.blocks {
+        if let Some(builder) = strom::blocks::builtin::get_builder(&block.block_definition_id) {
+            block.computed_external_pads = builder.get_external_pads(&block.properties);
+        }
+    }
+
+    let temp_file = NamedTempFile::new().unwrap();
+    let registry = BlockRegistry::new(temp_file.path());
+    let mut manager = PipelineManager::new(
+        &flow,
+        EventBroadcaster::new(10, false, false),
+        &registry,
+        vec![],
+        "all".to_string(),
+        None,
+        std::env::temp_dir(),
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+    )
+    .expect("build GPU pipeline");
+    manager.start().expect("start GPU pipeline");
+
+    let mixer = manager
+        .pipeline()
+        .by_name(&format!("{}:mixer", AGE_BLOCK_ID))
+        .expect("mixer in pipeline");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while mixer.query_position::<gstreamer::ClockTime>().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "mixer never produced output (position query still failing after 30s)"
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    manager
+        .pipeline()
+        .by_name("valve1")
+        .expect("valve1")
+        .set_property("drop", true);
+    // Frames already queued past the valve keep reaching the mixer for a
+    // while, longer on a loaded runner, so wait for the gap instead of a
+    // fixed time.
+    let s =
+        strom::blocks::builtin::vision_mixer::overlay::get_overlay_state(&flow.id, AGE_BLOCK_ID)
+            .expect("overlay state registered");
+    let read =
+        || -> Vec<Option<u64>> { (0..s.num_inputs).map(|i| s.input_media_age_ms(i)).collect() };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut a = read();
+    while !matches!((a[0], a[1]), (Some(live), Some(stalled)) if stalled >= live + 1500)
+        && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        a = read();
+    }
+
+    manager.stop().expect("stop");
+    strom::blocks::builtin::vision_mixer::overlay::unregister_flow(&flow.id);
+    drop(manager);
+
+    let (live, stalled) = (
+        a[0].expect("input 0 delivered"),
+        a[1].expect("input 1 delivered"),
+    );
+    assert!(
+        stalled >= live + 1500,
+        "stalled input 1 must read at least 1.5 s older than live input 0: {:?}",
+        a
+    );
+    assert_eq!(a[2], None, "unlinked input 2 never delivered: {:?}", a);
+}
