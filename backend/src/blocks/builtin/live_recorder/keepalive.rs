@@ -188,7 +188,7 @@ impl Track {
         mux.release_request_pad(&pad);
     }
 
-    /// The input's drop probe and the queue's position probes.
+    /// The input's drop and caps-query probes, and the queue's position probes.
     pub fn install_probes(self: &Arc<Self>) {
         if let Some(input_sink) = self.input.upgrade().and_then(|i| i.static_pad("sink")) {
             // Without it, a retired track's branch would answer upstream with
@@ -211,6 +211,29 @@ impl Track {
                     }
                 },
             );
+
+            // Answer caps queries here, as the input did before its parser was
+            // linked: anything is accepted, and what cannot be recorded is refused
+            // with a message when its caps arrive. Passed on, a query reaches the
+            // muxer, which once it has caps answers with exactly those, including
+            // fields the encoder added itself (vtenc's chroma-site). The encoder
+            // then refuses its own input caps, and a converter in front of it that
+            // cannot renegotiate fails with not-negotiated, which stops the source.
+            input_sink.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, |_pad, info| match info
+                .query_mut()
+                .map(|q| q.view_mut())
+            {
+                Some(gst::QueryViewMut::Caps(q)) => {
+                    let caps = q.filter_owned().unwrap_or_else(gst::Caps::new_any);
+                    q.set_result(&caps);
+                    gst::PadProbeReturn::Handled
+                }
+                Some(gst::QueryViewMut::AcceptCaps(q)) => {
+                    q.set_result(true);
+                    gst::PadProbeReturn::Handled
+                }
+                _ => gst::PadProbeReturn::Ok,
+            });
         }
 
         let Some(queue_sink) = self.queue.upgrade().and_then(|q| q.static_pad("sink")) else {
