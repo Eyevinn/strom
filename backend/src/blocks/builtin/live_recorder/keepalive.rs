@@ -213,8 +213,8 @@ impl Track {
             );
 
             // Answer caps queries here, as the input did before its parser was
-            // linked: anything is accepted, and what cannot be recorded is refused
-            // with a message when its caps arrive. Passed on, a query reaches the
+            // linked: any caps, and what cannot be recorded is refused with a
+            // message when its caps arrive. Passed on, a query reaches the
             // muxer, which once it has caps answers with exactly those, including
             // fields the encoder added itself (vtenc's chroma-site). The encoder
             // then refuses its own input caps, and a converter in front of it that
@@ -226,10 +226,6 @@ impl Track {
                 Some(gst::QueryViewMut::Caps(q)) => {
                     let caps = q.filter_owned().unwrap_or_else(gst::Caps::new_any);
                     q.set_result(&caps);
-                    gst::PadProbeReturn::Handled
-                }
-                Some(gst::QueryViewMut::AcceptCaps(q)) => {
-                    q.set_result(true);
                     gst::PadProbeReturn::Handled
                 }
                 _ => gst::PadProbeReturn::Ok,
