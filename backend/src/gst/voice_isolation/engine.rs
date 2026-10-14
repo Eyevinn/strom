@@ -24,8 +24,12 @@ pub(super) const MODEL_DELAY: usize = HOP + MODEL_DELAY_FRAMES * HOP;
 static MODEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dpdfnet2_48khz_hr.onnx"));
 
 pub(super) struct Engine {
-    /// Reused across hops so a run allocates no plan state of its own.
-    runner: TypedSimpleState,
+    /// Each hop runs in a fresh session of this plan. tract's GRUs carry
+    /// their final hidden state into the next run of a session instead of
+    /// starting from the model's initial_h, and DPDFNet's GRUs run across
+    /// frequency within one frame, so a reused session leaks each frame into
+    /// the next and the recurrent state drifts until speech is suppressed.
+    plan: Arc<TypedRunnableModel>,
     init_state: Tensor,
     /// The model's recurrent state, fed back in on every hop.
     state: Tensor,
@@ -62,7 +66,7 @@ impl Engine {
             .map(|p| (p.key.as_str(), p.value.as_str()))
             .collect();
         let init_state = tensor1(&initial_state(&metadata)?);
-        let runner = onnx
+        let plan = onnx
             .model_for_proto_model(&proto)
             .map_err(err)?
             .with_input_fact(0, f32::fact([1, 1, BINS, 2]).into())
@@ -72,8 +76,6 @@ impl Engine {
             .into_optimized()
             .map_err(err)?
             .into_runnable()
-            .map_err(err)?
-            .spawn()
             .map_err(err)?;
 
         let mut planner = RealFftPlanner::<f32>::new();
@@ -88,7 +90,7 @@ impl Engine {
         Ok(Self {
             state: init_state.clone(),
             init_state,
-            runner,
+            plan,
             time_buf: fwd.make_input_vec(),
             freq_buf: fwd.make_output_vec(),
             scratch_fwd: fwd.make_scratch_vec(),
@@ -149,7 +151,7 @@ impl Engine {
         let spec = Tensor::from_shape(&[1, 1, BINS, 2], &self.spec).map_err(err)?;
         let state = std::mem::take(&mut self.state);
         let mut outputs = self
-            .runner
+            .plan
             .run(tvec!(spec.into(), state.into()))
             .map_err(err)?;
         self.state = outputs.remove(1).into_tensor();

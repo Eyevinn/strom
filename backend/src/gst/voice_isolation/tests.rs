@@ -260,3 +260,44 @@ fn element_is_finalized_after_running() {
         "voice isolation element still alive after drop"
     );
 }
+
+/// `Engine::reset` must forget everything, so a reset engine answers the
+/// same audio exactly as a fresh one. tract's GRUs keep their final hidden
+/// state between runs of one session, so a session reused across hops carries
+/// each frame's GRU state into the next, and past a reset.
+#[test]
+fn reset_engine_matches_a_fresh_one() {
+    use super::engine::{Engine, HOP};
+
+    let mono = |rng: &mut u32, hops: usize| -> Vec<f32> {
+        noise(rng, hops * HOP)
+            .into_iter()
+            .step_by(CHANNELS)
+            .collect()
+    };
+    let run = |e: &mut Engine, input: &[f32]| -> Vec<f32> {
+        let mut out = vec![0.0; input.len()];
+        for (i, o) in input.chunks(HOP).zip(out.chunks_mut(HOP)) {
+            e.process_hop(i, o).unwrap();
+        }
+        out
+    };
+    let probe = mono(&mut 5, 50);
+
+    let fresh = run(&mut Engine::load().unwrap(), &probe);
+
+    let mut e = Engine::load().unwrap();
+    run(&mut e, &mono(&mut 9, 50));
+    e.reset();
+    let after_reset = run(&mut e, &probe);
+
+    let diff = fresh
+        .iter()
+        .zip(&after_reset)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        diff < 1e-6 && energy(&fresh) > 0.0,
+        "a reset engine differs from a fresh one by up to {diff}"
+    );
+}
