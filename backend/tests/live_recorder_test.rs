@@ -1191,3 +1191,60 @@ fn a_stop_before_a_dataless_track_is_released_still_writes_the_file() {
         span
     );
 }
+
+/// Wait until the muxer has caps on every sink pad, so it has started pinning
+/// them in its caps answers.
+fn wait_for_mux_caps(mux: &gst::Element) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while mux.sink_pads().iter().any(|p| p.current_caps().is_none()) {
+        assert!(Instant::now() < deadline, "the muxer never got caps");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Once the muxer has caps it answers a caps query with exactly those. Passed
+/// through, that answer reaches the encoder, and `vtenc` then refuses input caps
+/// that lack a field it pinned. The input must answer as it did before its
+/// parser was linked.
+#[test]
+fn the_input_answers_caps_queries_without_the_muxers_current_caps() {
+    init();
+    let dir = tempfile::tempdir().unwrap();
+    let pipeline = gst::Pipeline::new();
+    let rec = add_live_recorder(
+        &pipeline,
+        "rec",
+        dir.path(),
+        &[
+            ("num_video_tracks", PropertyValue::UInt(1)),
+            ("num_audio_tracks", PropertyValue::UInt(0)),
+        ],
+    );
+    let enc = recorder::video_source(&pipeline, -1, true);
+    enc.link(&rec.input("video_input_0")).unwrap();
+    rec.run_setups();
+
+    pipeline.set_state(gst::State::Playing).unwrap();
+    wait_for_mux_caps(&rec.mux());
+    no_errors(&pipeline);
+
+    // The encoder's caps without `level`: one fixed structure, as an encoder
+    // asks with, missing a field the muxer's current caps carry.
+    let enc_src = enc.static_pad("src").unwrap();
+    let mut filter = enc_src.current_caps().unwrap();
+    filter
+        .make_mut()
+        .structure_mut(0)
+        .unwrap()
+        .remove_field("level");
+    let answer = enc_src.peer_query_caps(Some(&filter));
+    pipeline.set_state(gst::State::Null).unwrap();
+
+    assert!(
+        filter.is_subset(&answer),
+        "the recorder input narrowed a caps query to the muxer's current caps\n\
+         asked:    {}\nanswered: {}",
+        filter,
+        answer
+    );
+}
