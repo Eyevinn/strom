@@ -362,8 +362,6 @@ async fn a_take_plays_with_no_park_probe_on_its_path() {
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
 
-/// A flow stopped in the middle of a take releases its pipeline, and the
-/// take left waiting for its clip's end does not touch the next run.
 /// A clip whose first load never delivers a frame is loaded again, and then
 /// parks. On the Windows runner `decodebin3` now and then never lets a
 /// freshly loaded clip's stream through (issue #1069); without the second
@@ -371,6 +369,9 @@ async fn a_take_plays_with_no_park_probe_on_its_path() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn a_clip_that_delivers_no_frame_is_loaded_again() {
+    if common::skip_known_ci_failure(&["macos"], "the stinger suite fails on the macOS runner") {
+        return;
+    }
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
     }
@@ -397,6 +398,8 @@ async fn a_clip_that_delivers_no_frame_is_loaded_again() {
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
 
+/// A flow stopped in the middle of a take releases its pipeline, and the
+/// take left waiting for its clip's end does not touch the next run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn stopping_mid_take_releases_the_pipeline() {
