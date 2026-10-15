@@ -661,11 +661,16 @@ impl MediaPlayerState {
         if !play {
             self.is_paused.store(true, Ordering::SeqCst);
             self.expect_source();
-            pipeline.set_state(gst::State::Paused).map_err(|e| {
-                self.mark_source_ready();
-                error!("Failed to pause new file: {:?}", e);
-                "Failed to load file paused".to_string()
-            })?;
+            // Through `up_from_ready`, as `start` does: a clip loaded paused
+            // goes up from READY too, and its typefind racing this change
+            // left the clip's stream stuck at decodebin3's input on the
+            // Windows runner (issue #1069), or deadlocked it (issue #963).
+            self.up_from_ready(pipeline, gst::State::Paused)
+                .map_err(|e| {
+                    self.mark_source_ready();
+                    error!("Failed to pause new file: {:?}", e);
+                    "Failed to load file paused".to_string()
+                })?;
             return Ok(());
         }
         self.is_paused.store(false, Ordering::SeqCst);
@@ -860,12 +865,20 @@ impl MediaPlayerState {
         }
         // Outside the control lock: a take or a stop may come in meanwhile,
         // and the frame arrives on the internal pipeline's own thread.
+        let mut deadline = started + CUE_TIMEOUT;
+        let mut reloaded = false;
         while self.stinger.park.seen.load(Ordering::Acquire) == before {
-            if started.elapsed() > CUE_TIMEOUT {
-                return Err(format!(
-                    "clip {} decoded no frame within {:?}",
-                    index, CUE_TIMEOUT
-                ));
+            if std::time::Instant::now() > deadline {
+                let timed_out = format!("clip {} decoded no frame within {:?}", index, CUE_TIMEOUT);
+                if reloaded {
+                    return Err(timed_out);
+                }
+                reloaded = true;
+                match self.reload_unparked(index, before, &timed_out)? {
+                    Some(count) => before = count,
+                    None => break,
+                }
+                deadline = std::time::Instant::now() + CUE_TIMEOUT;
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
@@ -880,6 +893,47 @@ impl MediaPlayerState {
         }
         self.warm_up_consumer();
         Ok(started.elapsed())
+    }
+
+    /// Load clip `index` again after its first frame failed to park within
+    /// [`CUE_TIMEOUT`], and return the parked-frame count to wait past.
+    ///
+    /// A clip whose stream never reaches the bridge leaves the stinger
+    /// unready until an operator loads the clip by hand. On the Windows CI
+    /// runner that happened when typefind raced the load's state change
+    /// (issue #1069, now held back in `load_current_file_inner`); loading the
+    /// clip again builds its stream anew, whatever stalled it.
+    ///
+    /// `None` when the frame came in meanwhile. Gives up with `timed_out`
+    /// when the player has moved on: another clip cued, or the pipeline
+    /// stopped.
+    fn reload_unparked(
+        &self,
+        index: usize,
+        before: u64,
+        timed_out: &str,
+    ) -> Result<Option<u64>, String> {
+        let _control = self.lock_control();
+        let park = &self.stinger.park;
+        if park.seen.load(Ordering::Acquire) != before {
+            return Ok(None);
+        }
+        let stopped = self
+            .internal_pipeline
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(is_stopped))
+            .unwrap_or(true);
+        if stopped || self.current_index() != index {
+            return Err(timed_out.to_string());
+        }
+        warn!(
+            "Media Player {}: {}, loading it again",
+            self.block_id, timed_out
+        );
+        let before = park.seen.load(Ordering::Acquire);
+        self.load_current_file_and(false)?;
+        Ok(Some(before))
     }
 
     /// Restart an output whose streaming stopped on an error. A consumer that

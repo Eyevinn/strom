@@ -12,7 +12,7 @@ use crate::gst::rtp_hdrext;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use strom_types::{FlowId, StromEvent};
@@ -83,6 +83,36 @@ fn wait_out_test_hold(block_id: &str, media_type: &str) {
     if let Some(ms) = ms {
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
+}
+
+/// Set while any [`stall_next_clip_for_tests`] stall waits, so the bridge
+/// looks one up only then: one relaxed load per new chain.
+static CLIP_STALLS_ARMED: AtomicBool = AtomicBool::new(false);
+/// Stinger players whose next clip delivers no frame, by flow and block id.
+static CLIP_STALLS: LazyLock<Mutex<HashSet<(FlowId, String)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Make the next clip that stinger player `block_id` in `flow` loads deliver
+/// no frame: its video stream is dropped before the park clocksync, as when
+/// `decodebin3` never lets the stream through (issue #1069). Lets a test
+/// check that a cue recovers from a clip that never parks.
+#[doc(hidden)]
+pub fn stall_next_clip_for_tests(flow: FlowId, block_id: &str) {
+    let mut stalls = CLIP_STALLS.lock().unwrap_or_else(|p| p.into_inner());
+    stalls.insert((flow, block_id.to_string()));
+    CLIP_STALLS_ARMED.store(true, Ordering::Release);
+}
+
+fn take_test_stall(flow: FlowId, block_id: &str) -> bool {
+    if !CLIP_STALLS_ARMED.load(Ordering::Relaxed) {
+        return false;
+    }
+    let mut stalls = CLIP_STALLS.lock().unwrap_or_else(|p| p.into_inner());
+    let taken = stalls.remove(&(flow, block_id.to_string()));
+    if stalls.is_empty() {
+        CLIP_STALLS_ARMED.store(false, Ordering::Release);
+    }
+    taken
 }
 
 /// Create the internal pipeline for decode mode.
@@ -780,6 +810,9 @@ fn link_pad_through_clocksync(
     if state.stinger.enabled
         && clocksync_name == super::state::StingerPlayback::park_clocksync_name(&state.block_id)
     {
+        if take_test_stall(state.flow_id, &state.block_id) {
+            src_pad.add_probe(gst::PadProbeType::BUFFER, |_, _| gst::PadProbeReturn::Drop);
+        }
         if let Some(sink) = clocksync.static_pad("sink") {
             state.stinger.arm_park_probe(&sink);
         }

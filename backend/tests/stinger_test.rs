@@ -174,10 +174,7 @@ async fn gpu_stingers_land_frame_accurately() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn cpu_stingers_play_classic() {
-    if common::skip_known_ci_failure(
-        &["macos", "windows"],
-        "the stinger never parks on the Windows runner (issue #1069)",
-    ) {
+    if common::skip_known_ci_failure(&["macos"], "the stinger suite fails on the macOS runner") {
         return;
     }
     if !common::plugins_available(CODEC_ELEMENTS) {
@@ -324,10 +321,7 @@ async fn fade_to_black_waits_for_a_stinger() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn a_take_plays_with_no_park_probe_on_its_path() {
-    if common::skip_known_ci_failure(
-        &["macos", "windows"],
-        "the stinger never parks on the Windows runner (issue #1069)",
-    ) {
+    if common::skip_known_ci_failure(&["macos"], "the stinger suite fails on the macOS runner") {
         return;
     }
     if !common::plugins_available(CODEC_ELEMENTS) {
@@ -370,13 +364,43 @@ async fn a_take_plays_with_no_park_probe_on_its_path() {
 
 /// A flow stopped in the middle of a take releases its pipeline, and the
 /// take left waiting for its clip's end does not touch the next run.
+/// A clip whose first load never delivers a frame is loaded again, and then
+/// parks. On the Windows runner `decodebin3` now and then never lets a
+/// freshly loaded clip's stream through (issue #1069); without the second
+/// load the stinger stayed unready for good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
+async fn a_clip_that_delivers_no_frame_is_loaded_again() {
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let clip = dir.path().join("classic.mov");
+    classic_clip(&clip);
+    let tag = "stall";
+    let r = start_edited(tag, "cpu", dir, vec![clip], |flow| {
+        strom::blocks::builtin::mediaplayer::stall_next_clip_for_tests(
+            flow.id,
+            &format!("sting-{tag}"),
+        );
+    })
+    .await;
+    r.wait_until_parked().await;
+    r.state
+        .stinger_take(&r.flow_id, &r.mixer(), Some(0), None)
+        .await
+        .expect("a take of the clip loaded again");
+    let report = r.wait_for_report(0).await;
+    let n = r.clip_frames(0).await;
+    assert_eq!(report.frames_arrived, n, "{report:?}");
+
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn stopping_mid_take_releases_the_pipeline() {
-    if common::skip_known_ci_failure(
-        &["macos", "windows"],
-        "the stinger never parks on the Windows runner (issue #1069)",
-    ) {
+    if common::skip_known_ci_failure(&["macos"], "the stinger suite fails on the macOS runner") {
         return;
     }
     if !common::plugins_available(CODEC_ELEMENTS) {
@@ -439,10 +463,7 @@ async fn stopping_mid_take_releases_the_pipeline() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn a_take_outlived_by_a_restart_leaves_the_new_run_alone() {
-    if common::skip_known_ci_failure(
-        &["macos", "windows"],
-        "the stinger never parks on the Windows runner (issue #1069)",
-    ) {
+    if common::skip_known_ci_failure(&["macos"], "the stinger suite fails on the macOS runner") {
         return;
     }
     if !common::plugins_available(CODEC_ELEMENTS) {
@@ -587,7 +608,7 @@ async fn a_late_cut_frame_is_reported() {
 async fn a_take_that_fails_to_program_leaves_the_old_source_on_air() {
     if common::skip_known_ci_failure(
         &["macos", "windows"],
-        "the stinger never parks on the Windows runner (issue #1069)",
+        "the old source's first frames miss on the macOS and Windows runners",
     ) {
         return;
     }
@@ -659,12 +680,6 @@ async fn a_take_that_fails_to_program_leaves_the_old_source_on_air() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn a_clip_that_will_not_play_still_changes_the_program() {
-    if common::skip_known_ci_failure(
-        &["windows"],
-        "the stinger never parks on the Windows runner (issue #1069)",
-    ) {
-        return;
-    }
     if !common::plugins_available(CODEC_ELEMENTS) {
         return;
     }
@@ -708,10 +723,7 @@ async fn a_clip_that_will_not_play_still_changes_the_program() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(stinger)]
 async fn a_clip_with_early_audio_lands_its_first_video_frame_on_the_take() {
-    if common::skip_known_ci_failure(
-        &["macos", "windows"],
-        "the stinger never parks on the Windows runner (issue #1069)",
-    ) {
+    if common::skip_known_ci_failure(&["macos"], "the stinger suite fails on the macOS runner") {
         return;
     }
     if !common::plugins_available(CODEC_ELEMENTS)
