@@ -3582,6 +3582,16 @@ dependencies = [
 
 [[package]]
 name = "if-addrs"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b2eeee38fef3aa9b4cc5f1beea8a2444fc00e7377cafae396de3f5c2065e24"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "if-addrs"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
@@ -4013,7 +4023,7 @@ checksum = "ba97b4c886eea3c2823388120d92063c011ac866919ffc4200a0e4b1642a54a5"
 dependencies = [
  "fastrand",
  "flume 0.12.0",
- "if-addrs",
+ "if-addrs 0.15.0",
  "log",
  "mio",
  "socket-pktinfo",
@@ -5236,6 +5246,12 @@ name = "pxfm"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0c5ccf5294c6ccd63a74f1565028353830a9c2f5eb0c682c355c471726a6e3f"
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "qrcodegen"
@@ -6641,6 +6657,7 @@ dependencies = [
  "strom-frontend",
  "strom-types",
  "sysinfo",
+ "tallycam-hub",
  "tempfile",
  "thiserror 2.0.20",
  "thread-priority",
@@ -6828,6 +6845,30 @@ dependencies = [
  "pkg-config",
  "toml 1.1.2+spec-1.1.0",
  "version-compare",
+]
+
+[[package]]
+name = "tallycam-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tallycam-hub"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "getrandom 0.3.4",
+ "if-addrs 0.13.4",
+ "qrcode",
+ "serde",
+ "serde_json",
+ "tallycam-core",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

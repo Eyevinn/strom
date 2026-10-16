@@ -21,6 +21,7 @@ pub mod api;
 pub mod assets;
 pub mod auth;
 pub mod blocks;
+pub mod cameras;
 pub mod cef_flags;
 pub mod cef_media;
 pub mod cef_pages;
@@ -417,6 +418,10 @@ pub async fn create_app_with_config(
         .route("/osc/pat", get(api::osc::get_osc_pat_status))
         .route("/osc/pat/{key}", put(api::osc::set_osc_pat_keyed))
         .route("/osc/pat/{key}", delete(api::osc::clear_osc_pat_keyed))
+        // Phone cameras (TallyCam)
+        .route("/cameras", get(api::cameras::list_cameras))
+        .route("/cameras/invite", post(api::cameras::create_invite))
+        .route("/cameras/control", get(api::cameras::control_ws))
         // Apply authentication middleware to all protected routes
         .layer(middleware::from_fn(auth::auth_middleware));
 
@@ -439,7 +444,9 @@ pub async fn create_app_with_config(
         // MCP Streamable HTTP endpoint (has its own session management)
         .route("/mcp", post(api::mcp::mcp_post))
         .route("/mcp", get(api::mcp::mcp_get))
-        .route("/mcp", delete(api::mcp::mcp_delete));
+        .route("/mcp", delete(api::mcp::mcp_delete))
+        // Phone cameras connect here; admitted by invite token, not session.
+        .route("/cameras/device", get(api::cameras::device_ws));
 
     // Remote control of HTML sources - outside /api, because the key in the
     // path is the credential and the DevTools application resolves its own
@@ -463,6 +470,8 @@ pub async fn create_app_with_config(
             "/vision-mixer/{flow_id}/{block_id}",
             get(api::vision_mixer_page::vision_mixer_page_for_block),
         )
+        .route("/cameras", get(api::cameras::cameras_page))
+        .route("/cameras/clapper", get(api::cameras::clapper_page))
         .with_state(state.clone());
 
     // WHEP proxy routes - outside /api (acts as WHEP server endpoint)

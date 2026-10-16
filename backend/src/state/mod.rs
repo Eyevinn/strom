@@ -1,5 +1,6 @@
 //! Application state management.
 
+mod cameras;
 mod ports;
 
 use crate::affinity_manager::AffinityManager;
@@ -125,6 +126,8 @@ struct AppStateInner {
     port_lease_ttl: parking_lot::Mutex<u64>,
     /// Whether to bind-probe a candidate before handing it out.
     port_probe: parking_lot::Mutex<bool>,
+    /// Phone cameras: the camera hub and the bindings of running flows.
+    cameras: Arc<crate::cameras::Cameras>,
 }
 
 /// Pick the ramp_ms that should apply to a single property in a batched
@@ -190,6 +193,7 @@ impl AppState {
                     strom_types::ports::DEFAULT_PORT_LEASE_TTL_SECS,
                 ),
                 port_probe: parking_lot::Mutex::new(true),
+                cameras: Arc::new(crate::cameras::Cameras::new()),
             }),
         }
     }
@@ -961,6 +965,13 @@ impl AppState {
                     );
                 }
             }
+        }
+
+        // Camera-bound SRT inputs become listeners with a fresh passphrase,
+        // which the phone gets when the flow has started.
+        if let Err(e) = self.inner.cameras.prepare_flow(&mut flow) {
+            error!("Cannot start flow {}: {}", id, e);
+            return Err(PipelineError::InvalidFlow(e));
         }
 
         for (block_id, pad_name) in flow.partially_unwired_block_inputs() {

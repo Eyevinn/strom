@@ -25,6 +25,21 @@ struct ConfigFile {
     cef: CefConfig,
     #[serde(default)]
     media: MediaConfig,
+    #[serde(default)]
+    cameras: CamerasConfig,
+}
+
+/// `[cameras]` section: where phone cameras (TallyCam) reach this Strom.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct CamerasConfig {
+    /// Host name or address phones use for this Strom, in the SRT URLs they
+    /// are told to send to and in invites. Unset: the host the phone (or the
+    /// operator's browser, for invites) used, or the first LAN address when
+    /// that is loopback.
+    public_host: Option<String>,
+    /// Full device WebSocket URL for invites when a proxy sits in front, e.g.
+    /// `wss://strom.example.com/api/cameras/device`.
+    device_url: Option<String>,
 }
 
 /// `[media]` section: downloading files from URLs into the media library.
@@ -228,6 +243,8 @@ const SCALAR_ENV_VARS: &[(&str, &str)] = &[
     ("STROM_STORAGE_CEF_CACHE_PATH", "storage.cef_cache_path"),
     ("STROM_LOGGING_LOG_FILE", "logging.log_file"),
     ("STROM_LOGGING_LOG_LEVEL", "logging.log_level"),
+    ("STROM_CAMERAS_PUBLIC_HOST", "cameras.public_host"),
+    ("STROM_CAMERAS_DEVICE_URL", "cameras.device_url"),
 ];
 
 /// Environment variables that map to a list config key, comma-separated.
@@ -316,6 +333,10 @@ pub struct Config {
     pub media_download_max_bytes: u64,
     /// Time allowed for one whole URL download, in seconds.
     pub media_download_timeout_seconds: u64,
+    /// Host phone cameras reach this Strom on (`[cameras] public_host`).
+    pub cameras_public_host: Option<String>,
+    /// Device WebSocket URL for camera invites (`[cameras] device_url`).
+    pub cameras_device_url: Option<String>,
 }
 
 /// Expand the `[ports] ports` entries into the pool.
@@ -430,6 +451,7 @@ impl Config {
             ports: PortsConfig::default(),
             cef: CefConfig::default(),
             media: MediaConfig::default(),
+            cameras: CamerasConfig::default(),
         }));
 
         // 2. Merge user config file if it exists
@@ -641,6 +663,8 @@ impl Config {
                 config_file.media.download_timeout_seconds,
                 crate::media_download::DEFAULT_TOTAL_TIMEOUT_SECS,
             )?,
+            cameras_public_host: strom_types::env::non_blank(config_file.cameras.public_host),
+            cameras_device_url: strom_types::env::non_blank(config_file.cameras.device_url),
         })
     }
 
@@ -651,6 +675,16 @@ impl Config {
             max_bytes: self.media_download_max_bytes,
             total_timeout: std::time::Duration::from_secs(self.media_download_timeout_seconds),
             ..Default::default()
+        }
+    }
+
+    /// Where phone cameras reach this Strom.
+    pub fn camera_settings(&self) -> crate::cameras::CameraSettings {
+        crate::cameras::CameraSettings {
+            public_host: self.cameras_public_host.clone(),
+            device_url: self.cameras_device_url.clone(),
+            http_port: self.port,
+            tls: self.tls_cert.is_some() && self.tls_key.is_some(),
         }
     }
 
