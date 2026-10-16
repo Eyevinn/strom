@@ -150,6 +150,9 @@ mod tests {
             status: None,
             preview: None,
             tally: Default::default(),
+            protocol: 2,
+            ownership: Default::default(),
+            image_stats: None,
             online,
             key_fingerprint: Some("abcdef".to_string()),
         }
