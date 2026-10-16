@@ -6964,8 +6964,8 @@ dependencies = [
 
 [[package]]
 name = "tallycam-core"
-version = "0.1.0"
-source = "git+https://github.com/Eyevinn/tallycam?tag=v0.1.0#b8ded2f6b92c6268799079feeda99e34e3e54913"
+version = "0.2.0"
+source = "git+https://github.com/Eyevinn/tallycam?tag=v0.2.0#2928d4c500cda5ca54d677b0c504aa1e863b9703"
 dependencies = [
  "base64 0.22.1",
  "p256",
@@ -6976,8 +6976,8 @@ dependencies = [
 
 [[package]]
 name = "tallycam-hub"
-version = "0.1.0"
-source = "git+https://github.com/Eyevinn/tallycam?tag=v0.1.0#b8ded2f6b92c6268799079feeda99e34e3e54913"
+version = "0.2.0"
+source = "git+https://github.com/Eyevinn/tallycam?tag=v0.2.0#2928d4c500cda5ca54d677b0c504aa1e863b9703"
 dependencies = [
  "axum",
  "futures-util",
