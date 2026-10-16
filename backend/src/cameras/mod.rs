@@ -18,6 +18,7 @@
 //! next to the flow state it reads.
 
 pub mod display;
+pub mod labels;
 pub mod settings;
 pub mod store;
 pub mod tally;
@@ -117,6 +118,7 @@ pub struct Cameras {
     hub: RwLock<Arc<Hub>>,
     settings: RwLock<CameraSettings>,
     bindings: Mutex<HashMap<BindingKey, ActiveBinding>>,
+    names: Mutex<labels::NameHistory>,
 }
 
 impl Default for Cameras {
@@ -132,6 +134,7 @@ impl Cameras {
             hub: RwLock::new(Self::make_hub(Hub::new())),
             settings: RwLock::new(CameraSettings::default()),
             bindings: Mutex::new(HashMap::new()),
+            names: Mutex::new(labels::NameHistory::default()),
         }
     }
 
@@ -398,6 +401,32 @@ impl Cameras {
             .collect();
         devices.sort_by_cached_key(|d| d.name.to_lowercase());
         devices
+    }
+
+    /// The display name of every known camera, by device id.
+    pub fn display_names(&self) -> HashMap<String, String> {
+        self.hub()
+            .devices()
+            .iter()
+            .map(|d| (d.id.clone(), display::snapshot_name(d)))
+            .collect()
+    }
+
+    /// Record the current display names of the known cameras. Returns the
+    /// devices whose name is new (first seen, or changed).
+    pub fn note_names(&self) -> Vec<String> {
+        let current = self.display_names();
+        let mut names = self.names.lock();
+        current
+            .into_iter()
+            .filter(|(device, name)| names.note(device, name))
+            .map(|(device, _)| device)
+            .collect()
+    }
+
+    /// The names `device` had before its current one, in this run.
+    pub fn previous_names(&self, device: &str) -> Vec<String> {
+        self.names.lock().previous(device)
     }
 
     /// A camera as an operator knows it: "'<display name>' (<device id>)", or

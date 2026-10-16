@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::Value;
 use strom_types::cameras::CameraTally;
 use strom_types::ports::{PortPoolStatus, PortState};
-use strom_types::{Flow, FlowId, StromEvent};
+use strom_types::{Flow, FlowId, PropertyValue, StromEvent};
 use tallycam_hub::hub::DEFAULT_CALL_TIMEOUT;
 use tallycam_hub::protocol::{ControllerEvent, TallyState, Values};
 use tokio::sync::broadcast::error::RecvError;
@@ -17,6 +17,7 @@ use tracing::{debug, error, info, warn};
 
 use super::AppState;
 use crate::blocks::builtin::vision_mixer::overlay;
+use crate::cameras::labels;
 use crate::cameras::tally::{self, MixerBuses};
 use crate::cameras::{
     redact_srt_uri, to_hub_tally, ActiveBinding, CameraSettings, Cameras, PortHolder,
@@ -146,6 +147,8 @@ impl AppState {
         let mut hub_events = self.inner.cameras.hub().subscribe();
         tokio::spawn(async move {
             let cameras = state.inner.cameras.clone();
+            // The names the cameras have now are not changes.
+            cameras.note_names();
             let mut tick = tokio::time::interval(RECONCILE_INTERVAL);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -156,6 +159,7 @@ impl AppState {
                                 spawn_go_live(&cameras, binding, Duration::ZERO);
                             }
                             state.update_camera_tally().await;
+                            state.relabel_camera_inputs(Some(flow_id), None).await;
                         }
                         Ok(StromEvent::VisionMixerStateChanged { .. }) => {
                             state.update_camera_tally().await;
@@ -169,6 +173,10 @@ impl AppState {
                             if let ControllerEvent::DeviceHello { device, .. } = &*frame.event {
                                 if let Some((_, binding)) = cameras.started_binding_of(device) {
                                     spawn_go_live(&cameras, binding, AFTER_HELLO_DELAY);
+                                }
+                                let renamed = cameras.note_names();
+                                if !renamed.is_empty() {
+                                    state.relabel_camera_inputs(None, Some(&renamed)).await;
                                 }
                             }
                         }
@@ -236,6 +244,90 @@ impl AppState {
         for (device, t) in result {
             // An unknown device (bound but never connected) has no tally.
             let _ = hub.set_tally(&device, to_hub_tally(t));
+        }
+    }
+}
+
+impl AppState {
+    /// Label the vision mixer inputs of running flows that show a camera with
+    /// the camera's display name, where the label is not the operator's own
+    /// (see [`labels::should_relabel`]). Limited to `only_flow` and to
+    /// `only_devices` when given. Persisted like any label change; a changed
+    /// flow is announced with `FlowUpdated` so clients reload it.
+    async fn relabel_camera_inputs(
+        &self,
+        only_flow: Option<FlowId>,
+        only_devices: Option<&[String]>,
+    ) {
+        let cameras = &self.inner.cameras;
+        let names = cameras.display_names();
+        let running = self.running_flow_ids().await;
+        let mut changes: Vec<(FlowId, String, HashMap<String, PropertyValue>)> = Vec::new();
+        {
+            let flows = self.inner.flows.read().await;
+            for flow in flows
+                .values()
+                .filter(|f| running.contains(&f.id) && only_flow.is_none_or(|id| id == f.id))
+            {
+                let mut by_mixer: HashMap<String, HashMap<String, PropertyValue>> = HashMap::new();
+                for input in labels::camera_inputs(flow) {
+                    if only_devices.is_some_and(|d| !d.contains(&input.device)) {
+                        continue;
+                    }
+                    let Some(name) = names.get(&input.device) else {
+                        continue;
+                    };
+                    let property = labels::label_property(input.input);
+                    let current = flow
+                        .blocks
+                        .iter()
+                        .find(|b| b.id == input.mixer)
+                        .and_then(|b| b.properties.get(&property));
+                    let previous = cameras.previous_names(&input.device);
+                    if labels::should_relabel(current, input.input, name, &previous) {
+                        by_mixer
+                            .entry(input.mixer)
+                            .or_default()
+                            .insert(property, PropertyValue::String(name.clone()));
+                    }
+                }
+                changes.extend(by_mixer.into_iter().map(|(m, p)| (flow.id, m, p)));
+            }
+        }
+        let mut updated = HashSet::new();
+        for (flow_id, mixer, properties) in changes {
+            let wanted = properties.len();
+            match self
+                .update_block_properties(&flow_id, &mixer, properties, None, None)
+                .await
+            {
+                Ok((_, rejected)) => {
+                    for (name, reason) in &rejected {
+                        warn!(
+                            "Camera label {} of block {} in flow {} not applied: {}",
+                            name, mixer, flow_id, reason
+                        );
+                    }
+                    if rejected.len() < wanted {
+                        info!(
+                            "Labelled {} input(s) of vision mixer {} in flow {} with camera names",
+                            wanted - rejected.len(),
+                            mixer,
+                            flow_id
+                        );
+                        updated.insert(flow_id);
+                    }
+                }
+                Err(e) => warn!(
+                    "Camera labels of block {} in flow {} not applied: {}",
+                    mixer, flow_id, e
+                ),
+            }
+        }
+        for flow_id in updated {
+            self.inner
+                .events
+                .broadcast(StromEvent::FlowUpdated { flow_id });
         }
     }
 }
