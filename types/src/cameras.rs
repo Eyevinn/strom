@@ -41,7 +41,8 @@ pub struct CameraBinding {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct CameraSummary {
-    /// Device id (the phone's own, stable across reconnects).
+    /// Device id: derived from the phone's device key (stable for the app
+    /// install), or the phone's own id for an app without device keys.
     pub id: String,
     pub name: String,
     pub model: String,
@@ -58,6 +59,10 @@ pub struct CameraSummary {
     /// Stream state from the latest status: `idle`, `connecting`, `live` or `error`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_state: Option<String>,
+    /// SHA-256 of the phone's device key (hex). The phone shows the start of
+    /// it in its settings, to tell cameras apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_fingerprint: Option<String>,
 }
 
 /// `GET /api/cameras`.

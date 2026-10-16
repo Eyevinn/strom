@@ -336,7 +336,7 @@
           "cameras"
         ],
         "summary": "Phone connection (TallyCam control protocol, device side).",
-        "description": "WebSocket for phones running TallyCam. Public: a phone is admitted with the one-time invite token from `POST /api/cameras/invite` (the `token` query parameter of the control URL in the invite), or because it was admitted before. A refused phone gets a `message` with the reason and is disconnected.",
+        "description": "WebSocket for phones running TallyCam. Public: a phone proves its device key (the hello carries the public key, Strom answers with a `challenge`, the phone signs it in `auth`). A new phone also needs the one-time invite token from `POST /api/cameras/invite` (the `token` query parameter of the control URL in the invite), which binds its key; a known phone is admitted by its key alone. Apps without device keys are refused. A refused phone gets a `message` with the reason and is disconnected.",
         "operationId": "device_ws",
         "parameters": [
           {
@@ -377,6 +377,42 @@
           },
           "503": {
             "description": "No address a phone could reach",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cameras/{id}": {
+      "delete": {
+        "tags": [
+          "cameras"
+        ],
+        "summary": "Forget a camera.",
+        "description": "Forget (revoke) a camera: it is disconnected, removed from the list and from `cameras.json`, and its device key no longer admits it. To come back it needs a new invite. SRT input blocks bound to it keep their `camera` property.",
+        "operationId": "forget_camera",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Camera (device) id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Forgotten"
+          },
+          "404": {
+            "description": "No such camera",
             "content": {
               "application/json": {
                 "schema": {
@@ -6814,7 +6850,14 @@
           },
           "id": {
             "type": "string",
-            "description": "Device id (the phone's own, stable across reconnects)."
+            "description": "Device id: derived from the phone's device key (stable for the app\ninstall), or the phone's own id for an app without device keys."
+          },
+          "key_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SHA-256 of the phone's device key (hex). The phone shows the start of\nit in its settings, to tell cameras apart."
           },
           "model": {
             "type": "string"

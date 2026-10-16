@@ -2,13 +2,15 @@
 //!
 //! One JSON file in the data directory (`cameras.json`), rewritten whole on
 //! every change, on the pattern of the port reservations file. Only identity
-//! is kept: a camera that was admitted once (with an invite) is known after a
-//! restart and may reconnect without a new invite. Tally, status and control
-//! values are live data and start empty.
+//! is kept: the phone's info and its device key. A camera that was admitted
+//! once (with an invite) is known after a restart and reconnects by proving
+//! its key, without a new invite. A camera stored without a key (an app
+//! before device keys) needs a new invite. Tally, status and control values
+//! are live data and start empty.
 //!
 //! The hub calls [`DeviceStore::save`] synchronously from the task that
 //! handled the phone's `hello`, outside its own lock. A save is a small
-//! write and happens only when a phone is new or renamed.
+//! write and happens only when a phone is new, renamed or forgotten.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -97,6 +99,18 @@ impl DeviceStore for CameraStore {
             warn!("Cannot write camera store {}: {}", self.path.display(), e);
         }
     }
+
+    fn remove(&self, id: &str) {
+        let mut cameras = self.cameras.lock().unwrap_or_else(|e| e.into_inner());
+        let before = cameras.len();
+        cameras.retain(|d| d.info.id != id);
+        if cameras.len() == before {
+            return;
+        }
+        if let Err(e) = self.write(&cameras) {
+            warn!("Cannot write camera store {}: {}", self.path.display(), e);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -106,6 +120,7 @@ mod tests {
     fn device(id: &str, name: &str) -> StoredDevice {
         StoredDevice {
             info: serde_json::from_value(serde_json::json!({"id": id, "name": name})).unwrap(),
+            public_key: None,
         }
     }
 
@@ -123,6 +138,29 @@ mod tests {
         assert_eq!(names, ["Stage left", "Cam A"]);
         let text = std::fs::read_to_string(reopened.path()).unwrap();
         assert!(text.contains("\"version\": 1"));
+    }
+
+    #[test]
+    fn keeps_the_device_key_and_forgets_removed_cameras() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CameraStore::open(dir.path());
+        let mut keyed = device("k", "Keyed");
+        keyed.public_key = Some("BAE=".into());
+        store.save(&keyed);
+        store.save(&device("old", "Before device keys"));
+        store.remove("old");
+        store.remove("unknown");
+
+        let reopened = CameraStore::open(dir.path());
+        assert_eq!(reopened.load(), [keyed]);
+        // A file written before device keys still loads (no key).
+        std::fs::write(
+            reopened.path(),
+            r#"{"version":1,"cameras":[{"info":{"id":"a","name":"A"}}]}"#,
+        )
+        .unwrap();
+        let old = CameraStore::open(dir.path()).load();
+        assert_eq!(old[0].public_key, None);
     }
 
     #[test]

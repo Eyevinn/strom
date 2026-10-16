@@ -6,11 +6,16 @@
 //! invite token instead (a new phone needs one from `POST
 //! /api/cameras/invite`; a known phone reconnects without). Operator UIs use
 //! `/api/cameras/control`, behind Strom's authentication.
+//!
+//! A phone proves who it is with its device key: the hello carries the
+//! public key (the device id is derived from it), Strom sends a challenge and
+//! the phone signs it. An invite binds the key; afterwards the key alone
+//! admits the phone, until it is forgotten (`DELETE /api/cameras/{id}`).
 
 use std::net::SocketAddr;
 
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{ConnectInfo, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
@@ -36,10 +41,13 @@ fn host_header(headers: &HeaderMap) -> Option<String> {
     get,
     path = "/api/cameras/device",
     tag = "cameras",
-    description = "WebSocket for phones running TallyCam. Public: a phone is admitted with the \
-                   one-time invite token from `POST /api/cameras/invite` (the `token` query \
-                   parameter of the control URL in the invite), or because it was admitted \
-                   before. A refused phone gets a `message` with the reason and is disconnected.",
+    description = "WebSocket for phones running TallyCam. Public: a phone proves its device key \
+                   (the hello carries the public key, Strom answers with a `challenge`, the phone \
+                   signs it in `auth`). A new phone also needs the one-time invite token from \
+                   `POST /api/cameras/invite` (the `token` query parameter of the control URL in \
+                   the invite), which binds its key; a known phone is admitted by its key alone. \
+                   Apps without device keys are refused. A refused phone gets a `message` with the \
+                   reason and is disconnected.",
     params(
         ("token" = Option<String>, Query, description = "One-time invite token")
     ),
@@ -109,6 +117,36 @@ pub async fn list_cameras(State(state): State<AppState>) -> Json<CameraListRespo
     Json(CameraListResponse { cameras })
 }
 
+/// Forget a camera.
+#[utoipa::path(
+    delete,
+    path = "/api/cameras/{id}",
+    tag = "cameras",
+    description = "Forget (revoke) a camera: it is disconnected, removed from the list and \
+                   from `cameras.json`, and its device key no longer admits it. To come back it \
+                   needs a new invite. SRT input blocks bound to it keep their `camera` property.",
+    params(
+        ("id" = String, Path, description = "Camera (device) id")
+    ),
+    responses(
+        (status = 204, description = "Forgotten"),
+        (status = 404, description = "No such camera", body = ErrorResponse)
+    )
+)]
+pub async fn forget_camera(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    if state.cameras().hub().forget(&id) {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!("no camera '{id}'"))),
+        ))
+    }
+}
+
 /// Create a one-time invite for a new phone.
 #[utoipa::path(
     post,
@@ -142,6 +180,7 @@ pub async fn cameras_page() -> impl IntoResponse {
     Html(operator_page(&serde_json::json!({
         "controlPath": CONTROL_PATH,
         "inviteUrl": "/api/cameras/invite",
+        "devicesUrl": "/api/cameras",
         "clapperUrl": "/cameras/clapper",
         "title": "Strom Cameras",
     })))
