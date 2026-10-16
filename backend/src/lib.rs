@@ -470,8 +470,12 @@ pub async fn create_app_with_config(
             "/vision-mixer/{flow_id}/{block_id}",
             get(api::vision_mixer_page::vision_mixer_page_for_block),
         )
-        .route("/cameras", get(api::cameras::cameras_page))
-        .route("/cameras/clapper", get(api::cameras::clapper_page))
+        .with_state(state.clone());
+
+    // TallyCam operator page (phone cameras); its data is under /api/cameras
+    let cameras_page_router = Router::new()
+        .route("/", get(api::cameras::cameras_page))
+        .route("/clapper", get(api::cameras::clapper_page))
         .with_state(state.clone());
 
     // WHEP proxy routes - outside /api (acts as WHEP server endpoint)
@@ -590,6 +594,7 @@ pub async fn create_app_with_config(
         .nest("/api", api_router)
         .nest("/devtools", devtools_router)
         .nest("/player", player_router)
+        .nest("/cameras", cameras_page_router)
         .nest("/whep", whep_router)
         .nest("/whip", whip_router)
         .nest("/static", static_router)
