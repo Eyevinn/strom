@@ -422,6 +422,7 @@ pub async fn create_app_with_config(
         .route("/cameras", get(api::cameras::list_cameras))
         .route("/cameras/invite", post(api::cameras::create_invite))
         .route("/cameras/control", get(api::cameras::control_ws))
+        .route("/cameras/{id}", delete(api::cameras::forget_camera))
         // Apply authentication middleware to all protected routes
         .layer(middleware::from_fn(auth::auth_middleware));
 

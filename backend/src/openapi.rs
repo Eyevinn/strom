@@ -196,6 +196,7 @@ use utoipa::OpenApi;
         crate::api::cameras::control_ws,
         crate::api::cameras::list_cameras,
         crate::api::cameras::create_invite,
+        crate::api::cameras::forget_camera,
         // Remote control of HTML source browsers
         crate::api::devtools::list_targets,
         crate::api::devtools::create_link,

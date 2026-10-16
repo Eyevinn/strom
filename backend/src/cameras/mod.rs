@@ -413,6 +413,7 @@ fn summary(d: DeviceSnapshot, bound: &mut HashMap<String, Vec<CameraBinding>>) -
             .as_ref()
             .and_then(|s| s.stream.as_ref())
             .map(|s| s.state.clone()),
+        key_fingerprint: d.key_fingerprint,
         id: d.id,
     }
 }
