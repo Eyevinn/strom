@@ -14,6 +14,7 @@ mod buffer_age;
 mod clipboard;
 mod clocks;
 mod compositor_editor;
+mod device_lists;
 mod discovery;
 mod graph;
 mod info_page;

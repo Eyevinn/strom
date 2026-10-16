@@ -44,6 +44,8 @@ pub struct CameraSummary {
     /// Device id: derived from the phone's device key (stable for the app
     /// install), or the phone's own id for an app without device keys.
     pub id: String,
+    /// Display name: the name the phone reports, or, when it reports none or
+    /// only a generic word like "iPhone", "<model> · <start of the id>".
     pub name: String,
     pub model: String,
     pub platform: String,

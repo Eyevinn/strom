@@ -621,12 +621,13 @@
           "discovery"
         ],
         "summary": "List all discovered devices.",
+        "description": "`category=camera` lists the phone cameras (TallyCam) Strom knows instead:\n`id` is the device id (what an SRT input's `camera` property stores),\n`name` the display name, and `properties` carry `online` (\"true\"/\"false\"),\n`model`, `platform`, `app_version`, `reported_name` and `key_fingerprint`.\nCameras are not part of the unfiltered list.",
         "operationId": "list_devices",
         "parameters": [
           {
             "name": "category",
             "in": "query",
-            "description": "Filter by category",
+            "description": "Filter by category (audio_source, audio_sink, video_source, network_source, camera)",
             "required": false,
             "schema": {
               "type": "string"
@@ -6863,7 +6864,8 @@
             "type": "string"
           },
           "name": {
-            "type": "string"
+            "type": "string",
+            "description": "Display name: the name the phone reports, or, when it reports none or\nonly a generic word like \"iPhone\", \"<model> · <start of the id>\"."
           },
           "online": {
             "type": "boolean",
@@ -7255,6 +7257,7 @@
           "audiosink",
           "videosource",
           "networksource",
+          "camera",
           "other"
         ]
       },
@@ -9846,7 +9849,7 @@
                 "properties": {
                   "category": {
                     "$ref": "#/components/schemas/DeviceCategory",
-                    "description": "Which `DeviceCategory` to fetch and display (video source,\naudio source, audio sink, network source)."
+                    "description": "Which `DeviceCategory` to fetch and display (video source,\naudio source, audio sink, network source, camera)."
                   }
                 }
               }

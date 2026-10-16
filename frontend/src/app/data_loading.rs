@@ -204,10 +204,10 @@ impl StromApp {
         &self.network_interfaces
     }
 
-    /// Load local capture devices (cameras + microphones) from the backend
-    /// when the cache is empty or older than `ttl`. Triggered from the
-    /// properties panel when a `Device { category }` field is rendered.
-    /// `force` bypasses the TTL (used by the refresh button).
+    /// Load local capture devices (cameras + microphones) and the known phone
+    /// cameras from the backend when the cache is empty or older than `ttl`.
+    /// Triggered from the properties panel when a `Device { category }` field
+    /// is rendered. `force` bypasses the TTL (used by the refresh button).
     ///
     /// `devices_last_loaded` is *not* set here — it is updated when the
     /// `LocalDevicesLoaded` message arrives (see `app::update`), so a
@@ -218,6 +218,8 @@ impl StromApp {
         force: bool,
         ttl: std::time::Duration,
     ) {
+        use strom_types::discovery::DeviceCategory;
+
         let fresh = self
             .devices_last_loaded
             .map(|t| t.elapsed() < ttl)
@@ -225,15 +227,12 @@ impl StromApp {
         if !force && fresh {
             return;
         }
-        if self.video_devices_loading && self.audio_devices_loading {
+        if self.video_devices_loading && self.audio_devices_loading && self.camera_devices_loading {
             return;
         }
 
-        let api = self.api.clone();
-        let tx = self.channels.sender();
-
         if force {
-            let api_refresh = api.clone();
+            let api_refresh = self.api.clone();
             spawn_task(async move {
                 if let Err(e) = api_refresh.refresh_devices().await {
                     tracing::warn!("refresh_devices failed: {}", e);
@@ -243,56 +242,43 @@ impl StromApp {
 
         if !self.video_devices_loading {
             self.video_devices_loading = true;
-            let api = api.clone();
-            let tx = tx.clone();
-            let ctx = ctx.clone();
-            spawn_task(async move {
-                match api.list_devices("video_source").await {
-                    Ok(devices) => {
-                        let _ = tx.send(AppMessage::LocalDevicesLoaded {
-                            category: strom_types::discovery::DeviceCategory::VideoSource,
-                            devices,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!("list_devices(video_source) failed: {}", e);
-                        let _ = tx.send(AppMessage::LocalDevicesLoaded {
-                            category: strom_types::discovery::DeviceCategory::VideoSource,
-                            devices: Vec::new(),
-                        });
-                    }
-                }
-                ctx.request_repaint();
-            });
+            self.fetch_devices(DeviceCategory::VideoSource, "video_source", &ctx);
         }
-
         if !self.audio_devices_loading {
             self.audio_devices_loading = true;
-            spawn_task(async move {
-                match api.list_devices("audio_source").await {
-                    Ok(devices) => {
-                        let _ = tx.send(AppMessage::LocalDevicesLoaded {
-                            category: strom_types::discovery::DeviceCategory::AudioSource,
-                            devices,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!("list_devices(audio_source) failed: {}", e);
-                        let _ = tx.send(AppMessage::LocalDevicesLoaded {
-                            category: strom_types::discovery::DeviceCategory::AudioSource,
-                            devices: Vec::new(),
-                        });
-                    }
-                }
-                ctx.request_repaint();
-            });
+            self.fetch_devices(DeviceCategory::AudioSource, "audio_source", &ctx);
+        }
+        if !self.camera_devices_loading {
+            self.camera_devices_loading = true;
+            self.fetch_devices(DeviceCategory::Camera, "camera", &ctx);
         }
     }
 
-    /// Whether a local-device fetch is in flight for either category —
+    /// Fetch one device list; the result (empty on failure) arrives as
+    /// `LocalDevicesLoaded`.
+    fn fetch_devices(
+        &self,
+        category: strom_types::discovery::DeviceCategory,
+        query: &'static str,
+        ctx: &egui::Context,
+    ) {
+        let api = self.api.clone();
+        let tx = self.channels.sender();
+        let ctx = ctx.clone();
+        spawn_task(async move {
+            let devices = api.list_devices(query).await.unwrap_or_else(|e| {
+                tracing::warn!("list_devices({}) failed: {}", query, e);
+                Vec::new()
+            });
+            let _ = tx.send(AppMessage::LocalDevicesLoaded { category, devices });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Whether a device fetch is in flight for any category —
     /// used by the picker UI to distinguish "loading" from "empty".
     pub fn local_devices_loading(&self) -> bool {
-        self.video_devices_loading || self.audio_devices_loading
+        self.video_devices_loading || self.audio_devices_loading || self.camera_devices_loading
     }
 
     /// Get cached local video capture devices.

@@ -17,6 +17,7 @@
 //! The running side (event loop, pushes, tally) is in `state/cameras.rs`,
 //! next to the flow state it reads.
 
+pub mod display;
 pub mod settings;
 pub mod store;
 pub mod tally;
@@ -250,15 +251,17 @@ impl Cameras {
                 bindings.iter().find(|(_, b)| b.device == device)
             {
                 return Err(format!(
-                    "Camera {device} (block '{}') is already in use by block '{other_block}' \
+                    "Camera {} (block '{}') is already in use by block '{other_block}' \
                      of flow {other_flow}. Stop that flow, or bind another camera to this block.",
+                    self.label(&device),
                     block.id
                 ));
             }
             if let Some((other_block, _)) = prepared.iter().find(|(_, b)| b.device == device) {
                 return Err(format!(
-                    "Camera {device} is bound to both block '{other_block}' and block '{}' \
+                    "Camera {} is bound to both block '{other_block}' and block '{}' \
                      of this flow. Bind it to one block only.",
+                    self.label(&device),
                     block.id
                 ));
             }
@@ -384,6 +387,29 @@ impl Cameras {
             .map(|d| summary(d, &mut bound))
             .collect()
     }
+
+    /// Every known camera as a device list entry (the camera picker).
+    pub fn device_list(&self) -> Vec<strom_types::discovery::DeviceResponse> {
+        let mut devices: Vec<_> = self
+            .hub()
+            .devices()
+            .iter()
+            .map(display::device_response)
+            .collect();
+        devices.sort_by_cached_key(|d| d.name.to_lowercase());
+        devices
+    }
+
+    /// A camera as an operator knows it: "'<display name>' (<device id>)", or
+    /// the device id of a camera Strom does not know.
+    fn label(&self, device: &str) -> String {
+        self.hub()
+            .devices()
+            .iter()
+            .find(|d| d.id == device)
+            .map(|d| format!("'{}' ({device})", display::snapshot_name(d)))
+            .unwrap_or_else(|| device.to_string())
+    }
 }
 
 /// The `devices` that no binding in `bindings` uses any more.
@@ -397,7 +423,7 @@ fn unbound(devices: Vec<String>, bindings: &HashMap<BindingKey, ActiveBinding>) 
 fn summary(d: DeviceSnapshot, bound: &mut HashMap<String, Vec<CameraBinding>>) -> CameraSummary {
     CameraSummary {
         bindings: bound.remove(&d.id).unwrap_or_default(),
-        name: d.info.name,
+        name: display::snapshot_name(&d),
         model: d.info.model,
         platform: d.info.platform,
         app_version: d.info.app_version,

@@ -61,6 +61,9 @@ pub enum DeviceCategory {
     VideoSource,
     /// Network sources (NDI, etc.).
     NetworkSource,
+    /// Phone cameras (TallyCam) known to this Strom: the id is the device id,
+    /// the name the camera's display name.
+    Camera,
     /// Other/unknown device types.
     Other,
 }
@@ -84,7 +87,7 @@ impl DeviceCategory {
             Self::AudioSink => Some("Audio/Sink"),
             Self::VideoSource => Some("Video/Source"),
             Self::NetworkSource => Some("Source/Network"),
-            Self::Other => None,
+            Self::Camera | Self::Other => None,
         }
     }
 }
