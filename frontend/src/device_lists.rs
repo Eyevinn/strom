@@ -86,7 +86,7 @@ pub(crate) fn show_camera_editor(
                     let text = if loading {
                         "Loading…"
                     } else {
-                        "(no cameras: add one on the /cameras page)"
+                        "(no cameras yet)"
                     };
                     ui.add_enabled(false, egui::Label::new(text));
                 }
@@ -119,9 +119,27 @@ pub(crate) fn show_camera_editor(
         if refresh.clicked() {
             actions.refresh_requested = true;
         }
+        if manage_cameras_button(ui) {
+            actions.manage_cameras_requested = true;
+        }
     });
+    if cameras.is_empty() && !loading {
+        ui.horizontal(|ui| {
+            ui.weak("No cameras yet — add one");
+            if manage_cameras_button(ui) {
+                actions.manage_cameras_requested = true;
+            }
+        });
+    }
 
     changed
+}
+
+/// The button that opens the camera page, where phones are added and named.
+fn manage_cameras_button(ui: &mut Ui) -> bool {
+    ui.small_button("Manage cameras…")
+        .on_hover_text("Open the camera page in a new tab: add a phone, name it, control it")
+        .clicked()
 }
 
 #[cfg(test)]

@@ -187,6 +187,8 @@ pub struct BlockInspectorResult {
     pub local_devices_needed: bool,
     /// Inspector requested a forced re-scan of capture devices (↻ button).
     pub local_devices_refresh_requested: bool,
+    /// "Manage cameras…" was clicked: open the camera page.
+    pub open_cameras_page: bool,
 }
 
 /// Side-channel collected by the property editor when it renders a
@@ -196,6 +198,8 @@ pub struct BlockInspectorResult {
 pub(crate) struct DevicePickerActions {
     pub needed: bool,
     pub refresh_requested: bool,
+    /// The camera picker's "Manage cameras…" button was clicked.
+    pub manage_cameras_requested: bool,
 }
 
 /// Property inspector panel.
@@ -1455,6 +1459,7 @@ impl PropertyInspector {
 
         result.local_devices_needed = device_picker_actions.needed;
         result.local_devices_refresh_requested = device_picker_actions.refresh_requested;
+        result.open_cameras_page = device_picker_actions.manage_cameras_requested;
         result
     }
 
