@@ -114,13 +114,31 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
         );
 
         // Get SRT URI
-        let srt_uri = properties
+        let mut srt_uri = properties
             .get("srt_uri")
             .and_then(|v| match v {
                 PropertyValue::String(s) => Some(s.clone()),
                 _ => None,
             })
             .unwrap_or_else(|| DEFAULT_SRT_INPUT_URI.to_string());
+
+        // A camera block listens on the port of its URI, encrypted with the
+        // passphrase its flow start generated (never stored in the flow).
+        let camera_passphrase = if crate::cameras::camera_of(properties).is_some() {
+            let passphrase = match properties.get(crate::cameras::PASSPHRASE_PROPERTY) {
+                Some(PropertyValue::String(p)) if !p.is_empty() => p.clone(),
+                _ => {
+                    return Err(BlockBuildError::InvalidConfiguration(format!(
+                        "block {instance_id} is bound to a camera but has no passphrase: \
+                         start its flow through Strom, which generates one"
+                    )))
+                }
+            };
+            srt_uri = crate::cameras::listener_uri(crate::cameras::srt_port(properties));
+            Some(passphrase)
+        } else {
+            None
+        };
 
         // Get SRT latency
         let latency = properties
@@ -180,6 +198,10 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
 
         srtsrc.set_property("uri", &srt_uri);
         srtsrc.set_property("latency", latency);
+        if let Some(passphrase) = camera_passphrase {
+            srtsrc.set_property("passphrase", passphrase);
+            srtsrc.set_property_from_str("pbkeylen", &crate::cameras::PBKEYLEN.to_string());
+        }
 
         let keep_listening = properties
             .get("keep_listening")
@@ -782,7 +804,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: strom_types::cameras::CAMERA_PROPERTY.to_string(),
                 label: "Camera".to_string(),
-                description: "Device id of a TallyCam phone (see /cameras or GET /api/cameras). When set, the block listens on the port of the SRT URI with a fresh passphrase, and starting the flow tells the phone where to send and puts it live; the vision mixer drives its tally. Empty: a plain SRT input.".to_string(),
+                description: "Device id of a TallyCam phone (see /cameras or GET /api/cameras). When set, the block listens on the port of the SRT URI (which no other flow may use, and which must not be reserved in the port pool) with a fresh passphrase, and starting the flow tells the phone where to send and puts it live; the vision mixer drives its tally. Empty: a plain SRT input.".to_string(),
                 property_type: PropertyType::String,
                 default_value: Some(PropertyValue::String(String::new())),
                 mapping: PropertyMapping {
@@ -917,5 +939,66 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
             height: Some(2.0),
             ..Default::default()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build(properties: &[(&str, &str)]) -> Result<BlockBuildResult, BlockBuildError> {
+        gst::init().unwrap();
+        let properties: HashMap<String, PropertyValue> = properties
+            .iter()
+            .map(|(k, v)| (k.to_string(), PropertyValue::String(v.to_string())))
+            .collect();
+        let ctx = BlockBuildContext::new(vec![], "all".to_string());
+        MpegTsSrtInputBuilder.build("cam", &properties, &ctx)
+    }
+
+    fn srtsrc(result: &BlockBuildResult) -> &gst::Element {
+        &result
+            .elements
+            .iter()
+            .find(|(id, _)| id == "cam:srtsrc")
+            .expect("srtsrc")
+            .1
+    }
+
+    /// The passphrase reaches srtsrc on its write-only property, never in the
+    /// URI: the URI is readable from the running pipeline.
+    #[test]
+    fn camera_block_listens_encrypted_without_the_passphrase_in_its_uri() {
+        let result = build(&[
+            (strom_types::cameras::CAMERA_PROPERTY, "phone-1"),
+            ("srt_uri", "srt://192.0.2.1:7110?mode=caller"),
+            (crate::cameras::PASSPHRASE_PROPERTY, "0123456789abcdef"),
+        ])
+        .unwrap();
+        let src = srtsrc(&result);
+        assert_eq!(src.property::<String>("uri"), "srt://:7110?mode=listener");
+        let pbkeylen = src.property_value("pbkeylen");
+        let pbkeylen = gst::glib::EnumValue::from_value(&pbkeylen)
+            .unwrap()
+            .1
+            .value();
+        assert_eq!(pbkeylen, crate::cameras::PBKEYLEN as i32);
+    }
+
+    #[test]
+    fn camera_block_without_a_passphrase_is_refused() {
+        let err = build(&[(strom_types::cameras::CAMERA_PROPERTY, "phone-1")])
+            .err()
+            .expect("refused");
+        assert!(err.to_string().contains("passphrase"), "{err}");
+    }
+
+    #[test]
+    fn plain_block_keeps_its_uri() {
+        let result = build(&[("srt_uri", "srt://192.0.2.1:7110?mode=caller")]).unwrap();
+        assert_eq!(
+            srtsrc(&result).property::<String>("uri"),
+            "srt://192.0.2.1:7110?mode=caller"
+        );
     }
 }

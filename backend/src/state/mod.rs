@@ -967,12 +967,8 @@ impl AppState {
             }
         }
 
-        // Camera-bound SRT inputs become listeners with a fresh passphrase,
-        // which the phone gets when the flow has started.
-        if let Err(e) = self.inner.cameras.prepare_flow(&mut flow) {
-            error!("Cannot start flow {}: {}", id, e);
-            return Err(PipelineError::InvalidFlow(e));
-        }
+        // Built instead of `flow` when it has cameras; never stored.
+        let camera_build = self.prepare_cameras(&flow).await?;
 
         for (block_id, pad_name) in flow.partially_unwired_block_inputs() {
             warn!(
@@ -990,7 +986,7 @@ impl AppState {
         // Create pipeline with event broadcaster and block registry
         info!("Creating PipelineManager (this may block)...");
         let mut manager = match PipelineManager::new(
-            &flow,
+            camera_build.as_ref().unwrap_or(&flow),
             self.inner.events.clone(),
             &self.inner.block_registry,
             self.inner.ice_servers.clone(),
@@ -1495,6 +1491,7 @@ impl AppState {
         // the process. Doing it first also means the thread is not pushing into
         // an appsrc while the pipeline is being taken to NULL below.
         crate::blocks::builtin::vision_mixer::overlay::unregister_flow(id);
+        self.release_cameras(id);
 
         let Some(mut manager) = manager else {
             // No pipeline was ever built. Blocks constructed before the failing
@@ -2509,6 +2506,8 @@ impl AppState {
             PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
         })?;
         manager.select_vision_mixer_pip_for_preview(block_instance_id, pip_idx)?;
+        drop(pipelines);
+        self.broadcast_vision_mixer_state(flow_id, block_instance_id);
         Ok(())
     }
 
@@ -2527,7 +2526,37 @@ impl AppState {
             PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
         })?;
         manager.apply_vision_mixer_pip_config(block_instance_id, pip_idx, bg, zones, transforms)?;
+        drop(pipelines);
+        // What a bus shows changed only if it shows this PiP. Tally follows
+        // this event, so it must not wait for a periodic check.
+        let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+            flow_id,
+            block_instance_id,
+        );
+        if overlay.is_some_and(|s| s.pgm_pip() == Some(pip_idx) || s.pvw_pip() == Some(pip_idx)) {
+            self.broadcast_vision_mixer_state(flow_id, block_instance_id);
+        }
         Ok(())
+    }
+
+    /// Broadcast a vision mixer's buses, read from its overlay state.
+    fn broadcast_vision_mixer_state(&self, flow_id: &FlowId, block_instance_id: &str) {
+        let Some(s) = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+            flow_id,
+            block_instance_id,
+        ) else {
+            return;
+        };
+        self.inner
+            .events
+            .broadcast(StromEvent::VisionMixerStateChanged {
+                flow_id: *flow_id,
+                block_id: block_instance_id.to_string(),
+                preview_input: s.pvw_input(),
+                program_input: s.pgm_input(),
+                preview_pip: s.pvw_pip(),
+                program_pip: s.pgm_pip(),
+            });
     }
 
     /// Read the negotiated input resolutions for a vision mixer block.
