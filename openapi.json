@@ -290,6 +290,104 @@
         }
       }
     },
+    "/api/cameras": {
+      "get": {
+        "tags": [
+          "cameras"
+        ],
+        "summary": "List the known cameras.",
+        "description": "Every camera Strom knows (connected now, or admitted before), with its tally, the SRT input blocks it is bound to, and its latest battery and stream state.",
+        "operationId": "list_cameras",
+        "responses": {
+          "200": {
+            "description": "Known cameras",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CameraListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cameras/control": {
+      "get": {
+        "tags": [
+          "cameras"
+        ],
+        "summary": "Operator UI connection (TallyCam control protocol, controller side).",
+        "description": "WebSocket for operator UIs: a snapshot of every camera, then their events (state, status, previews, results, logs, tally); requests set controls, run commands and show messages on the phones. Previews run while at least one controller is connected.",
+        "operationId": "control_ws",
+        "responses": {
+          "101": {
+            "description": "WebSocket connection upgraded"
+          },
+          "401": {
+            "description": "Authentication required"
+          }
+        }
+      }
+    },
+    "/api/cameras/device": {
+      "get": {
+        "tags": [
+          "cameras"
+        ],
+        "summary": "Phone connection (TallyCam control protocol, device side).",
+        "description": "WebSocket for phones running TallyCam. Public: a phone is admitted with the one-time invite token from `POST /api/cameras/invite` (the `token` query parameter of the control URL in the invite), or because it was admitted before. A refused phone gets a `message` with the reason and is disconnected.",
+        "operationId": "device_ws",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "description": "One-time invite token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket connection upgraded"
+          }
+        }
+      }
+    },
+    "/api/cameras/invite": {
+      "post": {
+        "tags": [
+          "cameras"
+        ],
+        "summary": "Create a one-time invite for a new phone.",
+        "description": "A provisioning link for a new phone and its QR code. The link carries the device WebSocket URL with a one-time token; it admits one phone and expires. The address in it is `cameras.public_host` (or `cameras.device_url`) when configured, else the host this request was made to, or this machine's first LAN address when that is loopback.",
+        "operationId": "create_invite",
+        "responses": {
+          "200": {
+            "description": "Invite",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CameraInviteResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No address a phone could reach",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/client-log": {
       "post": {
         "tags": [
@@ -6614,6 +6712,143 @@
             "description": "Width in the editor (in grid units)"
           }
         }
+      },
+      "CameraBinding": {
+        "type": "object",
+        "description": "Which SRT input block a camera is bound to.",
+        "required": [
+          "flow_id",
+          "block_id",
+          "running"
+        ],
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "running": {
+            "type": "boolean",
+            "description": "Whether the flow is running."
+          }
+        }
+      },
+      "CameraInviteResponse": {
+        "type": "object",
+        "description": "`POST /api/cameras/invite`: a one-time provisioning link for a new phone.",
+        "required": [
+          "deep_link",
+          "control_url",
+          "qr_svg",
+          "expires_in_secs"
+        ],
+        "properties": {
+          "control_url": {
+            "type": "string",
+            "description": "The device WebSocket URL with the invite token."
+          },
+          "deep_link": {
+            "type": "string",
+            "description": "`tallycam://connect?control=...`, what the QR code carries."
+          },
+          "expires_in_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The token admits one new phone and expires after this many seconds.",
+            "minimum": 0
+          },
+          "qr_svg": {
+            "type": "string",
+            "description": "The deep link as a QR code (SVG)."
+          }
+        }
+      },
+      "CameraListResponse": {
+        "type": "object",
+        "description": "`GET /api/cameras`.",
+        "required": [
+          "cameras"
+        ],
+        "properties": {
+          "cameras": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CameraSummary"
+            }
+          }
+        }
+      },
+      "CameraSummary": {
+        "type": "object",
+        "description": "One known camera.",
+        "required": [
+          "id",
+          "name",
+          "model",
+          "platform",
+          "app_version",
+          "online",
+          "tally",
+          "bindings"
+        ],
+        "properties": {
+          "app_version": {
+            "type": "string"
+          },
+          "battery_level": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Battery level 0..1, from the latest status."
+          },
+          "bindings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CameraBinding"
+            },
+            "description": "SRT input blocks this camera is bound to (the `camera` property)."
+          },
+          "id": {
+            "type": "string",
+            "description": "Device id (the phone's own, stable across reconnects)."
+          },
+          "model": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "online": {
+            "type": "boolean",
+            "description": "Connected to Strom now."
+          },
+          "platform": {
+            "type": "string"
+          },
+          "stream_state": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stream state from the latest status: `idle`, `connecting`, `live` or `error`."
+          },
+          "tally": {
+            "$ref": "#/components/schemas/CameraTally"
+          }
+        }
+      },
+      "CameraTally": {
+        "type": "string",
+        "description": "Tally light of a camera.",
+        "enum": [
+          "off",
+          "preview",
+          "program"
+        ]
       },
       "ClientMessage": {
         "oneOf": [
@@ -14617,6 +14852,10 @@
     {
       "name": "ports",
       "description": "Port numbers Strom administers and hands out"
+    },
+    {
+      "name": "cameras",
+      "description": "Phone cameras (TallyCam): connections, invites, tally"
     },
     {
       "name": "System",

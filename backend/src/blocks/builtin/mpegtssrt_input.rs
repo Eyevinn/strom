@@ -215,7 +215,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
 
         info!(
             "SRT source configured: uri={}, latency={}ms, tsdemux_latency={}ms, ignore_pcr={}, keep-listening={}, auto-reconnect={}, wait-for-connection={}",
-            srt_uri, latency, tsdemux_latency, ignore_pcr, keep_listening, auto_reconnect, wait_for_connection
+            crate::cameras::redact_srt_uri(&srt_uri), latency, tsdemux_latency, ignore_pcr, keep_listening, auto_reconnect, wait_for_connection
         );
 
         // Create demux/decode element
@@ -702,6 +702,20 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "srt_uri".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: strom_types::cameras::CAMERA_PROPERTY.to_string(),
+                label: "Camera".to_string(),
+                description: "Device id of a TallyCam phone (see /player/cameras or GET /api/cameras). When set, the block listens on the port of the SRT URI with a fresh passphrase, and starting the flow tells the phone where to send and puts it live; the vision mixer drives its tally. Empty: a plain SRT input.".to_string(),
+                property_type: PropertyType::String,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: strom_types::cameras::CAMERA_PROPERTY.to_string(),
                     transform: None,
                 },
                 live: false,
