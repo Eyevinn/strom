@@ -83,7 +83,7 @@ pub enum PropertyType {
     /// renders a dropdown of `DeviceResponse`s.
     Device {
         /// Which `DeviceCategory` to fetch and display (video source,
-        /// audio source, audio sink, network source).
+        /// audio source, audio sink, network source, camera).
         category: DeviceCategory,
     },
 }

@@ -1,5 +1,6 @@
 //! Property inspector for editing element properties.
 
+use crate::device_lists::DeviceLists;
 use crate::graph::PropertyTab;
 use egui::{Color32, ScrollArea, Ui};
 use strom_types::{
@@ -520,9 +521,7 @@ impl PropertyInspector {
         rtp_stats: Option<&strom_types::api::FlowStatsResponse>,
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
         available_channels: &[strom_types::api::AvailableOutput],
-        video_devices: &[strom_types::discovery::DeviceResponse],
-        audio_devices: &[strom_types::discovery::DeviceResponse],
-        local_devices_loading: bool,
+        devices: DeviceLists<'_>,
         qr_inline: &mut Option<(String, String)>,
         devtools_link_warning: Option<&(String, String)>,
         qr_cache: &mut crate::qr::QrCache,
@@ -948,9 +947,7 @@ impl PropertyInspector {
                                 flow_id,
                                 network_interfaces,
                                 available_channels,
-                                video_devices,
-                                audio_devices,
-                                local_devices_loading,
+                                devices,
                                 taken_endpoint_ids,
                                 &mut device_picker_actions,
                                 &mut result,
@@ -986,9 +983,7 @@ impl PropertyInspector {
                                     flow_id,
                                     network_interfaces,
                                     available_channels,
-                                    video_devices,
-                                    audio_devices,
-                                    local_devices_loading,
+                                    devices,
                                     taken_endpoint_ids,
                                     &mut device_picker_actions,
                                 );
@@ -1505,9 +1500,7 @@ impl PropertyInspector {
         flow_id: Option<strom_types::FlowId>,
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
         available_channels: &[strom_types::api::AvailableOutput],
-        video_devices: &[strom_types::discovery::DeviceResponse],
-        audio_devices: &[strom_types::discovery::DeviceResponse],
-        local_devices_loading: bool,
+        devices: DeviceLists<'_>,
         taken_endpoint_ids: &std::collections::HashSet<String>,
         device_picker_actions: &mut DevicePickerActions,
         result: &mut BlockInspectorResult,
@@ -1683,9 +1676,7 @@ impl PropertyInspector {
                         flow_id,
                         network_interfaces,
                         available_channels,
-                        video_devices,
-                        audio_devices,
-                        local_devices_loading,
+                        devices,
                         taken_endpoint_ids,
                         device_picker_actions,
                         result,
@@ -1707,9 +1698,7 @@ impl PropertyInspector {
                         flow_id,
                         network_interfaces,
                         available_channels,
-                        video_devices,
-                        audio_devices,
-                        local_devices_loading,
+                        devices,
                         taken_endpoint_ids,
                         device_picker_actions,
                         result,
@@ -1738,9 +1727,7 @@ impl PropertyInspector {
                                     flow_id,
                                     network_interfaces,
                                     available_channels,
-                                    video_devices,
-                                    audio_devices,
-                                    local_devices_loading,
+                                    devices,
                                     taken_endpoint_ids,
                                     device_picker_actions,
                                     result,
@@ -1760,9 +1747,7 @@ impl PropertyInspector {
                                                 flow_id,
                                                 network_interfaces,
                                                 available_channels,
-                                                video_devices,
-                                                audio_devices,
-                                                local_devices_loading,
+                                                devices,
                                                 taken_endpoint_ids,
                                                 device_picker_actions,
                                                 result,
@@ -1784,9 +1769,7 @@ impl PropertyInspector {
                                                 flow_id,
                                                 network_interfaces,
                                                 available_channels,
-                                                video_devices,
-                                                audio_devices,
-                                                local_devices_loading,
+                                                devices,
                                                 taken_endpoint_ids,
                                                 device_picker_actions,
                                                 result,
@@ -1808,9 +1791,7 @@ impl PropertyInspector {
                                                 flow_id,
                                                 network_interfaces,
                                                 available_channels,
-                                                video_devices,
-                                                audio_devices,
-                                                local_devices_loading,
+                                                devices,
                                                 taken_endpoint_ids,
                                                 device_picker_actions,
                                                 result,
@@ -1832,9 +1813,7 @@ impl PropertyInspector {
                                                 flow_id,
                                                 network_interfaces,
                                                 available_channels,
-                                                video_devices,
-                                                audio_devices,
-                                                local_devices_loading,
+                                                devices,
                                                 taken_endpoint_ids,
                                                 device_picker_actions,
                                                 result,
@@ -1856,9 +1835,7 @@ impl PropertyInspector {
                                                 flow_id,
                                                 network_interfaces,
                                                 available_channels,
-                                                video_devices,
-                                                audio_devices,
-                                                local_devices_loading,
+                                                devices,
                                                 taken_endpoint_ids,
                                                 device_picker_actions,
                                                 result,
@@ -1880,9 +1857,7 @@ impl PropertyInspector {
                                                 flow_id,
                                                 network_interfaces,
                                                 available_channels,
-                                                video_devices,
-                                                audio_devices,
-                                                local_devices_loading,
+                                                devices,
                                                 taken_endpoint_ids,
                                                 device_picker_actions,
                                                 result,
@@ -1917,9 +1892,7 @@ impl PropertyInspector {
                                     flow_id,
                                     network_interfaces,
                                     available_channels,
-                                    video_devices,
-                                    audio_devices,
-                                    local_devices_loading,
+                                    devices,
                                     taken_endpoint_ids,
                                     device_picker_actions,
                                     result,
@@ -1952,9 +1925,7 @@ impl PropertyInspector {
                                     flow_id,
                                     network_interfaces,
                                     available_channels,
-                                    video_devices,
-                                    audio_devices,
-                                    local_devices_loading,
+                                    devices,
                                     taken_endpoint_ids,
                                     device_picker_actions,
                                     result,
@@ -1976,9 +1947,7 @@ impl PropertyInspector {
         flow_id: Option<strom_types::FlowId>,
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
         available_channels: &[strom_types::api::AvailableOutput],
-        video_devices: &[strom_types::discovery::DeviceResponse],
-        audio_devices: &[strom_types::discovery::DeviceResponse],
-        local_devices_loading: bool,
+        devices: DeviceLists<'_>,
         taken_endpoint_ids: &std::collections::HashSet<String>,
         device_picker_actions: &mut DevicePickerActions,
         result: &mut BlockInspectorResult,
@@ -1993,9 +1962,7 @@ impl PropertyInspector {
                 flow_id,
                 network_interfaces,
                 available_channels,
-                video_devices,
-                audio_devices,
-                local_devices_loading,
+                devices,
                 taken_endpoint_ids,
                 device_picker_actions,
             );
@@ -2061,9 +2028,12 @@ impl PropertyInspector {
                 flow_id,
                 network_interfaces,
                 available_channels,
-                &[],
-                &[],
-                false,
+                DeviceLists {
+                    video: &[],
+                    audio: &[],
+                    cameras: &[],
+                    loading: false,
+                },
                 &std::collections::HashSet::new(),
                 &mut sink,
             );
@@ -2248,9 +2218,7 @@ impl PropertyInspector {
         _flow_id: Option<strom_types::FlowId>,
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
         available_channels: &[strom_types::api::AvailableOutput],
-        video_devices: &[strom_types::discovery::DeviceResponse],
-        audio_devices: &[strom_types::discovery::DeviceResponse],
-        local_devices_loading: bool,
+        devices: DeviceLists<'_>,
         taken_endpoint_ids: &std::collections::HashSet<String>,
         device_picker_actions: &mut DevicePickerActions,
     ) -> bool {
@@ -2390,30 +2358,25 @@ impl PropertyInspector {
                             }
                             strom_types::block::PropertyType::Device { category } => {
                                 device_picker_actions.needed = true;
-                                use strom_types::discovery::DeviceCategory;
-                                let (devices, kind_label): (&[_], &str) = match category {
-                                    DeviceCategory::VideoSource => {
-                                        (video_devices, "video source")
-                                    }
-                                    DeviceCategory::AudioSource => {
-                                        (audio_devices, "audio source")
-                                    }
-                                    // No UI lists for these yet — picker will
-                                    // show an empty list with the refresh
-                                    // button, which is intentional until we
-                                    // wire up extra fetches.
-                                    DeviceCategory::AudioSink
-                                    | DeviceCategory::NetworkSource
-                                    | DeviceCategory::Other => (&[], "device"),
-                                };
-                                Self::show_local_device_editor(
-                                    ui,
-                                    &mut value,
-                                    devices,
-                                    kind_label,
-                                    local_devices_loading,
-                                    device_picker_actions,
-                                )
+                                let (list, kind_label) = devices.for_category(*category);
+                                if *category == strom_types::discovery::DeviceCategory::Camera {
+                                    crate::device_lists::show_camera_editor(
+                                        ui,
+                                        &mut value,
+                                        list,
+                                        devices.loading,
+                                        device_picker_actions,
+                                    )
+                                } else {
+                                    Self::show_local_device_editor(
+                                        ui,
+                                        &mut value,
+                                        list,
+                                        kind_label,
+                                        devices.loading,
+                                        device_picker_actions,
+                                    )
+                                }
                             }
                             _ => {
                                 // Convert block::PropertyType to element::PropertyType for other types

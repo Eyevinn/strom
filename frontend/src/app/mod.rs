@@ -605,6 +605,10 @@ pub struct StromApp {
     video_devices_loading: bool,
     /// In-flight flag for audio device fetch
     audio_devices_loading: bool,
+    /// Cached phone cameras (camera picker of the SRT input)
+    camera_devices: Vec<strom_types::discovery::DeviceResponse>,
+    /// In-flight flag for camera fetch
+    camera_devices_loading: bool,
     /// Last time the device lists were fetched (used as a TTL to avoid spamming the API)
     devices_last_loaded: Option<instant::Instant>,
     /// Current log filter string from backend
