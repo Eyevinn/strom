@@ -782,7 +782,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: strom_types::cameras::CAMERA_PROPERTY.to_string(),
                 label: "Camera".to_string(),
-                description: "Device id of a TallyCam phone (see /player/cameras or GET /api/cameras). When set, the block listens on the port of the SRT URI with a fresh passphrase, and starting the flow tells the phone where to send and puts it live; the vision mixer drives its tally. Empty: a plain SRT input.".to_string(),
+                description: "Device id of a TallyCam phone (see /cameras or GET /api/cameras). When set, the block listens on the port of the SRT URI with a fresh passphrase, and starting the flow tells the phone where to send and puts it live; the vision mixer drives its tally. Empty: a plain SRT input.".to_string(),
                 property_type: PropertyType::String,
                 default_value: Some(PropertyValue::String(String::new())),
                 mapping: PropertyMapping {

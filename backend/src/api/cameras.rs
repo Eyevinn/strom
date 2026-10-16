@@ -137,18 +137,18 @@ pub async fn create_invite(
 
 /// The TallyCam operator page, against Strom's camera endpoints. The page is
 /// public; what it loads (the control WebSocket, invites) is not.
-/// GET /player/cameras
+/// GET /cameras
 pub async fn cameras_page() -> impl IntoResponse {
     Html(operator_page(&serde_json::json!({
         "controlPath": CONTROL_PATH,
         "inviteUrl": "/api/cameras/invite",
-        "clapperUrl": "/player/cameras/clapper",
+        "clapperUrl": "/cameras/clapper",
         "title": "Strom Cameras",
     })))
 }
 
 /// The clapper page: flash and beep at whole seconds, to film for A/V sync.
-/// GET /player/cameras/clapper
+/// GET /cameras/clapper
 pub async fn clapper_page() -> impl IntoResponse {
     Html(CLAPPER_HTML)
 }
