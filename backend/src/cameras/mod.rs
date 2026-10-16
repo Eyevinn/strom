@@ -7,7 +7,8 @@
 //!
 //! - when the flow starts, the block becomes an SRT listener with a fresh
 //!   passphrase ([`Cameras::prepare_flow`]), and the phone is told where to
-//!   send (`stream_url`) and to go live;
+//!   send (`stream_url`) and to go live. The passphrase lives only in memory:
+//!   never in the flow, so never in `flows.json` or the flow API;
 //! - a bound phone that connects while its flow runs is put live too;
 //! - when the flow stops, the phone stops streaming and its tally goes off;
 //! - while the flow runs, its vision mixers drive the phone's tally
@@ -16,6 +17,7 @@
 //! The running side (event loop, pushes, tally) is in `state/cameras.rs`,
 //! next to the flow state it reads.
 
+pub mod settings;
 pub mod store;
 pub mod tally;
 
@@ -35,6 +37,7 @@ use tallycam_hub::provision::{deep_link_control, qr_svg, with_invite_token};
 use tallycam_hub::{Hub, Provisioning};
 use tracing::info;
 
+pub use settings::{CameraSettings, CamerasConfig};
 use store::CameraStore;
 
 /// The SRT input block that has a camera mode.
@@ -43,25 +46,15 @@ pub const SRT_INPUT_BLOCK: &str = "builtin.mpegtssrt_input";
 pub const DEVICE_PATH: &str = "/api/cameras/device";
 /// Where operator UIs (LCP controllers) connect.
 pub const CONTROL_PATH: &str = "/api/cameras/control";
-/// A binding prepared for a flow that never reported started is dropped
-/// after this long (the start failed).
+/// Build-time-only block property carrying a camera block's passphrase from
+/// [`Cameras::prepare_flow`] to the block builder. It is set on the copy of
+/// the flow that is built, never on the stored flow.
+pub const PASSPHRASE_PROPERTY: &str = "_camera_passphrase";
+/// The SRT key length that goes with the passphrase, in bytes.
+pub const PBKEYLEN: u32 = 16;
+/// Safety net for a binding whose flow never reported started and was not
+/// torn down either.
 const PREPARED_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Where phones reach this Strom. See `[cameras]` in the configuration.
-#[derive(Debug, Clone, Default)]
-pub struct CameraSettings {
-    /// Host name or address (no port) phones use for this Strom, in SRT
-    /// URLs and invites. Unset: the host the phone or the operator's browser
-    /// used, or the first LAN address when that is loopback.
-    pub public_host: Option<String>,
-    /// The full device WebSocket URL to put in invites, when a proxy sits in
-    /// front (`wss://strom.example.com/api/cameras/device`).
-    pub device_url: Option<String>,
-    /// Strom's HTTP port, for invite URLs built from a host.
-    pub http_port: u16,
-    /// Strom serves HTTPS, so invites use `wss://`.
-    pub tls: bool,
-}
 
 /// A camera-bound SRT input of a starting or running flow.
 #[derive(Debug, Clone)]
@@ -83,18 +76,36 @@ impl ActiveBinding {
     /// The URL the phone sends to, on `host` (as the phone can reach it).
     pub fn stream_url(&self, host: &str) -> String {
         format!(
-            "srt://{host}:{}?streamid={}&latency={}&passphrase={}&pbkeylen=16",
+            "srt://{host}:{}?streamid={}&latency={}&passphrase={}&pbkeylen={PBKEYLEN}",
             self.port, self.stream_id, self.latency_ms, self.passphrase
         )
     }
+}
 
-    /// The URI the block's `srtsrc` listens with.
-    fn listener_uri(&self) -> String {
-        format!(
-            "srt://:{}?mode=listener&passphrase={}&pbkeylen=16",
-            self.port, self.passphrase
-        )
-    }
+/// The URI a camera block's `srtsrc` listens with. The passphrase is set on
+/// the element's write-only `passphrase` property instead, so it cannot be
+/// read back from the running pipeline either.
+pub fn listener_uri(port: u16) -> String {
+    format!("srt://:{port}?mode=listener")
+}
+
+/// An SRT listener of a flow: a block or element that binds a local UDP port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listener {
+    pub block_id: String,
+    pub port: u16,
+    /// A camera-bound SRT input (always a listener, whatever its URI says).
+    pub camera: bool,
+}
+
+/// Who already uses a port, as an operator would look for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortHolder {
+    /// For the error, e.g. "block 'x' of running flow 'y'".
+    pub description: String,
+    /// A camera block. Plain SRT listeners sharing a port with each other are
+    /// not refused here; only clashes involving a camera are.
+    pub camera: bool,
 }
 
 /// Key of a binding: block ids are unique only within their flow.
@@ -140,10 +151,6 @@ impl Cameras {
 
     pub fn hub(&self) -> Arc<Hub> {
         self.hub.read().clone()
-    }
-
-    pub fn settings(&self) -> CameraSettings {
-        self.settings.read().clone()
     }
 
     // -----------------------------------------------------------------------
@@ -207,14 +214,31 @@ impl Cameras {
     // Bindings
     // -----------------------------------------------------------------------
 
-    /// Make the camera-bound SRT inputs of `flow` (a copy about to be built)
-    /// listeners with a fresh passphrase, and remember the bindings. Fails
-    /// when a camera is already in another running flow.
-    pub fn prepare_flow(&self, flow: &mut Flow) -> Result<(), String> {
+    /// Bind the cameras of `flow`, about to start: each camera block gets a
+    /// fresh passphrase, kept here. Returns the copy of the flow to build,
+    /// with the passphrases on it ([`PASSPHRASE_PROPERTY`]), or `None` when
+    /// the flow has no cameras. `flow` itself is not changed, so the stored
+    /// flow never holds a passphrase.
+    ///
+    /// Refused, with what to change: a camera already in another flow, and an
+    /// SRT port clash involving a camera, against `taken` (other running flows
+    /// and the port pool), other flows being started, and this flow itself.
+    pub fn prepare_flow(
+        &self,
+        flow: &Flow,
+        taken: &HashMap<u16, PortHolder>,
+    ) -> Result<Option<Flow>, String> {
         let mut bindings = self.bindings.lock();
         bindings.retain(|(f, _), _| *f != flow.id);
-        let mut prepared = Vec::new();
-        for block in flow
+
+        let listeners = listeners(flow);
+        for listener in &listeners {
+            check_port(flow, listener, &listeners, taken, &bindings)?;
+        }
+
+        let mut build = flow.clone();
+        let mut prepared: Vec<(String, ActiveBinding)> = Vec::new();
+        for block in build
             .blocks
             .iter_mut()
             .filter(|b| b.block_definition_id == SRT_INPUT_BLOCK)
@@ -226,16 +250,16 @@ impl Cameras {
                 bindings.iter().find(|(_, b)| b.device == device)
             {
                 return Err(format!(
-                    "camera {device} (block {}) is already in use by block {other_block} of flow {other_flow}",
+                    "Camera {device} (block '{}') is already in use by block '{other_block}' \
+                     of flow {other_flow}. Stop that flow, or bind another camera to this block.",
                     block.id
                 ));
             }
-            if prepared
-                .iter()
-                .any(|(_, b): &(String, ActiveBinding)| b.device == device)
-            {
+            if let Some((other_block, _)) = prepared.iter().find(|(_, b)| b.device == device) {
                 return Err(format!(
-                    "camera {device} is bound to more than one SRT input in this flow"
+                    "Camera {device} is bound to both block '{other_block}' and block '{}' \
+                     of this flow. Bind it to one block only.",
+                    block.id
                 ));
             }
             let binding = ActiveBinding {
@@ -248,8 +272,8 @@ impl Cameras {
                 prepared_at: Instant::now(),
             };
             block.properties.insert(
-                "srt_uri".to_string(),
-                PropertyValue::String(binding.listener_uri()),
+                PASSPHRASE_PROPERTY.to_string(),
+                PropertyValue::String(binding.passphrase.clone()),
             );
             info!(
                 "Camera {} bound to block {} of flow {}: SRT listener on port {}",
@@ -257,10 +281,13 @@ impl Cameras {
             );
             prepared.push((block.id.clone(), binding));
         }
+        if prepared.is_empty() {
+            return Ok(None);
+        }
         for (block_id, binding) in prepared {
             bindings.insert((flow.id, block_id), binding);
         }
-        Ok(())
+        Ok(Some(build))
     }
 
     /// The flow is running: its bindings are live. Returns them.
@@ -276,20 +303,22 @@ impl Cameras {
             .collect()
     }
 
-    /// The flow stopped: forget its bindings. Returns the devices that are no
+    /// The flow was torn down (stopped, or its start failed): forget its
+    /// bindings. Returns the devices that went live with it and are no
     /// longer bound anywhere.
     pub fn flow_stopped(&self, flow_id: &FlowId) -> Vec<String> {
         let mut bindings = self.bindings.lock();
-        let removed: Vec<String> = bindings
-            .iter()
-            .filter(|((f, _), _)| f == flow_id)
-            .map(|(_, b)| b.device.clone())
-            .collect();
-        bindings.retain(|(f, _), _| f != flow_id);
-        removed
-            .into_iter()
-            .filter(|d| !bindings.values().any(|b| &b.device == d))
-            .collect()
+        let mut removed = Vec::new();
+        bindings.retain(|(f, _), b| {
+            if f != flow_id {
+                return true;
+            }
+            if b.started {
+                removed.push(b.device.clone());
+            }
+            false
+        });
+        unbound(removed, &bindings)
     }
 
     /// Drop bindings whose flow is not running: started ones whose flow
@@ -305,10 +334,7 @@ impl Cameras {
             }
             keep
         });
-        removed
-            .into_iter()
-            .filter(|d| !bindings.values().any(|b| &b.device == d))
-            .collect()
+        unbound(removed, &bindings)
     }
 
     /// The started binding of `device`, if its flow runs.
@@ -360,6 +386,14 @@ impl Cameras {
     }
 }
 
+/// The `devices` that no binding in `bindings` uses any more.
+fn unbound(devices: Vec<String>, bindings: &HashMap<BindingKey, ActiveBinding>) -> Vec<String> {
+    devices
+        .into_iter()
+        .filter(|d| !bindings.values().any(|b| &b.device == d))
+        .collect()
+}
+
 fn summary(d: DeviceSnapshot, bound: &mut HashMap<String, Vec<CameraBinding>>) -> CameraSummary {
     CameraSummary {
         bindings: bound.remove(&d.id).unwrap_or_default(),
@@ -407,9 +441,97 @@ pub fn camera_of(properties: &HashMap<String, PropertyValue>) -> Option<String> 
     }
 }
 
+/// The SRT listeners of `flow`: camera blocks, and any block or element with
+/// an `srt://` URI property in listener mode.
+pub fn listeners(flow: &Flow) -> Vec<Listener> {
+    let blocks = flow.blocks.iter().map(|b| {
+        let camera = b.block_definition_id == SRT_INPUT_BLOCK && camera_of(&b.properties).is_some();
+        (&b.id, &b.properties, camera)
+    });
+    let elements = flow.elements.iter().map(|e| (&e.id, &e.properties, false));
+    blocks
+        .chain(elements)
+        .filter_map(|(id, properties, camera)| {
+            let port = if camera {
+                Some(srt_port(properties))
+            } else {
+                properties.values().find_map(|v| match v {
+                    PropertyValue::String(uri) if is_srt_listener(uri) => uri_port(uri),
+                    _ => None,
+                })
+            }?;
+            Some(Listener {
+                block_id: id.clone(),
+                port,
+                camera,
+            })
+        })
+        .collect()
+}
+
+/// `srt://` with `mode=listener`, or with no host and no mode (which srtsrc
+/// and srtsink treat as a listener).
+fn is_srt_listener(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("srt://") else {
+        return false;
+    };
+    let (authority, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let mode = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("mode="))
+        .map(str::to_ascii_lowercase);
+    match mode.as_deref() {
+        Some("listener") => true,
+        Some(_) => false,
+        None => authority.starts_with(':'),
+    }
+}
+
+/// Refuse a port clash that involves a camera.
+fn check_port(
+    flow: &Flow,
+    listener: &Listener,
+    listeners: &[Listener],
+    taken: &HashMap<u16, PortHolder>,
+    bindings: &HashMap<BindingKey, ActiveBinding>,
+) -> Result<(), String> {
+    let port = listener.port;
+    let same_flow = listeners.iter().find(|other| {
+        other.port == port
+            && other.block_id != listener.block_id
+            && (listener.camera || other.camera)
+    });
+    let in_taken = || {
+        taken
+            .get(&port)
+            .filter(|h| listener.camera || h.camera)
+            .map(|h| h.description.clone())
+    };
+    // Bindings also cover a flow that is starting and not yet running.
+    let in_bindings = || {
+        bindings
+            .iter()
+            .find(|((f, _), b)| *f != flow.id && b.port == port)
+            .map(|((f, block), _)| format!("camera block '{block}' of flow {f}"))
+    };
+    let holder = same_flow
+        .map(|other| format!("block '{}' of this flow", other.block_id))
+        .or_else(in_taken)
+        .or_else(in_bindings);
+    match holder {
+        Some(holder) => Err(format!(
+            "{} block '{}' listens on SRT port {port}, which {holder} already uses. \
+             Change the port in the SRT URI of one of them.",
+            if listener.camera { "Camera" } else { "SRT" },
+            listener.block_id
+        )),
+        None => Ok(()),
+    }
+}
+
 /// The port of the block's `srt_uri` (listener or caller form), or the
 /// default URI's port.
-fn srt_port(properties: &HashMap<String, PropertyValue>) -> u16 {
+pub fn srt_port(properties: &HashMap<String, PropertyValue>) -> u16 {
     let uri = match properties.get("srt_uri") {
         Some(PropertyValue::String(s)) => s.as_str(),
         _ => strom_types::DEFAULT_SRT_INPUT_URI,
@@ -501,8 +623,19 @@ mod tests {
         .unwrap()
     }
 
+    fn free() -> HashMap<u16, PortHolder> {
+        HashMap::new()
+    }
+
+    fn uri(block: &BlockInstance) -> &str {
+        match &block.properties["srt_uri"] {
+            PropertyValue::String(s) => s,
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
-    fn prepare_makes_camera_blocks_listeners_with_a_passphrase() {
+    fn prepare_keeps_the_passphrase_out_of_the_stored_flow() {
         let cameras = Cameras::new();
         let mut flow = Flow::new("cams");
         flow.blocks = vec![
@@ -519,24 +652,30 @@ mod tests {
                 serde_json::json!({"srt_uri": "srt://192.0.2.1:7002?mode=caller"}),
             ),
         ];
-        cameras.prepare_flow(&mut flow).unwrap();
-
-        let PropertyValue::String(uri) = &flow.blocks[0].properties["srt_uri"] else {
-            panic!()
-        };
-        assert!(uri.starts_with("srt://:7001?mode=listener&passphrase="));
-        assert!(uri.ends_with("&pbkeylen=16"));
-        let PropertyValue::String(plain) = &flow.blocks[1].properties["srt_uri"] else {
-            panic!()
-        };
-        assert_eq!(plain, "srt://192.0.2.1:7002?mode=caller", "untouched");
+        let stored = serde_json::to_string(&flow).unwrap();
+        let build = cameras.prepare_flow(&flow, &free()).unwrap().unwrap();
 
         let started = cameras.flow_started(&flow.id);
         assert_eq!(started.len(), 1);
         let b = &started[0].1;
         assert_eq!(b.device, "CF93DF9D-22AB-4927");
+        assert_eq!(b.port, 7001);
         assert_eq!(b.stream_id, "cam-cf93df9d");
-        assert!(uri.contains(&b.passphrase), "block and phone share it");
+
+        assert_eq!(
+            serde_json::to_string(&flow).unwrap(),
+            stored,
+            "flow untouched"
+        );
+        assert!(
+            matches!(&build.blocks[0].properties[PASSPHRASE_PROPERTY],
+                PropertyValue::String(p) if *p == b.passphrase),
+            "the built copy carries it to the block"
+        );
+        assert_eq!(uri(&build.blocks[0]), "srt://:7001?mode=listener");
+        assert_eq!(uri(&build.blocks[1]), "srt://192.0.2.1:7002?mode=caller");
+        assert!(!build.blocks[1].properties.contains_key(PASSPHRASE_PROPERTY));
+
         assert_eq!(
             b.stream_url("192.0.2.10"),
             format!(
@@ -544,18 +683,159 @@ mod tests {
                 b.passphrase
             )
         );
-        assert!(!redact_srt_uri(uri).contains(&b.passphrase));
+        assert!(!redact_srt_uri(&b.stream_url("192.0.2.10")).contains(&b.passphrase));
 
-        // The same camera in a second flow is refused while the first runs.
+        // A restart gets a new passphrase.
+        cameras.flow_stopped(&flow.id);
+        cameras.prepare_flow(&flow, &free()).unwrap();
+        assert_ne!(cameras.flow_started(&flow.id)[0].1.passphrase, b.passphrase);
+    }
+
+    #[test]
+    fn a_flow_without_cameras_is_built_as_it_is() {
+        let cameras = Cameras::new();
+        let mut flow = Flow::new("plain");
+        flow.blocks = vec![srt_block("in", serde_json::json!({}))];
+        assert!(cameras.prepare_flow(&flow, &free()).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_camera_is_in_one_running_flow_at_a_time() {
+        let cameras = Cameras::new();
+        let mut flow = Flow::new("cams");
+        flow.blocks = vec![srt_block("cam", serde_json::json!({"camera": "dev1"}))];
+        cameras.prepare_flow(&flow, &free()).unwrap();
+        cameras.flow_started(&flow.id);
         let mut other = Flow::new("other");
         other.blocks = vec![srt_block(
             "cam",
-            serde_json::json!({"camera": "CF93DF9D-22AB-4927"}),
+            serde_json::json!({"camera": "dev1", "srt_uri": "srt://:7300?mode=listener"}),
         )];
-        assert!(cameras.prepare_flow(&mut other).is_err());
+        let err = cameras.prepare_flow(&other, &free()).unwrap_err();
+        assert!(err.contains("already in use"), "{err}");
+        assert_eq!(cameras.flow_stopped(&flow.id), ["dev1"]);
+        assert!(cameras.prepare_flow(&other, &free()).is_ok());
+    }
 
-        assert_eq!(cameras.flow_stopped(&flow.id), ["CF93DF9D-22AB-4927"]);
-        assert!(cameras.prepare_flow(&mut other).is_ok());
+    #[test]
+    fn a_camera_port_clash_is_refused_with_who_holds_it() {
+        let camera = |port: u16| {
+            srt_block(
+                "cam",
+                serde_json::json!({
+                    "camera": "dev1",
+                    "srt_uri": format!("srt://:{port}?mode=listener"),
+                }),
+            )
+        };
+
+        // Another running flow, or the port pool.
+        let cameras = Cameras::new();
+        let mut flow = Flow::new("cams");
+        flow.blocks = vec![camera(7110)];
+        let taken = HashMap::from([(
+            7110,
+            PortHolder {
+                description: "block 'srt' of running flow 'Studio'".into(),
+                camera: false,
+            },
+        )]);
+        let err = cameras.prepare_flow(&flow, &taken).unwrap_err();
+        assert!(err.contains("SRT port 7110"), "{err}");
+        assert!(
+            err.contains("block 'srt' of running flow 'Studio'"),
+            "{err}"
+        );
+        assert!(cameras.started_bindings().is_empty() && cameras.flow_started(&flow.id).is_empty());
+
+        // Another listener in the same flow.
+        flow.blocks.push(srt_block(
+            "listener",
+            serde_json::json!({"srt_uri": "srt://:7110"}),
+        ));
+        let err = cameras.prepare_flow(&flow, &free()).unwrap_err();
+        assert!(err.contains("block 'listener' of this flow"), "{err}");
+
+        // A camera of a flow still starting, and the other way round: a plain
+        // listener starting on a camera's port.
+        let mut first = Flow::new("first");
+        first.blocks = vec![camera(7120)];
+        cameras.prepare_flow(&first, &free()).unwrap();
+        let mut second = Flow::new("second");
+        second.blocks = vec![srt_block(
+            "in",
+            serde_json::json!({"srt_uri": "srt://0.0.0.0:7120?mode=listener"}),
+        )];
+        let err = cameras.prepare_flow(&second, &free()).unwrap_err();
+        assert!(err.contains("camera block 'cam' of flow"), "{err}");
+
+        // Plain listeners sharing a port are not this module's business, and
+        // a caller does not bind the port.
+        let plain = HashMap::from([(
+            7130,
+            PortHolder {
+                description: "x".into(),
+                camera: false,
+            },
+        )]);
+        second.blocks = vec![srt_block(
+            "in",
+            serde_json::json!({"srt_uri": "srt://:7130?mode=listener"}),
+        )];
+        assert!(cameras.prepare_flow(&second, &plain).is_ok());
+        second.blocks = vec![srt_block(
+            "in",
+            serde_json::json!({"srt_uri": "srt://192.0.2.1:7120?mode=caller"}),
+        )];
+        assert!(cameras.prepare_flow(&second, &free()).is_ok());
+    }
+
+    #[test]
+    fn listeners_are_found_in_blocks_and_elements() {
+        let mut flow = Flow::new("l");
+        flow.blocks = vec![
+            srt_block(
+                "cam",
+                serde_json::json!({"camera": "d", "srt_uri": "srt://192.0.2.1:7001?mode=caller"}),
+            ),
+            srt_block("caller", serde_json::json!({})),
+        ];
+        flow.elements = vec![serde_json::from_value(serde_json::json!({
+            "id": "sink",
+            "element_type": "srtsink",
+            "properties": {"uri": "srt://:7002"},
+            "position": [0.0, 0.0],
+        }))
+        .unwrap()];
+        let ports: Vec<(String, u16, bool)> = listeners(&flow)
+            .into_iter()
+            .map(|l| (l.block_id, l.port, l.camera))
+            .collect();
+        assert_eq!(
+            ports,
+            [("cam".into(), 7001, true), ("sink".into(), 7002, false)]
+        );
+        assert!(is_srt_listener("srt://192.0.2.1:7000?mode=Listener"));
+        assert!(!is_srt_listener("srt://:7000?mode=rendezvous"));
+        assert!(!is_srt_listener("udp://:7000"));
+    }
+
+    #[test]
+    fn stopping_releases_the_flow_and_stops_only_phones_that_went_live() {
+        let cameras = Cameras::new();
+        let mut flow = Flow::new("cams");
+        flow.blocks = vec![srt_block("cam", serde_json::json!({"camera": "dev1"}))];
+        cameras.prepare_flow(&flow, &free()).unwrap();
+        assert!(cameras.flow_stopped(&flow.id).is_empty(), "start failed");
+        assert!(
+            cameras.flow_started(&flow.id).is_empty(),
+            "and is forgotten"
+        );
+
+        cameras.prepare_flow(&flow, &free()).unwrap();
+        cameras.flow_started(&flow.id);
+        assert_eq!(cameras.flow_stopped(&flow.id), ["dev1"]);
+        assert!(cameras.started_bindings().is_empty());
     }
 
     #[test]
@@ -563,7 +843,7 @@ mod tests {
         let cameras = Cameras::new();
         let mut flow = Flow::new("cams");
         flow.blocks = vec![srt_block("cam", serde_json::json!({"camera": "dev1"}))];
-        cameras.prepare_flow(&mut flow).unwrap();
+        cameras.prepare_flow(&flow, &free()).unwrap();
         // A fresh preparation survives while its flow is starting.
         assert!(cameras.reconcile(&|_| false).is_empty());
         cameras.flow_started(&flow.id);

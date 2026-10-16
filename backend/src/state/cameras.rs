@@ -8,19 +8,23 @@ use std::time::Duration;
 
 use serde_json::Value;
 use strom_types::cameras::CameraTally;
-use strom_types::{FlowId, StromEvent};
+use strom_types::ports::{PortPoolStatus, PortState};
+use strom_types::{Flow, FlowId, StromEvent};
 use tallycam_hub::hub::DEFAULT_CALL_TIMEOUT;
 use tallycam_hub::protocol::{ControllerEvent, TallyState, Values};
 use tokio::sync::broadcast::error::RecvError;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::AppState;
 use crate::blocks::builtin::vision_mixer::overlay;
 use crate::cameras::tally::{self, MixerBuses};
-use crate::cameras::{redact_srt_uri, to_hub_tally, ActiveBinding, CameraSettings, Cameras};
+use crate::cameras::{
+    redact_srt_uri, to_hub_tally, ActiveBinding, CameraSettings, Cameras, PortHolder,
+};
+use crate::gst::PipelineError;
 
-/// How often the bindings and tallies are checked without an event (a PiP
-/// zone change, a flow that stopped on an error).
+/// How often the bindings and tallies are checked without an event, for
+/// changes nothing announces (a flow that died without a teardown).
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 /// A phone sends its full `state` right after `hello`; wait for it before
 /// comparing its stream URL with ours.
@@ -35,6 +39,99 @@ impl AppState {
     /// main, before the server accepts connections.
     pub fn configure_cameras(&self, data_dir: &Path, settings: CameraSettings) {
         self.inner.cameras.configure(data_dir, settings);
+    }
+
+    /// Bind the cameras of `flow` before it is built (see
+    /// [`Cameras::prepare_flow`]). Returns the copy of the flow to build when
+    /// it has cameras.
+    pub(super) async fn prepare_cameras(&self, flow: &Flow) -> Result<Option<Flow>, PipelineError> {
+        let pool = self.port_pool_status().await;
+        let taken = self.srt_ports_taken(flow.id, &pool).await;
+        let build = self.inner.cameras.prepare_flow(flow, &taken).map_err(|e| {
+            error!("Cannot start flow {}: {}", flow.id, e);
+            PipelineError::InvalidFlow(e)
+        })?;
+        // A free pool port can still be handed to a reservation later, and
+        // nothing would then notice the clash.
+        for listener in crate::cameras::listeners(flow).iter().filter(|l| l.camera) {
+            if pool
+                .ports
+                .iter()
+                .any(|s| (s.first..=s.last).contains(&listener.port))
+            {
+                warn!(
+                    "Camera block {} of flow {} listens on port {}, which is in the port pool; \
+                     pick a port outside the pool so no reservation is given it",
+                    listener.block_id, flow.id, listener.port
+                );
+            }
+        }
+        Ok(build)
+    }
+
+    /// The SRT listener ports of running flows other than `starting`, and the
+    /// ports the port pool holds for someone other than `starting`.
+    async fn srt_ports_taken(
+        &self,
+        starting: FlowId,
+        pool: &PortPoolStatus,
+    ) -> HashMap<u16, PortHolder> {
+        let mut taken = HashMap::new();
+        for entry in pool.entries.iter().cloned() {
+            let holder = match (entry.state, entry.flow_id) {
+                (PortState::Assigned, Some(f)) if f == starting => continue,
+                (PortState::Blocked, _) => continue,
+                (PortState::Assigned, Some(f)) => {
+                    format!("the port pool (assigned to flow {f})")
+                }
+                _ => format!(
+                    "the port pool (reserved by '{}')",
+                    entry.owner_id.unwrap_or_default()
+                ),
+            };
+            taken.insert(
+                entry.port,
+                PortHolder {
+                    description: holder,
+                    camera: false,
+                },
+            );
+        }
+        let running = self.running_flow_ids().await;
+        let flows = self.inner.flows.read().await;
+        for flow in flows
+            .values()
+            .filter(|f| f.id != starting && running.contains(&f.id))
+        {
+            for listener in crate::cameras::listeners(flow) {
+                if taken
+                    .get(&listener.port)
+                    .is_some_and(|h: &PortHolder| h.camera)
+                {
+                    continue;
+                }
+                taken.insert(
+                    listener.port,
+                    PortHolder {
+                        description: format!(
+                            "block '{}' of running flow '{}'",
+                            listener.block_id, flow.name
+                        ),
+                        camera: listener.camera,
+                    },
+                );
+            }
+        }
+        taken
+    }
+
+    /// The flow is torn down (stopped, or its start failed): its phones stop
+    /// streaming and their tally goes off. Done in the teardown rather than
+    /// on `FlowStopped`, which arrives later and could undo a quick restart.
+    pub(super) fn release_cameras(&self, flow_id: &FlowId) {
+        for device in self.inner.cameras.flow_stopped(flow_id) {
+            spawn_stop(&self.inner.cameras, device);
+        }
     }
 
     async fn running_flow_ids(&self) -> HashSet<FlowId> {
@@ -60,11 +157,6 @@ impl AppState {
                             }
                             state.update_camera_tally().await;
                         }
-                        Ok(StromEvent::FlowStopped { flow_id }) => {
-                            for device in cameras.flow_stopped(&flow_id) {
-                                spawn_stop(&cameras, device);
-                            }
-                        }
                         Ok(StromEvent::VisionMixerStateChanged { .. }) => {
                             state.update_camera_tally().await;
                         }
@@ -80,7 +172,13 @@ impl AppState {
                                 }
                             }
                         }
-                        Err(RecvError::Lagged(_)) => {}
+                        // A missed hello: offer every live binding again;
+                        // go_live leaves a phone that is already right alone.
+                        Err(RecvError::Lagged(_)) => {
+                            for (_, binding) in cameras.started_bindings() {
+                                spawn_go_live(&cameras, binding, Duration::ZERO);
+                            }
+                        }
                         Err(RecvError::Closed) => break,
                     },
                     _ = tick.tick() => {
@@ -98,7 +196,7 @@ impl AppState {
 
     /// Set the tally of every bound camera from the running vision mixers.
     /// The hub only sends changes, so calling this often is cheap.
-    pub(crate) async fn update_camera_tally(&self) {
+    async fn update_camera_tally(&self) {
         let bindings = self.inner.cameras.started_bindings();
         if bindings.is_empty() {
             return;
@@ -220,4 +318,219 @@ async fn set(
     hub.set(device, values, DEFAULT_CALL_TIMEOUT)
         .await
         .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::JsonFileStorage;
+    use strom_types::BlockInstance;
+    use tempfile::TempDir;
+
+    fn new_state(dir: &TempDir) -> AppState {
+        gstreamer::init().unwrap();
+        AppState::new(
+            JsonFileStorage::new(dir.path().join("flows.json")),
+            dir.path().join("blocks.json"),
+            dir.path().join("media"),
+            vec![],
+            "all".to_string(),
+            vec![],
+            false,
+            false,
+        )
+    }
+
+    fn block(id: &str, definition: &str, properties: serde_json::Value) -> BlockInstance {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "block_definition_id": definition,
+            "properties": properties,
+            "position": {"x": 0.0, "y": 0.0},
+        }))
+        .unwrap()
+    }
+
+    fn free_udp_port() -> u16 {
+        std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    async fn add_flow(state: &AppState, name: &str, blocks: Vec<BlockInstance>) -> FlowId {
+        let mut flow = Flow::new(name);
+        flow.blocks = blocks;
+        let id = flow.id;
+        state.upsert_flow(flow).await.unwrap();
+        id
+    }
+
+    fn camera_block(port: u16) -> BlockInstance {
+        block(
+            "cam",
+            crate::cameras::SRT_INPUT_BLOCK,
+            serde_json::json!({
+                "camera": "phone-1",
+                "srt_uri": format!("srt://:{port}?mode=listener"),
+            }),
+        )
+    }
+
+    /// The stored flow (memory, flow API, flows.json) never holds the
+    /// passphrase, while the camera binding does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn started_camera_flow_stores_no_passphrase() {
+        let dir = TempDir::new().unwrap();
+        let state = new_state(&dir);
+        let port = free_udp_port();
+        let id = add_flow(&state, "cams", vec![camera_block(port)]).await;
+
+        state.start_flow(&id).await.expect("camera flow starts");
+        let (_, binding) = state
+            .cameras()
+            .flow_started(&id)
+            .pop()
+            .expect("camera bound");
+        assert!(!binding.passphrase.is_empty());
+
+        let stored = serde_json::to_string(&state.get_flow(&id).await.unwrap()).unwrap();
+        assert!(!stored.contains(&binding.passphrase), "{stored}");
+        assert!(!stored.contains("passphrase"), "{stored}");
+        let file = std::fs::read_to_string(dir.path().join("flows.json")).unwrap();
+        assert!(!file.contains(&binding.passphrase), "{file}");
+        assert!(!file.contains("passphrase"), "{file}");
+
+        state.stop_flow(&id).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn camera_port_used_by_a_running_flow_or_the_pool_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let state = new_state(&dir);
+
+        // A running flow listens on the port.
+        let port = free_udp_port();
+        let plain = add_flow(
+            &state,
+            "Studio",
+            vec![block(
+                "srt",
+                crate::cameras::SRT_INPUT_BLOCK,
+                serde_json::json!({"srt_uri": format!("srt://:{port}?mode=listener")}),
+            )],
+        )
+        .await;
+        state
+            .start_flow(&plain)
+            .await
+            .expect("plain SRT flow starts");
+        let cams = add_flow(&state, "cams", vec![camera_block(port)]).await;
+        let err = state.start_flow(&cams).await.unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("SRT port {port}"))
+                && err.contains("block 'srt' of running flow 'Studio'"),
+            "{err}"
+        );
+        assert!(state.get_flow_state(&cams).await.is_none());
+        state.stop_flow(&plain).await.unwrap();
+
+        // The port pool holds it for someone else.
+        let pool_port = free_udp_port();
+        state
+            .configure_port_pool(
+                std::collections::BTreeSet::from([pool_port]),
+                crate::ports::PortReservationStore::new(dir.path()),
+                600,
+                false,
+            )
+            .await
+            .unwrap();
+        state
+            .reserve_ports("other", 1, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let pooled = add_flow(&state, "pooled", vec![camera_block(pool_port)]).await;
+        let err = state.start_flow(&pooled).await.unwrap_err().to_string();
+        assert!(err.contains("the port pool (reserved by 'other')"), "{err}");
+    }
+
+    /// Tally follows `VisionMixerStateChanged`, so a PiP change that alters
+    /// what a bus shows must broadcast it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pip_changes_on_a_bus_broadcast_the_mixer_state() {
+        let dir = TempDir::new().unwrap();
+        let state = new_state(&dir);
+        crate::gpu::detect_gpu_capabilities();
+        let id = add_flow(
+            &state,
+            "mixer",
+            vec![block(
+                "vm",
+                "builtin.vision_mixer",
+                serde_json::json!({
+                    "compositor_preference": "cpu",
+                    "num_inputs": 2,
+                    "num_pips": 2,
+                }),
+            )],
+        )
+        .await;
+        state
+            .start_flow(&id)
+            .await
+            .expect("vision mixer flow starts");
+        let mut events = state.inner.events.subscribe();
+        let mut next_state = || {
+            let mut found = None;
+            while let Ok(ev) = events.try_recv() {
+                if let StromEvent::VisionMixerStateChanged { preview_pip, .. } = ev {
+                    found = Some(preview_pip);
+                }
+            }
+            found
+        };
+
+        state
+            .select_vision_mixer_pip_for_preview(&id, "vm", 0)
+            .await
+            .unwrap();
+        assert_eq!(next_state(), Some(Some(0)), "PiP selected on preview");
+
+        let zone = |sources: Vec<usize>| strom_types::vision_mixer::Zone {
+            rect: None,
+            capacity: None,
+            sources,
+            border: None,
+        };
+        state
+            .apply_vision_mixer_pip_config(
+                &id,
+                "vm",
+                0,
+                Some(0),
+                vec![zone(vec![1])],
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next_state(), Some(Some(0)), "PiP on preview changed");
+
+        state
+            .apply_vision_mixer_pip_config(
+                &id,
+                "vm",
+                1,
+                Some(1),
+                vec![zone(vec![0])],
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next_state(), None, "PiP on no bus: nothing visible changed");
+
+        state.stop_flow(&id).await.unwrap();
+    }
 }
