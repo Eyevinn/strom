@@ -702,6 +702,30 @@ fn assemble_chain(
     Ok(())
 }
 
+/// Caps for the appsink of a decoded video track. Left open, a hardware decoder
+/// keeps frames in GL memory of a context this pipeline made for itself, and
+/// the mixer's glcolorconvert rejects a buffer from any other context. CUDA
+/// memory carries no GL context. A stinger takes system memory only:
+/// VideoToolbox drops ProRes 4444's alpha in GL memory but keeps it in system
+/// memory (AYUV64).
+fn decoded_video_caps(stinger: bool) -> gst::Caps {
+    let mut caps = gst::Caps::new_empty();
+    let caps_mut = caps.make_mut();
+    if !stinger {
+        caps_mut.append_structure_full(
+            gst::Structure::new_empty("video/x-raw"),
+            Some(gst::CapsFeatures::new(["memory:CUDAMemory"])),
+        );
+    }
+    caps_mut.append_structure_full(
+        gst::Structure::new_empty("video/x-raw"),
+        Some(gst::CapsFeatures::new([
+            gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY,
+        ])),
+    );
+    caps
+}
+
 /// Link a dynamic pad through clocksync → appsink, with appsink bridging to the given appsrc.
 ///
 /// The bridge computes a timestamp offset from the first buffer:
@@ -765,16 +789,8 @@ fn link_pad_through_clocksync(
         .name(appsink_name)
         .sync(false)
         .build();
-    // A stinger clip's frames in system memory. A hardware decoder left to
-    // choose keeps them in GL memory, and VideoToolbox does that in NV12,
-    // dropping ProRes 4444's alpha; asked for system memory it gives AYUV64,
-    // alpha and all. The mixer's stinger input adapts the pixel format.
-    if state.stinger.enabled && media_type == "video" {
-        appsink.set_caps(Some(
-            &gst::Caps::builder("video/x-raw")
-                .features([gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY])
-                .build(),
-        ));
+    if (state.decode || state.stinger.enabled) && media_type == "video" {
+        appsink.set_caps(Some(&decoded_video_caps(state.stinger.enabled)));
     }
 
     let appsink_element = appsink.upcast_ref::<gst::Element>();
@@ -1130,6 +1146,71 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Mutex, RwLock};
+
+    /// The appsink `link_pad_through_clocksync` puts on a track of `media_type`.
+    fn bridge_appsink_caps(decode: bool, stinger: bool, media_type: &str) -> Option<gst::Caps> {
+        gst::init().unwrap();
+        let mut state = Arc::try_unwrap(test_state()).ok().unwrap();
+        state.decode = decode;
+        state.stinger.enabled = stinger;
+        let state = Arc::new(state);
+
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("fakesrc").build().unwrap();
+        pipeline.add(&src).unwrap();
+        let appsrc = gst_app::AppSrc::builder().build();
+        link_pad_through_clocksync(
+            &pipeline,
+            &src.static_pad("src").unwrap(),
+            &appsrc,
+            &state,
+            "clocksync_test",
+            "appsink_test",
+            false,
+            media_type,
+        )
+        .unwrap();
+        let sink = pipeline
+            .by_name("appsink_test")
+            .unwrap()
+            .downcast::<gst_app::AppSink>()
+            .unwrap();
+        let caps = sink.caps();
+        let _ = pipeline.set_state(gst::State::Null);
+        caps
+    }
+
+    #[test]
+    fn decoded_video_appsink_refuses_gl_memory() {
+        gst::init().unwrap();
+        let gl = gst::Caps::builder("video/x-raw")
+            .features(["memory:GLMemory"])
+            .build();
+        let system = gst::Caps::builder("video/x-raw")
+            .features([gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY])
+            .build();
+        let cuda = gst::Caps::builder("video/x-raw")
+            .features(["memory:CUDAMemory"])
+            .build();
+
+        let clip = bridge_appsink_caps(true, false, "video").expect("clip video appsink has caps");
+        assert!(!clip.can_intersect(&gl));
+        assert!(clip.can_intersect(&system));
+        assert!(clip.can_intersect(&cuda));
+
+        let stinger =
+            bridge_appsink_caps(true, true, "video").expect("stinger video appsink has caps");
+        assert!(!stinger.can_intersect(&gl));
+        assert!(stinger.can_intersect(&system));
+        assert!(!stinger.can_intersect(&cuda));
+    }
+
+    #[test]
+    fn appsink_caps_stay_open_for_audio_and_passthrough() {
+        let open = |caps: Option<gst::Caps>| caps.is_none_or(|c| c.is_any());
+        assert!(open(bridge_appsink_caps(true, false, "audio")));
+        assert!(open(bridge_appsink_caps(false, false, "video")));
+    }
 
     /// The bare minimum for the two pipeline constructors: they read `sync` and
     /// stash a weak ref to the source element, nothing else, before returning.
