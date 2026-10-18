@@ -1243,6 +1243,11 @@ impl eframe::App for StromApp {
                             self.audio_devices = devices;
                             self.audio_devices_loading = false;
                         }
+                        strom_types::discovery::DeviceCategory::Camera => {
+                            tracing::info!("Cameras loaded: {} camera(s)", devices.len());
+                            self.camera_devices = devices;
+                            self.camera_devices_loading = false;
+                        }
                         _ => {}
                     }
                     // Mark caches as fresh once both fetches have settled.
@@ -1250,7 +1255,7 @@ impl eframe::App for StromApp {
                     // result rather than dropping silently) doesn't lock
                     // the TTL retry window — the timestamp only advances
                     // when no fetch is in flight.
-                    if !self.video_devices_loading && !self.audio_devices_loading {
+                    if !self.local_devices_loading() {
                         self.devices_last_loaded = Some(instant::Instant::now());
                     }
                 }

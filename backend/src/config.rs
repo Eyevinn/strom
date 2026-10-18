@@ -25,6 +25,8 @@ struct ConfigFile {
     cef: CefConfig,
     #[serde(default)]
     media: MediaConfig,
+    #[serde(default)]
+    cameras: crate::cameras::CamerasConfig,
 }
 
 /// `[media]` section: downloading files from URLs into the media library.
@@ -228,6 +230,8 @@ const SCALAR_ENV_VARS: &[(&str, &str)] = &[
     ("STROM_STORAGE_CEF_CACHE_PATH", "storage.cef_cache_path"),
     ("STROM_LOGGING_LOG_FILE", "logging.log_file"),
     ("STROM_LOGGING_LOG_LEVEL", "logging.log_level"),
+    ("STROM_CAMERAS_PUBLIC_HOST", "cameras.public_host"),
+    ("STROM_CAMERAS_DEVICE_URL", "cameras.device_url"),
 ];
 
 /// Environment variables that map to a list config key, comma-separated.
@@ -316,6 +320,8 @@ pub struct Config {
     pub media_download_max_bytes: u64,
     /// Time allowed for one whole URL download, in seconds.
     pub media_download_timeout_seconds: u64,
+    /// Where phone cameras reach this Strom (`[cameras]`).
+    pub cameras: crate::cameras::CamerasConfig,
 }
 
 /// Expand the `[ports] ports` entries into the pool.
@@ -430,6 +436,7 @@ impl Config {
             ports: PortsConfig::default(),
             cef: CefConfig::default(),
             media: MediaConfig::default(),
+            cameras: Default::default(),
         }));
 
         // 2. Merge user config file if it exists
@@ -641,6 +648,7 @@ impl Config {
                 config_file.media.download_timeout_seconds,
                 crate::media_download::DEFAULT_TOTAL_TIMEOUT_SECS,
             )?,
+            cameras: config_file.cameras.normalized(),
         })
     }
 
@@ -652,6 +660,12 @@ impl Config {
             total_timeout: std::time::Duration::from_secs(self.media_download_timeout_seconds),
             ..Default::default()
         }
+    }
+
+    /// Where phone cameras reach this Strom.
+    pub fn camera_settings(&self) -> crate::cameras::CameraSettings {
+        let tls = self.tls_cert.is_some() && self.tls_key.is_some();
+        self.cameras.settings(self.port, tls)
     }
 
     /// Returns TLS config paths if both cert and key are provided.
@@ -713,6 +727,7 @@ impl Config {
             media_download_allow_private_addresses: false,
             media_download_max_bytes: strom_types::media_download::DEFAULT_MEDIA_DOWNLOAD_MAX_BYTES,
             media_download_timeout_seconds: crate::media_download::DEFAULT_TOTAL_TIMEOUT_SECS,
+            cameras: Default::default(),
         })
     }
 
@@ -775,6 +790,7 @@ impl Default for Config {
                 media_download_max_bytes:
                     strom_types::media_download::DEFAULT_MEDIA_DOWNLOAD_MAX_BYTES,
                 media_download_timeout_seconds: crate::media_download::DEFAULT_TOTAL_TIMEOUT_SECS,
+                cameras: Default::default(),
             }
         })
     }
