@@ -8,9 +8,9 @@
 //! before device keys) needs a new invite. Tally, status and control values
 //! are live data and start empty.
 //!
-//! The hub calls [`DeviceStore::save`] synchronously from the task that
-//! handled the phone's `hello`, outside its own lock. A save is a small
-//! write and happens only when a phone is new, renamed or forgotten.
+//! The hub calls [`DeviceStore::save`] synchronously while it holds its own
+//! lock, so a save blocks the hub for one small write. It happens only when a
+//! phone is new, renamed or forgotten.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

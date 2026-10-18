@@ -155,8 +155,9 @@ impl AppState {
                 tokio::select! {
                     ev = events.recv() => match ev {
                         Ok(StromEvent::FlowStarted { flow_id }) => {
-                            for (_, binding) in cameras.flow_started(&flow_id) {
-                                spawn_go_live(&cameras, binding, Duration::ZERO);
+                            let running = state.running_flow_ids().await;
+                            for (_, binding) in cameras.mark_started(&|f| *f == flow_id && running.contains(f)) {
+                                spawn_go_live(&cameras, binding, Duration::ZERO, false);
                             }
                             state.update_camera_tally().await;
                             state.relabel_camera_inputs(Some(flow_id), None).await;
@@ -172,7 +173,7 @@ impl AppState {
                         Ok(frame) => {
                             if let ControllerEvent::DeviceHello { device, .. } = &*frame.event {
                                 if let Some((_, binding)) = cameras.started_binding_of(device) {
-                                    spawn_go_live(&cameras, binding, AFTER_HELLO_DELAY);
+                                    spawn_go_live(&cameras, binding, AFTER_HELLO_DELAY, false);
                                 }
                                 let renamed = cameras.note_names();
                                 if !renamed.is_empty() {
@@ -184,22 +185,31 @@ impl AppState {
                         // go_live leaves a phone that is already right alone.
                         Err(RecvError::Lagged(_)) => {
                             for (_, binding) in cameras.started_bindings() {
-                                spawn_go_live(&cameras, binding, Duration::ZERO);
+                                spawn_go_live(&cameras, binding, Duration::ZERO, false);
                             }
                         }
                         Err(RecvError::Closed) => break,
                     },
                     _ = tick.tick() => {
                         let running = state.running_flow_ids().await;
-                        // A running flow's pipeline is built, so its listeners
-                        // are up, whether or not we saw its FlowStarted.
-                        for (_, binding) in cameras.running_flows_started(&|f| running.contains(f)) {
-                            spawn_go_live(&cameras, binding, Duration::ZERO);
-                        }
+                        // A FlowStarted we missed.
+                        let missed: HashSet<FlowId> = cameras
+                            .mark_started(&|f| running.contains(f))
+                            .into_iter()
+                            .map(|((flow_id, _), _)| flow_id)
+                            .collect();
                         for device in cameras.reconcile(&|f| running.contains(f)) {
                             spawn_stop(&cameras, device);
                         }
+                        // Every live binding, so a failed go-live is tried
+                        // again; a phone that is already right is left alone.
+                        for (_, binding) in cameras.started_bindings() {
+                            spawn_go_live(&cameras, binding, Duration::ZERO, true);
+                        }
                         state.update_camera_tally().await;
+                        for flow_id in missed {
+                            state.relabel_camera_inputs(Some(flow_id), None).await;
+                        }
                     }
                 }
             }
@@ -337,30 +347,49 @@ impl AppState {
     }
 }
 
-/// Tell a bound phone where to send and put it live, after `delay`.
-fn spawn_go_live(cameras: &Arc<Cameras>, binding: ActiveBinding, delay: Duration) {
+/// Tell a bound phone where to send and put it live, after `delay`. Skipped
+/// while an attempt for the phone is in flight; a `retry` also waits a while
+/// after the last attempt (see [`Cameras::begin_go_live`]).
+fn spawn_go_live(cameras: &Arc<Cameras>, binding: ActiveBinding, delay: Duration, retry: bool) {
     let cameras = cameras.clone();
     tokio::spawn(async move {
         tokio::time::sleep(delay).await;
-        go_live(&cameras, &binding).await;
+        if !cameras.begin_go_live(&binding.device, retry) {
+            return;
+        }
+        go_live(&cameras, &binding, retry).await;
+        cameras.end_go_live(&binding.device);
     });
 }
 
-async fn go_live(cameras: &Cameras, binding: &ActiveBinding) {
+/// A `retry` reports a phone it cannot reach at debug level only: the first
+/// attempt already said so.
+async fn go_live(cameras: &Cameras, binding: &ActiveBinding, retry: bool) {
     let hub = cameras.hub();
     let device = &binding.device;
+    // A binding of an earlier run must not touch the phone: its URL carries
+    // the old passphrase. Checked again after every call that waits.
+    if !cameras.is_current(binding) {
+        return;
+    }
     if !hub.is_online(device) {
-        info!(
-            "Camera {} is offline; it goes live when it connects",
-            device
-        );
+        if !retry {
+            info!(
+                "Camera {} is offline; it goes live when it connects",
+                device
+            );
+        }
         return;
     }
     let Some(host) = cameras.srt_host_for(device) else {
-        warn!(
-            "Camera {}: no address it can send SRT to; set cameras.public_host",
-            device
-        );
+        if retry {
+            debug!("Camera {}: still no address it can send SRT to", device);
+        } else {
+            warn!(
+                "Camera {}: no address it can send SRT to; set cameras.public_host",
+                device
+            );
+        }
         return;
     };
     let url = binding.stream_url(&host);
@@ -377,6 +406,9 @@ async fn go_live(cameras: &Cameras, binding: &ActiveBinding) {
     if live {
         if let Err(e) = set(&hub, device, "live", Value::Bool(false)).await {
             warn!("Camera {}: could not stop the old stream: {}", device, e);
+            return;
+        }
+        if !cameras.is_current(binding) {
             return;
         }
     }
@@ -503,7 +535,7 @@ mod tests {
         state.start_flow(&id).await.expect("camera flow starts");
         let (_, binding) = state
             .cameras()
-            .flow_started(&id)
+            .mark_started(&|f| *f == id)
             .pop()
             .expect("camera bound");
         assert!(!binding.passphrase.is_empty());
