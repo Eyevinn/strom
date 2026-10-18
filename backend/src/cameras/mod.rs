@@ -787,7 +787,11 @@ mod tests {
     use super::*;
     use strom_types::BlockInstance;
 
+    /// A camera-capable SRT input. Every test that finds listeners uses one,
+    /// and finding them reads the built-in block definitions, which need
+    /// GStreamer: initialized here, not left to whichever test ran first.
     fn srt_block(id: &str, props: serde_json::Value) -> BlockInstance {
+        gstreamer::init().unwrap();
         serde_json::from_value(serde_json::json!({
             "id": id,
             "block_definition_id": SRT_INPUT_BLOCK,
