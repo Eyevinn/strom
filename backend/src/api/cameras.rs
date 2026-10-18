@@ -22,9 +22,10 @@ use axum::Json;
 use strom_types::api::ErrorResponse;
 use strom_types::cameras::{CameraInviteResponse, CameraListResponse};
 use tallycam_hub::server::{
-    controller_session, device_session_for, operator_page, DeviceConnection, DeviceQuery,
-    CLAPPER_HTML,
+    controller_session, device_session_for, limit_upgrade, operator_page, same_origin,
+    DeviceConnection, DeviceQuery, CLAPPER_HTML,
 };
+use tracing::warn;
 
 use crate::cameras::CONTROL_PATH;
 use crate::state::AppState;
@@ -68,7 +69,7 @@ pub async fn device_ws(
         token: query.token,
         host: host_header(&headers),
     };
-    ws.on_upgrade(move |socket| device_session_for(socket, hub, connection))
+    limit_upgrade(ws).on_upgrade(move |socket| device_session_for(socket, hub, connection))
 }
 
 /// Operator UI connection (TallyCam control protocol, controller side).
@@ -79,19 +80,32 @@ pub async fn device_ws(
     description = "WebSocket for operator UIs: a snapshot of every camera, then their events \
                    (state, status, previews, results, logs, tally); requests set controls, run \
                    commands and show messages on the phones. Previews run while at least one \
-                   controller is connected.",
+                   controller is connected and watches the camera. A browser upgrade from \
+                   another origin (another site, or another port of this host) is refused.",
     responses(
         (status = 101, description = "WebSocket connection upgraded"),
-        (status = 401, description = "Authentication required")
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "Cross-origin upgrade refused")
     )
 )]
 pub async fn control_ws(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Response {
+    // Browsers make no CORS check for WebSockets, and the session cookie
+    // (SameSite=Strict) still goes to another port of the same host: a page
+    // there must not drive the cameras through the operator's browser.
+    if !same_origin(&headers) {
+        warn!(
+            "Camera controller from {} refused: cross-origin upgrade",
+            addr
+        );
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let hub = state.cameras().hub();
-    ws.on_upgrade(move |socket| controller_session(socket, hub, addr))
+    limit_upgrade(ws).on_upgrade(move |socket| controller_session(socket, hub, addr))
 }
 
 /// List the known cameras.

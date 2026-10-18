@@ -318,7 +318,7 @@
           "cameras"
         ],
         "summary": "Operator UI connection (TallyCam control protocol, controller side).",
-        "description": "WebSocket for operator UIs: a snapshot of every camera, then their events (state, status, previews, results, logs, tally); requests set controls, run commands and show messages on the phones. Previews run while at least one controller is connected.",
+        "description": "WebSocket for operator UIs: a snapshot of every camera, then their events (state, status, previews, results, logs, tally); requests set controls, run commands and show messages on the phones. Previews run while at least one controller is connected and watches the camera. A browser upgrade from another origin (another site, or another port of this host) is refused.",
         "operationId": "control_ws",
         "responses": {
           "101": {
@@ -326,6 +326,9 @@
           },
           "401": {
             "description": "Authentication required"
+          },
+          "403": {
+            "description": "Cross-origin upgrade refused"
           }
         }
       }
