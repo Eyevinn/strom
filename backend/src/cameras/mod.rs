@@ -54,9 +54,13 @@ pub const CONTROL_PATH: &str = "/api/cameras/control";
 pub const PASSPHRASE_PROPERTY: &str = "_camera_passphrase";
 /// The SRT key length that goes with the passphrase, in bytes.
 pub const PBKEYLEN: u32 = 16;
-/// Safety net for a binding whose flow never reported started and was not
-/// torn down either.
-const PREPARED_TIMEOUT: Duration = Duration::from_secs(60);
+/// Safety net for a binding whose flow is not running and was not torn down
+/// either. Every failed start tears down, so this only bounds a leak; it is
+/// long so a slow start keeps its binding.
+const PREPARED_TIMEOUT: Duration = Duration::from_secs(600);
+/// Least time between two go-live attempts for one camera, so a phone that
+/// keeps refusing is not asked every reconcile tick.
+const GO_LIVE_RETRY: Duration = Duration::from_secs(5);
 
 /// A camera-bound SRT input of a starting or running flow.
 #[derive(Debug, Clone)]
@@ -119,6 +123,8 @@ pub struct Cameras {
     settings: RwLock<CameraSettings>,
     bindings: Mutex<HashMap<BindingKey, ActiveBinding>>,
     names: Mutex<labels::NameHistory>,
+    /// Go-live attempts by device: in flight, and when the last one began.
+    go_live: Mutex<HashMap<String, (bool, Instant)>>,
 }
 
 impl Default for Cameras {
@@ -135,6 +141,7 @@ impl Cameras {
             settings: RwLock::new(CameraSettings::default()),
             bindings: Mutex::new(HashMap::new()),
             names: Mutex::new(labels::NameHistory::default()),
+            go_live: Mutex::new(HashMap::new()),
         }
     }
 
@@ -296,26 +303,19 @@ impl Cameras {
         Ok(Some(build))
     }
 
-    /// The flow is running: its bindings are live. Returns the ones that
-    /// were not live yet.
-    pub fn flow_started(&self, flow_id: &FlowId) -> Vec<(BindingKey, ActiveBinding)> {
-        self.mark_started(&|f| f == flow_id)
-    }
-
-    /// Mark the prepared bindings of running flows live, for a `FlowStarted`
-    /// that was missed (a lagged event receiver). Returns the ones marked.
-    pub fn running_flows_started(
+    /// Mark the prepared bindings of `running` flows live and return them.
+    /// Only a running flow's pipeline is built, so its listeners are up. Called
+    /// on `FlowStarted` and on every reconcile tick (for a missed event); a
+    /// late `FlowStarted` of an earlier run cannot mark a restart that is
+    /// still building, since that flow is not running yet.
+    pub fn mark_started(
         &self,
         running: &dyn Fn(&FlowId) -> bool,
     ) -> Vec<(BindingKey, ActiveBinding)> {
-        self.mark_started(running)
-    }
-
-    fn mark_started(&self, flows: &dyn Fn(&FlowId) -> bool) -> Vec<(BindingKey, ActiveBinding)> {
         let mut bindings = self.bindings.lock();
         bindings
             .iter_mut()
-            .filter(|((f, _), b)| !b.started && flows(f))
+            .filter(|((f, _), b)| !b.started && running(f))
             .map(|(k, b)| {
                 b.started = true;
                 (k.clone(), b.clone())
@@ -351,19 +351,44 @@ impl Cameras {
     }
 
     /// Drop bindings whose flow is not running: started ones whose flow
-    /// stopped without an event we saw, and prepared ones whose start
-    /// failed. Returns the devices that are no longer bound anywhere.
+    /// stopped without an event we saw, and prepared ones left behind for
+    /// [`PREPARED_TIMEOUT`]. Returns, like [`Self::flow_stopped`], only the
+    /// devices that went live and are no longer bound anywhere: a phone that
+    /// never went live with the flow is not ours to stop.
     pub fn reconcile(&self, running: &dyn Fn(&FlowId) -> bool) -> Vec<String> {
         let mut bindings = self.bindings.lock();
         let mut removed = Vec::new();
         bindings.retain(|(f, _), b| {
-            let keep = running(f) || (!b.started && b.prepared_at.elapsed() < PREPARED_TIMEOUT);
-            if !keep {
-                removed.push(b.device.clone());
+            if running(f) {
+                return true;
             }
-            keep
+            if b.started {
+                removed.push(b.device.clone());
+                return false;
+            }
+            b.prepared_at.elapsed() < PREPARED_TIMEOUT
         });
         unbound(removed, &bindings)
+    }
+
+    /// Claim a go-live attempt for `device`: false while one is in flight,
+    /// and, for a `retry`, within [`GO_LIVE_RETRY`] of the last one. Pair
+    /// with [`Self::end_go_live`].
+    pub fn begin_go_live(&self, device: &str, retry: bool) -> bool {
+        let mut attempts = self.go_live.lock();
+        if let Some((in_flight, last)) = attempts.get(device) {
+            if *in_flight || (retry && last.elapsed() < GO_LIVE_RETRY) {
+                return false;
+            }
+        }
+        attempts.insert(device.to_string(), (true, Instant::now()));
+        true
+    }
+
+    pub fn end_go_live(&self, device: &str) {
+        if let Some((in_flight, _)) = self.go_live.lock().get_mut(device) {
+            *in_flight = false;
+        }
     }
 
     /// The started binding of `device`, if its flow runs.
@@ -773,7 +798,7 @@ mod tests {
         let stored = serde_json::to_string(&flow).unwrap();
         let build = cameras.prepare_flow(&flow, &free()).unwrap().unwrap();
 
-        let started = cameras.flow_started(&flow.id);
+        let started = cameras.mark_started(&|f| *f == flow.id);
         assert_eq!(started.len(), 1);
         let b = &started[0].1;
         assert_eq!(b.device, "CF93DF9D-22AB-4927");
@@ -806,7 +831,10 @@ mod tests {
         // A restart gets a new passphrase.
         cameras.flow_stopped(&flow.id);
         cameras.prepare_flow(&flow, &free()).unwrap();
-        assert_ne!(cameras.flow_started(&flow.id)[0].1.passphrase, b.passphrase);
+        assert_ne!(
+            cameras.mark_started(&|f| *f == flow.id)[0].1.passphrase,
+            b.passphrase
+        );
     }
 
     #[test]
@@ -823,7 +851,7 @@ mod tests {
         let mut flow = Flow::new("cams");
         flow.blocks = vec![srt_block("cam", serde_json::json!({"camera": "dev1"}))];
         cameras.prepare_flow(&flow, &free()).unwrap();
-        cameras.flow_started(&flow.id);
+        cameras.mark_started(&|f| *f == flow.id);
         let mut other = Flow::new("other");
         other.blocks = vec![srt_block(
             "cam",
@@ -864,7 +892,10 @@ mod tests {
             err.contains("block 'srt' of running flow 'Studio'"),
             "{err}"
         );
-        assert!(cameras.started_bindings().is_empty() && cameras.flow_started(&flow.id).is_empty());
+        assert!(
+            cameras.started_bindings().is_empty()
+                && cameras.mark_started(&|f| *f == flow.id).is_empty()
+        );
 
         // Another listener in the same flow.
         flow.blocks.push(srt_block(
@@ -971,12 +1002,12 @@ mod tests {
         cameras.prepare_flow(&flow, &free()).unwrap();
         assert!(cameras.flow_stopped(&flow.id).is_empty(), "start failed");
         assert!(
-            cameras.flow_started(&flow.id).is_empty(),
+            cameras.mark_started(&|f| *f == flow.id).is_empty(),
             "and is forgotten"
         );
 
         cameras.prepare_flow(&flow, &free()).unwrap();
-        cameras.flow_started(&flow.id);
+        cameras.mark_started(&|f| *f == flow.id);
         assert_eq!(cameras.flow_stopped(&flow.id), ["dev1"]);
         assert!(cameras.started_bindings().is_empty());
     }
@@ -989,10 +1020,22 @@ mod tests {
         cameras.prepare_flow(&flow, &free()).unwrap();
         // A fresh preparation survives while its flow is starting.
         assert!(cameras.reconcile(&|_| false).is_empty());
-        cameras.flow_started(&flow.id);
+        cameras.mark_started(&|f| *f == flow.id);
         assert!(cameras.reconcile(&|_| true).is_empty());
         assert_eq!(cameras.reconcile(&|_| false), ["dev1"]);
         assert!(cameras.started_bindings().is_empty());
+    }
+
+    /// One go-live per phone at a time; a retry also waits after the last.
+    #[test]
+    fn go_live_attempts_do_not_overlap_and_retries_wait() {
+        let cameras = Cameras::new();
+        assert!(cameras.begin_go_live("dev1", false));
+        assert!(!cameras.begin_go_live("dev1", false), "in flight");
+        assert!(cameras.begin_go_live("dev2", true), "another phone");
+        cameras.end_go_live("dev1");
+        assert!(!cameras.begin_go_live("dev1", true), "retry too soon");
+        assert!(cameras.begin_go_live("dev1", false), "an event goes now");
     }
 
     /// A missed `FlowStarted` is made up for once the flow is seen running,
@@ -1003,12 +1046,15 @@ mod tests {
         let mut flow = Flow::new("cams");
         flow.blocks = vec![srt_block("cam", serde_json::json!({"camera": "dev1"}))];
         cameras.prepare_flow(&flow, &free()).unwrap();
-        assert!(cameras.running_flows_started(&|_| false).is_empty());
-        let started = cameras.running_flows_started(&|f| *f == flow.id);
+        assert!(cameras.mark_started(&|_| false).is_empty());
+        let started = cameras.mark_started(&|f| *f == flow.id);
         assert_eq!(started.len(), 1);
         assert!(cameras.is_current(&started[0].1));
-        assert!(cameras.flow_started(&flow.id).is_empty(), "already live");
-        assert!(cameras.running_flows_started(&|_| true).is_empty());
+        assert!(
+            cameras.mark_started(&|f| *f == flow.id).is_empty(),
+            "already live"
+        );
+        assert!(cameras.mark_started(&|_| true).is_empty());
     }
 
     /// A binding stops being current when its flow stops or restarts, so a
@@ -1019,11 +1065,11 @@ mod tests {
         let mut flow = Flow::new("cams");
         flow.blocks = vec![srt_block("cam", serde_json::json!({"camera": "dev1"}))];
         cameras.prepare_flow(&flow, &free()).unwrap();
-        let (_, old) = cameras.flow_started(&flow.id).pop().unwrap();
+        let (_, old) = cameras.mark_started(&|f| *f == flow.id).pop().unwrap();
         cameras.flow_stopped(&flow.id);
         assert!(!cameras.is_current(&old));
         cameras.prepare_flow(&flow, &free()).unwrap();
-        cameras.flow_started(&flow.id);
+        cameras.mark_started(&|f| *f == flow.id);
         assert!(!cameras.is_current(&old), "a restart has a new passphrase");
     }
 
