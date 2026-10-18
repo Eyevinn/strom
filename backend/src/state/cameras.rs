@@ -191,6 +191,11 @@ impl AppState {
                     },
                     _ = tick.tick() => {
                         let running = state.running_flow_ids().await;
+                        // A running flow's pipeline is built, so its listeners
+                        // are up, whether or not we saw its FlowStarted.
+                        for (_, binding) in cameras.running_flows_started(&|f| running.contains(f)) {
+                            spawn_go_live(&cameras, binding, Duration::ZERO);
+                        }
                         for device in cameras.reconcile(&|f| running.contains(f)) {
                             spawn_stop(&cameras, device);
                         }
@@ -379,8 +384,24 @@ async fn go_live(cameras: &Cameras, binding: &ActiveBinding) {
         warn!("Camera {}: could not set the stream URL: {}", device, e);
         return;
     }
+    // The flow can stop while the calls above wait on the phone; going live
+    // then would leave it streaming to a closed port.
+    if !cameras.is_current(binding) {
+        debug!("Camera {}: its flow stopped while going live", device);
+        return;
+    }
     if let Err(e) = set(&hub, device, "live", Value::Bool(true)).await {
         warn!("Camera {}: could not go live: {}", device, e);
+    }
+    // A stop that raced the call above may have landed first.
+    if !cameras.is_current(binding) {
+        info!(
+            "Camera {}: flow stopped while going live, stopping its stream",
+            device
+        );
+        if let Err(e) = set(&hub, device, "live", Value::Bool(false)).await {
+            warn!("Camera {}: could not stop streaming: {}", device, e);
+        }
     }
 }
 

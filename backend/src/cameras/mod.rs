@@ -25,7 +25,7 @@ pub mod tally;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
@@ -296,17 +296,40 @@ impl Cameras {
         Ok(Some(build))
     }
 
-    /// The flow is running: its bindings are live. Returns them.
+    /// The flow is running: its bindings are live. Returns the ones that
+    /// were not live yet.
     pub fn flow_started(&self, flow_id: &FlowId) -> Vec<(BindingKey, ActiveBinding)> {
+        self.mark_started(&|f| f == flow_id)
+    }
+
+    /// Mark the prepared bindings of running flows live, for a `FlowStarted`
+    /// that was missed (a lagged event receiver). Returns the ones marked.
+    pub fn running_flows_started(
+        &self,
+        running: &dyn Fn(&FlowId) -> bool,
+    ) -> Vec<(BindingKey, ActiveBinding)> {
+        self.mark_started(running)
+    }
+
+    fn mark_started(&self, flows: &dyn Fn(&FlowId) -> bool) -> Vec<(BindingKey, ActiveBinding)> {
         let mut bindings = self.bindings.lock();
         bindings
             .iter_mut()
-            .filter(|((f, _), _)| f == flow_id)
+            .filter(|((f, _), b)| !b.started && flows(f))
             .map(|(k, b)| {
                 b.started = true;
                 (k.clone(), b.clone())
             })
             .collect()
+    }
+
+    /// `binding` is still the live binding of its device: its flow was not
+    /// stopped or restarted since (a restart gives a new passphrase).
+    pub fn is_current(&self, binding: &ActiveBinding) -> bool {
+        self.bindings
+            .lock()
+            .values()
+            .any(|b| b.started && b.device == binding.device && b.passphrase == binding.passphrase)
     }
 
     /// The flow was torn down (stopped, or its start failed): forget its
@@ -500,21 +523,36 @@ pub fn camera_of(properties: &HashMap<String, PropertyValue>) -> Option<String> 
 /// The SRT listeners of `flow`: camera blocks, and any block or element with
 /// an `srt://` URI property in listener mode.
 pub fn listeners(flow: &Flow) -> Vec<Listener> {
+    let defaults = default_srt_listener_uris();
     let blocks = flow.blocks.iter().map(|b| {
         let camera = b.block_definition_id == SRT_INPUT_BLOCK && camera_of(&b.properties).is_some();
-        (&b.id, &b.properties, camera)
+        // A property left at its default is not stored, so a block that
+        // listens on its default URI has no URI among its properties.
+        let default = defaults
+            .get(&b.block_definition_id)
+            .into_iter()
+            .flatten()
+            .filter(|(name, _)| !b.properties.contains_key(name))
+            .find_map(|(_, uri)| uri_port(uri));
+        (&b.id, &b.properties, camera, default)
     });
-    let elements = flow.elements.iter().map(|e| (&e.id, &e.properties, false));
+    let elements = flow
+        .elements
+        .iter()
+        .map(|e| (&e.id, &e.properties, false, None));
     blocks
         .chain(elements)
-        .filter_map(|(id, properties, camera)| {
+        .filter_map(|(id, properties, camera, default)| {
             let port = if camera {
                 Some(srt_port(properties))
             } else {
-                properties.values().find_map(|v| match v {
-                    PropertyValue::String(uri) if is_srt_listener(uri) => uri_port(uri),
-                    _ => None,
-                })
+                properties
+                    .values()
+                    .find_map(|v| match v {
+                        PropertyValue::String(uri) if is_srt_listener(uri) => uri_port(uri),
+                        _ => None,
+                    })
+                    .or(default)
             }?;
             Some(Listener {
                 block_id: id.clone(),
@@ -523,6 +561,30 @@ pub fn listeners(flow: &Flow) -> Vec<Listener> {
             })
         })
         .collect()
+}
+
+/// The SRT listener URIs that built-in blocks use by default, by block
+/// definition id: (property name, default URI).
+fn default_srt_listener_uris() -> &'static HashMap<String, Vec<(String, String)>> {
+    static DEFAULTS: OnceLock<HashMap<String, Vec<(String, String)>>> = OnceLock::new();
+    DEFAULTS.get_or_init(|| {
+        crate::blocks::builtin::get_all_builtin_blocks()
+            .into_iter()
+            .filter_map(|def| {
+                let uris: Vec<(String, String)> = def
+                    .exposed_properties
+                    .iter()
+                    .filter_map(|p| match &p.default_value {
+                        Some(PropertyValue::String(uri)) if is_srt_listener(uri) => {
+                            Some((p.name.clone(), uri.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                (!uris.is_empty()).then_some((def.id, uris))
+            })
+            .collect()
+    })
 }
 
 /// `srt://` with `mode=listener`, or with no host and no mode (which srtsrc
@@ -876,6 +938,31 @@ mod tests {
         assert!(!is_srt_listener("udp://:7000"));
     }
 
+    /// An SRT output left at its default URI listens on the default port,
+    /// which a camera without an `srt_uri` also takes.
+    #[test]
+    fn a_default_srt_output_listener_clashes_with_a_default_camera() {
+        let cameras = Cameras::new();
+        let mut flow = Flow::new("defaults");
+        let mut output = srt_block("out", serde_json::json!({}));
+        output.block_definition_id = "builtin.mpegtssrt_output".into();
+        flow.blocks = vec![srt_block("cam", serde_json::json!({"camera": "d"})), output];
+        let ports: Vec<(String, u16)> = listeners(&flow)
+            .into_iter()
+            .map(|l| (l.block_id, l.port))
+            .collect();
+        assert_eq!(ports, [("cam".into(), 5000), ("out".into(), 5000)]);
+        let err = cameras.prepare_flow(&flow, &free()).unwrap_err();
+        assert!(err.contains("block 'out' of this flow"), "{err}");
+
+        // A URI set to a caller is not the default listener.
+        flow.blocks[1].properties.insert(
+            "srt_uri".into(),
+            PropertyValue::String("srt://192.0.2.1:5000?mode=caller".into()),
+        );
+        assert_eq!(listeners(&flow).len(), 1);
+    }
+
     #[test]
     fn stopping_releases_the_flow_and_stops_only_phones_that_went_live() {
         let cameras = Cameras::new();
@@ -906,6 +993,38 @@ mod tests {
         assert!(cameras.reconcile(&|_| true).is_empty());
         assert_eq!(cameras.reconcile(&|_| false), ["dev1"]);
         assert!(cameras.started_bindings().is_empty());
+    }
+
+    /// A missed `FlowStarted` is made up for once the flow is seen running,
+    /// and each binding is handed out to go live once.
+    #[test]
+    fn a_running_flow_goes_live_without_its_started_event() {
+        let cameras = Cameras::new();
+        let mut flow = Flow::new("cams");
+        flow.blocks = vec![srt_block("cam", serde_json::json!({"camera": "dev1"}))];
+        cameras.prepare_flow(&flow, &free()).unwrap();
+        assert!(cameras.running_flows_started(&|_| false).is_empty());
+        let started = cameras.running_flows_started(&|f| *f == flow.id);
+        assert_eq!(started.len(), 1);
+        assert!(cameras.is_current(&started[0].1));
+        assert!(cameras.flow_started(&flow.id).is_empty(), "already live");
+        assert!(cameras.running_flows_started(&|_| true).is_empty());
+    }
+
+    /// A binding stops being current when its flow stops or restarts, so a
+    /// go-live still in flight does not leave the phone streaming.
+    #[test]
+    fn a_stopped_or_restarted_binding_is_not_current() {
+        let cameras = Cameras::new();
+        let mut flow = Flow::new("cams");
+        flow.blocks = vec![srt_block("cam", serde_json::json!({"camera": "dev1"}))];
+        cameras.prepare_flow(&flow, &free()).unwrap();
+        let (_, old) = cameras.flow_started(&flow.id).pop().unwrap();
+        cameras.flow_stopped(&flow.id);
+        assert!(!cameras.is_current(&old));
+        cameras.prepare_flow(&flow, &free()).unwrap();
+        cameras.flow_started(&flow.id);
+        assert!(!cameras.is_current(&old), "a restart has a new passphrase");
     }
 
     #[test]
