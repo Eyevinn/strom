@@ -16,26 +16,19 @@ use std::net::SocketAddr;
 
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
 use strom_types::api::ErrorResponse;
 use strom_types::cameras::{CameraInviteResponse, CameraListResponse};
 use tallycam_hub::server::{
-    controller_session, device_session_for, limit_upgrade, operator_page, same_origin,
-    DeviceConnection, DeviceQuery, CLAPPER_HTML,
+    controller_session, device_session_for, limit_upgrade, operator_page, request_host_of,
+    same_origin_of, DeviceConnection, DeviceQuery, CLAPPER_HTML,
 };
 use tracing::warn;
 
 use crate::cameras::CONTROL_PATH;
 use crate::state::AppState;
-
-/// The host the client reached Strom by: `X-Forwarded-Host` behind a proxy,
-/// else `Host`. A phone's device-key proof is bound to it (LCP protocol 4),
-/// and invites name it.
-fn host_header(headers: &HeaderMap) -> Option<String> {
-    tallycam_hub::server::request_host(headers)
-}
 
 /// Phone connection (TallyCam control protocol, device side).
 #[utoipa::path(
@@ -61,13 +54,16 @@ pub async fn device_ws(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Query(query): Query<DeviceQuery>,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Response {
     let hub = state.cameras().hub();
     let connection = DeviceConnection {
         addr,
         token: query.token,
-        host: host_header(&headers),
+        // X-Forwarded-Host, else Host, else the HTTP/2 authority: the host
+        // the phone's device-key proof is bound to (LCP protocol 4).
+        host: request_host_of(&headers, &uri),
     };
     limit_upgrade(ws).on_upgrade(move |socket| device_session_for(socket, hub, connection))
 }
@@ -92,12 +88,13 @@ pub async fn control_ws(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Response {
     // Browsers make no CORS check for WebSockets, and the session cookie
     // (SameSite=Strict) still goes to another port of the same host: a page
     // there must not drive the cameras through the operator's browser.
-    if !same_origin(&headers) {
+    if !same_origin_of(&headers, &uri) {
         warn!(
             "Camera controller from {} refused: cross-origin upgrade",
             addr
@@ -178,11 +175,12 @@ pub async fn forget_camera(
 )]
 pub async fn create_invite(
     State(state): State<AppState>,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Result<Json<CameraInviteResponse>, (StatusCode, Json<ErrorResponse>)> {
     state
         .cameras()
-        .invite(host_header(&headers).as_deref())
+        .invite(request_host_of(&headers, &uri).as_deref())
         .map(Json)
         .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse::new(e))))
 }
@@ -204,4 +202,29 @@ pub async fn cameras_page() -> impl IntoResponse {
 /// GET /cameras/clapper
 pub async fn clapper_page() -> impl IntoResponse {
     Html(CLAPPER_HTML)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::header;
+
+    /// A browser on HTTP/2 sends no `Host`; the invite and the origin check
+    /// use the URI's authority (the hub's helpers, as the routes call them).
+    #[test]
+    fn an_http2_request_gets_its_host_from_the_uri() {
+        let uri: Uri = "https://strom.example.com:8082/api/cameras/invite"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            request_host_of(&HeaderMap::new(), &uri).as_deref(),
+            Some("strom.example.com:8082")
+        );
+        let mut browser = HeaderMap::new();
+        browser.insert(
+            header::ORIGIN,
+            "https://strom.example.com:8082".parse().unwrap(),
+        );
+        assert!(same_origin_of(&browser, &uri));
+    }
 }
