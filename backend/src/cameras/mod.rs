@@ -492,9 +492,12 @@ impl Cameras {
             .collect()
     }
 
-    /// The names `device` had before its current one, in this run.
-    pub fn previous_names(&self, device: &str) -> Vec<String> {
-        self.names.lock().previous(device)
+    /// Every name a camera has or had in this run: a label that is one of
+    /// them was set by Strom, not by an operator.
+    pub fn camera_names(&self) -> std::collections::HashSet<String> {
+        let mut all = self.names.lock().all();
+        all.extend(self.display_names().into_values());
+        all
     }
 
     /// A camera as an operator knows it: "'<display name>' (<device id>)", or
