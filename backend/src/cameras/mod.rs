@@ -342,12 +342,12 @@ impl Cameras {
             if f != flow_id {
                 return true;
             }
-            if b.started {
-                removed.push(b.device.clone());
-            }
+            removed.push((b.device.clone(), b.started));
             false
         });
-        unbound(removed, &bindings)
+        let released = unbound(removed, &bindings);
+        drop(bindings);
+        self.released(released)
     }
 
     /// Drop bindings whose flow is not running: started ones whose flow
@@ -359,16 +359,36 @@ impl Cameras {
         let mut bindings = self.bindings.lock();
         let mut removed = Vec::new();
         bindings.retain(|(f, _), b| {
-            if running(f) {
+            if running(f) || (!b.started && b.prepared_at.elapsed() < PREPARED_TIMEOUT) {
                 return true;
             }
-            if b.started {
-                removed.push(b.device.clone());
-                return false;
-            }
-            b.prepared_at.elapsed() < PREPARED_TIMEOUT
+            removed.push((b.device.clone(), b.started));
+            false
         });
-        unbound(removed, &bindings)
+        let released = unbound(removed, &bindings);
+        drop(bindings);
+        self.released(released)
+    }
+
+    /// Devices whose last binding ended: each follows the hub's production
+    /// again. Returns those that went live, for the caller to stop.
+    ///
+    /// Strom gives no camera a production of its own yet: the flow has no
+    /// mains or shutter setting. Clearing it here keeps a camera from keeping
+    /// a flow's production once that flow lets go of it.
+    /// TODO: set the flow's production on the bound cameras when a flow gets
+    /// one (tallycam docs/SHADING.md D6: cameras bound to a block in a flow
+    /// get the flow's settings; an unbound camera gets Strom's default).
+    fn released(&self, released: Vec<(String, bool)>) -> Vec<String> {
+        let hub = self.hub();
+        released
+            .into_iter()
+            .filter_map(|(device, went_live)| {
+                // An unknown device (bound, never connected) has none.
+                let _ = hub.set_device_production(&device, None);
+                went_live.then_some(device)
+            })
+            .collect()
     }
 
     /// Claim a go-live attempt for `device`: false while one is in flight,
@@ -489,12 +509,23 @@ impl Cameras {
     }
 }
 
-/// The `devices` that no binding in `bindings` uses any more.
-fn unbound(devices: Vec<String>, bindings: &HashMap<BindingKey, ActiveBinding>) -> Vec<String> {
-    devices
-        .into_iter()
-        .filter(|d| !bindings.values().any(|b| &b.device == d))
-        .collect()
+/// The removed `(device, went live)` that no binding in `bindings` uses any
+/// more, once per device (went live if any of its removed bindings did).
+fn unbound(
+    removed: Vec<(String, bool)>,
+    bindings: &HashMap<BindingKey, ActiveBinding>,
+) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    for (device, went_live) in removed {
+        if bindings.values().any(|b| b.device == device) {
+            continue;
+        }
+        match out.iter_mut().find(|(d, _)| *d == device) {
+            Some((_, live)) => *live |= went_live,
+            None => out.push((device, went_live)),
+        }
+    }
+    out
 }
 
 fn summary(d: DeviceSnapshot, bound: &mut HashMap<String, Vec<CameraBinding>>) -> CameraSummary {
@@ -1071,6 +1102,75 @@ mod tests {
         cameras.prepare_flow(&flow, &free()).unwrap();
         cameras.mark_started(&|f| *f == flow.id);
         assert!(!cameras.is_current(&old), "a restart has a new passphrase");
+    }
+
+    /// Cameras with `dev1` known (offline), kept in `dir`.
+    fn cameras_knowing_dev1(dir: &std::path::Path) -> Cameras {
+        std::fs::write(
+            dir.join("cameras.json"),
+            r#"{"version":1,"cameras":[{"info":{"id":"dev1","name":"Cam 1"}}]}"#,
+        )
+        .unwrap();
+        let cameras = Cameras::new();
+        cameras.configure(dir, CameraSettings::default());
+        cameras
+    }
+
+    fn own_production(
+        cameras: &Cameras,
+        device: &str,
+    ) -> Option<tallycam_hub::protocol::Production> {
+        cameras
+            .hub()
+            .devices()
+            .into_iter()
+            .find(|d| d.id == device)
+            .and_then(|d| d.production)
+    }
+
+    /// A camera's own production ends with its binding: when the flow stops
+    /// (whether or not the phone went live) and when reconcile drops it.
+    #[test]
+    fn a_camera_follows_the_hub_production_once_its_binding_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let cameras = cameras_knowing_dev1(dir.path());
+        let hub = cameras.hub();
+        let mut flow_production = hub.production();
+        flow_production.mains_hz = if flow_production.mains_hz == 60 {
+            50
+        } else {
+            60
+        };
+        let mut flow = Flow::new("cams");
+        flow.blocks = vec![srt_block("cam", serde_json::json!({"camera": "dev1"}))];
+        let give = || {
+            hub.set_device_production("dev1", Some(flow_production.clone()))
+                .unwrap();
+            assert!(own_production(&cameras, "dev1").is_some());
+        };
+
+        // Stopped after going live.
+        cameras.prepare_flow(&flow, &free()).unwrap();
+        cameras.mark_started(&|f| *f == flow.id);
+        give();
+        assert_eq!(cameras.flow_stopped(&flow.id), ["dev1"]);
+        assert_eq!(own_production(&cameras, "dev1"), None, "flow stopped");
+        assert_eq!(hub.device_production("dev1"), Some(hub.production()));
+
+        // A start that failed before the phone went live.
+        cameras.prepare_flow(&flow, &free()).unwrap();
+        give();
+        assert!(cameras.flow_stopped(&flow.id).is_empty());
+        assert_eq!(own_production(&cameras, "dev1"), None, "start failed");
+
+        // A flow that stopped without an event.
+        cameras.prepare_flow(&flow, &free()).unwrap();
+        cameras.mark_started(&|f| *f == flow.id);
+        give();
+        assert!(cameras.reconcile(&|_| true).is_empty());
+        assert!(own_production(&cameras, "dev1").is_some(), "still running");
+        assert_eq!(cameras.reconcile(&|_| false), ["dev1"]);
+        assert_eq!(own_production(&cameras, "dev1"), None, "reconciled");
     }
 
     #[test]
