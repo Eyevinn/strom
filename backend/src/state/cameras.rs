@@ -276,6 +276,7 @@ impl AppState {
     ) {
         let cameras = &self.inner.cameras;
         let names = cameras.display_names();
+        let camera_names = cameras.camera_names();
         let running = self.running_flow_ids().await;
         let mut changes: Vec<(FlowId, String, HashMap<String, PropertyValue>)> = Vec::new();
         {
@@ -284,28 +285,7 @@ impl AppState {
                 .values()
                 .filter(|f| running.contains(&f.id) && only_flow.is_none_or(|id| id == f.id))
             {
-                let mut by_mixer: HashMap<String, HashMap<String, PropertyValue>> = HashMap::new();
-                for input in labels::camera_inputs(flow) {
-                    if only_devices.is_some_and(|d| !d.contains(&input.device)) {
-                        continue;
-                    }
-                    let Some(name) = names.get(&input.device) else {
-                        continue;
-                    };
-                    let property = labels::label_property(input.input);
-                    let current = flow
-                        .blocks
-                        .iter()
-                        .find(|b| b.id == input.mixer)
-                        .and_then(|b| b.properties.get(&property));
-                    let previous = cameras.previous_names(&input.device);
-                    if labels::should_relabel(current, input.input, name, &previous) {
-                        by_mixer
-                            .entry(input.mixer)
-                            .or_default()
-                            .insert(property, PropertyValue::String(name.clone()));
-                    }
-                }
+                let by_mixer = labels::relabels(flow, &names, &camera_names, only_devices);
                 changes.extend(by_mixer.into_iter().map(|(m, p)| (flow.id, m, p)));
             }
         }

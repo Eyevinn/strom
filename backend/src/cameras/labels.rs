@@ -1,9 +1,11 @@
 //! Vision mixer input labels that follow the camera on the input.
 //!
 //! A mixer input fed by a camera-bound SRT input is labelled with the
-//! camera's display name, and the label follows when the name changes. An
-//! operator's own label is left alone: a label is only replaced when it is
-//! empty, the mixer's default ("In N"), or a name the camera had before.
+//! camera's display name, and the label follows when the name changes, or
+//! when the input gets another camera. An operator's own label is left
+//! alone: a label is only replaced when it is empty, the mixer's default
+//! ("In N"), or a name a camera has or had (this camera's earlier name, or
+//! the name of a camera the input showed before).
 
 use std::collections::{HashMap, HashSet};
 
@@ -72,13 +74,14 @@ pub fn camera_inputs(flow: &Flow) -> Vec<CameraInput> {
 }
 
 /// Whether input `input`'s label (`current`) may be replaced by the camera's
-/// name `name`: it is unset, empty, the default "In N", or one of the
-/// camera's `previous` names. Not when it already is `name`.
+/// name `name`: it is unset, empty, the default "In N", or one of
+/// `camera_names`, the names cameras have or had (so a label is no
+/// operator's own). Not when it already is `name`.
 pub fn should_relabel(
     current: Option<&PropertyValue>,
     input: usize,
     name: &str,
-    previous: &[String],
+    camera_names: &HashSet<String>,
 ) -> bool {
     let current = match current {
         None => return true,
@@ -90,7 +93,41 @@ pub fn should_relabel(
     }
     current.trim().is_empty()
         || current == default_input_label(input)
-        || previous.iter().any(|p| p == current)
+        || camera_names.contains(current)
+}
+
+/// The label changes for the camera inputs of `flow`, by mixer block id:
+/// each input fed by one camera gets the camera's display name (`names`, by
+/// device id) where [`should_relabel`] allows. Limited to `only_devices`
+/// when given.
+pub fn relabels(
+    flow: &Flow,
+    names: &HashMap<String, String>,
+    camera_names: &HashSet<String>,
+    only_devices: Option<&[String]>,
+) -> HashMap<String, HashMap<String, PropertyValue>> {
+    let mut by_mixer: HashMap<String, HashMap<String, PropertyValue>> = HashMap::new();
+    for input in camera_inputs(flow) {
+        if only_devices.is_some_and(|d| !d.contains(&input.device)) {
+            continue;
+        }
+        let Some(name) = names.get(&input.device) else {
+            continue;
+        };
+        let property = label_property(input.input);
+        let current = flow
+            .blocks
+            .iter()
+            .find(|b| b.id == input.mixer)
+            .and_then(|b| b.properties.get(&property));
+        if should_relabel(current, input.input, name, camera_names) {
+            by_mixer
+                .entry(input.mixer)
+                .or_default()
+                .insert(property, PropertyValue::String(name.clone()));
+        }
+    }
+    by_mixer
 }
 
 /// The names each camera has had in this run, to recognise a label that is
@@ -122,6 +159,11 @@ impl NameHistory {
             .get(device)
             .map(|n| n[..n.len().saturating_sub(1)].to_vec())
             .unwrap_or_default()
+    }
+
+    /// Every name every camera has had in this run, current ones included.
+    pub fn all(&self) -> HashSet<String> {
+        self.names.values().flatten().cloned().collect()
     }
 }
 
@@ -198,7 +240,7 @@ mod tests {
     #[test]
     fn only_unset_default_or_earlier_camera_names_are_replaced() {
         let s = |v: &str| PropertyValue::String(v.to_string());
-        let previous = vec!["iPhone 16 · 55dd".to_string()];
+        let previous = HashSet::from(["iPhone 16 · 55dd".to_string()]);
         let name = "Stage left";
         assert!(should_relabel(None, 0, name, &previous));
         assert!(should_relabel(Some(&s("")), 0, name, &previous));
@@ -225,5 +267,68 @@ mod tests {
         assert_eq!(h.previous("p"), vec!["iPhone 16 · 55dd".to_string()]);
         assert!(h.note("p", "iPhone 16 · 55dd"));
         assert_eq!(h.previous("p"), vec!["Stage left".to_string()]);
+        h.note("q", "Wide");
+        assert_eq!(
+            h.all(),
+            HashSet::from(["Stage left", "iPhone 16 · 55dd", "Wide"].map(String::from))
+        );
+    }
+
+    /// An input that gets another camera (the block's `camera` changed, or
+    /// two cameras swapped blocks) shows the new camera's name, not the
+    /// name the input was labelled with for the old one. An operator's own
+    /// label stays.
+    #[test]
+    fn an_input_that_gets_another_camera_is_relabelled() {
+        let mut flow = flow();
+        let mixer = flow.blocks.iter_mut().find(|b| b.id == "mixer").unwrap();
+        // Input 0 (cam_a, now phone-a) still has phone-b's name; input 1
+        // (cam_b, now phone-b) has phone-a's. Input 2 is the operator's.
+        for (input, label) in [(0, "Stage right"), (1, "Stage left"), (2, "Wide shot")] {
+            mixer.properties.insert(
+                label_property(input),
+                PropertyValue::String(label.to_string()),
+            );
+        }
+        let names: HashMap<String, String> = [
+            ("phone-a", "Stage left"),
+            ("phone-b", "Stage right"),
+            ("phone-c", "Overhead"),
+        ]
+        .into_iter()
+        .map(|(d, n)| (d.to_string(), n.to_string()))
+        .collect();
+        let camera_names: HashSet<String> = names.values().cloned().collect();
+
+        let changes = relabels(&flow, &names, &camera_names, None);
+        let s = |v: &str| v.to_string();
+        // PropertyValue has no PartialEq: compare the strings.
+        let texts = |m: &HashMap<String, PropertyValue>| -> HashMap<String, String> {
+            m.iter()
+                .map(|(k, v)| match v {
+                    PropertyValue::String(t) => (k.clone(), t.clone()),
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
+        assert_eq!(
+            texts(&changes["mixer"]),
+            HashMap::from([
+                (label_property(0), s("Stage left")),
+                (label_property(1), s("Stage right")),
+            ])
+        );
+        // The inner mixer's unset label gets its camera's name.
+        assert_eq!(
+            texts(&changes["inner"]),
+            HashMap::from([(label_property(0), s("Overhead"))])
+        );
+        // Limited to some devices.
+        let only = relabels(&flow, &names, &camera_names, Some(&["phone-b".into()]));
+        assert_eq!(
+            texts(&only["mixer"]),
+            HashMap::from([(label_property(1), s("Stage right"))])
+        );
+        assert!(!only.contains_key("inner"));
     }
 }
