@@ -16,7 +16,7 @@ use std::net::SocketAddr;
 
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
 use strom_types::api::ErrorResponse;
@@ -30,11 +30,11 @@ use tracing::warn;
 use crate::cameras::CONTROL_PATH;
 use crate::state::AppState;
 
+/// The host the client reached Strom by: `X-Forwarded-Host` behind a proxy,
+/// else `Host`. A phone's device-key proof is bound to it (LCP protocol 4),
+/// and invites name it.
 fn host_header(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .map(str::to_string)
+    tallycam_hub::server::request_host(headers)
 }
 
 /// Phone connection (TallyCam control protocol, device side).

@@ -73,9 +73,7 @@ gst-plugins-lsp = { git = "https://github.com/srperens/lsp-plugins-rs", tag = "v
 gst-plugin-efp = { git = "https://github.com/Eyevinn/efp", tag = "v0.4.0", package = "gst-plugin-efp", optional = true }
 
 # Phone cameras (TallyCam): device registry, tally and provisioning.
-# Pinned to a main commit until the next tag (after v0.2.0); move to that tag
-# when it exists.
-tallycam-hub = { git = "https://github.com/Eyevinn/tallycam", rev = "01aa4dfd1481b72eb51fd85db387ff450faf0a33", features = ["server"] }
+tallycam-hub = { git = "https://github.com/Eyevinn/tallycam", tag = "v0.3.0", features = ["server"] }
 
 # Encoding
 base64 = "0.22"
