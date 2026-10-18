@@ -121,6 +121,8 @@ mod tests {
         StoredDevice {
             info: serde_json::from_value(serde_json::json!({"id": id, "name": name})).unwrap(),
             public_key: None,
+            tags: Vec::new(),
+            last_seen_s: None,
         }
     }
 

@@ -150,11 +150,13 @@ mod tests {
             status: None,
             preview: None,
             tally: Default::default(),
-            protocol: 2,
-            ownership: Default::default(),
+            protocol: 3,
             image_stats: None,
             online,
             key_fingerprint: Some("abcdef".to_string()),
+            tags: Vec::new(),
+            last_seen_s: None,
+            production: None,
         }
     }
 
