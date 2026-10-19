@@ -656,6 +656,7 @@ impl BlockBuilder for RtmpOutputBuilder {
         let video_slot_for_setup = video_pad_slot.clone();
         let audio_slot_for_setup = audio_pad_slot.clone();
         let instance_for_setup = instance_id.to_string();
+        let link_targets = ctx.flow_link_targets();
         ctx.register_element_setup(Box::new(move |_flow_id, _events| {
             let Some(mux) = mux_for_setup.upgrade() else {
                 return;
@@ -664,7 +665,7 @@ impl BlockBuilder for RtmpOutputBuilder {
                 (&video_input_weak, &video_slot_for_setup, "video"),
                 (&audio_input_weak, &audio_slot_for_setup, "audio"),
             ] {
-                if !input_is_connected(input) {
+                if !input_is_connected(input, &link_targets) {
                     debug!(
                         "RTMP {}: {} input is not connected, reserving no pad",
                         instance_for_setup, name

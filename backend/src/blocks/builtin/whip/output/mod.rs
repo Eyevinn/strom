@@ -16,9 +16,10 @@
 //! for each pad's caps before they do. A declared track that nothing feeds would
 //! hold the whole session back, audio included. So the sink pads are requested
 //! in a `register_element_setup` hook, the window after construction has linked
-//! every block and before the pipeline leaves NULL, and only for the inputs that
-//! are linked by then. See [`input_is_connected`] for the one kind of
-//! link that window cannot see.
+//! every block and before the pipeline leaves NULL, and only for the inputs the
+//! flow feeds: linked by then, or targeted by a link that waits for a sometimes
+//! pad upstream (see [`input_is_connected`]). The late link lands on the input
+//! element, which the hook has already wired to its sink pad.
 
 pub(crate) mod definition;
 mod video;
@@ -186,6 +187,7 @@ pub(super) fn register_sink_pad_requests(
 ) {
     let sink_weak = sink_element.downgrade();
     let instance_id = instance_id.to_string();
+    let link_targets = ctx.flow_link_targets();
     ctx.register_element_setup(Box::new(move |_flow_id, _events| {
         let Some(sink_element) = sink_weak.upgrade() else {
             return;
@@ -195,7 +197,7 @@ pub(super) fn register_sink_pad_requests(
         let mut linked_video = 0usize;
 
         for track in &tracks {
-            if !input_is_connected(&track.input) {
+            if !input_is_connected(&track.input, &link_targets) {
                 info!(
                     "WHIP Output {}: {} track {} is not connected, requesting no sink pad for it",
                     instance_id,
