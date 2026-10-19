@@ -19,6 +19,7 @@ pub mod inter;
 pub mod latency;
 pub mod live_recorder;
 pub mod liveaudiorouter;
+pub mod local_output;
 pub mod loudness;
 pub mod mediaplayer;
 pub mod meter;
@@ -74,6 +75,9 @@ pub fn get_all_builtin_blocks() -> Vec<BlockDefinition> {
 
     // Add Local Input block (local video/audio sources via native OS APIs)
     blocks.extend(devicesrc::get_blocks());
+
+    // Add Local Output block (local audio outputs via native OS APIs)
+    blocks.extend(local_output::get_blocks());
 
     // Add EFP/SRT blocks
     #[cfg(feature = "efp")]
@@ -171,6 +175,7 @@ pub fn get_builder(block_definition_id: &str) -> Option<Arc<dyn BlockBuilder>> {
         "builtin.decklink_input" => Some(Arc::new(decklink::DeckLinkInputBuilder)),
         "builtin.decklink_output" => Some(Arc::new(decklink::DeckLinkOutputBuilder)),
         "builtin.local_input" => Some(Arc::new(devicesrc::LocalInputBuilder)),
+        "builtin.local_output" => Some(Arc::new(local_output::LocalOutputBuilder)),
         "builtin.html_input" => Some(Arc::new(html_input::HtmlInputBuilder)),
         "builtin.inter_output" => Some(Arc::new(inter::InterOutputBuilder)),
         "builtin.inter_input" => Some(Arc::new(inter::InterInputBuilder)),

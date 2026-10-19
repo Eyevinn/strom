@@ -2391,25 +2391,35 @@ impl PropertyInspector {
                             strom_types::block::PropertyType::Device { category } => {
                                 device_picker_actions.needed = true;
                                 use strom_types::discovery::DeviceCategory;
-                                let (devices, kind_label): (&[_], &str) = match category {
+                                // The audio list holds inputs and outputs.
+                                let of_category = |list: &[strom_types::discovery::DeviceResponse]| {
+                                    list.iter()
+                                        .filter(|d| d.category == *category)
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                };
+                                let (devices, kind_label) = match category {
                                     DeviceCategory::VideoSource => {
-                                        (video_devices, "video source")
+                                        (of_category(video_devices), "video source")
                                     }
                                     DeviceCategory::AudioSource => {
-                                        (audio_devices, "audio source")
+                                        (of_category(audio_devices), "audio source")
+                                    }
+                                    DeviceCategory::AudioSink => {
+                                        (of_category(audio_devices), "audio output")
                                     }
                                     // No UI lists for these yet — picker will
                                     // show an empty list with the refresh
                                     // button, which is intentional until we
                                     // wire up extra fetches.
-                                    DeviceCategory::AudioSink
-                                    | DeviceCategory::NetworkSource
-                                    | DeviceCategory::Other => (&[], "device"),
+                                    DeviceCategory::NetworkSource | DeviceCategory::Other => {
+                                        (Vec::new(), "device")
+                                    }
                                 };
                                 Self::show_local_device_editor(
                                     ui,
                                     &mut value,
-                                    devices,
+                                    &devices,
                                     kind_label,
                                     local_devices_loading,
                                     device_picker_actions,

@@ -269,21 +269,19 @@ impl StromApp {
         if !self.audio_devices_loading {
             self.audio_devices_loading = true;
             spawn_task(async move {
-                match api.list_devices("audio_source").await {
-                    Ok(devices) => {
-                        let _ = tx.send(AppMessage::LocalDevicesLoaded {
-                            category: strom_types::discovery::DeviceCategory::AudioSource,
-                            devices,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!("list_devices(audio_source) failed: {}", e);
-                        let _ = tx.send(AppMessage::LocalDevicesLoaded {
-                            category: strom_types::discovery::DeviceCategory::AudioSource,
-                            devices: Vec::new(),
-                        });
+                // Audio inputs (Local Input) and outputs (Local Output) share
+                // one list; each picker keeps the entries of its category.
+                let mut devices = Vec::new();
+                for category in ["audio_source", "audio_sink"] {
+                    match api.list_devices(category).await {
+                        Ok(found) => devices.extend(found),
+                        Err(e) => tracing::warn!("list_devices({}) failed: {}", category, e),
                     }
                 }
+                let _ = tx.send(AppMessage::LocalDevicesLoaded {
+                    category: strom_types::discovery::DeviceCategory::AudioSource,
+                    devices,
+                });
                 ctx.request_repaint();
             });
         }

@@ -12,6 +12,17 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
+/// Device classes the monitor lists. `Audio/Source` and `Video/Source` fill
+/// Local Input's pickers, `Audio/Sink` fills Local Output's. On Windows the
+/// providers (WASAPI, DirectSound, MF, ASIO) probe hardware on enumeration,
+/// a one-time cost at startup that buys picking local devices from the UI.
+const MONITORED_DEVICE_CLASSES: [&str; 4] = [
+    "Audio/Source",
+    "Audio/Sink",
+    "Video/Source",
+    "Source/Network",
+];
+
 /// Sync, shareable map of discovery-id → live `gst::Device` handle.
 /// Mirrored alongside `DiscoveredDevice` so block builders (which run on
 /// blocking threads where we can't await an async lock) can resolve a
@@ -140,14 +151,9 @@ impl DeviceDiscovery {
         let monitor = gst::DeviceMonitor::new();
 
         // Add filters for device types we care about.
-        // Audio/Source + Video/Source are needed by the Local Input block to
-        // populate its device picker. On Windows the underlying providers
-        // (WASAPI, DirectSound, MF) do hardware probing on enumeration which
-        // adds a small one-time cost at startup; this is the trade-off for
-        // letting users pick local capture devices from the UI.
-        monitor.add_filter(Some("Audio/Source"), None);
-        monitor.add_filter(Some("Video/Source"), None);
-        monitor.add_filter(Some("Source/Network"), None);
+        for class in MONITORED_DEVICE_CLASSES {
+            monitor.add_filter(Some(class), None);
+        }
 
         // Get the bus for device events
         let bus = monitor.bus();
@@ -543,6 +549,12 @@ impl Drop for DeviceDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_outputs_are_monitored_for_the_local_output_picker() {
+        assert!(MONITORED_DEVICE_CLASSES.contains(&"Audio/Sink"));
+        assert!(MONITORED_DEVICE_CLASSES.contains(&"Audio/Source"));
+    }
 
     #[test]
     fn test_device_category_from_class() {
