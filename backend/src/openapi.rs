@@ -191,6 +191,12 @@ use utoipa::OpenApi;
         crate::api::probes::deactivate_probe,
         // WebSocket endpoint
         crate::api::websocket::websocket_handler,
+        // Phone cameras (TallyCam)
+        crate::api::cameras::device_ws,
+        crate::api::cameras::control_ws,
+        crate::api::cameras::list_cameras,
+        crate::api::cameras::create_invite,
+        crate::api::cameras::forget_camera,
         // Remote control of HTML source browsers
         crate::api::devtools::list_targets,
         crate::api::devtools::create_link,
@@ -363,6 +369,12 @@ use utoipa::OpenApi;
             ActiveProbesResponse,
             // MCP types
             JsonRpcRequest,
+            // Camera types
+            strom_types::cameras::CameraTally,
+            strom_types::cameras::CameraBinding,
+            strom_types::cameras::CameraSummary,
+            strom_types::cameras::CameraListResponse,
+            strom_types::cameras::CameraInviteResponse,
             // WebSocket event types
             StromEvent,
             ServerMessage,
@@ -376,6 +388,7 @@ use utoipa::OpenApi;
         (name = "gst-launch", description = "gst-launch-1.0 import/export endpoints"),
         (name = "Network", description = "Network interface discovery endpoints"),
         (name = "ports", description = "Port numbers Strom administers and hands out"),
+        (name = "cameras", description = "Phone cameras (TallyCam): connections, invites, tally"),
         (name = "System", description = "System information endpoints"),
         (name = "Media", description = "Media file management endpoints"),
         (name = "auth", description = "Authentication endpoints"),

@@ -130,7 +130,8 @@ pub async fn device_status(State(state): State<AppState>) -> impl IntoResponse {
             DeviceCategory::AudioSink => by_category.audio_sink += 1,
             DeviceCategory::VideoSource => by_category.video_source += 1,
             DeviceCategory::NetworkSource => by_category.network_source += 1,
-            DeviceCategory::Other => by_category.other += 1,
+            // Cameras are not GStreamer devices; discovery never reports one.
+            DeviceCategory::Camera | DeviceCategory::Other => by_category.other += 1,
         }
     }
 
@@ -145,16 +146,34 @@ pub async fn device_status(State(state): State<AppState>) -> impl IntoResponse {
 /// Query parameters for device listing.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct DeviceListQuery {
-    /// Filter by category (audio_source, audio_sink, video_source, network_source).
+    /// Filter by category (audio_source, audio_sink, video_source, network_source, camera).
     pub category: Option<String>,
 }
 
+/// The category of a `category` query value; `None` lists every discovered device.
+fn parse_category(category: &str) -> Option<DeviceCategory> {
+    match category {
+        "audio_source" | "audiosource" => Some(DeviceCategory::AudioSource),
+        "audio_sink" | "audiosink" => Some(DeviceCategory::AudioSink),
+        "video_source" | "videosource" => Some(DeviceCategory::VideoSource),
+        "network_source" | "networksource" | "ndi" => Some(DeviceCategory::NetworkSource),
+        "camera" | "cameras" => Some(DeviceCategory::Camera),
+        _ => None,
+    }
+}
+
 /// List all discovered devices.
+///
+/// `category=camera` lists the phone cameras (TallyCam) Strom knows instead:
+/// `id` is the device id (what an SRT input's `camera` property stores),
+/// `name` the display name, and `properties` carry `online` ("true"/"false"),
+/// `model`, `platform`, `app_version`, `reported_name` and `key_fingerprint`.
+/// Cameras are not part of the unfiltered list.
 #[utoipa::path(
     get,
     path = "/api/discovery/devices",
     params(
-        ("category" = Option<String>, Query, description = "Filter by category")
+        ("category" = Option<String>, Query, description = "Filter by category (audio_source, audio_sink, video_source, network_source, camera)")
     ),
     responses(
         (status = 200, description = "List of discovered devices", body = Vec<DeviceResponse>),
@@ -165,22 +184,10 @@ pub async fn list_devices(
     State(state): State<AppState>,
     Query(query): Query<DeviceListQuery>,
 ) -> impl IntoResponse {
-    let devices = if let Some(category_str) = query.category {
-        let category = match category_str.as_str() {
-            "audio_source" | "audiosource" => Some(DeviceCategory::AudioSource),
-            "audio_sink" | "audiosink" => Some(DeviceCategory::AudioSink),
-            "video_source" | "videosource" => Some(DeviceCategory::VideoSource),
-            "network_source" | "networksource" | "ndi" => Some(DeviceCategory::NetworkSource),
-            _ => None,
-        };
-
-        if let Some(cat) = category {
-            state.discovery().get_devices_by_category(cat).await
-        } else {
-            state.discovery().get_devices().await
-        }
-    } else {
-        state.discovery().get_devices().await
+    let devices = match query.category.as_deref().and_then(parse_category) {
+        Some(DeviceCategory::Camera) => return Json(state.cameras().device_list()),
+        Some(cat) => state.discovery().get_devices_by_category(cat).await,
+        None => state.discovery().get_devices().await,
     };
 
     let responses: Vec<DeviceResponse> = devices.iter().map(|d| d.to_api_response()).collect();
@@ -271,4 +278,20 @@ pub async fn list_ndi_sources(State(state): State<AppState>) -> impl IntoRespons
 pub async fn refresh_ndi_sources(State(state): State<AppState>) -> impl IntoResponse {
     state.discovery().refresh_devices().await;
     StatusCode::OK
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn camera_category_is_parsed() {
+        assert_eq!(parse_category("camera"), Some(DeviceCategory::Camera));
+        assert_eq!(parse_category("cameras"), Some(DeviceCategory::Camera));
+        assert_eq!(
+            parse_category("video_source"),
+            Some(DeviceCategory::VideoSource)
+        );
+        assert_eq!(parse_category("bogus"), None);
+    }
 }

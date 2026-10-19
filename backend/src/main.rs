@@ -619,6 +619,13 @@ fn run_with_gui(
             )
             .await
             .expect("failed to configure port pool");
+        state.configure_cameras(
+            config
+                .flows_path
+                .parent()
+                .unwrap_or(std::path::Path::new(".")),
+            config.camera_settings(),
+        );
         state
             .media_downloads()
             .configure(config.media_download_settings());
@@ -636,6 +643,7 @@ fn run_with_gui(
 
         // Start background services (SAP discovery listener and announcer)
         state.start_services().await;
+        state.start_camera_service();
 
         // Start debounced flow save task (batches rapid changes to avoid disk thrashing)
         state.start_debounced_save_task();
@@ -894,6 +902,13 @@ async fn run_headless(
             config.probe_before_handout,
         )
         .await?;
+    state.configure_cameras(
+        config
+            .flows_path
+            .parent()
+            .unwrap_or(std::path::Path::new(".")),
+        config.camera_settings(),
+    );
     state
         .media_downloads()
         .configure(config.media_download_settings());
@@ -908,6 +923,7 @@ async fn run_headless(
 
     // Start background services (SAP discovery listener and announcer)
     state.start_services().await;
+    state.start_camera_service();
 
     // Start debounced flow save task (batches rapid changes to avoid disk thrashing)
     state.start_debounced_save_task();

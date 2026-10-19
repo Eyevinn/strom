@@ -230,6 +230,11 @@ impl ApiClient {
         )
     }
 
+    /// The phone camera page (TallyCam operator page).
+    pub fn get_cameras_page_url(&self) -> String {
+        format!("{}/cameras", self.base_url.trim_end_matches("/api"))
+    }
+
     /// Get the vision mixer control page URL for a given flow ID and block ID.
     pub fn get_vision_mixer_url(&self, flow_id: &strom_types::FlowId, block_id: &str) -> String {
         let server_base = self.base_url.trim_end_matches("/api");

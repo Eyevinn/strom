@@ -166,6 +166,23 @@ impl StromApp {
                         self.current_page = AppPage::Links;
                         self.focus_target = FocusTarget::None;
                     }
+                    if ui
+                        .selectable_label(
+                            false,
+                            egui::RichText::new(format!(
+                                "Cameras {}",
+                                egui_phosphor::regular::ARROW_SQUARE_OUT
+                            ))
+                            .size(16.0),
+                        )
+                        .on_hover_text(
+                            "Phone cameras: add, name and control them (opens in a new tab)",
+                        )
+                        .clicked()
+                    {
+                        let url = self.api.get_cameras_page_url();
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(&url));
+                    }
 
                     ui.separator();
 
@@ -1454,9 +1471,12 @@ impl StromApp {
                             rtp_stats,
                             &self.network_interfaces,
                             &self.available_channels,
-                            &self.video_devices,
-                            &self.audio_devices,
-                            local_devices_loading,
+                            crate::device_lists::DeviceLists {
+                                video: &self.video_devices,
+                                audio: &self.audio_devices,
+                                cameras: &self.camera_devices,
+                                loading: local_devices_loading,
+                            },
                             &mut self.qr_inline,
                             self.devtools_link_warning.as_ref(),
                             &mut self.qr_cache,
@@ -1482,6 +1502,11 @@ impl StromApp {
                                 true,
                                 std::time::Duration::from_secs(0),
                             );
+                        }
+
+                        if result.open_cameras_page {
+                            let url = self.api.get_cameras_page_url();
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(&url));
                         }
 
                         // Handle deletion request

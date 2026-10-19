@@ -181,8 +181,13 @@ pub fn parse_input_labels(
 fn input_label_text(i: usize, value: Option<&PropertyValue>) -> String {
     match value {
         Some(PropertyValue::String(s)) if !s.is_empty() => s.clone(),
-        _ => format!("In {}", i + 1),
+        _ => default_input_label(i),
     }
+}
+
+/// The label input `i` shows when it has none of its own: "In N".
+pub fn default_input_label(i: usize) -> String {
+    format!("In {}", i + 1)
 }
 
 /// The input index an `input_N_label` property name refers to.
