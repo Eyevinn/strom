@@ -25,10 +25,12 @@ fn init_gst() {
     });
 }
 
-/// Build the real block and wire its internal links into a pipeline. Linking
-/// requests whipclientsink's input pad, which is when webrtcsink creates the
-/// input appsink, so no endpoint has to be reachable.
-fn build_linked_block() -> (gst::Pipeline, HashMap<String, gst::Element>) {
+/// Build the real block, wire its internal links into a pipeline, link a live
+/// audio source into its audio input and run its setup hook, as the pipeline
+/// manager does. The hook requests whipclientsink's input pad for the linked
+/// input, which is when webrtcsink creates the input appsink, so no endpoint
+/// has to be reachable.
+fn build_linked_block() -> (gst::Pipeline, HashMap<String, gst::Element>, gst::Element) {
     init_gst();
 
     let properties: HashMap<String, PropertyValue> = [
@@ -55,25 +57,37 @@ fn build_linked_block() -> (gst::Pipeline, HashMap<String, gst::Element>) {
         elements.insert(id.clone(), element.clone());
     }
     for (from, to) in &result.internal_links {
-        let src = &elements[&from.element_id];
-        let dst = &elements[&to.element_id];
-        let src_pad = src
-            .static_pad(from.pad_name.as_deref().unwrap_or("src"))
-            .expect("source pad");
-        let dst_name = to.pad_name.as_deref().unwrap_or("sink");
-        let dst_pad = dst
-            .static_pad(dst_name)
-            .or_else(|| dst.request_pad_simple(dst_name))
-            .unwrap_or_else(|| panic!("no sink pad {dst_name} on {}", dst.name()));
-        src_pad.link(&dst_pad).expect("internal link");
+        elements[&from.element_id]
+            .link_pads(
+                from.pad_name.as_deref(),
+                &elements[&to.element_id],
+                to.pad_name.as_deref(),
+            )
+            .expect("internal link");
     }
 
-    (pipeline, elements)
+    // audiotestsrc reports one buffer of latency; the block's share is the
+    // pipeline latency minus that.
+    let src = gst::ElementFactory::make("audiotestsrc")
+        .property("is-live", true)
+        .build()
+        .expect("audiotestsrc");
+    pipeline.add(&src).expect("add source");
+    src.link(&elements["whip:audioconvert"])
+        .expect("link source to the block's audio input");
+
+    let flow_id = strom_types::flow::FlowId::new_v4();
+    let events = strom::events::EventBroadcaster::with_capacity(16);
+    for setup in ctx.take_element_setups() {
+        setup(flow_id, events.clone());
+    }
+
+    (pipeline, elements, src)
 }
 
 #[test]
 fn every_whipclientsink_input_appsink_has_no_processing_deadline() {
-    let (pipeline, elements) = build_linked_block();
+    let (pipeline, elements, _src) = build_linked_block();
 
     let bin = elements["whip:whipclientsink"]
         .clone()
@@ -107,17 +121,7 @@ fn every_whipclientsink_input_appsink_has_no_processing_deadline() {
 
 #[test]
 fn whip_output_latency_excludes_appsink_processing_deadline() {
-    let (pipeline, elements) = build_linked_block();
-
-    // audiotestsrc reports one buffer of latency; the block's share is the
-    // pipeline latency minus that.
-    let src = gst::ElementFactory::make("audiotestsrc")
-        .property("is-live", true)
-        .build()
-        .expect("audiotestsrc");
-    pipeline.add(&src).expect("add source");
-    src.link(&elements["whip:audioconvert"])
-        .expect("link source to the block's audio input");
+    let (pipeline, _elements, src) = build_linked_block();
 
     pipeline.set_state(gst::State::Playing).expect("PLAYING");
     let (res, state, _) = pipeline.state(gst::ClockTime::from_seconds(10));

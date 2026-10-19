@@ -15,6 +15,7 @@ pub mod efpsrt;
 #[cfg(feature = "efp")]
 pub mod efpsrt_input;
 pub mod html_input;
+pub(crate) mod inputs;
 pub mod inter;
 pub mod latency;
 pub mod live_recorder;

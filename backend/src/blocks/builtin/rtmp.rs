@@ -133,6 +133,7 @@
 //! refused with a message naming that block. See the audio section above for why
 //! the two sides differ.
 
+use super::inputs::input_is_connected;
 use super::refusal::refuse_input;
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
@@ -855,19 +856,6 @@ fn release_reserved_pad(slot: &PadSlot, mux: &gst::Element, name: &str, instance
             instance, name
         );
     }
-}
-
-/// Whether an input identity has something linked to its sink pad.
-///
-/// Runs after construction's linking pass, so this is exact for links resolved
-/// there. Same helper and same caveat as `recorder.rs`: a link deferred to
-/// `pending_links` would resolve after this and read as unconnected.
-fn input_is_connected(input: &gst::glib::WeakRef<gst::Element>) -> bool {
-    input
-        .upgrade()
-        .and_then(|e| e.static_pad("sink"))
-        .map(|p| p.is_linked())
-        .unwrap_or(false)
 }
 
 /// Request one of flvmux's fixed-name sink pads.
