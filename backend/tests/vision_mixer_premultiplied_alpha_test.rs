@@ -15,11 +15,8 @@ use gstreamer::prelude::*;
 use serial_test::serial;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use strom::blocks::BlockRegistry;
-use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
 use strom_types::{Flow, PropertyValue as PV};
-use tempfile::NamedTempFile;
 
 const W: usize = 320;
 const H: usize = 180;
@@ -241,20 +238,9 @@ impl Running {
             let ml = main_loop.clone();
             std::thread::spawn(move || ml.run())
         };
-        let temp_file = NamedTempFile::new().unwrap();
-        let registry = BlockRegistry::new(temp_file.path());
         let flow = build_flow(backend, block_id, alpha_mode, dsk);
-        let mut manager = PipelineManager::new(
-            &flow,
-            EventBroadcaster::new(10, false, false),
-            &registry,
-            vec![],
-            "all".to_string(),
-            None,
-            std::env::temp_dir(),
-            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-        )
-        .unwrap_or_else(|e| panic!("build {} pipeline: {}", backend, e));
+        let mut manager = common::manager::build(&flow)
+            .unwrap_or_else(|e| panic!("build {} pipeline: {}", backend, e));
         manager
             .start()
             .unwrap_or_else(|e| panic!("start {} pipeline: {}", backend, e));
