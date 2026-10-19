@@ -2,14 +2,13 @@
 //! CPU mixer flow built through `PipelineManager`: `input_media_age_ms` from
 //! the state, and `actual_transition_type` from a take.
 
+pub mod common;
+
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use strom::blocks::BlockRegistry;
-use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
 use strom_types::vision_mixer::{PipTransforms, SourceCrop};
 use strom_types::{Flow, PropertyValue as PV};
-use tempfile::NamedTempFile;
 
 /// A take index for `trigger_transition`, which takes `usize` on main and
 /// `Option<usize>` once #806 lands. Either signature accepts this.
@@ -106,19 +105,7 @@ fn build_flow(block_id: &str, num_inputs: u64, linked: usize, extra: &[(&str, &s
 async fn start(flow: &Flow, block_id: &str) -> PipelineManager {
     gstreamer::init().unwrap();
     strom::gpu::detect_gpu_capabilities();
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
-    let mut manager = PipelineManager::new(
-        flow,
-        EventBroadcaster::new(10, false, false),
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        std::env::temp_dir(),
-        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-    )
-    .expect("build pipeline");
+    let mut manager = common::manager::build(flow).expect("build pipeline");
     manager.start().expect("start pipeline");
     // A live latency answer is not proof of data: wait for the mixer to run.
     let mixer = manager

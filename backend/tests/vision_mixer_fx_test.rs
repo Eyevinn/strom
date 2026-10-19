@@ -571,19 +571,7 @@ async fn master_fx_take_out_of_a_pip_reports_the_effect() {
         );
     }
 
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
-    let mut manager = PipelineManager::new(
-        &flow,
-        EventBroadcaster::new(10, false, false),
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        std::env::temp_dir(),
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-    )
-    .expect("build GPU pipeline");
+    let mut manager = common::manager::build(&flow).expect("build GPU pipeline");
     manager.start().expect("start GPU pipeline");
 
     let mixer = manager
@@ -693,19 +681,7 @@ async fn gpu_mixer_reports_media_age_per_input() {
         }
     }
 
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
-    let mut manager = PipelineManager::new(
-        &flow,
-        EventBroadcaster::new(10, false, false),
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        std::env::temp_dir(),
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-    )
-    .expect("build GPU pipeline");
+    let mut manager = common::manager::build(&flow).expect("build GPU pipeline");
     manager.start().expect("start GPU pipeline");
 
     let mixer = manager
