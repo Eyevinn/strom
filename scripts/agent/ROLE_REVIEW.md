@@ -41,6 +41,19 @@ line in it **starts with** `<!-- strom-agent`. Never decide it by author: that d
 human's own words. Anchor the match to the start of a line, because GitHub's "Quote reply"
 copies the marker into a human's comment mid-line.
 
+## Start with the whole board
+
+Before the first item, read the title and the first lines of every open issue and pull
+request:
+
+    gh issue list --state open --limit 200 --json number,title,body \
+      --jq '.[] | "#\(.number) \(.title) — \(.body[0:200])"'
+    gh pr list --state open --limit 200 --json number,title,body,baseRefName \
+      --jq '.[] | "#\(.number) [\(.baseRefName)] \(.title) — \(.body[0:200])"'
+
+Keep it in mind for every item. Keyword search misses an item that describes the same
+problem in other words; having read the whole board does not.
+
 ## Order and budget
 
 At most **eight items per run**, issues and pull requests combined. Finish and post each item

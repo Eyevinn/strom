@@ -7,7 +7,8 @@ investigate again with fresh eyes. Give them leads, not conclusions.
 ## Look around before you write
 
 1. **Read the issue and its comments.**
-2. **Find what it belongs with.** Search open *and* closed issues and pull requests for the
+2. **Find what it belongs with.** Start from the open board you read at the start of the run
+   (`ROLE_REVIEW.md`), then search closed issues and merged pull requests too, for the
    subsystem, the block, the element, the symptom:
 
        gh issue list --state all --search "<term>" --limit 30
