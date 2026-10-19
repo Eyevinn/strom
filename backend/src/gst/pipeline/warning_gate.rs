@@ -11,10 +11,32 @@ use std::time::{Duration, Instant};
 /// How long a warning is held back after it was last let through.
 pub(super) const WARNING_REPEAT_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Distinct warnings tracked before stale ones are dropped. A warning whose
-/// text changes every time (a timestamp in the debug string) would otherwise
-/// grow the map without bound.
+/// Distinct warnings tracked before stale ones are dropped. If none is stale
+/// the map is cleared, so it never grows past this.
 const MAX_TRACKED: usize = 256;
+
+/// Replaces every run of ASCII digits with `#`, for use in a gate key.
+///
+/// A warning's debug text often carries values that change between repeats:
+/// "Impossible to configure latency: max 0:00:01.000000000 < min
+/// 0:00:02.023000000" drifts with a jitterbuffer's reported minimum. Keyed on
+/// the raw text, each new value would pass the gate as a new warning.
+pub(super) fn mask_digits(text: &str) -> String {
+    let mut masked = String::with_capacity(text.len());
+    let mut in_digits = false;
+    for c in text.chars() {
+        if c.is_ascii_digit() {
+            if !in_digits {
+                masked.push('#');
+            }
+            in_digits = true;
+        } else {
+            masked.push(c);
+            in_digits = false;
+        }
+    }
+    masked
+}
 
 struct Seen {
     last_reported: Instant,
@@ -44,6 +66,9 @@ impl WarningGate {
         if self.seen.len() >= MAX_TRACKED {
             self.seen
                 .retain(|_, seen| now.duration_since(seen.last_reported) < WARNING_REPEAT_INTERVAL);
+            if self.seen.len() >= MAX_TRACKED {
+                self.seen.clear();
+            }
         }
         self.seen.insert(
             key,
@@ -100,5 +125,25 @@ mod tests {
         }
         gate.check("new".into(), t0 + WARNING_REPEAT_INTERVAL);
         assert_eq!(gate.seen.len(), 1);
+    }
+
+    #[test]
+    fn the_map_is_cleared_when_it_is_full_and_nothing_is_stale() {
+        let mut gate = WarningGate::default();
+        let t0 = Instant::now();
+        for i in 0..MAX_TRACKED {
+            gate.check(format!("w{i}"), t0);
+        }
+        assert_eq!(gate.check("new".into(), t0), Some(0));
+        assert_eq!(gate.seen.len(), 1);
+    }
+
+    #[test]
+    fn warnings_that_differ_only_in_their_numbers_share_a_key() {
+        let a = "Impossible to configure latency: max 0:00:01.000000000 < min 0:00:02.000000000";
+        let b = "Impossible to configure latency: max 0:00:01.000000000 < min 0:00:02.023000000";
+        assert_eq!(mask_digits(a), mask_digits(b));
+        assert_eq!(mask_digits("max 10 < min 2"), "max # < min #");
+        assert_ne!(mask_digits("latency"), mask_digits("buffer"));
     }
 }

@@ -1,4 +1,4 @@
-use super::warning_gate::{WarningGate, WARNING_REPEAT_INTERVAL};
+use super::warning_gate::{mask_digits, WarningGate, WARNING_REPEAT_INTERVAL};
 use super::PipelineManager;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -124,7 +124,14 @@ impl PipelineManager {
                     let debug_info = warn.debug();
                     let source = warn.src().map(|s| s.name().to_string());
 
-                    let key = format!("{:?}\n{}\n{:?}", source, warning_msg, debug_info);
+                    // The source name is kept as it is: queue3 and queue4 are
+                    // different elements. Only the debug text carries values.
+                    let key = format!(
+                        "{:?}\n{}\n{:?}",
+                        source,
+                        warning_msg,
+                        debug_info.as_deref().map(mask_digits)
+                    );
                     let Some(suppressed) = warning_gate.lock().unwrap().check(key, Instant::now())
                     else {
                         return;
