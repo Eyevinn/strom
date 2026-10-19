@@ -7,14 +7,13 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use strom::state::AppState;
-use strom::storage::JsonFileStorage;
 use strom_types::stinger::{
     STINGER_MODE_PROPERTY, WEB_STINGER_CUT_POINT_PROPERTY, WEB_STINGER_DURATION_PROPERTY,
 };
 use strom_types::{Flow, Link, PropertyValue as PV};
-use tempfile::NamedTempFile;
 use tower::ServiceExt;
+
+pub mod common;
 
 const URL: &str = "https://example.com/stinger.html";
 
@@ -60,7 +59,7 @@ fn block(id: &str, definition: &str, props: &[(&str, PV)]) -> strom_types::Block
 }
 
 /// A stopped flow: a vision mixer with its stinger input fed by a page.
-async fn page_flow(url: &str) -> (AppState, strom_types::FlowId, NamedTempFile, NamedTempFile) {
+async fn page_flow(url: &str) -> (common::state::TestState, strom_types::FlowId) {
     gstreamer::init().unwrap();
     let mut flow = Flow::new("stinger_page_api");
     flow.blocks.push(block(
@@ -85,27 +84,16 @@ async fn page_flow(url: &str) -> (AppState, strom_types::FlowId, NamedTempFile, 
         from: "web:video_out".to_string(),
         to: "vm:stinger_in".to_string(),
     });
-    let storage = NamedTempFile::new().unwrap();
-    let blocks = NamedTempFile::new().unwrap();
-    let state = AppState::new(
-        JsonFileStorage::new(storage.path()),
-        blocks.path(),
-        std::env::temp_dir(),
-        vec![],
-        "all".to_string(),
-        vec![],
-        false,
-        false,
-    );
+    let state = common::state::new();
     let flow_id = flow.id;
     state.upsert_flow(flow).await.unwrap();
-    (state, flow_id, storage, blocks)
+    (state, flow_id)
 }
 
 #[tokio::test]
 async fn a_page_is_the_one_entry_and_the_library_is_refused() {
-    let (state, flow_id, _s, _b) = page_flow(URL).await;
-    let app = strom::create_app_with_state(state).await;
+    let (state, flow_id) = page_flow(URL).await;
+    let app = strom::create_app_with_state(state.app()).await;
     let base = format!("/api/flows/{}/blocks/vm/stinger", flow_id);
 
     let (status, s) = call(&app, "GET", &base, None).await;
@@ -171,7 +159,7 @@ async fn a_page_is_the_one_entry_and_the_library_is_refused() {
 
 #[tokio::test]
 async fn a_page_url_with_its_own_fragment_is_reported() {
-    let (state, flow_id, _s, _b) = page_flow("https://example.com/graphics/#/stinger").await;
+    let (state, flow_id) = page_flow("https://example.com/graphics/#/stinger").await;
     let s = state.stinger_state(&flow_id, "vm").await.unwrap();
     assert!(
         s.problem.as_deref().unwrap_or("").contains("#fragment"),
