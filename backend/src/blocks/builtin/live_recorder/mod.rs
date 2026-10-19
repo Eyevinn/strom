@@ -31,6 +31,7 @@ pub mod fragment_sink;
 mod keepalive;
 mod mkv_cluster;
 mod mp4_boxes;
+mod utc;
 
 use super::refusal::{audio_refusal, refuse_input, video_refusal};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
@@ -311,16 +312,21 @@ impl BlockBuilder for LiveRecorderBuilder {
                 let events_for_files = events.clone();
                 let block_for_files = block_id.clone();
                 let relative = relative_location.clone();
-                sink.set_file_opened_callback(Arc::new(move |index, path| {
+                sink.set_file_opened_callback(Arc::new(move |sink, index, path, start| {
                     debug!(
-                        "Live Recorder {}: writing file {}",
+                        "Live Recorder {}: writing file {} from running time {:?}",
                         block_for_files,
-                        path.display()
+                        path.display(),
+                        start
                     );
                     events_for_files.broadcast(StromEvent::RecorderFileChanged {
                         flow_id,
                         block_id: block_for_files.clone(),
                         filename: relative.replace("%05d", &format!("{:05}", index)),
+                        start_running_time_ns: start.map(|t| t.nseconds()),
+                        start_utc_us: start.and_then(|t| {
+                            utc::running_time_to_utc_us(flow_id, sink.upcast_ref(), t)
+                        }),
                     });
                 }));
 
