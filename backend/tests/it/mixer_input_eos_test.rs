@@ -20,8 +20,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use strom::blocks::builtin::{liveaudiorouter, mixer};
-use strom::blocks::{BlockBuildContext, BlockBuildResult, BlockBuilder};
+use strom::blocks::{BlockBuildResult, BlockBuilder};
 use strom_types::PropertyValue;
+
+pub mod common;
 
 /// CI installs gstreamer1.0-plugins-{base,good,bad}, which covers all of
 /// these, so a missing element is a failure and not a reason to skip.
@@ -74,57 +76,16 @@ impl Drop for Harness {
     }
 }
 
-/// Request pads created at build time are already present, so look in `pads()`
-/// before asking for a new one.
-fn resolve_pad(element: &gst::Element, name: &str) -> gst::Pad {
-    if let Some(pad) = element.static_pad(name) {
-        return pad;
-    }
-    if let Some(pad) = element.pads().into_iter().find(|p| p.name() == name) {
-        return pad;
-    }
-    element
-        .request_pad_simple(name)
-        .unwrap_or_else(|| panic!("element {} has no pad {name}", element.name()))
-}
-
 /// Assemble a builder's result into a pipeline the way the pipeline manager does.
 fn assemble(result: BlockBuildResult) -> Harness {
     let pipeline = gst::Pipeline::new();
-    let mut elements: HashMap<String, gst::Element> = HashMap::new();
-    for (id, element) in &result.elements {
-        pipeline.add(element).expect("add element");
-        elements.insert(id.clone(), element.clone());
-    }
-    for (from, to) in &result.internal_links {
-        let src = &elements[&from.element_id];
-        let dst = &elements[&to.element_id];
-        match (&from.pad_name, &to.pad_name) {
-            (Some(src_pad), Some(dst_pad)) => {
-                resolve_pad(src, src_pad)
-                    .link(&resolve_pad(dst, dst_pad))
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "link {}:{src_pad} -> {}:{dst_pad}: {e:?}",
-                            from.element_id, to.element_id
-                        )
-                    });
-            }
-            (Some(src_pad), None) => {
-                let dp = dst
-                    .compatible_pad(&resolve_pad(src, src_pad), None)
-                    .expect("compatible sink pad");
-                resolve_pad(src, src_pad).link(&dp).expect("pad link");
-            }
-            _ => src.link(dst).expect("element link"),
-        }
-    }
+    let elements = common::block::install(&pipeline, &result);
     Harness { pipeline, elements }
 }
 
 fn build_mixer(instance: &str, force_live: bool) -> Harness {
     require_elements();
-    let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+    let ctx = common::block::context();
     let result = mixer::MixerBuilder
         .build(
             instance,
@@ -140,7 +101,7 @@ fn build_mixer(instance: &str, force_live: bool) -> Harness {
 
 fn build_router(instance: &str, force_live: bool) -> Harness {
     require_elements();
-    let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+    let ctx = common::block::context();
     let result = liveaudiorouter::LiveAudioRouterBuilder
         .build(
             instance,
