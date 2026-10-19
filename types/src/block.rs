@@ -650,6 +650,42 @@ pub fn parse_audio_channel_config(value: &str) -> Option<AudioChannelConfig> {
     })
 }
 
+/// Channel choices for a block's audio channel property, as `(value, label)`
+/// in the form [`parse_audio_channel_config`] reads. Plain counts of 3 or more
+/// are parallel channels with no speaker layout; the surround choices carry
+/// one.
+pub const AUDIO_CHANNEL_CHOICES: &[(&str, &str)] = &[
+    ("1", "1 (Mono)"),
+    ("2", "2 (Stereo)"),
+    ("4", "4 (multichannel)"),
+    ("6", "6 (multichannel)"),
+    ("8", "8 (multichannel)"),
+    ("16", "16 (multichannel)"),
+    ("4:0x33", "4 - Quad Surround"),
+    ("6:0x3f", "6 - 5.1 Surround"),
+    ("8:0xc3f", "8 - 7.1 Surround"),
+];
+
+/// [`AUDIO_CHANNEL_CHOICES`] as `EnumValue`s, led by an empty "Default
+/// (device)" choice when `device_default` is set.
+pub fn audio_channel_enum_values(device_default: bool) -> Vec<EnumValue> {
+    let default = device_default.then(|| EnumValue {
+        value: String::new(),
+        label: Some("Default (device)".to_string()),
+    });
+    default
+        .into_iter()
+        .chain(
+            AUDIO_CHANNEL_CHOICES
+                .iter()
+                .map(|(value, label)| EnumValue {
+                    value: (*value).to_string(),
+                    label: Some((*label).to_string()),
+                }),
+        )
+        .collect()
+}
+
 /// Pixel formats accepted by `decklinkvideosrc` and `decklinkvideosink`'s
 /// `video-format` property. These are GstDecklinkVideoFormat enum nicks, not
 /// GStreamer caps `format=` strings — see `COMMON_VIDEO_PIXEL_FORMATS` for the

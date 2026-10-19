@@ -92,8 +92,8 @@ use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom_types::{
     block::{
-        common_video_framerate_enum_values, common_video_resolution_enum_values,
-        parse_resolution_string, StreamMode, *,
+        audio_channel_enum_values, common_video_framerate_enum_values,
+        common_video_resolution_enum_values, parse_resolution_string, StreamMode, *,
     },
     element::ElementPadRef,
     parse_audio_channel_config, AudioChannelConfig, MediaType, PropertyValue,
@@ -810,48 +810,7 @@ fn local_input_definition() -> BlockDefinition {
                 label: "Audio Channels".to_string(),
                 description: "Number of channels requested from the audio source. Empty = device default. Pro audio cards / ASIO / PipeWire / CoreAudio can expose 4/6/8/16-channel multichannel streams in one go; Plain counts of 3 or more are parallel channels with no speaker layout (channel-mask 0x0); the Surround choices carry a speaker layout. On an ASIO device this captures inputs 1..N, and empty captures every input; many WASAPI drivers instead split a multichannel card into separate stereo devices (1/2, 3/4, ...) — in that case pick the right device and keep this at 2.".to_string(),
                 property_type: PropertyType::Enum {
-                    values: vec![
-                        EnumValue {
-                            value: String::new(),
-                            label: Some("Default (device)".to_string()),
-                        },
-                        EnumValue {
-                            value: "1".to_string(),
-                            label: Some("1 (Mono)".to_string()),
-                        },
-                        EnumValue {
-                            value: "2".to_string(),
-                            label: Some("2 (Stereo)".to_string()),
-                        },
-                        EnumValue {
-                            value: "4".to_string(),
-                            label: Some("4 (multichannel)".to_string()),
-                        },
-                        EnumValue {
-                            value: "6".to_string(),
-                            label: Some("6 (multichannel)".to_string()),
-                        },
-                        EnumValue {
-                            value: "8".to_string(),
-                            label: Some("8 (multichannel)".to_string()),
-                        },
-                        EnumValue {
-                            value: "16".to_string(),
-                            label: Some("16 (multichannel)".to_string()),
-                        },
-                        EnumValue {
-                            value: "4:0x33".to_string(),
-                            label: Some("4 - Quad Surround".to_string()),
-                        },
-                        EnumValue {
-                            value: "6:0x3f".to_string(),
-                            label: Some("6 - 5.1 Surround".to_string()),
-                        },
-                        EnumValue {
-                            value: "8:0xc3f".to_string(),
-                            label: Some("8 - 7.1 Surround".to_string()),
-                        },
-                    ],
+                    values: audio_channel_enum_values(true),
                 },
                 default_value: Some(PropertyValue::String(String::new())),
                 mapping: PropertyMapping {
