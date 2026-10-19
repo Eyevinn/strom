@@ -1731,6 +1731,12 @@ impl AppState {
         Ok(state)
     }
 
+    /// Get the state of a flow's pipeline, `None` when it has no pipeline.
+    pub async fn get_flow_state(&self, id: &FlowId) -> Option<PipelineState> {
+        let pipelines = self.inner.pipelines.read().await;
+        pipelines.get(id).map(|p| p.get_state())
+    }
+
     /// Generate a debug DOT graph for a flow's pipeline.
     /// Returns the DOT graph content as a string.
     pub async fn generate_debug_graph(&self, id: &FlowId) -> Option<String> {
