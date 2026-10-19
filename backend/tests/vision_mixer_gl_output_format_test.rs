@@ -17,11 +17,8 @@ pub mod common;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
-use strom::blocks::BlockRegistry;
-use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
 use strom_types::{Flow, PropertyValue as PV};
-use tempfile::NamedTempFile;
 
 const BLOCK_ID: &str = "vmgl";
 const W: u32 = 320;
@@ -143,24 +140,8 @@ fn build_flow(gl_download: bool) -> Flow {
 }
 
 fn build_manager(gl_download: bool) -> PipelineManager {
-    gstreamer::init().unwrap();
     strom::gpu::detect_gpu_capabilities();
-
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
-    let events = EventBroadcaster::new(10, false, false);
-
-    PipelineManager::new(
-        &build_flow(gl_download),
-        events,
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        std::env::temp_dir(),
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-    )
-    .expect("build GPU pipeline")
+    common::manager::build(&build_flow(gl_download)).expect("build GPU pipeline")
 }
 
 /// Walk upstream from `start` to the element named `origin`, asserting every
@@ -521,20 +502,7 @@ async fn keyed_dsk_alpha_survives_nv12_on_gpu() {
     }
     strom::gpu::detect_gpu_capabilities();
 
-    let temp_file = tempfile::NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
-    let events = EventBroadcaster::new(10, false, false);
-    let mut manager = PipelineManager::new(
-        &build_keyed_flow(),
-        events,
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        std::env::temp_dir(),
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-    )
-    .expect("build GPU pipeline");
+    let mut manager = common::manager::build(&build_keyed_flow()).expect("build GPU pipeline");
     manager.start().expect("start GPU pipeline");
 
     // DSK pads are built hidden (alpha=0) — key the graphic in.
