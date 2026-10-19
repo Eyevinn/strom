@@ -425,6 +425,27 @@ impl BlockBuilder for AES67InputBuilder {
                     .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {}", e)))?
             };
 
+            // audiobuffersplit pushes a whole output buffer at once from the
+            // jitterbuffer's streaming thread. Without a thread boundary right
+            // after it, a downstream that blocks (an encoder, a syncing sink)
+            // stalls the receive path, buffers go missing before the split, and
+            // every gap makes it resync: audible clicks on every output.
+            let split_queue = audiobuffersplit
+                .factory()
+                .is_some_and(|f| f.name() == "audiobuffersplit")
+                .then(|| {
+                    let queue_id = format!("{}:audiobuffersplit_queue", instance_id);
+                    gst::ElementFactory::make("queue")
+                        .name(&queue_id)
+                        .build()
+                        .map(|queue| (queue_id, queue))
+                        .map_err(|e| BlockBuildError::ElementCreation(format!("queue: {}", e)))
+                })
+                .transpose()?;
+            let split_out_id = split_queue
+                .as_ref()
+                .map_or_else(|| buffersplit_id.clone(), |(id, _)| id.clone());
+
             let audioconvert = gst::ElementFactory::make("audioconvert")
                 .name(&audioconvert_id)
                 .build()
@@ -493,41 +514,51 @@ impl BlockBuilder for AES67InputBuilder {
                 }
             });
 
+            let mut elements = vec![
+                (filesrc_id.clone(), filesrc),
+                (sdpdemux_id.clone(), sdpdemux),
+                (decodebin_id.clone(), decodebin),
+                (capssetter_id.clone(), capssetter),
+                (buffersplit_id.clone(), audiobuffersplit),
+            ];
+            let mut internal_links = vec![
+                (
+                    ElementPadRef::pad(&filesrc_id, "src"),
+                    ElementPadRef::pad(&sdpdemux_id, "sink"),
+                ),
+                // sdpdemux:stream_0 -> decodebin:sink (dynamic pad - pipeline builder handles)
+                (
+                    ElementPadRef::pad(&sdpdemux_id, "stream_0"),
+                    ElementPadRef::pad(&decodebin_id, "sink"),
+                ),
+                // decodebin -> capssetter is dynamic (handled by pad-added above)
+                // capssetter -> audiobuffersplit [-> queue] (or identity) -> audioconvert -> audioresample
+                (
+                    ElementPadRef::pad(&capssetter_id, "src"),
+                    ElementPadRef::pad(&buffersplit_id, "sink"),
+                ),
+            ];
+            if let Some((queue_id, queue)) = split_queue {
+                internal_links.push((
+                    ElementPadRef::pad(&buffersplit_id, "src"),
+                    ElementPadRef::pad(&queue_id, "sink"),
+                ));
+                elements.push((queue_id, queue));
+            }
+            elements.push((audioconvert_id.clone(), audioconvert));
+            elements.push((audioresample_id.clone(), audioresample));
+            internal_links.push((
+                ElementPadRef::pad(&split_out_id, "src"),
+                ElementPadRef::pad(&audioconvert_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&audioconvert_id, "src"),
+                ElementPadRef::pad(&audioresample_id, "sink"),
+            ));
+
             Ok(BlockBuildResult {
-                elements: vec![
-                    (filesrc_id.clone(), filesrc),
-                    (sdpdemux_id.clone(), sdpdemux),
-                    (decodebin_id.clone(), decodebin),
-                    (capssetter_id.clone(), capssetter),
-                    (buffersplit_id.clone(), audiobuffersplit),
-                    (audioconvert_id.clone(), audioconvert),
-                    (audioresample_id.clone(), audioresample),
-                ],
-                internal_links: vec![
-                    (
-                        ElementPadRef::pad(&filesrc_id, "src"),
-                        ElementPadRef::pad(&sdpdemux_id, "sink"),
-                    ),
-                    // sdpdemux:stream_0 -> decodebin:sink (dynamic pad - pipeline builder handles)
-                    (
-                        ElementPadRef::pad(&sdpdemux_id, "stream_0"),
-                        ElementPadRef::pad(&decodebin_id, "sink"),
-                    ),
-                    // decodebin -> capssetter is dynamic (handled by pad-added above)
-                    // capssetter -> audiobuffersplit (or identity) -> audioconvert -> audioresample
-                    (
-                        ElementPadRef::pad(&capssetter_id, "src"),
-                        ElementPadRef::pad(&buffersplit_id, "sink"),
-                    ),
-                    (
-                        ElementPadRef::pad(&buffersplit_id, "src"),
-                        ElementPadRef::pad(&audioconvert_id, "sink"),
-                    ),
-                    (
-                        ElementPadRef::pad(&audioconvert_id, "src"),
-                        ElementPadRef::pad(&audioresample_id, "sink"),
-                    ),
-                ],
+                elements,
+                internal_links,
                 bus_message_handler: None,
                 pad_properties: HashMap::new(),
             })
