@@ -16,11 +16,8 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use strom::state::AppState;
-use strom::storage::JsonFileStorage;
 use strom_types::element::Link;
 use strom_types::{Flow, PropertyValue as PV};
-use tempfile::NamedTempFile;
 
 const FRAMES: usize = 45;
 
@@ -280,18 +277,7 @@ async fn stinger_measurements() {
     let paths: Vec<PathBuf> = clips.iter().map(|(_, p)| p.clone()).collect();
     let mut rows = Vec::new();
     for preroll in [120u64, 80, 50] {
-        let storage = NamedTempFile::new().unwrap();
-        let blocks = NamedTempFile::new().unwrap();
-        let state = AppState::new(
-            JsonFileStorage::new(storage.path()),
-            blocks.path(),
-            dir.path(),
-            vec![],
-            "all".to_string(),
-            vec![],
-            false,
-            false,
-        );
+        let state = common::state::with_media(dir.path());
         let flow = flow_for(&paths, preroll);
         let flow_id = flow.id;
         state.upsert_flow(flow).await.unwrap();

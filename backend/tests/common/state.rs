@@ -37,8 +37,13 @@ impl Deref for TestState {
 
 /// A fresh [`TestState`], with media under the system temp dir.
 pub fn new() -> TestState {
+    with_media(&std::env::temp_dir())
+}
+
+/// A fresh [`TestState`] with its media under `media`.
+pub fn with_media(media: &Path) -> TestState {
     let dir = tempfile::tempdir().expect("state dir");
-    let state = in_dir(dir.path(), &std::env::temp_dir());
+    let state = in_dir(dir.path(), media);
     TestState {
         state,
         _dir: Arc::new(dir),

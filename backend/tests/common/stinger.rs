@@ -8,11 +8,9 @@ use gstreamer_app as gst_app;
 use gstreamer_video::prelude::*;
 use std::collections::HashMap;
 use strom::state::AppState;
-use strom::storage::JsonFileStorage;
 use strom_types::element::Link;
 use strom_types::stinger::{StingerClipSettings, StingerVariant};
 use strom_types::{Flow, PropertyValue as PV};
-use tempfile::NamedTempFile;
 
 pub const W: u32 = 320;
 pub const H: u32 = 180;
@@ -418,10 +416,8 @@ pub fn stinger_also_on_an_input(flow: &mut Flow) {
 
 pub struct Running {
     pub tag: String,
-    pub state: AppState,
+    pub state: crate::common::state::TestState,
     pub flow_id: strom_types::FlowId,
-    pub _storage: NamedTempFile,
-    pub _blocks: NamedTempFile,
     pub _dir: tempfile::TempDir,
 }
 
@@ -645,18 +641,7 @@ pub async fn start_edited(
     }
     let _ = strom::gpu::detect_gpu_capabilities();
 
-    let storage = NamedTempFile::new().unwrap();
-    let blocks = NamedTempFile::new().unwrap();
-    let state = AppState::new(
-        JsonFileStorage::new(storage.path()),
-        blocks.path(),
-        dir.path(),
-        vec![],
-        "all".to_string(),
-        vec![],
-        false,
-        false,
-    );
+    let state = crate::common::state::with_media(dir.path());
     let mut flow = build_flow(tag, backend, &clips);
     edit(&mut flow);
     let flow_id = flow.id;
@@ -666,8 +651,6 @@ pub async fn start_edited(
         tag: tag.to_string(),
         state,
         flow_id,
-        _storage: storage,
-        _blocks: blocks,
         _dir: dir,
     };
     running.wait_until_parked().await;

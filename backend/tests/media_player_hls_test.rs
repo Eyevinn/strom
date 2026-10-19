@@ -16,10 +16,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use strom::blocks::builtin::mediaplayer::{MediaPlayerKey, MEDIA_PLAYER_REGISTRY};
-use strom::state::AppState;
-use strom::storage::JsonFileStorage;
 use strom_types::{Flow, Link, PropertyValue};
-use tempfile::NamedTempFile;
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -43,22 +40,6 @@ const REQUIRED: &[&str] = &[
     "appsink",
     "fakesink",
 ];
-
-fn new_app_state() -> (AppState, [NamedTempFile; 2]) {
-    let storage_file = NamedTempFile::new().unwrap();
-    let blocks_file = NamedTempFile::new().unwrap();
-    let state = AppState::new(
-        JsonFileStorage::new(storage_file.path()),
-        blocks_file.path(),
-        std::env::temp_dir(),
-        vec![],
-        "all".to_string(),
-        vec![],
-        false,
-        false,
-    );
-    (state, [storage_file, blocks_file])
-}
 
 /// Run the default GLib main context, where the flow's bus watch (and with it
 /// the start of the player's internal pipeline) is dispatched, as Strom does
@@ -210,7 +191,7 @@ async fn muxed_hls_plays_audio_and_video_in_passthrough() {
     write_muxed_hls(dir.path());
     let uri = format!("{}/index.m3u8", serve_dir(dir.path().to_path_buf()));
 
-    let (state, _files) = new_app_state();
+    let state = common::state::new();
     let flow = build_passthrough_flow("media_player_hls_passthrough", &uri);
     let flow_id = flow.id;
     state.upsert_flow(flow).await.expect("upsert_flow failed");

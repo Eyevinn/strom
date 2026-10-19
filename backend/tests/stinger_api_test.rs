@@ -47,7 +47,7 @@ async fn the_library_is_edited_on_the_mixer_and_guarded_by_file() {
         return;
     }
     let r = start("api-lib", "cpu").await;
-    let app = strom::create_app_with_state(r.state.clone()).await;
+    let app = strom::create_app_with_state(r.state.app()).await;
     let base = format!("/api/flows/{}/blocks/{}/stinger", r.flow_id, r.mixer());
     let (_, state) = call(&app, "GET", &base, None).await;
     let files: Vec<String> = state["clips"]
@@ -152,7 +152,7 @@ async fn a_take_is_followed_by_its_id() {
         return;
     }
     let r = start("api-take", "cpu").await;
-    let app = strom::create_app_with_state(r.state.clone()).await;
+    let app = strom::create_app_with_state(r.state.app()).await;
     let mut events = r.state.events().subscribe();
     let blocks = format!("/api/flows/{}/blocks/{}", r.flow_id, r.mixer());
 
@@ -251,7 +251,7 @@ async fn removing_the_cued_clip_parks_its_successor() {
         return;
     }
     let r = start("api-rm-cued", "cpu").await;
-    let app = strom::create_app_with_state(r.state.clone()).await;
+    let app = strom::create_app_with_state(r.state.app()).await;
     let base = format!("/api/flows/{}/blocks/{}/stinger", r.flow_id, r.mixer());
     let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
     assert_eq!(s.cued_index, Some(0));
@@ -286,7 +286,7 @@ async fn a_take_owns_its_clip_source() {
         return;
     }
     let r = start("api-owned", "cpu").await;
-    let app = strom::create_app_with_state(r.state.clone()).await;
+    let app = strom::create_app_with_state(r.state.app()).await;
     let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
     let files: Vec<String> = s.clips.iter().map(|c| c.file.clone()).collect();
     let extra = std::path::Path::new(&files[2]).with_file_name("extra.mov");
@@ -384,7 +384,7 @@ async fn a_playlist_put_over_the_parked_index_recues_it() {
         return;
     }
     let r = start("api-put-cued", "cpu").await;
-    let app = strom::create_app_with_state(r.state.clone()).await;
+    let app = strom::create_app_with_state(r.state.app()).await;
     let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
     assert_eq!(s.cued_index, Some(0));
     let files: Vec<String> = s.clips.iter().map(|c| c.file.clone()).collect();
@@ -467,7 +467,7 @@ async fn reload_picks_up_a_clip_rewritten_on_disk() {
         return;
     }
     let r = start("api-reload", "cpu").await;
-    let app = strom::create_app_with_state(r.state.clone()).await;
+    let app = strom::create_app_with_state(r.state.app()).await;
     let base = format!("/api/flows/{}/blocks/{}/stinger", r.flow_id, r.mixer());
     let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
     assert_eq!(s.cued_index, Some(0));
@@ -531,7 +531,7 @@ async fn a_cue_loads_a_parked_clip_rewritten_on_disk() {
         return;
     }
     let r = start("api-recue", "cpu").await;
-    let app = strom::create_app_with_state(r.state.clone()).await;
+    let app = strom::create_app_with_state(r.state.app()).await;
     let base = format!("/api/flows/{}/blocks/{}/stinger", r.flow_id, r.mixer());
     let s = r.state.stinger_state(&r.flow_id, &r.mixer()).await.unwrap();
     assert_eq!(s.cued_index, Some(0));
