@@ -21,6 +21,7 @@ pub mod thread_priority;
 pub mod thumbnail;
 pub mod thumbnail_tap;
 pub mod transitions;
+pub mod ts_arrival_clock;
 pub(crate) mod underlay;
 pub mod video_adapt;
 pub mod video_input_bridge;
