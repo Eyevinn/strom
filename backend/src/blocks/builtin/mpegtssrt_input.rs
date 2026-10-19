@@ -24,11 +24,15 @@
 //! By default the first audio streams to arrive take the audio outputs in
 //! order. With `map_audio_by_pid`, `audio_out_k` carries the k-th audio stream
 //! in PID order instead (see [`audio_by_pid`]).
+//!
+//! With `ignore_pcr` and `arrival_retiming` (both default), tsdemux's output is
+//! retimed from srtsrc's arrival timestamps (see `gst::ts_arrival_clock`).
 
 pub mod audio_by_pid;
 
 use self::audio_by_pid::PidOrderedAudio;
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+use crate::gst::ts_arrival_clock::{self, ArrivalClock};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -166,6 +170,23 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
             })
             .unwrap_or(true);
 
+        let arrival_retiming = properties
+            .get("arrival_retiming")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(DEFAULT_TS_ARRIVAL_RETIMING);
+
+        let arrival_margin_ms = properties
+            .get("arrival_margin_ms")
+            .and_then(|v| match v {
+                PropertyValue::UInt(u) => Some((*u).min(10_000) as i64),
+                PropertyValue::Int(i) => Some((*i).clamp(0, 10_000)),
+                _ => None,
+            })
+            .unwrap_or(DEFAULT_TS_ARRIVAL_MARGIN_MS);
+
         // Get number of video and audio tracks
         let num_video_tracks = properties
             .get("num_video_tracks")
@@ -244,6 +265,27 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
             redact_srt_uri(&srt_uri), latency, tsdemux_latency, ignore_pcr, keep_listening, auto_reconnect, wait_for_connection
         );
 
+        // With ignore-pcr, tsdemux anchors its timestamps once, on the first PES
+        // it parses. Re-anchor them from srtsrc's arrival timestamps instead.
+        let arrival_clock = (ignore_pcr && arrival_retiming).then(|| {
+            let clock = Arc::new(ArrivalClock::new(arrival_margin_ms * 1_000_000));
+            if let Some(pad) = srtsrc.static_pad("src") {
+                ts_arrival_clock::watch_arrivals(&pad, &clock);
+            }
+            for signal in ["caller-added", "caller-removed"] {
+                let clock = clock.clone();
+                srtsrc.connect(signal, false, move |_| {
+                    clock.on_caller_change();
+                    None
+                });
+            }
+            info!(
+                "MPEGTSSRT Input {}: retiming from arrival, margin {}ms",
+                instance_id, arrival_margin_ms
+            );
+            clock
+        });
+
         // Create demux/decode element
         // NOTE (2026-03-02): Using decodebin (v2) instead of decodebin3 because decodebin3
         // has known issues with MPEG-TS where it only exposes audio and skips video due to
@@ -258,6 +300,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
 
             // Catch tsdemux when decodebin creates it internally, and set its properties.
             let instance_for_deep = instance_id.to_string();
+            let clock_for_deep = arrival_clock.clone();
             element.connect("deep-element-added", false, move |args| {
                 let added: gst::Element = args[2].get().unwrap();
                 let factory = added.factory();
@@ -266,6 +309,9 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                         added.set_property("latency", tsdemux_latency);
                         if ignore_pcr && added.has_property("ignore-pcr") {
                             added.set_property("ignore-pcr", true);
+                        }
+                        if let Some(clock) = &clock_for_deep {
+                            ts_arrival_clock::retime_demuxer(&added, clock, &instance_for_deep);
                         }
                         info!(
                             "MPEGTSSRT Input {}: Set tsdemux latency={}ms, ignore-pcr={} (inside decodebin)",
@@ -289,6 +335,9 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
             element.set_property("latency", tsdemux_latency);
             if ignore_pcr && element.has_property("ignore-pcr") {
                 element.set_property("ignore-pcr", true);
+            }
+            if let Some(clock) = &arrival_clock {
+                ts_arrival_clock::retime_demuxer(&element, clock, instance_id);
             }
             (id, element)
         };
@@ -1018,12 +1067,42 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "ignore_pcr".to_string(),
                 label: "Ignore PCR".to_string(),
-                description: "Ignore PCR (Program Clock Reference) timestamps in the MPEG-TS stream. Recommended for live pipelines where SRT already handles clock recovery and jitter. Disabling PCR avoids unnecessary timestamp adjustments.".to_string(),
+                description: "Ignore PCR (Program Clock Reference) timestamps in the MPEG-TS stream. Recommended: many senders get PCR wrong. With Retime From Arrival the timestamps then follow when the data arrives.".to_string(),
                 property_type: PropertyType::Bool,
                 default_value: Some(PropertyValue::Bool(true)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "ignore_pcr".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
+            ExposedProperty {
+                name: "arrival_retiming".to_string(),
+                label: "Retime From Arrival".to_string(),
+                description: "With Ignore PCR, place the stream's timestamps from when its data arrives. Without it, tsdemux anchors them once, on the first packet, and keeps any error in that packet for the whole connection (a caller that encoded before it connected arrives seconds late).".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(DEFAULT_TS_ARRIVAL_RETIMING)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "arrival_retiming".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
+            ExposedProperty {
+                name: "arrival_margin_ms".to_string(),
+                label: "Arrival Margin (ms)".to_string(),
+                description: "With Retime From Arrival: how far ahead of arrival the stream is stamped, to absorb jitter within a stream. A buffer that would still be late moves the timing forward on its own.".to_string(),
+                property_type: PropertyType::Int,
+                default_value: Some(PropertyValue::Int(DEFAULT_TS_ARRIVAL_MARGIN_MS)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "arrival_margin_ms".to_string(),
                     transform: None,
                 },
                 live: false,

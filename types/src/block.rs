@@ -435,6 +435,14 @@ pub const DEFAULT_TSDEMUX_LATENCY_MS: i32 = 0;
 /// audio streams to arrive take the audio outputs in order.
 pub const DEFAULT_MPEGTSSRT_MAP_AUDIO_BY_PID: bool = false;
 
+/// Default for retiming a demuxed MPEG-TS stream from when its data arrives
+/// (with `ignore-pcr`), instead of from the first PES tsdemux parsed.
+pub const DEFAULT_TS_ARRIVAL_RETIMING: bool = true;
+
+/// Default margin, in milliseconds, between a retimed MPEG-TS stream's
+/// arrival and its timestamps. Covers jitter within one stream.
+pub const DEFAULT_TS_ARRIVAL_MARGIN_MS: i64 = 100;
+
 /// Default MTU for EFP fragmentation (bytes).
 pub const DEFAULT_EFP_MTU: u32 = 1400;
 
