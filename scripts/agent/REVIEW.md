@@ -52,6 +52,9 @@ Read the mechanism, not the description. In rough order of what matters:
    guards nothing? Read the check runs (`gh pr checks <N>`): zero runs is not green.
 5. **CLAUDE.md and `docs/BLOCK_GUIDELINES.md`.** Quote the rule a diff breaks.
 
+Skip small things. Style, naming, wording and "consider also" suggestions are not worth the
+reader's time; leave them out unless they hide a real problem.
+
 Every claim about how the code behaves carries a `path:line` you read at this head. If you
 could not settle something, say so; do not guess. Mark a risk you have not traced as
 "not verified".
