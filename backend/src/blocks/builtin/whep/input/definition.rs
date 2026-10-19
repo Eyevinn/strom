@@ -7,9 +7,23 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.whep_input".to_string(),
         name: "WHEP Input".to_string(),
-        description: "Receives audio/video via WebRTC WHEP protocol. Default uses stable whepsrc element.".to_string(),
+        description: "Receives audio and video from a WHEP server over WebRTC. All audio tracks are mixed to audio_out. Set Number of Video Tracks to get decoded video on video_out (video_out_1, ... for more tracks); video on an output that is not linked is discarded without decoding.".to_string(),
         category: "Inputs".to_string(),
         exposed_properties: vec![
+            ExposedProperty {
+                name: "num_video_tracks".to_string(),
+                label: "Number of Video Tracks".to_string(),
+                description: "Number of video outputs (0-8). Incoming video tracks fill them in arrival order; tracks beyond this number, or on an output that is not linked, are discarded without decoding. 0 keeps the block audio-only.".to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(0)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "num_video_tracks".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
             ExposedProperty {
                 name: "implementation".to_string(),
                 label: "Implementation".to_string(),
@@ -136,6 +150,8 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
                 persist: None,
             },
         ],
+        // Static default (audio only). WHEPInputBuilder::get_external_pads adds
+        // the video outputs from num_video_tracks.
         external_pads: ExternalPads {
             inputs: vec![],
             outputs: vec![ExternalPad {

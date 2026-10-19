@@ -1,5 +1,8 @@
-//! WHEP Input stream handling: audio is decoded into the liveadder, video is discarded.
+//! WHEP Input stream handling: audio is decoded into the liveadder, video is
+//! decoded into its slot's output tee when that output is linked, and
+//! discarded undecoded otherwise.
 
+use super::video::{configure_keyframe_recovery, VideoRoute, VideoSlots};
 use crate::gst::whep_probe::{self, WhepProbeRegistry};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -11,11 +14,14 @@ use tracing::{error, info, warn};
 /// Uses an identity element to immediately claim the pad (preventing auto-tee),
 /// then a pad probe to detect actual caps before deciding how to handle the stream:
 /// - Audio: decode and route to liveadder
-/// - Video: discard via fakesink (no decode to avoid expensive video decoding)
+/// - Video: claim the next video slot (arrival order). Decode into the slot's
+///   tee if its output is linked; otherwise, or when every slot is taken,
+///   discard via fakesink without decoding.
 pub(super) fn setup_stream_with_caps_detection(
     src: &gst::Element,
     src_pad: &gst::Pad,
     liveadder: &gst::Element,
+    video: &Arc<VideoSlots>,
     instance_id: &str,
     stream_num: usize,
     probe_registry: &Option<Arc<WhepProbeRegistry>>,
@@ -66,6 +72,7 @@ pub(super) fn setup_stream_with_caps_detection(
     // Create weak references for the probe callback
     let pipeline_weak = pipeline.downgrade();
     let liveadder_weak = liveadder.downgrade();
+    let video = Arc::clone(video);
     let instance_id_owned = instance_id.to_string();
     let probe_registry_clone = probe_registry.clone();
 
@@ -144,15 +151,42 @@ pub(super) fn setup_stream_with_caps_detection(
                                 }
                             }
                         } else if is_video {
-                            // Video stream - use fakesink to discard (no decode)
-                            info!(
-                                "WHEP: Stream {} is video, discarding via fakesink (no decode)",
-                                stream_num
-                            );
-                            if let Err(e) =
-                                setup_video_discard(pad, &pipeline, &instance_id_owned, stream_num)
-                            {
-                                error!("WHEP: Failed to setup video discard: {}", e);
+                            match video.claim() {
+                                VideoRoute::Decode { slot, tee } => {
+                                    info!(
+                                        "WHEP: Stream {} is video, decoding into video slot {}",
+                                        stream_num, slot
+                                    );
+                                    if let Err(e) = setup_video_decode_chain(
+                                        pad,
+                                        &pipeline,
+                                        &tee,
+                                        &instance_id_owned,
+                                        stream_num,
+                                    ) {
+                                        error!("WHEP: Failed to setup video decode chain: {}", e);
+                                    }
+                                }
+                                VideoRoute::Discard { slot } => {
+                                    match slot {
+                                        Some(slot) => info!(
+                                            "WHEP: Stream {} is video for slot {}, whose output is not linked; discarding via fakesink (no decode)",
+                                            stream_num, slot
+                                        ),
+                                        None => info!(
+                                            "WHEP: Stream {} is video beyond the declared video tracks; discarding via fakesink (no decode)",
+                                            stream_num
+                                        ),
+                                    }
+                                    if let Err(e) = setup_video_discard(
+                                        pad,
+                                        &pipeline,
+                                        &instance_id_owned,
+                                        stream_num,
+                                    ) {
+                                        error!("WHEP: Failed to setup video discard: {}", e);
+                                    }
+                                }
                             }
                         } else {
                             warn!(
@@ -371,6 +405,97 @@ fn setup_audio_decode_chain(
 
     info!(
         "WHEP: Audio decode chain setup complete for stream {}",
+        stream_num
+    );
+    Ok(())
+}
+
+/// Setup video decode chain: decodebin -> slot tee.
+///
+/// The decoder's output goes to the tee as it is, in whatever memory the
+/// decoder produced: the consuming block adapts its own input.
+fn setup_video_decode_chain(
+    src_pad: &gst::Pad,
+    pipeline: &gst::Pipeline,
+    tee: &gst::Element,
+    instance_id: &str,
+    stream_num: usize,
+) -> Result<(), String> {
+    let decodebin_name = format!("{}:video_decodebin_{}", instance_id, stream_num);
+    let decodebin = gst::ElementFactory::make("decodebin")
+        .name(&decodebin_name)
+        .build()
+        .map_err(|e| format!("Failed to create video decodebin: {}", e))?;
+
+    // Ask the sender for a keyframe after loss; see configure_keyframe_recovery.
+    // The element arrives as a signal argument, so nothing is captured.
+    decodebin.connect("deep-element-added", false, |values| {
+        if let Ok(element) = values[2].get::<gst::Element>() {
+            configure_keyframe_recovery(&element);
+        }
+        None
+    });
+
+    // Weak: the decodebin owns this handler, and the tee is its sibling.
+    let tee_weak = tee.downgrade();
+    decodebin.connect_pad_added(move |_decodebin, pad| {
+        let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
+        let is_video = caps
+            .structure(0)
+            .is_some_and(|s| s.name().starts_with("video/"));
+        if !is_video {
+            warn!(
+                "WHEP: Stream {} video decodebin exposed a non-video pad ({}), leaving it unlinked",
+                stream_num, caps
+            );
+            return;
+        }
+        let Some(tee) = tee_weak.upgrade() else {
+            return;
+        };
+        let Some(tee_sink) = tee.static_pad("sink") else {
+            error!("WHEP: Stream {} video tee has no sink pad", stream_num);
+            return;
+        };
+        if tee_sink.is_linked() {
+            error!(
+                "WHEP: Stream {} video tee {} is already fed, cannot link a second decoder output",
+                stream_num,
+                tee.name()
+            );
+            return;
+        }
+        match pad.link(&tee_sink) {
+            Ok(_) => info!(
+                "WHEP: Stream {} decoded video linked to {} ({})",
+                stream_num,
+                tee.name(),
+                caps
+            ),
+            Err(e) => error!(
+                "WHEP: Stream {} failed to link decoded video to {}: {:?}",
+                stream_num,
+                tee.name(),
+                e
+            ),
+        }
+    });
+
+    pipeline
+        .add(&decodebin)
+        .map_err(|e| format!("Failed to add video decodebin to pipeline: {}", e))?;
+    let decodebin_sink = decodebin
+        .static_pad("sink")
+        .ok_or("Video decodebin has no sink pad")?;
+    src_pad
+        .link(&decodebin_sink)
+        .map_err(|e| format!("Failed to link to video decodebin: {:?}", e))?;
+    decodebin
+        .sync_state_with_parent()
+        .map_err(|e| format!("Failed to sync video decodebin state: {}", e))?;
+
+    info!(
+        "WHEP: Video decode chain setup complete for stream {}",
         stream_num
     );
     Ok(())
