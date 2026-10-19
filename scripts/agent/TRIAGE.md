@@ -1,205 +1,76 @@
 # Triaging an issue
 
-Read `PROTOCOL.md` first.
+The goal is not to judge the issue. It is to place it: what it is really about, what it
+belongs with, and where someone picking it up should start reading. Whoever picks it up will
+investigate again with fresh eyes. Give them leads, not conclusions.
 
-An issue report is a claim about the code and gets verified the same way a PR does. Lead with
-the finding — no "thanks for the detailed report" opener, and never merely restate the issue
-back at the reporter.
+## Look around before you write
 
-## Verify against `main`
+1. **Read the issue and its comments.**
+2. **Find what it belongs with.** Search open *and* closed issues and pull requests for the
+   subsystem, the block, the element, the symptom:
 
-Locate the responsible module and read it, then say whether the reported behaviour follows
-from the code as written.
+       gh issue list --state all --search "<term>" --limit 30
+       gh pr list --state all --search "<term>" --limit 30
+       git log --oneline -20 -- <path>
 
-Use history. The outcomes, in descending order of value to the reporter:
+   An item is related when it shares a cause, shares a design decision, changes the same code
+   path, or would make this one unnecessary. Mentioning the same word is not related.
+   Recently merged work in the same area counts: an issue that appears right after a change
+   is often caused by it.
+3. **Read enough code to know which part of Strom this lives in.** You need the area, not the
+   line. If the issue states something about how the code behaves, check it.
+4. **Search the web** when it helps: an upstream GStreamer issue or merge request, an element's
+   documentation, a spec, a known limitation, how another project solved the same thing.
+   Link what you used. If web search is not available in this run, skip this step.
 
-- **already fixed since their version** — cite the fix commit; this is the best outcome and
-  the cheapest to check, so check it first;
-- **a regression** — find the commit that introduced it;
-- **a duplicate** — link the original;
-- **long-standing behaviour** — say so plainly.
+## What to write
 
-Check the docs for a mismatch. Check whether an existing test encodes the current behaviour,
-because changing the behaviour means changing that test — name it if so.
+One comment, at most **1000 characters**, in this shape. Leave out any section with nothing
+in it.
 
-## Reach exactly one verdict
+    **Area:** a few words naming the part of Strom and the concern, e.g. "WHIP ingest,
+    session lifecycle". Free text, not a category from a list.
 
-One token from the triage-verdict row in `PROTOCOL.md`. If you cannot reach one, post nothing
-and record `insufficient evidence, no comment` in the run summary.
+    **About:** one or two sentences on what the problem actually is. If the reported symptom
+    and the underlying problem differ, say both.
 
-The tokens are named for bug reports, but most of the board is not a bug report — it is
-feature requests, extensions of something that exists, and capability questions. Read them
-this way for those:
+    **Relates to:** #N (shares the cause), #M (same code path), merged #K (likely introduced
+    it). This is the most important line: say how each one relates.
 
-| Token | For a bug report | For a feature request or capability gap |
-|---|---|---|
-| `CONFIRMED` | the behaviour follows from the code | the capability genuinely is absent, and the code says where it would go |
-| `NOT_REPRODUCIBLE` | the code does not produce this | the capability already exists by another route — name it |
-| `ALREADY_ADDRESSED` | fixed since their version | shipped since their version, or an existing block already does it. **The highest-value outcome for a request** — check it first |
-| `NEEDS_INFO` | cannot tell without more detail | the request is not yet specific enough to scope |
+    **References:** upstream issues, docs, specs, with links.
 
-Then set `work=` in the marker: `bug` for wrong behaviour, `extension` for adding to
-something that exists, `feature` for something new. The implementation stage reads it to pick
-its branch, commit and title vocabulary.
+    **Thoughts:** a sentence or three. Is this a symptom of something larger? Is it already
+    possible some other way? What direction looks right, and what looks like a trap?
 
-## For a CONFIRMED issue, add a design proposal
+    <!-- strom-agent triage -->
 
-Then **stop**. Do not implement it, do not open a PR, do not write more code than makes an
-option concrete. A human decides the design before anything is built, and a separate task
-implements what they approve.
+Rules:
 
-The proposal carries, in this order:
+- No code, no line numbers, no quoted source. Name a module or a file if it helps.
+- No questions to the maintainer, no options to choose between, no verdicts.
+- If you could not tell something, say that in a few words instead of guessing.
+- Write for the person who reported it as well as for the maintainer: plain sentences.
+- If the issue is already solved or already possible, say how, briefly, with a link to the
+  commit or PR.
+- If the report lacks what anyone would need to reproduce it, say what is missing in one
+  sentence.
 
-1. **Root cause** in a sentence or two, cited.
-2. **Two options** with their trade-offs, including what each would break or complicate — or
-   one option and why the obvious alternative is worse.
-3. **Overlaps**, from `PROTOCOL.md`'s "Find what else is already open on it". Every open
-   issue or pull request that owns this design decision or changes this code path, by number
-   and by which kind of overlap it is. Where one exists, **one of the two options above must
-   be "wait for #N, change nothing here"** — a fix that is `LOCAL` in the code can still
-   settle a `GLOBAL` design question by being merged first, and that is the reader's decision,
-   not yours. Where none exists, say the search found none.
-4. **Blast radius** of the recommendation. One token from the radius row. **Radius scores
-   what the change modifies, not how much it adds** — a new block with no existing call sites
-   is `LOCAL` however large it is. Size belongs in the scope proposal below.
-5. **The test that would guard the change**, and where it would live.
-6. **Recommendation** in one line.
-7. For `work=extension` or `work=feature`, a **scope proposal**: what PR 1 contains, and what
-   becomes follow-up issues. Nothing else in this protocol cuts a feature into slices, so if
-   you do not propose the cut, nobody does.
-8. **`Ask:`** — the question, answerable in one line.
+## Updating
 
-The `Ask:` is the interface to the implementation stage, which will not act until a human
-answers it. So:
+When something changes (see `ROLE_REVIEW.md`), **edit your comment** rather than adding one:
 
-- Make the options **distinguishable by name**, not by position. "Option A (single bus watch)"
-  and "Option B (per-block guard)" can be answered; "the first one" cannot.
-- Make the question closed. One line should settle it.
-- State that `/agent-fix <option-name>` in a reply is the answer the implementation stage
-  reads, and that any other phrasing needs a human to interpret it.
+    gh api -X PATCH repos/Eyevinn/strom/issues/comments/<comment_id> -F body=@body.md
 
-## Marker backfill — cheap, and not a re-triage
+Rewrite it as it should read now; do not append "Update:" paragraphs. Writing `#N` in the
+comment makes GitHub show the link on #N too, so relations show up on both issues.
 
-Triage comments written before the marker carried `verdict=` / `radius=` / `excluded=` /
-`ask=` leave `board.sh` unable to say anything useful about an issue. It reports them as
-notes against the candidate:
+## Old-format comments
 
-    #719   notes: triage marker predates the structured fields
+Many issues still carry long triage comments from an earlier protocol (they contain
+`protocol=v3`). Do not add a new comment beside them. Edit the **most recent** one into the
+format above, and minimize the older ones as outdated so the thread reads short:
 
-For each one, post a short comment carrying **only** the marker, with a one-line note that it
-restates the standing triage rather than replacing it:
+    gh api graphql -f query='mutation { minimizeComment(input: {subjectId: "<node_id>", classifier: OUTDATED}) { clientMutationId } }'
 
-    Marker backfill for my triage of 2026-08-27 — verdict and radius unchanged, no re-verification.
-
-    To implement Option A, reply: /agent-fix A
-
-    <!-- strom-agent protocol=v3 kind=triage issue=719 base=1c06c37 verdict=CONFIRMED work=bug radius=LOCAL excluded=none overlaps=none ask=open confidence=HIGH -->
-
-**That middle line is required, not decoration** — the backfill is the only comment that will
-be posted on those issues, so it is the only place the answer syntax can be offered. Where
-the marker records a non-`LOCAL` radius or an excluded area, spell out the override the
-answer needs:
-
-    To implement Option A, reply: /agent-fix A --accept-radius SHARED
-
-Read the fields off your own standing comment. Do not re-derive them, do not re-verify, and
-do not restate the design proposal — the original comment stays the record.
-
-A backfill is one API call and no verification, so it **does not consume item budget**. Do at
-most six per run. If your standing comment does not actually state a radius, or you cannot
-tell which excluded areas the fix touches, the issue needs a real re-triage — leave it and
-say so in the summary rather than guessing a token into the marker.
-
-## When a standing triage must be re-read
-
-A standing v3 comment normally suppresses re-triage. Two cases override that, because in both
-the issue has moved and nothing else will ever notice:
-
-1. **`verdict=NEEDS_INFO` and a human has commented since.** That comment is the answer to
-   your own question. Re-triage from scratch — the new information very likely changes the
-   verdict.
-2. **`ask=open` and a human replied without the answer syntax.** The implementation stage
-   cannot act on that reply, but you are the stage that should read it and decide whether the
-   design changed. If it did, publish a new proposal. If it did not, say so and restate the
-   token to use.
-
-Put both above "anything genuinely new" in your priority order. `board.sh` names the issues
-in case 1 explicitly (`needs RE-TRIAGE, not a fix`) and lists case 2 under the
-"a human replied" heading, so you do not have to hunt for them.
-
-## Length
-
-**The triage comment body is at most 2500 characters.** Count before posting; the check is
-`scripts/agent/verify-citations.sh --max-chars 2500 <file>`.
-
-That is a ceiling. The target is the worked example below, which is 2000 characters — most
-triages should land near it. The design proposal is the part worth its length; what has to go
-is restatement: do not summarise the issue back at the reporter, do not repeat what your own
-standing comment already established, and do not pad the options with reasoning that does not
-change the choice.
-
-## Labels
-
-Only labels that already exist in this repo:
-
-    bug  documentation  duplicate  enhancement  good first issue
-    help wanted  invalid  question  wontfix  dependencies  rust
-
-At most two, only where your verification justifies it. Never create one. Remove any you can
-no longer justify.
-
-## Worked example
-
----
-
-**CONFIRMED.** `remove_bus_watch()` removes the bus *signal* watch rather than the per-block
-handler, so the first block to stop takes the watch away from every other block on the same
-bus, and GStreamer logs a CRITICAL on each subsequent stop.
-
-`backend/src/gst/pipeline/bus.rs:212` — `` `bus.remove_watch().ok();` ``
-
-The watch is added once per block at `bus.rs:141` — `` `bus.add_signal_watch();` `` — so the
-add is refcounted per block while the remove is not, and the imbalance surfaces on the second
-stop of any flow with two or more bus-listening blocks (Media Player, audio analyzer, mixer,
-vision mixer).
-
-**Option A — one watch for the bus.** Take the signal watch once in `setup_bus_watch` for the
-pipeline's lifetime and let blocks attach handlers to it; remove it once in teardown.
-Removes the imbalance rather than counting around it. Complicates nothing, but touches the
-order in which handlers see messages, so a block that relies on being the only handler would
-need checking — grep says none do.
-
-**Option B — refcount the removes.** Keep the per-block add and track a count, removing the
-watch only when it reaches zero. Smaller diff, but it leaves two mechanisms (GStreamer's own
-refcount and ours) that have to stay in agreement, which is the class of bug being fixed.
-
-**Radius** — `LOCAL`: one module, no contract surface, log-noise-only in observable impact.
-
-**Guarding test** — `backend/tests/bus_watch_test.rs`: build a flow with two bus-listening
-blocks, stop it, assert no CRITICAL reaches the log capture. Fails today on the second stop.
-
-**Recommendation** — Option A. It removes the invariant instead of maintaining it.
-
-**Ask:** Option A (single bus watch) or Option B (refcounted removes)? Reply
-`/agent-fix A` or `/agent-fix B`; any other phrasing needs a human to interpret before the
-implementation stage can act.
-
-Confidence: HIGH
-
-`<!-- strom-agent protocol=v3 kind=triage issue=719 base=1c06c37 verdict=CONFIRMED work=bug radius=LOCAL excluded=none overlaps=none ask=open confidence=HIGH -->`
-
----
-
-## Before you post, confirm
-
-- You ran the overlap search, and the proposal names what it found — or says it found
-  nothing.
-- `verify-citations.sh` exits zero on your body. A marker backfill cites nothing by
-  design, so check that one with `--allow-no-citations`.
-- The marker carries `verdict=`, `work=`, `radius=`, `excluded=` and `ask=`, using vocabulary
-  tokens. `board.sh` reports each missing one as a note the implementation stage has to
-  answer in its PR body, so an incomplete marker turns into work for the next reader.
-- `excluded=` names what the change would **break**, not what it touches. Adding a type to
-  `strom-types` is `none` — CLAUDE.md requires it to go there.
-- The `Ask:` names its options and can be answered in one line.
-- Labels are from the list above, at most two.
+Only ever edit or minimize comments that are yours by the marker.

@@ -8,8 +8,7 @@
 # Version updates were costing more than they gave: each pull request
 # re-resolved Cargo.lock on its own, so they conflicted with each other, every
 # rebase cost another CI run, and GStreamer bumps broke the build from patch
-# releases (#861). Keeping up now happens once a month, in one pull request
-# from the implementation agent: scripts/agent/DEPS.md.
+# releases (#861). Keeping up is done by hand, in one pull request at a time.
 
 version: 2
 updates:
