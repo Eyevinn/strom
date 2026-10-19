@@ -8,11 +8,9 @@ use gstreamer_app as gst_app;
 use gstreamer_video::prelude::*;
 use std::collections::HashMap;
 use strom::state::AppState;
-use strom::storage::JsonFileStorage;
 use strom_types::element::Link;
 use strom_types::stinger::{StingerClipSettings, StingerVariant};
 use strom_types::{Flow, PropertyValue as PV};
-use tempfile::NamedTempFile;
 
 pub const W: u32 = 320;
 pub const H: u32 = 180;
@@ -418,10 +416,8 @@ pub fn stinger_also_on_an_input(flow: &mut Flow) {
 
 pub struct Running {
     pub tag: String,
-    pub state: AppState,
+    pub state: crate::common::state::TestState,
     pub flow_id: strom_types::FlowId,
-    pub _storage: NamedTempFile,
-    pub _blocks: NamedTempFile,
     pub _dir: tempfile::TempDir,
 }
 
@@ -496,11 +492,55 @@ impl Running {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "stinger never ready: {:?}",
-                s.problem
+                "stinger never ready: {:?}; {}",
+                s.problem,
+                self.why_not_parked(&s)
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+
+    /// Each condition `ready` is made of, as it stands now. For the failure
+    /// message of a stinger that never parks.
+    fn why_not_parked(&self, s: &strom_types::stinger::StingerState) -> String {
+        use std::sync::atomic::Ordering;
+        use strom::blocks::builtin::mediaplayer::{
+            file_stamp, normalize_uri, MediaPlayerKey, MEDIA_PLAYER_REGISTRY,
+        };
+        let Some(source) = &s.source_block_id else {
+            return "no stinger source".to_string();
+        };
+        let Some(player) = MEDIA_PLAYER_REGISTRY.get(&MediaPlayerKey {
+            flow_id: self.flow_id,
+            block_id: source.clone(),
+        }) else {
+            return format!("media player {source} not registered");
+        };
+        let (current_index, files) = player
+            .playlist
+            .read()
+            .map(|p| (p.current_index, p.files.clone()))
+            .unwrap_or_default();
+        let cued_now = files.get(current_index).map(|f| {
+            let uri = normalize_uri(f, &player.media_path);
+            (
+                file_stamp(&uri),
+                strom::stinger::analysis::software_only(&uri),
+            )
+        });
+        format!(
+            "running {}, cued {:?}, parked {}, paused {}, current_index {}, files {:?}, \
+             loaded {:?}, cued file now (stamp, software_only) {:?}, clips {:?}",
+            s.running,
+            s.cued_index,
+            player.stinger.park.parked.load(Ordering::Acquire),
+            player.is_paused.load(Ordering::SeqCst),
+            current_index,
+            files,
+            player.loaded_clip(),
+            cued_now,
+            s.clips
+        )
     }
 
     /// Wait until the take finished and its report is in.
@@ -601,18 +641,7 @@ pub async fn start_edited(
     }
     let _ = strom::gpu::detect_gpu_capabilities();
 
-    let storage = NamedTempFile::new().unwrap();
-    let blocks = NamedTempFile::new().unwrap();
-    let state = AppState::new(
-        JsonFileStorage::new(storage.path()),
-        blocks.path(),
-        dir.path(),
-        vec![],
-        "all".to_string(),
-        vec![],
-        false,
-        false,
-    );
+    let state = crate::common::state::with_media(dir.path());
     let mut flow = build_flow(tag, backend, &clips);
     edit(&mut flow);
     let flow_id = flow.id;
@@ -622,8 +651,6 @@ pub async fn start_edited(
         tag: tag.to_string(),
         state,
         flow_id,
-        _storage: storage,
-        _blocks: blocks,
         _dir: dir,
     };
     running.wait_until_parked().await;

@@ -8,30 +8,13 @@
 //! These tests call `create_flow` directly, so reverting the fix in
 //! `backend/src/api/flows.rs` turns `creates_flow_with_the_supplied_id` red.
 
+pub mod common;
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use strom::api::flows::create_flow;
 use strom::json_rejection::JsonBody;
-use strom::state::AppState;
-use strom::storage::JsonFileStorage;
 use strom_types::Flow;
-use tempfile::NamedTempFile;
-
-fn new_state() -> AppState {
-    let storage_file = NamedTempFile::new().unwrap();
-    let blocks_file = NamedTempFile::new().unwrap();
-    let storage = JsonFileStorage::new(storage_file.path());
-    AppState::new(
-        storage,
-        blocks_file.path(),
-        std::env::temp_dir(),
-        vec![],
-        "all".to_string(),
-        vec![],
-        false,
-        false,
-    )
-}
 
 /// The id the caller sends is the id the flow gets, and the id it is stored
 /// under. This is the assertion that fails if the unconditional overwrite
@@ -39,13 +22,13 @@ fn new_state() -> AppState {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn creates_flow_with_the_supplied_id() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let mut flow = Flow::new("supplied-id");
     let chosen = Flow::new("scratch").id; // a fresh, known uuid
     flow.id = chosen;
 
-    let (status, body) = create_flow(State(state.clone()), JsonBody(flow))
+    let (status, body) = create_flow(State(state.app()), JsonBody(flow))
         .await
         .expect("create_flow should succeed");
 
@@ -65,18 +48,18 @@ async fn creates_flow_with_the_supplied_id() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rejects_a_duplicate_id_with_conflict() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let mut first = Flow::new("first");
     let shared = Flow::new("scratch").id;
     first.id = shared;
-    let _first = create_flow(State(state.clone()), JsonBody(first))
+    let _first = create_flow(State(state.app()), JsonBody(first))
         .await
         .expect("first create should succeed");
 
     let mut second = Flow::new("second");
     second.id = shared;
-    let err = create_flow(State(state.clone()), JsonBody(second))
+    let err = create_flow(State(state.app()), JsonBody(second))
         .await
         .expect_err("a duplicate id must be rejected");
 
@@ -97,7 +80,7 @@ async fn rejects_a_duplicate_id_with_conflict() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn assigns_an_id_when_the_caller_sends_nil() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let mut flow = Flow::new("nil-id");
     flow.id = Default::default(); // uuid nil
@@ -106,7 +89,7 @@ async fn assigns_an_id_when_the_caller_sends_nil() {
         "precondition: the request carries a nil id"
     );
 
-    let (status, body) = create_flow(State(state.clone()), JsonBody(flow))
+    let (status, body) = create_flow(State(state.app()), JsonBody(flow))
         .await
         .expect("create_flow should succeed");
 
@@ -129,14 +112,14 @@ async fn assigns_an_id_when_the_caller_sends_nil() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_creates_with_the_same_id_yield_one_flow() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let shared = Flow::new("scratch").id;
     let attempts = 16;
 
     let mut handles = Vec::with_capacity(attempts);
     for i in 0..attempts {
-        let state = state.clone();
+        let state = state.app();
         handles.push(tokio::spawn(async move {
             let mut flow = Flow::new(format!("racer-{i}"));
             flow.id = shared;

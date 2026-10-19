@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.7.0"
+    "version": "0.7.1"
   },
   "paths": {
     "/api/auth/status": {
@@ -3702,10 +3702,10 @@
             }
           },
           "400": {
-            "description": "Invalid request"
+            "description": "Invalid request, or a block with no inputs to probe"
           },
           "404": {
-            "description": "Flow not found or not running"
+            "description": "Flow not found or not running, or no such element or block (or block definition)"
           }
         }
       }

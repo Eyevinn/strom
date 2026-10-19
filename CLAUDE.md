@@ -48,7 +48,7 @@ The block contract (what a block emits and accepts, memory formats, output block
 - Operator/usage guides (how to *use* a feature) may stay top-level, but carry the disclaimer: "Code is the source of truth — this may have drifted; read the code for the current implementation." Do not cite file paths in disclaimers (paths drift too) — just say "read the code".
 - Doc filenames in `docs/` use `UPPER_SNAKE_CASE` (e.g. `DOCKER_GPU_SETUP.md`). Leave `README.md` and `.github/ISSUE_TEMPLATE/*` lowercase (GitHub convention).
 - There is no committed roadmap. Ideas go in `docs/FEATURE_SUGGESTIONS.md` (an unordered "not a roadmap" list) or as GitHub Issues/Discussions.
-- Strom is authored by Claude Code (AI), not hand-written by humans. We welcome feature requests, ideas, and (ideally AI-written) PRs.
+- Strom is authored by Claude Code (AI), not hand-written by humans. We welcome issues, feature requests and ideas, and prefer a good issue (what is broken, a proposed direction, a test case) over a PR.
 
 ## Shared Types (`strom-types`)
 - Before defining a new struct, enum, constant, or default value — always check if it already exists in `strom-types`. All new API-visible or shared types must be placed in `strom-types`, never directly in the backend. If you find a duplicate, move it to `strom-types`.
@@ -72,7 +72,7 @@ The block contract (what a block emits and accepts, memory formats, output block
 - A regression test must fail if the fix is reverted. If it hardcodes the fixed path (e.g. a `use_queues: true` flag with no failing counterpart), it is a demonstration, not a guard — say so in the PR body and explain why a real guard is not feasible.
 - A test that requires a GStreamer element must be able to run in CI. Tests that skip on a missing element pass green and guard nothing, so check the package list in `.github/workflows/ci.yml` before relying on one, and add the missing package in the same PR.
 - State in the PR body which tests you actually ran, and which were skipped or not run. "CI is green" is not the same as "the new test executed".
-- Write the PR body from `.github/PULL_REQUEST_TEMPLATE.md`. `gh pr create --body` and `--body-file` skip the template, so read it first. The scheduled fix stage follows `scripts/agent/FIX.md` instead.
+- Write the PR body from `.github/PULL_REQUEST_TEMPLATE.md`. `gh pr create --body` and `--body-file` skip the template, so read it first.
 
 ## Dead Code
 - Never use blanket `#![allow(dead_code)]`. Each case must be handled individually. Never use `#[allow(dead_code)]` in `strom-types`.

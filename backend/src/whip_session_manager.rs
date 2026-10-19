@@ -1506,14 +1506,6 @@ impl WhipSessionManager {
         sessions.get(resource_id).map(|s| s.port)
     }
 
-    /// Look up the port for a session, also returning the endpoint_id.
-    pub fn get_session_info(&self, resource_id: &str) -> Option<(u16, String)> {
-        let sessions = self.sessions.read().unwrap();
-        sessions
-            .get(resource_id)
-            .map(|s| (s.port, s.endpoint_id.clone()))
-    }
-
     /// Remove a session and return (element, session_pipeline, endpoint_id, port, slot) for teardown.
     pub fn remove_session(
         &self,
@@ -1594,12 +1586,6 @@ impl WhipSessionManager {
         );
         self.endpoints.write().unwrap().remove(endpoint_id);
         self.remove_all_sessions(endpoint_id)
-    }
-
-    /// List all registered endpoint IDs.
-    pub fn list_endpoints(&self) -> Vec<String> {
-        let endpoints = self.endpoints.read().unwrap();
-        endpoints.keys().cloned().collect()
     }
 
     /// Remove stale entries from the dynamic webrtcbin store for a block.

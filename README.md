@@ -127,7 +127,7 @@ Copy `.strom.toml.example` to `.strom.toml` for all options. Key topics have ded
 
 Strom is written by **Claude Code**. The codebase is authored by AI, not hand-written by humans — that's intentional, and it's also why the code (not the docs) is the source of truth for how things work.
 
-We welcome feature requests, ideas, and pull requests — ideally AI-written, in the same spirit. Open a [GitHub Discussion](https://github.com/Eyevinn/strom/discussions), file a [feature request](https://github.com/Eyevinn/strom/issues), or send a PR.
+We welcome bug reports, feature requests and ideas. We would rather have a good [issue](https://github.com/Eyevinn/strom/issues) than a pull request: say what is broken, how you would solve it, and how we would test it. Code is quick to generate and goes stale fast. Questions and ideas also fit in [GitHub Discussions](https://github.com/Eyevinn/strom/discussions).
 
 ## Contributing
 
@@ -139,4 +139,4 @@ MIT OR Apache-2.0
 
 ---
 
-> The name **Strom** comes from "Ström" — Swedish for "stream".
+> The name Strom (rhymes with "from") comes from "Ström" — Swedish for "stream".

@@ -1,7 +1,6 @@
 //! WHIP endpoint registry.
 //!
-//! Maps endpoint IDs to internal localhost ports for WHIP Input blocks.
-//! The axum proxy uses this to route requests to the correct whipserversrc instance.
+//! Maps endpoint IDs to the stream mode of their WHIP Input blocks.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,13 +10,11 @@ use tokio::sync::RwLock;
 /// Information about a registered WHIP endpoint.
 #[derive(Debug, Clone)]
 pub struct WhipEndpointEntry {
-    /// Internal localhost port where whipserversrc is listening
-    pub port: u16,
     /// Stream mode (audio, video, or both)
     pub mode: StreamMode,
 }
 
-/// Registry mapping endpoint IDs to internal ports.
+/// Registry mapping endpoint IDs to their endpoint info.
 #[derive(Debug, Clone, Default)]
 pub struct WhipRegistry {
     inner: Arc<RwLock<HashMap<String, WhipEndpointEntry>>>,
@@ -31,15 +28,10 @@ impl WhipRegistry {
         }
     }
 
-    /// Register an endpoint with its internal port and stream mode.
+    /// Register an endpoint with its stream mode.
     ///
     /// Returns an error if an endpoint with the same ID is already registered.
-    pub async fn register(
-        &self,
-        endpoint_id: String,
-        port: u16,
-        mode: StreamMode,
-    ) -> Result<(), String> {
+    pub async fn register(&self, endpoint_id: String, mode: StreamMode) -> Result<(), String> {
         let mut map = self.inner.write().await;
         if map.contains_key(&endpoint_id) {
             return Err(format!(
@@ -47,7 +39,7 @@ impl WhipRegistry {
                 endpoint_id
             ));
         }
-        map.insert(endpoint_id, WhipEndpointEntry { port, mode });
+        map.insert(endpoint_id, WhipEndpointEntry { mode });
         Ok(())
     }
 
@@ -55,18 +47,6 @@ impl WhipRegistry {
     pub async fn unregister(&self, endpoint_id: &str) {
         let mut map = self.inner.write().await;
         map.remove(endpoint_id);
-    }
-
-    /// Look up the internal port for an endpoint ID.
-    pub async fn get_port(&self, endpoint_id: &str) -> Option<u16> {
-        let map = self.inner.read().await;
-        map.get(endpoint_id).map(|e| e.port)
-    }
-
-    /// Look up endpoint info (port and mode) for an endpoint ID.
-    pub async fn get(&self, endpoint_id: &str) -> Option<WhipEndpointEntry> {
-        let map = self.inner.read().await;
-        map.get(endpoint_id).cloned()
     }
 
     /// Check if an endpoint ID is already registered.
@@ -79,16 +59,5 @@ impl WhipRegistry {
     pub async fn list_all(&self) -> Vec<(String, WhipEndpointEntry)> {
         let map = self.inner.read().await;
         map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-    }
-
-    /// Update the port for an existing endpoint (sync version for use from
-    /// non-async contexts like `spawn_blocking` or `std::thread::spawn`).
-    ///
-    /// Used when whipserversrc is recreated on a new port after session end.
-    pub fn update_port_sync(&self, endpoint_id: &str, new_port: u16) {
-        let mut map = self.inner.blocking_write();
-        if let Some(entry) = map.get_mut(endpoint_id) {
-            entry.port = new_port;
-        }
     }
 }

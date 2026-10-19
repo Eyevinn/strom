@@ -37,6 +37,14 @@ What actually happened.
 Paste relevant logs here (check ~/.strom/logs/ or use GST_DEBUG=3)
 ```
 
+## Proposed Fix (optional)
+
+If you have an idea of what is wrong or how to fix it, a few sentences are enough. No code needed.
+
+## Test Case
+
+How would we know it is fixed? A minimal reproduction or a flow export we can turn into a test is the most useful thing you can give us.
+
 ## Additional Context
 
 Any other context about the problem.

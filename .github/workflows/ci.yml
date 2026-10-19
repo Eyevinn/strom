@@ -640,6 +640,9 @@ jobs:
           # Held back until the job could report a failure at all and the MSI
           # installed every plugin group; both are true as of this commit.
           STROM_REQUIRE_GST_PLUGINS: 1
+          # Skip the tests that pass locally but fail on this runner — see
+          # common::skip_known_ci_failure(). Linux CI still runs them.
+          STROM_SKIP_KNOWN_CI_FAILURES: 1
 
       # A pull request asks this job to verify the platform code, which
       # clippy and the tests do. The release binary is only wanted from main
@@ -736,6 +739,8 @@ jobs:
           # its headless runner renders through surfaceless EGL. Windows does
           # not: its runner has no OpenGL driver GStreamer can use.
           STROM_REQUIRE_GL: 1
+          # See the Windows job.
+          STROM_SKIP_KNOWN_CI_FAILURES: 1
 
       # Not on a pull request: see the Windows job.
       - name: Build

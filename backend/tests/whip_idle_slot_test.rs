@@ -13,7 +13,6 @@ pub mod common;
 use std::collections::HashMap;
 use strom::blocks::builtin::whip::WHIPInputBuilder;
 use strom::blocks::{BlockBuildContext, BlockBuilder};
-use strom_types::element::ElementPadRef;
 use strom_types::PropertyValue;
 
 use gstreamer as gst;
@@ -37,31 +36,6 @@ const REQUIRED: &[&str] = &[
     "nicesrc",
     "nicesink",
 ];
-
-/// Resolve one side of a block's declared internal link to a pad.
-fn resolve_pad(
-    by_id: &HashMap<String, gst::Element>,
-    reference: &ElementPadRef,
-    request: bool,
-) -> gst::Pad {
-    let element = by_id.get(&reference.element_id).unwrap_or_else(|| {
-        panic!(
-            "block declares a link to unknown element {}",
-            reference.element_id
-        )
-    });
-    let pad_name = reference.pad_name.as_deref().unwrap_or("src");
-    element
-        .static_pad(pad_name)
-        .or_else(|| {
-            if request {
-                element.request_pad_simple(pad_name)
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| panic!("{} has no pad {}", reference.element_id, pad_name))
-}
 
 /// Build `inputs` WHIP Input blocks through the real block builder and wire up
 /// the internal links they declare, exactly as the pipeline manager does.
@@ -94,21 +68,11 @@ fn build_whip_inputs(
         props.insert("max_sessions".to_string(), PropertyValue::Int(1));
         props.insert("decode".to_string(), PropertyValue::Bool(true));
 
-        let ctx = BlockBuildContext::new(vec![], "all".to_string());
+        let ctx = common::block::context();
         let built = WHIPInputBuilder
             .build(&instance_id, &props, &ctx)
             .expect("WHIP Input block builds");
-
-        for (id, element) in &built.elements {
-            pipeline.add(element).expect("add block element");
-            by_id.insert(id.clone(), element.clone());
-        }
-        for (from, to) in &built.internal_links {
-            let src = resolve_pad(&by_id, from, true);
-            let sink = resolve_pad(&by_id, to, true);
-            src.link(&sink)
-                .unwrap_or_else(|e| panic!("link {:?} -> {:?}: {:?}", from, to, e));
-        }
+        by_id.extend(common::block::install(&pipeline, &built));
         contexts.push(ctx);
     }
 

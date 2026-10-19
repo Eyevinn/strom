@@ -3,6 +3,11 @@
 //! Include it as `pub mod common;`. The `pub` is what keeps the helpers a given
 //! test binary does not call from being reported as dead code.
 
+pub mod block;
+pub mod bus;
+pub mod manager;
+pub mod state;
+
 use gstreamer as gst;
 
 /// The elements in `required` that this GStreamer install does not provide.
@@ -53,6 +58,22 @@ pub fn gl_elements_available(required: &[&str]) -> bool {
         missing.join(", ")
     );
     require_or_skip(&missing)
+}
+
+/// True when this test should skip because it fails on the CI runner for this
+/// platform but passes on a developer machine. The macOS and Windows CI jobs set
+/// `STROM_SKIP_KNOWN_CI_FAILURES=1`; Linux CI and local runs leave it unset, so
+/// there the test runs as normal. `platforms` lists the runners it fails on, as
+/// `std::env::consts::OS` names them ("macos", "windows"), so it still runs on
+/// the others. `reason` says what goes wrong on the runner.
+pub fn skip_known_ci_failure(platforms: &[&str], reason: &str) -> bool {
+    if strom_types::env::var_opt("STROM_SKIP_KNOWN_CI_FAILURES").is_none()
+        || !platforms.contains(&std::env::consts::OS)
+    {
+        return false;
+    }
+    eprintln!("SKIP: known CI runner failure: {reason}");
+    true
 }
 
 /// Fail outright if any element in `required` is missing, whatever
@@ -169,4 +190,14 @@ pub fn gl_available(required: &[&str]) -> bool {
     );
     eprintln!("SKIP: GL environment unavailable ({})", error);
     false
+}
+
+/// A free UDP port on 127.0.0.1. Binding one and dropping it races with
+/// anything else on the host, so a caller whose listener fails to bind should
+/// name the element in its error rather than read it as the regression.
+pub fn free_udp_port() -> u16 {
+    std::net::UdpSocket::bind("127.0.0.1:0")
+        .and_then(|s| s.local_addr())
+        .map(|a| a.port())
+        .expect("no free UDP port")
 }

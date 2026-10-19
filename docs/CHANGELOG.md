@@ -2,6 +2,30 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.7.1] - 2026-10-12
+
+### Fixed
+- Stinger: decode a clip in software when its hardware decoder refuses it, and keep a failed analysis (#1054)
+- Local Input: multichannel audio is unpositioned, with explicit surround choices (ASIO 3+ channels) (#1059)
+- Headless: run the server on its own thread on Windows and Linux too (#1060)
+- Windows: run OpenGL on the discrete GPU on hybrid laptops (#1061)
+- WHIP Input: restore the default jitterbuffer latency to 200 ms (#1064)
+- Media Player: play HLS with muxed audio and video in passthrough (#1065)
+- Probe: a block without inputs gets no Probe button, and the API answers `400 Block '<id>' has no inputs to probe` instead of a 404 (#1065)
+
+### Changed
+- Media Player: `decode` now defaults to `true`, as on SRT, EFP and WHIP Input (#1065). **Saved flows:** a Media Player that never set `decode` now decodes. If it feeds an encoded-only output (SRT, RTMP, Recorder), that output refuses raw video and the flow fails to start. Set `decode=false` on the Media Player to keep passthrough.
+- WHIP, WHEP: split the block files into input and output modules (#1053)
+
+### CI
+- Tests: fix main-red tests on macOS and Windows (glupload format, partial file size, `filesrc` paths), and run the stinger tests one at a time (#1050, #1051)
+
+### Documentation
+- Catch up with 0.7.0 (#1052)
+- README: repoint the OSC badge to hosted Open Live (#1058)
+
+---
+
 ## [0.7.0] - 2026-10-08
 
 ### Added

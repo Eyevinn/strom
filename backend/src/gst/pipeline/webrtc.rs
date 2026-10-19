@@ -1,4 +1,4 @@
-use super::{PipelineError, PipelineManager};
+use super::PipelineManager;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use tracing::{debug, info, trace, warn};
@@ -141,34 +141,6 @@ impl PipelineManager {
         } else {
             None
         }
-    }
-
-    /// Get the negotiated caps for a specific pad.
-    /// Returns the caps as a string, or None if caps haven't been negotiated yet.
-    pub fn get_pad_caps(
-        &self,
-        element_id: &str,
-        pad_name: &str,
-    ) -> Result<Option<gst::Caps>, PipelineError> {
-        let element = self
-            .elements
-            .get(element_id)
-            .ok_or_else(|| PipelineError::ElementNotFound(element_id.to_string()))?;
-
-        // Get pad reference
-        let pad = if let Some(p) = element.static_pad(pad_name) {
-            p
-        } else if let Some(p) = element.request_pad_simple(pad_name) {
-            p
-        } else {
-            return Err(PipelineError::PadNotFound {
-                element: element_id.to_string(),
-                pad: pad_name.to_string(),
-            });
-        };
-
-        // Get current negotiated caps (not template caps)
-        Ok(pad.current_caps())
     }
 
     /// Get WebRTC statistics from all webrtcbin elements in the pipeline.

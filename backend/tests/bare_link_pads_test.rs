@@ -9,32 +9,15 @@
 //! These tests call `create_flow` and `update_flow` directly, so reverting the
 //! fix in `backend/src/api/flows.rs` turns them red.
 
+pub mod common;
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use std::collections::HashMap;
 use strom::api::flows::{create_flow, update_flow};
 use strom::json_rejection::JsonBody;
-use strom::state::AppState;
-use strom::storage::JsonFileStorage;
 use strom_types::block::{BlockInstance, Position};
 use strom_types::{Element, Flow, Link, PropertyValue};
-use tempfile::NamedTempFile;
-
-fn new_state() -> AppState {
-    let storage_file = NamedTempFile::new().unwrap();
-    let blocks_file = NamedTempFile::new().unwrap();
-    let storage = JsonFileStorage::new(storage_file.path());
-    AppState::new(
-        storage,
-        blocks_file.path(),
-        std::env::temp_dir(),
-        vec![],
-        "all".to_string(),
-        vec![],
-        false,
-        false,
-    )
-}
 
 fn element(id: &str, element_type: &str, x: f32) -> Element {
     Element {
@@ -77,12 +60,12 @@ fn bare_link_flow(name: &str) -> Flow {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_flow_keeps_links_written_with_bare_element_ids() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let flow = bare_link_flow("bare-links");
     let id = flow.id;
 
-    let (status, body) = create_flow(State(state.clone()), JsonBody(flow))
+    let (status, body) = create_flow(State(state.app()), JsonBody(flow))
         .await
         .expect("a flow with bare links must be accepted");
 
@@ -107,13 +90,13 @@ async fn create_flow_keeps_links_written_with_bare_element_ids() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_flow_keeps_links_written_with_bare_element_ids() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let mut flow = bare_link_flow("bare-links-update");
     let id = flow.id;
     flow.links.clear();
 
-    let _created = create_flow(State(state.clone()), JsonBody(flow.clone()))
+    let _created = create_flow(State(state.app()), JsonBody(flow.clone()))
         .await
         .expect("create should succeed");
 
@@ -121,13 +104,9 @@ async fn update_flow_keeps_links_written_with_bare_element_ids() {
         from: "src0".to_string(),
         to: "caps0".to_string(),
     });
-    let body = update_flow(
-        State(state.clone()),
-        axum::extract::Path(id),
-        JsonBody(flow),
-    )
-    .await
-    .expect("an update with bare links must be accepted");
+    let body = update_flow(State(state.app()), axum::extract::Path(id), JsonBody(flow))
+        .await
+        .expect("an update with bare links must be accepted");
 
     assert_eq!(body.0.flow.links.len(), 1);
     let stored = state.get_flow(&id).await.expect("flow must be stored");
@@ -143,7 +122,7 @@ async fn update_flow_keeps_links_written_with_bare_element_ids() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_flow_rejects_a_link_to_an_unknown_node() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let mut flow = bare_link_flow("unknown-node");
     let id = flow.id;
@@ -152,7 +131,7 @@ async fn create_flow_rejects_a_link_to_an_unknown_node() {
         to: "ghost:sink".to_string(),
     });
 
-    let (status, body) = create_flow(State(state.clone()), JsonBody(flow))
+    let (status, body) = create_flow(State(state.app()), JsonBody(flow))
         .await
         .expect_err("a link naming an unknown element must be rejected");
 
@@ -173,11 +152,11 @@ async fn create_flow_rejects_a_link_to_an_unknown_node() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_flow_rejects_a_link_to_an_unknown_node() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let mut flow = bare_link_flow("unknown-node-update");
     let id = flow.id;
-    let _created = create_flow(State(state.clone()), JsonBody(flow.clone()))
+    let _created = create_flow(State(state.app()), JsonBody(flow.clone()))
         .await
         .expect("create should succeed");
 
@@ -185,13 +164,9 @@ async fn update_flow_rejects_a_link_to_an_unknown_node() {
         from: "caps0:src".to_string(),
         to: "ghost:sink".to_string(),
     });
-    let (status, _body) = update_flow(
-        State(state.clone()),
-        axum::extract::Path(id),
-        JsonBody(flow),
-    )
-    .await
-    .expect_err("a link naming an unknown element must be rejected");
+    let (status, _body) = update_flow(State(state.app()), axum::extract::Path(id), JsonBody(flow))
+        .await
+        .expect_err("a link naming an unknown element must be rejected");
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let stored = state.get_flow(&id).await.expect("flow must still exist");
@@ -207,7 +182,7 @@ async fn update_flow_rejects_a_link_to_an_unknown_node() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_flow_resolves_a_bare_block_reference_to_its_only_pad() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let mut flow = Flow::new("bare-block");
     let id = flow.id;
@@ -224,7 +199,7 @@ async fn create_flow_resolves_a_bare_block_reference_to_its_only_pad() {
         to: "sink0:sink".to_string(),
     });
 
-    let _created = create_flow(State(state.clone()), JsonBody(flow))
+    let _created = create_flow(State(state.app()), JsonBody(flow))
         .await
         .expect("bare block references must be accepted");
 
@@ -245,7 +220,7 @@ async fn create_flow_resolves_a_bare_block_reference_to_its_only_pad() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_flow_rejects_an_ambiguous_bare_block_reference() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let mut flow = Flow::new("ambiguous-block");
     let id = flow.id;
@@ -256,7 +231,7 @@ async fn create_flow_rejects_an_ambiguous_bare_block_reference() {
         to: "b0".to_string(),
     });
 
-    let (status, body) = create_flow(State(state.clone()), JsonBody(flow))
+    let (status, body) = create_flow(State(state.app()), JsonBody(flow))
         .await
         .expect_err("a bare reference to a multi-input block must be rejected");
 
@@ -277,7 +252,7 @@ async fn create_flow_rejects_an_ambiguous_bare_block_reference() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_flow_prunes_a_link_to_a_pad_the_block_no_longer_has() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let mut flow = Flow::new("stale-block-pad");
     let id = flow.id;
@@ -294,7 +269,7 @@ async fn create_flow_prunes_a_link_to_a_pad_the_block_no_longer_has() {
         to: "b0:video_in_2".to_string(),
     });
 
-    let (status, _body) = create_flow(State(state.clone()), JsonBody(flow))
+    let (status, _body) = create_flow(State(state.app()), JsonBody(flow))
         .await
         .expect("a stale block pad must not fail the request");
 

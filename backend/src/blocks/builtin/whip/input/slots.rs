@@ -96,7 +96,7 @@ fn lock_slot_audio_caps(capsfilter: &gst::Element, slot: usize) {
     });
 }
 
-/// Parse jitterbuffer_latency_ms from properties (default: 400, negative clamps to 0).
+/// Parse jitterbuffer_latency_ms from properties (default: 200, negative clamps to 0).
 fn parse_jitterbuffer_latency_ms(properties: &HashMap<String, PropertyValue>) -> u32 {
     properties
         .get("jitterbuffer_latency_ms")
@@ -104,7 +104,7 @@ fn parse_jitterbuffer_latency_ms(properties: &HashMap<String, PropertyValue>) ->
             PropertyValue::Int(i) => Some((*i).max(0) as u32),
             _ => None,
         })
-        .unwrap_or(400)
+        .unwrap_or(200)
 }
 
 /// Keep a slot with no publisher from holding the pipeline out of PLAYING.
@@ -214,11 +214,10 @@ pub fn build_whipserversrc(
         .unwrap_or(true);
 
     // Jitterbuffer latency: how long to buffer before dropping/releasing packets.
-    // Left unset, webrtcbin defaults to 200ms, which combined with
-    // drop-on-latency (below, on by default) can be too tight for an initial video
-    // keyframe's packet burst on a freshly-created per-session pipeline,
-    // causing the whole video stream to stall (never reaching decodebin)
-    // even though the packets arrived fine over the network.
+    // The default matches webrtcbin's own (200ms). Combined with drop-on-latency
+    // (below, on by default) it can be too tight for an initial video keyframe's
+    // packet burst on a freshly-created per-session pipeline; raise it if video
+    // never starts.
     let jitterbuffer_latency_ms = parse_jitterbuffer_latency_ms(properties);
     let do_retransmission = parse_do_retransmission(properties);
     let drop_on_latency = parse_drop_on_latency(properties);
@@ -646,8 +645,8 @@ mod tests {
     }
 
     #[test]
-    fn jitterbuffer_latency_ms_defaults_to_400() {
-        assert_eq!(parse_jitterbuffer_latency_ms(&props(&[])), 400);
+    fn jitterbuffer_latency_ms_defaults_to_200() {
+        assert_eq!(parse_jitterbuffer_latency_ms(&props(&[])), 200);
     }
 
     #[test]

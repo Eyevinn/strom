@@ -5,11 +5,8 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use strom::blocks::BlockRegistry;
-use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
 use strom_types::{Flow, PropertyValue as PV};
-use tempfile::NamedTempFile;
 
 use crate::common;
 
@@ -159,7 +156,6 @@ pub struct Running {
     block_id: String,
     main_loop: gst::glib::MainLoop,
     main_loop_thread: std::thread::JoinHandle<()>,
-    _registry_file: NamedTempFile,
 }
 
 impl Running {
@@ -185,19 +181,8 @@ impl Running {
             let ml = main_loop.clone();
             std::thread::spawn(move || ml.run())
         };
-        let registry_file = NamedTempFile::new().unwrap();
-        let registry = BlockRegistry::new(registry_file.path());
-        let mut manager = PipelineManager::new(
-            &flow,
-            EventBroadcaster::with_capacity(10),
-            &registry,
-            vec![],
-            "all".to_string(),
-            None,
-            std::env::temp_dir(),
-            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-        )
-        .expect("build vision mixer pipeline");
+        let mut manager =
+            crate::common::manager::build(&flow).expect("build vision mixer pipeline");
         configure(manager.pipeline());
         manager.start().expect("start vision mixer pipeline");
         let appsink = manager
@@ -212,7 +197,6 @@ impl Running {
             block_id: block_id.to_string(),
             main_loop,
             main_loop_thread,
-            _registry_file: registry_file,
         }
     }
 

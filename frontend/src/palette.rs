@@ -17,7 +17,6 @@ enum PaletteTab {
 #[derive(Default)]
 pub struct ElementPalette {
     /// Available GStreamer elements
-    #[allow(dead_code)]
     elements: Vec<ElementInfo>,
     /// Available blocks (built-in + user-defined)
     blocks: Vec<BlockDefinition>,

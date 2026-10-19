@@ -110,11 +110,6 @@ impl DeviceDiscovery {
         self.gst_devices.clone()
     }
 
-    /// Look up a live `gst::Device` by its discovery id.
-    pub fn get_gst_device(&self, id: &str) -> Option<gst::Device> {
-        self.gst_devices.lock().ok()?.get(id).cloned()
-    }
-
     /// Check if a specific device provider is available.
     pub fn is_provider_available(provider_name: &str) -> bool {
         let registry = gst::Registry::get();

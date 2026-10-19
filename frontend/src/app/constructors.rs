@@ -101,7 +101,6 @@ impl StromApp {
             flow_pending_copy: None,
             pending_flow_navigation: None,
             pending_flow_selection: None,
-            ws_client: None,
             connection_state: ConnectionState::Disconnected,
             channels,
             editing_properties_flow_id: None,
@@ -281,7 +280,6 @@ impl StromApp {
             flow_pending_copy: None,
             pending_flow_navigation: None,
             pending_flow_selection: None,
-            ws_client: None,
             connection_state: ConnectionState::Disconnected,
             channels,
             editing_properties_flow_id: None,
@@ -410,26 +408,6 @@ impl StromApp {
         app
     }
 
-    /// Create a new application instance with shutdown handler (native mode only).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn new_with_shutdown(
-        cc: &eframe::CreationContext<'_>,
-        port: u16,
-        tls_enabled: bool,
-        shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> Self {
-        let scheme = if tls_enabled { "https" } else { "http" };
-        let api_base_url = format!("{}://localhost:{}/api", scheme, port);
-        Self::new_internal(
-            cc,
-            api_base_url,
-            Some(shutdown_flag),
-            port,
-            tls_enabled,
-            None,
-        )
-    }
-
     /// Create a new application instance with shutdown handler and auth token (native mode only).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new_with_shutdown_and_auth(
@@ -520,8 +498,5 @@ impl StromApp {
 
         // Connect the WebSocket with the channel sender
         ws_client.connect(self.channels.sender(), ctx);
-
-        // Store the WebSocket client to keep the connection alive
-        self.ws_client = Some(ws_client);
     }
 }

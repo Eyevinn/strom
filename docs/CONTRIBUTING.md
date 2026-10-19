@@ -4,10 +4,21 @@ Thank you for your interest in contributing to Strom! This document explains how
 
 ## How this project is built
 
-Strom is written by **Claude Code**. The codebase is authored by AI — humans are not meant to hand-write the code. People set direction, review, and steer; the AI writes the implementation. This is by design, and it shapes how to contribute. We welcome feature requests, ideas, and pull requests:
+Strom is written by **Claude Code**. The codebase is authored by AI — humans are not meant to hand-write the code. People set direction, review, and steer; the AI writes the implementation. This is by design, and it shapes how to contribute.
 
-- **AI-written changes.** Open a pull request whose changes were written by an AI coding agent (Claude Code or similar). Describe *what* you want and *why*; let the agent produce the diff.
-- **Or just the idea.** Open a [GitHub Discussion](https://github.com/Eyevinn/strom/discussions) or file a feature request in [Issues](https://github.com/Eyevinn/strom/issues) — you don't have to write code at all.
+## Start with an issue
+
+**We would rather have a good issue than a pull request.** Code is quick to generate and goes stale quickly: Strom changes fast, and a pull request that is not merged within days needs rebasing, and often rethinking. Most problems also turn out to be connected to other work in progress, which is easier to see from an issue than from a diff.
+
+A useful [issue](https://github.com/Eyevinn/strom/issues) says:
+
+- **What is broken**, or what is missing, and how to see it: steps, a flow export, logs.
+- **How you would solve it**, if you have an idea. A direction in a few sentences is worth more than a diff.
+- **A test case**: how we would know it works. A reproduction we can turn into a test is the most valuable thing you can give us.
+
+Ideas and open questions also fit in [GitHub Discussions](https://github.com/Eyevinn/strom/discussions).
+
+Pull requests are still welcome, especially small ones tied to an issue, but expect us to sometimes take the idea and implement it differently alongside related work.
 
 Because the code is AI-authored and evolves quickly, **the code is the source of truth**, not the documentation. Docs in this repo are for navigation and high-level understanding (what Strom is, what it can do, how to set it up, how things fit together). Documents that describe internal design or implementation live in [`archive/`](archive/) with a disclaimer — assume they have drifted, and read the code for current behaviour.
 
@@ -50,8 +61,8 @@ Blocks follow one contract: a block emits what it naturally produces, and each c
 
 ### Pull request guidelines
 
+- Open or link an issue first, so the problem is discussed separately from one way of fixing it.
 - Provide a clear description of *what* changed and *why*.
-- Reference any related issue or discussion.
 - Keep changes focused and atomic; add tests for new behaviour.
 - Update docs only where they are navigational — don't add code-describing docs (see [How this project is built](#how-this-project-is-built)).
 - Ensure all CI checks pass.
@@ -66,7 +77,7 @@ A draft is fine for as long as someone is working on it. When it goes quiet, it 
 
 ## Review
 
-Reviews are handled by our Claude Code with human oversight. Address the feedback it raises; once the change is sound and CI is green, it can be merged.
+An AI agent comments on new issues with related work and references, and reviews pull requests that are not drafts. Its reviews are input, not a verdict: a maintainer decides what is merged.
 
 ## License
 

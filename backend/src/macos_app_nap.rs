@@ -10,8 +10,11 @@
 //! `beginActivityWithOptions:reason:` is the documented opt-out, and works
 //! regardless of activation policy.
 //!
-//! Only headless mode needs this. In GUI mode the window keeps the app out of App
-//! Nap.
+//! Both launch modes take it. A window keeps the app out of App Nap only while
+//! it is visible: hidden, minimised or covered by other windows, the GUI process
+//! is demoted the same way. Its live mixers then miss their deadlines in bursts,
+//! so video freezes and the audio mix goes silent while every element still
+//! reports `Playing`.
 
 /// Take a user-initiated activity assertion that lasts as long as the process.
 ///
