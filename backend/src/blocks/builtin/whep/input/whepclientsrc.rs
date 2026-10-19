@@ -11,6 +11,7 @@ use strom_types::{block::*, element::ElementPadRef, PropertyValue};
 use tracing::{debug, error, info};
 
 use super::stream::{get_pipeline_from_element, setup_stream_with_caps_detection};
+use super::video::{build_video_slots, num_video_tracks};
 use crate::blocks::builtin::webrtc_props::parse_drop_on_latency;
 
 /// Build using the new whepclientsrc (signaller-based) implementation
@@ -165,6 +166,10 @@ pub(super) fn build_whepclientsrc(
     // Set up WHEP diagnostic probes if enabled
     let probe_registry = whep_probe::setup_whep_probes(&whepclientsrc, &instance_id_owned);
 
+    // Video output slots (none unless num_video_tracks is set)
+    let (video_elements, video_slots) =
+        build_video_slots(instance_id, num_video_tracks(properties), ctx)?;
+
     // Counter for unique element naming
     let stream_counter = Arc::new(AtomicUsize::new(0));
 
@@ -179,7 +184,8 @@ pub(super) fn build_whepclientsrc(
     // The actual caps are only set after negotiation completes.
     // Strategy: Install a pad probe to detect actual caps, then:
     // - Audio: decode and route to liveadder
-    // - Video: discard via fakesink (no decode - that would be expensive)
+    // - Video: decode into its slot's tee if that output is linked, otherwise
+    //   discard via fakesink (no decode - that would be expensive)
     whepclientsrc.connect_pad_added(move |src, pad| {
         let pad_name = pad.name();
 
@@ -194,6 +200,7 @@ pub(super) fn build_whepclientsrc(
                 src,
                 pad,
                 &liveadder,
+                &video_slots,
                 &instance_id_owned,
                 stream_num,
                 &probe_registry_clone,
@@ -420,14 +427,17 @@ pub(super) fn build_whepclientsrc(
         ),
     ];
 
+    let mut elements = vec![
+        (whepclientsrc_id, whepclientsrc),
+        (liveadder_id, liveadder),
+        (capsfilter_id, capsfilter),
+        (output_audioconvert_id, output_audioconvert),
+        (output_audioresample_id, output_audioresample),
+    ];
+    elements.extend(video_elements);
+
     Ok(BlockBuildResult {
-        elements: vec![
-            (whepclientsrc_id, whepclientsrc),
-            (liveadder_id, liveadder),
-            (capsfilter_id, capsfilter),
-            (output_audioconvert_id, output_audioconvert),
-            (output_audioresample_id, output_audioresample),
-        ],
+        elements,
         internal_links,
         bus_message_handler: None,
         pad_properties: HashMap::new(),

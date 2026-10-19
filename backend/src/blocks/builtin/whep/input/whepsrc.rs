@@ -13,6 +13,7 @@ use strom_types::{block::*, element::ElementPadRef, PropertyValue};
 use tracing::{debug, error, info};
 
 use super::stream::setup_stream_with_caps_detection;
+use super::video::{build_video_slots, num_video_tracks};
 use crate::blocks::builtin::webrtc_props::parse_drop_on_latency;
 
 /// Build using the stable whepsrc implementation
@@ -221,6 +222,10 @@ pub(super) fn build_whepsrc(
     // Set up WHEP diagnostic probes if enabled
     let probe_registry = whep_probe::setup_whep_probes(&whepsrc, &instance_id_owned);
 
+    // Video output slots (none unless num_video_tracks is set)
+    let (video_elements, video_slots) =
+        build_video_slots(instance_id, num_video_tracks(properties), ctx)?;
+
     // Counter for unique element naming
     let stream_counter = Arc::new(AtomicUsize::new(0));
 
@@ -245,6 +250,7 @@ pub(super) fn build_whepsrc(
                 src,
                 pad,
                 &liveadder,
+                &video_slots,
                 &instance_id_owned,
                 stream_num,
                 &probe_registry_clone,
@@ -279,14 +285,17 @@ pub(super) fn build_whepsrc(
         ),
     ];
 
+    let mut elements = vec![
+        (whepsrc_id, whepsrc),
+        (liveadder_id, liveadder),
+        (capsfilter_id, capsfilter),
+        (output_audioconvert_id, output_audioconvert),
+        (output_audioresample_id, output_audioresample),
+    ];
+    elements.extend(video_elements);
+
     Ok(BlockBuildResult {
-        elements: vec![
-            (whepsrc_id, whepsrc),
-            (liveadder_id, liveadder),
-            (capsfilter_id, capsfilter),
-            (output_audioconvert_id, output_audioconvert),
-            (output_audioresample_id, output_audioresample),
-        ],
+        elements,
         internal_links,
         bus_message_handler: None,
         pad_properties: HashMap::new(),
