@@ -21,9 +21,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strom::state::AppState;
-use strom::storage::JsonFileStorage;
 use strom_types::{Flow, FlowId, Link, PropertyValue};
-use tempfile::NamedTempFile;
+
+pub mod common;
 
 /// Budget for the first frame. CEF's first initialisation in a process takes
 /// several seconds on a CI runner.
@@ -123,22 +123,6 @@ fn source_tap_flow(name: &str, url: &str) -> Flow {
     ));
     flow.links.push(link("cef:src", "tap:sink"));
     flow
-}
-
-fn new_state() -> (AppState, NamedTempFile, NamedTempFile) {
-    let storage_file = NamedTempFile::new().unwrap();
-    let blocks_file = NamedTempFile::new().unwrap();
-    let state = AppState::new(
-        JsonFileStorage::new(storage_file.path()),
-        blocks_file.path(),
-        std::env::temp_dir(),
-        vec![],
-        "all".to_string(),
-        vec![],
-        false,
-        false,
-    );
-    (state, storage_file, blocks_file)
 }
 
 /// Looks up an element of a running flow. The caller must drop the returned
@@ -246,7 +230,7 @@ async fn cefsrc_flow_restarts_without_leaking() {
     // last cycle.
     const THREAD_SLACK: usize = 2;
 
-    let (state, _storage, _blocks) = new_state();
+    let state = common::state::new();
     let flow = source_tap_flow("cefsrc_lifecycle", &animated_page_url(""));
     let flow_id = flow.id;
     state.upsert_flow(flow).await.expect("upsert_flow");
@@ -403,7 +387,7 @@ async fn cefsrc_on_dsk_input_reaches_mixer() {
     flow.links.push(link("vm:pgm_out", "pgm_sink:sink"));
     flow.links.push(link("vm:multiview_out", "mv_sink:sink"));
 
-    let (state, _storage, _blocks) = new_state();
+    let state = common::state::new();
     let flow_id = flow.id;
     state.upsert_flow(flow).await.expect("upsert_flow");
     state.start_flow(&flow_id).await.expect("start_flow");
@@ -500,7 +484,7 @@ async fn cefsrc_emits_premultiplied_alpha() {
         return;
     }
 
-    let (state, _storage, _blocks) = new_state();
+    let state = common::state::new();
     let flow = source_tap_flow(
         "cefsrc_alpha",
         &animated_page_url("background:rgba(255,255,255,0.5)"),
