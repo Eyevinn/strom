@@ -8,6 +8,9 @@ use strom_types::Flow;
 
 use super::*;
 use super::{FocusTarget, ThemePreference};
+
+/// Colour for a block that has stopped passing data.
+const FAILED_BLOCK_COLOR: Color32 = Color32::from_rgb(220, 60, 60);
 impl StromApp {
     /// Render the top toolbar.
     pub(super) fn render_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -762,14 +765,42 @@ impl StromApp {
                                 );
                                 child_ui.add_space(4.0);
 
-                                // Show running state icon
+                                // Show running state icon. A flow with a failed
+                                // block is not running even though GStreamer
+                                // still reports Playing, so it must not read as
+                                // healthy here.
+                                let failed_blocks: Vec<_> = flow.failed_blocks().collect();
                                 let state_icon = if flow.running { "▶" } else { "■" };
-                                let state_color = if flow.running {
+                                let state_color = if !failed_blocks.is_empty() {
+                                    FAILED_BLOCK_COLOR
+                                } else if flow.running {
                                     Color32::from_rgb(0, 200, 0)
                                 } else {
                                     Color32::GRAY
                                 };
                                 child_ui.colored_label(state_color, state_icon);
+
+                                if !failed_blocks.is_empty() {
+                                    child_ui
+                                        .colored_label(FAILED_BLOCK_COLOR, "⚠")
+                                        .on_hover_ui(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("Stopped passing data")
+                                                    .strong(),
+                                            );
+                                            ui.separator();
+                                            for health in &failed_blocks {
+                                                ui.label(format!(
+                                                    "{}: {}",
+                                                    health.block_id,
+                                                    health
+                                                        .detail
+                                                        .as_deref()
+                                                        .unwrap_or("no detail")
+                                                ));
+                                            }
+                                        });
+                                }
 
                                 // Show QoS indicator if there are issues - make it clickable to open log
                                 if let Some(qos_health) = self.qos_stats.get_flow_health(&flow.id) {
@@ -898,12 +929,24 @@ impl StromApp {
                                     }
 
                                     ui.add_space(5.0);
-                                    let state_text = if flow.running {
+                                    let state_text = if flow.has_failed_block() {
+                                        "Failed"
+                                    } else if flow.running {
                                         "Running"
                                     } else {
                                         "Stopped"
                                     };
                                     ui.label(format!("State: {}", state_text));
+                                    for health in flow.failed_blocks() {
+                                        ui.colored_label(
+                                            FAILED_BLOCK_COLOR,
+                                            format!(
+                                                "{} stopped: {}",
+                                                health.block_id,
+                                                health.detail.as_deref().unwrap_or("no detail")
+                                            ),
+                                        );
+                                    }
 
                                     // Show timestamps
                                     if flow.properties.started_at.is_some()

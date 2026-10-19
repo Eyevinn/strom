@@ -3,6 +3,7 @@
 mod bus;
 mod construction;
 pub(crate) mod effects;
+mod health;
 mod lifecycle;
 mod linking;
 pub(crate) mod properties;
@@ -174,6 +175,8 @@ pub struct PipelineManager {
     events: EventBroadcaster,
     /// Pending links that couldn't be made because source pads don't exist yet (dynamic pads)
     pending_links: Vec<Link>,
+    /// Links the linker has given up on, read by the block health scan
+    unformed_links: health::UnformedLinks,
     /// Flow properties (clock configuration, etc.)
     properties: strom_types::flow::FlowProperties,
     /// Pad properties to apply after pads are created (element_id -> (pad_name -> properties))
@@ -206,6 +209,10 @@ pub struct PipelineManager {
     qos_aggregator: QoSAggregator,
     /// Handle for the periodic QoS stats broadcast task
     qos_broadcast_task: Option<tokio::task::JoinHandle<()>>,
+    /// Latest per-block health snapshot from the stalled-pad-task scan
+    block_health: std::sync::Arc<std::sync::RwLock<Vec<strom_types::flow::BlockHealth>>>,
+    /// Handle for the periodic block health scan task
+    block_health_task: Option<tokio::task::JoinHandle<()>>,
     /// PTP clock reference (stored for querying grandmaster/master info)
     ptp_clock: Option<gst_net::PtpClock>,
     /// PTP statistics (updated by statistics callback)
@@ -258,6 +265,7 @@ impl Drop for PipelineManager {
         self.probe_manager.stop_broadcast_task();
         self.probe_manager.deactivate_all();
         self.stop_qos_broadcast_task();
+        self.stop_block_health_task();
 
         // Ensure pipeline is in Null state before releasing references.
         // If stop() was already called this is a no-op. If stop() gave up on
