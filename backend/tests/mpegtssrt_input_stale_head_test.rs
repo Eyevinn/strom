@@ -13,6 +13,8 @@
 //! stream from two seconds in, paced in real time. It measures how far each
 //! buffer leaving the block runs ahead of the latest SRT input.
 
+pub mod common;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -60,13 +62,6 @@ fn plugins_available() -> bool {
         missing.join(", ")
     );
     false
-}
-
-fn srt_port() -> u16 {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .and_then(|s| s.local_addr())
-        .map(|a| a.port())
-        .expect("no free UDP port for the SRT listener")
 }
 
 /// Largest lead from arrival a buffer may have and still count as on time:
@@ -349,7 +344,7 @@ fn max_live_lead(decode: bool) -> Option<(i64, usize)> {
     }
 
     let chunks = encode_stream();
-    let port = srt_port();
+    let port = common::free_udp_port();
     let receiver = build_receiver(decode, port, false);
     receiver
         .pipeline
@@ -416,7 +411,7 @@ fn assert_second_caller_on_time(second_from: gst::ClockTime) {
     }
 
     let chunks = encode_stream();
-    let port = srt_port();
+    let port = common::free_udp_port();
     let receiver = build_receiver(false, port, true);
     receiver
         .pipeline
