@@ -23,13 +23,10 @@ use gstreamer_app as gst_app;
 use serial_test::serial;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use strom::state::AppState;
-use strom::storage::JsonFileStorage;
 use strom_types::stinger::{
     STINGER_MODE_PROPERTY, WEB_STINGER_CUT_POINT_PROPERTY, WEB_STINGER_DURATION_PROPERTY,
 };
 use strom_types::{Flow, FlowId, Link, PropertyValue as PV, StromEvent};
-use tempfile::NamedTempFile;
 
 const W: usize = 640;
 const H: usize = 360;
@@ -167,11 +164,9 @@ fn link(from: &str, to: &str) -> Link {
 }
 
 struct Running {
-    state: AppState,
+    state: common::state::TestState,
     flow_id: FlowId,
     tap: gst_app::AppSink,
-    _storage: NamedTempFile,
-    _blocks: NamedTempFile,
 }
 
 /// Red on input 0 and green on input 1 (live), the page on the stinger
@@ -250,18 +245,7 @@ async fn start(name: &str, backend: &str, url: &str, duration_ms: u64, page_fps:
     flow.links.push(link("vm:pgm_out", "pgm_convert:sink"));
     flow.links.push(link("pgm_convert:src", "pgm_tap:sink"));
 
-    let storage = NamedTempFile::new().unwrap();
-    let blocks = NamedTempFile::new().unwrap();
-    let state = AppState::new(
-        JsonFileStorage::new(storage.path()),
-        blocks.path(),
-        std::env::temp_dir(),
-        vec![],
-        "all".to_string(),
-        vec![],
-        false,
-        false,
-    );
+    let state = common::state::new();
     let flow_id = flow.id;
     state.upsert_flow(flow).await.expect("upsert_flow");
     state.start_flow(&flow_id).await.expect("start_flow");
@@ -277,8 +261,6 @@ async fn start(name: &str, backend: &str, url: &str, duration_ms: u64, page_fps:
         state,
         flow_id,
         tap,
-        _storage: storage,
-        _blocks: blocks,
     };
     // Let CEF start and the page load before the first take.
     let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
