@@ -32,6 +32,7 @@
 //!
 //! Output files are written to: {media_path}/{output_dir}/{filename_prefix}_%05d.{ext}
 
+use super::inputs::input_is_connected;
 use super::refusal::{audio_refusal, refuse_input, video_refusal};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use chrono;
@@ -1427,20 +1428,6 @@ impl BlockBuilder for RecorderBuilder {
             pad_properties: HashMap::new(),
         })
     }
-}
-
-/// Whether a recorder input identity has something linked to its sink pad.
-///
-/// Runs after construction's linking pass, so this is exact for links resolved there —
-/// every link into a recorder today, since recorder inputs take encoded media and so are
-/// fed by encoder src pads. A link deferred to `pending_links` resolves after this and
-/// would read as unconnected, losing that track. Nothing enforces that none can be.
-fn input_is_connected(input: &gst::glib::WeakRef<gst::Element>) -> bool {
-    input
-        .upgrade()
-        .and_then(|e| e.static_pad("sink"))
-        .map(|p| p.is_linked())
-        .unwrap_or(false)
 }
 
 /// Build a TS passthrough pipeline: identity -> multifilesink.

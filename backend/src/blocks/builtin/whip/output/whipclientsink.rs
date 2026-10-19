@@ -1,5 +1,9 @@
 //! WHIP Output using `whipclientsink` (signaller-based).
 
+use super::video::{build_video_input, OnAccept};
+use super::{
+    element_id, make, register_sink_pad_requests, resolve_track_counts, Sink, Track, TrackKind,
+};
 use crate::blocks::{
     set_ice_transport_policy, BlockBuildContext, BlockBuildError, BlockBuildResult,
 };
@@ -54,21 +58,8 @@ pub(super) fn build_whipclientsink(
     let turn_server = ctx.turn_server();
     let ice_transport_policy = ctx.resolve_ice_transport_policy(properties);
 
-    // Create namespaced element IDs
+    let (num_audio_tracks, num_video_tracks) = resolve_track_counts(properties);
     let whipclientsink_id = format!("{}:whipclientsink", instance_id);
-    let audioconvert_id = format!("{}:audioconvert", instance_id);
-    let audioresample_id = format!("{}:audioresample", instance_id);
-
-    // Create audio processing elements
-    let audioconvert = gst::ElementFactory::make("audioconvert")
-        .name(&audioconvert_id)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("audioconvert: {}", e)))?;
-
-    let audioresample = gst::ElementFactory::make("audioresample")
-        .name(&audioresample_id)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("audioresample: {}", e)))?;
 
     // Create whipclientsink element
     let whipclientsink = gst::ElementFactory::make("whipclientsink")
@@ -96,8 +87,12 @@ pub(super) fn build_whipclientsink(
         "WHIP Output (whipclientsink)",
     );
 
-    // Disable video codecs by setting video-caps to empty
-    whipclientsink.set_property("video-caps", gst::Caps::new_empty());
+    // No video tracks: offer no video codecs. With video tracks the input
+    // probe narrows video-caps to the codec that arrives, and the setup hook
+    // empties it again if no video input is linked.
+    if num_video_tracks == 0 {
+        whipclientsink.set_property("video-caps", gst::Caps::new_empty());
+    }
 
     // Access the signaller child and set its properties
     let signaller = whipclientsink.property::<gst::glib::Object>("signaller");
@@ -170,7 +165,8 @@ pub(super) fn build_whipclientsink(
     // mixers and routers pace their own output.
     //
     // webrtcsink creates these appsinks when a pad is requested, which happens
-    // when the flow links the block, so the handler has to be in place now.
+    // in the setup hook before the pipeline starts, so the handler has to be
+    // in place now.
     if let Ok(bin) = whipclientsink.clone().downcast::<gst::Bin>() {
         bin.connect("deep-element-added", false, |args| {
             let owner: gst::Bin = args[0].get().ok()?;
@@ -191,24 +187,65 @@ pub(super) fn build_whipclientsink(
         whip_endpoint, stun_server, turn_server, ice_transport_policy
     );
 
-    // Define internal links
-    let internal_links = vec![
-        (
-            ElementPadRef::pad(&audioconvert_id, "src"),
-            ElementPadRef::pad(&audioresample_id, "sink"),
-        ),
-        (
-            ElementPadRef::pad(&audioresample_id, "src"),
-            ElementPadRef::pad(&whipclientsink_id, "audio_0"),
-        ),
-    ];
+    let mut elements: Vec<(String, gst::Element)> = Vec::new();
+    let mut internal_links: Vec<(ElementPadRef, ElementPadRef)> = Vec::new();
+    let mut tracks: Vec<Track> = Vec::new();
+
+    // Audio: raw in, audioconvert -> audioresample; webrtcsink encodes.
+    for slot in 0..num_audio_tracks {
+        let convert_id = element_id(instance_id, "audioconvert", slot);
+        let convert = make("audioconvert", &convert_id)?;
+        let resample_id = element_id(instance_id, "audioresample", slot);
+        let resample = make("audioresample", &resample_id)?;
+        internal_links.push((
+            ElementPadRef::pad(&convert_id, "src"),
+            ElementPadRef::pad(&resample_id, "sink"),
+        ));
+        tracks.push(Track {
+            kind: TrackKind::Audio,
+            slot,
+            input: convert.downgrade(),
+            tail: resample.downgrade(),
+            payloader: None,
+        });
+        elements.push((convert_id, convert));
+        elements.push((resample_id, resample));
+    }
+
+    // Video: encoded H.264 in, checked by the input probe, which also tells
+    // whipclientsink the codec. webrtcsink parses and payloads it.
+    for slot in 0..num_video_tracks {
+        let (input_id, input) = build_video_input(
+            instance_id,
+            slot,
+            OnAccept::TellWebrtcSink(whipclientsink.downgrade()),
+        )?;
+        tracks.push(Track {
+            kind: TrackKind::Video,
+            slot,
+            input: input.downgrade(),
+            tail: input.downgrade(),
+            payloader: None,
+        });
+        elements.push((input_id, input));
+    }
+
+    info!(
+        "WHIP Output {} (whipclientsink): {} audio and {} video track(s) declared",
+        instance_id, num_audio_tracks, num_video_tracks
+    );
+
+    register_sink_pad_requests(
+        ctx,
+        instance_id,
+        &whipclientsink,
+        Sink::WhipClientSink,
+        tracks,
+    );
+    elements.push((whipclientsink_id, whipclientsink));
 
     Ok(BlockBuildResult {
-        elements: vec![
-            (audioconvert_id, audioconvert),
-            (audioresample_id, audioresample),
-            (whipclientsink_id, whipclientsink),
-        ],
+        elements,
         internal_links,
         bus_message_handler: None,
         pad_properties: HashMap::new(),
