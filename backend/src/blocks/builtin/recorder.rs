@@ -1264,6 +1264,7 @@ impl BlockBuilder for RecorderBuilder {
         {
             let splitmuxsink_weak = splitmuxsink.downgrade();
             let block_id = instance_id.to_string();
+            let link_targets = ctx.flow_link_targets();
             ctx.register_element_setup(Box::new(move |_flow_id, _events| {
                 let Some(splitmuxsink) = splitmuxsink_weak.upgrade() else {
                     return;
@@ -1280,7 +1281,7 @@ impl BlockBuilder for RecorderBuilder {
                     .zip(video_activities.iter())
                     .enumerate()
                 {
-                    if !input_is_connected(input) {
+                    if !input_is_connected(input, &link_targets) {
                         info!(
                             "Recorder {}: video track {} is not connected — requesting no splitmuxsink pad for it",
                             block_id, vi
@@ -1325,7 +1326,7 @@ impl BlockBuilder for RecorderBuilder {
                     .zip(audio_activities.iter())
                     .enumerate()
                 {
-                    if !input_is_connected(input) {
+                    if !input_is_connected(input, &link_targets) {
                         info!(
                             "Recorder {}: audio track {} is not connected — requesting no splitmuxsink pad for it",
                             block_id, i

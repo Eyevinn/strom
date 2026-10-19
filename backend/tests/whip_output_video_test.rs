@@ -12,7 +12,8 @@
 //!   the video track declared but unlinked, the audio still gets through.
 //! - **Pipeline manager**: the same through a stored flow, with the block's
 //!   computed pads, the manager's linking and setup hooks, and teardown with
-//!   nothing left alive.
+//!   nothing left alive; also with both inputs fed from sometimes pads, whose
+//!   links are still pending when the setup hook runs.
 
 pub mod common;
 
@@ -520,9 +521,25 @@ fn whipclientsink_publishes_audio_with_a_video_track_left_unlinked() {
 
 // --- Through the pipeline manager ----------------------------------------
 
+/// How the flow's sources reach the block's inputs.
+#[derive(Clone, Copy, Debug)]
+enum Upstream {
+    /// Straight from the encoder and the audio source: linked at construction.
+    Direct,
+    /// Through `parsebin` (video) and `decodebin` (audio), whose src pads are
+    /// sometimes pads. Construction cannot link them, so both links wait in
+    /// `pending_links` while the block's setup hook runs, and are made only
+    /// when data flows.
+    SometimesPads,
+}
+
 /// A flow as the API stores it: raw elements encode H.264 and feed the block's
 /// `video_in`, a raw audio source feeds `audio_in`.
-fn flow_into_whip_output(implementation: &str, endpoint: &str) -> strom_types::Flow {
+fn flow_into_whip_output(
+    implementation: &str,
+    endpoint: &str,
+    upstream: Upstream,
+) -> strom_types::Flow {
     use strom_types::{Element, Flow, Link};
 
     let element = |id: &str, kind: &str, props: &[(&str, PropertyValue)]| Element {
@@ -570,6 +587,11 @@ fn flow_into_whip_output(implementation: &str, endpoint: &str) -> strom_types::F
         &[("is-live", PropertyValue::Bool(true))],
     ));
 
+    if let Upstream::SometimesPads = upstream {
+        flow.elements.push(element("vparse", "parsebin", &[]));
+        flow.elements.push(element("adec", "decodebin", &[]));
+    }
+
     let properties = props(implementation, endpoint, 1);
     flow.blocks.push(strom_types::BlockInstance {
         id: "out".to_string(),
@@ -581,12 +603,20 @@ fn flow_into_whip_output(implementation: &str, endpoint: &str) -> strom_types::F
         computed_external_pads: WHIPOutputBuilder.get_external_pads(&properties),
     });
 
-    for (from, to) in [
-        ("vsrc:src", "vcaps:sink"),
-        ("vcaps:src", "venc:sink"),
-        ("venc:src", "out:video_in"),
-        ("asrc:src", "out:audio_in"),
-    ] {
+    let mut links = vec![("vsrc:src", "vcaps:sink"), ("vcaps:src", "venc:sink")];
+    match upstream {
+        Upstream::Direct => {
+            links.push(("venc:src", "out:video_in"));
+            links.push(("asrc:src", "out:audio_in"));
+        }
+        Upstream::SometimesPads => {
+            links.push(("venc:src", "vparse:sink"));
+            links.push(("vparse:src", "out:video_in"));
+            links.push(("asrc:src", "adec:sink"));
+            links.push(("adec:src", "out:audio_in"));
+        }
+    }
+    for (from, to) in links {
         flow.links.push(Link {
             from: from.to_string(),
             to: to.to_string(),
@@ -598,17 +628,20 @@ fn flow_into_whip_output(implementation: &str, endpoint: &str) -> strom_types::F
 /// The real path: expansion with the computed pads, the pipeline manager's
 /// linking and setup hooks, and teardown. Video must reach the server, and
 /// nothing the block built may outlive the flow.
-fn publishes_through_the_manager(implementation: &str) {
+fn publishes_through_the_manager(implementation: &str, upstream: Upstream) {
     let server = Server::start();
-    let flow = flow_into_whip_output(implementation, &server.endpoint);
+    let flow = flow_into_whip_output(implementation, &server.endpoint, upstream);
     let mut manager = common::manager::build(&flow).expect("PipelineManager builds");
     manager.start().expect("flow starts");
 
     let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline && server.received().1 < 10 {
+    while Instant::now() < deadline && {
+        let (audio, video) = server.received();
+        audio < 10 || video < 10
+    } {
         std::thread::sleep(Duration::from_millis(100));
     }
-    let received = server.received().1;
+    let (audio, video) = server.received();
 
     let pipeline_weak = manager.pipeline_weak();
     let element_weak_refs = manager.element_weak_refs();
@@ -616,10 +649,13 @@ fn publishes_through_the_manager(implementation: &str) {
     drop(manager);
 
     assert!(
-        received >= 10,
-        "the WHIP server received {} video buffers from the flow ({}) in 20 s",
-        received,
-        implementation
+        video >= 10 && audio >= 10,
+        "the WHIP server received {} video and {} audio buffers from the flow \
+         ({}, {:?}) in 20 s",
+        video,
+        audio,
+        implementation,
+        upstream
     );
     assert!(
         pipeline_weak.upgrade().is_none(),
@@ -635,9 +671,10 @@ fn publishes_through_the_manager(implementation: &str) {
 /// The pipeline manager spawns tokio tasks, so it needs a runtime, but the
 /// WebRTC elements block on their own runtime while they stop, which tokio
 /// refuses on a worker thread. A blocking-pool thread has both.
-async fn on_blocking_thread(implementation: &'static str) {
+async fn on_blocking_thread(implementation: &'static str, upstream: Upstream) {
     if let Err(e) =
-        tokio::task::spawn_blocking(move || publishes_through_the_manager(implementation)).await
+        tokio::task::spawn_blocking(move || publishes_through_the_manager(implementation, upstream))
+            .await
     {
         std::panic::resume_unwind(e.into_panic());
     }
@@ -648,7 +685,7 @@ async fn whipsink_flow_publishes_video_and_tears_down() {
     if !available(LOOPBACK_ELEMENTS) {
         return;
     }
-    on_blocking_thread("whipsink").await;
+    on_blocking_thread("whipsink", Upstream::Direct).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -656,5 +693,24 @@ async fn whipclientsink_flow_publishes_video_and_tears_down() {
     if !available(LOOPBACK_ELEMENTS) {
         return;
     }
-    on_blocking_thread("whipclientsink").await;
+    on_blocking_thread("whipclientsink", Upstream::Direct).await;
+}
+
+/// A link into the block from a sometimes pad is still pending when the setup
+/// hook decides which inputs get a sink pad. It must count as connected, or
+/// the track gets no pad and the late link delivers into nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whipsink_flow_publishes_through_sometimes_pads() {
+    if !available(&[LOOPBACK_ELEMENTS, &["parsebin", "decodebin"]].concat()) {
+        return;
+    }
+    on_blocking_thread("whipsink", Upstream::SometimesPads).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whipclientsink_flow_publishes_through_sometimes_pads() {
+    if !available(&[LOOPBACK_ELEMENTS, &["parsebin", "decodebin"]].concat()) {
+        return;
+    }
+    on_blocking_thread("whipclientsink", Upstream::SometimesPads).await;
 }

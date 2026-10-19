@@ -1,6 +1,7 @@
 //! Helpers for a block's input tracks: how many a block declares, and which of
 //! them a flow actually links.
 
+use crate::blocks::FlowLinkTargets;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -22,19 +23,26 @@ pub(crate) fn explicit_track_count(
     })
 }
 
-/// Whether a block's input element has something linked to its sink pad.
+/// Whether the flow feeds a block's input element.
 ///
-/// Call it from a `register_element_setup` hook: those run after construction's
-/// linking pass and before the pipeline leaves NULL, so the answer is exact for
-/// every link resolved there. A link construction could not make at once (a
-/// sometimes pad, such as a raw `decodebin` element's) is deferred to
-/// `pending_links`, resolves after the hook, and reads as unconnected here.
-pub(crate) fn input_is_connected(input: &gst::glib::WeakRef<gst::Element>) -> bool {
-    input
-        .upgrade()
-        .and_then(|e| e.static_pad("sink"))
-        .map(|p| p.is_linked())
-        .unwrap_or(false)
+/// True when the input's sink pad is linked, or when a flow link points into
+/// it that construction could not make yet: a link from a sometimes pad (a raw
+/// `decodebin` element's, say) waits in `pending_links` and is made when the
+/// pad appears, after the setup hooks have run. Without the second half such
+/// an input reads as unconnected and its block requests no muxer or sink pad
+/// for it, so the late link has nowhere to go.
+///
+/// Call it from a `register_element_setup` hook, with the handle from
+/// `ctx.flow_link_targets()`: the hooks run after construction's linking pass
+/// and block expansion has filled the targets by then.
+pub(crate) fn input_is_connected(
+    input: &gst::glib::WeakRef<gst::Element>,
+    targets: &FlowLinkTargets,
+) -> bool {
+    let Some(input) = input.upgrade() else {
+        return false;
+    };
+    input.static_pad("sink").is_some_and(|p| p.is_linked()) || targets.contains(&input.name())
 }
 
 #[cfg(test)]
@@ -54,19 +62,28 @@ mod tests {
     }
 
     #[test]
-    fn an_input_is_connected_only_while_its_sink_pad_is_linked() {
+    fn an_input_is_connected_when_linked_or_a_flow_link_targets_it() {
         gst::init().expect("gst init");
         let src = gst::ElementFactory::make("fakesrc").build().unwrap();
-        let input = gst::ElementFactory::make("identity").build().unwrap();
+        let input = gst::ElementFactory::make("identity")
+            .name("blk:input")
+            .build()
+            .unwrap();
         let weak = input.downgrade();
-        assert!(!input_is_connected(&weak));
+        let targets = FlowLinkTargets::default();
+        assert!(!input_is_connected(&weak, &targets));
         src.link(&input).unwrap();
-        assert!(input_is_connected(&weak));
+        assert!(input_is_connected(&weak, &targets));
         src.unlink(&input);
-        assert!(!input_is_connected(&weak));
+        assert!(!input_is_connected(&weak, &targets));
+
+        // A flow link that waits for a sometimes pad counts as connected.
+        targets.insert("blk:input");
+        assert!(input_is_connected(&weak, &targets));
+
         drop(input);
         assert!(
-            !input_is_connected(&weak),
+            !input_is_connected(&weak, &targets),
             "a dropped input is not connected"
         );
     }
