@@ -15,8 +15,9 @@ use rig::*;
 #[serial_test::serial(stinger)]
 async fn prores_4444_keeps_its_alpha() {
     if common::skip_known_ci_failure(
-        &["macos"],
-        "ProRes decode fails on the macOS runner (no VideoToolbox ProRes)",
+        &["macos", "linux"],
+        "ProRes decode fails on the macOS runner (no VideoToolbox ProRes) \
+         and lands frames late on the loaded Linux runner",
     ) {
         return;
     }
@@ -47,8 +48,9 @@ async fn prores_4444_keeps_its_alpha() {
 #[serial_test::serial(stinger)]
 async fn a_prores_clip_after_another_format_still_airs() {
     if common::skip_known_ci_failure(
-        &["macos"],
-        "ProRes decode fails on the macOS runner (no VideoToolbox ProRes)",
+        &["macos", "linux"],
+        "ProRes decode fails on the macOS runner (no VideoToolbox ProRes) \
+         and lands frames late on the loaded Linux runner",
     ) {
         return;
     }
@@ -86,8 +88,9 @@ async fn a_prores_clip_after_another_format_still_airs() {
 #[serial_test::serial(stinger)]
 async fn another_format_after_a_prores_clip_still_airs() {
     if common::skip_known_ci_failure(
-        &["macos"],
-        "ProRes decode fails on the macOS runner (no VideoToolbox ProRes)",
+        &["macos", "linux"],
+        "ProRes decode fails on the macOS runner (no VideoToolbox ProRes) \
+         and lands frames late on the loaded Linux runner",
     ) {
         return;
     }

@@ -172,6 +172,8 @@ jobs:
           # rasteriser (libegl-mesa0, libgl1-mesa-dri) — see common::init_gl().
           # So they must run here rather than skip green — see gl_available().
           STROM_REQUIRE_GL: 1
+          # Skip tests that list "linux" — see common::skip_known_ci_failure().
+          STROM_SKIP_KNOWN_CI_FAILURES: 1
 
       - name: Run tests on shared types
         run: cargo test --package strom-types

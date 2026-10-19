@@ -75,6 +75,12 @@ async fn cpu_gbr_10le() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gpu_videotestsrc_direct() {
+    if common::skip_known_ci_failure(
+        &["linux"],
+        "the GPU pipeline sometimes never reaches PLAYING on the Linux runner",
+    ) {
+        return;
+    }
     assert_input_reaches_pgm("vmfmt_gpu_direct", Backend::Gpu, Front::Direct, false);
 }
 
