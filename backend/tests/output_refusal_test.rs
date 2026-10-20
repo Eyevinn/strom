@@ -27,6 +27,8 @@ use strom_types::PropertyValue;
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_app as gst_app;
+use strom::blocks::builtin::audio_bridge::AudioBridgeOutputBuilder;
 
 /// Elements this file needs beyond core GStreamer. Missing on a bare CI image.
 const REQUIRED: &[&str] = &[
@@ -48,6 +50,9 @@ const TEST_SOURCE: &str = "test_source";
 enum Feed {
     RawVideo,
     RawAudio,
+    /// AAC-shaped caps on a source that sends one empty buffer, enough to
+    /// carry the Caps event.
+    EncodedAudio,
 }
 
 /// Build `builder`'s block, feed `feed` into the element named `input`, run it
@@ -73,7 +78,25 @@ fn errors_after_feeding<B: BlockBuilder>(
         .get(&input_id)
         .unwrap_or_else(|| panic!("block builds {}", input_id))
         .clone();
+    let mut late_caps = None;
     let (src, caps) = match feed {
+        Feed::EncodedAudio => {
+            let src = gst_app::AppSrc::builder()
+                .name(TEST_SOURCE)
+                .is_live(true)
+                .format(gst::Format::Time)
+                .build();
+            let caps = gst::Caps::builder("audio/mpeg")
+                .field("mpegversion", 4i32)
+                .field("stream-format", "raw")
+                .field("rate", 48_000i32)
+                .field("channels", 2i32)
+                .build();
+            // Caps go on after linking, as a demuxer's pad gets them: the
+            // block's internal audioconvert would refuse them at link time.
+            late_caps = Some((src.clone(), caps));
+            (src.upcast::<gst::Element>(), gst::Caps::new_any())
+        }
         Feed::RawVideo => (
             gst::ElementFactory::make("videotestsrc")
                 .name(TEST_SOURCE)
@@ -104,6 +127,10 @@ fn errors_after_feeding<B: BlockBuilder>(
     pipeline.add_many([&src, &filter]).expect("add source");
     gst::Element::link_many([&src, &filter, &input_element]).expect("link source to block");
 
+    if let Some((appsrc, caps)) = late_caps {
+        appsrc.set_caps(Some(&caps));
+        let _ = appsrc.push_buffer(gst::Buffer::from_slice([0u8; 16]));
+    }
     common::block::run_setups(&ctx);
 
     let bus = pipeline.bus().expect("pipeline bus");
@@ -178,6 +205,15 @@ fn recorder_props(media_root: &std::path::Path) -> HashMap<String, PropertyValue
     props.insert(
         "_media_path".to_string(),
         PropertyValue::String(media_root.to_string_lossy().to_string()),
+    );
+    props
+}
+
+fn audio_bridge_props(channel: &str) -> HashMap<String, PropertyValue> {
+    let mut props = HashMap::new();
+    props.insert(
+        "channel".to_string(),
+        PropertyValue::String(channel.to_string()),
     );
     props
 }
@@ -261,4 +297,34 @@ fn efpsrt_output_refuses_raw_video_by_failing_the_flow() {
         Feed::RawVideo,
     );
     assert_refused_by_block(&errors, "efpout:video_input", "builtin.videoenc");
+}
+
+#[test]
+fn audio_bridge_output_takes_raw_audio_without_error() {
+    if !common::plugins_available(&["audioconvert", "audioresample", "capsfilter", "identity"]) {
+        return;
+    }
+    let errors = errors_after_feeding(
+        AudioBridgeOutputBuilder,
+        "bridge_out",
+        audio_bridge_props("refusal-test-raw"),
+        "input",
+        Feed::RawAudio,
+    );
+    assert!(errors.is_empty(), "raw audio must flow: {:?}", errors);
+}
+
+#[test]
+fn audio_bridge_output_refuses_encoded_audio_by_failing_the_flow() {
+    if !common::plugins_available(&["audioconvert", "audioresample", "capsfilter", "identity"]) {
+        return;
+    }
+    let errors = errors_after_feeding(
+        AudioBridgeOutputBuilder,
+        "bridge_out",
+        audio_bridge_props("refusal-test-encoded"),
+        "input",
+        Feed::EncodedAudio,
+    );
+    assert_refused_by_block(&errors, "bridge_out:input", "raw audio");
 }
