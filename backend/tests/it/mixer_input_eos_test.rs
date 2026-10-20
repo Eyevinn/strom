@@ -125,9 +125,8 @@ fn build_router(instance: &str, force_live: bool) -> Harness {
 
 /// A live mono tone into `target`, ending with EOS after `buffers` buffers of
 /// 480 samples if given. Live `audiotestsrc` stamps running time, as a live
-/// network source does. The rate is left to the block: on GStreamer 1.24 a
-/// force-live bus can settle on its rate before any input links, and the mixer
-/// channel has no resampler, so a pinned rate fails with not-negotiated.
+/// network source does. The rate is left unpinned: each block resamples its
+/// inputs to the bus rate, so the test needs no particular source rate.
 fn feed(h: &Harness, target: &str, volume: f64, buffers: Option<i32>) {
     let src = gst::ElementFactory::make("audiotestsrc")
         .property("is-live", true)
