@@ -258,7 +258,7 @@ impl DeviceDiscovery {
     /// the live `gst::Device` returned by the long-running monitor.
     pub fn device_id_for(device: &gst::Device) -> String {
         let class = device.device_class().to_string();
-        let provider = Self::get_provider_name(device, &class);
+        let provider = Self::id_provider_name(device, &class);
         let display = device.display_name().to_string();
         let key = Self::stable_key(device).unwrap_or_else(|| display.clone());
         DiscoveredDevice::generate_id(&class, &provider, &key)
@@ -285,7 +285,29 @@ impl DeviceDiscovery {
     }
 
     /// Get provider name from device properties or infer from device class.
+    /// The provider shown for `device`: its `device.api`, or else the
+    /// provider its device type belongs to (`GstOsxAudioDevice` is
+    /// `osxaudiodeviceprovider`). Devices with neither, CoreAudio's among
+    /// them, used to be labelled by [`Self::id_provider_name`]'s guess, so a
+    /// Mac's speakers showed as PulseAudio.
     fn get_provider_name(device: &gst::Device, device_class: &str) -> String {
+        if let Some(props) = device.properties() {
+            if let Ok(api) = props.get::<String>("device.api") {
+                return format!("{}provider", api.to_lowercase());
+            }
+            if props.get::<String>("ndi-name").is_ok() {
+                return "ndideviceprovider".to_string();
+            }
+        }
+        provider_from_type_name(device.type_().name())
+            .unwrap_or_else(|| Self::id_provider_name(device, device_class))
+    }
+
+    /// The provider name that goes into a device's id. Unlike
+    /// [`Self::get_provider_name`] it still guesses PulseAudio for any audio
+    /// device without a `device.api`: the ids saved flows hold were made
+    /// with that guess, and changing it would orphan them.
+    fn id_provider_name(device: &gst::Device, device_class: &str) -> String {
         if let Some(props) = device.properties() {
             // Try to get from device.api property
             if let Ok(api) = props.get::<String>("device.api") {
@@ -546,9 +568,30 @@ impl Drop for DeviceDiscovery {
     }
 }
 
+/// The device provider a device type belongs to, by GStreamer's naming:
+/// `Gst<Name>Device` comes from `<name>deviceprovider`.
+fn provider_from_type_name(type_name: &str) -> Option<String> {
+    let name = type_name.strip_prefix("Gst")?.strip_suffix("Device")?;
+    (!name.is_empty()).then(|| format!("{}deviceprovider", name.to_lowercase()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_device_type_names_its_provider() {
+        assert_eq!(
+            provider_from_type_name("GstOsxAudioDevice").as_deref(),
+            Some("osxaudiodeviceprovider")
+        );
+        assert_eq!(
+            provider_from_type_name("GstPulseDevice").as_deref(),
+            Some("pulsedeviceprovider")
+        );
+        assert_eq!(provider_from_type_name("GstDevice"), None);
+        assert_eq!(provider_from_type_name("SomethingElse"), None);
+    }
 
     #[test]
     fn audio_outputs_are_monitored_for_the_local_output_picker() {
