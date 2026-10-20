@@ -20,6 +20,10 @@ use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult};
 /// reports Playing. Converting on the GPU is also the cheaper place to do it:
 /// RGBA to NV12 halves the bytes that cross the bus.
 ///
+/// The formats `glcolorconvert` can produce vary with the GStreamer version,
+/// so the format is checked against the factory's src template. A pin it
+/// cannot satisfy would never link and leave the branch without video.
+///
 /// Feeding from the branch's own pad (not the mixer's) keeps the conversion
 /// off the PGM feed into the multiview compositor, which needs RGBA.
 fn output_convert_source(
@@ -33,6 +37,7 @@ fn output_convert_source(
     let Some(format) = p.output_format.as_deref() else {
         return Ok((from_id.to_string(), from_pad.to_string()));
     };
+    ensure_gl_can_produce(format)?;
     let cc_id = p.id(name);
     elems.push((
         cc_id.clone(),
@@ -47,6 +52,31 @@ fn output_convert_source(
         p.instance_id, format, name
     );
     Ok((cc_id, "src".to_string()))
+}
+
+/// Fail with an actionable error when `glcolorconvert` has no GL-memory src
+/// caps for `format`.
+fn ensure_gl_can_produce(format: &str) -> Result<(), BlockBuildError> {
+    let factory = gst::ElementFactory::find("glcolorconvert").ok_or_else(|| {
+        BlockBuildError::MissingPlugin("glcolorconvert (gstreamer1.0-gl) is not installed".into())
+    })?;
+    let wanted = gst::Caps::builder("video/x-raw")
+        .features(["memory:GLMemory"])
+        .field("format", format)
+        .build();
+    let producible = factory
+        .static_pad_templates()
+        .iter()
+        .filter(|t| t.direction() == gst::PadDirection::Src)
+        .any(|t| t.caps().can_intersect(&wanted));
+    if producible {
+        return Ok(());
+    }
+    Err(BlockBuildError::InvalidConfiguration(format!(
+        "output_format {} cannot be produced on the GPU backend: glcolorconvert has no {} output \
+         in this GStreamer. Pick another output_format or use the CPU compositor backend.",
+        format, format
+    )))
 }
 
 pub(super) fn build_gpu_pipeline(

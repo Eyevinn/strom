@@ -59,6 +59,10 @@ const GL_ELEMENTS: &[&str] = &["glvideomixerelement", "glcolorconvert", "gltests
 /// terminated in a sink. The DSK pad exists but is left unfed. `gl_download` selects between the two GPU
 /// output shapes: download to system memory, or hand GL memory downstream.
 fn build_flow(gl_download: bool) -> Flow {
+    build_flow_with_format(gl_download, OUTPUT_FORMAT)
+}
+
+fn build_flow_with_format(gl_download: bool, output_format: &str) -> Flow {
     let mut flow = Flow::new(format!("vm_gl_output_format_{}", gl_download));
     flow.blocks.push(strom_types::BlockInstance {
         id: BLOCK_ID.to_string(),
@@ -74,7 +78,7 @@ fn build_flow(gl_download: bool) -> Flow {
             p.insert("num_dsk_inputs".to_string(), PV::String("1".to_string()));
             p.insert(
                 "output_format".to_string(),
-                PV::String(OUTPUT_FORMAT.to_string()),
+                PV::String(output_format.to_string()),
             );
             p.insert("gl_download".to_string(), PV::Bool(gl_download));
             p.insert(
@@ -242,6 +246,25 @@ async fn gpu_output_format_links_without_gl_download() {
     gstreamer::init().unwrap();
     require_gl_plugin();
     assert_output_chain_pins_format(false);
+}
+
+/// A format `glcolorconvert` cannot produce must fail the build with a message
+/// naming it, not build a branch whose pin never links. YVYU is a valid
+/// GStreamer format outside the converter's list.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gpu_output_format_glcolorconvert_cannot_produce_fails_the_build() {
+    gstreamer::init().unwrap();
+    require_gl_plugin();
+    strom::gpu::detect_gpu_capabilities();
+    let err = common::manager::build(&build_flow_with_format(false, "YVYU"))
+        .err()
+        .expect("an unproducible output_format must fail the build");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("YVYU") && msg.contains("output_format"),
+        "error does not name the format: {}",
+        msg
+    );
 }
 
 /// End to end: the requested format has to be *negotiated*, not merely
