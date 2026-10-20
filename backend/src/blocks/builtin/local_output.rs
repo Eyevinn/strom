@@ -303,6 +303,21 @@ fn device_refusal(channels: u32, device: &gst::Caps) -> String {
     )
 }
 
+/// Set `convert`'s mix-matrix, or with `None` leave it mixing by position.
+///
+/// An empty matrix does not mean "none": `audioconvert` takes it as set, and
+/// then plays mono on the left channel only. What clears a matrix set before
+/// is one whose first row is empty, so that is set only when one is there.
+fn set_mix_matrix(convert: &gst::Element, matrix: Option<&[Vec<f32>]>) {
+    match matrix {
+        Some(matrix) => convert.set_property("mix-matrix", matrix_value(matrix)),
+        None if !convert.property::<gst::Array>("mix-matrix").is_empty() => {
+            convert.set_property("mix-matrix", matrix_value(&[Vec::new()]))
+        }
+        None => {}
+    }
+}
+
 fn matrix_value(matrix: &[Vec<f32>]) -> gst::Array {
     gst::Array::new(
         matrix
@@ -402,8 +417,7 @@ fn adapt_input(
                         "mixed by speaker position"
                     }
                 );
-                let matrix = plan.matrix.as_deref().unwrap_or(&[]);
-                convert.set_property("mix-matrix", matrix_value(matrix));
+                set_mix_matrix(&convert, plan.matrix.as_deref());
                 outcaps.set_property("caps", output_caps(plan.channels, plan.mask));
                 gst::PadProbeReturn::Ok
             }

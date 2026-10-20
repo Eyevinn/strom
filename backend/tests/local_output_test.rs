@@ -31,12 +31,14 @@ const REQUIRED: &[&str] = &[
 /// The name the test source gets, so its errors can be told from the block's.
 const TEST_SOURCE: &str = "test_source";
 
-/// What macOS's `osxaudiosink` offers for built-in speakers.
-const SPEAKERS: &str = "audio/x-raw, layout=interleaved, channels=2, \
-                        channel-mask=(bitmask)0x3; audio/x-raw, layout=interleaved, channels=1";
+/// What macOS's `osxaudiosink` offers for built-in speakers. S16 only, so the
+/// test can read the samples that reach the device.
+const SPEAKERS: &str = "audio/x-raw, format=S16LE, layout=interleaved, channels=2, \
+                        channel-mask=(bitmask)0x3; \
+                        audio/x-raw, format=S16LE, layout=interleaved, channels=1";
 
 /// An ASIO interface with 16 outputs: any count up to 16, no layout.
-const ASIO_16: &str = "audio/x-raw, layout=interleaved, channels=(int)[ 1, 16 ]";
+const ASIO_16: &str = "audio/x-raw, format=S16LE, layout=interleaved, channels=(int)[ 1, 16 ]";
 
 /// A stand-in output device that takes `caps` and plays nowhere.
 fn device(name: &str, caps: &str) -> gst::Element {
@@ -96,6 +98,28 @@ fn run_block(
     );
     sink.1 = device(&sink_id, device_caps);
     let device_pad = sink.1.static_pad("sink").expect("device pad");
+    // Loudest sample per output channel that reaches the device.
+    let peaks = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i32>::new()));
+    let peaks_probe = peaks.clone();
+    device_pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+        let channels = pad
+            .current_caps()
+            .and_then(|c| c.structure(0).and_then(|s| s.get::<i32>("channels").ok()))
+            .unwrap_or(1)
+            .max(1) as usize;
+        if let Some(buffer) = info.buffer() {
+            if let Ok(map) = buffer.map_readable() {
+                let mut peaks = peaks_probe.lock().unwrap();
+                peaks.resize(channels, 0);
+                for (i, frame) in map.as_chunks::<2>().0.iter().enumerate() {
+                    let v = i16::from_le_bytes(*frame) as i32;
+                    let ch = i % channels;
+                    peaks[ch] = peaks[ch].max(v.abs());
+                }
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
     let pipeline = gst::Pipeline::new();
     let by_id = common::block::install(&pipeline, &built);
     let input = by_id[&format!("{}:input", instance)].clone();
@@ -104,7 +128,7 @@ fn run_block(
     let src = gst::ElementFactory::make("audiotestsrc")
         .name(TEST_SOURCE)
         .property("is-live", true)
-        .property_from_str("wave", "silence")
+        .property("volume", 0.3f64)
         .build()
         .expect("audiotestsrc");
     let filter = gst::ElementFactory::make("capsfilter")
@@ -136,11 +160,13 @@ fn run_block(
         ))
     });
     let _ = pipeline.set_state(gst::State::Null);
+    let peaks = peaks.lock().unwrap().clone();
     Outcome {
         state,
         errors,
         matrix_rows,
         at_device,
+        peaks,
     }
 }
 
@@ -152,6 +178,8 @@ struct Outcome {
     matrix_rows: usize,
     /// Channels and channel-mask the device negotiated.
     at_device: Option<(i32, Option<u64>)>,
+    /// Loudest sample on each output channel at the device.
+    peaks: Vec<i32>,
 }
 
 /// Six unpositioned channels of 32-bit float at 96 kHz, as Local Input hands
@@ -202,6 +230,24 @@ fn by_default_multichannel_audio_plays_1_and_2_in_stereo() {
          pick channels 1 and 2 itself, or a real device refuses them"
     );
     assert_eq!(out.at_device, Some((2, Some(0x3))));
+}
+
+/// Mono plays on both sides of a stereo device, not only the left.
+#[test]
+fn mono_plays_on_both_sides() {
+    gst::init().unwrap();
+    let mono = gst::Caps::builder("audio/x-raw")
+        .field("channels", 1i32)
+        .field("rate", 48000i32)
+        .build();
+    let out = run_block("lo_mono", None, SPEAKERS, mono, None);
+    assert!(out.errors.is_empty(), "mono must play: {:?}", out.errors);
+    assert_eq!(out.at_device, Some((2, Some(0x3))));
+    assert!(
+        out.peaks.len() == 2 && out.peaks.iter().all(|p| *p > 1000),
+        "both channels must carry the mono signal: peaks {:?}",
+        out.peaks
+    );
 }
 
 /// Set to 8, an interface with 16 outputs gets 8 independent channels: inputs
