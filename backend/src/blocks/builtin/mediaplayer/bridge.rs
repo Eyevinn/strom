@@ -148,6 +148,10 @@ pub fn create_decode_pipeline(
         });
     }
 
+    if decoder == Decoder::Classic {
+        restrict_decoder_memory(&source, state.stinger.enabled);
+    }
+
     if let Some(uri) = initial_uri {
         if state.stinger.enabled {
             apply_stinger_decoding(&source, uri);
@@ -726,6 +730,50 @@ fn decoded_video_caps(stinger: bool) -> gst::Caps {
     caps
 }
 
+/// Answer a video decoder's CAPS query inside classic `uridecodebin` with
+/// [`decoded_video_caps`]. Classic decodebin starts every stream's decoder
+/// before the bridge appsink is linked, so a second video track's VideoToolbox
+/// decoder would otherwise pick GL memory and then fail `not-negotiated` against
+/// the appsink's caps.
+fn restrict_decoder_memory(source: &gst::Element, stinger: bool) {
+    source.connect("autoplug-query", false, move |args| {
+        let element = args[2].get::<gst::Element>().ok()?;
+        // The signal passes the query by pointer; a `Value` getter would hand
+        // back a copy and the answer would be lost.
+        let query = args[3].get::<&gst::QueryRef>().ok()?;
+        let query = unsafe { &mut *(query.as_mut_ptr() as *mut gst::QueryRef) };
+        Some(answer_decoder_caps_query(&element, query, stinger).to_value())
+    });
+}
+
+/// Fill in `query` when it is a CAPS query from a video decoder; returns
+/// whether it did. The answer is the query's filter narrowed to
+/// [`decoded_video_caps`], so a decoder with no system-memory output ends up
+/// with empty caps and fails the flow with a clear error instead of GL frames.
+fn answer_decoder_caps_query(
+    element: &gst::Element,
+    query: &mut gst::QueryRef,
+    stinger: bool,
+) -> bool {
+    let is_video_decoder = element.factory().is_some_and(|f| {
+        let klass = f.klass();
+        klass.contains("Decoder") && klass.contains("Video")
+    });
+    let gst::QueryViewMut::Caps(q) = query.view_mut() else {
+        return false;
+    };
+    if !is_video_decoder {
+        return false;
+    }
+    let wanted = decoded_video_caps(stinger);
+    let answer = match q.filter() {
+        Some(filter) => filter.intersect(&wanted),
+        None => wanted,
+    };
+    q.set_result(&answer);
+    true
+}
+
 /// Link a dynamic pad through clocksync → appsink, with appsink bridging to the given appsrc.
 ///
 /// The bridge computes a timestamp offset from the first buffer:
@@ -1203,6 +1251,40 @@ mod tests {
         assert!(!stinger.can_intersect(&gl));
         assert!(stinger.can_intersect(&system));
         assert!(!stinger.can_intersect(&cuda));
+    }
+
+    /// Classic decodebin asks the decoder's caps before the appsink exists, so
+    /// the bridge answers that query itself. The answer must exclude GL memory.
+    #[test]
+    fn classic_source_answers_decoder_caps_query_without_gl() {
+        gst::init().unwrap();
+        let decoder = gst::ElementFactory::make("theoradec").build().unwrap();
+        let mut filter = gst::Caps::builder("video/x-raw")
+            .features(["memory:GLMemory"])
+            .build();
+        filter.merge(gst::Caps::builder("video/x-raw").build());
+        let gl = gst::Caps::builder("video/x-raw")
+            .features(["memory:GLMemory"])
+            .build();
+
+        let mut query = gst::query::Caps::new(Some(&filter));
+        assert!(answer_decoder_caps_query(&decoder, &mut query, false));
+        let result = query.result_owned().expect("answered");
+        assert!(!result.can_intersect(&gl));
+        assert!(result.can_intersect(&gst::Caps::builder("video/x-raw").build()));
+
+        // Not a video decoder: left to decodebin.
+        let identity = gst::ElementFactory::make("identity").build().unwrap();
+        let mut query = gst::query::Caps::new(Some(&filter));
+        assert!(!answer_decoder_caps_query(&identity, &mut query, false));
+
+        // The signal is wired on a classic source. (A query emitted from here
+        // is shared, so its answer is not writable; decodebin's is.)
+        let source = gst::ElementFactory::make("uridecodebin").build().unwrap();
+        restrict_decoder_memory(&source, false);
+        let pad = gst::Pad::builder(gst::PadDirection::Src).build();
+        let query: gst::Query = gst::query::Caps::new(Some(&filter)).into();
+        assert!(source.emit_by_name::<bool>("autoplug-query", &[&pad, &decoder, &query]));
     }
 
     #[test]
