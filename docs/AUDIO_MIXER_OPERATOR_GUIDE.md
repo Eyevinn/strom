@@ -185,14 +185,13 @@ held up. A consumer that stops and resumes first receives up to 3 s of
 old audio.
 
 A direct out carries nothing until its channel has input. (With Force
-Live on, the default, the other outputs carry silence instead.) An
-output that waits for its first audio before starting gets nothing
+Live on, the default, the other outputs carry silence instead.) A
+consumer that waits for its first audio before starting gets nothing
 until a source reaches that channel, and the flow reports itself as
 paused instead of playing until then. Main and the other outputs keep
-playing. The NDI, DeckLink audio and TAMS outputs wait like this, and so
-does a raw GStreamer sink with `async` left on (for example
-`interaudiosink`). The other Strom outputs, including Inter Output, do
-not.
+playing. A raw GStreamer sink with `async` left on (for example
+`interaudiosink`) waits like this. The Strom outputs do not, including
+NDI, DeckLink audio, TAMS and Inter Output.
 
 ### Quick routing matrix view
 
