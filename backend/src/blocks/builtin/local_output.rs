@@ -18,11 +18,13 @@
 //! surround choice (5.1, 7.1, ...) is a speaker layout instead. See
 //! [`plan_output`] for how the two meet what arrives and what the device takes.
 
-use super::refusal::refuse_input;
+use super::refusal::{accept_input, refuse_input};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use strom_types::{
     block::*, element::ElementPadRef, parse_audio_channel_config, AudioChannelConfig, MediaType,
     PropertyValue,
@@ -373,6 +375,27 @@ fn adapt_input(
     let convert_weak = convert.downgrade();
     let outcaps_weak = outcaps.downgrade();
     let instance_id = instance_id.to_string();
+    // Set while the stream is refused. The identity then drops every buffer
+    // and sends a gap in its place, and those gaps are dropped too: a device
+    // sink that gets a gap before any caps posts "Sink not negotiated before
+    // gap event", and that error would follow the block's own.
+    let refused = Arc::new(AtomicBool::new(false));
+    let refused_gaps = refused.clone();
+    let src_pad = input
+        .static_pad("src")
+        .ok_or_else(|| BlockBuildError::ElementCreation("identity has no src pad".into()))?;
+    src_pad.add_probe(
+        gst::PadProbeType::EVENT_DOWNSTREAM,
+        move |_pad, info| match info.data.as_ref() {
+            Some(gst::PadProbeData::Event(e))
+                if e.type_() == gst::EventType::Gap && refused_gaps.load(Ordering::SeqCst) =>
+            {
+                gst::PadProbeReturn::Drop
+            }
+            _ => gst::PadProbeReturn::Ok,
+        },
+    );
+
     sink_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
         let Some(gst::PadProbeData::Event(event)) = info.data.as_ref() else {
             return gst::PadProbeReturn::Ok;
@@ -384,6 +407,7 @@ fn adapt_input(
             return gst::PadProbeReturn::Ok;
         };
         if s.name() != "audio/x-raw" {
+            refused.store(true, Ordering::SeqCst);
             if let Some(input) = pad.parent_element() {
                 refuse_input(&input, &encoded_audio_refusal(s.name()));
             }
@@ -404,6 +428,11 @@ fn adapt_input(
             .unwrap_or_else(gst::Caps::new_any);
         match plan_output(in_channels, in_mask, want, &device) {
             Ok(plan) => {
+                if refused.swap(false, Ordering::SeqCst) {
+                    if let Some(input) = pad.parent_element() {
+                        accept_input(&input);
+                    }
+                }
                 info!(
                     "Local Output {}: {} input channels play as {} output channels \
                      (channel-mask {:?}, {})",
@@ -422,6 +451,7 @@ fn adapt_input(
                 gst::PadProbeReturn::Ok
             }
             Err(reason) => {
+                refused.store(true, Ordering::SeqCst);
                 if let Some(input) = pad.parent_element() {
                     refuse_input(&input, &reason);
                 }

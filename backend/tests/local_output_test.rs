@@ -98,6 +98,19 @@ fn run_block(
     );
     sink.1 = device(&sink_id, device_caps);
     let device_pad = sink.1.static_pad("sink").expect("device pad");
+    // A real device sink fails on a gap that comes before any caps
+    // ("Sink not negotiated before gap event"); the stand-in does not, so
+    // count them here.
+    let early_gaps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let early_gaps_probe = early_gaps.clone();
+    device_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+        if let Some(gst::PadProbeData::Event(e)) = info.data.as_ref() {
+            if e.type_() == gst::EventType::Gap && pad.current_caps().is_none() {
+                early_gaps_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
     // Loudest sample per output channel that reaches the device.
     let peaks = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i32>::new()));
     let peaks_probe = peaks.clone();
@@ -161,12 +174,14 @@ fn run_block(
     });
     let _ = pipeline.set_state(gst::State::Null);
     let peaks = peaks.lock().unwrap().clone();
+    let early_gaps = early_gaps.load(std::sync::atomic::Ordering::SeqCst);
     Outcome {
         state,
         errors,
         matrix_rows,
         at_device,
         peaks,
+        early_gaps,
     }
 }
 
@@ -180,6 +195,8 @@ struct Outcome {
     at_device: Option<(i32, Option<u64>)>,
     /// Loudest sample on each output channel at the device.
     peaks: Vec<i32>,
+    /// Gap events that reached the device before any caps did.
+    early_gaps: usize,
 }
 
 /// Six unpositioned channels of 32-bit float at 96 kHz, as Local Input hands
@@ -195,7 +212,13 @@ fn six_unpositioned() -> gst::Caps {
 
 /// The refusal `instance`'s input posted, asserting it is the only one and
 /// that the source did not follow it with an error of its own.
-fn the_refusal(instance: &str, errors: &[BusError]) -> String {
+fn the_refusal(instance: &str, out: &Outcome) -> String {
+    let errors = &out.errors;
+    assert_eq!(
+        out.early_gaps, 0,
+        "a refused stream's gaps must not reach the device, or a real sink posts \
+         its own error before ours"
+    );
     let input = format!("{}:input", instance);
     let from_block: Vec<&BusError> = errors.iter().filter(|e| e.source == input).collect();
     assert_eq!(
@@ -275,7 +298,7 @@ fn eight_channels_reach_an_interface_as_eight_independent_outputs() {
 fn a_device_that_cannot_take_the_channels_is_refused_with_what_it_takes() {
     gst::init().unwrap();
     let out = run_block("lo_toomany", Some("8"), SPEAKERS, six_unpositioned(), None);
-    let reason = the_refusal("lo_toomany", &out.errors);
+    let reason = the_refusal("lo_toomany", &out);
     assert!(reason.contains("8 channels"), "{}", reason);
     assert!(reason.contains("audio_channels"), "{}", reason);
 }
@@ -290,7 +313,7 @@ fn encoded_audio_is_refused_with_the_blocks_reason() {
         .field("rate", 48000i32)
         .build();
     let out = run_block("lo_opus", None, SPEAKERS, caps, Some("opusenc"));
-    let reason = the_refusal("lo_opus", &out.errors);
+    let reason = the_refusal("lo_opus", &out);
     assert!(
         reason.contains("audio/x-opus") && reason.contains("raw audio"),
         "the refusal must name what arrived and what the block plays: {}",
