@@ -9,10 +9,11 @@
 //! to a program output or a recording.
 //!
 //! ```text
-//! Output:  audio_in → audioconvert → audioresample → capsfilter → stromaudiobridgesink
+//! Output:  audio_in → identity → audioconvert → audioresample → capsfilter → stromaudiobridgesink
 //! Input:   stromaudiobridgesrc → audio_out
 //! ```
 
+use super::refusal::refuse_input;
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gst::audio_bridge;
 use gstreamer as gst;
@@ -23,12 +24,23 @@ use strom_types::audio_bridge::{
     MAX_MAX_LATENCY_MS, MAX_RATE_CHANGE_PERCENT, MAX_TARGET_LATENCY_MS, MIN_TARGET_LATENCY_MS,
 };
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
-use tracing::info;
+use tracing::{info, warn};
 
 pub use strom_types::audio_bridge::{INPUT_BLOCK_ID, OUTPUT_BLOCK_ID};
 
 /// Element id of the bridge source inside an Audio Bridge Input.
 pub const BRIDGE_ELEMENT: &str = "bridge";
+
+const OUTPUT_NAME: &str = "Audio Bridge Output";
+
+/// The reason to give when an Audio Bridge Output gets audio that is not raw.
+/// The bridge carries raw audio between flows, so it needs a decoder upstream.
+fn encoded_audio_refusal(caps_name: &str) -> String {
+    format!(
+        "{OUTPUT_NAME} needs raw audio, but its audio input carries {caps_name}. Link a source \
+         that decodes its audio, for example an MPEG-TS/SRT Input with decode enabled"
+    )
+}
 
 fn channel(properties: &HashMap<String, PropertyValue>) -> Result<String, BlockBuildError> {
     match properties.get("channel") {
@@ -79,6 +91,7 @@ impl BlockBuilder for AudioBridgeOutputBuilder {
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("{factory}: {e}")))
         };
+        let input = make("identity", "input")?;
         let convert = make("audioconvert", "convert")?;
         let resample = make("audioresample", "resample")?;
         let caps = make("capsfilter", "caps")?;
@@ -86,10 +99,48 @@ impl BlockBuilder for AudioBridgeOutputBuilder {
         let sink = make(audio_bridge::SINK_FACTORY, "sink")?;
         sink.set_property("channel", &channel);
 
+        // audioconvert only takes raw audio, and it would answer a caps query
+        // from an encoded source with a bare not-negotiated before any caps
+        // event arrives. So the input's src pad stays unlinked, which accepts
+        // anything, until raw audio shows up; anything else is refused with a
+        // reason the operator can act on.
+        let src_pad = input
+            .static_pad("src")
+            .ok_or_else(|| BlockBuildError::ElementCreation("identity has no src pad".into()))?;
+        let convert_weak = convert.downgrade();
+        src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+            let Some(gst::PadProbeData::Event(event)) = info.data.as_ref() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let gst::EventView::Caps(c) = event.view() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let Some(name) = c.caps().structure(0).map(|s| s.name().to_string()) else {
+                return gst::PadProbeReturn::Ok;
+            };
+            if name == "audio/x-raw" {
+                if !pad.is_linked() {
+                    let sink = convert_weak
+                        .upgrade()
+                        .and_then(|convert| convert.static_pad("sink"));
+                    if let Some(sink) = sink {
+                        if let Err(e) = pad.link(&sink) {
+                            warn!("Audio Bridge Output: linking the input failed: {e:?}");
+                        }
+                    }
+                }
+            } else if let Some(input) = pad.parent_element() {
+                refuse_input(&input, &encoded_audio_refusal(&name));
+            }
+            gst::PadProbeReturn::Ok
+        });
+
         info!("Audio Bridge Output {instance_id} -> channel '{channel}'");
 
-        let ids = ["convert", "resample", "caps", "sink"].map(|n| format!("{instance_id}:{n}"));
-        let internal_links = ids
+        let ids =
+            ["input", "convert", "resample", "caps", "sink"].map(|n| format!("{instance_id}:{n}"));
+        // input -> convert is made by the caps probe above.
+        let internal_links = ids[1..]
             .windows(2)
             .map(|w| {
                 (
@@ -98,9 +149,10 @@ impl BlockBuilder for AudioBridgeOutputBuilder {
                 )
             })
             .collect();
-        let [convert_id, resample_id, caps_id, sink_id] = ids;
+        let [input_id, convert_id, resample_id, caps_id, sink_id] = ids;
         Ok(BlockBuildResult {
             elements: vec![
+                (input_id, input),
                 (convert_id, convert),
                 (resample_id, resample),
                 (caps_id, caps),
@@ -216,7 +268,7 @@ fn output_definition() -> BlockDefinition {
                 label: None,
                 name: "audio_in".to_string(),
                 media_type: MediaType::Audio,
-                internal_element_id: "convert".to_string(),
+                internal_element_id: "input".to_string(),
                 internal_pad_name: "sink".to_string(),
             }],
             outputs: vec![],
