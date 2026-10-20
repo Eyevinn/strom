@@ -39,17 +39,20 @@ impl ApiClient {
         Ok(interfaces)
     }
 
-    /// List discovered local capture devices in a given category
-    /// (e.g. `"video_source"`, `"audio_source"`). Backed by the GStreamer
-    /// `DeviceMonitor` running on the backend.
+    /// List discovered local devices in a category (e.g. `"video_source"`),
+    /// or every device with `None`. Backed by the GStreamer `DeviceMonitor`
+    /// running on the backend.
     pub async fn list_devices(
         &self,
-        category: &str,
+        category: Option<&str>,
     ) -> ApiResult<Vec<strom_types::discovery::DeviceResponse>> {
         use tracing::info;
 
-        let url = format!("{}/discovery/devices?category={}", self.base_url, category);
-        info!("Fetching {} devices from: {}", category, url);
+        let url = match category {
+            Some(category) => format!("{}/discovery/devices?category={}", self.base_url, category),
+            None => format!("{}/discovery/devices", self.base_url),
+        };
+        info!("Fetching devices from: {}", url);
 
         let response = self
             .with_auth(self.client.get(&url))
@@ -72,7 +75,11 @@ impl ApiClient {
                 ApiError::Decode(e.to_string())
             })?;
 
-        info!("Loaded {} {} device(s)", devices.len(), category);
+        info!(
+            "Loaded {} {} device(s)",
+            devices.len(),
+            category.unwrap_or("all")
+        );
         Ok(devices)
     }
 

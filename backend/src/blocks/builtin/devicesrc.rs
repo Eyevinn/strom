@@ -321,7 +321,7 @@ impl BlockBuilder for LocalInputBuilder {
                     })
                 });
                 if let Some(inputs) = inputs {
-                    let list = asio_input_channels(inputs);
+                    let list = asio_channel_list(inputs);
                     info!(
                         "Local Input: capturing ASIO inputs {} on {}",
                         list, audiosrc_id
@@ -444,6 +444,17 @@ fn make_source(
             device_kind, device_id
         ))
     })?;
+    // Discovery lists outputs too, for Local Output: an output's id must not
+    // become a source here.
+    if device.device_class() != device_kind {
+        return Err(BlockBuildError::InvalidConfiguration(format!(
+            "Device '{}' ({}) is a {} device, not a {} device",
+            device.display_name(),
+            device_id,
+            device.device_class(),
+            device_kind
+        )));
+    }
 
     let element = device.create_element(Some(element_id)).map_err(|e| {
         BlockBuildError::ElementCreation(format!(
@@ -475,10 +486,10 @@ const ASIO_SOURCE_FACTORY: &str = "asiosrc";
 /// Widest channel count GStreamer's channel mixer takes. `audioconvert`
 /// segfaults above it on GStreamer 1.24 (`gst_audio_channel_mixer_new`
 /// asserts `in_channels <= 64`), so the block never negotiates more.
-const MAX_AUDIO_CHANNELS: u32 = 64;
+pub(super) const MAX_AUDIO_CHANNELS: u32 = 64;
 
 /// Highest channel count a device's caps offer.
-fn max_channels(caps: &gst::Caps) -> Option<u32> {
+pub(super) fn max_channels(caps: &gst::Caps) -> Option<u32> {
     caps.iter()
         .filter_map(|s| {
             s.get::<gst::IntRange<i32>>("channels")
@@ -490,8 +501,9 @@ fn max_channels(caps: &gst::Caps) -> Option<u32> {
         .and_then(|c| u32::try_from(c).ok())
 }
 
-/// `input-channels` value that captures the first `channels` ASIO inputs.
-fn asio_input_channels(channels: u32) -> String {
+/// The first `channels` ASIO channels, as `asiosrc`'s `input-channels` and
+/// `asiosink`'s `output-channels` take them: `"0,1,...,channels-1"`.
+pub(super) fn asio_channel_list(channels: u32) -> String {
     (0..channels)
         .map(|c| c.to_string())
         .collect::<Vec<_>>()
@@ -1223,9 +1235,9 @@ mod tests {
     }
 
     #[test]
-    fn asio_input_channels_lists_the_first_inputs() {
-        assert_eq!(asio_input_channels(1), "0");
-        assert_eq!(asio_input_channels(4), "0,1,2,3");
+    fn asio_channel_list_lists_the_first_inputs() {
+        assert_eq!(asio_channel_list(1), "0");
+        assert_eq!(asio_channel_list(4), "0,1,2,3");
     }
 
     // --- get_external_pads ---

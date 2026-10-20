@@ -2392,12 +2392,7 @@ impl PropertyInspector {
                                 device_picker_actions.needed = true;
                                 use strom_types::discovery::DeviceCategory;
                                 // The audio list holds inputs and outputs.
-                                let of_category = |list: &[strom_types::discovery::DeviceResponse]| {
-                                    list.iter()
-                                        .filter(|d| d.category == *category)
-                                        .cloned()
-                                        .collect::<Vec<_>>()
-                                };
+                                let of_category = |list| devices_of(list, *category);
                                 let (devices, kind_label) = match category {
                                     DeviceCategory::VideoSource => {
                                         (of_category(video_devices), "video source")
@@ -2876,7 +2871,7 @@ impl PropertyInspector {
     fn show_local_device_editor(
         ui: &mut Ui,
         value: &mut PropertyValue,
-        devices: &[strom_types::discovery::DeviceResponse],
+        devices: &[&strom_types::discovery::DeviceResponse],
         kind_label: &str,
         loading: bool,
         actions: &mut DevicePickerActions,
@@ -2900,7 +2895,7 @@ impl PropertyInspector {
                 devices
                     .iter()
                     .find(|d| d.id == *s)
-                    .map(device_label)
+                    .map(|d| device_label(d))
                     .unwrap_or_else(|| format!("{} (not found — refresh)", s))
             };
 
@@ -3103,6 +3098,15 @@ impl PropertyInspector {
             }
         }
     }
+}
+
+/// The devices in `list` of `category`, by reference: the property panel
+/// draws every frame, so it does not copy the lists it filters.
+fn devices_of(
+    list: &[strom_types::discovery::DeviceResponse],
+    category: strom_types::discovery::DeviceCategory,
+) -> Vec<&strom_types::discovery::DeviceResponse> {
+    list.iter().filter(|d| d.category == category).collect()
 }
 
 #[cfg(test)]

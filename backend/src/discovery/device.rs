@@ -284,7 +284,6 @@ impl DeviceDiscovery {
         None
     }
 
-    /// Get provider name from device properties or infer from device class.
     /// The provider shown for `device`: its `device.api`, or else the
     /// provider its device type belongs to (`GstOsxAudioDevice` is
     /// `osxaudiodeviceprovider`). Devices with neither, CoreAudio's among

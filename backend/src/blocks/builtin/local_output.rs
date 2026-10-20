@@ -18,6 +18,7 @@
 //! surround choice (5.1, 7.1, ...) is a speaker layout instead. See
 //! [`plan_output`] for how the two meet what arrives and what the device takes.
 
+use super::devicesrc::{asio_channel_list, max_channels, MAX_AUDIO_CHANNELS};
 use super::refusal::{accept_input, refuse_input};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
@@ -33,11 +34,9 @@ use tracing::info;
 
 const BLOCK_NAME: &str = "Local Output";
 
-/// Channels the device gets unless `audio_channels` says otherwise.
+/// Channels the device gets unless `audio_channels` says otherwise, or the
+/// device cannot take them.
 const DEFAULT_CHANNELS: &str = "2";
-
-/// Widest channel count GStreamer's channel mixer takes (see Local Input).
-const MAX_AUDIO_CHANNELS: u32 = 64;
 
 /// Local Output block builder.
 pub struct LocalOutputBuilder;
@@ -55,7 +54,7 @@ impl BlockBuilder for LocalOutputBuilder {
             Some(PropertyValue::String(s)) => s.trim().to_string(),
             _ => String::new(),
         };
-        let want = read_channels(properties)?;
+        let (want, explicit) = read_channels(properties)?;
 
         let input_id = format!("{}:input", instance_id);
         let convert_id = format!("{}:audioconvert", instance_id);
@@ -71,11 +70,21 @@ impl BlockBuilder for LocalOutputBuilder {
         let outcaps = make("capsfilter", &outcaps_id)?;
         outcaps.set_property("caps", gst::Caps::new_empty_simple("audio/x-raw"));
         let sink = make_sink(ctx, &device_id, &sink_id)?;
-        // An ASIO driver plays only the outputs it is told to open.
-        if sink.find_property("output-channels").is_some() {
-            sink.set_property("output-channels", first_channels(want.channels));
-        }
-        adapt_input(instance_id, want, &input, &convert, &outcaps)?;
+        // An ASIO driver plays only the outputs it is told to open, and fails
+        // on its own if told to open more than it has.
+        let want = if sink.find_property("output-channels").is_some() {
+            let outputs = ctx
+                .local_device(&device_id)
+                .and_then(|d| d.caps())
+                .and_then(|caps| max_channels(&caps));
+            let want = asio_channels(want, explicit, outputs)
+                .map_err(BlockBuildError::InvalidConfiguration)?;
+            sink.set_property("output-channels", asio_channel_list(want.channels));
+            want
+        } else {
+            want
+        };
+        adapt_input(instance_id, want, explicit, &input, &convert, &outcaps)?;
 
         let internal_links = vec![
             (
@@ -111,16 +120,18 @@ impl BlockBuilder for LocalOutputBuilder {
     }
 }
 
-/// `audio_channels`, 2 when unset.
+/// `audio_channels`, 2 when unset, and whether it was set.
 fn read_channels(
     properties: &HashMap<String, PropertyValue>,
-) -> Result<AudioChannelConfig, BlockBuildError> {
-    let value = match properties.get("audio_channels") {
-        Some(PropertyValue::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
-        Some(PropertyValue::UInt(n)) => n.to_string(),
-        Some(PropertyValue::Int(n)) => n.to_string(),
-        _ => DEFAULT_CHANNELS.to_string(),
+) -> Result<(AudioChannelConfig, bool), BlockBuildError> {
+    let set = match properties.get("audio_channels") {
+        Some(PropertyValue::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        Some(PropertyValue::UInt(n)) => Some(n.to_string()),
+        Some(PropertyValue::Int(n)) => Some(n.to_string()),
+        _ => None,
     };
+    let explicit = set.is_some();
+    let value = set.unwrap_or_else(|| DEFAULT_CHANNELS.to_string());
     let config = parse_audio_channel_config(&value).ok_or_else(|| {
         BlockBuildError::InvalidProperty(format!(
             "audio_channels '{}' is not a channel count or a count with a layout (6:0x3f)",
@@ -133,12 +144,29 @@ fn read_channels(
             config.channels, MAX_AUDIO_CHANNELS
         )));
     }
-    Ok(config)
+    Ok((config, explicit))
 }
 
-/// `"0,1,...,n-1"`: an ASIO driver's first `n` outputs.
-fn first_channels(n: u32) -> String {
-    (0..n).map(|c| c.to_string()).collect::<Vec<_>>().join(",")
+/// The channels to open on an ASIO driver with `outputs` outputs (`None`
+/// when its caps do not say). A count the operator set that the driver does
+/// not have is refused; the default of 2 shrinks to a driver with fewer.
+fn asio_channels(
+    want: AudioChannelConfig,
+    explicit: bool,
+    outputs: Option<u32>,
+) -> Result<AudioChannelConfig, String> {
+    match outputs {
+        Some(outputs) if want.channels > outputs && explicit => Err(format!(
+            "{} is set to {} channels, but its ASIO device has {} outputs. Change \
+             audio_channels",
+            BLOCK_NAME, want.channels, outputs
+        )),
+        Some(outputs) if want.channels > outputs => Ok(AudioChannelConfig {
+            channels: outputs.max(1),
+            channel_mask: None,
+        }),
+        _ => Ok(want),
+    }
 }
 
 fn make(factory: &str, name: &str) -> Result<gst::Element, BlockBuildError> {
@@ -240,7 +268,10 @@ fn plan_output(
     device: &gst::Caps,
 ) -> Result<OutputPlan, String> {
     let n = want.channels;
-    let positioned_in = in_channels <= 2 || in_mask.is_some_and(|m| m != 0);
+    let positioned_in = match in_mask {
+        Some(mask) => mask != 0,
+        None => in_channels <= 2,
+    };
     let (mask, positioned_out) = match (n, want.channel_mask) {
         (1, _) => (None, true),
         (2, _) => (Some(0x3), true),
@@ -278,6 +309,41 @@ fn device_layout(device: &gst::Caps, channels: u32) -> Option<u64> {
     device.iter().find_map(|s| {
         let mask = s.get::<gst::Bitmask>("channel-mask").ok()?.0;
         (mask.count_ones() == channels).then_some(mask)
+    })
+}
+
+/// The output the device itself offers first, for when the default of 2 is
+/// not something it takes: its first channel count (the top of a range), and
+/// that structure's layout.
+fn device_choice(device: &gst::Caps) -> Option<AudioChannelConfig> {
+    let s = device.structure(0)?;
+    let channels = s
+        .get::<i32>("channels")
+        .or_else(|_| s.get::<gst::IntRange<i32>>("channels").map(|r| r.max()))
+        .ok()
+        .and_then(|c| u32::try_from(c).ok())?
+        .min(MAX_AUDIO_CHANNELS);
+    Some(AudioChannelConfig {
+        channels,
+        channel_mask: s.get::<gst::Bitmask>("channel-mask").ok().map(|m| m.0),
+    })
+}
+
+/// [`plan_output`], and when the default of 2 channels is refused, the same
+/// for the output the device offers instead. A count the operator set is
+/// never changed.
+fn plan_for_device(
+    in_channels: u32,
+    in_mask: Option<u64>,
+    want: AudioChannelConfig,
+    explicit: bool,
+    device: &gst::Caps,
+) -> Result<OutputPlan, String> {
+    plan_output(in_channels, in_mask, want, device).or_else(|refusal| {
+        match device_choice(device).filter(|_| !explicit) {
+            Some(offered) => plan_output(in_channels, in_mask, offered, device),
+            None => Err(refusal),
+        }
     })
 }
 
@@ -344,6 +410,7 @@ fn matrix_value(matrix: &[Vec<f32>]) -> gst::Array {
 fn adapt_input(
     instance_id: &str,
     want: AudioChannelConfig,
+    explicit: bool,
     input: &gst::Element,
     convert: &gst::Element,
     outcaps: &gst::Element,
@@ -426,7 +493,7 @@ fn adapt_input(
             .static_pad("src")
             .map(|p| p.peer_query_caps(None))
             .unwrap_or_else(gst::Caps::new_any);
-        match plan_output(in_channels, in_mask, want, &device) {
+        match plan_for_device(in_channels, in_mask, want, explicit, &device) {
             Ok(plan) => {
                 if refused.swap(false, Ordering::SeqCst) {
                     if let Some(input) = pad.parent_element() {
@@ -635,8 +702,9 @@ mod tests {
 
     #[test]
     fn audio_channels_defaults_to_stereo() {
-        let config = read_channels(&HashMap::new()).unwrap();
+        let (config, explicit) = read_channels(&HashMap::new()).unwrap();
         assert_eq!((config.channels, config.channel_mask), (2, None));
+        assert!(!explicit);
         let def = local_output_definition();
         let prop = def
             .exposed_properties
@@ -650,9 +718,47 @@ mod tests {
     }
 
     #[test]
-    fn asio_opens_the_first_outputs() {
-        assert_eq!(first_channels(1), "0");
-        assert_eq!(first_channels(4), "0,1,2,3");
+    fn asio_refuses_more_outputs_than_set_but_shrinks_the_default() {
+        let err = asio_channels(want("8"), true, Some(2)).unwrap_err();
+        assert!(
+            err.contains("8 channels") && err.contains("2 outputs"),
+            "{}",
+            err
+        );
+        assert_eq!(
+            asio_channels(want("2"), false, Some(1)).unwrap().channels,
+            1
+        );
+        assert_eq!(
+            asio_channels(want("8"), true, Some(16)).unwrap().channels,
+            8
+        );
+        assert_eq!(asio_channels(want("8"), true, None).unwrap().channels, 8);
+    }
+
+    #[test]
+    fn the_default_takes_what_a_device_without_stereo_offers() {
+        // An HDMI output whose mix format is 7.1, and nothing else.
+        let hdmi = caps("audio/x-raw, channels=8, channel-mask=(bitmask)0xc3f");
+        let plan = plan_for_device(2, Some(0x3), want("2"), false, &hdmi).unwrap();
+        assert_eq!((plan.channels, plan.mask), (8, Some(0xc3f)));
+        assert_eq!(plan.matrix, None, "stereo is placed by position");
+        // A mono-only device.
+        let mono = caps("audio/x-raw, channels=1");
+        let plan = plan_for_device(2, Some(0x3), want("2"), false, &mono).unwrap();
+        assert_eq!(plan.channels, 1);
+    }
+
+    #[test]
+    fn a_count_the_operator_set_is_never_changed() {
+        let hdmi = caps("audio/x-raw, channels=8, channel-mask=(bitmask)0xc3f");
+        assert!(plan_for_device(2, Some(0x3), want("2"), true, &hdmi).is_err());
+    }
+
+    #[test]
+    fn unpositioned_stereo_goes_channel_for_channel() {
+        let plan = plan_output(2, Some(0), want("6:0x3f"), &alsa()).unwrap();
+        assert_eq!(plan.matrix, one_to_one(6, 2));
     }
 
     #[test]

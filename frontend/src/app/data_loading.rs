@@ -247,7 +247,7 @@ impl StromApp {
             let tx = tx.clone();
             let ctx = ctx.clone();
             spawn_task(async move {
-                match api.list_devices("video_source").await {
+                match api.list_devices(Some("video_source")).await {
                     Ok(devices) => {
                         let _ = tx.send(AppMessage::LocalDevicesLoaded {
                             category: strom_types::discovery::DeviceCategory::VideoSource,
@@ -270,14 +270,24 @@ impl StromApp {
             self.audio_devices_loading = true;
             spawn_task(async move {
                 // Audio inputs (Local Input) and outputs (Local Output) share
-                // one list; each picker keeps the entries of its category.
-                let mut devices = Vec::new();
-                for category in ["audio_source", "audio_sink"] {
-                    match api.list_devices(category).await {
-                        Ok(found) => devices.extend(found),
-                        Err(e) => tracing::warn!("list_devices({}) failed: {}", category, e),
+                // one list, fetched in one request; each picker keeps the
+                // entries of its category.
+                use strom_types::discovery::DeviceCategory;
+                let devices = match api.list_devices(None).await {
+                    Ok(all) => all
+                        .into_iter()
+                        .filter(|d| {
+                            matches!(
+                                d.category,
+                                DeviceCategory::AudioSource | DeviceCategory::AudioSink
+                            )
+                        })
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!("list_devices (audio) failed: {}", e);
+                        Vec::new()
                     }
-                }
+                };
                 let _ = tx.send(AppMessage::LocalDevicesLoaded {
                     category: strom_types::discovery::DeviceCategory::AudioSource,
                     devices,
