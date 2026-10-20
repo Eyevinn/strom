@@ -52,8 +52,16 @@
 //! A decoder that can output CUDA memory picks it, its ACCEPT_CAPS is then CUDA
 //! only, and the adapter goes in: the frames stay on the GPU. A producer that
 //! cannot output CUDA memory never chooses the extra entries.
+//!
+//! D3D12 and D3D11 memory, what the Windows hardware decoders output, are
+//! adapted the same way, with `d3d12download` or `d3d11download`. Those
+//! download to system memory, which `glupload` then uploads: there is no
+//! D3D-to-GL interop element to keep the frames on the GPU. Only a producer
+//! that offers D3D memory and nothing else is adapted, and no D3D memory is
+//! added to the input's answer, so a decoder that can choose picks system
+//! memory itself.
 
-use crate::gst::video_adapt::{self, Adapter, Consumer, CUDA_MEMORY_FEATURE};
+use crate::gst::video_adapt::{self, Adapter, Consumer, Refusal, CUDA_MEMORY_FEATURE};
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
@@ -214,6 +222,36 @@ fn adapter_in(front_src: &gst::Pad, upload: &gst::Element, factory: &str) -> Opt
         .find(|e| factory_of(e) == factory)
 }
 
+/// The download out of device memory among `adapters`, if any.
+fn device_download(adapters: &[Adapter]) -> Option<Adapter> {
+    adapters
+        .iter()
+        .copied()
+        .find(|a| a.downloads_device_memory())
+}
+
+/// True when `factory`'s sink pad takes `caps`. `false` when it is not
+/// installed.
+fn factory_sink_takes(factory: &str, caps: &gst::CapsRef) -> bool {
+    gst::ElementFactory::find(factory)
+        .and_then(|f| {
+            f.static_pad_templates()
+                .into_iter()
+                .find(|t| t.direction() == gst::PadDirection::Sink)
+        })
+        .is_some_and(|t| caps.can_intersect(&t.caps()))
+}
+
+/// The memory a device-memory download takes, and the GStreamer plugin that
+/// provides it, for the error that says what is missing.
+fn download_origin(factory: &str) -> (&'static str, &'static str) {
+    match factory {
+        video_adapt::D3D12_DOWNLOAD_FACTORY => ("D3D12 memory", "d3d12"),
+        video_adapt::D3D11_DOWNLOAD_FACTORY => ("D3D11 memory", "d3d11"),
+        _ => ("CUDA memory", "nvcodec"),
+    }
+}
+
 /// What one GL input's front knows. Weak handles only: the probes that share
 /// it are owned by pads of the same pipeline.
 struct Front {
@@ -225,20 +263,21 @@ struct Front {
     /// read, which never calls for a converter.
     uploads: gst::Caps,
     /// Queries can arrive from several threads at once. The lock serialises
-    /// the query-time `cudadownload` splice; `cuda_in` lets the ones that
-    /// lost the race through untouched.
+    /// the query-time download splice; `download_in` lets the ones that lost
+    /// the race through untouched.
     splice_lock: Mutex<()>,
-    /// `cudadownload` is in, on its way in, or reported missing.
-    cuda_in: AtomicBool,
+    /// The device-memory download (`cudadownload`, `d3d12download` or
+    /// `d3d11download`) is in, on its way in, or reported missing.
+    download_in: AtomicBool,
     /// `videoconvert` is in. Set and cleared on the streaming thread, where
     /// it goes in and comes out.
     convert_in: AtomicBool,
 }
 
 impl Front {
-    fn decide(&self, caps: &gst::CapsRef) -> Result<Vec<Adapter>, video_adapt::Refusal> {
-        // The registry is only consulted for caps that call for the CUDA
-        // adapter.
+    fn decide(&self, caps: &gst::CapsRef) -> Result<Vec<Adapter>, Refusal> {
+        // The registry is only consulted for caps that call for a
+        // device-memory download.
         video_adapt::decide(
             caps,
             Consumer::GlUpload(&self.uploads),
@@ -259,13 +298,16 @@ impl Front {
 
 /// Watch `front_sink` — the first sink pad of a GL consumer's video input — and
 /// splice what the producer turns out to need in front of `upload`: when it
-/// offers CUDA memory only, [`CUDA_ADAPTER_FACTORY`]; when it offers system
-/// memory only, in a pixel format `glupload` does not upload,
+/// offers CUDA memory only, [`CUDA_ADAPTER_FACTORY`]; when it offers D3D12 or
+/// D3D11 memory only, [`video_adapt::D3D12_DOWNLOAD_FACTORY`] or
+/// [`video_adapt::D3D11_DOWNLOAD_FACTORY`]; when it offers system memory
+/// only, in a pixel format `glupload` does not upload,
 /// [`video_adapt::VIDEO_CONVERT_FACTORY`]. `upload` is the input's `glupload`;
 /// `label` names the input in logs and in the error posted when the input
 /// cannot be adapted.
 ///
-/// `cudadownload` stays once it is in, as it always has. `videoconvert` comes
+/// A device-memory download stays once it is in, as `cudadownload` always
+/// has. `videoconvert` comes
 /// out again as soon as a CAPS event carries
 /// caps the input takes without it (see the module docs).
 pub fn install(front_sink: &gst::Pad, upload: &gst::Element, label: &str) {
@@ -287,7 +329,7 @@ pub fn install(front_sink: &gst::Pad, upload: &gst::Element, label: &str) {
             .cloned()
             .unwrap_or_else(gst::Caps::new_any),
         splice_lock: Mutex::new(()),
-        cuda_in: AtomicBool::new(false),
+        download_in: AtomicBool::new(false),
         convert_in: AtomicBool::new(false),
     });
 
@@ -331,7 +373,7 @@ fn on_query(front: &Front, pad: &gst::Pad, info: &mut gst::PadProbeInfo) -> gst:
     };
     let decision = front.decide(&caps);
     let convert_in = front.convert_in.load(Ordering::Acquire);
-    let cuda_in = front.cuda_in.load(Ordering::Acquire);
+    let download_in = front.download_in.load(Ordering::Acquire);
 
     // The converter goes in and out on the streaming thread, as the CAPS
     // event leaves the front element (see the module docs). Until then, an
@@ -344,37 +386,36 @@ fn on_query(front: &Front, pad: &gst::Pad, info: &mut gst::PadProbeInfo) -> gst:
             return gst::PadProbeReturn::Handled;
         }
         if !needs_convert && convert_in {
-            let accepted = if adapters.contains(&Adapter::CudaDownload) && !cuda_in {
-                adapter_cuda_sink_caps().is_some_and(|sink| caps.can_intersect(sink))
-            } else {
-                front
-                    .behind_convert()
-                    .is_some_and(|direct| direct.query_accept_caps(&caps))
-            };
+            let accepted =
+                if let Some(download) = device_download(adapters).filter(|_| !download_in) {
+                    factory_sink_takes(download.factory(), &caps)
+                } else {
+                    front
+                        .behind_convert()
+                        .is_some_and(|direct| direct.query_accept_caps(&caps))
+                };
             q.set_result(accepted);
             return gst::PadProbeReturn::Handled;
         }
     }
     if convert_in {
-        // CUDA memory while the converter is in also waits for the CAPS
-        // event, so `cudadownload` never lands in front of the converter.
+        // Device memory while the converter is in also waits for the CAPS
+        // event, so its download never lands in front of the converter.
         return gst::PadProbeReturn::Ok;
     }
 
-    // CUDA memory only: `cudadownload` goes in at once.
-    let installed = |adapter: &Adapter| match adapter {
-        Adapter::CudaDownload => front.cuda_in.load(Ordering::Acquire),
-        Adapter::VideoConvert | Adapter::GlDownload => true,
+    // Device memory only: its download goes in at once.
+    let factory = match &decision {
+        Ok(adapters) => match device_download(adapters) {
+            Some(download) if !download_in => download.factory(),
+            _ => return gst::PadProbeReturn::Ok,
+        },
+        Err(Refusal::MissingFactory { factory }) if !download_in => factory,
+        Err(_) => return gst::PadProbeReturn::Ok,
     };
-    if decision
-        .as_ref()
-        .is_ok_and(|adapters| adapters.iter().all(installed))
-    {
-        return gst::PadProbeReturn::Ok;
-    }
 
     let _guard = front.splice_lock.lock().unwrap_or_else(|p| p.into_inner());
-    if front.cuda_in.load(Ordering::Acquire) {
+    if front.download_in.load(Ordering::Acquire) {
         return gst::PadProbeReturn::Ok;
     }
     let (Some(upload), Some(front_src)) = (front.upload.upgrade(), front.front_src.upgrade())
@@ -383,65 +424,63 @@ fn on_query(front: &Front, pad: &gst::Pad, info: &mut gst::PadProbeInfo) -> gst:
         return gst::PadProbeReturn::Remove;
     };
     let label = &front.label;
+    let (memory, plugin) = download_origin(factory);
     match decision {
         Ok(_) => {
-            match splice_when_idle(
-                &front_src,
-                &upload,
-                CUDA_ADAPTER_FACTORY,
-                label,
-                SPLICE_WAIT,
-            ) {
+            match splice_when_idle(&front_src, &upload, factory, label, SPLICE_WAIT) {
                 Ok(()) => info!(
-                    "{}: input offers CUDA memory only ({}), inserted {} in front of {}",
+                    "{}: input offers {} only ({}), inserted {} in front of {}",
                     label,
+                    memory,
                     caps,
-                    CUDA_ADAPTER_FACTORY,
+                    factory,
                     upload.name()
                 ),
                 Err(e) => {
                     // Leave the query to fail as it would have: the flow
                     // reports not-negotiated, and this says why.
                     warn!(
-                        "{}: input offers CUDA memory only, but {} could not be inserted: {}",
-                        label, CUDA_ADAPTER_FACTORY, e
+                        "{}: input offers {} only, but {} could not be inserted: {}",
+                        label, memory, factory, e
                     );
                 }
             }
         }
-        Err(_missing) => {
+        Err(_) => {
             if let Some(element) = pad.parent_element() {
                 gst::element_error!(
                     element,
                     gst::CoreError::Negotiation,
                     (
-                        "{} receives CUDA memory, which this GL input cannot take without {}",
+                        "{} receives {}, which this GL input cannot take without {}",
                         label,
-                        CUDA_ADAPTER_FACTORY
+                        memory,
+                        factory
                     ),
                     [
-                        "The producer offers {} only. Install the GStreamer nvcodec \
+                        "The producer offers {} only. Install the GStreamer {} \
                          plugin, which provides {}, or feed this input from a source \
                          that outputs system or GL memory.",
                         caps,
-                        CUDA_ADAPTER_FACTORY
+                        plugin,
+                        factory
                     ]
                 );
             }
         }
     }
-    front.cuda_in.store(true, Ordering::Release);
+    front.download_in.store(true, Ordering::Release);
     gst::PadProbeReturn::Ok
 }
 
 /// Adjust the input's answer to a CAPS query (see the module docs).
 fn answer_caps_query(front: &Front, q: &mut gst::query::Caps) {
     let filter = q.filter_owned();
-    let cuda_in = front.cuda_in.load(Ordering::Acquire);
+    let download_in = front.download_in.load(Ordering::Acquire);
     if front.convert_in.load(Ordering::Acquire) {
         // What only the converter takes goes last.
         if let (Some(direct), Some(mut answer)) = (front.behind_convert(), q.result_owned()) {
-            let adapter_sink = if cuda_in {
+            let adapter_sink = if download_in {
                 None
             } else {
                 adapter_cuda_sink_caps()
@@ -470,7 +509,7 @@ fn answer_caps_query(front: &Front, q: &mut gst::query::Caps) {
     };
     let mut changed = false;
     // CUDA memory is added, so a decoder upstream can choose it.
-    if !cuda_in {
+    if !download_in {
         if let Some(widened) = adapter_cuda_sink_caps()
             .and_then(|sink| with_cuda_alternative(&answer, sink, filter.as_deref()))
         {
@@ -596,12 +635,19 @@ fn on_caps_leaving_front(
         }
         _ => {}
     }
-    if adapters.contains(&Adapter::CudaDownload)
-        && adapter_in(front_src, &upload, CUDA_ADAPTER_FACTORY).is_none()
-    {
-        // CUDA memory after a converter period: the queries were answered for
-        // the input without the converter, so `cudadownload` goes in now.
-        insert_at_front(front, front_src, CUDA_ADAPTER_FACTORY, &front.cuda_in, caps);
+    if let Some(download) = device_download(&adapters) {
+        if adapter_in(front_src, &upload, download.factory()).is_none() {
+            // Device memory after a converter period: the queries were
+            // answered for the input without the converter, so its download
+            // goes in now.
+            insert_at_front(
+                front,
+                front_src,
+                download.factory(),
+                &front.download_in,
+                caps,
+            );
+        }
     }
     gst::PadProbeReturn::Ok
 }
