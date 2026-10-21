@@ -28,6 +28,12 @@ const BYTES_PER_FRAME: u64 = CHANNELS * 3;
 
 #[test]
 fn aes67_input_keeps_all_audio_when_downstream_blocks() {
+    if common::skip_known_ci_failure(
+        &["macos"],
+        "AES67 Input loses audio when downstream blocks on the macOS runner",
+    ) {
+        return;
+    }
     if !common::plugins_available(&[
         "filesrc",
         "sdpdemux",

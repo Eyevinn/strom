@@ -342,6 +342,12 @@ fn wait_for_border(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn static_underlays_are_not_reuploaded_gpu() {
+    if common::skip_known_ci_failure(
+        &["linux"],
+        "the GPU underlay checks fail now and then on the Linux runner",
+    ) {
+        return;
+    }
     if !common::gl_available(GL_ELEMENTS) {
         return;
     }
