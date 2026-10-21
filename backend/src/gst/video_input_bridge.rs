@@ -17,12 +17,16 @@
 //!   `whepserversink` advertises `video/x-raw(memory:GLMemory)` on its video
 //!   request pads, so GL frames negotiate all the way to the sink and its
 //!   encoder discovery then finds no encoder that can take them — video goes
-//!   missing while audio keeps working. Other GPU memory (CUDA, NVMM, D3D11,
-//!   VA, DMABuf) is left in place when the sink accepts it: the encoders that
-//!   advertise those really do take them, and downloading would cost a full
-//!   round trip per frame. When the sink refuses it, CUDA memory is
+//!   missing while audio keeps working. D3D12 and D3D11 memory, what the
+//!   Windows hardware decoders output, are always downloaded too: the sink
+//!   refuses D3D12 memory at link time, and it accepts D3D11 memory but
+//!   encodes with the highest-ranked encoder for the codec, which on an NVIDIA
+//!   host does not take D3D11 memory. Other GPU memory (CUDA,
+//!   NVMM, VA, DMABuf) is left in place when the sink accepts it: the encoders
+//!   that advertise those really do take them, and downloading would cost a
+//!   full round trip per frame. When the sink refuses it, CUDA memory is
 //!   downloaded, and any other memory fails the flow with an element error
-//!   that says what arrived and what the sink takes. Both rules come from
+//!   that says what arrived and what the sink takes. The rules come from
 //!   [`video_adapt::decide`].
 //!
 //! * **The pixel format** is converted to 8-bit 4:2:0 once the frames are in
@@ -416,8 +420,8 @@ fn post_refusal(pad: &gst::Pad, caps: &gst::CapsRef, name_prefix: &str, refusal:
                 feature
             ),
             [
-                "Arrived: {}. WHEP Output takes raw video in system, GL or CUDA memory, \
-                 a GPU memory its encoders accept, or encoded video. Feed it from a \
+                "Arrived: {}. WHEP Output takes raw video in system, GL, CUDA, D3D12 or \
+                 D3D11 memory, a GPU memory its encoders accept, or encoded video. Feed it from a \
                  source that outputs one of those, or encode with builtin.videoenc first.",
                 caps
             ]
@@ -776,7 +780,6 @@ mod tests {
         for feature in [
             "memory:CUDAMemory",
             "memory:NVMM",
-            "memory:D3D11Memory",
             "memory:VAMemory",
             "memory:DMABuf",
         ] {
@@ -789,6 +792,68 @@ mod tests {
                 ),
                 Ok(Plan::default()),
                 "{} should be left in place",
+                feature
+            );
+        }
+    }
+
+    /// `whepserversink` refuses D3D12 memory, and its top encoder for a codec
+    /// may not take D3D11 memory: D3D memory is downloaded whatever the sink
+    /// answers, then judged on its format.
+    #[test]
+    fn d3d_memory_is_downloaded_whatever_the_sink_answers() {
+        for (feature, download, factory) in [
+            (
+                "memory:D3D12Memory",
+                Adapter::D3d12Download,
+                video_adapt::D3D12_DOWNLOAD_FACTORY,
+            ),
+            (
+                "memory:D3D11Memory",
+                Adapter::D3d11Download,
+                video_adapt::D3D11_DOWNLOAD_FACTORY,
+            ),
+        ] {
+            for sink_accepts in [true, false] {
+                assert_eq!(
+                    plan(
+                        &caps(&format!("video/x-raw({}), format=NV12", feature)),
+                        None,
+                        || sink_accepts,
+                        all
+                    ),
+                    Ok(Plan {
+                        memory: vec![download],
+                        convert: None
+                    }),
+                    "{} (sink accepts: {})",
+                    feature,
+                    sink_accepts
+                );
+            }
+            assert_eq!(
+                plan(
+                    &caps(&format!("video/x-raw({}), format=BGRA", feature)),
+                    None,
+                    || true,
+                    all
+                ),
+                Ok(Plan {
+                    memory: vec![download],
+                    convert: Some(NATIVE_FORMAT.to_string())
+                }),
+                "{}",
+                feature
+            );
+            assert_eq!(
+                plan(
+                    &caps(&format!("video/x-raw({}), format=NV12", feature)),
+                    None,
+                    || true,
+                    none
+                ),
+                Err(Refusal::MissingFactory { factory }),
+                "{}",
                 feature
             );
         }
@@ -825,12 +890,7 @@ mod tests {
     /// Memory nothing here can download, refused by the sink, is a refusal.
     #[test]
     fn other_memory_the_sink_refuses_is_a_refusal() {
-        for feature in [
-            "memory:NVMM",
-            "memory:D3D11Memory",
-            "memory:VAMemory",
-            "memory:DMABuf",
-        ] {
+        for feature in ["memory:NVMM", "memory:VAMemory", "memory:DMABuf"] {
             assert_eq!(
                 plan(
                     &caps(&format!("video/x-raw({}), format=NV12", feature)),
