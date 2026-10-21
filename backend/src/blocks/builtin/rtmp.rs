@@ -133,6 +133,7 @@
 //! refused with a message naming that block. See the audio section above for why
 //! the two sides differ.
 
+use super::inputs::input_is_connected;
 use super::refusal::refuse_input;
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
@@ -655,6 +656,7 @@ impl BlockBuilder for RtmpOutputBuilder {
         let video_slot_for_setup = video_pad_slot.clone();
         let audio_slot_for_setup = audio_pad_slot.clone();
         let instance_for_setup = instance_id.to_string();
+        let link_targets = ctx.flow_link_targets();
         ctx.register_element_setup(Box::new(move |_flow_id, _events| {
             let Some(mux) = mux_for_setup.upgrade() else {
                 return;
@@ -663,7 +665,7 @@ impl BlockBuilder for RtmpOutputBuilder {
                 (&video_input_weak, &video_slot_for_setup, "video"),
                 (&audio_input_weak, &audio_slot_for_setup, "audio"),
             ] {
-                if !input_is_connected(input) {
+                if !input_is_connected(input, &link_targets) {
                     debug!(
                         "RTMP {}: {} input is not connected, reserving no pad",
                         instance_for_setup, name
@@ -855,19 +857,6 @@ fn release_reserved_pad(slot: &PadSlot, mux: &gst::Element, name: &str, instance
             instance, name
         );
     }
-}
-
-/// Whether an input identity has something linked to its sink pad.
-///
-/// Runs after construction's linking pass, so this is exact for links resolved
-/// there. Same helper and same caveat as `recorder.rs`: a link deferred to
-/// `pending_links` would resolve after this and read as unconnected.
-fn input_is_connected(input: &gst::glib::WeakRef<gst::Element>) -> bool {
-    input
-        .upgrade()
-        .and_then(|e| e.static_pad("sink"))
-        .map(|p| p.is_linked())
-        .unwrap_or(false)
 }
 
 /// Request one of flvmux's fixed-name sink pads.

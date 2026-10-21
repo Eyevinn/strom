@@ -8,7 +8,7 @@ use crate::whip_session_manager::WhipEndpointConfig;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use strom_types::{
     block::{ExternalPads, StreamMode},
@@ -125,6 +125,34 @@ pub struct WhepEndpointInfo {
     pub num_video_tracks: usize,
 }
 
+/// The elements the flow's links point into, by element ID.
+///
+/// Block expansion fills it once it has resolved the flow's links, which is
+/// after every block has been built and before any setup hook runs. A builder
+/// takes a handle from [`BlockBuildContext::flow_link_targets`] and reads it
+/// from its setup hook. It answers "does the flow link into this input?" even
+/// for a link construction could not make yet, which waits for a sometimes pad
+/// in `pending_links` and is not linked in GStreamer when the hooks run.
+#[derive(Debug, Clone, Default)]
+pub struct FlowLinkTargets(Arc<Mutex<HashSet<String>>>);
+
+impl FlowLinkTargets {
+    /// Whether a flow link points into the element with this ID.
+    pub fn contains(&self, element_id: &str) -> bool {
+        self.0
+            .lock()
+            .map(|set| set.contains(element_id))
+            .unwrap_or(false)
+    }
+
+    /// Record that a flow link points into the element with this ID.
+    pub fn insert(&self, element_id: impl Into<String>) {
+        if let Ok(mut set) = self.0.lock() {
+            set.insert(element_id.into());
+        }
+    }
+}
+
 /// Context provided to block builders during build.
 ///
 /// Contains methods for blocks to register services, endpoints, or other
@@ -156,6 +184,8 @@ pub struct BlockBuildContext {
     /// starting transient `DeviceMonitor` instances (which crash on
     /// macOS — see Local Input block).
     local_devices: GstDeviceMap,
+    /// Elements the flow links into, filled by block expansion after the build.
+    flow_link_targets: FlowLinkTargets,
 }
 
 impl BlockBuildContext {
@@ -172,6 +202,7 @@ impl BlockBuildContext {
             element_setups: RefCell::new(Vec::new()),
             session_thread_config: SessionThreadConfig::new(),
             local_devices: Arc::new(Mutex::new(HashMap::new())),
+            flow_link_targets: FlowLinkTargets::default(),
         }
     }
 
@@ -195,7 +226,14 @@ impl BlockBuildContext {
             element_setups: RefCell::new(Vec::new()),
             session_thread_config,
             local_devices,
+            flow_link_targets: FlowLinkTargets::default(),
         }
+    }
+
+    /// The elements the flow links into. Empty while blocks build; block
+    /// expansion fills it before any setup hook runs. See [`FlowLinkTargets`].
+    pub fn flow_link_targets(&self) -> FlowLinkTargets {
+        self.flow_link_targets.clone()
     }
 
     /// Look up a live local `gst::Device` (Video/Source or Audio/Source) by
