@@ -26,7 +26,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
 
@@ -321,8 +321,10 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
         let mode_label = if decode { "decode" } else { "passthrough" };
         let mode_label_owned = mode_label.to_string();
 
-        let video_slots = Mutex::new(video_slots);
-        let audio_slots = Mutex::new(audio_slots);
+        let video_slots = Arc::new(Mutex::new(video_slots));
+        let audio_slots = Arc::new(Mutex::new(audio_slots));
+        let removed_video_slots = video_slots.clone();
+        let removed_audio_slots = audio_slots.clone();
         demux_element.connect_pad_added(move |element, pad| {
             let caps = pad.current_caps().or_else(|| {
                 let query_caps = pad.query_caps(None);
@@ -373,12 +375,27 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                 }
             };
 
-            if !link_to_output(slots, element, pad, first_link, media, &instance_id_clone) {
-                warn!(
-                    "MPEGTSSRT Input {}: No available {} output for pad {}",
-                    instance_id_clone, media, pad_name
-                );
-            }
+            link_to_output(slots, element, pad, first_link, media, &instance_id_clone);
+        });
+
+        // A removed pad is already unlinked, so the output it fed is free.
+        // Its caps may be gone, so both media are checked.
+        let instance_id_clone = instance_id.to_string();
+        demux_element.connect_pad_removed(move |element, pad| {
+            release_output(
+                &removed_video_slots,
+                element,
+                pad,
+                "video",
+                &instance_id_clone,
+            );
+            release_output(
+                &removed_audio_slots,
+                element,
+                pad,
+                "audio",
+                &instance_id_clone,
+            );
         });
 
         // Internal link: srtsrc -> decodebin/tsdemux
@@ -405,22 +422,27 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
 #[derive(Default)]
 struct OutputSlots {
     slots: Vec<OutputSlot>,
-    /// Links made so far, used to order `OutputSlot::linked_at`.
-    links: u64,
+    /// Pads that arrived while every output was fed, oldest first. Each takes
+    /// the first output a removed pad leaves.
+    parked: Vec<ParkedPad>,
 }
 
 /// One output: the `identity` it ends in, and the pad a demuxer pad links into.
 ///
-/// Only weak references: the slots live in the demuxer's `pad-added` closure,
-/// which the demuxer owns.
+/// Only weak references: the slots live in the demuxer's pad closures, which
+/// the demuxer owns.
 struct OutputSlot {
     identity: gst::glib::WeakRef<gst::Element>,
     /// Where a demuxer pad links: the identity's sink pad in passthrough, the
     /// head of the convert chain in decode mode. `None` until the first link
     /// builds it. Its peer is the pad currently feeding this output.
     target: Option<gst::glib::WeakRef<gst::Pad>>,
-    /// Value of `OutputSlots::links` when this output was last linked.
-    linked_at: u64,
+}
+
+/// A demuxer pad waiting for an output.
+struct ParkedPad {
+    pad: gst::glib::WeakRef<gst::Pad>,
+    first_link: FirstLink,
 }
 
 impl OutputSlots {
@@ -428,7 +450,6 @@ impl OutputSlots {
         self.slots.push(OutputSlot {
             identity: identity.downgrade(),
             target: None,
-            linked_at: 0,
         });
     }
 }
@@ -442,18 +463,19 @@ impl OutputSlot {
 /// Builds the first link from a demuxer pad into an output `identity`.
 type FirstLink = fn(&gst::Element, &gst::Pad, &gst::Element, &str) -> Result<(), String>;
 
-/// Link a demuxer pad to one of a medium's outputs. Returns `false` if none
-/// could take it.
+/// Link a new demuxer pad to one of a medium's outputs, or park it until one
+/// is free.
+///
+/// The first pads of a medium take its outputs in order, and further pads
+/// wait: with one audio output and two audio streams, the first stream plays.
 ///
 /// A demuxer replaces its pad when a reconnecting caller's stream moves a PID
 /// or changes codec, and the two demuxers do it in opposite orders:
 /// - `decodebin` removes the old pad first, which unlinks it, so the output is
 ///   free again. The new pad links into the chain the old one fed, which is
 ///   still linked to the identity.
-/// - `tsdemux` adds the new pad first. With every output fed, the new pad takes
-///   the one linked longest ago; with several outputs of one medium that is a
-///   guess from pad order. The retiring pad's EOS is dropped, so it cannot end
-///   the output it no longer feeds.
+/// - `tsdemux` adds the new pad first. It is parked, and takes the output when
+///   the old pad is removed (see [`release_output`]).
 fn link_to_output(
     slots: &Mutex<OutputSlots>,
     element: &gst::Element,
@@ -461,11 +483,60 @@ fn link_to_output(
     first_link: FirstLink,
     media: &str,
     instance_id: &str,
-) -> bool {
-    let mut guard = slots.lock().unwrap_or_else(|e| e.into_inner());
-    let state = &mut *guard;
+) {
+    let mut state = slots.lock().unwrap_or_else(|e| e.into_inner());
+    if link_free_output(&mut state, element, pad, first_link, media, instance_id) {
+        return;
+    }
+    state.parked.push(ParkedPad {
+        pad: pad.downgrade(),
+        first_link,
+    });
+    info!(
+        "MPEGTSSRT Input {}: Every {} output is fed, pad {} waits for one to free up",
+        instance_id,
+        media,
+        pad.name()
+    );
+}
 
-    // An output nothing feeds: never linked, or its feeder was removed.
+/// After the demuxer removed a pad: forget it if it was parked, and give any
+/// output it fed to the pad parked longest.
+fn release_output(
+    slots: &Mutex<OutputSlots>,
+    element: &gst::Element,
+    removed: &gst::Pad,
+    media: &str,
+    instance_id: &str,
+) {
+    let mut state = slots.lock().unwrap_or_else(|e| e.into_inner());
+    state
+        .parked
+        .retain(|parked| parked.pad.upgrade().is_some_and(|p| &p != removed));
+
+    while let Some(parked) = state.parked.first() {
+        let first_link = parked.first_link;
+        let Some(pad) = parked.pad.upgrade() else {
+            state.parked.remove(0);
+            continue;
+        };
+        if !link_free_output(&mut state, element, &pad, first_link, media, instance_id) {
+            break;
+        }
+        state.parked.remove(0);
+    }
+}
+
+/// Link `pad` to the first output nothing feeds: never linked, or its feeder
+/// was removed. Returns `false` if every output is fed.
+fn link_free_output(
+    state: &mut OutputSlots,
+    element: &gst::Element,
+    pad: &gst::Pad,
+    first_link: FirstLink,
+    media: &str,
+    instance_id: &str,
+) -> bool {
     for slot in state.slots.iter_mut() {
         let Some(identity) = slot.identity.upgrade() else {
             continue;
@@ -489,8 +560,6 @@ fn link_to_output(
             continue;
         }
         slot.target = pad.peer().map(|p| p.downgrade());
-        state.links += 1;
-        slot.linked_at = state.links;
         info!(
             "MPEGTSSRT Input {}: Linked {} pad {} -> {}",
             instance_id,
@@ -500,58 +569,7 @@ fn link_to_output(
         );
         return true;
     }
-
-    // Every output is fed: the replacement arrived before the pad it replaces
-    // was removed. Retire the feeder linked longest ago.
-    let retiring = state
-        .slots
-        .iter_mut()
-        .filter_map(|slot| {
-            let target = slot.target()?;
-            let feeder = target.peer()?;
-            Some((slot, target, feeder))
-        })
-        .min_by_key(|(slot, _, _)| slot.linked_at);
-    let Some((slot, target, feeder)) = retiring else {
-        return false;
-    };
-
-    // The retiring pad may still push its EOS from another thread before the
-    // unlink below; that EOS belongs to a stream this output no longer carries.
-    feeder.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, |_pad, info| {
-        let Some(gst::PadProbeData::Event(event)) = &info.data else {
-            return gst::PadProbeReturn::Ok;
-        };
-        if event.type_() == gst::EventType::Eos {
-            gst::PadProbeReturn::Drop
-        } else {
-            gst::PadProbeReturn::Ok
-        }
-    });
-    let _ = feeder.unlink(&target);
-
-    if let Err(e) = pad.link(&target) {
-        error!(
-            "MPEGTSSRT Input {}: Failed to move {} output from pad {} to pad {}: {:?}",
-            instance_id,
-            media,
-            feeder.name(),
-            pad.name(),
-            e
-        );
-        let _ = feeder.link(&target);
-        return false;
-    }
-    state.links += 1;
-    slot.linked_at = state.links;
-    info!(
-        "MPEGTSSRT Input {}: Moved {} output from pad {} to pad {}",
-        instance_id,
-        media,
-        feeder.name(),
-        pad.name()
-    );
-    true
+    false
 }
 
 /// tsdemux pad -> identity, no conversion.
