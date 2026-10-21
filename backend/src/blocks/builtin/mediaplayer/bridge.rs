@@ -709,17 +709,29 @@ fn assemble_chain(
 /// Caps for the appsink of a decoded video track. Left open, a hardware decoder
 /// keeps frames in GL memory of a context this pipeline made for itself, and
 /// the mixer's glcolorconvert rejects a buffer from any other context. CUDA
-/// memory carries no GL context. A stinger takes system memory only:
+/// and D3D memory carry no GL context, so they pass and the consumer downloads
+/// them itself (`video_adapt::decide()`). A stinger takes system memory only:
 /// VideoToolbox drops ProRes 4444's alpha in GL memory but keeps it in system
 /// memory (AYUV64).
+///
+/// A producer-side memory choice, and the one exception to "the consumer
+/// adapts" in BLOCK_GUIDELINES: caps queries stop at the appsink/appsrc
+/// boundary and a GL context does not show in caps. `glupload` passes GL memory
+/// when contexts can share, but `glcolorconvert` needs the very same context.
 fn decoded_video_caps(stinger: bool) -> gst::Caps {
     let mut caps = gst::Caps::new_empty();
     let caps_mut = caps.make_mut();
     if !stinger {
-        caps_mut.append_structure_full(
-            gst::Structure::new_empty("video/x-raw"),
-            Some(gst::CapsFeatures::new(["memory:CUDAMemory"])),
-        );
+        for feature in [
+            "memory:CUDAMemory",
+            "memory:D3D12Memory",
+            "memory:D3D11Memory",
+        ] {
+            caps_mut.append_structure_full(
+                gst::Structure::new_empty("video/x-raw"),
+                Some(gst::CapsFeatures::new([feature])),
+            );
+        }
     }
     caps_mut.append_structure_full(
         gst::Structure::new_empty("video/x-raw"),
@@ -741,20 +753,31 @@ fn restrict_decoder_memory(source: &gst::Element, stinger: bool) {
         // The signal passes the query by pointer; a `Value` getter would hand
         // back a copy and the answer would be lost.
         let query = args[3].get::<&gst::QueryRef>().ok()?;
-        let query = unsafe { &mut *(query.as_mut_ptr() as *mut gst::QueryRef) };
+        let query = unsafe { gst::QueryRef::from_mut_ptr(query.as_mut_ptr()) };
         Some(answer_decoder_caps_query(&element, query, stinger).to_value())
     });
 }
 
 /// Fill in `query` when it is a CAPS query from a video decoder; returns
 /// whether it did. The answer is the query's filter narrowed to
-/// [`decoded_video_caps`], so a decoder with no system-memory output ends up
-/// with empty caps and fails the flow with a clear error instead of GL frames.
+/// [`decoded_video_caps`]. A decoder with no output in those memory types gets
+/// empty caps and fails with a plain `not-negotiated`: an empty answer to a
+/// filtered query is a normal "no" in caps probing, so it is not escalated to
+/// an element error here.
 fn answer_decoder_caps_query(
     element: &gst::Element,
     query: &mut gst::QueryRef,
     stinger: bool,
 ) -> bool {
+    // A query emitted from outside decodebin is shared; writing to it would
+    // trip a GStreamer critical and leave the caller with no result.
+    // `QueryRef` has no safe writability check.
+    let writable = unsafe {
+        gst::ffi::gst_mini_object_is_writable(query.as_ptr() as *const gst::ffi::GstMiniObject) != 0
+    };
+    if !writable {
+        return false;
+    }
     let is_video_decoder = element.factory().is_some_and(|f| {
         let klass = f.klass();
         klass.contains("Decoder") && klass.contains("Video")
@@ -1240,17 +1263,25 @@ mod tests {
         let cuda = gst::Caps::builder("video/x-raw")
             .features(["memory:CUDAMemory"])
             .build();
+        let d3d = |feature: &str| {
+            gst::Caps::builder("video/x-raw")
+                .features([feature])
+                .build()
+        };
 
         let clip = bridge_appsink_caps(true, false, "video").expect("clip video appsink has caps");
         assert!(!clip.can_intersect(&gl));
         assert!(clip.can_intersect(&system));
         assert!(clip.can_intersect(&cuda));
+        assert!(clip.can_intersect(&d3d("memory:D3D12Memory")));
+        assert!(clip.can_intersect(&d3d("memory:D3D11Memory")));
 
         let stinger =
             bridge_appsink_caps(true, true, "video").expect("stinger video appsink has caps");
         assert!(!stinger.can_intersect(&gl));
         assert!(stinger.can_intersect(&system));
         assert!(!stinger.can_intersect(&cuda));
+        assert!(!stinger.can_intersect(&d3d("memory:D3D12Memory")));
     }
 
     /// Classic decodebin asks the decoder's caps before the appsink exists, so
@@ -1278,13 +1309,32 @@ mod tests {
         let mut query = gst::query::Caps::new(Some(&filter));
         assert!(!answer_decoder_caps_query(&identity, &mut query, false));
 
-        // The signal is wired on a classic source. (A query emitted from here
-        // is shared, so its answer is not writable; decodebin's is.)
-        let source = gst::ElementFactory::make("uridecodebin").build().unwrap();
-        restrict_decoder_memory(&source, false);
-        let pad = gst::Pad::builder(gst::PadDirection::Src).build();
-        let query: gst::Query = gst::query::Caps::new(Some(&filter)).into();
-        assert!(source.emit_by_name::<bool>("autoplug-query", &[&pad, &decoder, &query]));
+        // A shared query is left alone.
+        let shared: gst::Query = gst::query::Caps::new(Some(&filter)).into();
+        let _other_ref = shared.clone();
+        // `from_mut_ptr` asserts writability, so go through the raw pointer.
+        let shared_ref = unsafe { &mut *(shared.as_ptr() as *mut gst::QueryRef) };
+        assert!(!answer_decoder_caps_query(&decoder, shared_ref, false));
+    }
+
+    /// The classic decoder's pipeline answers decoder caps queries: a handler is
+    /// connected to `autoplug-query`, and a native (decodebin3) one has none.
+    #[test]
+    fn classic_pipeline_connects_autoplug_query() {
+        gst::init().unwrap();
+        let has_handler = |decoder: Decoder| {
+            let pipeline =
+                create_decode_pipeline("autoplug-test", &test_state(), None, decoder).unwrap();
+            let source = pipeline
+                .by_name(&format!("autoplug-test_{}", decoder.factory()))
+                .unwrap();
+            let id = gst::glib::subclass::SignalId::lookup("autoplug-query", source.type_());
+            id.is_some_and(|id| {
+                gst::glib::signal::signal_has_handler_pending(&source, id, None, true)
+            })
+        };
+        assert!(has_handler(Decoder::Classic));
+        assert!(!has_handler(Decoder::Decodebin3));
     }
 
     #[test]
