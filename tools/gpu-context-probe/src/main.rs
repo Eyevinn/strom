@@ -36,6 +36,8 @@ fn main() {
     gst::init().expect("gst::init");
     gstrsinter::plugin_register_static().expect("register rsinter");
     gstrswebrtc::plugin_register_static().expect("register rswebrtc");
+    // Strom registers these too: rtpav1pay and the other Rust payloaders.
+    gstrsrtp::plugin_register_static().expect("register rsrtp");
 
     let code = match args.first().map(String::as_str) {
         Some("cross") => cross(&Opts::parse(&args[1..])),
