@@ -460,6 +460,56 @@ async fn stopping_mid_take_releases_the_pipeline() {
     r.state.stop_flow(&r.flow_id).await.unwrap();
 }
 
+/// A take whose request is dropped while it cues its clip (the client went
+/// away) still finishes and frees the mixer: it completes, and the next take
+/// runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(stinger)]
+async fn a_dropped_take_request_still_frees_the_mixer() {
+    if common::skip_known_ci_failure(&["macos"], "the stinger suite fails on the macOS runner") {
+        return;
+    }
+    if !common::plugins_available(CODEC_ELEMENTS) {
+        return;
+    }
+    let r = start("dropped", "cpu").await;
+    let mut events = r.state.events().subscribe();
+    // Clip 1 is not the parked one, so its take cues it first.
+    let dropped = tokio::time::timeout(
+        std::time::Duration::from_millis(1),
+        r.state.stinger_take(&r.flow_id, &r.mixer(), Some(1), None),
+    )
+    .await;
+    assert!(
+        dropped.is_err(),
+        "the take must still be cueing its clip at 1 ms"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match tokio::time::timeout_at(deadline.into(), events.recv()).await {
+            Ok(Ok(strom_types::StromEvent::StingerCompleted { .. })) => break,
+            Ok(Ok(strom_types::StromEvent::StingerFailed { reason, .. })) => {
+                panic!("take failed: {reason}")
+            }
+            Ok(_) => continue,
+            Err(_) => panic!("the dropped take never finished"),
+        }
+    }
+    assert!(
+        !r.state
+            .stinger_state(&r.flow_id, &r.mixer())
+            .await
+            .unwrap()
+            .running
+    );
+    r.state
+        .stinger_take(&r.flow_id, &r.mixer(), Some(0), None)
+        .await
+        .expect("the next take runs");
+    r.wait_for_report(0).await;
+    r.state.stop_flow(&r.flow_id).await.unwrap();
+}
+
 /// A take whose flow restarts while it cues and analyses its clip gives up
 /// without touching the new run: it neither programs the new mixer nor cuts
 /// its program, and the next take on the new run lands as usual.

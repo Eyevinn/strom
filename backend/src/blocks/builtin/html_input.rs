@@ -895,6 +895,77 @@ fn html_input_definition() -> BlockDefinition {
                 live: false,
                 persist: None,
             },
+            ExposedProperty {
+                name: strom_types::stinger::STINGER_MODE_PROPERTY.to_string(),
+                label: "Stinger Page".to_string(),
+                description: "Play this page as a Vision Mixer stinger: wire video_out to the mixer's stinger \
+                              input, and a take triggers the page by setting its URL fragment to \
+                              #strom-take-<n> (listen for hashchange), so its URL cannot \
+                              have a fragment of its own. The page must be transparent and \
+                              stop drawing at rest, and change something visible on the first \
+                              frame of its animation; the cut is timed from that frame. Plays as \
+                              a classic stinger with premultiplied alpha."
+                    .to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: strom_types::stinger::STINGER_MODE_PROPERTY.to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: strom_types::stinger::WEB_STINGER_DURATION_PROPERTY.to_string(),
+                label: "Stinger Duration (ms)".to_string(),
+                description: "How long the stinger page covers the program after a take. Required for a \
+                              stinger page."
+                    .to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(0)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: strom_types::stinger::WEB_STINGER_DURATION_PROPERTY.to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: strom_types::stinger::WEB_STINGER_CUT_POINT_PROPERTY.to_string(),
+                label: "Stinger Cut Point (ms)".to_string(),
+                description: "How far into the page's animation the program changes beneath it, while the \
+                              page covers the frame. 0 takes the middle of the duration. Must be \
+                              at least about 170 ms (the take finds the page's first frame \
+                              first) and before the end."
+                    .to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(0)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: strom_types::stinger::WEB_STINGER_CUT_POINT_PROPERTY.to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: strom_types::stinger::WEB_STINGER_MIX_PROPERTY.to_string(),
+                label: "Stinger Mix (ms)".to_string(),
+                description: "How long the program mixes from the old source to the new one at the cut \
+                              point. 0 cuts."
+                    .to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(0)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: strom_types::stinger::WEB_STINGER_MIX_PROPERTY.to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
         ],
         external_pads: ExternalPads {
             inputs: vec![],
