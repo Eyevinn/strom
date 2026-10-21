@@ -6,6 +6,10 @@
 //! source on input 0 and measures the white area of PGM. A 720x1280 source on
 //! a 1280x720 canvas is pillarboxed to about a third of the width; stretched,
 //! PGM is entirely white.
+//!
+//! The tests run one at a time (`serial(gl)`): GPU vision mixers started
+//! together in one process race on their EGL contexts on Mesa's software
+//! rasteriser, and a pipeline then fails to reach PLAYING.
 
 pub mod common;
 
@@ -297,6 +301,7 @@ impl Running {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn source_switched_to_portrait_is_pillarboxed() {
     if !common::gl_available(GL_ELEMENTS) {
         return;
@@ -323,6 +328,7 @@ async fn source_switched_to_portrait_is_pillarboxed() {
 /// The first fit runs before the mixer's output has negotiated its size, so
 /// it must use the configured PGM size, not a default canvas.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn source_portrait_from_the_start_is_pillarboxed() {
     if !common::gl_available(GL_ELEMENTS) {
         return;
@@ -340,6 +346,7 @@ async fn source_portrait_from_the_start_is_pillarboxed() {
 /// The mixer pad stores new caps only after its event probes return. A
 /// streaming thread held up there must not leave the old shape in place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn source_switch_fits_when_caps_are_stored_late() {
     if !common::gl_available(GL_ELEMENTS) {
         return;
@@ -376,6 +383,7 @@ async fn source_switch_fits_when_caps_are_stored_late() {
 /// A source that changes shape during a fade must not cut the fade short,
 /// and must be fitted in its new shape once the fade is over.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn source_resized_during_a_fade_is_fitted_after_it() {
     if !common::gl_available(GL_ELEMENTS) {
         return;
@@ -445,6 +453,7 @@ async fn source_resized_during_a_fade_is_fitted_after_it() {
 
 /// A source that changes shape during Fade to Black comes back fitted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn source_switched_during_ftb_is_pillarboxed_after_it() {
     if !common::gl_available(GL_ELEMENTS) {
         return;
@@ -515,6 +524,7 @@ fn slow_down_mixer(running: &Running, block_id: &str) {
 /// FTB keyframes are in the mixer's stream time. On a mixer slower than real
 /// time, both fades must still play out in full.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn ftb_plays_out_on_a_slow_mixer() {
     if !common::gl_available(GL_ELEMENTS) {
         return;
@@ -543,6 +553,7 @@ async fn ftb_plays_out_on_a_slow_mixer() {
 
 /// FTB off pressed while FTB on is still fading out brings PGM fully back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn ftb_off_during_the_fade_out_restores_pgm() {
     if !common::gl_available(GL_ELEMENTS) {
         return;
@@ -573,6 +584,7 @@ async fn ftb_off_during_the_fade_out_restores_pgm() {
 /// A cropped PiP source that changes shape during FTB comes back with its
 /// crop re-derived from the new width: half of 720 px, not of 1280.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn pip_crop_follows_a_source_resized_during_ftb() {
     use strom_types::vision_mixer::{PipTransforms, SourceCrop, Zone};
     if !common::gl_available(GL_ELEMENTS) {

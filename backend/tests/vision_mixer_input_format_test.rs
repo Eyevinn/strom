@@ -15,6 +15,12 @@
 //! The CUDA tests here use a `cudadownload` stand-in on hosts without nvcodec
 //! (see `stand_in`). The one with real NVDEC output is ignored by default;
 //! see `nvdec_cuda_after_a_converted_format_stays_on_the_gpu`.
+//!
+//! Every test runs one at a time (`serial(gl)`), the CPU ones too: each probes
+//! GL through `detect_gpu_capabilities`. Run together in one process, their EGL
+//! displays and contexts on Mesa's software rasteriser race. On the Linux
+//! runner one run in five then failed to reach PLAYING (`EGL_NOT_INITIALIZED`),
+//! and one in forty crashed with SIGSEGV with only the GPU tests serialized.
 
 pub mod common;
 pub mod vision_mixer_input_format;
@@ -27,11 +33,13 @@ use vision_mixer_input_format::*;
 // --- #674 on the CPU backend ---------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn cpu_videotestsrc_direct() {
     assert_input_reaches_pgm("vmfmt_cpu_direct", Backend::Cpu, Front::Direct, false);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn cpu_videotestsrc_via_videoconvert() {
     assert_input_reaches_pgm(
         "vmfmt_cpu_conv",
@@ -42,16 +50,19 @@ async fn cpu_videotestsrc_via_videoconvert() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn cpu_i420() {
     assert_input_reaches_pgm("vmfmt_cpu_i420", Backend::Cpu, Front::Format("I420"), false);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn cpu_nv12() {
     assert_input_reaches_pgm("vmfmt_cpu_nv12", Backend::Cpu, Front::Format("NV12"), false);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn cpu_ayuv64() {
     assert_input_reaches_pgm(
         "vmfmt_cpu_ayuv64",
@@ -62,6 +73,7 @@ async fn cpu_ayuv64() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn cpu_gbr_10le() {
     assert_input_reaches_pgm(
         "vmfmt_cpu_gbr10",
@@ -74,17 +86,13 @@ async fn cpu_gbr_10le() {
 // --- #674 on the GPU backend ---------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn gpu_videotestsrc_direct() {
-    if common::skip_known_ci_failure(
-        &["linux"],
-        "the GPU pipeline sometimes never reaches PLAYING on the Linux runner",
-    ) {
-        return;
-    }
     assert_input_reaches_pgm("vmfmt_gpu_direct", Backend::Gpu, Front::Direct, false);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn gpu_videotestsrc_via_videoconvert() {
     assert_input_reaches_pgm(
         "vmfmt_gpu_conv",
@@ -95,17 +103,20 @@ async fn gpu_videotestsrc_via_videoconvert() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn gpu_i420() {
     assert_input_reaches_pgm("vmfmt_gpu_i420", Backend::Gpu, Front::Format("I420"), false);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn gpu_nv12() {
     assert_input_reaches_pgm("vmfmt_gpu_nv12", Backend::Gpu, Front::Format("NV12"), false);
 }
 
 /// `glupload` does not upload `AYUV64`: a converter goes in front of it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn gpu_ayuv64() {
     assert_input_reaches_pgm(
         "vmfmt_gpu_ayuv64",
@@ -117,6 +128,7 @@ async fn gpu_ayuv64() {
 
 /// Nor `GBR_10LE`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn gpu_gbr_10le() {
     assert_input_reaches_pgm(
         "vmfmt_gpu_gbr10",
@@ -133,6 +145,7 @@ async fn gpu_gbr_10le() {
 /// is back on an uploadable format, the frames go straight into `glupload`
 /// again, and PGM keeps showing the source throughout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn gpu_converter_comes_out_when_the_format_switches_back() {
     if !ready(Backend::Gpu) {
         return;
@@ -187,6 +200,7 @@ async fn gpu_converter_comes_out_when_the_format_switches_back() {
 /// source that can choose picks a format with no CPU conversion. Checked on
 /// the answer itself, and on a source that is told only "raw video".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn gpu_converter_answers_with_direct_formats_first() {
     if !ready(Backend::Gpu) {
         return;
