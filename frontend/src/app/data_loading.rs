@@ -247,7 +247,7 @@ impl StromApp {
             let tx = tx.clone();
             let ctx = ctx.clone();
             spawn_task(async move {
-                match api.list_devices(Some("video_source")).await {
+                match api.list_devices("video_source").await {
                     Ok(devices) => {
                         let _ = tx.send(AppMessage::LocalDevicesLoaded {
                             category: strom_types::discovery::DeviceCategory::VideoSource,
@@ -269,29 +269,25 @@ impl StromApp {
         if !self.audio_devices_loading {
             self.audio_devices_loading = true;
             spawn_task(async move {
-                // Audio inputs (Local Input) and outputs (Local Output) share
-                // one list, fetched in one request; each picker keeps the
-                // entries of its category.
+                // Audio inputs (Local Input) and outputs (Local Output), asked
+                // for together. Outputs are sent last: their arrival ends the
+                // audio fetch.
                 use strom_types::discovery::DeviceCategory;
-                let devices = match api.list_devices(None).await {
-                    Ok(all) => all
-                        .into_iter()
-                        .filter(|d| {
-                            matches!(
-                                d.category,
-                                DeviceCategory::AudioSource | DeviceCategory::AudioSink
-                            )
-                        })
-                        .collect(),
-                    Err(e) => {
-                        tracing::warn!("list_devices (audio) failed: {}", e);
+                let (inputs, outputs) = futures_util::future::join(
+                    api.list_devices("audio_source"),
+                    api.list_devices("audio_sink"),
+                )
+                .await;
+                for (category, result) in [
+                    (DeviceCategory::AudioSource, inputs),
+                    (DeviceCategory::AudioSink, outputs),
+                ] {
+                    let devices = result.unwrap_or_else(|e| {
+                        tracing::warn!("list_devices({:?}) failed: {}", category, e);
                         Vec::new()
-                    }
-                };
-                let _ = tx.send(AppMessage::LocalDevicesLoaded {
-                    category: strom_types::discovery::DeviceCategory::AudioSource,
-                    devices,
-                });
+                    });
+                    let _ = tx.send(AppMessage::LocalDevicesLoaded { category, devices });
+                }
                 ctx.request_repaint();
             });
         }

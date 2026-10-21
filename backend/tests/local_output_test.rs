@@ -28,6 +28,9 @@ const REQUIRED: &[&str] = &[
     "opusenc",
 ];
 
+/// Widest output a test reads back peaks for.
+const MAX_TEST_CHANNELS: usize = 16;
+
 /// The name the test source gets, so its errors can be told from the block's.
 const TEST_SOURCE: &str = "test_source";
 
@@ -111,23 +114,39 @@ fn run_block(
         }
         gst::PadProbeReturn::Ok
     });
-    // Loudest sample per output channel that reaches the device.
-    let peaks = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i32>::new()));
+    // Loudest sample per output channel that reaches the device. A BUFFER
+    // probe, so atomics only, sized before the run: no lock, no allocation.
+    let peaks: std::sync::Arc<Vec<std::sync::atomic::AtomicI32>> = std::sync::Arc::new(
+        (0..MAX_TEST_CHANNELS)
+            .map(|_| std::sync::atomic::AtomicI32::new(0))
+            .collect(),
+    );
+    let channels_seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let channels_probe = channels_seen.clone();
+    device_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+        if let Some(gst::PadProbeData::Event(e)) = info.data.as_ref() {
+            if let gst::EventView::Caps(c) = e.view() {
+                let channels = c
+                    .caps()
+                    .structure(0)
+                    .and_then(|s| s.get::<i32>("channels").ok())
+                    .unwrap_or(0) as usize;
+                channels_probe.store(channels, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
     let peaks_probe = peaks.clone();
-    device_pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
-        let channels = pad
-            .current_caps()
-            .and_then(|c| c.structure(0).and_then(|s| s.get::<i32>("channels").ok()))
-            .unwrap_or(1)
-            .max(1) as usize;
+    let channels_buffer = channels_seen.clone();
+    device_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+        let channels = channels_buffer
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .clamp(1, MAX_TEST_CHANNELS);
         if let Some(buffer) = info.buffer() {
             if let Ok(map) = buffer.map_readable() {
-                let mut peaks = peaks_probe.lock().unwrap();
-                peaks.resize(channels, 0);
                 for (i, frame) in map.as_chunks::<2>().0.iter().enumerate() {
-                    let v = i16::from_le_bytes(*frame) as i32;
-                    let ch = i % channels;
-                    peaks[ch] = peaks[ch].max(v.abs());
+                    let v = (i16::from_le_bytes(*frame) as i32).abs();
+                    peaks_probe[i % channels].fetch_max(v, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
@@ -173,7 +192,13 @@ fn run_block(
         ))
     });
     let _ = pipeline.set_state(gst::State::Null);
-    let peaks = peaks.lock().unwrap().clone();
+    let seen = channels_seen
+        .load(std::sync::atomic::Ordering::SeqCst)
+        .min(MAX_TEST_CHANNELS);
+    let peaks = peaks[..seen]
+        .iter()
+        .map(|p| p.load(std::sync::atomic::Ordering::SeqCst))
+        .collect();
     let early_gaps = early_gaps.load(std::sync::atomic::Ordering::SeqCst);
     Outcome {
         state,
@@ -301,6 +326,26 @@ fn a_device_that_cannot_take_the_channels_is_refused_with_what_it_takes() {
     let reason = the_refusal("lo_toomany", &out);
     assert!(reason.contains("8 channels"), "{}", reason);
     assert!(reason.contains("audio_channels"), "{}", reason);
+}
+
+/// More input channels than GStreamer's channel mixer takes are refused by
+/// the block, instead of reaching `audioconvert`, which asserts on them.
+#[test]
+fn more_than_64_input_channels_are_refused() {
+    gst::init().unwrap();
+    let caps = gst::Caps::builder("audio/x-raw")
+        .field("format", "S16LE")
+        .field("channels", 65i32)
+        .field("channel-mask", gst::Bitmask::new(0))
+        .field("rate", 48000i32)
+        .build();
+    let out = run_block("lo_wide", None, SPEAKERS, caps, None);
+    let reason = the_refusal("lo_wide", &out);
+    assert!(
+        reason.contains("at most 64") && reason.contains("65"),
+        "{}",
+        reason
+    );
 }
 
 /// Encoded audio cannot be played. The block says so from its input, and the

@@ -18,7 +18,9 @@
 //! surround choice (5.1, 7.1, ...) is a speaker layout instead. See
 //! [`plan_output`] for how the two meet what arrives and what the device takes.
 
-use super::devicesrc::{asio_channel_list, max_channels, relabel_caps, MAX_AUDIO_CHANNELS};
+use super::devicesrc::{
+    asio_channel_list, make_device_element, max_channels, relabel_caps, MAX_AUDIO_CHANNELS,
+};
 use super::refusal::{accept_input, refuse_input};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
@@ -185,54 +187,19 @@ fn make(factory: &str, name: &str) -> Result<gst::Element, BlockBuildError> {
 }
 
 /// The sink for `device_id`, or `autoaudiosink` when it is empty.
-///
-/// The device comes from the app-lifetime `DeviceDiscovery`, as Local Input's
-/// sources do, not from a transient `DeviceMonitor`: tearing one of those down
-/// right after enumeration crashed inside the macOS providers.
 fn make_sink(
     ctx: &BlockBuildContext,
     device_id: &str,
     element_id: &str,
 ) -> Result<gst::Element, BlockBuildError> {
-    if device_id.is_empty() {
-        return make("autoaudiosink", element_id);
-    }
-
-    let device = ctx.local_device(device_id).ok_or_else(|| {
-        BlockBuildError::InvalidConfiguration(format!(
-            "Audio/Sink device '{}' not found. Refresh /api/discovery/devices and pick a current id",
-            device_id
-        ))
-    })?;
-    if device.device_class() != "Audio/Sink" {
-        return Err(BlockBuildError::InvalidConfiguration(format!(
-            "Device '{}' ({}) is a {} device, not an audio output",
-            device.display_name(),
-            device_id,
-            device.device_class()
-        )));
-    }
-
-    let element = device.create_element(Some(element_id)).map_err(|e| {
-        BlockBuildError::ElementCreation(format!(
-            "create_element for Audio/Sink device '{}' ({}): {}",
-            device.display_name(),
-            device_id,
-            e
-        ))
-    })?;
-
-    info!(
-        "Local Output: bound to device '{}' (id={}, factory={})",
-        device.display_name(),
+    make_device_element(
+        ctx,
+        BLOCK_NAME,
+        "Audio/Sink",
         device_id,
-        element
-            .factory()
-            .map(|f| f.name().to_string())
-            .unwrap_or_else(|| "<unknown>".to_string())
-    );
-
-    Ok(element)
+        element_id,
+        "autoaudiosink",
+    )
 }
 
 /// Keep independent outputs unpositioned past `audioconvert`, while
@@ -339,8 +306,8 @@ fn plan_output(
     };
     let (mask, positioned_out) = match (n, want.channel_mask) {
         (1, _) => (None, true),
-        (2, _) => (Some(0x3), true),
         (_, Some(m)) if m != 0 => (Some(m), true),
+        (2, None) => (Some(0x3), true),
         _ => {
             let mask = if device.can_intersect(&output_caps(n, Some(0))) {
                 0
@@ -557,6 +524,14 @@ fn adapt_input(
         };
         let in_channels = s.get::<i32>("channels").unwrap_or(0).max(0) as u32;
         let in_mask = s.get::<gst::Bitmask>("channel-mask").ok().map(|m| m.0);
+        // audioconvert's channel mixer asserts on more (Local Input's note).
+        if in_channels > MAX_AUDIO_CHANNELS {
+            refused.store(true, Ordering::SeqCst);
+            if let Some(input) = pad.parent_element() {
+                refuse_input(&input, &too_many_inputs_refusal(in_channels));
+            }
+            return gst::PadProbeReturn::Drop;
+        }
         // What the device takes: asked of whatever the filter feeds.
         let device = outcaps
             .static_pad("src")
@@ -605,6 +580,14 @@ fn adapt_input(
         }
     });
     Ok(())
+}
+
+fn too_many_inputs_refusal(channels: u32) -> String {
+    format!(
+        "{} takes at most {} input channels, but its audio input carries {}. Reduce the \
+         channels before it (Audio Format or Audio Router)",
+        BLOCK_NAME, MAX_AUDIO_CHANNELS, channels
+    )
 }
 
 fn encoded_audio_refusal(caps_name: &str) -> String {
@@ -831,6 +814,14 @@ mod tests {
     fn a_count_the_operator_set_is_never_changed() {
         let hdmi = caps("audio/x-raw, channels=8, channel-mask=(bitmask)0xc3f");
         assert!(plan_for_device(2, Some(0x3), want("2"), true, &hdmi).is_err());
+    }
+
+    #[test]
+    fn two_unpositioned_outputs_stay_independent() {
+        let plan = plan_output(2, Some(0x3), want("2:0x0"), &asio(8)).unwrap();
+        assert_eq!(plan.mask, Some(0));
+        assert!(plan.independent);
+        assert_eq!(plan.matrix, one_to_one(2, 2));
     }
 
     #[test]

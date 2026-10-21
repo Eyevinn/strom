@@ -395,7 +395,37 @@ impl BlockBuilder for LocalInputBuilder {
     }
 }
 
-/// Build a source element for the given media type.
+/// Build a source element for the given media type ([`make_device_element`]
+/// with `Video/Source` or `Audio/Source`).
+fn make_source(
+    ctx: &BlockBuildContext,
+    media: MediaType,
+    device_id: &str,
+    element_id: &str,
+    fallback_element_name: &str,
+) -> Result<gst::Element, BlockBuildError> {
+    let device_class = match media {
+        MediaType::Video => "Video/Source",
+        MediaType::Audio => "Audio/Source",
+        _ => {
+            return Err(BlockBuildError::InvalidConfiguration(format!(
+                "Unsupported media type for Local Input source: {:?}",
+                media
+            )));
+        }
+    };
+    make_device_element(
+        ctx,
+        "Local Input",
+        device_class,
+        device_id,
+        element_id,
+        fallback_element_name,
+    )
+}
+
+/// Build the element for local device `device_id`, which must be a
+/// `device_class` device; Local Input and Local Output both bind this way.
 ///
 /// If `device_id` is non-empty, look up the live `gst::Device` from the
 /// long-running `DeviceDiscovery` (shared via `BlockBuildContext`) and call
@@ -403,17 +433,18 @@ impl BlockBuilder for LocalInputBuilder {
 /// device-path property automatically.
 ///
 /// If `device_id` is empty, create `fallback_element_name` (typically
-/// `autovideosrc`/`autoaudiosrc`) so the block still works without an
-/// explicit selection.
+/// `autovideosrc`/`autoaudiosrc`/`autoaudiosink`) so the block still works
+/// without an explicit selection.
 ///
 /// **Why not spin up a transient `gst::DeviceMonitor` here?** That was the
 /// original implementation, and it crashed inside `gst_device_provider_stop`
 /// on macOS (SIGSEGV with pointer-authentication failure) when the AVFoundation
 /// / CoreAudio providers were torn down right after enumeration. Reusing the
 /// app-lifetime monitor sidesteps the buggy stop path entirely.
-fn make_source(
+pub(super) fn make_device_element(
     ctx: &BlockBuildContext,
-    media: MediaType,
+    block: &str,
+    device_class: &str,
     device_id: &str,
     element_id: &str,
     fallback_element_name: &str,
@@ -427,39 +458,30 @@ fn make_source(
             });
     }
 
-    let device_kind = match media {
-        MediaType::Video => "Video/Source",
-        MediaType::Audio => "Audio/Source",
-        _ => {
-            return Err(BlockBuildError::InvalidConfiguration(format!(
-                "Unsupported media type for Local Input source: {:?}",
-                media
-            )));
-        }
-    };
-
     let device = ctx.local_device(device_id).ok_or_else(|| {
         BlockBuildError::InvalidConfiguration(format!(
             "{} device '{}' not found — refresh /api/discovery/devices and pick a current id",
-            device_kind, device_id
+            device_class, device_id
         ))
     })?;
-    // Discovery lists outputs too, for Local Output: an output's id must not
-    // become a source here.
-    if device.device_class() != device_kind {
+    // Discovery lists inputs and outputs, so an id can name the wrong kind.
+    // By class tokens, not the whole string: DeckLink reports
+    // `Video/Source/Hardware`, libcamera `Source/Video`.
+    if !device.has_classes(device_class) {
         return Err(BlockBuildError::InvalidConfiguration(format!(
-            "Device '{}' ({}) is a {} device, not a {} device",
+            "{}: device '{}' ({}) is a {} device, not a {} device",
+            block,
             device.display_name(),
             device_id,
             device.device_class(),
-            device_kind
+            device_class
         )));
     }
 
     let element = device.create_element(Some(element_id)).map_err(|e| {
         BlockBuildError::ElementCreation(format!(
             "create_element for {} device '{}' ({}): {}",
-            device_kind,
+            device_class,
             device.display_name(),
             device_id,
             e
@@ -467,8 +489,9 @@ fn make_source(
     })?;
 
     info!(
-        "Local Input: bound {} pad to device '{}' (id={}, factory={})",
-        device_kind,
+        "{}: bound {} device '{}' (id={}, factory={})",
+        block,
+        device_class,
         device.display_name(),
         device_id,
         element

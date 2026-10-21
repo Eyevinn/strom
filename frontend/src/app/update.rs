@@ -1236,10 +1236,20 @@ impl eframe::App for StromApp {
                             self.video_devices = devices;
                             self.video_devices_loading = false;
                         }
-                        strom_types::discovery::DeviceCategory::AudioSource => {
-                            tracing::info!("Audio devices loaded: {} device(s)", devices.len());
-                            self.audio_devices = devices;
-                            self.audio_devices_loading = false;
+                        strom_types::discovery::DeviceCategory::AudioSource
+                        | strom_types::discovery::DeviceCategory::AudioSink => {
+                            tracing::info!(
+                                "Audio {:?} devices loaded: {} device(s)",
+                                category,
+                                devices.len()
+                            );
+                            // One list holds both; replace this category's.
+                            self.audio_devices.retain(|d| d.category != category);
+                            self.audio_devices.extend(devices);
+                            // Outputs arrive last and end the audio fetch.
+                            if category == strom_types::discovery::DeviceCategory::AudioSink {
+                                self.audio_devices_loading = false;
+                            }
                         }
                         _ => {}
                     }
