@@ -170,6 +170,34 @@ mod tests {
             let gst::MessageView::Warning(w) = msg.view() else {
                 continue;
             };
+            {
+                let agg = msg
+                    .src()
+                    .and_then(|s| s.downcast_ref::<gstreamer_base::Aggregator>().cloned());
+                let pads: Vec<String> = agg
+                    .map(|a| {
+                        a.sink_pads()
+                            .iter()
+                            .map(|pad| {
+                                let mut q = gst::query::Latency::new();
+                                let ok = pad.peer_query(&mut q);
+                                let (live, min, max) = q.result();
+                                format!(
+                                    "{}:ok={ok},live={live},min={min},max={max:?},origin={}",
+                                    pad.name(),
+                                    origin(pad)
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                eprintln!(
+                    "DIAG t={:?} state={:?} debug={:?} pads={pads:?}",
+                    deadline - Instant::now(),
+                    pipeline.current_state(),
+                    w.debug().map(|d| d.chars().take(120).collect::<String>())
+                );
+            }
             if let Some(described) =
                 diagnose_warning(msg.src(), w.debug().as_deref(), str::to_string)
             {

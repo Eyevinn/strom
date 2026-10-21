@@ -1,0 +1,59 @@
+name: diag-macos
+on:
+  push:
+    branches: ["diag/**"]
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  SCCACHE_BUCKET: sccache
+  SCCACHE_ENDPOINT: https://olivedev-rustcache.minio-minio.auto.prod-se.osaas.io
+  SCCACHE_REGION: us-east-1
+  SCCACHE_S3_USE_SSL: "true"
+  AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+jobs:
+  diag:
+    runs-on: macos-latest
+    timeout-minutes: 75
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install GStreamer
+        run: |
+          brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav libnice-gstreamer
+          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig:$(brew --prefix gstreamer)/lib/pkgconfig:$(brew --prefix glib)/lib/pkgconfig" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$(brew --prefix)/lib" >> $GITHUB_ENV
+      - name: Placeholder frontend dist
+        run: |
+          mkdir -p backend/dist
+          echo '<html></html>' > backend/dist/index.html
+          touch backend/dist/placeholder.wasm
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Build lib tests
+        run: cargo test --package strom --features efp --lib --no-run 2>&1 | tail -3
+      - name: Loop alone and inside the full lib suite
+        run: |
+          set +e
+          BIN=$(ls -t target/debug/deps/strom-* | grep -vE '\.(d|dylib|rlib)$' | head -1)
+          echo "binary $BIN"
+          mkdir -p out
+          ok=0; fail=0
+          for i in $(seq 1 20); do
+            GST_DEBUG=aggregator:2 $BIN finds_both_inputs_of_a_mixer --nocapture > out/alone-$i.txt 2>&1 && ok=$((ok+1)) || fail=$((fail+1))
+          done
+          echo "SUMMARY alone: ok=$ok fail=$fail" | tee -a out/summary.txt
+          ok=0; fail=0
+          for i in $(seq 1 8); do
+            $BIN --nocapture > out/suite-$i.txt 2>&1
+            grep -q "finds_both_inputs_of_a_mixer_that_cannot_configure_latency ... ok" out/suite-$i.txt && ok=$((ok+1)) || fail=$((fail+1))
+          done
+          echo "SUMMARY in full lib suite: ok=$ok fail=$fail" | tee -a out/summary.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diag-out
+          path: out
