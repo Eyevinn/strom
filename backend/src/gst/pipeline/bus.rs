@@ -2,6 +2,7 @@ use super::warning_gate::{mask_digits, WarningGate, WARNING_REPEAT_INTERVAL};
 use super::PipelineManager;
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
 use strom_types::{PipelineState, StromEvent};
@@ -66,6 +67,17 @@ impl PipelineManager {
         let cached_state = self.cached_state.clone();
         let qos_aggregator = self.qos_aggregator.clone();
         let warning_gate = Mutex::new(WarningGate::default());
+        let block_names: HashMap<String, String> = self
+            .blocks
+            .iter()
+            .map(|b| (b.id.clone(), b.name.clone().unwrap_or_else(|| b.id.clone())))
+            .collect();
+        // What the operator knows an element by: its block's name, or its own
+        // id for an element placed in the flow directly.
+        let label = move |element: &str| {
+            let block = element.split_once(':').map_or(element, |(block, _)| block);
+            format!("'{}'", block_names.get(block).map_or(block, String::as_str))
+        };
 
         let main_handler_id = bus.connect_message(None, move |_bus, msg| {
             use gst::MessageView;
@@ -135,6 +147,16 @@ impl PipelineManager {
                     let Some(suppressed) = warning_gate.lock().unwrap().check(key, Instant::now())
                     else {
                         return;
+                    };
+                    // An aggregator that cannot configure its latency names only
+                    // itself. Ask its inputs which ones disagree.
+                    let warning_msg = match crate::gst::latency_diagnosis::diagnose_warning(
+                        msg.src(),
+                        debug_info.as_ref().map(|d| d.as_str()),
+                        &label,
+                    ) {
+                        Some(diagnosis) => format!("{} {}.", warning_msg, diagnosis),
+                        None => warning_msg,
                     };
                     let warning_msg = if suppressed > 0 {
                         format!(
