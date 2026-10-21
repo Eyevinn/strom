@@ -580,7 +580,7 @@ fn audio_source_layout(rate: Option<i32>, config: Option<AudioChannelConfig>) ->
 /// one of the same width, or back, so the block rewrites the caps event
 /// instead: the samples stay as they are, only the layout label changes.
 /// A source with a different positioned layout keeps it.
-fn relabel_caps(caps: &gst::CapsRef, mask: u64) -> Option<gst::Caps> {
+pub(super) fn relabel_caps(caps: &gst::CapsRef, mask: u64) -> Option<gst::Caps> {
     let s = caps.structure(0)?;
     let channels = s.get::<i32>("channels").ok()?;
     let current = s.get::<gst::Bitmask>("channel-mask").ok()?.0;

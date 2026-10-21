@@ -18,7 +18,7 @@
 //! surround choice (5.1, 7.1, ...) is a speaker layout instead. See
 //! [`plan_output`] for how the two meet what arrives and what the device takes.
 
-use super::devicesrc::{asio_channel_list, max_channels, MAX_AUDIO_CHANNELS};
+use super::devicesrc::{asio_channel_list, max_channels, relabel_caps, MAX_AUDIO_CHANNELS};
 use super::refusal::{accept_input, refuse_input};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
@@ -30,7 +30,7 @@ use strom_types::{
     block::*, element::ElementPadRef, parse_audio_channel_config, AudioChannelConfig, MediaType,
     PropertyValue,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 const BLOCK_NAME: &str = "Local Output";
 
@@ -84,7 +84,15 @@ impl BlockBuilder for LocalOutputBuilder {
         } else {
             want
         };
-        adapt_input(instance_id, want, explicit, &input, &convert, &outcaps)?;
+        adapt_input(
+            instance_id,
+            want,
+            explicit,
+            &input,
+            &convert,
+            &resample,
+            &outcaps,
+        )?;
 
         let internal_links = vec![
             (
@@ -227,6 +235,61 @@ fn make_sink(
     Ok(element)
 }
 
+/// Keep independent outputs unpositioned past `audioconvert`, while
+/// `unpositioned` is set.
+///
+/// When a mix-matrix changes the channel count, GStreamer 1.24's
+/// `audioconvert` labels its output with the default speaker layout for that
+/// count (7.1 for 8) whatever its peer asks for, and the unpositioned filter
+/// after it then refuses the caps (`not-negotiated`); 1.28 honours the peer.
+/// The samples are already in output order, so only the label is wrong. This
+/// relabels it at `resample`'s sink, as Local Input does after its source:
+/// the caps event, and the accept-caps query that `audioconvert` sends
+/// before it.
+fn relabel_unpositioned(
+    resample: &gst::Element,
+    unpositioned: Arc<AtomicBool>,
+) -> Result<(), BlockBuildError> {
+    let pad = resample
+        .static_pad("sink")
+        .ok_or_else(|| BlockBuildError::ElementCreation("audioresample has no sink pad".into()))?;
+    let unpositioned_query = unpositioned.clone();
+    pad.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, move |pad, info| {
+        if !unpositioned_query.load(Ordering::SeqCst) {
+            return gst::PadProbeReturn::Ok;
+        }
+        let Some(gst::PadProbeData::Query(query)) = info.data.as_mut() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::QueryViewMut::AcceptCaps(q) = query.view_mut() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let Some(relabelled) = relabel_caps(q.caps(), 0) else {
+            return gst::PadProbeReturn::Ok;
+        };
+        // Asks the pad again with the unpositioned label, which this probe
+        // lets through.
+        q.set_result(pad.query_accept_caps(&relabelled));
+        gst::PadProbeReturn::Handled
+    });
+    pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+        if !unpositioned.load(Ordering::SeqCst) {
+            return gst::PadProbeReturn::Ok;
+        }
+        let Some(gst::PadProbeData::Event(ref event)) = info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::EventView::Caps(caps_event) = event.view() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if let Some(caps) = relabel_caps(caps_event.caps(), 0) {
+            info.data = Some(gst::PadProbeData::Event(gst::event::Caps::new(&caps)));
+        }
+        gst::PadProbeReturn::Ok
+    });
+    Ok(())
+}
+
 /// Raw audio caps with `channels`, and `mask` as the channel-mask when given.
 fn output_caps(channels: u32, mask: Option<u64>) -> gst::Caps {
     let mut caps = gst::Caps::builder("audio/x-raw").field("channels", channels as i32);
@@ -245,6 +308,8 @@ struct OutputPlan {
     /// `audioconvert`'s mix-matrix (rows = outputs, columns = input channels),
     /// or `None` to let it mix by speaker position.
     matrix: Option<Vec<Vec<f32>>>,
+    /// The outputs are independent channels, not a speaker layout.
+    independent: bool,
 }
 
 /// Decide how `in_channels` arriving with `in_mask` reach a device that
@@ -301,6 +366,7 @@ fn plan_output(
         channels: n,
         mask,
         matrix,
+        independent: !positioned_out,
     })
 }
 
@@ -413,8 +479,11 @@ fn adapt_input(
     explicit: bool,
     input: &gst::Element,
     convert: &gst::Element,
+    resample: &gst::Element,
     outcaps: &gst::Element,
 ) -> Result<(), BlockBuildError> {
+    let unpositioned = Arc::new(AtomicBool::new(false));
+    relabel_unpositioned(resample, unpositioned.clone())?;
     let sink_pad = input
         .static_pad("sink")
         .ok_or_else(|| BlockBuildError::ElementCreation("identity has no sink pad".into()))?;
@@ -500,19 +569,28 @@ fn adapt_input(
                         accept_input(&input);
                     }
                 }
-                info!(
-                    "Local Output {}: {} input channels play as {} output channels \
-                     (channel-mask {:?}, {})",
-                    instance_id,
-                    in_channels,
-                    plan.channels,
-                    plan.mask,
-                    if plan.matrix.is_some() {
-                        "channel for channel"
-                    } else {
-                        "mixed by speaker position"
-                    }
-                );
+                unpositioned.store(plan.independent && plan.mask == Some(0), Ordering::SeqCst);
+                match (plan.independent, plan.mask) {
+                    (true, Some(mask)) if mask != 0 => warn!(
+                        "Local Output {}: the device offers {} channels only as the speaker \
+                         layout 0x{:x}, so the {} independent outputs carry it. A sink that \
+                         maps channels by position (raw ALSA) can play them out of order",
+                        instance_id, plan.channels, mask, plan.channels
+                    ),
+                    _ => info!(
+                        "Local Output {}: {} input channels play as {} output channels \
+                         (channel-mask {:?}, {})",
+                        instance_id,
+                        in_channels,
+                        plan.channels,
+                        plan.mask,
+                        if plan.matrix.is_some() {
+                            "channel for channel"
+                        } else {
+                            "mixed by speaker position"
+                        }
+                    ),
+                }
                 set_mix_matrix(&convert, plan.matrix.as_deref());
                 outcaps.set_property("caps", output_caps(plan.channels, plan.mask));
                 gst::PadProbeReturn::Ok
