@@ -13,7 +13,7 @@
 //! Input:   stromaudiobridgesrc → audio_out
 //! ```
 
-use super::refusal::refuse_input;
+use super::refusal::{accept_input, refuse_input};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gst::audio_bridge;
 use gstreamer as gst;
@@ -24,7 +24,7 @@ use strom_types::audio_bridge::{
     MAX_MAX_LATENCY_MS, MAX_RATE_CHANGE_PERCENT, MAX_TARGET_LATENCY_MS, MIN_TARGET_LATENCY_MS,
 };
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
-use tracing::{info, warn};
+use tracing::info;
 
 pub use strom_types::audio_bridge::{INPUT_BLOCK_ID, OUTPUT_BLOCK_ID};
 
@@ -118,18 +118,26 @@ impl BlockBuilder for AudioBridgeOutputBuilder {
             let Some(name) = c.caps().structure(0).map(|s| s.name().to_string()) else {
                 return gst::PadProbeReturn::Ok;
             };
+            let Some(input) = pad.parent_element() else {
+                return gst::PadProbeReturn::Ok;
+            };
             if name == "audio/x-raw" {
+                // A refusal earlier on this pad left the input dropping everything.
+                accept_input(&input);
                 if !pad.is_linked() {
                     let sink = convert_weak
                         .upgrade()
                         .and_then(|convert| convert.static_pad("sink"));
                     if let Some(sink) = sink {
                         if let Err(e) = pad.link(&sink) {
-                            warn!("Audio Bridge Output: linking the input failed: {e:?}");
+                            refuse_input(
+                                &input,
+                                &format!("{OUTPUT_NAME} could not link its audio input: {e:?}"),
+                            );
                         }
                     }
                 }
-            } else if let Some(input) = pad.parent_element() {
+            } else {
                 refuse_input(&input, &encoded_audio_refusal(&name));
             }
             gst::PadProbeReturn::Ok

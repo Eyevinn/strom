@@ -328,3 +328,89 @@ fn audio_bridge_output_refuses_encoded_audio_by_failing_the_flow() {
     );
     assert_refused_by_block(&errors, "bridge_out:input", "raw audio");
 }
+
+/// A refusal must not outlive the encoded caps that caused it: when raw audio
+/// replaces them on the same pad, the block has to carry it. Counts buffers
+/// leaving the input `identity`, which is where a refusal drops them.
+#[test]
+fn audio_bridge_output_carries_raw_audio_that_follows_a_refusal() {
+    if !common::plugins_available(&["audioconvert", "audioresample", "capsfilter", "identity"]) {
+        return;
+    }
+    let ctx = common::block::context();
+    let built = AudioBridgeOutputBuilder
+        .build(
+            "bridge_out",
+            &audio_bridge_props("refusal-test-recover"),
+            &ctx,
+        )
+        .expect("block builds");
+    let pipeline = gst::Pipeline::new();
+    let by_id = common::block::install(&pipeline, &built);
+    let input = by_id.get("bridge_out:input").expect("input").clone();
+
+    let src = gst_app::AppSrc::builder()
+        .name(TEST_SOURCE)
+        .is_live(true)
+        .format(gst::Format::Time)
+        .build();
+    pipeline.add(&src).expect("add source");
+    src.link(&input).expect("link source to block");
+    common::block::run_setups(&ctx);
+
+    let passed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = passed.clone();
+    input.static_pad("src").expect("input src pad").add_probe(
+        gst::PadProbeType::BUFFER,
+        move |_, _| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            gst::PadProbeReturn::Ok
+        },
+    );
+
+    let bus = pipeline.bus().expect("pipeline bus");
+    pipeline
+        .set_state(gst::State::Playing)
+        .expect("pipeline goes to PLAYING");
+
+    src.set_caps(Some(
+        &gst::Caps::builder("audio/mpeg")
+            .field("mpegversion", 4i32)
+            .field("stream-format", "raw")
+            .field("rate", 48_000i32)
+            .field("channels", 2i32)
+            .build(),
+    ));
+    let _ = src.push_buffer(gst::Buffer::from_slice([0u8; 16]));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        passed.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the refused stream must be dropped"
+    );
+
+    src.set_caps(Some(
+        &gst::Caps::builder("audio/x-raw")
+            .field("format", "F32LE")
+            .field("layout", "interleaved")
+            .field("rate", 48_000i32)
+            .field("channels", 2i32)
+            .build(),
+    ));
+    for i in 0..20u64 {
+        let mut buffer = gst::Buffer::from_slice(vec![0u8; 960 * 2 * 4]);
+        buffer
+            .get_mut()
+            .expect("unshared buffer")
+            .set_pts(gst::ClockTime::from_mseconds(i * 20));
+        let _ = src.push_buffer(buffer);
+    }
+    let errors = common::bus::collect_errors(&bus, Duration::from_secs(1));
+    let _ = pipeline.set_state(gst::State::Null);
+
+    assert!(
+        passed.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "raw audio after a refusal must flow; errors: {:?}",
+        errors
+    );
+}
