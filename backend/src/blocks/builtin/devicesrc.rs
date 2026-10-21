@@ -92,8 +92,8 @@ use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom_types::{
     block::{
-        common_video_framerate_enum_values, common_video_resolution_enum_values,
-        parse_resolution_string, StreamMode, *,
+        audio_channel_enum_values, common_video_framerate_enum_values,
+        common_video_resolution_enum_values, parse_resolution_string, StreamMode, *,
     },
     element::ElementPadRef,
     parse_audio_channel_config, AudioChannelConfig, MediaType, PropertyValue,
@@ -321,7 +321,7 @@ impl BlockBuilder for LocalInputBuilder {
                     })
                 });
                 if let Some(inputs) = inputs {
-                    let list = asio_input_channels(inputs);
+                    let list = asio_channel_list(inputs);
                     info!(
                         "Local Input: capturing ASIO inputs {} on {}",
                         list, audiosrc_id
@@ -395,7 +395,37 @@ impl BlockBuilder for LocalInputBuilder {
     }
 }
 
-/// Build a source element for the given media type.
+/// Build a source element for the given media type ([`make_device_element`]
+/// with `Video/Source` or `Audio/Source`).
+fn make_source(
+    ctx: &BlockBuildContext,
+    media: MediaType,
+    device_id: &str,
+    element_id: &str,
+    fallback_element_name: &str,
+) -> Result<gst::Element, BlockBuildError> {
+    let device_class = match media {
+        MediaType::Video => "Video/Source",
+        MediaType::Audio => "Audio/Source",
+        _ => {
+            return Err(BlockBuildError::InvalidConfiguration(format!(
+                "Unsupported media type for Local Input source: {:?}",
+                media
+            )));
+        }
+    };
+    make_device_element(
+        ctx,
+        "Local Input",
+        device_class,
+        device_id,
+        element_id,
+        fallback_element_name,
+    )
+}
+
+/// Build the element for local device `device_id`, which must be a
+/// `device_class` device; Local Input and Local Output both bind this way.
 ///
 /// If `device_id` is non-empty, look up the live `gst::Device` from the
 /// long-running `DeviceDiscovery` (shared via `BlockBuildContext`) and call
@@ -403,17 +433,18 @@ impl BlockBuilder for LocalInputBuilder {
 /// device-path property automatically.
 ///
 /// If `device_id` is empty, create `fallback_element_name` (typically
-/// `autovideosrc`/`autoaudiosrc`) so the block still works without an
-/// explicit selection.
+/// `autovideosrc`/`autoaudiosrc`/`autoaudiosink`) so the block still works
+/// without an explicit selection.
 ///
 /// **Why not spin up a transient `gst::DeviceMonitor` here?** That was the
 /// original implementation, and it crashed inside `gst_device_provider_stop`
 /// on macOS (SIGSEGV with pointer-authentication failure) when the AVFoundation
 /// / CoreAudio providers were torn down right after enumeration. Reusing the
 /// app-lifetime monitor sidesteps the buggy stop path entirely.
-fn make_source(
+pub(super) fn make_device_element(
     ctx: &BlockBuildContext,
-    media: MediaType,
+    block: &str,
+    device_class: &str,
     device_id: &str,
     element_id: &str,
     fallback_element_name: &str,
@@ -427,28 +458,30 @@ fn make_source(
             });
     }
 
-    let device_kind = match media {
-        MediaType::Video => "Video/Source",
-        MediaType::Audio => "Audio/Source",
-        _ => {
-            return Err(BlockBuildError::InvalidConfiguration(format!(
-                "Unsupported media type for Local Input source: {:?}",
-                media
-            )));
-        }
-    };
-
     let device = ctx.local_device(device_id).ok_or_else(|| {
         BlockBuildError::InvalidConfiguration(format!(
             "{} device '{}' not found — refresh /api/discovery/devices and pick a current id",
-            device_kind, device_id
+            device_class, device_id
         ))
     })?;
+    // Discovery lists inputs and outputs, so an id can name the wrong kind.
+    // By class tokens, not the whole string: DeckLink reports
+    // `Video/Source/Hardware`, libcamera `Source/Video`.
+    if !device.has_classes(device_class) {
+        return Err(BlockBuildError::InvalidConfiguration(format!(
+            "{}: device '{}' ({}) is a {} device, not a {} device",
+            block,
+            device.display_name(),
+            device_id,
+            device.device_class(),
+            device_class
+        )));
+    }
 
     let element = device.create_element(Some(element_id)).map_err(|e| {
         BlockBuildError::ElementCreation(format!(
             "create_element for {} device '{}' ({}): {}",
-            device_kind,
+            device_class,
             device.display_name(),
             device_id,
             e
@@ -456,8 +489,9 @@ fn make_source(
     })?;
 
     info!(
-        "Local Input: bound {} pad to device '{}' (id={}, factory={})",
-        device_kind,
+        "{}: bound {} device '{}' (id={}, factory={})",
+        block,
+        device_class,
         device.display_name(),
         device_id,
         element
@@ -475,10 +509,10 @@ const ASIO_SOURCE_FACTORY: &str = "asiosrc";
 /// Widest channel count GStreamer's channel mixer takes. `audioconvert`
 /// segfaults above it on GStreamer 1.24 (`gst_audio_channel_mixer_new`
 /// asserts `in_channels <= 64`), so the block never negotiates more.
-const MAX_AUDIO_CHANNELS: u32 = 64;
+pub(super) const MAX_AUDIO_CHANNELS: u32 = 64;
 
 /// Highest channel count a device's caps offer.
-fn max_channels(caps: &gst::Caps) -> Option<u32> {
+pub(super) fn max_channels(caps: &gst::Caps) -> Option<u32> {
     caps.iter()
         .filter_map(|s| {
             s.get::<gst::IntRange<i32>>("channels")
@@ -490,8 +524,9 @@ fn max_channels(caps: &gst::Caps) -> Option<u32> {
         .and_then(|c| u32::try_from(c).ok())
 }
 
-/// `input-channels` value that captures the first `channels` ASIO inputs.
-fn asio_input_channels(channels: u32) -> String {
+/// The first `channels` ASIO channels, as `asiosrc`'s `input-channels` and
+/// `asiosink`'s `output-channels` take them: `"0,1,...,channels-1"`.
+pub(super) fn asio_channel_list(channels: u32) -> String {
     (0..channels)
         .map(|c| c.to_string())
         .collect::<Vec<_>>()
@@ -568,7 +603,7 @@ fn audio_source_layout(rate: Option<i32>, config: Option<AudioChannelConfig>) ->
 /// one of the same width, or back, so the block rewrites the caps event
 /// instead: the samples stay as they are, only the layout label changes.
 /// A source with a different positioned layout keeps it.
-fn relabel_caps(caps: &gst::CapsRef, mask: u64) -> Option<gst::Caps> {
+pub(super) fn relabel_caps(caps: &gst::CapsRef, mask: u64) -> Option<gst::Caps> {
     let s = caps.structure(0)?;
     let channels = s.get::<i32>("channels").ok()?;
     let current = s.get::<gst::Bitmask>("channel-mask").ok()?.0;
@@ -810,48 +845,7 @@ fn local_input_definition() -> BlockDefinition {
                 label: "Audio Channels".to_string(),
                 description: "Number of channels requested from the audio source. Empty = device default. Pro audio cards / ASIO / PipeWire / CoreAudio can expose 4/6/8/16-channel multichannel streams in one go; Plain counts of 3 or more are parallel channels with no speaker layout (channel-mask 0x0); the Surround choices carry a speaker layout. On an ASIO device this captures inputs 1..N, and empty captures every input; many WASAPI drivers instead split a multichannel card into separate stereo devices (1/2, 3/4, ...) — in that case pick the right device and keep this at 2.".to_string(),
                 property_type: PropertyType::Enum {
-                    values: vec![
-                        EnumValue {
-                            value: String::new(),
-                            label: Some("Default (device)".to_string()),
-                        },
-                        EnumValue {
-                            value: "1".to_string(),
-                            label: Some("1 (Mono)".to_string()),
-                        },
-                        EnumValue {
-                            value: "2".to_string(),
-                            label: Some("2 (Stereo)".to_string()),
-                        },
-                        EnumValue {
-                            value: "4".to_string(),
-                            label: Some("4 (multichannel)".to_string()),
-                        },
-                        EnumValue {
-                            value: "6".to_string(),
-                            label: Some("6 (multichannel)".to_string()),
-                        },
-                        EnumValue {
-                            value: "8".to_string(),
-                            label: Some("8 (multichannel)".to_string()),
-                        },
-                        EnumValue {
-                            value: "16".to_string(),
-                            label: Some("16 (multichannel)".to_string()),
-                        },
-                        EnumValue {
-                            value: "4:0x33".to_string(),
-                            label: Some("4 - Quad Surround".to_string()),
-                        },
-                        EnumValue {
-                            value: "6:0x3f".to_string(),
-                            label: Some("6 - 5.1 Surround".to_string()),
-                        },
-                        EnumValue {
-                            value: "8:0xc3f".to_string(),
-                            label: Some("8 - 7.1 Surround".to_string()),
-                        },
-                    ],
+                    values: audio_channel_enum_values(true),
                 },
                 default_value: Some(PropertyValue::String(String::new())),
                 mapping: PropertyMapping {
@@ -1264,9 +1258,9 @@ mod tests {
     }
 
     #[test]
-    fn asio_input_channels_lists_the_first_inputs() {
-        assert_eq!(asio_input_channels(1), "0");
-        assert_eq!(asio_input_channels(4), "0,1,2,3");
+    fn asio_channel_list_lists_the_first_inputs() {
+        assert_eq!(asio_channel_list(1), "0");
+        assert_eq!(asio_channel_list(4), "0,1,2,3");
     }
 
     // --- get_external_pads ---

@@ -599,7 +599,8 @@ pub struct StromApp {
     network_interfaces_loaded: bool,
     /// Cached local video capture devices (Local Input block picker)
     video_devices: Vec<strom_types::discovery::DeviceResponse>,
-    /// Cached local audio capture devices (Local Input block picker)
+    /// Cached local audio devices, inputs and outputs (Local Input and Local
+    /// Output pickers)
     audio_devices: Vec<strom_types::discovery::DeviceResponse>,
     /// In-flight flag for video device fetch
     video_devices_loading: bool,

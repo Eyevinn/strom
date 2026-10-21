@@ -2391,25 +2391,30 @@ impl PropertyInspector {
                             strom_types::block::PropertyType::Device { category } => {
                                 device_picker_actions.needed = true;
                                 use strom_types::discovery::DeviceCategory;
-                                let (devices, kind_label): (&[_], &str) = match category {
+                                // The audio list holds inputs and outputs.
+                                let of_category = |list| devices_of(list, *category);
+                                let (devices, kind_label) = match category {
                                     DeviceCategory::VideoSource => {
-                                        (video_devices, "video source")
+                                        (of_category(video_devices), "video source")
                                     }
                                     DeviceCategory::AudioSource => {
-                                        (audio_devices, "audio source")
+                                        (of_category(audio_devices), "audio source")
+                                    }
+                                    DeviceCategory::AudioSink => {
+                                        (of_category(audio_devices), "audio output")
                                     }
                                     // No UI lists for these yet — picker will
                                     // show an empty list with the refresh
                                     // button, which is intentional until we
                                     // wire up extra fetches.
-                                    DeviceCategory::AudioSink
-                                    | DeviceCategory::NetworkSource
-                                    | DeviceCategory::Other => (&[], "device"),
+                                    DeviceCategory::NetworkSource | DeviceCategory::Other => {
+                                        (Vec::new(), "device")
+                                    }
                                 };
                                 Self::show_local_device_editor(
                                     ui,
                                     &mut value,
-                                    devices,
+                                    &devices,
                                     kind_label,
                                     local_devices_loading,
                                     device_picker_actions,
@@ -2866,7 +2871,7 @@ impl PropertyInspector {
     fn show_local_device_editor(
         ui: &mut Ui,
         value: &mut PropertyValue,
-        devices: &[strom_types::discovery::DeviceResponse],
+        devices: &[&strom_types::discovery::DeviceResponse],
         kind_label: &str,
         loading: bool,
         actions: &mut DevicePickerActions,
@@ -2890,7 +2895,7 @@ impl PropertyInspector {
                 devices
                     .iter()
                     .find(|d| d.id == *s)
-                    .map(device_label)
+                    .map(|d| device_label(d))
                     .unwrap_or_else(|| format!("{} (not found — refresh)", s))
             };
 
@@ -3093,6 +3098,15 @@ impl PropertyInspector {
             }
         }
     }
+}
+
+/// The devices in `list` of `category`, by reference: the property panel
+/// draws every frame, so it does not copy the lists it filters.
+fn devices_of(
+    list: &[strom_types::discovery::DeviceResponse],
+    category: strom_types::discovery::DeviceCategory,
+) -> Vec<&strom_types::discovery::DeviceResponse> {
+    list.iter().filter(|d| d.category == category).collect()
 }
 
 #[cfg(test)]
