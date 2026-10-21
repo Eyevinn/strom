@@ -74,7 +74,7 @@ fn ensure_gl_can_produce(format: &str) -> Result<(), BlockBuildError> {
     }
     Err(BlockBuildError::InvalidConfiguration(format!(
         "output_format {} cannot be produced on the GPU backend: glcolorconvert has no {} output \
-         in this GStreamer. Pick another output_format or use the CPU compositor backend.",
+         in this GStreamer. Pick another output_format, or set Backend (compositor_preference) to CPU Only.",
         format, format
     )))
 }
