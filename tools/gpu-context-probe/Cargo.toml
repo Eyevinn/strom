@@ -1,0 +1,15 @@
+[package]
+name = "gpu-context-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Measures how GPU video memory and its GStreamer contexts cross pipeline boundaries"
+
+# Standalone: not a member of the Strom workspace.
+[workspace]
+
+[dependencies]
+gstreamer = { version = "0.25", features = ["v1_22"] }
+gstreamer-app = { version = "0.25", features = ["v1_22"] }
+gstreamer-gl = { version = "0.25", features = ["v1_22"] }
+gst-plugin-inter = "0.15"
