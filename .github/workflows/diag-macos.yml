@@ -19,6 +19,9 @@ jobs:
     timeout-minutes: 75
     env:
       RUSTC_WRAPPER: sccache
+      STROM_REQUIRE_GST_PLUGINS: 1
+      STROM_REQUIRE_GL: 1
+      STROM_SKIP_KNOWN_CI_FAILURES: 1
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -42,13 +45,13 @@ jobs:
           echo "binary $BIN"
           mkdir -p out
           ok=0; fail=0
-          for i in $(seq 1 20); do
+          for i in $(seq 1 5); do
             GST_DEBUG=aggregator:2 $BIN finds_both_inputs_of_a_mixer --nocapture > out/alone-$i.txt 2>&1 && ok=$((ok+1)) || fail=$((fail+1))
           done
           echo "SUMMARY alone: ok=$ok fail=$fail" | tee -a out/summary.txt
           ok=0; fail=0
-          for i in $(seq 1 8); do
-            $BIN --nocapture > out/suite-$i.txt 2>&1
+          for i in $(seq 1 12); do
+            $BIN > out/suite-$i.txt 2>&1
             grep -q "finds_both_inputs_of_a_mixer_that_cannot_configure_latency ... ok" out/suite-$i.txt && ok=$((ok+1)) || fail=$((fail+1))
           done
           echo "SUMMARY in full lib suite: ok=$ok fail=$fail" | tee -a out/summary.txt
