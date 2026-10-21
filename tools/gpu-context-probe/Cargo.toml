@@ -13,3 +13,4 @@ gstreamer = { version = "0.25", features = ["v1_22"] }
 gstreamer-app = { version = "0.25", features = ["v1_22"] }
 gstreamer-gl = { version = "0.25", features = ["v1_22"] }
 gst-plugin-inter = "0.15"
+gst-plugin-webrtc = { version = "0.15", default-features = false, features = ["whep", "rustls-aws-lc-rs"] }

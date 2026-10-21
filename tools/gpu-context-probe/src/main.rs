@@ -7,6 +7,9 @@
 //!
 //! * `cross`    one case: producer pipeline A → bridge → consumer pipeline B
 //! * `encoders` which installed video encoders take which memory directly
+//! * `webrtc`   frames in one memory into a real `whepserversink`, watched by a
+//!              `whepclientsrc`: which encoder webrtcsink picks, and whether
+//!              video reaches the viewer
 //! * `clip`     write a video-only H.264 clip for the `decode` cases
 //! * `all`      every case this host supports, each in its own process
 //!
@@ -32,10 +35,12 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     gst::init().expect("gst::init");
     gstrsinter::plugin_register_static().expect("register rsinter");
+    gstrswebrtc::plugin_register_static().expect("register rswebrtc");
 
     let code = match args.first().map(String::as_str) {
         Some("cross") => cross(&Opts::parse(&args[1..])),
         Some("encoders") => encoders(&Opts::parse(&args[1..])),
+        Some("webrtc") => webrtc(&Opts::parse(&args[1..])),
         Some("clip") => clip(),
         Some("all") => all(&Opts::parse(&args[1..])),
         _ => {
@@ -45,6 +50,7 @@ fn main() {
                  \x20         --share none|forward  --start a|b  [--producer LAUNCH] [--consumer LAUNCH]\n\
                  \x20         [--frames N] [--timeout SECS] [--verbose]\n\
                  encoders: [--run] [--frames N]\n\
+                 webrtc:   --memory system|gl|cuda|d3d12|d3d11  --codec h264|h265|vp9|av1 [--timeout SECS]\n\
                  all:      [--frames N] [--timeout SECS]"
             );
             2
@@ -62,6 +68,7 @@ struct Opts {
     producer: Option<String>,
     consumer: Option<String>,
     encoder: Option<String>,
+    codec: String,
     frames: u32,
     timeout: u64,
     run: bool,
@@ -78,6 +85,7 @@ impl Opts {
             producer: None,
             consumer: None,
             encoder: None,
+            codec: "h264".into(),
             frames: 60,
             timeout: 15,
             run: false,
@@ -94,6 +102,7 @@ impl Opts {
                 "--producer" => o.producer = Some(val()),
                 "--consumer" => o.consumer = Some(val()),
                 "--encoder" => o.encoder = Some(val()),
+                "--codec" => o.codec = val(),
                 "--frames" => o.frames = val().parse().unwrap_or(60),
                 "--timeout" => o.timeout = val().parse().unwrap_or(15),
                 "--run" => o.run = true,
@@ -446,7 +455,7 @@ fn cross(o: &Opts) -> i32 {
         .iter()
         .filter(|l| {
             let l = l.to_lowercase();
-            ["context", "different", "register", "copy", "fallback", "not-negotiated", "failed"]
+            NOTABLE
                 .iter()
                 .any(|k| l.contains(k))
         })
@@ -466,6 +475,18 @@ fn cross(o: &Opts) -> i32 {
     }
     code
 }
+
+const NOTABLE: [&str; 9] = [
+    "context",
+    "different",
+    "register",
+    "copy",
+    "fallback",
+    "not-negotiated",
+    "failed",
+    "codec",
+    "encoder",
+];
 
 fn distinct(ctxs: &[(String, gst_gl::GLContext)]) -> usize {
     let mut p: Vec<usize> = ctxs.iter().map(|(_, c)| ptr(c)).collect();
@@ -602,6 +623,238 @@ fn encoders(o: &Opts) -> i32 {
     0
 }
 
+fn codec_caps(codec: &str) -> gst::Caps {
+    let name = match codec {
+        "h265" => "video/x-h265",
+        "vp9" => "video/x-vp9",
+        "av1" => "video/x-av1",
+        "vp8" => "video/x-vp8",
+        _ => "video/x-h264",
+    };
+    gst::Caps::new_empty_simple(name)
+}
+
+/// The encoder webrtcsink would pick for `caps`: it takes the first factory of
+/// rank MARGINAL or above whose src template intersects, from a list in
+/// decreasing rank, and builds a converter for the input memory in front of it
+/// whether or not that encoder takes the memory.
+fn webrtcsink_encoder(caps: &gst::Caps) -> Option<gst::ElementFactory> {
+    gst::ElementFactory::factories_with_type(gst::ElementFactoryType::ENCODER, gst::Rank::MARGINAL)
+        .into_iter()
+        .find(|f| {
+            f.static_pad_templates().iter().any(|t| {
+                let tc = t.caps();
+                t.direction() == gst::PadDirection::Src && !tc.is_any() && caps.can_intersect(&tc)
+            })
+        })
+}
+
+fn memory_feature(memory: &str) -> &'static str {
+    match memory {
+        "gl" => "memory:GLMemory",
+        "cuda" => "memory:CUDAMemory",
+        "d3d12" => "memory:D3D12Memory",
+        "d3d11" => "memory:D3D11Memory",
+        _ => "system",
+    }
+}
+
+/// Frames in `--memory` into a real `whepserversink` that offers only
+/// `--codec`, and a `whepclientsrc` on the same host as its viewer. Codec
+/// discovery and the encoding chain run only once a viewer connects.
+fn webrtc(o: &Opts) -> i32 {
+    let log = capture_log(o.verbose);
+    let caps = codec_caps(&o.codec);
+    let feature = memory_feature(&o.memory);
+    let (top, top_takes) = match webrtcsink_encoder(&caps) {
+        Some(f) => {
+            let mems = sink_memories(&f);
+            let takes = mems.iter().any(|m| {
+                m == feature
+                    || m == "ANY"
+                    || (feature == "system" && m == "memory:SystemMemory")
+            });
+            (f.name().to_string(), takes.to_string())
+        }
+        None => ("none".to_string(), "false".to_string()),
+    };
+    let head = format!(
+        "webrtc memory={} codec={} top_encoder={top} top_takes_memory={top_takes}",
+        o.memory, o.codec
+    );
+
+    let port = match std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()) {
+        Ok(a) => a.port(),
+        Err(e) => {
+            println!("{head} result=SETUP_FAIL error=\"port: {e}\"");
+            return 1;
+        }
+    };
+    let producer = default_producer(&o.memory, o.frames).replacen(
+        &format!("num-buffers={}", o.frames),
+        "is-live=true",
+        1,
+    );
+    let server = match launch(&format!("{producer} ! whepserversink name=ws")) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("{head} result=REFUSED error=\"{}\"", e.replace('"', "'"));
+            return 1;
+        }
+    };
+    let ws = server.by_name("ws").unwrap();
+    ws.set_property("stun-server", None::<&str>);
+    ws.set_property("do-fec", false);
+    ws.set_property("audio-caps", gst::Caps::new_empty());
+    ws.set_property("video-caps", &caps);
+    ws.property::<gst::glib::Object>("signaller")
+        .set_property("host-addr", format!("http://127.0.0.1:{port}"));
+
+    let discovery_encoders = Arc::new(Mutex::new(Vec::<String>::new()));
+    let session_encoders = Arc::new(Mutex::new(Vec::<String>::new()));
+    let encoded = Arc::new(AtomicU64::new(0));
+    {
+        let (disc, sess, encoded) = (
+            discovery_encoders.clone(),
+            session_encoders.clone(),
+            encoded.clone(),
+        );
+        ws.connect("encoder-setup", false, move |args| {
+            let consumer = args[1].get::<String>().unwrap_or_default();
+            if let Ok(enc) = args[3].get::<gst::Element>() {
+                let name = enc
+                    .factory()
+                    .map(|f| f.name().to_string())
+                    .unwrap_or_default();
+                if consumer == "discovery" {
+                    disc.lock().unwrap().push(name);
+                } else {
+                    sess.lock().unwrap().push(name);
+                    if let Some(pad) = enc.static_pad("src") {
+                        let encoded = encoded.clone();
+                        pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                            encoded.fetch_add(1, Ordering::Relaxed);
+                            gst::PadProbeReturn::Ok
+                        });
+                    }
+                }
+            }
+            Some(false.to_value())
+        });
+    }
+
+    let client = gst::Pipeline::new();
+    let wc = match gst::ElementFactory::make("whepclientsrc").build() {
+        Ok(e) => e,
+        Err(e) => {
+            println!("{head} result=SETUP_FAIL error=\"whepclientsrc: {e}\"");
+            return 1;
+        }
+    };
+    wc.set_property("stun-server", None::<&str>);
+    wc.property::<gst::glib::Object>("signaller").set_property(
+        "whep-endpoint",
+        format!("http://127.0.0.1:{port}/whep/endpoint"),
+    );
+    client.add(&wc).unwrap();
+    let received = Arc::new(AtomicU64::new(0));
+    {
+        let weak = client.downgrade();
+        let received = received.clone();
+        wc.connect_pad_added(move |_, pad| {
+            let Some(pipeline) = weak.upgrade() else {
+                return;
+            };
+            let Ok(sink) = gst::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .property("async", false)
+                .build()
+            else {
+                return;
+            };
+            let _ = pipeline.add(&sink);
+            let _ = sink.sync_state_with_parent();
+            let sink_pad = sink.static_pad("sink").unwrap();
+            let received = received.clone();
+            sink_pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                received.fetch_add(1, Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            });
+            let _ = pad.link(&sink_pad);
+        });
+    }
+
+    let mut error = String::new();
+    if let Err(e) = server.set_state(gst::State::Playing) {
+        error = format!("server set_state: {e}");
+    }
+    std::thread::sleep(Duration::from_millis(1000));
+    if error.is_empty() {
+        if let Err(e) = client.set_state(gst::State::Playing) {
+            error = format!("client set_state: {e}");
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(o.timeout);
+    let (bus_s, bus_c) = (server.bus().unwrap(), client.bus().unwrap());
+    while error.is_empty()
+        && received.load(Ordering::Relaxed) < 30
+        && Instant::now() < deadline
+    {
+        for (which, bus) in [("server", &bus_s), ("client", &bus_c)] {
+            while let Some(msg) = bus.pop() {
+                if let gst::MessageView::Error(e) = msg.view() {
+                    if error.is_empty() {
+                        error = format!(
+                            "{which}:{}: {} ({})",
+                            msg.src().map(|s| s.name().to_string()).unwrap_or_default(),
+                            e.error(),
+                            e.debug().map(|d| d.to_string()).unwrap_or_default()
+                        );
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = client.set_state(gst::State::Null);
+    let _ = server.set_state(gst::State::Null);
+
+    let (enc, got) = (encoded.load(Ordering::Relaxed), received.load(Ordering::Relaxed));
+    let sess = session_encoders.lock().unwrap().join(",");
+    let mut disc = discovery_encoders.lock().unwrap().clone();
+    disc.sort();
+    disc.dedup();
+    let result = if enc > 0 && got > 0 {
+        "OK"
+    } else if !error.is_empty() {
+        "FAIL"
+    } else if sess.is_empty() {
+        "NO_SESSION_ENCODER"
+    } else if enc == 0 {
+        "NOT_ENCODED"
+    } else {
+        "NOT_RECEIVED"
+    };
+    println!(
+        "{head} result={result} session_encoders={} discovery_encoders={} encoded={enc} received={got} error=\"{}\"",
+        if sess.is_empty() { "none".into() } else { sess },
+        if disc.is_empty() { "none".into() } else { disc.join(",") },
+        error.replace('"', "'").replace('\n', " ")
+    );
+    let lines = log.lock().unwrap().clone();
+    for l in lines
+        .iter()
+        .filter(|l| {
+            let l = l.to_lowercase();
+            NOTABLE.iter().any(|k| l.contains(k))
+        })
+        .take(6)
+    {
+        println!("    log: {}", l.replace('\n', " "));
+    }
+    i32::from(result != "OK")
+}
+
 fn run_to_eos(desc: &str, timeout: u64) -> (&'static str, String) {
     let p = match launch(desc) {
         Ok(p) => p,
@@ -695,6 +948,21 @@ fn all(o: &Opts) -> i32 {
         }
     }
     run_child(&exe, &["encoders", "--run", "--frames", "30"], 600);
+
+    if have("whepserversink") && have("whepclientsrc") {
+        for memory in MEMORIES {
+            if !needed(memory).iter().all(|e| have(e)) {
+                continue;
+            }
+            for codec in ["h264", "h265", "vp9", "av1"] {
+                run_child(
+                    &exe,
+                    &["webrtc", "--memory", memory, "--codec", codec, "--timeout", "20"],
+                    45,
+                );
+            }
+        }
+    }
     0
 }
 
