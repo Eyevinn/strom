@@ -19,7 +19,9 @@
 //!   encoder discovery then finds no encoder that can take them — video goes
 //!   missing while audio keeps working. D3D12 and D3D11 memory, what the
 //!   Windows hardware decoders output, are always downloaded too: the sink
-//!   accepts them and then cannot encode them either. Other GPU memory (CUDA,
+//!   refuses D3D12 memory at link time, and it accepts D3D11 memory but
+//!   encodes with the highest-ranked encoder for the codec, which on an NVIDIA
+//!   host does not take D3D11 memory. Other GPU memory (CUDA,
 //!   NVMM, VA, DMABuf) is left in place when the sink accepts it: the encoders
 //!   that advertise those really do take them, and downloading would cost a
 //!   full round trip per frame. When the sink refuses it, CUDA memory is
@@ -795,11 +797,11 @@ mod tests {
         }
     }
 
-    /// `whepserversink` accepts D3D memory and then finds no encoder for it,
-    /// as with GL memory: it is downloaded whatever the sink answers, then
-    /// judged on its format.
+    /// `whepserversink` refuses D3D12 memory, and its top encoder for a codec
+    /// may not take D3D11 memory: D3D memory is downloaded whatever the sink
+    /// answers, then judged on its format.
     #[test]
-    fn d3d_memory_is_downloaded_even_when_the_sink_accepts_it() {
+    fn d3d_memory_is_downloaded_whatever_the_sink_answers() {
         for (feature, download, factory) in [
             (
                 "memory:D3D12Memory",
