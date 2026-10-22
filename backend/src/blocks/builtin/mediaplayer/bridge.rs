@@ -710,7 +710,9 @@ fn assemble_chain(
 /// keeps frames in GL memory of a context this pipeline made for itself, and
 /// the mixer's glcolorconvert rejects a buffer from any other context. CUDA
 /// and D3D memory carry no GL context, so they pass and the consumer downloads
-/// them itself (`video_adapt::decide()`). A stinger takes system memory only:
+/// them itself (`video_adapt::decide()`). NVMM, VA and DMABuf pass too: a
+/// decoder whose only output is one of them (Jetson's `nvv4l2decoder`) would
+/// otherwise fail `not-negotiated` on files that play without this restriction. A stinger takes system memory only:
 /// VideoToolbox drops ProRes 4444's alpha in GL memory but keeps it in system
 /// memory (AYUV64).
 ///
@@ -726,6 +728,9 @@ fn decoded_video_caps(stinger: bool) -> gst::Caps {
             "memory:CUDAMemory",
             "memory:D3D12Memory",
             "memory:D3D11Memory",
+            "memory:NVMM",
+            "memory:VAMemory",
+            "memory:DMABuf",
         ] {
             caps_mut.append_structure_full(
                 gst::Structure::new_empty("video/x-raw"),
@@ -753,9 +758,26 @@ fn restrict_decoder_memory(source: &gst::Element, stinger: bool) {
         // The signal passes the query by pointer; a `Value` getter would hand
         // back a copy and the answer would be lost.
         let query = args[3].get::<&gst::QueryRef>().ok()?;
-        let query = unsafe { gst::QueryRef::from_mut_ptr(query.as_mut_ptr()) };
-        Some(answer_decoder_caps_query(&element, query, stinger).to_value())
+        Some(handle_autoplug_query(&element, query, stinger).to_value())
     });
+}
+
+/// Body of the `autoplug-query` handler. `QueryRef::from_mut_ptr` asserts
+/// writability in debug builds, and a panic inside a glib signal closure aborts
+/// the process, so a shared query is declined before it is converted.
+fn handle_autoplug_query(element: &gst::Element, query: &gst::QueryRef, stinger: bool) -> bool {
+    if !query_is_writable(query) {
+        return false;
+    }
+    let query = unsafe { gst::QueryRef::from_mut_ptr(query.as_mut_ptr()) };
+    answer_decoder_caps_query(element, query, stinger)
+}
+
+/// `QueryRef` has no safe writability check.
+fn query_is_writable(query: &gst::QueryRef) -> bool {
+    unsafe {
+        gst::ffi::gst_mini_object_is_writable(query.as_ptr() as *const gst::ffi::GstMiniObject) != 0
+    }
 }
 
 /// Fill in `query` when it is a CAPS query from a video decoder; returns
@@ -771,11 +793,7 @@ fn answer_decoder_caps_query(
 ) -> bool {
     // A query emitted from outside decodebin is shared; writing to it would
     // trip a GStreamer critical and leave the caller with no result.
-    // `QueryRef` has no safe writability check.
-    let writable = unsafe {
-        gst::ffi::gst_mini_object_is_writable(query.as_ptr() as *const gst::ffi::GstMiniObject) != 0
-    };
-    if !writable {
+    if !query_is_writable(query) {
         return false;
     }
     let is_video_decoder = element.factory().is_some_and(|f| {
@@ -1275,6 +1293,9 @@ mod tests {
         assert!(clip.can_intersect(&cuda));
         assert!(clip.can_intersect(&d3d("memory:D3D12Memory")));
         assert!(clip.can_intersect(&d3d("memory:D3D11Memory")));
+        for feature in ["memory:NVMM", "memory:VAMemory", "memory:DMABuf"] {
+            assert!(clip.can_intersect(&d3d(feature)), "{feature}");
+        }
 
         let stinger =
             bridge_appsink_caps(true, true, "video").expect("stinger video appsink has caps");
@@ -1282,6 +1303,7 @@ mod tests {
         assert!(stinger.can_intersect(&system));
         assert!(!stinger.can_intersect(&cuda));
         assert!(!stinger.can_intersect(&d3d("memory:D3D12Memory")));
+        assert!(!stinger.can_intersect(&d3d("memory:NVMM")));
     }
 
     /// Classic decodebin asks the decoder's caps before the appsink exists, so
@@ -1309,12 +1331,11 @@ mod tests {
         let mut query = gst::query::Caps::new(Some(&filter));
         assert!(!answer_decoder_caps_query(&identity, &mut query, false));
 
-        // A shared query is left alone.
+        // A shared query is left alone, without tripping `from_mut_ptr`'s
+        // debug assertion: the handler checks before it converts.
         let shared: gst::Query = gst::query::Caps::new(Some(&filter)).into();
         let _other_ref = shared.clone();
-        // `from_mut_ptr` asserts writability, so go through the raw pointer.
-        let shared_ref = unsafe { &mut *(shared.as_ptr() as *mut gst::QueryRef) };
-        assert!(!answer_decoder_caps_query(&decoder, shared_ref, false));
+        assert!(!handle_autoplug_query(&decoder, &shared, false));
     }
 
     /// The classic decoder's pipeline answers decoder caps queries: a handler is
