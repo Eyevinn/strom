@@ -48,6 +48,7 @@ Make sure you have the following installed:
 | Feature | Description | Extra dependencies |
 |---------|-------------|--------------------|
 | `nvidia` | NVIDIA GPU monitoring (default) | None |
+| `lsp` | Built-in lsp-plugins-rs gate, compressor, EQ and limiter for the mixer's Rust DSP backend (default; LGPL-3.0-or-later). Without it those Rust-backend stages pass audio through unprocessed; the LV2 backend is unchanged | None |
 | `efp` | EFP/SRT input and output blocks | `cmake`, `libclang-dev` (Linux) / `cmake` (macOS, via Homebrew) |
 | `no-gui` | Build without the native GUI (server only; used by the Docker image) | None |
 

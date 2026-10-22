@@ -8,6 +8,13 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 
 /// Get Mixer block definition (metadata only).
 pub(super) fn mixer_definition() -> BlockDefinition {
+    // Without the `lsp` feature the Rust DSP stages are passthrough: say so.
+    #[cfg(feature = "lsp")]
+    let dsp_backend_description =
+        "LV2 uses external C++ LSP plugins, Rust uses built-in lsp-plugins-rs";
+    #[cfg(not(feature = "lsp"))]
+    let dsp_backend_description =
+        "LV2 uses external C++ LSP plugins; Rust DSP is not in this build (passthrough)";
     // Generate channel properties
     let mut exposed_properties = vec![
         // Global: number of channels — construction-time only, defines how the
@@ -31,8 +38,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         ExposedProperty {
             name: "dsp_backend".to_string(),
             label: "DSP Backend".to_string(),
-            description: "LV2 uses external C++ LSP plugins, Rust uses built-in lsp-plugins-rs"
-                .to_string(),
+            description: dsp_backend_description.to_string(),
             property_type: PropertyType::Enum {
                 values: vec![
                     EnumValue {

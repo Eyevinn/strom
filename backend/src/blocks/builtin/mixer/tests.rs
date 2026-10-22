@@ -10,8 +10,10 @@ use strom_types::block::ExposedProperty;
 use strom_types::mixer::DEFAULT_INTERNAL_BUS_LATENCY_MS;
 use strom_types::PropertyValue;
 
+// Tests that need the lsp-rs elements carry #[cfg(feature = "lsp")].
 fn init_gst() {
     let _ = gst::init();
+    #[cfg(feature = "lsp")]
     let _ = gst_plugins_lsp::plugin_register_static();
 }
 
@@ -296,6 +298,7 @@ fn test_mixer_config_properties_not_live() {
 // ---- Element factories ----
 
 #[test]
+#[cfg(feature = "lsp")]
 fn test_rust_backend_elements_take_their_settings() {
     init_gst();
     // lsp-rs is statically registered, so the rust backend never falls back
@@ -415,6 +418,7 @@ fn test_make_hpf_element() {
 
 // ---- Property translation (lsp-rs is statically registered) ----
 
+#[cfg(feature = "lsp")]
 fn lsp_rs(factory: &str) -> gst::Element {
     init_gst();
     gst::ElementFactory::make(factory)
@@ -422,6 +426,7 @@ fn lsp_rs(factory: &str) -> gst::Element {
         .unwrap_or_else(|e| panic!("{factory} is statically registered: {e}"))
 }
 
+#[cfg(feature = "lsp")]
 fn float(value: &PropertyValue) -> f64 {
     match value {
         PropertyValue::Float(v) => *v,
@@ -430,6 +435,7 @@ fn float(value: &PropertyValue) -> f64 {
 }
 
 #[test]
+#[cfg(feature = "lsp")]
 fn test_translate_gate_property() {
     let gate = lsp_rs("lsp-rs-gate");
     // gt (linear) -> open-threshold + close-threshold (dB): 0.1 linear = -20 dB
@@ -442,6 +448,7 @@ fn test_translate_gate_property() {
 }
 
 #[test]
+#[cfg(feature = "lsp")]
 fn test_translate_compressor_property() {
     let comp = lsp_rs("lsp-rs-compressor");
     for (lv2, rust) in [
@@ -461,6 +468,7 @@ fn test_translate_compressor_property() {
 }
 
 #[test]
+#[cfg(feature = "lsp")]
 fn test_translate_eq_property() {
     let eq = lsp_rs("lsp-rs-equalizer");
 
@@ -481,6 +489,7 @@ fn test_translate_eq_property() {
 }
 
 #[test]
+#[cfg(feature = "lsp")]
 fn test_translate_limiter_property() {
     let lim = lsp_rs("lsp-rs-limiter");
     // th (linear) -> threshold (dB)
@@ -689,6 +698,7 @@ fn test_build_wires_channels_aux_group_and_monitor() {
 /// is within the build's counts. The definition is generated for the largest
 /// mixer, so this filters it down to the properties a small build has
 /// elements for.
+#[cfg(feature = "lsp")]
 fn in_config(name: &str, channels: usize, aux: usize, groups: usize) -> bool {
     name.split('_').all(|token| {
         for (prefix, max) in [
@@ -709,6 +719,7 @@ fn in_config(name: &str, channels: usize, aux: usize, groups: usize) -> bool {
 }
 
 #[test]
+#[cfg(feature = "lsp")]
 fn test_every_live_property_targets_a_built_element() {
     // The definition names element ids and property names as strings; the
     // builder names elements separately. A rename on either side silently
@@ -756,6 +767,7 @@ fn test_every_live_property_targets_a_built_element() {
 }
 
 #[test]
+#[cfg(feature = "lsp")]
 fn test_build_applies_properties_to_elements() {
     let m = assemble(&small_mixer_props(&[
         ("ch1_gain", PropertyValue::Int(-20)),
