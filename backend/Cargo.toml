@@ -7,10 +7,13 @@ authors.workspace = true
 default-run = "strom"
 
 [features]
-default = ["nvidia"]
+default = ["nvidia", "lsp"]
 no-gui = []
 nvidia = ["dep:nvml-wrapper"]
 efp = ["dep:gst-plugin-efp"]
+# Built-in lsp-plugins-rs DSP (LGPL-3.0-or-later) for the mixer's Rust backend.
+# Build with --no-default-features to leave it out.
+lsp = ["dep:gst-plugins-lsp"]
 
 [dependencies]
 # Internal
@@ -69,7 +72,7 @@ gst-plugin-webrtchttp.workspace = true
 gst-plugin-inter.workspace = true
 gst-plugin-rtp.workspace = true
 gst-plugin-isobmff.workspace = true
-gst-plugins-lsp = { git = "https://github.com/srperens/lsp-plugins-rs", tag = "v1.3.1", package = "gst-plugins-lsp" }
+gst-plugins-lsp = { git = "https://github.com/srperens/lsp-plugins-rs", tag = "v1.3.1", package = "gst-plugins-lsp", optional = true }
 gst-plugin-efp = { git = "https://github.com/Eyevinn/efp", tag = "v0.4.0", package = "gst-plugin-efp", optional = true }
 
 # Encoding
