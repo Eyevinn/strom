@@ -13,8 +13,33 @@ pub enum CompositorBackend {
     Software,
 }
 
+/// Whether `glcolorconvert` has GL-memory src caps for `format`, read from its
+/// pad templates so it follows whichever GStreamer runs. `None` when the
+/// element is not installed.
+pub fn gl_can_produce(format: &str) -> Option<bool> {
+    let factory = gst::ElementFactory::find("glcolorconvert")?;
+    let wanted = gst::Caps::builder("video/x-raw")
+        .features(["memory:GLMemory"])
+        .field("format", format)
+        .build();
+    Some(
+        factory
+            .static_pad_templates()
+            .iter()
+            .filter(|t| t.direction() == gst::PadDirection::Src)
+            .any(|t| t.caps().can_intersect(&wanted)),
+    )
+}
+
 /// Determine which compositor backend to use.
-pub fn select_backend(preference: &str) -> Result<CompositorBackend, BlockBuildError> {
+///
+/// `output_format` only matters for `auto`: the GPU backend cannot produce
+/// every format, and `auto` should pick the CPU compositor rather than fail
+/// the build on a format the operator asked for.
+pub fn select_backend(
+    preference: &str,
+    output_format: Option<&str>,
+) -> Result<CompositorBackend, BlockBuildError> {
     match preference {
         "gpu" => {
             if gst::ElementFactory::find("glvideomixerelement").is_some() {
@@ -29,15 +54,33 @@ pub fn select_backend(preference: &str) -> Result<CompositorBackend, BlockBuildE
         _ => {
             // Auto: prefer GPU, but only if a real hardware GL renderer is available.
             // Mesa software renderers (llvmpipe) are slower than the CPU compositor.
-            if gst::ElementFactory::find("glvideomixerelement").is_some() && gpu::has_hardware_gl()
-            {
-                info!("Vision mixer: using GPU (OpenGL) backend");
-                Ok(CompositorBackend::OpenGL)
-            } else {
-                info!("Vision mixer: no hardware GL, using CPU backend");
-                Ok(CompositorBackend::Software)
+            let gpu_usable = gst::ElementFactory::find("glvideomixerelement").is_some()
+                && gpu::has_hardware_gl();
+            let backend = auto_backend(gpu_usable, output_format);
+            match backend {
+                CompositorBackend::OpenGL => info!("Vision mixer: using GPU (OpenGL) backend"),
+                CompositorBackend::Software if gpu_usable => info!(
+                    "Vision mixer: GPU backend cannot produce output_format {}, using CPU backend",
+                    output_format.unwrap_or_default()
+                ),
+                CompositorBackend::Software => {
+                    info!("Vision mixer: no hardware GL, using CPU backend")
+                }
             }
+            Ok(backend)
         }
+    }
+}
+
+/// The `auto` choice: GPU when it is usable and can produce `output_format`,
+/// otherwise CPU. Mesa software renderers (llvmpipe) are slower than the CPU
+/// compositor, so `gpu_usable` is false for them.
+fn auto_backend(gpu_usable: bool, output_format: Option<&str>) -> CompositorBackend {
+    let format_ok = output_format.is_none_or(|f| gl_can_produce(f) != Some(false));
+    if gpu_usable && format_ok {
+        CompositorBackend::OpenGL
+    } else {
+        CompositorBackend::Software
     }
 }
 
@@ -285,5 +328,26 @@ fn backend_name(backend: CompositorBackend) -> &'static str {
     match backend {
         CompositorBackend::OpenGL => "OpenGL",
         CompositorBackend::Software => "Software",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_falls_back_to_cpu_for_a_format_gl_cannot_produce() {
+        gst::init().unwrap();
+        if gst::ElementFactory::find("glcolorconvert").is_none() {
+            return;
+        }
+        // YVYU is a valid GStreamer format outside glcolorconvert's list.
+        assert_eq!(
+            auto_backend(true, Some("YVYU")),
+            CompositorBackend::Software
+        );
+        assert_eq!(auto_backend(true, None), CompositorBackend::OpenGL);
+        assert_eq!(auto_backend(true, Some("NV12")), CompositorBackend::OpenGL);
+        assert_eq!(auto_backend(false, None), CompositorBackend::Software);
     }
 }
