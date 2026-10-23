@@ -57,26 +57,17 @@ fn output_convert_source(
 /// Fail with an actionable error when `glcolorconvert` has no GL-memory src
 /// caps for `format`.
 fn ensure_gl_can_produce(format: &str) -> Result<(), BlockBuildError> {
-    let factory = gst::ElementFactory::find("glcolorconvert").ok_or_else(|| {
-        BlockBuildError::MissingPlugin("glcolorconvert (gstreamer1.0-gl) is not installed".into())
-    })?;
-    let wanted = gst::Caps::builder("video/x-raw")
-        .features(["memory:GLMemory"])
-        .field("format", format)
-        .build();
-    let producible = factory
-        .static_pad_templates()
-        .iter()
-        .filter(|t| t.direction() == gst::PadDirection::Src)
-        .any(|t| t.caps().can_intersect(&wanted));
-    if producible {
-        return Ok(());
+    match elements::gl_can_produce(format) {
+        Some(true) => Ok(()),
+        Some(false) => Err(BlockBuildError::InvalidConfiguration(format!(
+            "output_format {} cannot be produced on the GPU backend: glcolorconvert has no {} output \
+             in this GStreamer. Pick another output_format, or set Backend (compositor_preference) to CPU Only.",
+            format, format
+        ))),
+        None => Err(BlockBuildError::MissingPlugin(
+            "glcolorconvert (gstreamer1.0-gl) is not installed".into(),
+        )),
     }
-    Err(BlockBuildError::InvalidConfiguration(format!(
-        "output_format {} cannot be produced on the GPU backend: glcolorconvert has no {} output \
-         in this GStreamer. Pick another output_format, or set Backend (compositor_preference) to CPU Only.",
-        format, format
-    )))
 }
 
 pub(super) fn build_gpu_pipeline(

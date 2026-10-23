@@ -171,7 +171,7 @@ impl BlockBuilder for VisionMixerBuilder {
                 _ => None,
             })
             .unwrap_or("auto");
-        let backend = super::elements::select_backend(pref)?;
+        let backend = super::elements::select_backend(pref, output_format.as_deref())?;
 
         info!(
             "Building vision mixer: {} inputs, PGM={}x{}@{}/{}, MV={}x{}@{}/{}, backend={:?}, pgm={}, pvw={}",
