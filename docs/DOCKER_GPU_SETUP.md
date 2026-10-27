@@ -91,7 +91,7 @@ docker run -d \
 |---------|-------------|----------|
 | Video Encoding | `nvh264enc`, `nvh265enc`, `nvav1enc` | `x264enc`, `x265enc` |
 | Video Decoding | `nvh264dec`, `nvh265dec` | `avdec_h264` |
-| Color Conversion | `autovideoconvert` (glcolorconvert) | `videoconvert` |
+| Color Conversion | `glcolorconvert`, `cudaconvertscale` (where the video is in GL or CUDA memory) | `videoconvert` |
 | Video Scaling | `glvideomixer` | `videoscale` |
 | Compositing | `glvideomixer` | `compositor` |
 

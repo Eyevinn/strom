@@ -122,8 +122,8 @@ impl BlockBuilder for VideoEncBuilder {
 
         // Create elements.
         //
-        // The converter is plain `videoconvert` whatever the global video
-        // convert mode says. `autovideoconvert` turned CUDA memory from
+        // The converter is plain `videoconvert`, never `autovideoconvert`.
+        // `autovideoconvert` turned CUDA memory from
         // `nvh264dec` into GL RGBA that `nvh264enc` never negotiates from
         // (#1104). `videoconvert` passes GPU memory through untouched when the
         // encoder lists it, and converts system memory; the input front puts

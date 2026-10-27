@@ -156,8 +156,16 @@ pub fn detect_gpu_capabilities() {
     let gl_info = detect_gl_renderer();
     let _ = GL_RENDERER_INFO.set(gl_info);
 
+    #[cfg(target_os = "macos")]
+    info!(
+        "macOS - video conversion uses videoconvert with n-threads={}",
+        video_convert_threads()
+    );
+
+    // On WSL, GL comes from Mesa while NVENC runs on the NVIDIA card, and the
+    // warning's advice (pick the high-performance GPU) cannot be followed.
     #[cfg(not(target_os = "macos"))]
-    {
+    if !is_wsl() {
         let has_nvenc = gst::Registry::get()
             .find_feature("nvh264enc", gst::ElementFactory::static_type())
             .is_some();
@@ -165,6 +173,20 @@ pub fn detect_gpu_capabilities() {
             warn_if_gl_is_not_on_nvidia();
         }
     }
+}
+
+/// True inside WSL (Windows Subsystem for Linux).
+#[cfg(not(target_os = "macos"))]
+fn is_wsl() -> bool {
+    if std::env::var("WSL_DISTRO_NAME").is_ok() || std::env::var("WSL_INTEROP").is_ok() {
+        return true;
+    }
+    std::fs::read_to_string("/proc/version")
+        .map(|v| {
+            let v = v.to_lowercase();
+            v.contains("microsoft") || v.contains("wsl")
+        })
+        .unwrap_or(false)
 }
 
 /// Sanity bound on the detected core count, not a performance policy: it sits

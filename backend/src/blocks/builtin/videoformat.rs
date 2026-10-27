@@ -111,10 +111,9 @@ impl BlockBuilder for VideoFormatBuilder {
         // Always create all elements for consistent external pad references
         // Elements will just pass through if their respective properties aren't set
         //
-        // The converter is plain `videoconvert` whatever the global video
-        // convert mode says. GPU memory is scaled by a GPU chain that the
-        // front splices in from the negotiated caps, instead of
-        // `autovideoconvert` choosing one by rank.
+        // The converter is plain `videoconvert`, never `autovideoconvert`.
+        // GPU memory is scaled by a GPU chain that the front splices in from
+        // the negotiated caps, instead of a converter chosen by rank.
         let input_id = format!("{}:input", instance_id);
         let output_id = format!("{}:output", instance_id);
         let scale_id = format!("{}:videoscale", instance_id);
