@@ -54,8 +54,15 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 /// the disk.
 const FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Fragments an MP4 file without a split duration has room to index: about
-/// 4.5 hours of the muxer's 1 s fragments, for 196 KB at the start of the file.
+/// Most fragments a second the index makes room for. The muxer cuts at a
+/// keyframe near its 1 s fragment duration: a 2 s GOP gives one fragment
+/// every 2 s, but short GOPs, audio alone or a stalled video track give two a
+/// second and more.
+const INDEX_ENTRIES_PER_SECOND: u64 = 5;
+
+/// Fragments an MP4 file without a split duration has room to index, for
+/// 196 KB at the start of the file: 9 hours with a 2 s GOP, under an hour at
+/// five fragments a second.
 const UNSPLIT_INDEX_ENTRIES: usize = 16_384;
 
 /// Called with the index and path of every file the sink opens.
@@ -378,13 +385,15 @@ mod imp {
             Ok((index, path))
         }
 
-        /// How many fragments a file's index has room for. The muxer cuts a
-        /// fragment about once a second, at the first keyframe after 1 s, so
-        /// two a second leaves a margin.
+        /// How many fragments a file's index has room for. A split file can
+        /// run past its split duration until the next cut point, hence the
+        /// margin. One `sidx` holds at most `u16::MAX` entries.
         fn index_capacity(&self) -> usize {
             let max_duration = self.settings.lock().unwrap().policy.max_duration;
             match max_duration {
-                Some(max) => (max.seconds() as usize * 2 + 16).min(u16::MAX as usize),
+                Some(max) => {
+                    (max.seconds() * INDEX_ENTRIES_PER_SECOND + 16).min(u16::MAX as u64) as usize
+                }
                 None => UNSPLIT_INDEX_ENTRIES,
             }
         }
@@ -457,20 +466,24 @@ mod imp {
                     if let Some(base) = state.file_base {
                         mp4_boxes::shift_decode_times(&mut bytes, &state.timescales, base);
                     }
-                    if let Some(index) = state.index.as_mut() {
+                    let offset = state.bytes_in_file;
+                    let times = state.index.as_ref().map(|_| {
                         let start = mp4_boxes::fragment_start_ns(&bytes, &state.timescales);
                         let end = mp4_boxes::fragment_end_ns(
                             &bytes,
                             &state.timescales,
                             &state.default_durations,
                         );
-                        if let (Some(start), Some(end)) = (start, end) {
-                            index.fragments.push(IndexedFragment {
-                                offset: state.bytes_in_file,
-                                start,
-                                end,
-                            });
-                        } else {
+                        start.zip(end)
+                    });
+                    self.write(state, &bytes)?;
+                    match times {
+                        Some(Some((start, end))) => {
+                            if let Some(index) = state.index.as_mut() {
+                                index.fragments.push(IndexedFragment { offset, start, end });
+                            }
+                        }
+                        Some(None) => {
                             gst::warning!(
                                 CAT,
                                 imp = self,
@@ -478,8 +491,9 @@ mod imp {
                             );
                             state.index = None;
                         }
+                        None => {}
                     }
-                    self.write(state, &bytes)
+                    Ok(())
                 }
                 Format::Matroska => {
                     let Some(ts) = mkv_cluster::cluster_timestamp(bytes) else {
@@ -763,10 +777,97 @@ mod imp {
             to_ts(first.start),
             &entries,
         );
-        let mut bytes = mp4_boxes::free(room - sidx.len());
-        bytes.extend_from_slice(&sidx);
-        file.seek(SeekFrom::Start(index.at))
-            .and_then(|_| file.write_all(&bytes))
+        // The index goes in first, at the end of the room, while the room's
+        // own `free` header still covers it: a write that stops short, on a
+        // full disk or a crash, leaves the file as it was. Shortening that
+        // header to end where the index starts is the last write. The room
+        // was written as zeros, so the header is all the new `free` needs.
+        let free_len = room - sidx.len();
+        let mut header = (free_len as u32).to_be_bytes().to_vec();
+        header.extend_from_slice(b"free");
+        file.seek(SeekFrom::Start(index.at + free_len as u64))
+            .and_then(|_| file.write_all(&sidx))
+            .and_then(|_| file.sync_data())
+            .and_then(|_| file.seek(SeekFrom::Start(index.at)))
+            .and_then(|_| file.write_all(&header))
             .map_err(|e| e.to_string())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::io::Read;
+
+        /// A file as the sink leaves it before the close: the init segment,
+        /// the room, and `sizes.len()` fragments of those sizes, 1 s each.
+        fn file_with(capacity: usize, sizes: &[u64]) -> (tempfile::NamedTempFile, FileIndex, u64) {
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            let init = vec![0xAAu8; 100];
+            tmp.write_all(&init).unwrap();
+            tmp.write_all(&mp4_boxes::free(index_room(capacity)))
+                .unwrap();
+            let mut offset = (init.len() + index_room(capacity)) as u64;
+            let mut fragments = Vec::new();
+            for (i, &size) in sizes.iter().enumerate() {
+                let i = i as u64;
+                fragments.push(IndexedFragment {
+                    offset,
+                    start: i * 1_000_000_000,
+                    end: (i + 1) * 1_000_000_000,
+                });
+                tmp.write_all(&vec![0xBB; size as usize]).unwrap();
+                offset += size;
+            }
+            let index = FileIndex {
+                at: init.len() as u64,
+                capacity,
+                track_id: 1,
+                timescale: 90_000,
+                fragments,
+            };
+            (tmp, index, offset)
+        }
+
+        fn contents(tmp: &tempfile::NamedTempFile) -> Vec<u8> {
+            let mut data = Vec::new();
+            File::open(tmp.path())
+                .unwrap()
+                .read_to_end(&mut data)
+                .unwrap();
+            data
+        }
+
+        fn be32(data: &[u8], at: usize) -> u32 {
+            u32::from_be_bytes(data[at..at + 4].try_into().unwrap())
+        }
+
+        #[test]
+        fn the_index_ends_where_the_first_fragment_starts_and_covers_the_file() {
+            let (tmp, index, len) = file_with(8, &[1000, 2000, 500]);
+            write_index(tmp.as_file().try_clone().as_mut().unwrap(), &index, len).unwrap();
+            let data = contents(&tmp);
+            assert_eq!(data.len() as u64, len);
+            let free_len = be32(&data, 100) as usize;
+            assert_eq!(&data[104..108], b"free");
+            let sidx = 100 + free_len;
+            assert_eq!(&data[sidx + 4..sidx + 8], b"sidx");
+            assert_eq!(
+                sidx + be32(&data, sidx) as usize,
+                index.fragments[0].offset as usize
+            );
+            let sizes: Vec<u32> = (0..3).map(|i| be32(&data, sidx + 40 + i * 12)).collect();
+            assert_eq!(sizes, vec![1000, 2000, 500]);
+            let durations: Vec<u32> = (0..3).map(|i| be32(&data, sidx + 44 + i * 12)).collect();
+            assert_eq!(durations, vec![90_000; 3]);
+        }
+
+        #[test]
+        fn more_fragments_than_room_leaves_the_file_untouched() {
+            let (tmp, index, len) = file_with(2, &[1000, 2000, 500]);
+            let before = contents(&tmp);
+            let result = write_index(tmp.as_file().try_clone().as_mut().unwrap(), &index, len);
+            assert!(result.is_err());
+            assert_eq!(contents(&tmp), before);
+        }
     }
 }
