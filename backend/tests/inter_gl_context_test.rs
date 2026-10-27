@@ -86,8 +86,33 @@ fn element(built: &BlockBuildResult, id: &str) -> gst::Element {
         .unwrap_or_else(|| panic!("{id} in the block"))
 }
 
-/// Flow A: GL frames into the real Inter Output. Also returns its channel.
-fn publisher() -> (gst::Pipeline, String) {
+/// GL frames, as a GPU Vision Mixer with `gl_download=false` sends them.
+const GL_SOURCE: &str = "gltestsrc is-live=true ! \
+     video/x-raw(memory:GLMemory),format=RGBA,width=320,height=240,framerate=30/1 ! identity";
+
+/// A GPU Vision Mixer input: it uploads, then converts on the GPU.
+const GL_CONSUMER: &str = "glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),format=NV12 ! \
+     gldownload ! fakesink name=sink sync=false";
+
+/// Sets the pipelines it still finds to NULL when dropped, so a failed assert
+/// does not leave GL and streaming threads running in the test binary. Weak,
+/// so it does not keep a flow alive that a test drops on purpose.
+struct StopOnDrop(Vec<glib::WeakRef<gst::Pipeline>>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        for pipeline in self.0.iter().filter_map(|weak| weak.upgrade()) {
+            let _ = pipeline.set_state(gst::State::Null);
+        }
+    }
+}
+
+fn stop_on_drop(pipelines: &[&gst::Pipeline]) -> StopOnDrop {
+    StopOnDrop(pipelines.iter().map(|p| p.downgrade()).collect())
+}
+
+/// Flow A: `source` into the real Inter Output. Also returns its channel.
+fn publisher(source: &str) -> (gst::Pipeline, String) {
     let flow_id = uuid::Uuid::new_v4().to_string();
     let props: HashMap<String, PropertyValue> = [
         (
@@ -106,12 +131,7 @@ fn publisher() -> (gst::Pipeline, String) {
         .expect("Inter Output builds");
     let flow = gst::Pipeline::new();
     add_block(&flow, &built);
-    let source = gst::parse::bin_from_description(
-        "gltestsrc is-live=true ! \
-         video/x-raw(memory:GLMemory),format=RGBA,width=320,height=240,framerate=30/1 ! identity",
-        true,
-    )
-    .expect("GL source");
+    let source = gst::parse::bin_from_description(source, true).expect("source");
     flow.add(&source).unwrap();
     source
         .link(&element(&built, "out:intersink"))
@@ -119,9 +139,9 @@ fn publisher() -> (gst::Pipeline, String) {
     (flow, format!("strom_{}_out", flow_id))
 }
 
-/// Flow B: the real Inter Input into a GL converter, as a GPU mixer input.
-/// Also returns the count of frames that reached its sink.
-fn subscriber(channel: &str) -> (gst::Pipeline, Arc<AtomicU64>) {
+/// Flow B: the real Inter Input into `consumer`, which ends in a sink named
+/// `sink`. Also returns the count of frames that reached that sink.
+fn subscriber(channel: &str, consumer: &str) -> (gst::Pipeline, Arc<AtomicU64>) {
     let props: HashMap<String, PropertyValue> = [
         (
             "channel".to_string(),
@@ -138,12 +158,7 @@ fn subscriber(channel: &str) -> (gst::Pipeline, Arc<AtomicU64>) {
         .expect("Inter Input builds");
     let flow = gst::Pipeline::new();
     add_block(&flow, &built);
-    let consumer = gst::parse::bin_from_description(
-        "glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),format=NV12 ! gldownload ! \
-         fakesink name=sink sync=false",
-        true,
-    )
-    .expect("consumer");
+    let consumer = gst::parse::bin_from_description(consumer, true).expect("consumer");
     flow.add(&consumer).unwrap();
     element(&built, "in:front")
         .link(&consumer)
@@ -198,8 +213,9 @@ fn gl_frames_from_another_flow_convert_in_the_subscriber() {
     }
     register_inter();
 
-    let (a, channel) = publisher();
-    let (b, received) = subscriber(&channel);
+    let (a, channel) = publisher(GL_SOURCE);
+    let (b, received) = subscriber(&channel, GL_CONSUMER);
+    let _stop = stop_on_drop(&[&a, &b]);
     a.set_state(gst::State::Playing).expect("flow A plays");
     b.set_state(gst::State::Playing).expect("flow B plays");
 
@@ -236,7 +252,7 @@ fn flow_a_gl_context_outlives_flow_a_until_flow_b_lets_go() {
     }
     register_inter();
 
-    let (a, channel) = publisher();
+    let (a, channel) = publisher(GL_SOURCE);
     // Flow A's GL context, from the memory of a frame it publishes. Test
     // code: the probe removes itself after the first frame.
     let context: Arc<Mutex<Option<glib::WeakRef<gst_gl::GLContext>>>> = Arc::default();
@@ -261,7 +277,8 @@ fn flow_a_gl_context_outlives_flow_a_until_flow_b_lets_go() {
             *seen.lock().unwrap() = Some(memory.context().downgrade());
             gst::PadProbeReturn::Remove
         });
-    let (b, received) = subscriber(&channel);
+    let (b, received) = subscriber(&channel, GL_CONSUMER);
+    let _stop = stop_on_drop(&[&a, &b]);
     a.set_state(gst::State::Playing).expect("flow A plays");
     b.set_state(gst::State::Playing).expect("flow B plays");
 
@@ -332,5 +349,90 @@ fn flow_a_gl_context_outlives_flow_a_until_flow_b_lets_go() {
     assert!(
         !alive,
         "flow A's GL context is still alive after flow B let go of its buffers"
+    );
+}
+
+/// A consumer that takes system memory only, behind Inter Input, still gets
+/// another flow's GL frames: downloaded. The download has to be agreed before
+/// the caps arrive, since `intersrc` asks downstream whether it accepts them.
+#[test]
+fn gl_frames_from_another_flow_reach_a_system_memory_consumer() {
+    if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
+        return;
+    }
+    register_inter();
+
+    let (a, channel) = publisher(GL_SOURCE);
+    let (b, received) = subscriber(
+        &channel,
+        "capsfilter caps=video/x-raw ! videoconvert ! fakesink name=sink sync=false",
+    );
+    let _stop = stop_on_drop(&[&a, &b]);
+    a.set_state(gst::State::Playing).expect("flow A plays");
+    b.set_state(gst::State::Playing).expect("flow B plays");
+
+    let error = wait(&[&a, &b], Duration::from_secs(15), || {
+        received.load(Ordering::Relaxed) >= FRAMES
+    });
+    assert!(
+        error.is_none(),
+        "flow B failed on flow A's frames: {:?}",
+        error
+    );
+    assert!(
+        received.load(Ordering::Relaxed) >= FRAMES,
+        "only {} of {} frames reached flow B's sink",
+        received.load(Ordering::Relaxed),
+        FRAMES
+    );
+}
+
+/// A publisher that switches from GL to system memory mid-stream (a GPU
+/// Vision Mixer whose `gl_download` is turned on) keeps flowing: the download
+/// is taken out again for the new caps.
+#[test]
+fn a_switch_from_gl_to_system_memory_takes_the_download_out() {
+    if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
+        return;
+    }
+    register_inter();
+
+    let (a, channel) = publisher(
+        "gltestsrc is-live=true ! \
+         video/x-raw(memory:GLMemory),format=RGBA,width=320,height=240,framerate=30/1 ! \
+         gldownload ! capsfilter name=memory caps=video/x-raw(memory:GLMemory)",
+    );
+    let (b, received) = subscriber(&channel, GL_CONSUMER);
+    let _stop = stop_on_drop(&[&a, &b]);
+    a.set_state(gst::State::Playing).expect("flow A plays");
+    b.set_state(gst::State::Playing).expect("flow B plays");
+    let error = wait(&[&a, &b], Duration::from_secs(15), || {
+        received.load(Ordering::Relaxed) >= FRAMES
+    });
+    assert!(error.is_none(), "on GL memory: {:?}", error);
+    assert!(
+        b.by_name("in:input_gldownload").is_some(),
+        "the download is in while the publisher sends GL memory"
+    );
+
+    a.by_name("memory")
+        .expect("flow A's memory pick")
+        .set_property("caps", gst::Caps::new_empty_simple("video/x-raw"));
+    let switched = received.load(Ordering::Relaxed);
+    let error = wait(&[&a, &b], Duration::from_secs(15), || {
+        received.load(Ordering::Relaxed) >= switched + FRAMES
+    });
+    assert!(
+        error.is_none(),
+        "after the switch to system memory: {:?}",
+        error
+    );
+    assert!(
+        received.load(Ordering::Relaxed) >= switched + FRAMES,
+        "frames stopped after the switch to system memory"
+    );
+    assert!(
+        b.by_name("in:input_gldownload").is_none(),
+        "the download is out once the publisher sends system memory"
     );
 }

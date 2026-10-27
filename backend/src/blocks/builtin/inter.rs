@@ -128,8 +128,19 @@ struct OtherPipelineInput {
 /// Watch the caps `intersrc` sends and splice what the input from another
 /// flow needs between `intersrc` and `front`.
 ///
-/// The probe is EVENT_DOWNSTREAM and looks at CAPS only, so it fires per
-/// event, never per buffer. The CAPS event is handled before `intersrc`'s
+/// The probes are EVENT_DOWNSTREAM, looking at CAPS only, and
+/// QUERY_DOWNSTREAM, answering ACCEPT_CAPS only, so they fire per event and
+/// per query, never per buffer.
+///
+/// `intersrc` is a bin around an `appsrc`. Before its CAPS event reaches the
+/// ghost pad, the bin's internal pad asks downstream whether it accepts the
+/// caps, through the ghost pad. Left to the front, a consumer that takes system
+/// memory only refuses GL memory, and the event that would have spliced the
+/// download in never comes. So the probe answers for the input as it will be:
+/// yes when a download goes in, and the front's own answer otherwise, whatever
+/// chain is in place now.
+///
+///  The CAPS event is handled before `intersrc`'s
 /// source pad resolves its peer, on the streaming thread that carries the
 /// buffers, so no buffer crosses the link while it is replaced and the event
 /// lands on the new chain (the same in-probe splice as
@@ -148,6 +159,36 @@ fn adapt_other_pipeline_input(intersrc: &gst::Element, front: &gst::Element, lab
         front_sink: front_sink.downgrade(),
         spliced: Mutex::new(Spliced::default()),
     });
+    let queries = Arc::clone(&state);
+    src.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, move |pad, info| {
+        if info.mask.contains(gst::PadProbeType::PULL) {
+            return gst::PadProbeReturn::Ok;
+        }
+        let Some(gst::PadProbeData::Query(ref mut query)) = info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::QueryViewMut::AcceptCaps(q) = query.view_mut() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let Some(front_sink) = queries.front_sink.upgrade() else {
+            // The pipeline is being torn down.
+            return gst::PadProbeReturn::Ok;
+        };
+        let caps = q.caps_owned();
+        let accepted = match wanted(&caps) {
+            Ok(adapters) if adapters.is_empty() => front_sink.query_accept_caps(&caps),
+            // The download goes in with the CAPS event.
+            Ok(_) => true,
+            Err(e) => {
+                if caps.is_fixed() {
+                    post_failure(&queries.label, pad, &caps, &e);
+                }
+                false
+            }
+        };
+        q.set_result(accepted);
+        gst::PadProbeReturn::Handled
+    });
     src.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
         let Some(gst::PadProbeData::Event(ref event)) = info.data else {
             return gst::PadProbeReturn::Ok;
@@ -160,18 +201,53 @@ fn adapt_other_pipeline_input(intersrc: &gst::Element, front: &gst::Element, lab
     });
 }
 
-/// A CAPS event leaving `intersrc`: bring the adapters in line with `caps`.
-fn on_caps(input: &OtherPipelineInput, src: &gst::Pad, caps: &gst::CapsRef) {
-    let Some(front_sink) = input.front_sink.upgrade() else {
-        return;
-    };
+/// The adapters `caps` from another flow need. An error when the download
+/// called for does not take them: the link would be made on templates and the
+/// CAPS event then refused with a bare not-negotiated.
+fn wanted(caps: &gst::CapsRef) -> Result<Vec<Adapter>, String> {
     // `OtherPipeline` never refuses: what it does not download passes.
-    let wanted = video_adapt::decide(
+    let adapters = video_adapt::decide(
         caps,
         Consumer::OtherPipeline,
         video_adapt::factory_available,
     )
     .unwrap_or_default();
+    match adapters.iter().find(|a| !a.sink_takes(caps)) {
+        Some(download) => Err(format!("{} does not take these caps", download.factory())),
+        None => Ok(adapters),
+    }
+}
+
+/// Fail the flow: GL memory from another flow arrived and cannot be
+/// downloaded. Names what arrived and why.
+fn post_failure(label: &str, pad: &gst::Pad, caps: &gst::CapsRef, reason: &str) {
+    let message = format!(
+        "{}: GL memory from another flow could not be downloaded: {}",
+        label, reason
+    );
+    tracing::error!("{}", message);
+    if let Some(element) = pad.parent_element() {
+        gst::element_error!(
+            element,
+            gst::CoreError::Negotiation,
+            ("{}", message),
+            ["input caps {}", caps]
+        );
+    }
+}
+
+/// A CAPS event leaving `intersrc`: bring the adapters in line with `caps`.
+fn on_caps(input: &OtherPipelineInput, src: &gst::Pad, caps: &gst::CapsRef) {
+    let Some(front_sink) = input.front_sink.upgrade() else {
+        return;
+    };
+    let wanted = match wanted(caps) {
+        Ok(wanted) => wanted,
+        Err(e) => {
+            post_failure(&input.label, src, caps, &e);
+            return;
+        }
+    };
 
     let mut spliced = input.spliced.lock().unwrap_or_else(|p| p.into_inner());
     if wanted == spliced.adapters {
@@ -221,21 +297,7 @@ fn on_caps(input: &OtherPipelineInput, src: &gst::Pad, caps: &gst::CapsRef) {
             spliced.elements = new.iter().map(|e| e.downgrade()).collect();
             spliced.adapters = wanted;
         }
-        Err(e) => {
-            let message = format!(
-                "{}: GL memory from another flow could not be downloaded: {}",
-                input.label, e
-            );
-            tracing::error!("{}", message);
-            if let Some(element) = src.parent_element() {
-                gst::element_error!(
-                    element,
-                    gst::CoreError::Negotiation,
-                    ("{}", message),
-                    ["input caps {}", caps]
-                );
-            }
-        }
+        Err(e) => post_failure(&input.label, src, caps, &e),
     }
 }
 
@@ -360,7 +422,7 @@ impl BlockBuilder for InterInputBuilder {
             .property("silent", true)
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {}", e)))?;
-        adapt_other_pipeline_input(&intersrc, &front, &format!("{}_gl", instance_id));
+        adapt_other_pipeline_input(&intersrc, &front, &format!("{}:input", instance_id));
 
         tracing::info!(
             "InterInput block created: {} <- channel '{}' (buffer: {}ms)",
