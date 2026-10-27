@@ -44,9 +44,10 @@ fn link(flow: &mut Flow, from: &str, to: &str) {
     });
 }
 
-/// A CPU Compositor with GL RGBA from `gltestsrc` on `video_in_0` and its
-/// output in an appsink.
-fn gl_flow(block_id: &str, use_queues: bool) -> Flow {
+/// A CPU Compositor with RGBA on `video_in_0`, from `gltestsrc` in GL memory
+/// when `gl`, from `videotestsrc` in system memory otherwise, and its output
+/// in an appsink.
+fn input_flow(block_id: &str, use_queues: bool, gl: bool) -> Flow {
     let mut flow = Flow::new(format!("compositor_cpu_{block_id}"));
     let properties: HashMap<String, PV> = HashMap::from([
         (
@@ -71,17 +72,20 @@ fn gl_flow(block_id: &str, use_queues: bool) -> Flow {
         runtime_data: None,
         computed_external_pads,
     });
-    flow.elements
-        .push(elem("src", "gltestsrc", vec![("is-live", PV::Bool(true))]));
+    flow.elements.push(elem(
+        "src",
+        if gl { "gltestsrc" } else { "videotestsrc" },
+        vec![("is-live", PV::Bool(true))],
+    ));
+    let memory = if gl { "(memory:GLMemory)" } else { "" };
     flow.elements.push(elem(
         "srccaps",
         "capsfilter",
         vec![(
             "caps",
-            PV::String(
-                "video/x-raw(memory:GLMemory),format=RGBA,width=320,height=240,framerate=30/1"
-                    .into(),
-            ),
+            PV::String(format!(
+                "video/x-raw{memory},format=RGBA,width=320,height=240,framerate=30/1"
+            )),
         )],
     ));
     flow.elements.push(elem(
@@ -130,14 +134,20 @@ fn input_adapters(manager: &PipelineManager, block_id: &str) -> Vec<String> {
     panic!("videoconvert_0 is not fed from input 0's front: {factories:?}");
 }
 
-async fn assert_gl_input_downloaded_by_its_front(block_id: &str, use_queues: bool) {
+/// Run the flow until input 0's converter has negotiated, and return what
+/// the front spliced in before it. `None` when GL is not available.
+async fn adapters_once_negotiated(
+    block_id: &str,
+    use_queues: bool,
+    gl: bool,
+) -> Option<Vec<String>> {
     gst::init().unwrap();
     if !common::gl_available(ELEMENTS) {
-        return;
+        return None;
     }
     strom::gpu::detect_gpu_capabilities();
-    let mut manager =
-        common::manager::build(&gl_flow(block_id, use_queues)).expect("build compositor flow");
+    let mut manager = common::manager::build(&input_flow(block_id, use_queues, gl))
+        .expect("build compositor flow");
     manager.start().expect("start compositor flow");
     // The compositor outputs its background before the input negotiates, so
     // wait for frames through the input's converter, not for output frames.
@@ -157,8 +167,15 @@ async fn assert_gl_input_downloaded_by_its_front(block_id: &str, use_queues: boo
 
     assert!(
         negotiated.is_some(),
-        "GL memory on video_in_0 never reached the CPU compositor's converter: {error:?}"
+        "video_in_0 never reached the CPU compositor's converter: {error:?}"
     );
+    Some(adapters)
+}
+
+async fn assert_gl_input_downloaded_by_its_front(block_id: &str, use_queues: bool) {
+    let Some(adapters) = adapters_once_negotiated(block_id, use_queues, true).await else {
+        return;
+    };
     // The linker's GL-download retry (#802) also rescues a refused link, so
     // negotiation alone would not show which side adapted. The input's own
     // front has to.
@@ -179,4 +196,16 @@ async fn gl_memory_on_a_queued_input_is_downloaded_by_its_front() {
 #[serial_test::serial(gl)]
 async fn gl_memory_on_an_unqueued_input_is_downloaded_by_its_front() {
     assert_gl_input_downloaded_by_its_front("comp_cpu_gl_direct", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
+async fn system_memory_on_an_input_passes_without_a_download() {
+    let Some(adapters) = adapters_once_negotiated("comp_cpu_sys", true, false).await else {
+        return;
+    };
+    assert!(
+        adapters.is_empty(),
+        "system memory needs nothing between input 0's front and its videoconvert, got {adapters:?}"
+    );
 }

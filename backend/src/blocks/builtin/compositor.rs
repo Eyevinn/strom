@@ -85,13 +85,14 @@ impl BlockBuilder for CompositorBuilder {
         let preference = parse_compositor_preference(properties);
         let backend = select_compositor(preference).unwrap_or(CompositorBackend::Software);
 
-        // Create input pads dynamically - map to queue or converter depending on settings
+        // Create input pads dynamically - map to the queue, or without queues to
+        // the backend's first input element
         let mut inputs = Vec::new();
         for i in 0..num_inputs {
             let internal_element_id = if use_queues {
                 format!("queue_{}", i)
             } else {
-                // Direct connection to converter element
+                // GPU: the upload. CPU: the input's front, ahead of its converter.
                 match backend {
                     CompositorBackend::OpenGL => format!("glupload_{}", i),
                     CompositorBackend::Software => format!("input_{}", i),
@@ -574,30 +575,20 @@ fn build_software_compositor(
             let queue = create_input_queue(&queue_id, i)?;
             elements.push((queue_id.clone(), queue));
 
-            // Link: queue -> input -> videoconvert -> [thumb_tee] -> mixer
             internal_links.push((
                 ElementPadRef::pad(&queue_id, "src"),
                 ElementPadRef::pad(&input_id, "sink"),
             ));
-            internal_links.push((
-                ElementPadRef::pad(&convert_id, "src"),
-                ElementPadRef::pad(&thumb_tee_id, "sink"),
-            ));
-            internal_links.push((
-                ElementPadRef::pad(&thumb_tee_id, "src_0"),
-                ElementPadRef::pad(&mixer_id, &mixer_pad_name),
-            ));
-        } else {
-            // Link: input -> videoconvert -> [thumb_tee] -> mixer
-            internal_links.push((
-                ElementPadRef::pad(&convert_id, "src"),
-                ElementPadRef::pad(&thumb_tee_id, "sink"),
-            ));
-            internal_links.push((
-                ElementPadRef::pad(&thumb_tee_id, "src_0"),
-                ElementPadRef::pad(&mixer_id, &mixer_pad_name),
-            ));
         }
+        // Link: [queue ->] input -> videoconvert -> [thumb_tee] -> mixer
+        internal_links.push((
+            ElementPadRef::pad(&convert_id, "src"),
+            ElementPadRef::pad(&thumb_tee_id, "sink"),
+        ));
+        internal_links.push((
+            ElementPadRef::pad(&thumb_tee_id, "src_0"),
+            ElementPadRef::pad(&mixer_id, &mixer_pad_name),
+        ));
     }
 
     // Add output elements and links
