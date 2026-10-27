@@ -222,9 +222,13 @@ fn gl_frames_from_another_flow_convert_in_the_subscriber() {
     );
 }
 
-/// GL buffers that flow B holds keep flow A's GL context alive after A stops:
-/// B downloads them without an error. Once B stops too, nothing holds the
-/// context any more, and it is finalized.
+/// A GL buffer that flow B holds keeps flow A's GL context alive after A
+/// stops, and B downloads it without an error. Once B has let that buffer go,
+/// nothing holds the context any more, and it is finalized while B still
+/// plays: nothing in Inter Input keeps a GL buffer from the other flow.
+///
+/// B holds the buffer for certain: a blocking probe on its `intersrc` keeps
+/// one of A's GL buffers in the streaming thread while A stops.
 #[test]
 fn flow_a_gl_context_outlives_flow_a_until_flow_b_lets_go() {
     if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
@@ -271,20 +275,62 @@ fn flow_a_gl_context_outlives_flow_a_until_flow_b_lets_go() {
         .take()
         .expect("flow A publishes GL memory");
 
-    // Flow A stops and is dropped. B keeps running on what it holds.
+    // B holds one of A's GL buffers, before the download. Test code: the
+    // probe only flags that it holds one.
+    let intersrc_src = b
+        .by_name("in:intersrc")
+        .expect("the block's intersrc")
+        .static_pad("src")
+        .unwrap();
+    let held = Arc::new(AtomicU64::new(0));
+    let holding = held.clone();
+    let hold = intersrc_src
+        .add_probe(
+            gst::PadProbeType::BLOCK_DOWNSTREAM | gst::PadProbeType::BUFFER,
+            move |_, _| {
+                holding.store(1, Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            },
+        )
+        .expect("blocking probe");
+    let error = wait(&[&a, &b], Duration::from_secs(5), || {
+        held.load(Ordering::Relaxed) == 1
+    });
+    assert!(error.is_none(), "while B starts holding: {:?}", error);
+    assert_eq!(
+        held.load(Ordering::Relaxed),
+        1,
+        "B holds one of A's buffers"
+    );
+
+    // Flow A stops and is dropped. The buffer B holds keeps A's context.
     a.set_state(gst::State::Null).expect("flow A stops");
     drop(a);
-    let error = wait(&[&b], Duration::from_secs(1), || false);
-    assert!(error.is_none(), "after flow A stopped: {:?}", error);
+    assert!(
+        context.upgrade().is_some(),
+        "flow A's GL context was finalized while flow B still holds its buffer"
+    );
 
-    b.set_state(gst::State::Null).expect("flow B stops");
-    drop(b);
+    // B lets the buffer go and downloads it from A's context.
+    let before = received.load(Ordering::Relaxed);
+    intersrc_src.remove_probe(hold);
+    let error = wait(&[&b], Duration::from_secs(5), || {
+        received.load(Ordering::Relaxed) > before
+    });
+    assert!(error.is_none(), "after flow A stopped: {:?}", error);
+    assert!(
+        received.load(Ordering::Relaxed) > before,
+        "flow B downloads the buffer it held after flow A stopped"
+    );
+
     let deadline = Instant::now() + Duration::from_secs(5);
     while context.upgrade().is_some() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
+    let alive = context.upgrade().is_some();
+    b.set_state(gst::State::Null).expect("flow B stops");
     assert!(
-        context.upgrade().is_none(),
-        "flow A's GL context is still alive after both flows stopped"
+        !alive,
+        "flow A's GL context is still alive after flow B let go of its buffers"
     );
 }
