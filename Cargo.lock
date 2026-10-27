@@ -6684,6 +6684,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "socket2",
  "strom-types",
  "tokio",
  "tokio-tungstenite",
