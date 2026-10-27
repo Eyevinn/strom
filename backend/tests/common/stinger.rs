@@ -26,8 +26,8 @@ pub const GL_ELEMENTS: &[&str] = &[
 ];
 /// PNG frames in QuickTime: lossless, alpha-capable, and decoded by libpng
 /// (`pngdec`) without frame threads, so every frame comes out. FFV1 would be
-/// smaller, but GStreamer 1.24.2's FFV1 decoder (Linux CI) drops a stream's
-/// last frame now and then, which makes frame counts flaky.
+/// smaller, but GStreamer 1.24.0 to 1.24.3's FFV1 decoder drops a stream's
+/// last frame now and then, and Strom still builds on older GStreamer.
 pub const CODEC_ELEMENTS: &[&str] = &["pngenc", "pngdec", "qtmux", "qtdemux"];
 
 /// Where clip frame `i`'s matte edge is: white (new source) left of it.
@@ -550,9 +550,8 @@ impl Running {
         mixer_pads_of(&self.state, self.flow_id, &self.mixer()).await
     }
 
-    /// Frames clip `index` decodes to. GStreamer 1.24.2's FFV1 decoder drops
-    /// the last frame of a stream (fixed in 1.24.4), so this is read from the
-    /// analysis instead of assumed.
+    /// Frames clip `index` decodes to, read from the analysis. Every clip
+    /// has `N` frames, and a decoder that drops one fails here.
     pub async fn clip_frames(&self, index: usize) -> u32 {
         let s = self
             .state
@@ -560,10 +559,7 @@ impl Running {
             .await
             .unwrap();
         let frames = s.clips[index].info.as_ref().expect("analysed").frames;
-        assert!(
-            frames + 1 >= N as u32 && frames <= N as u32,
-            "clip {index} decodes to {frames} frames"
-        );
+        assert_eq!(frames, N as u32, "clip {index} decodes to {frames} frames");
         frames
     }
 

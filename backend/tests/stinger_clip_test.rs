@@ -36,15 +36,12 @@ fn examples_encode_and_analyse_as_their_own_variants() {
             .unwrap()
             .to_string()
     };
-    // GStreamer 1.24.2's FFV1 decoder drops a stream's last frame now and
-    // then (fixed in 1.24.4); the examples are FFV1.
-    let frames_near = |got: u32, want: u32| got == want || got + 1 == want;
 
     let sweep = analysis::analyze(&uri(&files[0])).expect("analyse sweep");
     assert_eq!(sweep.detected_layout, StingerLayout::Classic);
     assert!(sweep.has_alpha);
     assert_eq!((sweep.width, sweep.height), (1920, 1080));
-    assert!(frames_near(sweep.frames, 45), "{} frames", sweep.frames);
+    assert_eq!(sweep.frames, 45, "sweep frames");
     assert_eq!(sweep.duration_ms, sweep.frames as u64 * 1000 / 30);
     assert!(sweep.cover_peak > 0.99, "peak cover {}", sweep.cover_peak);
     let peak = sweep.cover_peak_ms.expect("cover peak");
@@ -57,7 +54,7 @@ fn examples_encode_and_analyse_as_their_own_variants() {
     assert_eq!(blade.detected_layout, StingerLayout::SideBySide);
     assert!(blade.has_alpha);
     assert_eq!((blade.width, blade.height), (3840, 1080));
-    assert!(frames_near(blade.frames, 40), "{} frames", blade.frames);
+    assert_eq!(blade.frames, 40, "blade frames");
     let mid = blade.matte_midpoint_ms.expect("matte midpoint");
     assert!(
         (500..=800).contains(&mid),
@@ -68,7 +65,7 @@ fn examples_encode_and_analyse_as_their_own_variants() {
     assert_eq!(ribbons.detected_layout, StingerLayout::Stacked);
     assert!(ribbons.has_alpha);
     assert_eq!((ribbons.width, ribbons.height), (1920, 2160));
-    assert!(frames_near(ribbons.frames, 42), "{} frames", ribbons.frames);
+    assert_eq!(ribbons.frames, 42, "ribbons frames");
     let mid = ribbons.matte_midpoint_ms.expect("matte midpoint");
     assert!(
         (300..=900).contains(&mid),

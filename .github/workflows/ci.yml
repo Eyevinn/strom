@@ -33,8 +33,8 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   TRUNK_VERSION: "0.21.14"
-  # The GStreamer minor version the Linux and macOS test jobs must run (#964).
-  # Homebrew cannot be pinned, so this is where a drift shows up.
+  # The GStreamer minor version the Linux and macOS test jobs test (#964):
+  # .github/scripts/check-gst-baseline.sh fails below it and warns above it.
   GSTREAMER_BASELINE: "1.28"
   CARGO_INCREMENTAL: 0
   # Line tables only in dev/test builds: backtraces keep file and line, but
@@ -135,26 +135,25 @@ jobs:
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
             gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice gstreamer1.0-gl \
-            gstreamer1.0-tools libsoup-3.0-0 gsettings-desktop-schemas libegl-mesa0 libgl1-mesa-dri
-
-      - name: Check GStreamer is the baseline
-        shell: bash
-        run: |
-          gst-inspect-1.0 --version
-          version=$(gst-inspect-1.0 --version | sed -n 's/^GStreamer \([0-9.]*\).*/\1/p')
-          [[ "$version" == "$GSTREAMER_BASELINE".* ]] \
-            || { echo "::error::GStreamer is $version, the tested baseline is $GSTREAMER_BASELINE.x (#964)"; exit 1; }
+            gstreamer1.0-tools libsoup-3.0-0 gsettings-desktop-schemas libegl-mesa0 libgl1-mesa-dri \
+            zstd
 
       - uses: actions/checkout@v6
 
-      # The container starts with no Rust. With no argument, `rustup toolchain
-      # install` installs the toolchain and components in rust-toolchain.toml.
+      - name: Check GStreamer is the baseline
+        run: .github/scripts/check-gst-baseline.sh
+
+      # The channel rust-toolchain.toml pins, with the rustfmt and clippy this
+      # job uses but without the wasm32 target it also lists (check-wasm's).
+      # RUSTUP_TOOLCHAIN overrides the file, so rustup installs nothing more.
       - name: Install Rust
         run: |
+          CHANNEL=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          test -n "$CHANNEL"
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain none
-          "$HOME/.cargo/bin/rustup" toolchain install
+            | sh -s -- -y --profile minimal --default-toolchain "$CHANNEL" --component rustfmt,clippy
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "RUSTUP_TOOLCHAIN=$CHANNEL" >> "$GITHUB_ENV"
 
       # save-if main: PR runs restore the main-branch cache (GHA cache scoping
       # falls back to the base branch) but don't save their own per-branch
@@ -799,15 +798,10 @@ jobs:
           echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig:$(brew --prefix gstreamer)/lib/pkgconfig:$(brew --prefix glib)/lib/pkgconfig" >> $GITHUB_ENV
           echo "LIBRARY_PATH=$(brew --prefix)/lib" >> $GITHUB_ENV
 
-      # Homebrew cannot be pinned: this is how a move past the baseline shows.
-      # Same check as check-linux.
+      # Homebrew cannot be pinned: this is how a move past the baseline shows
+      # (a warning, so the release build still runs).
       - name: Check GStreamer is the baseline
-        shell: bash
-        run: |
-          gst-inspect-1.0 --version
-          version=$(gst-inspect-1.0 --version | sed -n 's/^GStreamer \([0-9.]*\).*/\1/p')
-          [[ "$version" == "$GSTREAMER_BASELINE".* ]] \
-            || { echo "::error::GStreamer is $version, the tested baseline is $GSTREAMER_BASELINE.x (#964)"; exit 1; }
+        run: .github/scripts/check-gst-baseline.sh
 
       - name: Download frontend dist
         uses: actions/download-artifact@v8

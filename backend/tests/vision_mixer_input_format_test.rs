@@ -8,9 +8,9 @@
 //! input front splices a `videoconvert` in, and takes it out again once the
 //! source delivers something `glupload` (or `cudadownload`) takes directly.
 //!
-//! `AYUV64` and `GBR_10LE` are the formats `glupload` does not take, on the
-//! GStreamer CI runs (1.24.2) and on current releases (1.28) alike.
-//! `A444_10LE`, a ProRes 4444 decode, uploads on both, so it is not used here.
+//! `AYUV64` and `GBR_10LE` are formats `glupload` does not take, on the
+//! GStreamer CI runs (1.28) and on 1.24 alike. `A444_10LE`, a ProRes 4444
+//! decode, uploads on both, so it is not used here.
 //!
 //! The CUDA tests here use a `cudadownload` stand-in on hosts without nvcodec
 //! (see `stand_in`). The one with real NVDEC output is ignored by default;
@@ -227,29 +227,21 @@ async fn gpu_converter_answers_with_direct_formats_first() {
         .static_pad("sink")
         .unwrap()
         .query_caps(None);
-    // The converter (`videoconvert`) outputs plain system memory only. Every
-    // entry with another caps feature reaches the answer through what takes
-    // it directly: `glupload` for GL memory, DMABuf (GStreamer 1.28 with Mesa
-    // EGL lists it) and the texture upload meta, `cudadownload` for CUDA
-    // memory (on a host with nvcodec). None of them needs the converter.
-    let direct = |s: &gst::StructureRef, f: &gst::CapsFeaturesRef| {
-        if !plain_system_memory(f) {
-            return true;
-        }
-        if !s.has_field("format") {
-            return false;
-        }
-        let mut one = gst::Caps::new_empty();
-        one.make_mut().append_structure(s.to_owned());
-        one.is_subset(&uploads)
-    };
-    let first_converted = answer
+    // GL memory, DMABuf and the texture upload meta go into `glupload` as
+    // they are, CUDA memory through `cudadownload` (on a host with nvcodec):
+    // see `common::upload_path`. None of them needs the converter.
+    use common::UploadPath;
+    let paths: Vec<UploadPath> = answer
         .iter_with_features()
-        .position(|(s, f)| !direct(s, f))
+        .map(|(s, f)| common::upload_path(s, f, &uploads))
+        .collect();
+    let first_converted = paths
+        .iter()
+        .position(|p| *p == UploadPath::ConverterOnly)
         .unwrap_or_else(|| panic!("the answer lists nothing only the converter takes: {answer}"));
-    let first_system_direct = answer
-        .iter_with_features()
-        .position(|(s, f)| plain_system_memory(f) && direct(s, f))
+    let first_system_direct = paths
+        .iter()
+        .position(|p| *p == UploadPath::DirectSystemMemory)
         .unwrap_or_else(|| {
             panic!("the answer lists no system-memory format glupload uploads: {answer}")
         });
@@ -285,12 +277,4 @@ async fn gpu_converter_answers_with_direct_formats_first() {
         running.gpu_input_adapters()
     );
     running.stop();
-}
-
-/// Caps features that say plain system memory: no memory type and no meta.
-/// The only kind of entry the CPU converter adds to an input's caps answer.
-fn plain_system_memory(features: &gst::CapsFeaturesRef) -> bool {
-    features
-        .iter()
-        .all(|f| f == gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY)
 }
