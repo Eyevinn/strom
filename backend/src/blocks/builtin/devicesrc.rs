@@ -13,10 +13,11 @@
 //! property the platform plugin needs. When no device id is set the block
 //! falls back to `autovideosrc`/`autoaudiosrc`, which picks the OS default.
 //!
-//! All captured streams are normalised through `videoconvert` + a
-//! `video/x-raw` capsfilter (and `audioconvert` + `audioresample` + an
-//! `audio/x-raw` capsfilter) so downstream blocks see a stable raw format
-//! regardless of what the source actually delivers.
+//! Video leaves the block as the source delivers it, in system memory or GL
+//! memory (an AVFoundation camera prefers GL), at the configured resolution
+//! and framerate: each consumer adapts its own input (BLOCK_GUIDELINES).
+//! Audio is normalised through `audioconvert` + `audioresample` + an
+//! `audio/x-raw` capsfilter.
 //!
 //! `stream_mode` chooses which pads are exposed (`audio_video`, `video`,
 //! `audio`) the same way the DeckLink and WHEP blocks do.
@@ -30,7 +31,7 @@
 //!   `video/x-raw` only. USB webcams that deliver `image/jpeg` natively
 //!   above 720p will fail caps negotiation. Fix is to widen the source caps
 //!   to `video/x-raw | image/jpeg` and put a `jpegdec` (or `decodebin`)
-//!   between the source and `videoconvert` when JPEG is negotiated.
+//!   after the source when JPEG is negotiated.
 //!
 //! - **Device id stability (best-effort):**
 //!   [`crate::discovery::device::DeviceDiscovery::device_id_for`] prefers
@@ -85,7 +86,6 @@
 //! without changes here.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
-use crate::gpu::{self, video_convert_mode};
 use crate::gst::video_adapt;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -120,7 +120,7 @@ impl BlockBuilder for LocalInputBuilder {
                 },
                 name: "video_out".to_string(),
                 media_type: MediaType::Video,
-                internal_element_id: "videocapsfilter".to_string(),
+                internal_element_id: "videosrc_caps".to_string(),
                 internal_pad_name: "src".to_string(),
             });
         }
@@ -166,8 +166,6 @@ impl BlockBuilder for LocalInputBuilder {
 
             let videosrc_id = format!("{}:videosrc", instance_id);
             let videosrc_caps_id = format!("{}:videosrc_caps", instance_id);
-            let videoconvert_id = format!("{}:videoconvert", instance_id);
-            let videocaps_id = format!("{}:videocapsfilter", instance_id);
 
             let videosrc = make_source(
                 ctx,
@@ -177,19 +175,20 @@ impl BlockBuilder for LocalInputBuilder {
                 "autovideosrc",
             )?;
 
-            // Pre-convert capsfilter: lets the source negotiate the requested
-            // resolution / framerate at capture-time (AVFoundation, v4l2 and
-            // Media Foundation all pick the closest matching mode) rather
-            // than always running at the device's default mode and paying a
-            // software downscale in videoconvert.
+            // The capture front, which is also the block's video output: the
+            // source must deliver the configured resolution / framerate at
+            // capture time (AVFoundation, v4l2 and Media Foundation pick the
+            // device mode that matches) rather than running at the device's
+            // default mode. Nothing in the block scales; a consumer that needs
+            // another size scales on its own input.
             // Both memory types are offered, system memory first so a device
             // that can deliver either keeps producing what it does today. A
             // capsfilter naming only `video/x-raw` means SystemMemory, not
             // "any": a camera that offers GL memory and nothing else (an
             // AVFoundation camera behind avfvideosrc is the common case) could
-            // not negotiate this filter at all. No download is asked for here
-            // — the linker inserts one where a GL producer meets a consumer
-            // that needs system memory.
+            // not negotiate this filter at all. No converter or download
+            // follows: a consumer that needs system memory or another pixel
+            // format adapts its own input.
             let mut structure_builder = gst::Structure::builder("video/x-raw");
             if let Some((w, h)) = resolution {
                 structure_builder = structure_builder
@@ -217,39 +216,13 @@ impl BlockBuilder for LocalInputBuilder {
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("videosrc_caps: {}", e)))?;
 
-            let convert_element_name = video_convert_mode().element_name();
-            let videoconvert = gst::ElementFactory::make(convert_element_name)
-                .name(&videoconvert_id)
-                .build()
-                .map_err(|e| {
-                    BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
-                })?;
-            gpu::configure_video_convert(&videoconvert);
-
-            let video_caps = gst::Caps::builder("video/x-raw").build();
-            let videocaps = gst::ElementFactory::make("capsfilter")
-                .name(&videocaps_id)
-                .property("caps", &video_caps)
-                .build()
-                .map_err(|e| BlockBuildError::ElementCreation(format!("videocapsfilter: {}", e)))?;
-
             internal_links.push((
                 ElementPadRef::pad(&videosrc_id, "src"),
                 ElementPadRef::pad(&videosrc_caps_id, "sink"),
             ));
-            internal_links.push((
-                ElementPadRef::pad(&videosrc_caps_id, "src"),
-                ElementPadRef::pad(&videoconvert_id, "sink"),
-            ));
-            internal_links.push((
-                ElementPadRef::pad(&videoconvert_id, "src"),
-                ElementPadRef::pad(&videocaps_id, "sink"),
-            ));
 
             elements.push((videosrc_id, videosrc));
             elements.push((videosrc_caps_id, videosrc_caps));
-            elements.push((videoconvert_id, videoconvert));
-            elements.push((videocaps_id, videocaps));
         }
 
         if stream_mode.has_audio() {
@@ -695,7 +668,7 @@ fn local_input_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.local_input".to_string(),
         name: "Local Input".to_string(),
-        description: "Captures from local video/audio sources exposed by the OS's native media APIs (v4l2 on Linux, AVFoundation on macOS, Media Foundation/WASAPI on Windows). Works for any GStreamer Video/Source or Audio/Source device — built-in cameras, USB capture cards, HDMI/SDI grabbers, professional audio interfaces, virtual sources, etc. Pick devices from /api/discovery/devices?category=video_source and ?category=audio_source — leave empty to use the OS default (autovideosrc/autoaudiosrc). Output is normalized to raw video/audio via videoconvert + audioconvert/audioresample.".to_string(),
+        description: "Captures from local video/audio sources exposed by the OS's native media APIs (v4l2 on Linux, AVFoundation on macOS, Media Foundation/WASAPI on Windows). Works for any GStreamer Video/Source or Audio/Source device — built-in cameras, USB capture cards, HDMI/SDI grabbers, professional audio interfaces, virtual sources, etc. Pick devices from /api/discovery/devices?category=video_source and ?category=audio_source — leave empty to use the OS default (autovideosrc/autoaudiosrc). Video leaves as the source delivers it (system or GL memory, at the chosen resolution and framerate); audio is normalized via audioconvert/audioresample.".to_string(),
         category: "Inputs".to_string(),
         exposed_properties: vec![
             ExposedProperty {
@@ -878,7 +851,7 @@ fn local_input_definition() -> BlockDefinition {
                     label: Some("V".to_string()),
                     name: "video_out".to_string(),
                     media_type: MediaType::Video,
-                    internal_element_id: "videocapsfilter".to_string(),
+                    internal_element_id: "videosrc_caps".to_string(),
                     internal_pad_name: "src".to_string(),
                 },
                 ExternalPad {
@@ -1312,7 +1285,6 @@ mod tests {
         // No device is selected, so build() falls back to autovideosrc and
         // autoaudiosrc without opening hardware.
         gst::init().expect("GStreamer init");
-        crate::gpu::detect_gpu_capabilities();
         let mut p = HashMap::new();
         p.insert("stream_mode".to_string(), prop_string("audio_video"));
         let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());

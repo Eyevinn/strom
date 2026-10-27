@@ -78,8 +78,6 @@ fn build_flow(block_id: &str, backend: &str) -> Flow {
                 "multiview_resolution".to_string(),
                 PV::String("640x360".into()),
             );
-            // Download PGM so the appsink can map pixels.
-            p.insert("gl_download".to_string(), PV::Bool(true));
             p
         },
         position: strom_types::block::Position { x: 100.0, y: 100.0 },
@@ -141,10 +139,20 @@ fn build_flow(block_id: &str, backend: &str) -> Flow {
     ));
     flow.elements
         .push(elem("mvsink", "fakesink", vec![("sync", PV::Bool(false))]));
-    flow.links.push(strom_types::Link {
-        from: format!("{block_id}:pgm_out"),
-        to: "pgmcaps:sink".to_string(),
-    });
+    if backend == "gpu" {
+        // The GPU mixer emits GL memory; download it for the appsink.
+        common::download::link_through_download(
+            &mut flow,
+            "pgm",
+            &format!("{block_id}:pgm_out"),
+            "pgmcaps:sink",
+        );
+    } else {
+        flow.links.push(strom_types::Link {
+            from: format!("{block_id}:pgm_out"),
+            to: "pgmcaps:sink".to_string(),
+        });
+    }
     flow.links.push(strom_types::Link {
         from: "pgmcaps:src".to_string(),
         to: "pgmsink:sink".to_string(),

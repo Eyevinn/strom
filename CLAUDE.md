@@ -28,6 +28,13 @@
 - The regression test `pipeline_lifecycle_test.rs` catches these leaks — it must always pass.
 - `stop_flow()` in `state.rs` logs `ERROR` at runtime if a pipeline survives after drop — treat these as P0 bugs.
 
+## GStreamer Versions
+- **Target: GStreamer 1.28.** The Docker images ship it, and CI runs the full test suite on it on every platform (Linux, macOS, Windows).
+- **Floor: GStreamer 1.22** (Debian 12 bookworm). CI builds Strom and runs a smoke test on it. The gstreamer-rs crates are built with the `v1_22` feature, which keeps newer API out at compile time.
+- Code that needs API or behaviour newer than the floor checks the runtime GStreamer version and degrades or fails with a message that names the version it needs. Do not raise the `v1_*` feature for one block.
+- Moving the target or the floor needs a stated reason in its own issue: a fix or feature we need, a supported distro going end of life. "A newer version exists" is not a reason. A change of either touches CI, the Docker images, `install.sh`, the Windows installer scripts, the `v1_*` Cargo features, the startup version warning, and the docs that name the versions. Move them together.
+- A test that fails only on an old GStreamer because of an upstream bug fixed in the target is not a reason to raise the floor. Keep it out of the floor smoke set, and name the upstream fix.
+
 ## GStreamer Queues
 - Leave `queue`, `queue2`, and `multiqueue` elements with default property values unless there is a documented latency requirement that justifies overriding them.
 

@@ -6,22 +6,21 @@
 //!
 //! Processing branch (when active):
 //! ```text
-//! GL path:
 //! [tee] ─┬─ (passthrough)
-//!         └─ queue ─[pad probe: rate limit]─→ glcolorscale
-//!            → capsfilter(GL,RGBA,WxH) → gldownload
-//!            → capsfilter(RGBA,WxH) → appsink
-//!
-//! System-memory path (CUDA memory gets a cudadownload in front):
-//! [tee] ─┬─ (passthrough)
-//!         └─ queue ─[pad probe: rate limit]─→ [cudadownload] → videoconvertscale
+//!         └─ queue ─[pad probe: rate limit]─→ [scale and convert]
 //!            → capsfilter(RGBA,WxH) → appsink
 //! ```
 //!
-//! The tap is a consumer of whatever the tee carries: which path it builds is
-//! decided by [`video_adapt::decide`] from the tee's negotiated caps. What it
-//! cannot read (GPU memory nothing here downloads, anything but raw video) is
-//! refused before anything is attached to the tee.
+//! The tap is a consumer of whatever the tee carries. The scale-and-convert
+//! chain is what [`video_adapt::decide`] calls for with
+//! `Consumer::ScaleConvert`, from the tee's negotiated caps, for an output of
+//! RGBA at the thumbnail's size in system memory: for GL memory in any format
+//! or texture target, `glcolorconvert ! glcolorscale ! glcolorconvert`, then
+//! the download, so only the small frame crosses the bus; for GPU memory
+//! whose scaler is missing, its download, then `videoscale ! videoconvert`;
+//! for system memory, `videoscale ! videoconvert`. What it cannot read (GPU
+//! memory nothing here downloads, anything but raw video) is refused before
+//! anything is attached to the tee.
 //!
 //! Frame rate is limited via a pad probe on the queue src pad that drops
 //! buffers arriving sooner than `update_interval`. This is invisible to
@@ -40,7 +39,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, warn};
 
 use crate::gst::thumbnail::ThumbnailError;
-use crate::gst::video_adapt::{self, Adapter, Consumer};
+use crate::gst::video_adapt::{self, Consumer};
 
 /// Configuration for a thumbnail tap.
 #[derive(Debug, Clone)]
@@ -207,14 +206,25 @@ impl ThumbnailTap {
             return Err(ThumbnailError::PipelineNotRunning);
         };
 
-        // What the tee carries decides the branch: GL memory is scaled on the
-        // GPU before its download, CUDA memory is downloaded first, and what
-        // the CPU cannot read is refused here, before anything is attached.
-        // A branch that cannot take the tee's caps would only have its link
-        // refused.
+        // The thumbnail: RGBA at its size, in system memory, for the JPEG
+        // encoder.
+        let caps_str = format!(
+            "video/x-raw,format=RGBA,width={},height={}",
+            self.config.width, self.config.height
+        );
+        let caps = gst::Caps::from_str(&caps_str)
+            .map_err(|e| ThumbnailError::FrameMapping(format!("caps: {}", e)))?;
+
+        // What the tee carries decides the branch, as for Video Format: GPU
+        // memory is scaled where it is when its scaler takes it (GL in any
+        // format or texture target goes through `glcolorconvert` first), then
+        // downloaded small; otherwise it is downloaded first and scaled on
+        // the CPU. What the CPU cannot read is refused here, before anything
+        // is attached. A branch that cannot take the tee's caps would only
+        // have its link refused.
         let adapters = match video_adapt::decide(
             &tee_caps,
-            Consumer::SystemMemory,
+            Consumer::ScaleConvert(&caps),
             video_adapt::factory_available,
         ) {
             Ok(adapters) => {
@@ -255,55 +265,15 @@ impl ThumbnailTap {
             .build()
             .map_err(|e| ThumbnailError::FrameMapping(format!("queue: {}", e)))?;
 
-        let mut branch_elements: Vec<gst::Element> = Vec::new();
         let adapter_prefix = format!("{}_thumb", prefix);
 
-        if adapters == [Adapter::GlDownload] {
-            // GL path: scale on GPU, then download the small frame.
-            // glcolorscale requires RGBA — the compositor tee already carries RGBA.
-            let scale = gst::ElementFactory::make("glcolorscale")
-                .name(format!("{}_thumb_glscale", prefix))
-                .build()
-                .map_err(|e| ThumbnailError::FrameMapping(format!("glcolorscale: {}", e)))?;
-            branch_elements.push(scale);
-
-            let gl_caps_str = format!(
-                "video/x-raw(memory:GLMemory),format=RGBA,width={},height={}",
-                self.config.width, self.config.height
-            );
-            let gl_caps = gst::Caps::from_str(&gl_caps_str)
-                .map_err(|e| ThumbnailError::FrameMapping(format!("gl caps: {}", e)))?;
-            let gl_capsfilter = gst::ElementFactory::make("capsfilter")
-                .name(format!("{}_thumb_glcaps", prefix))
-                .property("caps", &gl_caps)
-                .build()
-                .map_err(|e| ThumbnailError::FrameMapping(format!("gl capsfilter: {}", e)))?;
-            branch_elements.push(gl_capsfilter);
-
-            branch_elements.extend(
-                video_adapt::build_elements(&adapters, &adapter_prefix)
-                    .map_err(ThumbnailError::FrameMapping)?,
-            );
-        } else {
-            // System-memory path: download first where the memory calls for
-            // it, then CPU-based format conversion and scaling.
-            branch_elements.extend(
-                video_adapt::build_elements(&adapters, &adapter_prefix)
-                    .map_err(ThumbnailError::FrameMapping)?,
-            );
-            let convert = gst::ElementFactory::make("videoconvertscale")
-                .name(format!("{}_thumb_convert", prefix))
-                .build()
-                .map_err(|e| ThumbnailError::FrameMapping(format!("videoconvertscale: {}", e)))?;
-            branch_elements.push(convert);
+        let branch_elements = video_adapt::build_elements(&adapters, &adapter_prefix)
+            .map_err(ThumbnailError::FrameMapping)?;
+        for element in &branch_elements {
+            // Threads the CPU conversion on macOS; a no-op elsewhere.
+            crate::gpu::configure_video_convert(element);
         }
 
-        let caps_str = format!(
-            "video/x-raw,format=RGBA,width={},height={}",
-            self.config.width, self.config.height
-        );
-        let caps = gst::Caps::from_str(&caps_str)
-            .map_err(|e| ThumbnailError::FrameMapping(format!("caps: {}", e)))?;
         let capsfilter = gst::ElementFactory::make("capsfilter")
             .name(format!("{}_thumb_caps", prefix))
             .property("caps", &caps)
@@ -391,8 +361,7 @@ impl ThumbnailTap {
         );
 
         // Build the full element chain:
-        //   GL:     queue [pad probe] → glcolorscale → glcaps → gldownload → capsfilter → appsink
-        //   system: queue [pad probe] → [cudadownload] → videoconvertscale → capsfilter → appsink
+        //   queue [pad probe] → [what decide() called for] → capsfilter → appsink
         let mut elements: Vec<gst::Element> = vec![queue.clone()];
         elements.extend(branch_elements.iter().cloned());
         elements.push(capsfilter.clone());

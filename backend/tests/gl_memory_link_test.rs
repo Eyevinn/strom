@@ -5,8 +5,8 @@
 //! `video/x-raw(memory:GLMemory)` producer and the link is refused before any
 //! caps are negotiated. Nothing retries a link that failed for want of a common
 //! format, so without the fallback the consumer and everything below it carry
-//! no data while the flow reports Playing: a GPU Vision Mixer with
-//! `gl_download` off feeds a Video Encoder nothing.
+//! no data while the flow reports Playing: a GPU Vision Mixer, which emits GL
+//! memory, feeds a Video Encoder nothing.
 //!
 //! The linker adapts such a pair with a `gldownload`, and only such a pair.
 //! These tests build a real pipeline through `PipelineManager`, which links at
@@ -340,14 +340,14 @@ fn a_failed_adaptation_leaves_nothing_behind() {
 
 /// The Local Input capture front must not demand system memory.
 ///
-/// `devicesrc` puts a capsfilter between the camera and its converter so the
-/// device negotiates the configured resolution and framerate at capture time.
+/// `devicesrc` puts a capsfilter after the camera so the device negotiates
+/// the configured resolution and framerate at capture time.
 /// A capsfilter naming only `video/x-raw` means `memory:SystemMemory`, so a
 /// camera that delivers GL memory and nothing else — an AVFoundation camera
 /// behind `avfvideosrc` — shares no format with it and the capture front never
-/// negotiates. Offering both memory types lets it negotiate; the download that
-/// the system-memory output then needs is spliced by the linker, which is what
-/// the tests above cover.
+/// negotiates. Offering both memory types lets it negotiate; the block emits
+/// the GL memory as it is, and a consumer that needs system memory downloads
+/// it (`local_input_memory_test`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_local_input_capture_front_accepts_gl_memory() {
     gstreamer::init().unwrap();

@@ -3,23 +3,25 @@
     Prepares a minimal GStreamer runtime bundle for the Strom MSI installer.
 
 .DESCRIPTION
-    Downloads the GStreamer runtime MSI and extracts only the necessary
+    Downloads the GStreamer installer and extracts only the necessary
     components for Strom to function. This creates a smaller bundle by
     excluding development files, documentation, and unused plugins.
 
 .PARAMETER Version
-    GStreamer version to download (default: 1.26.10)
+    GStreamer version to download (default: 1.28.8)
 
 .PARAMETER OutputDir
     Directory to extract files to (default: gstreamer-bundle)
 
 .PARAMETER Full
-    If specified, includes all plugins (larger bundle, ~300MB)
-    Otherwise, includes only essential plugins (~150MB)
+    If specified, copies all of bin, lib\gstreamer-1.0, share and libexec
+    (larger bundle, ~320MB). This is what the released MSI ships.
+    Otherwise, includes every DLL in bin but only the essential plugins listed
+    below, and fails if one of them is missing from the installer.
 #>
 
 param(
-    [string]$Version = "1.26.10",
+    [string]$Version = "1.28.8",
     [string]$OutputDir = "gstreamer-bundle",
     [switch]$Full
 )
@@ -28,12 +30,13 @@ $ErrorActionPreference = "Stop"
 
 # GStreamer download URL from Eyevinn mirror (freedesktop.org blocks CI)
 $BaseUrl = "https://github.com/Eyevinn/strom/releases/download/gstreamer-deps"
-$MsiFile = "gstreamer-1.0-msvc-x86_64-$Version.msi"
-$MsiUrl = "$BaseUrl/$MsiFile"
+# Since 1.28 upstream ships one Inno Setup installer instead of MSIs.
+$InstallerFile = "gstreamer-1.0-msvc-x86_64-$Version.exe"
+$InstallerUrl = "$BaseUrl/$InstallerFile"
 
 # Temporary extraction directory
 $TempDir = "gstreamer-temp"
-$GstRoot = "$TempDir\gstreamer\1.0\msvc_x86_64"
+$GstRoot = "$((Get-Location).Path)\$TempDir"
 
 Write-Host "=== Preparing GStreamer Runtime Bundle ===" -ForegroundColor Cyan
 Write-Host "Version: $Version"
@@ -50,119 +53,48 @@ if (Test-Path $OutputDir) {
     Remove-Item -Recurse -Force $OutputDir
 }
 
-# Download GStreamer MSI
-if (-not (Test-Path $MsiFile)) {
-    Write-Host "Downloading GStreamer runtime from $MsiUrl..."
-    Invoke-WebRequest -Uri $MsiUrl -OutFile $MsiFile -UseBasicParsing
-    Write-Host "Download complete: $((Get-Item $MsiFile).Length / 1MB) MB"
+# Download the GStreamer installer
+if (-not (Test-Path $InstallerFile)) {
+    Write-Host "Downloading GStreamer from $InstallerUrl..."
+    $ProgressPreference = "SilentlyContinue"
+    Invoke-WebRequest -Uri $InstallerUrl -OutFile $InstallerFile -UseBasicParsing
+    Write-Host "Download complete: $((Get-Item $InstallerFile).Length / 1MB) MB"
 } else {
-    Write-Host "Using existing download: $MsiFile"
+    Write-Host "Using existing download: $InstallerFile"
 }
 
-# Extract MSI using msiexec to a temp directory
-Write-Host "Extracting GStreamer MSI..."
-$installArgs = "/a `"$((Get-Location).Path)\$MsiFile`" /qn TARGETDIR=`"$((Get-Location).Path)\$TempDir`""
-Start-Process msiexec.exe -ArgumentList $installArgs -Wait -NoNewWindow
-
-if (-not (Test-Path $GstRoot)) {
-    Write-Error "Extraction failed - GStreamer root not found at $GstRoot"
-    exit 1
+# Unpack the runtime into a temp directory. /portable=1 writes no
+# uninstaller, environment variable or registry key and skips the Visual C++
+# Redistributable; /TYPE=runtime takes every runtime component and no
+# development files.
+Write-Host "Unpacking GStreamer..."
+$LogFile = "$((Get-Location).Path)\gstreamer-install.log"
+$p = Start-Process ".\$InstallerFile" -Wait -NoNewWindow -PassThru `
+    -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /portable=1 /TYPE=runtime /DIR=`"$GstRoot`" /LOG=`"$LogFile`""
+if ($p.ExitCode -ne 0) {
+    if (Test-Path $LogFile) { Get-Content $LogFile -Tail 50 }
+    throw "GStreamer installer failed with exit code $($p.ExitCode)"
 }
+
+foreach ($d in @("bin", "lib\gstreamer-1.0", "libexec\gstreamer-1.0")) {
+    if (-not (Test-Path "$GstRoot\$d")) {
+        throw "GStreamer unpack is missing $GstRoot\$d"
+    }
+}
+Write-Host "Unpacked $((Get-ChildItem "$GstRoot\bin\*.dll").Count) DLLs, $((Get-ChildItem "$GstRoot\lib\gstreamer-1.0\*.dll").Count) plugins"
 
 # Create output directory structure
 New-Item -ItemType Directory -Path "$OutputDir\bin" -Force | Out-Null
 New-Item -ItemType Directory -Path "$OutputDir\lib\gstreamer-1.0" -Force | Out-Null
 New-Item -ItemType Directory -Path "$OutputDir\share" -Force | Out-Null
 
-# Essential DLLs to include (core runtime)
-$EssentialDlls = @(
-    # GStreamer core
-    "gstreamer-1.0-0.dll",
-    "gstbase-1.0-0.dll",
-    "gstcontroller-1.0-0.dll",
-    "gstnet-1.0-0.dll",
-    "gstcheck-1.0-0.dll",
+# Every DLL in bin is copied, in both modes. The plugins below pull in
+# libraries of their own (gstx264.dll needs the x264 DLL, and so on), and a
+# hand-kept list of those missed some and broke the plugins that needed them.
 
-    # GStreamer libraries
-    "gstapp-1.0-0.dll",
-    "gstaudio-1.0-0.dll",
-    "gstvideo-1.0-0.dll",
-    "gstpbutils-1.0-0.dll",
-    "gstrtp-1.0-0.dll",
-    "gstrtsp-1.0-0.dll",
-    "gstsdp-1.0-0.dll",
-    "gsttag-1.0-0.dll",
-    "gstgl-1.0-0.dll",
-    "gstwebrtc-1.0-0.dll",
-    "gstcodecs-1.0-0.dll",
-    "gstcodecparsers-1.0-0.dll",
-    "gstsctp-1.0-0.dll",
-    "gstplay-1.0-0.dll",
-    "gstplayer-1.0-0.dll",
-    "gstriff-1.0-0.dll",
-    "gstfft-1.0-0.dll",
-    "gstallocators-1.0-0.dll",
-    "gstinsertbin-1.0-0.dll",
-    "gstmpegts-1.0-0.dll",
-    "gstadaptivedemux-1.0-0.dll",
-    "gstbadaudio-1.0-0.dll",
-    "gstisoff-1.0-0.dll",
-    "gsturidownloader-1.0-0.dll",
-
-    # GLib and dependencies
-    "glib-2.0-0.dll",
-    "gobject-2.0-0.dll",
-    "gmodule-2.0-0.dll",
-    "gio-2.0-0.dll",
-    "gthread-2.0-0.dll",
-    "intl-8.dll",
-    "pcre2-8-0.dll",
-    "ffi-8.dll",
-    "z1.dll",
-    "zlib1.dll",
-
-    # SSL/TLS
-    "libssl-3-x64.dll",
-    "libcrypto-3-x64.dll",
-
-    # Audio/Video codecs
-    "avcodec-61.dll",
-    "avformat-61.dll",
-    "avutil-59.dll",
-    "swresample-5.dll",
-    "swscale-8.dll",
-    "avfilter-10.dll",
-
-    # Image formats
-    "jpeg62.dll",
-    "libpng16.dll",
-
-    # Other dependencies
-    "orc-0.4-0.dll",
-    "libnice-0.dll",
-    "soup-3.0-0.dll",
-    "json-glib-1.0-0.dll",
-    "libxml2.dll",
-    "iconv-2.dll",
-    "lzma.dll",
-    "bz2.dll",
-    "opus.dll",
-    "libsrtp2.dll",
-    "graphene-1.0-0.dll",
-    "cairo.dll",
-    "cairo-gobject.dll",
-    "pango-1.0-0.dll",
-    "pangocairo-1.0-0.dll",
-    "pangoft2-1.0-0.dll",
-    "pangowin32-1.0-0.dll",
-    "harfbuzz.dll",
-    "freetype.dll",
-    "fontconfig-1.dll",
-    "expat.dll",
-    "pixman-1-0.dll"
-)
-
-# Essential plugins for Strom
+# Essential plugins for Strom. Names as GStreamer 1.28.8 ships them; a missing
+# one fails the script (see below), so a rename upstream shows up here instead
+# of as a missing element on a user's machine.
 $EssentialPlugins = @(
     # Core plugins
     "gstcoreelements.dll",
@@ -204,8 +136,8 @@ $EssentialPlugins = @(
     "gstx264.dll",
     "gstx265.dll",
     "gstvpx.dll",
-    "gstav1.dll",
-    "gstaom.dll",
+    "gstdav1d.dll",
+    "gstrav1e.dll",
     "gstsvtav1.dll",
     "gstlibav.dll",
     "gstdeinterlace.dll",
@@ -253,9 +185,20 @@ $EssentialPlugins = @(
     "gstadaptivedemux2.dll"
 )
 
+if (-not $Full) {
+    $missing = @($EssentialPlugins | Where-Object { -not (Test-Path "$GstRoot\lib\gstreamer-1.0\$_") })
+    if ($missing.Count -gt 0) {
+        throw "GStreamer $Version does not ship these essential files (renamed or dropped upstream?): $($missing -join ', ')"
+    }
+}
+
 # Copy executables
 Write-Host "Copying GStreamer tools..."
 $tools = @("gst-launch-1.0.exe", "gst-inspect-1.0.exe", "gst-discoverer-1.0.exe", "gst-typefind-1.0.exe")
+if ($Full) {
+    # Everything in bin, as the released MSI has always shipped it.
+    $tools = Get-ChildItem "$GstRoot\bin" -File | Where-Object { $_.Extension -ne ".dll" } | Select-Object -ExpandProperty Name
+}
 foreach ($tool in $tools) {
     $src = "$GstRoot\bin\$tool"
     if (Test-Path $src) {
@@ -270,12 +213,8 @@ $srcBin = "$GstRoot\bin"
 $dllFiles = Get-ChildItem "$srcBin\*.dll" -File
 
 foreach ($dll in $dllFiles) {
-    $include = $Full -or ($EssentialDlls -contains $dll.Name)
-
-    if ($include) {
-        Copy-Item $dll.FullName "$OutputDir\bin\" -Force
-        $copied++
-    }
+    Copy-Item $dll.FullName "$OutputDir\bin\" -Force
+    $copied++
 }
 Write-Host "  Copied $copied DLLs"
 
@@ -299,7 +238,9 @@ Write-Host "  Copied $copiedPlugins plugins"
 
 # Copy share files (GStreamer registry, etc.)
 Write-Host "Copying share files..."
-if (Test-Path "$GstRoot\share\gstreamer-1.0") {
+if ($Full) {
+    Copy-Item "$GstRoot\share\*" "$OutputDir\share\" -Recurse -Force
+} elseif (Test-Path "$GstRoot\share\gstreamer-1.0") {
     Copy-Item "$GstRoot\share\gstreamer-1.0" "$OutputDir\share\" -Recurse -Force
 }
 

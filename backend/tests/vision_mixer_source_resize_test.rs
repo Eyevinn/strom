@@ -73,8 +73,6 @@ fn build_flow(block_id: &str, first_shape: (i32, i32)) -> Flow {
                 "multiview_resolution".to_string(),
                 PV::String("640x360".into()),
             );
-            // Download PGM to system memory so the appsink can map pixels.
-            p.insert("gl_download".to_string(), PV::Bool(true));
             p
         },
         position: strom_types::block::Position { x: 100.0, y: 100.0 },
@@ -122,10 +120,15 @@ fn build_flow(block_id: &str, first_shape: (i32, i32)) -> Flow {
         ("caps0:src".to_string(), format!("{block_id}:video_in_0")),
         ("src1:src".to_string(), "caps1:sink".to_string()),
         ("caps1:src".to_string(), format!("{block_id}:video_in_1")),
-        (format!("{block_id}:pgm_out"), "pgmsink:sink".to_string()),
     ] {
         flow.links.push(strom_types::Link { from, to });
     }
+    common::download::link_through_download(
+        &mut flow,
+        "pgm",
+        &format!("{block_id}:pgm_out"),
+        "pgmsink:sink",
+    );
     flow
 }
 

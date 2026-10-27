@@ -255,9 +255,9 @@ ARG TARGETARCH
 # - gstreamer1.0-gl: GL plugins (glupload, gldownload, glcolorconvert)
 # - libegl1, libegl-mesa0, libgbm1: Headless EGL/GBM rendering (no X11 required)
 # - libgles2: libGLESv2.so.2, where GStreamer GL looks up GL functions on EGL.
-#   Without it glupload fails with "glGetString not defined", the CUDA-GL
-#   interop probe fails and GPU flows fall back to software. Ubuntu 25.10
-#   pulled it in as a dependency; 26.04 does not.
+#   Without it glupload fails with "glGetString not defined" and GPU flows
+#   that go through GL fail. Ubuntu 25.10 pulled it in as a dependency;
+#   26.04 does not.
 # - libgl1-mesa-dri: Mesa DRI drivers for software fallback
 # The nvidia-container-toolkit mounts NVIDIA GL libraries at runtime via --gpus all
 #
