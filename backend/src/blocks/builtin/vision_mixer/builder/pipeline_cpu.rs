@@ -663,13 +663,6 @@ pub(super) fn build_cpu_pipeline(
     })
 }
 
-/// System-memory caps `videocrop` can actually crop, read from its sink pad
-/// template so the list follows the installed GStreamer version.
-///
-/// The template also carries `video/x-raw(ANY)` with no format list, for crop
-/// meta on other memory types. That structure matches system memory too, so
-/// it is dropped here: `videocrop` accepts any format through it at caps query
-/// time and then refuses the ones it cannot crop in `set_info`.
 /// The front of the input `pad`: an `identity` linked between the input's
 /// queue and `videoconvert`. The software compositor takes system memory only,
 /// and what reaches an input is known only from its caps (a decoder
@@ -699,6 +692,13 @@ fn input_front(
     Ok((id, front))
 }
 
+/// System-memory caps `videocrop` can actually crop, read from its sink pad
+/// template so the list follows the installed GStreamer version.
+///
+/// The template also carries `video/x-raw(ANY)` with no format list, for crop
+/// meta on other memory types. That structure matches system memory too, so
+/// it is dropped here: `videocrop` accepts any format through it at caps query
+/// time and then refuses the ones it cannot crop in `set_info`.
 fn videocrop_sink_caps() -> Result<gst::Caps, BlockBuildError> {
     let template = gst::ElementFactory::find("videocrop")
         .ok_or_else(|| BlockBuildError::ElementCreation("videocrop not found".to_string()))?

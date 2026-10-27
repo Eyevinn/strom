@@ -52,12 +52,12 @@ fn built_converters(running: &Running, block_id: &str) -> Vec<(String, String)> 
         .collect()
 }
 
-/// The factories between input 0's front and its `videoconvert`: what the
-/// front spliced in.
-fn input_adapters(running: &Running, block_id: &str) -> Vec<String> {
-    let front = format!("{block_id}:video_in_0_front");
+/// The factories between the front of the input `pad` and the `videoconvert`
+/// named `convert`: what the front spliced in.
+fn input_adapters(running: &Running, block_id: &str, pad: &str, convert: &str) -> Vec<String> {
+    let front = format!("{block_id}:{pad}_front");
     let mut factories = Vec::new();
-    let mut next = running.feeder_of(&running.mixer_element("videoconvert_0"));
+    let mut next = running.feeder_of(&running.mixer_element(convert));
     while let Some(element) = next {
         if element.name() == front {
             return factories;
@@ -69,10 +69,35 @@ fn input_adapters(running: &Running, block_id: &str) -> Vec<String> {
                 .map(|f| f.name().to_string())
                 .unwrap_or_default(),
         );
-        assert!(factories.len() < 5, "input 0 has a loop: {factories:?}");
+        assert!(factories.len() < 5, "{pad} has a loop: {factories:?}");
         next = running.feeder_of(&element);
     }
-    panic!("videoconvert_0 is not fed from input 0's front: {factories:?}");
+    panic!("{convert} is not fed from {pad}'s front: {factories:?}");
+}
+
+/// A `gltestsrc` emitting GL RGBA, named `id`, linked to `to`.
+fn add_gl_source(flow: &mut Flow, id: &str, to: &str) {
+    flow.elements.push(elem(
+        id,
+        "gltestsrc",
+        vec![
+            ("pattern", PV::String("white".into())),
+            ("is-live", PV::Bool(true)),
+        ],
+    ));
+    let caps = format!("{id}_caps");
+    flow.elements.push(elem(
+        &caps,
+        "capsfilter",
+        vec![(
+            "caps",
+            PV::String(format!(
+                "video/x-raw(memory:GLMemory),format=RGBA,width={W},height={H},framerate=30/1"
+            )),
+        )],
+    ));
+    link(flow, &format!("{id}:src"), &format!("{caps}:sink"));
+    link(flow, &format!("{caps}:src"), to);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -88,26 +113,7 @@ async fn gl_memory_on_an_input_is_downloaded_by_its_front() {
     let block_id = "vm_cpu_gl_in";
     let mut flow = Flow::new("vm_cpu_gl_input");
     flow.blocks.push(mixer_block(block_id, Backend::Cpu));
-    flow.elements.push(elem(
-        "src",
-        "gltestsrc",
-        vec![
-            ("pattern", PV::String("white".into())),
-            ("is-live", PV::Bool(true)),
-        ],
-    ));
-    flow.elements.push(elem(
-        "srccaps",
-        "capsfilter",
-        vec![(
-            "caps",
-            PV::String(format!(
-                "video/x-raw(memory:GLMemory),format=RGBA,width={W},height={H},framerate=30/1"
-            )),
-        )],
-    ));
-    link(&mut flow, "src:src", "srccaps:sink");
-    link(&mut flow, "srccaps:src", &format!("{block_id}:video_in_0"));
+    add_gl_source(&mut flow, "src", &format!("{block_id}:video_in_0"));
     add_pgm_tap(&mut flow, block_id);
 
     let running = Running::start(block_id, flow);
@@ -117,7 +123,7 @@ async fn gl_memory_on_an_input_is_downloaded_by_its_front() {
     // white PGM alone would not show which side adapted. The input's own
     // front has to.
     assert_eq!(
-        input_adapters(&running, block_id),
+        input_adapters(&running, block_id, "video_in_0", "videoconvert_0"),
         ["gldownload", "capsfilter"],
         "input 0's front must download the GL memory itself, pinned to system memory"
     );
@@ -149,8 +155,66 @@ async fn system_memory_on_an_input_passes_without_a_download() {
     );
     running.wait_for_white_pgm("system memory on video_in_0 of the CPU mixer", 3);
     assert!(
-        input_adapters(&running, block_id).is_empty(),
+        input_adapters(&running, block_id, "video_in_0", "videoconvert_0").is_empty(),
         "system memory needs no download between input 0's front and its videoconvert"
     );
+    running.stop();
+}
+
+/// The DSK and stinger inputs have their own fronts, and different consumers
+/// behind their `videoconvert`: a compositor pad for a DSK, `videocrop` for the
+/// stinger, whose sink template also lists `video/x-raw(ANY)`. GL memory on
+/// either is downloaded by that input's front.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
+async fn gl_memory_on_a_dsk_or_stinger_input_is_downloaded_by_its_front() {
+    force_gpu_convert_mode();
+    gst::init().unwrap();
+    let mut required = CPU_ELEMENTS.to_vec();
+    required.extend(["gltestsrc", "gldownload"]);
+    if !common::gl_available(&required) {
+        return;
+    }
+    let block_id = "vm_cpu_gl_dsk_stinger";
+    let mut flow = testsrc_flow(block_id, Backend::Cpu, Front::Direct);
+    let mixer = &mut flow.blocks[0].properties;
+    mixer.insert("num_dsk_inputs".to_string(), PV::String("1".into()));
+    mixer.insert(
+        strom_types::stinger::ENABLE_STINGER_PROPERTY.to_string(),
+        PV::Bool(true),
+    );
+    // DSK and stinger pads depend on the properties, so the flow carries them
+    // as the API would.
+    flow.blocks[0].computed_external_pads =
+        strom::blocks::builtin::get_builder("builtin.vision_mixer")
+            .and_then(|builder| builder.get_external_pads(&flow.blocks[0].properties));
+    add_gl_source(&mut flow, "dsksrc", &format!("{block_id}:dsk_in_0"));
+    add_gl_source(
+        &mut flow,
+        "stingersrc",
+        &format!("{block_id}:{}", strom_types::stinger::STINGER_INPUT_PAD),
+    );
+
+    let running = Running::start(block_id, flow);
+    running.wait_for_white_pgm("video_in_0 beside GL DSK and stinger inputs", 3);
+    for (pad, convert) in [
+        ("dsk_in_0", "videoconvert_dsk_0"),
+        (
+            strom_types::stinger::STINGER_INPUT_PAD,
+            "videoconvert_stinger",
+        ),
+    ] {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut adapters = input_adapters(&running, block_id, pad, convert);
+        while adapters != ["gldownload", "capsfilter"] && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            adapters = input_adapters(&running, block_id, pad, convert);
+        }
+        assert_eq!(
+            adapters,
+            ["gldownload", "capsfilter"],
+            "{pad}'s front must download the GL memory itself, pinned to system memory"
+        );
+    }
     running.stop();
 }
