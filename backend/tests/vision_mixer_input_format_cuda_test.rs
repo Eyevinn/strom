@@ -323,14 +323,7 @@ async fn cuda_after_a_converted_format_bypasses_the_converter() {
         .unwrap_or_else(|| panic!("the input does not offer CUDA memory: {answer}"));
     let first_converted = answer
         .iter_with_features()
-        .position(|(s, f)| {
-            if f.contains("memory:GLMemory") || f.contains("memory:CUDAMemory") {
-                return false;
-            }
-            let mut one = gst::Caps::new_empty();
-            one.make_mut().append_structure(s.to_owned());
-            !s.has_field("format") || !one.is_subset(&uploads)
-        })
+        .position(|(s, f)| common::upload_path(s, f, &uploads) == common::UploadPath::ConverterOnly)
         .unwrap_or_else(|| panic!("the answer lists nothing only the converter takes: {answer}"));
     assert!(
         first_cuda < first_converted,
