@@ -203,5 +203,20 @@ async fn gl_memory_on_a_dsk_or_stinger_input_is_downloaded_by_its_front() {
             "{pad}'s front must download the GL memory itself, pinned to system memory"
         );
     }
+
+    // Every input's converter comes from `download_front::convert_front`,
+    // which sets the configured thread count (macOS only).
+    #[cfg(target_os = "macos")]
+    for convert in [
+        "videoconvert_0",
+        "videoconvert_dsk_0",
+        "videoconvert_stinger",
+    ] {
+        assert_eq!(
+            running.mixer_element(convert).property::<u32>("n-threads"),
+            strom::gpu::video_convert_threads(),
+            "configure_video_convert did not reach {convert}"
+        );
+    }
     running.stop();
 }

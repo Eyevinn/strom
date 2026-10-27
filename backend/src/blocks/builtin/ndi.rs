@@ -6,7 +6,6 @@
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gst::download_front;
-use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -388,28 +387,10 @@ fn ndi_video_input(
 ) -> Result<String, BlockBuildError> {
     let input_id = format!("{}:input", instance_id);
     let convert_id = format!("{}:videoconvert", instance_id);
-    let input = gst::ElementFactory::make("identity")
-        .name(&input_id)
-        .property("silent", true)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {}", e)))?;
-    let videoconvert = gst::ElementFactory::make(VIDEO_CONVERT_FACTORY)
-        .name(&convert_id)
-        .build()
-        .map_err(|e| {
-            BlockBuildError::ElementCreation(format!("{}: {}", VIDEO_CONVERT_FACTORY, e))
-        })?;
-    crate::gpu::configure_video_convert(&videoconvert);
-    let convert_sink = videoconvert
-        .static_pad("sink")
-        .ok_or_else(|| BlockBuildError::ElementCreation("videoconvert has no sink pad".into()))?;
-    download_front::install(&input, &convert_sink, &input_id, "NDI Output");
-    links.push((
-        ElementPadRef::pad(&input_id, "src"),
-        ElementPadRef::pad(&convert_id, "sink"),
-    ));
-    elements.push((input_id, input));
-    elements.push((convert_id.clone(), videoconvert));
+    let front = download_front::convert_front(&input_id, &convert_id, "NDI Output")?;
+    links.push(front.link());
+    elements.push((input_id, front.front));
+    elements.push((convert_id.clone(), front.convert));
     Ok(convert_id)
 }
 
