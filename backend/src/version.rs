@@ -18,6 +18,42 @@ pub fn get_process_startup_time() -> DateTime<Local> {
     *PROCESS_STARTUP_TIME.get_or_init(Local::now)
 }
 
+/// The oldest GStreamer Strom supports: 1.22, as shipped by Debian 12
+/// (bookworm). Keep in step with the `v1_22` feature on the gstreamer crates in
+/// the workspace `Cargo.toml`. The `check-floor` CI job builds and runs on it.
+pub const MIN_GSTREAMER_VERSION: (u32, u32) = (1, 22);
+
+/// True when GStreamer `major.minor` is older than [`MIN_GSTREAMER_VERSION`].
+pub fn below_gstreamer_floor(major: u32, minor: u32) -> bool {
+    (major, minor) < MIN_GSTREAMER_VERSION
+}
+
+/// Log the runtime GStreamer version, and warn when it is older than
+/// [`MIN_GSTREAMER_VERSION`]. Strom still starts: the warning says that what
+/// follows is untested. Call after `gst::init()`.
+pub fn log_gstreamer_version() {
+    let (major, minor, micro, nano) = gstreamer::version();
+    tracing::info!(
+        "GStreamer runtime version {}.{}.{}.{}",
+        major,
+        minor,
+        micro,
+        nano
+    );
+    if below_gstreamer_floor(major, minor) {
+        let (floor_major, floor_minor) = MIN_GSTREAMER_VERSION;
+        tracing::warn!(
+            "GStreamer {}.{}.{} is older than {}.{}, the oldest version Strom supports; \
+             flows may fail to build or behave wrongly",
+            major,
+            minor,
+            micro,
+            floor_major,
+            floor_minor
+        );
+    }
+}
+
 /// Get the current system information, collecting runtime data.
 pub fn get() -> SystemInfo {
     // Get GStreamer version at runtime
@@ -144,5 +180,14 @@ mod tests {
             "a pod with KUBERNETES_SERVICE_HOST set must be reported as containerised \
              (is_in_docker() was {baseline} before the variable was set)"
         );
+    }
+
+    #[test]
+    fn gstreamer_floor_is_1_22() {
+        assert!(below_gstreamer_floor(1, 20));
+        assert!(below_gstreamer_floor(1, 21));
+        assert!(!below_gstreamer_floor(1, 22));
+        assert!(!below_gstreamer_floor(1, 28));
+        assert!(!below_gstreamer_floor(2, 0));
     }
 }

@@ -30,6 +30,22 @@ pub mod video_input_bridge;
 pub mod volume_ramp;
 pub mod whep_probe;
 
+/// Register the GStreamer plugins Strom links in statically (gst-plugins-rs
+/// WebRTC, inter, RTP, audiofx, isobmff, lsp-dsp-rs, and EFP with the `efp`
+/// feature). Call once, after `gst::init()`, before any flow is built. Panics
+/// when a plugin fails to register: the blocks that use it could not work.
+pub fn register_static_plugins() {
+    gstwebrtchttp::plugin_register_static().expect("Could not register webrtchttp plugins");
+    gstrswebrtc::plugin_register_static().expect("Could not register webrtc plugins");
+    gstrsinter::plugin_register_static().expect("Could not register inter plugins");
+    gstrsrtp::plugin_register_static().expect("Could not register rtp plugins");
+    gstrsaudiofx::plugin_register_static().expect("Could not register audiofx plugins");
+    gstisobmff::plugin_register_static().expect("Could not register isobmff plugins");
+    gst_plugins_lsp::plugin_register_static().expect("Could not register lsp-dsp-rs plugins");
+    #[cfg(feature = "efp")]
+    gst_plugin_efp::plugin_register_static().expect("Could not register efp mux/demux plugins");
+}
+
 pub use discovery::ElementDiscovery;
 pub use pipeline::{PipelineError, PipelineManager};
 pub use thread_priority::{

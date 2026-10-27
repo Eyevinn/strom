@@ -543,20 +543,13 @@ fn run_with_gui(
         // Initialize GStreamer INSIDE tokio runtime
         gstreamer::init().expect("Failed to initialize GStreamer");
         info!("GStreamer initialized");
+        strom::version::log_gstreamer_version();
 
         // Promote VA-API plugin ranks (gstva plugins have rank=0 by default)
         promote_va_plugin_ranks();
 
         // Register GStreamer plugins statically
-        gstwebrtchttp::plugin_register_static().expect("Could not register webrtchttp plugins");
-        gstrswebrtc::plugin_register_static().expect("Could not register webrtc plugins");
-        gstrsinter::plugin_register_static().expect("Could not register inter plugins");
-        gstrsrtp::plugin_register_static().expect("Could not register rtp plugins");
-        gstrsaudiofx::plugin_register_static().expect("Could not register audiofx plugins");
-        gstisobmff::plugin_register_static().expect("Could not register isobmff plugins");
-        gst_plugins_lsp::plugin_register_static().expect("Could not register lsp-dsp-rs plugins");
-        #[cfg(feature = "efp")]
-        gst_plugin_efp::plugin_register_static().expect("Could not register efp mux/demux plugins");
+        strom::gst::register_static_plugins();
 
         // Detect GPU capabilities for video conversion mode selection
         // This tests CUDA-GL interop to determine if autovideoconvert works
@@ -822,20 +815,13 @@ async fn run_headless(
     // Initialize GStreamer INSIDE tokio runtime
     gstreamer::init()?;
     info!("GStreamer initialized");
+    strom::version::log_gstreamer_version();
 
     // Promote VA-API plugin ranks (gstva plugins have rank=0 by default)
     promote_va_plugin_ranks();
 
     // Register GStreamer plugins statically
-    gstwebrtchttp::plugin_register_static().expect("Could not register webrtchttp plugins");
-    gstrswebrtc::plugin_register_static().expect("Could not register webrtc plugins");
-    gstrsinter::plugin_register_static().expect("Could not register inter plugins");
-    gstrsrtp::plugin_register_static().expect("Could not register rtp plugins");
-    gstrsaudiofx::plugin_register_static().expect("Could not register audiofx plugins");
-    gstisobmff::plugin_register_static().expect("Could not register isobmff plugins");
-    gst_plugins_lsp::plugin_register_static().expect("Could not register lsp-dsp-rs plugins");
-    #[cfg(feature = "efp")]
-    gst_plugin_efp::plugin_register_static().expect("Could not register efp mux/demux plugins");
+    strom::gst::register_static_plugins();
 
     // Detect GPU capabilities for video conversion mode selection
     // This tests CUDA-GL interop to determine if autovideoconvert works
