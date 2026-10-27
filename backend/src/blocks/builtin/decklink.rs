@@ -13,8 +13,8 @@
 //!
 //! DeckLink Input emits the card's native formats. DeckLink Output adapts its
 //! video input to the configured mode: an input front downloads GPU memory
-//! (`gst::download_front`), then `videoconvert`, `videoscale` and `videorate`
-//! convert the pixel format, scale and change the framerate to what
+//! (`gst::download_front`), then `videorate`, `videoscale` and `videoconvert`
+//! change the framerate, scale and convert the pixel format to what
 //! `decklinkvideosink` takes. Video whose interlacing does not match the mode
 //! fails the flow with an element error: nothing here interlaces or
 //! deinterlaces. Audio goes to `decklinkaudiosink` as it arrives (#1068).
