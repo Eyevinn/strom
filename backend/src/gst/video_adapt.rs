@@ -116,8 +116,8 @@ pub enum Consumer<'a> {
     /// takes, so they cannot be read this way.
     Exactly(&'a gst::CapsRef),
     /// A consumer that reads frames on the CPU and takes raw video in system
-    /// memory only (the thumbnail tap's branch). The producer caps are the
-    /// negotiated caps.
+    /// memory only, with no scaling of its own (WHEP Output's bridge, for
+    /// its CPU path). The producer caps are the negotiated caps.
     SystemMemory,
     /// An input fed from another pipeline that shares no context with this
     /// one (Inter Input, fed by another flow's Inter Output). GL memory there

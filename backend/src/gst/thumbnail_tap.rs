@@ -6,22 +6,21 @@
 //!
 //! Processing branch (when active):
 //! ```text
-//! GL path:
 //! [tee] ─┬─ (passthrough)
-//!         └─ queue ─[pad probe: rate limit]─→ glcolorscale
-//!            → capsfilter(GL,RGBA,WxH) → gldownload
-//!            → capsfilter(RGBA,WxH) → appsink
-//!
-//! System-memory path (CUDA memory gets a cudadownload in front):
-//! [tee] ─┬─ (passthrough)
-//!         └─ queue ─[pad probe: rate limit]─→ [cudadownload] → videoconvertscale
+//!         └─ queue ─[pad probe: rate limit]─→ [scale and convert]
 //!            → capsfilter(RGBA,WxH) → appsink
 //! ```
 //!
-//! The tap is a consumer of whatever the tee carries: which path it builds is
-//! decided by [`video_adapt::decide`] from the tee's negotiated caps. What it
-//! cannot read (GPU memory nothing here downloads, anything but raw video) is
-//! refused before anything is attached to the tee.
+//! The tap is a consumer of whatever the tee carries. The scale-and-convert
+//! chain is what [`video_adapt::decide`] calls for with
+//! `Consumer::ScaleConvert`, from the tee's negotiated caps, for an output of
+//! RGBA at the thumbnail's size in system memory: for GL memory in any format
+//! or texture target, `glcolorconvert ! glcolorscale ! glcolorconvert`, then
+//! the download, so only the small frame crosses the bus; for GPU memory
+//! whose scaler is missing, its download, then `videoscale ! videoconvert`;
+//! for system memory, `videoscale ! videoconvert`. What it cannot read (GPU
+//! memory nothing here downloads, anything but raw video) is refused before
+//! anything is attached to the tee.
 //!
 //! Frame rate is limited via a pad probe on the queue src pad that drops
 //! buffers arriving sooner than `update_interval`. This is invisible to
@@ -362,8 +361,7 @@ impl ThumbnailTap {
         );
 
         // Build the full element chain:
-        //   GL:     queue [pad probe] → glcolorscale → glcaps → gldownload → capsfilter → appsink
-        //   system: queue [pad probe] → [cudadownload] → videoconvertscale → capsfilter → appsink
+        //   queue [pad probe] → [what decide() called for] → capsfilter → appsink
         let mut elements: Vec<gst::Element> = vec![queue.clone()];
         elements.extend(branch_elements.iter().cloned());
         elements.push(capsfilter.clone());
