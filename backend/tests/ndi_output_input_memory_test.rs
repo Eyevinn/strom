@@ -157,7 +157,11 @@ const SYSTEM_Y42B: &str = "video/x-raw,format=Y42B,width=320,height=240,framerat
 /// block's converter must still be plain `videoconvert`.
 fn add_block(pipeline: &gst::Pipeline) -> (gst::Pad, gst_app::AppSink) {
     ndisink_stand_in::register();
-    let _ = strom::gpu::force_video_convert_mode(strom::gpu::VideoConvertMode::GpuAccelerated);
+    assert_eq!(
+        strom::gpu::force_video_convert_mode(strom::gpu::VideoConvertMode::GpuAccelerated),
+        strom::gpu::VideoConvertMode::GpuAccelerated,
+        "the convert mode was set before this test could force it"
+    );
     let props = HashMap::from([
         ("mode".to_string(), PropertyValue::String("video".into())),
         (
@@ -202,7 +206,8 @@ fn add_block(pipeline: &gst::Pipeline) -> (gst::Pad, gst_app::AppSink) {
     (block_in, appsink)
 }
 
-/// What reached the stand-in for `ndisink`: frames and their caps.
+/// The caps of the first sample that reached the stand-in for `ndisink`, or
+/// `None` when no sample arrived (or it carried no caps) within `timeout`.
 fn received(appsink: &gst_app::AppSink, timeout: Duration) -> Option<gst::Caps> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {

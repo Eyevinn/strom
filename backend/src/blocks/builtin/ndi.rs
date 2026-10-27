@@ -373,20 +373,19 @@ impl BlockBuilder for NDIInputBuilder {
     }
 }
 
-/// NDI Output's video input: elements and the links between them.
-struct VideoInput {
-    elements: Vec<(String, gst::Element)>,
-    links: Vec<(ElementPadRef, ElementPadRef)>,
-}
-
-/// NDI Output's video input, `input (identity) ! videoconvert`. Returns the
-/// `videoconvert`'s id, which feeds the sink or combiner.
+/// Add NDI Output's video input, `input (identity) ! videoconvert`, to
+/// `elements` and `links`. Returns the `videoconvert`'s id, which feeds the
+/// sink or combiner.
 ///
 /// The block adapts what arrives (BLOCK_GUIDELINES): the input downloads GPU
 /// memory from the negotiated caps (`gst::download_front`), and the plain
 /// `videoconvert` turns the pixel format into one NDI takes, converting only
 /// when the format does not already fit.
-fn ndi_video_input(instance_id: &str) -> Result<(String, VideoInput), BlockBuildError> {
+fn ndi_video_input(
+    instance_id: &str,
+    elements: &mut Vec<(String, gst::Element)>,
+    links: &mut Vec<(ElementPadRef, ElementPadRef)>,
+) -> Result<String, BlockBuildError> {
     let input_id = format!("{}:input", instance_id);
     let convert_id = format!("{}:videoconvert", instance_id);
     let input = gst::ElementFactory::make("identity")
@@ -405,17 +404,13 @@ fn ndi_video_input(instance_id: &str) -> Result<(String, VideoInput), BlockBuild
         .static_pad("sink")
         .ok_or_else(|| BlockBuildError::ElementCreation("videoconvert has no sink pad".into()))?;
     download_front::install(&input, &convert_sink, &input_id, "NDI Output");
-    let links = vec![(
+    links.push((
         ElementPadRef::pad(&input_id, "src"),
         ElementPadRef::pad(&convert_id, "sink"),
-    )];
-    Ok((
-        convert_id.clone(),
-        VideoInput {
-            elements: vec![(input_id, input), (convert_id, videoconvert)],
-            links,
-        },
-    ))
+    ));
+    elements.push((input_id, input));
+    elements.push((convert_id.clone(), videoconvert));
+    Ok(convert_id)
 }
 
 /// NDI Output block builder.
@@ -507,9 +502,8 @@ impl BlockBuilder for NDIOutputBuilder {
             "combined" => {
                 // Video path: the input adapts what arrives (see
                 // `ndi_video_input`).
-                let (videoconvert_id, video_input) = ndi_video_input(instance_id)?;
-                elements.extend(video_input.elements);
-                internal_links.extend(video_input.links);
+                let videoconvert_id =
+                    ndi_video_input(instance_id, &mut elements, &mut internal_links)?;
 
                 // Audio path
                 let audioconvert_id = format!("{}:audioconvert", instance_id);
@@ -587,9 +581,8 @@ impl BlockBuilder for NDIOutputBuilder {
             }
             "video" => {
                 // The input adapts what arrives (see `ndi_video_input`).
-                let (videoconvert_id, video_input) = ndi_video_input(instance_id)?;
-                elements.extend(video_input.elements);
-                internal_links.extend(video_input.links);
+                let videoconvert_id =
+                    ndi_video_input(instance_id, &mut elements, &mut internal_links)?;
                 let ndisink_id = format!("{}:ndisink", instance_id);
 
                 let ndisink = gst::ElementFactory::make("ndisink")
@@ -598,7 +591,7 @@ impl BlockBuilder for NDIOutputBuilder {
                     .build()
                     .map_err(|e| BlockBuildError::ElementCreation(format!("ndisink: {}", e)))?;
 
-                elements.extend(vec![(ndisink_id.clone(), ndisink)]);
+                elements.push((ndisink_id.clone(), ndisink));
 
                 internal_links.push((
                     ElementPadRef::pad(&videoconvert_id, "src"),
