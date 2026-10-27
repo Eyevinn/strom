@@ -18,6 +18,7 @@ pub mod pipeline;
 pub mod pipeline_bridge;
 pub mod pipeline_monitor;
 pub mod rtp_hdrext;
+pub mod scale_front;
 pub mod shaders;
 pub mod software_decoder;
 pub mod thread_priority;
