@@ -128,11 +128,12 @@ jobs:
       # what souphttpsrc loads and looks up the system proxy in.
       # The image points apt at archive.ubuntu.com, which once took 12 minutes
       # here and ran the job into its timeout. The Azure mirror is the one the
-      # hosted runners use, next to them.
+      # hosted runners use, next to them. ForceIPv4: the container has no IPv6
+      # route, and apt otherwise spends seconds per package on a v6 attempt.
       - name: Install build and GStreamer packages
         run: |
           sed -i -E 's#http://(archive|security)\.ubuntu\.com/#http://azure.archive.ubuntu.com/#' /etc/apt/sources.list.d/ubuntu.sources
-          echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
+          printf 'Acquire::Retries "3";\nAcquire::ForceIPv4 "true";\n' > /etc/apt/apt.conf.d/80-ci
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             build-essential ca-certificates curl git pkg-config cmake libclang-dev procps \
@@ -286,7 +287,7 @@ jobs:
       # check-linux.
       - name: Install build tools and GStreamer 1.22
         run: |
-          echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
+          printf 'Acquire::Retries "3";\nAcquire::ForceIPv4 "true";\n' > /etc/apt/apt.conf.d/80-ci
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates curl git build-essential gstreamer1.0-tools \
