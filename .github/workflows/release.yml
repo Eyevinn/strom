@@ -133,7 +133,7 @@ jobs:
             platform: windows
             target: x86_64-pc-windows-msvc
             binary_ext: ".exe"
-            features: ""
+            features: "efp"
           - os: macos-latest
             platform: macos
             target: aarch64-apple-darwin
@@ -243,30 +243,8 @@ jobs:
       # (freedesktop.org has bot protection that blocks CI downloads)
       - name: Install GStreamer (Windows)
         if: matrix.platform == 'windows'
-        run: |
-          $GSTREAMER_VERSION = "1.26.10"
-          $BASE_URL = "https://github.com/Eyevinn/strom/releases/download/gstreamer-deps"
-
-          # Download and install runtime from our GitHub mirror
-          Write-Host "Downloading GStreamer runtime from GitHub mirror..."
-          Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer.msi
-          Write-Host "Installing GStreamer runtime..."
-          Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer.msi /quiet /qn INSTALLDIR=D:\gstreamer'
-
-          # Download and install development files from our GitHub mirror
-          Write-Host "Downloading GStreamer development files from GitHub mirror..."
-          Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-devel-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer-devel.msi
-          Write-Host "Installing GStreamer development files..."
-          Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer-devel.msi /quiet /qn INSTALLDIR=D:\gstreamer'
-
-          # Install pkg-config via Chocolatey (still needed)
-          # --allow-empty-checksums needed because pkgconfiglite downloads from HTTP
-          choco install pkgconfiglite --yes --no-progress --allow-empty-checksums
-
-          # Set environment variables
-          echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=D:\gstreamer\1.0\msvc_x86_64\" >> $env:GITHUB_ENV
-          echo "D:\gstreamer\1.0\msvc_x86_64\bin" >> $env:GITHUB_PATH
-          echo "PKG_CONFIG_PATH=D:\gstreamer\1.0\msvc_x86_64\lib\pkgconfig" >> $env:GITHUB_ENV
+        shell: pwsh
+        run: .github/scripts/install-gstreamer-windows.ps1 -Version 1.28.8
 
       # macOS: Install GStreamer via Homebrew
       # Set PKG_CONFIG_PATH to ensure correct library paths are found
@@ -367,6 +345,9 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           draft: false
-          prerelease: false
+          # A tag with a suffix (v0.8.0-alpha.1) is a prerelease and must not
+          # become the latest release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
           generate_release_notes: true
           files: release-assets/*

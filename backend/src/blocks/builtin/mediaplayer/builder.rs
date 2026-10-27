@@ -29,7 +29,7 @@ pub struct MediaPlayerBuilder;
 /// beyond these, and tracks that are neither video nor audio, are discarded
 /// rather than left unlinked, which would stop playback.
 pub(super) fn track_counts(properties: &HashMap<String, PropertyValue>) -> (usize, usize) {
-    use crate::blocks::builtin::whep::explicit_track_count;
+    use crate::blocks::builtin::inputs::explicit_track_count;
     (
         explicit_track_count(properties, "num_video_tracks").unwrap_or(1),
         explicit_track_count(properties, "num_audio_tracks").unwrap_or(1),
@@ -413,11 +413,7 @@ fn connect_main_pipeline_handler(
 
     // Store main pipeline reference for timestamp offset computation in the bridge.
     // The appsrc lives in the main pipeline, so we traverse up from it to find the pipeline.
-    if let Some(appsrc) = state
-        .video_appsrcs
-        .first()
-        .or_else(|| state.audio_appsrcs.first())
-    {
+    if let Some(appsrc) = state.flow_anchor() {
         let mut current: Option<gst::Object> =
             Some(appsrc.clone().upcast::<gst::Element>().upcast());
         while let Some(obj) = current {

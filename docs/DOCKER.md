@@ -16,7 +16,7 @@ docker pull eyevinntechnology/strom:latest        # base image
 docker pull eyevinntechnology/strom-full:latest   # + CEF/Chromium for HTML rendering
 ```
 
-Pin a specific version with a tag, e.g. `eyevinntechnology/strom:0.7.0` (tags `X.Y.Z`, `X.Y`, `X` and `latest` are published).
+Pin a specific version with a tag, e.g. `eyevinntechnology/strom:0.7.2` (tags `X.Y.Z`, `X.Y`, `X` and `latest` are published).
 
 ## Quick start
 
@@ -39,7 +39,8 @@ For GPU acceleration add `--gpus all` and `-e NVIDIA_DRIVER_CAPABILITIES=all` �
 ## Configuration
 
 Strom is configured via environment variables. `strom --help` lists the command-line
-options; every other setting, with its environment variable, is in `.strom.toml.example`.
+options; most other settings, with their environment variables, are in `.strom.toml.example`
+(the CEF DevTools settings are in [HTML_RENDER.md](HTML_RENDER.md)).
 The common ones:
 
 | Variable | Purpose |
@@ -77,8 +78,8 @@ container — point your MCP client at `http://<host>:8080/api/mcp`. See [MCP.md
 
 ## Building the image yourself
 
-The [`Dockerfile`](../Dockerfile) uses a multi-stage build on Ubuntu 25.10 (Questing), which
-provides GStreamer 1.26 with the nvcodec fix:
+The [`Dockerfile`](../Dockerfile) uses a multi-stage build on Ubuntu 26.04 LTS (Resolute), which
+provides GStreamer 1.28 with the nvcodec fix:
 
 1. **Frontend builder** — builds the WASM frontend (platform-independent output).
 2. **Backend builder** — builds the backend, optionally cross-compiling

@@ -209,7 +209,7 @@ docker exec <container_id> ps aux | grep Xvfb
 
 ### "locale_file_path.empty() for locale"
 
-CEF can't find its locale files. This is fixed in strom-full:0.3.12+. Ensure you're using the latest image:
+CEF can't find its locale files. The current image ships them; make sure you are using the latest image:
 
 ```bash
 docker pull eyevinntechnology/strom-full:latest
@@ -253,7 +253,7 @@ The build uses Ubuntu Questing to match the strom base image's glibc version.
 
 An HTML source is a block: set the URL, the viewport size and the framerate,
 and choose with Stream Mode whether it outputs Video (the default), Audio +
-Video, or Audio only. Raw `cefsrc` pipelines still work — the block just spares
+Video, or Audio. Raw `cefsrc` pipelines still work — the block just spares
 you the caps.
 
 ## Which pages work

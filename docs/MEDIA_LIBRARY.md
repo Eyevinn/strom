@@ -19,6 +19,12 @@ source for: `http(s)` (including HLS and DASH), `rtsp://`, `srt://`, `udp://`, `
 **Video Tracks** and **Audio Tracks** (default 1, 0 discards that kind) set how many tracks of a file get an
 output: `video_out`, `video_out_1`, … and `audio_out`, `audio_out_1`, ….
 
+**Decode** is on by default, so the outputs carry raw video and audio. Turn it off to pass the
+encoded streams through, for example into an SRT, RTMP or Recorder output, which take encoded
+video only. A saved flow whose Media Player never set `decode` now decodes; if it feeds such an
+output, that output refuses the raw video and the flow fails to start until you set
+`decode=false`.
+
 ## Download from a URL
 
 Clips that live on a web server, such as stingers, can be copied into the library once instead

@@ -2,7 +2,7 @@
 
 > Code is the source of truth — this may have drifted; read the code for the current implementation.
 
-This section walks through deploying a local [Strom](https://github.com/Eyevinn/strom) instance that Open Live can connect to.
+This guide walks through deploying a local [Strom](https://github.com/Eyevinn/strom) instance that Open Live can connect to.
 
 [Open Live](https://github.com/Eyevinn/open-live) is an open-source live production platform, with [Open Live Studio](https://github.com/Eyevinn/open-live-studio) as its web-based production interface. Strom is a standalone GStreamer flow engine that handles the actual media pipelines — it is not tied to Open Live, but Open Live uses it as a backend, driving it over its REST and WebSocket APIs. This guide covers running your own Strom instance for Open Live to connect to.
 
@@ -106,10 +106,10 @@ docker run -d \
   eyevinntechnology/strom-full:latest
 ```
 
-Strom logs whether interop succeeded at startup:
+Strom logs the GPU it found at startup:
 
 ```
-INFO  CUDA-GL interop works - using GPU-accelerated video conversion
+INFO  GL renderer: NVIDIA L4/PCIe/SSE2 (NVIDIA Corporation), GL 4.6.0 NVIDIA ..., GLSL 4.60 NVIDIA
 INFO  NVML initialized successfully - found 1 GPU(s)
 ```
 

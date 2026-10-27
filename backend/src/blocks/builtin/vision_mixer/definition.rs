@@ -260,8 +260,7 @@ fn vision_mixer_definition() -> BlockDefinition {
         ExposedProperty {
             name: "output_format".to_string(),
             label: "Output Pixel Format".to_string(),
-            description: "Pixel format for compositor outputs. Auto lets GStreamer negotiate."
-                .to_string(),
+            description: "Pixel format for the CPU compositor's outputs. Auto lets GStreamer negotiate. The GPU mixer emits RGBA in GL memory; a consumer converts it.".to_string(),
             property_type: PropertyType::Enum {
                 values: {
                     let mut v = vec![EnumValue {
@@ -276,21 +275,6 @@ fn vision_mixer_definition() -> BlockDefinition {
             mapping: PropertyMapping {
                 element_id: "_block".to_string(),
                 property_name: "output_format".to_string(),
-                transform: None,
-            },
-            live: false,
-            persist: None,
-        },
-        // GL download (GPU path only)
-        ExposedProperty {
-            name: "gl_download".to_string(),
-            label: "GL Download".to_string(),
-            description: "Download GPU memory to system memory on output. Disable to pass GL memory downstream (GPU path only).".to_string(),
-            property_type: PropertyType::Bool,
-            default_value: Some(PropertyValue::Bool(DEFAULT_GL_DOWNLOAD)),
-            mapping: PropertyMapping {
-                element_id: "_block".to_string(),
-                property_name: "gl_download".to_string(),
                 transform: None,
             },
             live: false,

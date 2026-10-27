@@ -28,7 +28,7 @@ flowchart LR
     PIPS["PiP Compositions<br/>0 … 4 (configurable)"]:::stage
     PVW["PVW (Preview) Bus<br/>green"]:::pvw
     PGM["PGM (Program) Bus<br/>red"]:::pgm
-    TRANS["Transition Engine<br/>cut · fade · slide · push · dip"]:::stage
+    TRANS["Transition Engine<br/>cut · fade · slide · push · dip · stinger"]:::stage
     DSK["DSK Layers<br/>0 … 4 (alpha key)"]:::stage
     FTB["Fade-to-Black"]:::stage
     PGM_OUT["PGM Out<br/>(distribution)"]:::out
@@ -171,6 +171,12 @@ takes (`glitch_cut`, `flash_dissolve`, ...) keep their full-frame effect
 on top of the fade. All shader transitions downgrade to `fade` when the
 FX engine is unavailable (CPU backend, or Shader FX disabled).
 
+When a PiP take shares a source between PGM and PVW, the `fade` is not a
+dissolve: the shared source moves from its old box and crop to its new
+ones, and the response reports `actual_transition_type: "morph"`. The
+[Producer Switching guide](PRODUCER_SWITCHING_API_GUIDE.md) shows what each
+take looks like.
+
 ### 3.3 Cut vs Take/Auto
 
 | Operator button | What it triggers |
@@ -291,7 +297,8 @@ alpha in WebM (the usual format of stinger packs), ProRes 4444, FFV1 in
 Matroska, QuickTime Animation. H.264 has no alpha, which is fine for a
 mask or for the matte half of a track-matte clip, but not for a classic
 graphic. Stingers do not take PiP buses: PGM and PVW must be inputs.
-Stinger clips are meant to be local files: upload them with the media API.
+Stinger clips are meant to be local files: upload them, or download them from a URL, into
+the media library (see [MEDIA_LIBRARY.md](MEDIA_LIBRARY.md)).
 A URL plays, but it is fetched again on every cue, and a take depends on
 the server staying up.
 
@@ -565,7 +572,7 @@ action.
 | **Example stingers** | Render Strom's example clips into the media directory and add them to the library. | — |
 | **Reload stingers** | Look at the library's files again: analyse changed files, load the cued clip again if its file changed, flag missing files. | — |
 | **Set multiview overlay alpha** | Fade the multiview overlay (borders, labels, clock, VU meters). | `alpha`: 0.0 – 1.0 |
-| **Get state** | Snapshot of current PVW/PGM/DSK/FTB/PiP state. Useful when reconnecting to the mixer mid-show. | — |
+| **Get state** | Snapshot of current PVW/PGM/DSK/FTB/PiP state, and how long ago each input last delivered a frame (`input_media_age_ms`, see the [Producer Switching guide](PRODUCER_SWITCHING_API_GUIDE.md)). Useful when reconnecting to the mixer mid-show. | — |
 
 All state-changing actions broadcast a `VisionMixerStateChanged`
 WebSocket event so multiple operator panels stay in sync in real time.
@@ -606,6 +613,8 @@ Stinger takes also emit `StingerCued`, `StingerStarted`,
 | Initial PGM / PVW source | Empty (use the initial input). Set `input:N` or `pip:N` to start on a PiP. |
 | Swap PVW/PGM positions on multiview | Off (PVW left, PGM right) |
 | Shader FX | **On** (GPU backend only) |
+| Stinger Input | Off |
+| Stinger Preroll | 80 ms |
 | Latency (ms) | 20 ms |
 | Min upstream latency | 20 ms |
 
@@ -658,7 +667,7 @@ is live and takes effect immediately.
 | **Take** | Atomic swap of PVW ↔ PGM, animated (Auto) or instant (Cut). |
 | **Cut** | Zero-duration take. |
 | **Auto** | Animated take, using the currently selected transition type and duration. |
-| **Transition** | The animation that takes one source to another (`cut`, `fade`, `dip_to_black`, `slide_*`, `push_*`, and the shader transitions). |
+| **Transition** | The animation that takes one source to another (`cut`, `fade`, `dip_to_black`, `slide_*`, `push_*`, `stinger`, and the shader transitions). |
 | **Engine downgrade** | When the engine cannot honor the requested transition (any non-fade animation involving a PiP) it falls back to `fade`. The response reports both requested and actual. |
 | **FTB (Fade-to-Black)** | Forced fade of PGM to black, independent of takes. |
 | **DSK (Downstream Keyer)** | Alpha-keyed graphics overlay on the PGM output, sitting above the entire PGM composition. |

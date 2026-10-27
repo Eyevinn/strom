@@ -253,11 +253,18 @@ async fn system_clock_501_is_http_501() {
 
 #[tokio::test]
 async fn refused_connection_is_a_network_error() {
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    // Bound but never listening: connections are refused, and no other test's
+    // `serve()` can bind the port while `held` lives. Dropping a listener
+    // instead frees the port for the next ephemeral bind in a parallel test.
+    let held = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    held.bind(
+        &"127.0.0.1:0"
+            .parse::<std::net::SocketAddr>()
+            .unwrap()
+            .into(),
+    )
+    .unwrap();
+    let port = held.local_addr().unwrap().as_socket().unwrap().port();
 
     let err = client(&format!("http://127.0.0.1:{port}"))
         .delete_flow(flow_id())

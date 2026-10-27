@@ -4,7 +4,7 @@ members = ["types", "backend", "frontend"]
 default-members = ["backend"]
 
 [workspace.package]
-version = "0.7.1"
+version = "0.8.0-alpha.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Per Enstedt <per.enstedt@eyevinn.se>"]
@@ -38,7 +38,7 @@ gstreamer-video = { version = "0.25", features = ["v1_22"] }
 # Used by the SRT stats parser to format peer GSocketAddress fields.
 gio = "0.22"
 gst-plugin-webrtc = { version = "0.15", features = ["whep", "whip"] }
-gst-plugin-webrtchttp = { version = "0.15", default-features = false }
+gst-plugin-webrtchttp = { version = "0.15", default-features = false, features = ["rustls-ring"] }
 gst-plugin-audiofx = "0.15"
 gst-plugin-inter = "0.15"
 gst-plugin-rtp = "0.15"

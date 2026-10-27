@@ -5,6 +5,7 @@
 
 pub mod block;
 pub mod bus;
+pub mod download;
 pub mod manager;
 pub mod state;
 
@@ -88,16 +89,16 @@ pub fn require_elements(required: &[&str]) {
     );
 }
 
-/// Register the `gst-plugins-rs` WebRTC elements (`whipsink`, `whepsrc`, ...).
-/// The server links them in and registers them at startup, so a test binary has
-/// to do the same. Also initialises GStreamer. Safe to call repeatedly.
+/// Register the plugins the server links in statically, among them the
+/// `gst-plugins-rs` WebRTC elements (`whipsink`, `whepsrc`, ...), through
+/// `strom::gst::register_static_plugins()`, the call the server makes at
+/// startup. Also initialises GStreamer. Safe to call repeatedly.
 pub fn init_webrtc_plugins() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         gst::init().expect("GStreamer initialises");
-        gstwebrtchttp::plugin_register_static().expect("register webrtchttp plugins");
-        gstrswebrtc::plugin_register_static().expect("register webrtc plugins");
+        strom::gst::register_static_plugins();
     });
 }
 
@@ -200,4 +201,58 @@ pub fn free_udp_port() -> u16 {
         .and_then(|s| s.local_addr())
         .map(|a| a.port())
         .expect("no free UDP port")
+}
+
+/// What takes one entry of a GPU Vision Mixer input's answer to a CAPS query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadPath {
+    /// A memory type or meta that `glupload` (or `cudadownload`) takes as it is.
+    DirectFeature,
+    /// Plain system memory in a format `glupload` uploads.
+    DirectSystemMemory,
+    /// Anything else: only the converter in front of `glupload` takes it.
+    /// ANY caps features land here too, as nothing shows they are taken.
+    ConverterOnly,
+}
+
+/// Caps features that reach a GPU input's caps answer through what takes them
+/// directly: `glupload` for GL memory, DMABuf and the texture upload meta
+/// (GStreamer 1.28 with Mesa EGL lists all three), `cudadownload` for CUDA
+/// memory.
+pub const DIRECT_UPLOAD_FEATURES: &[&str] = &[
+    "memory:GLMemory",
+    "memory:DMABuf",
+    "meta:GstVideoGLTextureUploadMeta",
+    "memory:CUDAMemory",
+];
+
+/// Classify one caps answer entry. `uploads` is the system-memory part of
+/// `glupload`'s sink template (`gl_upload_system_caps()`).
+pub fn upload_path(
+    structure: &gst::StructureRef,
+    features: &gst::CapsFeaturesRef,
+    uploads: &gst::Caps,
+) -> UploadPath {
+    if features.is_any() {
+        return UploadPath::ConverterOnly;
+    }
+    if features
+        .iter()
+        .any(|feature| DIRECT_UPLOAD_FEATURES.contains(&feature.as_str()))
+    {
+        return UploadPath::DirectFeature;
+    }
+    let plain_system_memory = features
+        .iter()
+        .all(|feature| feature == gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY);
+    if !plain_system_memory || !structure.has_field("format") {
+        return UploadPath::ConverterOnly;
+    }
+    let mut one = gst::Caps::new_empty();
+    one.make_mut().append_structure(structure.to_owned());
+    if one.is_subset(uploads) {
+        UploadPath::DirectSystemMemory
+    } else {
+        UploadPath::ConverterOnly
+    }
 }
