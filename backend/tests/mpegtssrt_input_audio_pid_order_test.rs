@@ -151,15 +151,17 @@ fn run(decode: bool, a: &[u32], b: &[u32]) -> (Seen, Seen, Option<String>) {
     }
 
     let maps: Arc<Mutex<Vec<AudioMap>>> = Arc::new(Mutex::new(Vec::new()));
+    // tsdemux's pads, in the order it added them (passthrough only).
     let pad_order: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let demux_id = if decode { "decodebin" } else { "tsdemux" };
-    let pad_writer = pad_order.clone();
-    by_id
-        .get(&format!("{}:{}", instance_id, demux_id))
-        .unwrap_or_else(|| panic!("block has a {demux_id}"))
-        .connect_pad_added(move |_demux, pad| {
-            pad_writer.lock().unwrap().push(pad.name().to_string());
-        });
+    if !decode {
+        let pad_writer = pad_order.clone();
+        by_id
+            .get(&format!("{}:tsdemux", instance_id))
+            .expect("block has a tsdemux")
+            .connect_pad_added(move |_demux, pad| {
+                pad_writer.lock().unwrap().push(pad.name().to_string());
+            });
+    }
 
     let bus = pipeline.bus().expect("pipeline has a bus");
     let map_writer = maps.clone();

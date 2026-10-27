@@ -460,10 +460,13 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
         // pads by PID.
         if let Some(pid_audio) = pid_audio {
             demux_element.connect_no_more_pads(move |element| {
-                pid_audio
+                let message = pid_audio
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .no_more_pads(element);
+                if let Some(message) = message {
+                    let _ = element.post_message(message);
+                }
             });
         }
 

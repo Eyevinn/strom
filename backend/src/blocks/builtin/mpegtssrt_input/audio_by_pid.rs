@@ -159,58 +159,58 @@ impl PidOrderedAudio {
 
     /// The demuxer has added every pad of the current stream list: rank the
     /// new pads by PID and give each output its stream.
-    pub(super) fn no_more_pads(&mut self, demux: &gst::Element) {
+    ///
+    /// Returns the [`AUDIO_MAP_MESSAGE`] to post. The caller posts it after
+    /// releasing its lock, since a bus sync handler runs on this thread.
+    pub(super) fn no_more_pads(&mut self, demux: &gst::Element) -> Option<gst::Message> {
         if self.open_batch.is_empty() {
-            return;
+            return None;
         }
         // The new streams, in the order their pads were added.
-        let batch: Vec<&Stream> = self
+        let batch: Vec<(u64, Option<u32>)> = self
             .streams
             .iter()
             .filter(|s| self.open_batch.contains(&s.id))
+            .map(|s| (s.id, s.pid))
             .collect();
         self.open_batch.clear();
-        let streams = batch.len();
-        let batch_pids: Vec<Option<u32>> = batch.iter().map(|s| s.pid).collect();
+        let batch_pids: Vec<Option<u32>> = batch.iter().map(|(_, pid)| *pid).collect();
         let assigned = assign_outputs(&batch_pids, self.outputs.len());
         if assigned.is_empty() {
-            return;
+            return None;
         }
 
-        self.assignment = assigned.iter().map(|(i, _)| batch[*i].id).collect();
-        let pids: Vec<i32> = assigned
-            .iter()
-            .map(|(i, _)| batch[*i].pid.map_or(-1, |p| p as i32))
-            .collect();
-        let fallback: Vec<bool> = assigned.iter().map(|(_, f)| *f).collect();
-
-        for (k, output) in self.outputs.iter().enumerate() {
-            if fallback[k] {
+        self.assignment = assigned.iter().map(|(i, _)| batch[*i].0).collect();
+        for (output, (i, fallback)) in self.outputs.iter().zip(&assigned) {
+            let pid = format_pid(batch[*i].1);
+            if *fallback {
                 warn!(
                     "MPEGTSSRT Input {}: The feed has {} audio stream(s), so {} carries the first (PID {})",
                     self.instance_id,
-                    streams,
+                    batch.len(),
                     output.name,
-                    format_pid((pids[k] >= 0).then_some(pids[k] as u32))
+                    pid
                 );
             } else {
                 info!(
-                    "MPEGTSSRT Input {}: {} carries audio stream {} (PID {})",
-                    self.instance_id,
-                    output.name,
-                    k,
-                    format_pid((pids[k] >= 0).then_some(pids[k] as u32))
+                    "MPEGTSSRT Input {}: {} carries the audio stream with PID {}",
+                    self.instance_id, output.name, pid
                 );
             }
         }
 
         self.apply();
 
+        let pids: Vec<i32> = assigned
+            .iter()
+            .map(|(i, _)| batch[*i].1.map_or(-1, |p| p as i32))
+            .collect();
+        let fallback: Vec<bool> = assigned.iter().map(|(_, f)| *f).collect();
         let structure = gst::Structure::builder(AUDIO_MAP_MESSAGE)
             .field("pids", gst::Array::new(pids))
             .field("fallback", gst::Array::new(fallback))
             .build();
-        let _ = demux.post_message(gst::message::Element::builder(structure).src(demux).build());
+        Some(gst::message::Element::builder(structure).src(demux).build())
     }
 
     /// The demuxer removed a pad. If it was an audio pad, take down its tee,
@@ -273,11 +273,11 @@ impl PidOrderedAudio {
                 if feeder.as_ref() == Some(&tee) {
                     continue;
                 }
-                let retiring = self.streams.iter().any(|s| {
-                    !self.assignment.contains(&s.id)
-                        && s.tee.upgrade().is_some()
-                        && s.tee.upgrade() == feeder
-                });
+                let retiring = feeder.is_some()
+                    && self
+                        .streams
+                        .iter()
+                        .any(|s| !self.assignment.contains(&s.id) && s.tee.upgrade() == feeder);
                 if retiring {
                     continue;
                 }
