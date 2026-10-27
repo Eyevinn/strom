@@ -174,6 +174,12 @@ fn system_memory_from_the_source_leaves_the_block_unchanged() {
     let s = caps.structure(0).expect("caps structure");
     assert_eq!(s.get::<&str>("format").ok(), Some("UYVY"), "{caps}");
     assert_eq!(s.get::<i32>("width").ok(), Some(320), "{caps}");
+    assert_eq!(s.get::<i32>("height").ok(), Some(240), "{caps}");
+    assert_eq!(
+        s.get::<gst::Fraction>("framerate").ok(),
+        Some(gst::Fraction::new(30, 1)),
+        "{caps}"
+    );
     assert!(
         !has(&factories, "videoconvert") && !has(&factories, "autovideoconvert"),
         "the block converts its source's video: {factories:?}"

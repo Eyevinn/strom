@@ -175,12 +175,12 @@ impl BlockBuilder for LocalInputBuilder {
                 "autovideosrc",
             )?;
 
-            // The capture front, which is also the block's video output: lets
-            // the source negotiate the requested
-            // resolution / framerate at capture-time (AVFoundation, v4l2 and
-            // Media Foundation all pick the closest matching mode) rather
-            // than always running at the device's default mode and paying a
-            // software downscale downstream.
+            // The capture front, which is also the block's video output: the
+            // source must deliver the configured resolution / framerate at
+            // capture time (AVFoundation, v4l2 and Media Foundation pick the
+            // device mode that matches) rather than running at the device's
+            // default mode. Nothing in the block scales; a consumer that needs
+            // another size scales on its own input.
             // Both memory types are offered, system memory first so a device
             // that can deliver either keeps producing what it does today. A
             // capsfilter naming only `video/x-raw` means SystemMemory, not
@@ -303,8 +303,7 @@ impl BlockBuilder for LocalInputBuilder {
                 }
             }
 
-            // The capture front, which is also the block's video output: lets
-            // the source negotiate the requested
+            // Pre-convert capsfilter: lets the source negotiate the requested
             // sample rate / channel count directly. Sample-rate conversion
             // and channel mixing still go through audioresample/audioconvert
             // downstream, but only when the device truly can't deliver the
