@@ -220,10 +220,15 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             VERSION=${GITHUB_REF#refs/tags/v}
             echo "version=$VERSION" >> $GITHUB_OUTPUT
-            # Generate all tag variations for releases
-            MAJOR=$(echo $VERSION | cut -d. -f1)
-            MINOR=$(echo $VERSION | cut -d. -f2)
-            echo "tags=${{ env.IMAGE_NAME }}:${VERSION},${{ env.IMAGE_NAME }}:${MAJOR}.${MINOR},${{ env.IMAGE_NAME }}:${MAJOR},${{ env.IMAGE_NAME }}:latest" >> $GITHUB_OUTPUT
+            if [[ "$VERSION" == *-* ]]; then
+              # Prerelease (0.8.0-alpha.1): only its own tag, never latest
+              echo "tags=${{ env.IMAGE_NAME }}:${VERSION}" >> $GITHUB_OUTPUT
+            else
+              # Generate all tag variations for releases
+              MAJOR=$(echo $VERSION | cut -d. -f1)
+              MINOR=$(echo $VERSION | cut -d. -f2)
+              echo "tags=${{ env.IMAGE_NAME }}:${VERSION},${{ env.IMAGE_NAME }}:${MAJOR}.${MINOR},${{ env.IMAGE_NAME }}:${MAJOR},${{ env.IMAGE_NAME }}:latest" >> $GITHUB_OUTPUT
+            fi
           else
             VERSION="dev-$(echo $GITHUB_SHA | head -c7)"
             echo "version=$VERSION" >> $GITHUB_OUTPUT
