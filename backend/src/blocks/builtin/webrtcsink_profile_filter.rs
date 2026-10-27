@@ -1,5 +1,11 @@
-//! Keeps the profile and level a WHEP viewer offers from blocking pre-encoded
-//! video.
+//! Keeps the profile and level a WebRTC peer negotiates from blocking
+//! pre-encoded video, for the webrtcsink-based sinks: WHEP Output's
+//! `whepserversink` and WHIP Output's `whipclientsink`.
+//!
+//! The text below is written for WHEP Output, where a browser viewer makes the
+//! offer. On WHIP Output the block offers and the server answers, and the same
+//! filters carry the session's level: a pre-encoded source whose level rises
+//! mid-publish (720p to 1080p) would fail them and end the session.
 //!
 //! webrtcsink copies the viewer's offered profile onto the capsfilters around
 //! that viewer's payloader: the one directly upstream (the encoder filter)
@@ -39,13 +45,13 @@ const PROFILE_FIELDS: &[&str] = &[
 
 /// Strip profile fields from every capsfilter webrtcsink puts around a
 /// payloader, for discovery and for each viewer.
-pub(super) fn install(whepserversink: &gst::Element) {
+pub(crate) fn install(whepserversink: &gst::Element) {
     whepserversink.connect("payloader-setup", false, |values| {
         let consumer_id = values[1].get::<String>().unwrap_or_default();
         let payloader = values[3].get::<gst::Element>().unwrap();
 
         info!(
-            "WHEP Output: payloader-setup fired: consumer_id={}, payloader={} (factory={})",
+            "webrtcsink payloader-setup fired: consumer_id={}, payloader={} (factory={})",
             consumer_id,
             payloader.name(),
             payloader
@@ -110,7 +116,7 @@ fn strip(filter: &gst::Element, consumer_id: &str) {
         stripped.merge_structure(s);
     }
     info!(
-        "WHEP Output: Stripped profile from capsfilter {} for {}: {:?}",
+        "Stripped profile from webrtcsink capsfilter {} for {}: {:?}",
         filter.name(),
         consumer_id,
         stripped
