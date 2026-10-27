@@ -387,14 +387,10 @@ fn ndi_video_input(
 ) -> Result<String, BlockBuildError> {
     let input_id = format!("{}:input", instance_id);
     let convert_id = format!("{}:videoconvert", instance_id);
-    let download_front::ConvertFront { front, convert } =
-        download_front::convert_front(&input_id, &convert_id, "NDI Output")?;
-    links.push((
-        ElementPadRef::pad(&input_id, "src"),
-        ElementPadRef::pad(&convert_id, "sink"),
-    ));
-    elements.push((input_id, front));
-    elements.push((convert_id.clone(), convert));
+    let front = download_front::convert_front(&input_id, &convert_id, "NDI Output")?;
+    links.push(front.link());
+    elements.push((input_id, front.front));
+    elements.push((convert_id.clone(), front.convert));
     Ok(convert_id)
 }
 

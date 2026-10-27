@@ -58,6 +58,7 @@ use gstreamer::glib;
 use gstreamer::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use strom_types::element::ElementPadRef;
 use tracing::{info, warn};
 
 /// The adapters spliced in between the front element and the consumer.
@@ -137,11 +138,23 @@ pub fn install(front: &gst::Element, consumer_sink: &gst::Pad, label: &str, cons
 }
 
 /// An input's front and the `videoconvert` behind it, built by
-/// [`convert_front`]. The caller adds both to its block and links `front`'s
-/// `src` to `convert`'s `sink`.
+/// [`convert_front`]. The caller adds both to its block, with [`Self::link`]
+/// between them: the front splices its downloads in on that link.
 pub struct ConvertFront {
+    pub front_id: String,
     pub front: gst::Element,
+    pub convert_id: String,
     pub convert: gst::Element,
+}
+
+impl ConvertFront {
+    /// The link from the front's `src` to the converter's `sink`.
+    pub fn link(&self) -> (ElementPadRef, ElementPadRef) {
+        (
+            ElementPadRef::pad(&self.front_id, "src"),
+            ElementPadRef::pad(&self.convert_id, "sink"),
+        )
+    }
 }
 
 /// Build the front an input with a converter behind it needs:
@@ -149,10 +162,10 @@ pub struct ConvertFront {
 /// `videoconvert`, set up by [`crate::gpu::configure_video_convert`]), with
 /// [`install`] watching the front for `consumer`.
 ///
-/// Video Encoder, NDI Output and the CPU Vision Mixer's inputs build their
-/// input this way. The `videoconvert` passes GPU memory its consumer lists
-/// straight through and converts system memory; the front downloads the GPU
-/// memory the consumer leaves out. `consumer` names the consumer in errors.
+/// For an input whose consumer is the converter itself. The `videoconvert`
+/// passes GPU memory its consumer lists straight through and converts system
+/// memory; the front downloads the GPU memory the consumer leaves out.
+/// `consumer` names the consumer in errors.
 pub fn convert_front(
     front_id: &str,
     convert_id: &str,
@@ -174,7 +187,12 @@ pub fn convert_front(
         BlockBuildError::ElementCreation(format!("{} has no sink pad", VIDEO_CONVERT_FACTORY))
     })?;
     install(&front, &convert_sink, front_id, consumer);
-    Ok(ConvertFront { front, convert })
+    Ok(ConvertFront {
+        front_id: front_id.to_string(),
+        front,
+        convert_id: convert_id.to_string(),
+        convert,
+    })
 }
 
 /// A decision, with the consumer's caps it was made against (for errors).
@@ -615,6 +633,51 @@ mod tests {
                 "video/x-raw(memory:CUDAMemory); video/x-raw(memory:GLMemory); video/x-raw"
             )),
             "CUDA memory, GL memory and system memory"
+        );
+    }
+
+    /// The front is a silent `identity` watched by [`install`], and the
+    /// converter a plain `videoconvert` with the configured thread count.
+    #[test]
+    fn convert_front_builds_a_watched_identity_and_a_threaded_videoconvert() {
+        let _ = gst::init();
+        let built = convert_front("enc:input", "enc:videoconvert", "Test").expect("front");
+        assert_eq!(built.front.name(), "enc:input");
+        assert_eq!(built.convert.name(), "enc:videoconvert");
+        assert_eq!(
+            built
+                .front
+                .factory()
+                .map(|f| f.name().to_string())
+                .as_deref(),
+            Some("identity")
+        );
+        assert!(built.front.property::<bool>("silent"));
+        assert_eq!(
+            built
+                .convert
+                .factory()
+                .map(|f| f.name().to_string())
+                .as_deref(),
+            Some(VIDEO_CONVERT_FACTORY)
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            built.convert.property::<u32>("n-threads"),
+            crate::gpu::video_convert_threads(),
+            "configure_video_convert did not reach the converter"
+        );
+        // Encoded video is refused at once by the installed front; a bare
+        // identity would ask its unlinked peer instead.
+        let mut query = gst::query::AcceptCaps::new(&caps("video/x-h264"));
+        let front_sink = built.front.static_pad("sink").expect("sink pad");
+        assert!(!front_sink.query(&mut query) || !query.result());
+        assert_eq!(
+            built.link(),
+            (
+                ElementPadRef::pad("enc:input", "src"),
+                ElementPadRef::pad("enc:videoconvert", "sink"),
+            )
         );
     }
 

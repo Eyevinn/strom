@@ -134,10 +134,7 @@ impl BlockBuilder for VideoEncBuilder {
 
         // What arrives depends on the producer, often a decoder `decodebin`
         // picks at runtime, so the memory is adapted from the negotiated caps.
-        let download_front::ConvertFront {
-            front: input,
-            convert: videoconvert,
-        } = download_front::convert_front(
+        let front = download_front::convert_front(
             &input_id,
             &convert_id,
             &format!("Video Encoder ({})", encoder_name),
@@ -191,10 +188,7 @@ impl BlockBuilder for VideoEncBuilder {
 
         // Chain: input -> videoconvert -> encoder -> parser -> capsfilter
         let internal_links = vec![
-            (
-                ElementPadRef::pad(&input_id, "src"),
-                ElementPadRef::pad(&convert_id, "sink"),
-            ),
+            front.link(),
             (
                 ElementPadRef::pad(&convert_id, "src"),
                 ElementPadRef::pad(&encoder_id, "sink"),
@@ -211,8 +205,8 @@ impl BlockBuilder for VideoEncBuilder {
 
         Ok(BlockBuildResult {
             elements: vec![
-                (input_id, input),
-                (convert_id, videoconvert),
+                (input_id, front.front),
+                (convert_id, front.convert),
                 (encoder_id, encoder),
                 (parser_id, parser),
                 (capsfilter_id, capsfilter),
