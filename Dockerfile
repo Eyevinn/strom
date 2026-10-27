@@ -343,7 +343,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 # file is upstream's test for a972093b: 2 s of H.264 + AAC across the wrap.
 # tsparse timestamps the input, which puts tsdemux on its ignore-pcr path.
 # Unfixed (1.28.2) the largest step between buffers is ~95443 s; fixed, ~33 ms.
+# The plugin registry goes to a tmpfs that is not kept in the image: a registry
+# written here, on a build host without a GPU, records nvcodec with no
+# elements, and GStreamer does not rescan an unchanged plugin at runtime.
 RUN --mount=type=bind,source=tools/patched-gstreamer-plugins/testdata/test_pcr_rollover.ts,target=/tmp/test_pcr_rollover.ts \
+    --mount=type=tmpfs,target=/tmp/gst-registry \
+    GST_REGISTRY=/tmp/gst-registry/registry.bin \
     gst-launch-1.0 -v filesrc location=/tmp/test_pcr_rollover.ts \
         ! tsparse set-timestamps=true ! tsdemux ignore-pcr=true \
         ! fakesink silent=false sync=false 2>&1 \
@@ -351,7 +356,10 @@ RUN --mount=type=bind,source=tools/patched-gstreamer-plugins/testdata/test_pcr_r
     | awk '{ split($2, a, ":"); t = a[1] * 3600 + a[2] * 60 + a[3]; \
              if (n++) { d = t - p; if (d < 0) d = -d; if (d > m) m = d }; p = t } \
            END { printf "tsdemux PTS wrap check: %d buffers, largest step %.3f s\n", n, m; \
-                 if (n < 30 || m > 0.1) { print "tsdemux does not handle the PTS wrap in ignore-pcr mode" > "/dev/stderr"; exit 1 } }'
+                 if (n < 30 || m > 0.1) { print "tsdemux does not handle the PTS wrap in ignore-pcr mode" > "/dev/stderr"; exit 1 } }' \
+    && if [ -e /root/.cache/gstreamer-1.0 ]; then \
+         echo "A GStreamer registry was baked into the image; GPU plugins would stay unregistered at runtime" >&2; exit 1; \
+       fi
 
 # Copy the compiled binary from backend-builder to /app
 COPY --from=backend-builder /app/target/release/strom /app/strom
