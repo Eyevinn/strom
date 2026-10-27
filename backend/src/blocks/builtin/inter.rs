@@ -205,17 +205,12 @@ fn adapt_other_pipeline_input(intersrc: &gst::Element, front: &gst::Element, lab
 /// called for does not take them: the link would be made on templates and the
 /// CAPS event then refused with a bare not-negotiated.
 fn wanted(caps: &gst::CapsRef) -> Result<Vec<Adapter>, String> {
-    // `OtherPipeline` never refuses: what it does not download passes.
-    let adapters = video_adapt::decide(
+    video_adapt::decide(
         caps,
         Consumer::OtherPipeline,
         video_adapt::factory_available,
     )
-    .unwrap_or_default();
-    match adapters.iter().find(|a| !a.sink_takes(caps)) {
-        Some(download) => Err(format!("{} does not take these caps", download.factory())),
-        None => Ok(adapters),
-    }
+    .map_err(|refusal| refusal.to_string())
 }
 
 /// Fail the flow: GL memory from another flow arrived and cannot be
@@ -266,14 +261,9 @@ fn on_caps(input: &OtherPipelineInput, src: &gst::Pad, caps: &gst::CapsRef) {
         0 => input.label.clone(),
         n => format!("{}_{}", input.label, n),
     };
-    // `gldownload` also outputs GL memory, so the pin keeps the other
-    // flow's context out of this one.
-    let new = video_adapt::build_elements(&wanted, &prefix).and_then(|mut elements| {
-        if !elements.is_empty() {
-            elements.push(video_adapt::system_memory_pin(&prefix)?);
-        }
-        Ok(elements)
-    });
+    // `decide()` pins system memory after `gldownload`, which also outputs
+    // GL memory: the pin keeps the other flow's context out of this one.
+    let new = video_adapt::build_elements(&wanted, &prefix);
     match new.and_then(|new| resplice(src, &front_sink, &old, &new).map(|()| new)) {
         Ok(new) => {
             if new.is_empty() {

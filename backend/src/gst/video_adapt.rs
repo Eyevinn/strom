@@ -29,7 +29,8 @@
 //! | [`Consumer::SystemMemory`] | raw video in CUDA, D3D12 or D3D11 memory only | [`Adapter::CudaDownload`], [`Adapter::D3d12Download`] or [`Adapter::D3d11Download`] |
 //! | [`Consumer::SystemMemory`] | raw video in any other memory | [`Refusal::UnsupportedMemory`] |
 //! | [`Consumer::SystemMemory`] | encoded video, audio, anything but raw video | [`Refusal::NotRawVideo`] |
-//! | [`Consumer::OtherPipeline`] | raw video in GL memory only | [`Adapter::GlDownload`] |
+//! | [`Consumer::OtherPipeline`] | raw video in GL memory only | [`Adapter::GlDownload`], [`Adapter::SystemMemoryPin`] |
+//! | [`Consumer::OtherPipeline`] | as above, in a pixel format `gldownload` does not take | [`Refusal::NotDownloadable`] |
 //! | [`Consumer::OtherPipeline`] | anything else | none |
 //! | [`Consumer::ScaleConvert`] | raw video in system memory | [`Adapter::VideoScale`], [`Adapter::VideoConvert`] |
 //! | [`Consumer::ScaleConvert`] | raw video in GL, CUDA, D3D12 or D3D11 memory, which the output takes, with that GPU scaler installed and taking the pixel format | [`Adapter::GlScale`], [`Adapter::CudaScale`], [`Adapter::D3d12Scale`] or [`Adapter::D3d11Scale`] |
@@ -513,7 +514,7 @@ fn decide_with(
         }
         // `gldownload` ships with the opengl plugin that made the GL memory.
         Consumer::OtherPipeline if offers_only(producer, GL_MEMORY_FEATURE) => {
-            Ok(vec![Adapter::GlDownload])
+            pinned_download(Adapter::GlDownload, producer, |_| true, templates)
         }
         Consumer::OtherPipeline => Ok(Vec::new()),
     }
@@ -1247,7 +1248,7 @@ mod tests {
                 Consumer::OtherPipeline,
                 none
             ),
-            Ok(vec![Adapter::GlDownload])
+            Ok(vec![Adapter::GlDownload, Adapter::SystemMemoryPin])
         );
     }
 
