@@ -23,14 +23,9 @@ use gstreamer as gst;
 /// Elements the H.264 path of the encoder block builds. Missing on a bare image.
 const REQUIRED: &[&str] = &["x264enc", "h264parse", "videoconvert", "capsfilter"];
 
-/// Initialises what the encoder builder needs, then see
-/// `common::plugins_available`.
+/// Initialises GStreamer, then see `common::plugins_available`.
 fn plugins_available() -> bool {
     gst::init().expect("GStreamer initialises");
-    // `VideoEncBuilder::build` reads the process-global video convert mode, which
-    // panics until this has run — without it every test here dies before it ever
-    // reaches a bitrate.
-    strom::gpu::detect_gpu_capabilities();
     common::plugins_available(REQUIRED)
 }
 

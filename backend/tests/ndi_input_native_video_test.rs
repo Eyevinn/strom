@@ -177,16 +177,8 @@ const INSTANCE: &str = "ndiin";
 /// Build the block in `mode` and check its video branch: the demuxer's video
 /// pad feeds `capsfilter` (the block's video output) directly, and no
 /// converter is built.
-///
-/// The global video convert mode is forced to the GPU one first, so a block
-/// that reads it builds `autovideoconvert` instead of panicking.
 fn check(mode: &str, capsfilter: &str) {
     stand_ins::register();
-    assert_eq!(
-        strom::gpu::force_video_convert_mode(strom::gpu::VideoConvertMode::GpuAccelerated),
-        strom::gpu::VideoConvertMode::GpuAccelerated,
-        "the convert mode was set before this test could force it"
-    );
     let props = HashMap::from([
         ("mode".to_string(), PropertyValue::String(mode.into())),
         (

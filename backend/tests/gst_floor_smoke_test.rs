@@ -218,9 +218,7 @@ fn plain_flow() -> Flow {
 /// loop that dispatches the flow bus watches.
 ///
 /// Skipped: VA-API rank promotion (a private step in `main`; no flow here
-/// autoplugs a codec, and the CI container has no VA device), the CUDA-GL
-/// interop probe (it re-runs the `strom` binary with a probe subcommand that a
-/// test binary does not have, and no flow here uses CUDA), and the ICE and
+/// autoplugs a codec, and the CI container has no VA device), and the ICE and
 /// clock-discipline checks (they only log).
 fn init_like_main() {
     use std::sync::Once;

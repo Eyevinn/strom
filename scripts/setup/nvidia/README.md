@@ -124,19 +124,14 @@ This provides significant performance benefits for high-resolution video process
 
 ### Runtime Detection
 
-Strom automatically detects at startup whether CUDA-GL interop works:
+Strom logs the GPU that GStreamer's GL renders on at startup:
 
 ```
-INFO  GStreamer initialized
-INFO  CUDA-GL interop works - using GPU-accelerated video conversion
-INFO  ✓ NVML initialized successfully - found 1 GPU(s)
+INFO  GL renderer: NVIDIA L4/PCIe/SSE2 (NVIDIA Corporation), GL 4.6.0 NVIDIA ..., GLSL 4.60 NVIDIA
+INFO  NVML initialized successfully - found 1 GPU(s)
 ```
 
-Or if interop is not available:
-
-```
-WARN  CUDA-GL interop failed: CUDA_ERROR_OPERATING_SYSTEM - using software video conversion
-```
+If NVENC is available but GL renders on another GPU, Strom warns. Whether a block can take GPU memory directly or downloads it is decided per block from the negotiated caps; a block that cannot take what arrives fails the flow with a message naming the memory.
 
 When interop fails, Strom falls back to CPU-based color conversion (`videoconvert`) while still using GPU encoding (`nvh264enc`).
 

@@ -8,10 +8,8 @@
 //! (`gst::download_front`) that downloads what the compositor cannot take,
 //! decided from the negotiated caps, and every converter is `videoconvert`.
 //!
-//! The binary forces the global mode to the GPU one before any block is
-//! built, so the mixer would build `autovideoconvert` if it still asked the
-//! mode. A GPU Vision Mixer upstream emits GL memory; `gltestsrc` stands in
-//! for it.
+//! A GPU Vision Mixer upstream emits GL memory; `gltestsrc` stands in for
+//! it.
 //!
 //! The tests run one at a time with the other GL tests (`serial(gl)`): GL
 //! setup in parallel tests races on the Linux runner (#1095).
@@ -23,14 +21,6 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use strom_types::{Flow, PropertyValue as PV};
 use vision_mixer_input_format::*;
-
-fn force_gpu_convert_mode() {
-    assert_eq!(
-        strom::gpu::force_video_convert_mode(strom::gpu::VideoConvertMode::GpuAccelerated),
-        strom::gpu::VideoConvertMode::GpuAccelerated,
-        "the convert mode was set before this test could force it"
-    );
-}
 
 /// The factory of every converter the mixer built itself (not spliced in by a
 /// front), by element name.
@@ -103,7 +93,6 @@ fn add_gl_source(flow: &mut Flow, id: &str, to: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial(gl)]
 async fn gl_memory_on_an_input_is_downloaded_by_its_front() {
-    force_gpu_convert_mode();
     gst::init().unwrap();
     let mut required = CPU_ELEMENTS.to_vec();
     required.extend(["gltestsrc", "gldownload"]);
@@ -134,7 +123,7 @@ async fn gl_memory_on_an_input_is_downloaded_by_its_front() {
         .collect();
     assert!(
         not_plain.is_empty(),
-        "the CPU mixer built {not_plain:?} in the GPU convert mode; its converters \
+        "the CPU mixer built {not_plain:?}; its converters \
          must be plain videoconvert, with GPU memory left to each input's front"
     );
     running.stop();
@@ -143,7 +132,6 @@ async fn gl_memory_on_an_input_is_downloaded_by_its_front() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial(gl)]
 async fn system_memory_on_an_input_passes_without_a_download() {
-    force_gpu_convert_mode();
     gst::init().unwrap();
     if !common::gl_available(CPU_ELEMENTS) {
         return;
@@ -168,7 +156,6 @@ async fn system_memory_on_an_input_passes_without_a_download() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial(gl)]
 async fn gl_memory_on_a_dsk_or_stinger_input_is_downloaded_by_its_front() {
-    force_gpu_convert_mode();
     gst::init().unwrap();
     let mut required = CPU_ELEMENTS.to_vec();
     required.extend(["gltestsrc", "gldownload"]);

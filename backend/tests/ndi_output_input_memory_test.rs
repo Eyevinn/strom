@@ -153,15 +153,10 @@ const SYSTEM_Y42B: &str = "video/x-raw,format=Y42B,width=320,height=240,framerat
 /// its `videoconvert` to an `appsink` with `ndisink`'s caps. Returns the
 /// block's declared video input and the appsink.
 ///
-/// The global video convert mode is forced to the GPU one first, and the
-/// block's converter must still be plain `videoconvert`.
+/// The block's converter must be plain `videoconvert`, never
+/// `autovideoconvert`.
 fn add_block(pipeline: &gst::Pipeline) -> (gst::Pad, gst_app::AppSink) {
     ndisink_stand_in::register();
-    assert_eq!(
-        strom::gpu::force_video_convert_mode(strom::gpu::VideoConvertMode::GpuAccelerated),
-        strom::gpu::VideoConvertMode::GpuAccelerated,
-        "the convert mode was set before this test could force it"
-    );
     let props = HashMap::from([
         ("mode".to_string(), PropertyValue::String("video".into())),
         (
@@ -179,8 +174,8 @@ fn add_block(pipeline: &gst::Pipeline) -> (gst::Pad, gst_app::AppSink) {
     assert_eq!(
         converter.factory().map(|f| f.name().to_string()).as_deref(),
         Some("videoconvert"),
-        "in the GPU convert mode the block built another converter in front of ndisink; \
-         the block must not pick it from the global mode (#969)"
+        "the block built another converter in front of ndisink; it must be plain \
+         videoconvert, with GPU memory left to the input front (#969)"
     );
 
     let appsink = gst_app::AppSink::builder()

@@ -33,8 +33,6 @@ const REQUIRED: &[&str] = &["capsfilter", "videotestsrc", "fakesink"];
 /// frame count out of the block, its output caps and the factories in the
 /// pipeline.
 fn run(producer: &str, caps: &str) -> (u64, gst::Caps, Vec<String>) {
-    // A reverted block reads the global mode, which panics until it is set.
-    let _ = strom::gpu::force_video_convert_mode(strom::gpu::VideoConvertMode::GpuAccelerated);
     let props = HashMap::from([
         (
             "stream_mode".to_string(),

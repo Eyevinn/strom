@@ -10,11 +10,9 @@
 use super::*;
 use gstreamer as gst;
 
-/// Initialize GStreamer and GPU detection for tests
+/// Initialize GStreamer for tests
 fn init_gst() {
     let _ = gst::init();
-    // Initialize GPU detection (required for video conversion mode)
-    crate::gpu::detect_gpu_capabilities();
 }
 
 /// Check if an encoder is available on the system
