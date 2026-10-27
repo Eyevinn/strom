@@ -2,7 +2,7 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
-## [0.7.2] - Unreleased
+## [0.7.2] - 2026-10-27
 
 ### Added
 - Local Output: play audio on a local output device (#1090)
