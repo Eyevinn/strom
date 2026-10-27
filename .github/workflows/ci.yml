@@ -244,6 +244,70 @@ jobs:
           path: backend/dist
           retention-days: 1
 
+  # The GStreamer floor: Strom must still build and run on the oldest GStreamer
+  # it supports, 1.22 from Debian 12 bookworm (see MIN_GSTREAMER_VERSION in
+  # backend/src/version.rs and the `v1_22` crate features in Cargo.toml). Build
+  # plus a smoke test only, not the full suite: the suite would chase 1.22 bugs
+  # production never sees. A failure here means a newer GStreamer API slipped in
+  # ungated; gate it on gst::version() rather than raising the floor.
+  check-floor:
+    name: Check GStreamer floor (Debian 12, GStreamer 1.22)
+    if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
+    needs: preflight
+    runs-on: ubuntu-24.04
+    container: debian:bookworm
+    timeout-minutes: 30
+    env:
+      RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
+    steps:
+      # The check-linux package list, as far as bookworm has it (all of it,
+      # today), plus what a bare container lacks. No trunk: the build script
+      # then embeds a placeholder page instead of the WASM frontend, as in
+      # check-linux.
+      - name: Install build tools and GStreamer 1.22
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential gstreamer1.0-tools \
+            libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-gl gstreamer1.0-plugins-good libsoup-3.0-0 gsettings-desktop-schemas gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice libegl-mesa0 libgl1-mesa-dri pkg-config cmake libclang-dev
+          gst-inspect-1.0 --version
+          pkg-config --modversion gstreamer-1.0
+
+      - uses: actions/checkout@v6
+
+      # The channel rust-toolchain.toml pins, without the rustfmt, clippy and
+      # wasm32 extras it lists: this job only builds and tests the backend.
+      # RUSTUP_TOOLCHAIN overrides the file, so rustup installs nothing more.
+      - name: Install Rust
+        run: |
+          CHANNEL=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          test -n "$CHANNEL"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$CHANNEL"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "RUSTUP_TOOLCHAIN=$CHANNEL" >> "$GITHUB_ENV"
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: floor-bookworm
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Setup sccache
+        if: needs.preflight.outputs.cache_ok == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      # The features the shipped Linux binary has (release.yml), so the EFP
+      # plugin's static registration runs on 1.22 too.
+      - name: Build
+        run: cargo build --features efp
+
+      # Starts Strom the way main does and drives a few core flows to PLAYING
+      # through the API. The test fails, never skips, when an element it needs
+      # is missing, so STROM_REQUIRE_GST_PLUGINS is not needed here.
+      - name: Smoke test on GStreamer 1.22
+        run: cargo test --features efp --test gst_floor_smoke_test
+
   # OpenAPI breaking change detection (PRs only)
   api-contract:
     name: API Contract Check

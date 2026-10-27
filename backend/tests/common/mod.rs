@@ -89,16 +89,16 @@ pub fn require_elements(required: &[&str]) {
     );
 }
 
-/// Register the `gst-plugins-rs` WebRTC elements (`whipsink`, `whepsrc`, ...).
-/// The server links them in and registers them at startup, so a test binary has
-/// to do the same. Also initialises GStreamer. Safe to call repeatedly.
+/// Register the plugins the server links in statically, among them the
+/// `gst-plugins-rs` WebRTC elements (`whipsink`, `whepsrc`, ...), through
+/// `strom::gst::register_static_plugins()`, the call the server makes at
+/// startup. Also initialises GStreamer. Safe to call repeatedly.
 pub fn init_webrtc_plugins() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         gst::init().expect("GStreamer initialises");
-        gstwebrtchttp::plugin_register_static().expect("register webrtchttp plugins");
-        gstrswebrtc::plugin_register_static().expect("register webrtc plugins");
+        strom::gst::register_static_plugins();
     });
 }
 
