@@ -407,7 +407,7 @@ pub(super) fn build_whepserversink(
     });
 
     // WORKAROUND #2: a viewer's offered profile must not block the stream.
-    super::profile_filter::install(&whepserversink);
+    crate::blocks::builtin::webrtcsink_profile_filter::install(&whepserversink);
 
     // Handle consumer-removed to clean up webrtcbin from stats storage
     let dynamic_webrtcbin_store_remove = ctx.dynamic_webrtcbin_store();

@@ -43,6 +43,9 @@ const REQUIRED: &[&str] = &[
     "identity",
     "h264parse",
     "rtph264pay",
+    "rtpvp8pay",
+    "rtpvp9pay",
+    "funnel",
     "videotestsrc",
     "audiotestsrc",
     "capsfilter",
@@ -166,34 +169,68 @@ fn raw_video_source() -> Vec<gst::Element> {
     vec![src, filter]
 }
 
-/// videotestsrc -> x264enc, set up the way builtin.videoenc sets it up for
-/// WebRTC: no B-frames, low latency, a keyframe every second.
-fn h264_source() -> Vec<gst::Element> {
+/// Raw I420 test video at `width`x`height`, the filter named so a test can
+/// change the size while the flow runs.
+fn sized_raw_video(width: i32, height: i32) -> Vec<gst::Element> {
     let src = gst::ElementFactory::make("videotestsrc")
         .name(TEST_SOURCE)
         .property("is-live", true)
         .build()
         .expect("videotestsrc");
     let filter = gst::ElementFactory::make("capsfilter")
-        .property(
-            "caps",
-            gst::Caps::builder("video/x-raw")
-                .field("format", "I420")
-                .field("width", 320i32)
-                .field("height", 240i32)
-                .field("framerate", gst::Fraction::new(25, 1))
-                .build(),
-        )
+        .name(SIZE_FILTER)
+        .property("caps", video_size(width, height))
         .build()
         .expect("capsfilter");
-    let enc = gst::ElementFactory::make("x264enc")
-        .property("bframes", 0u32)
-        .property("key-int-max", 25u32)
-        .property_from_str("tune", "zerolatency")
-        .property_from_str("speed-preset", "ultrafast")
+    vec![src, filter]
+}
+
+const SIZE_FILTER: &str = "test_size";
+
+fn video_size(width: i32, height: i32) -> gst::Caps {
+    gst::Caps::builder("video/x-raw")
+        .field("format", "I420")
+        .field("width", width)
+        .field("height", height)
+        .field("framerate", gst::Fraction::new(25, 1))
         .build()
-        .expect("x264enc");
-    vec![src, filter, enc]
+}
+
+/// videotestsrc -> x264enc, set up the way builtin.videoenc sets it up for
+/// WebRTC: no B-frames, low latency, a keyframe every second.
+fn h264_source() -> Vec<gst::Element> {
+    let mut chain = sized_raw_video(320, 240);
+    chain.push(
+        gst::ElementFactory::make("x264enc")
+            .property("bframes", 0u32)
+            .property("key-int-max", 25u32)
+            .property_from_str("tune", "zerolatency")
+            .property_from_str("speed-preset", "ultrafast")
+            .build()
+            .expect("x264enc"),
+    );
+    chain
+}
+
+/// videotestsrc -> vp8enc or vp9enc, real time, a keyframe every second.
+fn vpx_source(encoder: &str) -> Vec<gst::Element> {
+    let mut chain = sized_raw_video(320, 240);
+    chain.push(
+        gst::ElementFactory::make(encoder)
+            .property("deadline", 1i64)
+            .property("keyframe-max-dist", 25i32)
+            .build()
+            .unwrap_or_else(|_| panic!("{encoder}")),
+    );
+    chain
+}
+
+fn vp8_source() -> Vec<gst::Element> {
+    vpx_source("vp8enc")
+}
+
+fn vp9_source() -> Vec<gst::Element> {
+    vpx_source("vp9enc")
 }
 
 // --- Connectivity ---------------------------------------------------------
@@ -229,7 +266,7 @@ fn whipsink_requests_no_pad_for_an_unlinked_video_track() {
         "only the linked audio track may have a whipsink pad"
     );
     assert!(!built
-        .element("rtph264pay")
+        .element("video_funnel")
         .static_pad("src")
         .unwrap()
         .is_linked());
@@ -253,12 +290,19 @@ fn whipsink_links_a_connected_video_track_with_its_own_payload_type() {
     let video_pt = built.element("rtph264pay").property::<u32>("pt");
     assert_eq!(audio_pt, 96);
     assert_ne!(audio_pt, video_pt, "each stream needs its own payload type");
+    for pay in ["rtpvp8pay", "rtpvp9pay"] {
+        assert_eq!(
+            built.element(pay).property::<u32>("pt"),
+            video_pt,
+            "{pay} carries the same track, so the same payload type"
+        );
+    }
     let peer = built
-        .element("rtph264pay")
+        .element("video_funnel")
         .static_pad("src")
         .unwrap()
         .peer()
-        .expect("video payloader is linked");
+        .expect("the video track is linked");
     assert_eq!(peer.name(), "sink_1");
 }
 
@@ -382,7 +426,7 @@ impl Server {
         src.set_property("stun-server", None::<&str>);
         src.property::<gst::glib::Object>("signaller")
             .set_property("host-addr", format!("http://127.0.0.1:{}", port));
-        src.set_property("video-codecs", gst::Array::new(["H264"]));
+        src.set_property("video-codecs", gst::Array::new(["H264", "VP8", "VP9"]));
         src.set_property("audio-codecs", gst::Array::new(["OPUS"]));
         pipeline.add(&src).expect("add whipserversrc");
 
@@ -442,51 +486,72 @@ impl Drop for Server {
 
 /// Publish from the block to a real WHIP server, with one video track
 /// declared, and return `(audio, video)` buffers the server received. Video is
-/// linked only when `link_video` is set. Stops early once enough has arrived.
-fn loopback(implementation: &str, link_video: bool) -> (usize, usize) {
+/// linked only when `video` is given. Stops early once enough has arrived.
+fn loopback(implementation: &str, video: Option<fn() -> Vec<gst::Element>>) -> (usize, usize) {
     let server = Server::start();
     let built = Built::new(props(implementation, &server.endpoint, 1));
     built.feed(&audio_source(), "audioconvert");
-    if link_video {
-        built.feed(&h264_source(), "video_input");
+    if let Some(source) = video {
+        built.feed(&source(), "video_input");
     }
     built.run_setups();
-    let bus = built.pipeline.bus().expect("bus");
-    built
-        .pipeline
-        .set_state(gst::State::Playing)
-        .expect("publisher plays");
-
-    let enough = |(audio, video): (usize, usize)| audio >= 10 && (!link_video || video >= 10);
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline && !enough(server.received()) {
-        if let Some(msg) = bus.timed_pop_filtered(
-            gst::ClockTime::from_mseconds(100),
-            &[gst::MessageType::Error],
-        ) {
-            if let gst::MessageView::Error(e) = msg.view() {
-                panic!(
-                    "publisher error from {:?}: {} ({:?})",
-                    msg.src().map(|s| s.name()),
-                    e.error(),
-                    e.debug()
-                );
-            }
-        }
-    }
+    built.play();
+    let link_video = video.is_some();
+    built.wait_for(&server, |audio, video| {
+        audio >= 10 && (!link_video || video >= 10)
+    });
     server.received()
 }
 
+impl Built {
+    fn play(&self) {
+        self.pipeline
+            .set_state(gst::State::Playing)
+            .expect("publisher plays");
+    }
+
+    /// Wait up to 20 s for `enough` of what the server received. Panics on
+    /// the first error the publisher posts.
+    fn wait_for(&self, server: &Server, enough: impl Fn(usize, usize) -> bool) {
+        let bus = self.pipeline.bus().expect("bus");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            let (audio, video) = server.received();
+            if enough(audio, video) {
+                return;
+            }
+            if let Some(msg) = bus.timed_pop_filtered(
+                gst::ClockTime::from_mseconds(100),
+                &[gst::MessageType::Error],
+            ) {
+                if let gst::MessageView::Error(e) = msg.view() {
+                    panic!(
+                        "publisher error from {:?}: {} ({:?})",
+                        msg.src().map(|s| s.name()),
+                        e.error(),
+                        e.debug()
+                    );
+                }
+            }
+        }
+    }
+}
+
 const LOOPBACK_ELEMENTS: &[&str] = &["whipserversrc", "x264enc", "fakesink"];
+const VPX_LOOPBACK_ELEMENTS: &[&str] = &["whipserversrc", "vp8enc", "vp9enc", "fakesink"];
+
+fn assert_publishes(implementation: &str, source: fn() -> Vec<gst::Element>) {
+    let (audio, video) = loopback(implementation, Some(source));
+    assert!(video >= 10, "the server received {video} video buffers");
+    assert!(audio >= 10, "the server received {audio} audio buffers");
+}
 
 #[test]
 fn whipsink_publishes_h264_to_a_whip_server() {
     if !available(LOOPBACK_ELEMENTS) {
         return;
     }
-    let (audio, video) = loopback("whipsink", true);
-    assert!(video >= 10, "the server received {video} video buffers");
-    assert!(audio >= 10, "the server received {audio} audio buffers");
+    assert_publishes("whipsink", h264_source);
 }
 
 #[test]
@@ -494,9 +559,84 @@ fn whipclientsink_publishes_h264_to_a_whip_server() {
     if !available(LOOPBACK_ELEMENTS) {
         return;
     }
-    let (audio, video) = loopback("whipclientsink", true);
-    assert!(video >= 10, "the server received {video} video buffers");
-    assert!(audio >= 10, "the server received {audio} audio buffers");
+    assert_publishes("whipclientsink", h264_source);
+}
+
+#[test]
+fn whipsink_publishes_vp8_to_a_whip_server() {
+    if !available(VPX_LOOPBACK_ELEMENTS) {
+        return;
+    }
+    assert_publishes("whipsink", vp8_source);
+}
+
+#[test]
+fn whipclientsink_publishes_vp8_to_a_whip_server() {
+    if !available(VPX_LOOPBACK_ELEMENTS) {
+        return;
+    }
+    assert_publishes("whipclientsink", vp8_source);
+}
+
+#[test]
+fn whipsink_publishes_vp9_to_a_whip_server() {
+    if !available(VPX_LOOPBACK_ELEMENTS) {
+        return;
+    }
+    assert_publishes("whipsink", vp9_source);
+}
+
+#[test]
+fn whipclientsink_publishes_vp9_to_a_whip_server() {
+    if !available(VPX_LOOPBACK_ELEMENTS) {
+        return;
+    }
+    assert_publishes("whipclientsink", vp9_source);
+}
+
+/// A pre-encoded source whose H.264 level rises mid-publish, here 320x240
+/// (level 1.2) to 1280x720 (level 3.1), as a reconnecting SRT caller at a
+/// higher resolution would. webrtcsink refuses a caps change to a higher level
+/// than the session started with, and the flow stops with not-negotiated,
+/// unless the block keeps `level` out of the caps it hands the sink.
+fn keeps_publishing_when_the_h264_level_rises(implementation: &str) {
+    let server = Server::start();
+    let built = Built::new(props(implementation, &server.endpoint, 1));
+    built.feed(&audio_source(), "audioconvert");
+    built.feed(&h264_source(), "video_input");
+    built.run_setups();
+    built.play();
+    built.wait_for(&server, |_, video| video >= 10);
+    let (_, before) = server.received();
+    assert!(before >= 10, "the server received {before} video buffers");
+
+    built
+        .pipeline
+        .by_name(SIZE_FILTER)
+        .expect("size filter")
+        .set_property("caps", video_size(1280, 720));
+    built.wait_for(&server, |_, video| video >= before + 50);
+    let (_, after) = server.received();
+    assert!(
+        after >= before + 50,
+        "video stopped after the level rose: {before} buffers before, {after} after"
+    );
+}
+
+#[test]
+fn whipsink_keeps_publishing_when_the_h264_level_rises() {
+    if !available(LOOPBACK_ELEMENTS) {
+        return;
+    }
+    keeps_publishing_when_the_h264_level_rises("whipsink");
+}
+
+#[test]
+fn whipclientsink_keeps_publishing_when_the_h264_level_rises() {
+    if !available(LOOPBACK_ELEMENTS) {
+        return;
+    }
+    keeps_publishing_when_the_h264_level_rises("whipclientsink");
 }
 
 /// The failure the connectivity guard prevents: a video track declared and
@@ -506,7 +646,7 @@ fn whipsink_publishes_audio_with_a_video_track_left_unlinked() {
     if !available(LOOPBACK_ELEMENTS) {
         return;
     }
-    let (audio, _) = loopback("whipsink", false);
+    let (audio, _) = loopback("whipsink", None);
     assert!(audio >= 10, "the server received {audio} audio buffers");
 }
 
@@ -515,7 +655,7 @@ fn whipclientsink_publishes_audio_with_a_video_track_left_unlinked() {
     if !available(LOOPBACK_ELEMENTS) {
         return;
     }
-    let (audio, _) = loopback("whipclientsink", false);
+    let (audio, _) = loopback("whipclientsink", None);
     assert!(audio >= 10, "the server received {audio} audio buffers");
 }
 

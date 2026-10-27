@@ -1,6 +1,6 @@
 //! WHIP Output using the legacy `whipsink`.
 
-use super::video::{build_video_input, OnAccept};
+use super::video::{build_video_input, CodecChains, OnAccept};
 use super::{
     element_id, make, register_sink_pad_requests, resolve_track_counts, Sink, Track, TrackKind,
 };
@@ -146,42 +146,70 @@ pub(super) fn build_whipsink(
             slot,
             input: built[0].downgrade(),
             tail: built[3].downgrade(),
-            payloader: Some(built[3].downgrade()),
+            payloaders: vec![built[3].downgrade()],
         });
         elements.extend(chain.into_iter().map(|(_, id)| id).zip(built));
     }
 
-    // Video: encoded H.264 in, checked by the input probe, which links it on
-    // to h264parse -> rtph264pay once it is accepted.
+    // Video: encoded in, checked by the input probe, which links it on to the
+    // chain for the codec that arrived. Each codec's payloader feeds a funnel,
+    // so the track has one tail for the setup hook whatever the codec.
     for slot in 0..num_video_tracks {
         let parse_id = element_id(instance_id, "h264parse", slot);
         let parse = make("h264parse", &parse_id)?;
-        let (input_id, input) =
-            build_video_input(instance_id, slot, OnAccept::LinkTo(parse.downgrade()))?;
-        let pay_id = element_id(instance_id, "rtph264pay", slot);
-        let pay = make("rtph264pay", &pay_id)?;
+        let h264_pay_id = element_id(instance_id, "rtph264pay", slot);
+        let h264_pay = make("rtph264pay", &h264_pay_id)?;
         // SPS and PPS with every IDR, so the receiver can start decoding at
         // any keyframe it asks for, not only the first.
-        pay.set_property("config-interval", -1i32);
+        h264_pay.set_property("config-interval", -1i32);
         // Send each access unit as soon as it is packetised, without waiting
         // for the next one: the mode webrtcsink uses for WebRTC.
-        if pay.find_property("aggregate-mode").is_some() {
-            pay.set_property_from_str("aggregate-mode", "zero-latency");
+        if h264_pay.find_property("aggregate-mode").is_some() {
+            h264_pay.set_property_from_str("aggregate-mode", "zero-latency");
         }
+        let vp8_pay_id = element_id(instance_id, "rtpvp8pay", slot);
+        let vp8_pay = make("rtpvp8pay", &vp8_pay_id)?;
+        let vp9_pay_id = element_id(instance_id, "rtpvp9pay", slot);
+        let vp9_pay = make("rtpvp9pay", &vp9_pay_id)?;
+        let funnel_id = element_id(instance_id, "video_funnel", slot);
+        let funnel = make("funnel", &funnel_id)?;
+
+        let (input_id, input) = build_video_input(
+            instance_id,
+            slot,
+            OnAccept::LinkTo(CodecChains {
+                h264: parse.downgrade(),
+                vp8: vp8_pay.downgrade(),
+                vp9: vp9_pay.downgrade(),
+            }),
+        )?;
         internal_links.push((
             ElementPadRef::pad(&parse_id, "src"),
-            ElementPadRef::pad(&pay_id, "sink"),
+            ElementPadRef::pad(&h264_pay_id, "sink"),
         ));
+        for pay_id in [&h264_pay_id, &vp8_pay_id, &vp9_pay_id] {
+            internal_links.push((
+                ElementPadRef::pad(pay_id, "src"),
+                ElementPadRef::pad(&funnel_id, "sink_%u"),
+            ));
+        }
         tracks.push(Track {
             kind: TrackKind::Video,
             slot,
             input: input.downgrade(),
-            tail: pay.downgrade(),
-            payloader: Some(pay.downgrade()),
+            tail: funnel.downgrade(),
+            payloaders: vec![
+                h264_pay.downgrade(),
+                vp8_pay.downgrade(),
+                vp9_pay.downgrade(),
+            ],
         });
         elements.push((input_id, input));
         elements.push((parse_id, parse));
-        elements.push((pay_id, pay));
+        elements.push((h264_pay_id, h264_pay));
+        elements.push((vp8_pay_id, vp8_pay));
+        elements.push((vp9_pay_id, vp9_pay));
+        elements.push((funnel_id, funnel));
     }
 
     info!(

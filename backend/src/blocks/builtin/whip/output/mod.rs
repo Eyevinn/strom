@@ -6,7 +6,7 @@
 //!   payloads (and for raw audio, encodes) internally.
 //!
 //! Audio arrives raw and is encoded inside the block. Video must arrive encoded
-//! (H.264): codec, profile and bitrate are the operator's choice, made in a
+//! (H.264, VP8 or VP9): codec, profile and bitrate are the operator's choice, made in a
 //! `builtin.videoenc` block in front of this one. Raw video and other codecs
 //! fail the flow with an error that says so; see [`video`].
 //!
@@ -158,9 +158,9 @@ pub(super) struct Track {
     pub input: gst::glib::WeakRef<gst::Element>,
     /// The element whose src pad goes to the sink's request pad.
     pub tail: gst::glib::WeakRef<gst::Element>,
-    /// `whipsink` only: the RTP payloader. Every stream in the session gets its
-    /// own payload type.
-    pub payloader: Option<gst::glib::WeakRef<gst::Element>>,
+    /// `whipsink` only: the track's RTP payloaders, one per codec it can
+    /// carry. Every stream in the session gets its own payload type.
+    pub payloaders: Vec<gst::glib::WeakRef<gst::Element>>,
 }
 
 /// Which sink the block feeds, which decides its request pad names.
@@ -211,7 +211,7 @@ pub(super) fn register_sink_pad_requests(
                 (Sink::WhipClientSink, TrackKind::Audio) => format!("audio_{}", linked_audio),
                 (Sink::WhipClientSink, TrackKind::Video) => format!("video_{}", linked_video),
             };
-            if let Some(payloader) = track.payloader.as_ref().and_then(|p| p.upgrade()) {
+            for payloader in track.payloaders.iter().filter_map(|p| p.upgrade()) {
                 payloader.set_property("pt", FIRST_DYNAMIC_PT + linked as u32);
             }
             let Some(sink_pad) = sink_element.request_pad_simple(&pad_name) else {

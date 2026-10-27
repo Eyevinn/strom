@@ -7,7 +7,7 @@ pub(crate) fn whip_output_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.whip_output".to_string(),
         name: "WHIP Output".to_string(),
-        description: "Publishes audio and, optionally, video to a WHIP server over WebRTC. Audio arrives raw and is encoded to Opus here; video must arrive encoded as H.264, so place a Video Encoder block before the video input. Default uses the stable whipsink element.".to_string(),
+        description: "Publishes audio and, optionally, video to a WHIP server over WebRTC. Audio arrives raw and is encoded to Opus here; video must arrive encoded as H.264, VP8 or VP9, so place a Video Encoder block before the video input. Default uses the stable whipsink element.".to_string(),
         category: "Outputs".to_string(),
         exposed_properties: vec![
             ExposedProperty {
@@ -52,7 +52,7 @@ pub(crate) fn whip_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "num_video_tracks".to_string(),
                 label: "Number of Video Tracks".to_string(),
-                description: "Number of video inputs (0 = audio only, the default). Video must arrive encoded as H.264: place a Video Encoder block before each video input.".to_string(),
+                description: "Number of video inputs (0 = audio only, the default). Video must arrive encoded as H.264, VP8 or VP9: place a Video Encoder block before each video input.".to_string(),
                 property_type: PropertyType::UInt,
                 default_value: Some(PropertyValue::UInt(0)),
                 mapping: PropertyMapping {

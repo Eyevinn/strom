@@ -92,6 +92,10 @@ pub(super) fn build_whipclientsink(
     // empties it again if no video input is linked.
     if num_video_tracks == 0 {
         whipclientsink.set_property("video-caps", gst::Caps::new_empty());
+    } else {
+        // The session's filters carry the level it started at; a pre-encoded
+        // source whose level rises would fail them and end the publish.
+        crate::blocks::builtin::webrtcsink_profile_filter::install(&whipclientsink);
     }
 
     // Access the signaller child and set its properties
@@ -206,7 +210,7 @@ pub(super) fn build_whipclientsink(
             slot,
             input: convert.downgrade(),
             tail: resample.downgrade(),
-            payloader: None,
+            payloaders: Vec::new(),
         });
         elements.push((convert_id, convert));
         elements.push((resample_id, resample));
@@ -225,7 +229,7 @@ pub(super) fn build_whipclientsink(
             slot,
             input: input.downgrade(),
             tail: input.downgrade(),
-            payloader: None,
+            payloaders: Vec::new(),
         });
         elements.push((input_id, input));
     }
