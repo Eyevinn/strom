@@ -227,10 +227,13 @@ async fn gpu_converter_answers_with_direct_formats_first() {
         .static_pad("sink")
         .unwrap()
         .query_caps(None);
-    // GL memory goes into `glupload` as it is, and CUDA memory through
-    // `cudadownload` (on a host with nvcodec): neither needs the converter.
+    // The converter (`videoconvert`) outputs plain system memory only. Every
+    // entry with another caps feature reaches the answer through what takes
+    // it directly: `glupload` for GL memory, DMABuf (GStreamer 1.28 with Mesa
+    // EGL lists it) and the texture upload meta, `cudadownload` for CUDA
+    // memory (on a host with nvcodec). None of them needs the converter.
     let direct = |s: &gst::StructureRef, f: &gst::CapsFeaturesRef| {
-        if f.contains("memory:GLMemory") || f.contains("memory:CUDAMemory") {
+        if !plain_system_memory(f) {
             return true;
         }
         if !s.has_field("format") {
@@ -246,9 +249,7 @@ async fn gpu_converter_answers_with_direct_formats_first() {
         .unwrap_or_else(|| panic!("the answer lists nothing only the converter takes: {answer}"));
     let first_system_direct = answer
         .iter_with_features()
-        .position(|(s, f)| {
-            !f.contains("memory:GLMemory") && !f.contains("memory:CUDAMemory") && direct(s, f)
-        })
+        .position(|(s, f)| plain_system_memory(f) && direct(s, f))
         .unwrap_or_else(|| {
             panic!("the answer lists no system-memory format glupload uploads: {answer}")
         });
@@ -284,4 +285,12 @@ async fn gpu_converter_answers_with_direct_formats_first() {
         running.gpu_input_adapters()
     );
     running.stop();
+}
+
+/// Caps features that say plain system memory: no memory type and no meta.
+/// The only kind of entry the CPU converter adds to an input's caps answer.
+fn plain_system_memory(features: &gst::CapsFeaturesRef) -> bool {
+    features
+        .iter()
+        .all(|f| f == gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY)
 }

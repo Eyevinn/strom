@@ -324,7 +324,14 @@ async fn cuda_after_a_converted_format_bypasses_the_converter() {
     let first_converted = answer
         .iter_with_features()
         .position(|(s, f)| {
-            if f.contains("memory:GLMemory") || f.contains("memory:CUDAMemory") {
+            // The converter outputs plain system memory only. GL memory,
+            // DMABuf (GStreamer 1.28 with Mesa EGL lists it) and the texture
+            // upload meta go into glupload as they are, CUDA memory through
+            // cudadownload.
+            if !f
+                .iter()
+                .all(|f| f == gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY)
+            {
                 return false;
             }
             let mut one = gst::Caps::new_empty();
