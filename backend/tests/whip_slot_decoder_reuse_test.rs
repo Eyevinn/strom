@@ -1,6 +1,6 @@
 //! Regression test for a WHIP Input slot reused by a second publisher.
 //!
-//! A slot's video chain (`appsrc_video_<slot>` → decodebin → videoconvert →
+//! A slot's video chain (`appsrc_video_<slot>` → decodebin →
 //! tee) stays in the running pipeline while sessions come and go. The decoder
 //! `decodebin` plugged for the first session kept that session's reference
 //! frames, reorder queue and configuration, and on macOS VideoToolbox then

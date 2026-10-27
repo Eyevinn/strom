@@ -128,7 +128,7 @@ fn prepare_idle_decodebin(decodebin: &gst::Element) {
 /// Stamp a slot's output activity for every buffer that reaches its tee.
 ///
 /// The tee's sink pad is the far end of the slot's chain: with `decode=true`
-/// everything upstream of it — `decodebin`, the converter — has already run, and
+/// everything upstream of it — `decodebin` and the audio converters — has already run, and
 /// everything downstream is a flow consumer. A buffer here is media the flow can
 /// actually use, which is the thing the session's appsink cannot see. The appsink
 /// sits in the isolated session pipeline, upstream of all of this, so it stamps
@@ -167,7 +167,9 @@ fn stamp_slot_output(tee: &gst::Element, stamp: Arc<ActivityStamp>, slot: usize,
 ///
 /// At build time, per-slot chains are created in the main pipeline:
 /// - decode=true: appsrc → decodebin → audioconvert → audioresample → capsfilter → tee (audio),
-///   appsrc → decodebin → videoconvert → tee (video)
+///   appsrc → decodebin → tee (video). The video leaves in whatever memory
+///   and pixel format the decoder `decodebin` plugged produces; each consumer
+///   adapts its own input (BLOCK_GUIDELINES).
 /// - decode=false: appsrc → tee (audio/video passthrough)
 ///
 /// The actual whipserversrc elements are created dynamically per-session
@@ -430,7 +432,6 @@ pub fn build_whipserversrc(
 
             if decode {
                 let decodebin_id = format!("{}:decodebin_video_{}", instance_id, slot);
-                let videoconvert_id = format!("{}:videoconvert_{}", instance_id, slot);
 
                 let decodebin = gst::ElementFactory::make("decodebin")
                     .name(&decodebin_id)
@@ -466,21 +467,17 @@ pub fn build_whipserversrc(
                         }
                     });
 
-                let videoconvert = gst::ElementFactory::make("videoconvert")
-                    .name(&videoconvert_id)
-                    .build()
-                    .map_err(|e| {
-                        BlockBuildError::ElementCreation(format!("videoconvert_{}: {}", slot, e))
-                    })?;
-
                 // clocksync → decodebin
                 internal_links.push((
                     ElementPadRef::pad(&appsrc_id, "src"),
                     ElementPadRef::pad(&decodebin_id, "sink"),
                 ));
 
-                // decodebin has dynamic pads — connect pad-added to link to videoconvert
-                let videoconvert_weak = videoconvert.downgrade();
+                // decodebin has dynamic pads — connect pad-added to link to the
+                // output tee. No converter in between: the slot emits what the
+                // decoder produces (GL from vtdec, CUDA from nvh264dec, system
+                // memory from a software decoder), and each consumer adapts.
+                let video_out_tee_weak = video_out_tee.downgrade();
                 let video_decoding_for_pad = video_decoding.clone();
                 let video_damage_for_pad = video_damage.clone();
                 decodebin.connect_pad_added(move |_dec, src_pad| {
@@ -501,29 +498,26 @@ pub fn build_whipserversrc(
                     if let Some(flag) = video_decoding_for_pad.get(slot) {
                         flag.store(true, Ordering::Relaxed);
                     }
-                    if let Some(vc) = videoconvert_weak.upgrade() {
-                        let sink = vc.static_pad("sink").unwrap();
+                    if let Some(tee) = video_out_tee_weak.upgrade() {
+                        let sink = tee.static_pad("sink").unwrap();
                         if !sink.is_linked() {
                             if let Err(e) = src_pad.link(&sink) {
-                                warn!("Failed to link decodebin video pad to videoconvert: {:?}", e);
+                                warn!("Failed to link decodebin video pad to the output tee: {:?}", e);
                             } else {
                                 info!(
-                                    "WHIP Input: decodebin video pad linked to videoconvert for slot {}",
-                                    slot
+                                    "WHIP Input: decodebin video pad linked to the output tee for slot {} ({})",
+                                    slot,
+                                    src_pad
+                                        .current_caps()
+                                        .map(|c| c.to_string())
+                                        .unwrap_or_else(|| "caps not negotiated yet".to_string())
                                 );
                             }
                         }
                     }
                 });
 
-                // videoconvert → tee
-                internal_links.push((
-                    ElementPadRef::pad(&videoconvert_id, "src"),
-                    ElementPadRef::pad(&video_out_tee_id, "sink"),
-                ));
-
                 elements.push((decodebin_id, decodebin));
-                elements.push((videoconvert_id, videoconvert));
             } else {
                 // decode=false: clocksync → tee directly
                 internal_links.push((
