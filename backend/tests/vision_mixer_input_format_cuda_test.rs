@@ -246,7 +246,7 @@ fn appsrc_flow(block_id: &str) -> Flow {
     flow.blocks.push(mixer_block(block_id, Backend::Gpu));
     flow.elements.push(elem("src", "appsrc", vec![]));
     link(&mut flow, "src:src", &format!("{block_id}:video_in_0"));
-    add_pgm_tap(&mut flow, block_id);
+    add_pgm_tap(&mut flow, block_id, Backend::Gpu);
     flow
 }
 
@@ -471,7 +471,7 @@ async fn nvdec_cuda_after_a_converted_format_stays_on_the_gpu() {
         link(&mut flow, from, to);
     }
     link(&mut flow, "sel:src", &format!("{block_id}:video_in_0"));
-    add_pgm_tap(&mut flow, block_id);
+    add_pgm_tap(&mut flow, block_id, Backend::Gpu);
 
     let running = Running::start(block_id, flow);
     let sel = running.element("sel");
