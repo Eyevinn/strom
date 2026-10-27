@@ -7,11 +7,11 @@
 //! which reports that it can hold nothing. Behind the default queue that is
 //! 1 s, less than the 2 s the mixer has to wait for the first input.
 //!
-//! The slow input resamples to whatever rate the mixer settles on. The mixer
-//! takes the format of the input that negotiates first, and the bridge's
-//! 48 kHz sometimes wins over the test source's 44.1 kHz. Without the
-//! resampler the slow input then fails not-negotiated, and the mixer, which
-//! cannot answer a latency query before both inputs can, never warns (#1136).
+//! The slow input is converted to the bridge's caps before the mixer. A bare
+//! `audiomixer` takes the format of whichever input negotiates first, and its
+//! inputs negotiate at the same time. When the bridge's 48 kHz stereo won,
+//! the slow input failed not-negotiated, and the mixer, which cannot answer a
+//! latency query before both inputs can, never warned (#1136).
 
 pub mod common;
 
@@ -74,6 +74,11 @@ async fn a_mixer_latency_failure_is_reported_once_with_its_inputs() {
         .push(elem("slow_conv2", "audioconvert", vec![]));
     flow.elements
         .push(elem("slow_resample", "audioresample", vec![]));
+    flow.elements.push(elem(
+        "slow_caps",
+        "capsfilter",
+        vec![("caps", PV::String(BRIDGE_CAPS.into()))],
+    ));
     flow.elements.push(elem("slow_queue", "queue", vec![]));
     flow.elements.push(elem(
         "bridge",
@@ -81,12 +86,7 @@ async fn a_mixer_latency_failure_is_reported_once_with_its_inputs() {
         vec![
             ("is-live", PV::Bool(true)),
             ("format", PV::String("time".into())),
-            (
-                "caps",
-                PV::String(
-                    "audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved".into(),
-                ),
-            ),
+            ("caps", PV::String(BRIDGE_CAPS.into())),
         ],
     ));
     flow.elements.push(elem("bridge_queue", "queue", vec![]));
@@ -103,6 +103,7 @@ async fn a_mixer_latency_failure_is_reported_once_with_its_inputs() {
             "slow_depay",
             "slow_conv2",
             "slow_resample",
+            "slow_caps",
             "slow_queue",
             "mix",
         ],
@@ -184,20 +185,21 @@ async fn a_mixer_latency_failure_is_reported_once_with_its_inputs() {
     );
 }
 
+const BRIDGE_CAPS: &str = "audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved";
+
 /// The failure from production: one input 2 s late, one from a live appsrc
 /// at its defaults, which reports that it can hold nothing. The aggregator's
 /// own warning names neither; `diagnose_warning` names both.
 #[test]
 fn finds_both_inputs_of_a_mixer_that_cannot_configure_latency() {
     gst::init().unwrap();
-    let pipeline = gst::parse::launch(
+    let pipeline = gst::parse::launch(&format!(
         "audiomixer name=mix ! fakesink sync=true \
          audiotestsrc name=slow is-live=true ! audioconvert ! rtpL16pay \
-           ! rtpjitterbuffer latency=2000 ! rtpL16depay ! audioconvert ! audioresample ! queue ! mix. \
-         appsrc name=bridge is-live=true format=time \
-           caps=audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
-           ! queue ! mix.",
-    )
+           ! rtpjitterbuffer latency=2000 ! rtpL16depay ! audioconvert ! audioresample \
+           ! {BRIDGE_CAPS} ! queue ! mix. \
+         appsrc name=bridge is-live=true format=time caps={BRIDGE_CAPS} ! queue ! mix."
+    ))
     .unwrap()
     .downcast::<gst::Pipeline>()
     .unwrap();
