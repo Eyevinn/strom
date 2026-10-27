@@ -6,7 +6,12 @@
 //! - Color format (pixel format) - enforced by caps
 //!
 //! All properties are optional. The block creates a fixed chain of elements:
-//! videoscale -> videoconvert -> capsfilter
+//! input -> videoscale -> videoconvert -> capsfilter
+//! - input: `identity` whose sink pad adapts the memory that arrives to what
+//!   the block takes, from the negotiated caps (see `gst::download_front`).
+//!   The block scales and converts on the CPU and emits system memory, so GL,
+//!   CUDA, D3D12 or D3D11 memory is downloaded first.
+//! - videoscale, videoconvert: plain CPU elements, never `autovideoconvert`.
 //!
 //! TEMPORARY: videorate element removed to avoid frame duplication issues.
 //!
@@ -14,8 +19,11 @@
 //! Unspecified properties allow passthrough - elements will not modify those aspects.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
-use crate::gpu::{self, video_convert_mode};
+use crate::gpu;
+use crate::gst::download_front;
+use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 use gstreamer as gst;
+use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom_types::{
     block::*, common_video_framerate_enum_values, common_video_pixel_format_enum_values,
@@ -68,7 +76,7 @@ impl BlockBuilder for VideoFormatBuilder {
             if parts.len() == 2 {
                 caps_fields.push(format!("width={}", parts[0]));
                 caps_fields.push(format!("height={}", parts[1]));
-                // Pin PAR to 1:1 so autovideoconvert doesn't compensate with non-square pixels
+                // Pin PAR to 1:1 so the scaler doesn't compensate with non-square pixels
                 caps_fields.push("pixel-aspect-ratio=1/1".to_string());
             }
         }
@@ -100,14 +108,21 @@ impl BlockBuilder for VideoFormatBuilder {
 
         // Always create all elements for consistent external pad references
         // Elements will just pass through if their respective properties aren't set
+        //
+        // The converter is plain `videoconvert` whatever the global video
+        // convert mode says: the capsfilter pins system memory, so the block
+        // works on the CPU, and the input front downloads GPU memory before
+        // the scaler instead of `autovideoconvert` choosing a GPU path.
+        let input_id = format!("{}:input", instance_id);
         let scale_id = format!("{}:videoscale", instance_id);
-        // Use detected video convert mode (autovideoconvert if GPU interop works, videoconvert otherwise)
-        // Note: We always use "videoconvert" as the element ID for consistent external pad references,
-        // even when the actual GStreamer element is "autovideoconvert"
-        let convert_mode = video_convert_mode();
-        let convert_element_name = convert_mode.element_name();
         let convert_id = format!("{}:videoconvert", instance_id);
         let capsfilter_id = format!("{}:capsfilter", instance_id);
+
+        let input = gst::ElementFactory::make("identity")
+            .name(&input_id)
+            .property("silent", true)
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {}", e)))?;
 
         let videoscale = gst::ElementFactory::make("videoscale")
             .name(&scale_id)
@@ -121,13 +136,20 @@ impl BlockBuilder for VideoFormatBuilder {
         //     .build()
         //     .map_err(|e| BlockBuildError::ElementCreation(format!("videorate: {}", e)))?;
 
-        let videoconvert = gst::ElementFactory::make(convert_element_name)
+        let videoconvert = gst::ElementFactory::make(VIDEO_CONVERT_FACTORY)
             .name(&convert_id)
             .build()
             .map_err(|e| {
-                BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
+                BlockBuildError::ElementCreation(format!("{}: {}", VIDEO_CONVERT_FACTORY, e))
             })?;
         gpu::configure_video_convert(&videoconvert);
+
+        // What arrives depends on the producer, often a decoder `decodebin`
+        // picks at runtime, so the memory is adapted from the negotiated caps.
+        let scale_sink = videoscale
+            .static_pad("sink")
+            .ok_or_else(|| BlockBuildError::ElementCreation("videoscale has no sink pad".into()))?;
+        download_front::install(&input, &scale_sink, &input_id, "Video Format");
 
         // capsfilter with caps (only constraints specified properties)
         let caps = caps_str.parse::<gst::Caps>().map_err(|_| {
@@ -140,10 +162,14 @@ impl BlockBuilder for VideoFormatBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
 
-        info!("VideoFormat block created (chain: videoscale -> {} -> capsfilter) [videorate TEMPORARILY REMOVED]", convert_element_name);
+        info!("VideoFormat block created (chain: input -> videoscale -> {} -> capsfilter) [videorate TEMPORARILY REMOVED]", VIDEO_CONVERT_FACTORY);
 
-        // Chain: videoscale -> videoconvert/autovideoconvert -> capsfilter (videorate temporarily removed)
+        // Chain: input -> videoscale -> videoconvert -> capsfilter (videorate temporarily removed)
         let internal_links = vec![
+            (
+                ElementPadRef::pad(&input_id, "src"),
+                ElementPadRef::pad(&scale_id, "sink"),
+            ),
             (
                 ElementPadRef::pad(&scale_id, "src"),
                 ElementPadRef::pad(&convert_id, "sink"),
@@ -156,6 +182,7 @@ impl BlockBuilder for VideoFormatBuilder {
 
         Ok(BlockBuildResult {
             elements: vec![
+                (input_id, input),
                 (scale_id, videoscale),
                 (convert_id, videoconvert),
                 (capsfilter_id, capsfilter),
@@ -234,7 +261,7 @@ fn videoformat_definition() -> BlockDefinition {
                 label: None,
                 name: "video_in".to_string(),
                 media_type: MediaType::Video,
-                internal_element_id: "videoscale".to_string(),
+                internal_element_id: "input".to_string(),
                 internal_pad_name: "sink".to_string(),
             }],
             outputs: vec![ExternalPad {
@@ -260,12 +287,9 @@ fn videoformat_definition() -> BlockDefinition {
 mod tests {
     use super::*;
     use crate::blocks::BlockBuildContext;
-    use gst::prelude::*;
 
     fn build(pairs: &[(&str, &str)]) -> BlockBuildResult {
         let _ = gst::init();
-        // video_convert_mode() panics until this has run.
-        crate::gpu::detect_gpu_capabilities();
         let props: HashMap<String, PropertyValue> = pairs
             .iter()
             .map(|(k, v)| (k.to_string(), PropertyValue::String(v.to_string())))
