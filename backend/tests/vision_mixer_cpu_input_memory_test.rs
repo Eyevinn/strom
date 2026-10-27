@@ -207,7 +207,7 @@ async fn gl_memory_on_a_dsk_or_stinger_input_is_downloaded_by_its_front() {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         let mut adapters = input_adapters(&running, block_id, pad, convert);
         while adapters != ["gldownload", "capsfilter"] && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             adapters = input_adapters(&running, block_id, pad, convert);
         }
         assert_eq!(

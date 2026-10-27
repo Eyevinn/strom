@@ -190,7 +190,8 @@ pub(super) fn build_cpu_pipeline(
         let crop_id = p.id("videocrop_stinger");
         let videoconvert = elements::make_element(VIDEO_CONVERT_FACTORY, &vc_id)?;
         gpu::configure_video_convert(&videoconvert);
-        let (front_id, front) = input_front(p, "stinger_in", &videoconvert)?;
+        let (front_id, front) =
+            input_front(p, strom_types::stinger::STINGER_INPUT_PAD, &videoconvert)?;
         elems.push((q_id.clone(), elements::make_queue(&q_id)?));
         elems.push((front_id.clone(), front));
         elems.push((vc_id.clone(), videoconvert));
