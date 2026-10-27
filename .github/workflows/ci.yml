@@ -33,6 +33,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   TRUNK_VERSION: "0.21.14"
+  # The GStreamer minor version the Linux and macOS test jobs must run (#964).
+  # Homebrew cannot be pinned, so this is where a drift shows up.
+  GSTREAMER_BASELINE: "1.28"
   CARGO_INCREMENTAL: 0
   # Line tables only in dev/test builds: backtraces keep file and line, but
   # the full debuginfo that made test builds slow to link and the sccache
@@ -106,50 +109,63 @@ jobs:
     # for push and workflow_dispatch, so it is a no-op there.
     if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
     needs: preflight
+    # The tests run on the GStreamer baseline (#964), not on the runner's
+    # Ubuntu 24.04 GStreamer 1.24.2, which fails on bugs the shipped versions
+    # do not have (avdec dropping an intra-only clip's last frame, fixed in
+    # 1.24.4). ubuntu:26.04 carries 1.28, the base the Docker images move to (#1101).
     runs-on: ubuntu-24.04
+    container: ubuntu:26.04
     timeout-minutes: 25
     env:
       RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
     steps:
+      # The container has none of the hosted runner's tools, and no sudo.
+      # Plain apt-get, not cache-apt-pkgs-action: a real install runs the
+      # postinst scripts and triggers (the libblas alternatives, the GSettings
+      # schemas) that a restored package cache skips.
+      # libegl-mesa0 and libgl1-mesa-dri give the GL tests a surfaceless EGL
+      # context (llvmpipe). libsoup-3.0-0 and gsettings-desktop-schemas are
+      # what souphttpsrc loads and looks up the system proxy in.
+      - name: Install build and GStreamer packages
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git pkg-config cmake libclang-dev procps \
+            libunwind-dev libssl-dev libcairo2-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice gstreamer1.0-gl \
+            gstreamer1.0-tools libsoup-3.0-0 gsettings-desktop-schemas libegl-mesa0 libgl1-mesa-dri
+
+      - name: Check GStreamer is the baseline
+        shell: bash
+        run: |
+          gst-inspect-1.0 --version
+          version=$(gst-inspect-1.0 --version | sed -n 's/^GStreamer \([0-9.]*\).*/\1/p')
+          [[ "$version" == "$GSTREAMER_BASELINE".* ]] \
+            || { echo "::error::GStreamer is $version, the tested baseline is $GSTREAMER_BASELINE.x (#964)"; exit 1; }
+
       - uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      # Package list must stay identical to build-linux-x86_64 so both jobs
-      # share one apt cache entry (the action keys by package list + arch).
-      - name: Cache apt packages
-        uses: awalsh128/cache-apt-pkgs-action@v1.6.1
-        with:
-          packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-gl gstreamer1.0-plugins-good libsoup-3.0-0 gsettings-desktop-schemas gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice libegl-mesa0 libgl1-mesa-dri pkg-config cmake libclang-dev
-          version: 1.5
-
-      # cache-apt-pkgs-action restores package files but does not run postinst,
-      # so update-alternatives links such as /usr/lib/*/libblas.so.3 never get
-      # created. gst-libav then fails to load ("libblas.so.3: cannot open shared
-      # object file"), avenc_aac goes missing, and every test requiring it skips
-      # green. Reinstalling runs postinst; ldconfig then picks the links up.
-      # The GSettings schemas are compiled by a trigger too: without
-      # org.gnome.system.proxy in gschemas.compiled, GIO aborts any test
-      # process whose souphttpsrc looks up the system proxy (SIGTRAP).
-      # Only needed here: the build jobs never load a plugin.
-      - name: Repair alternatives for cached libraries
+      # The container starts with no Rust. With no argument, `rustup toolchain
+      # install` installs the toolchain and components in rust-toolchain.toml.
+      - name: Install Rust
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --reinstall libblas3 liblapack3
-          sudo ldconfig
-          sudo glib-compile-schemas /usr/share/glib-2.0/schemas
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          "$HOME/.cargo/bin/rustup" toolchain install
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       # save-if main: PR runs restore the main-branch cache (GHA cache scoping
       # falls back to the base branch) but don't save their own per-branch
       # copy — that copy doubled every rust-cache entry against the 10 GB
       # repo ceiling. Changed workspace crates rebuild on PRs but hit sccache.
+      # Its own key: the build scripts here link against the container's
+      # libraries, not the hosted runner's.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: linux-x86_64
+          shared-key: linux-x86_64-ubuntu-26.04
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -448,9 +464,10 @@ jobs:
           install -m 0755 /tmp/cargo-zigbuild-x86_64-unknown-linux-gnu/cargo-zigbuild "$HOME/.cargo/bin/cargo-zigbuild"
 
       # Cached apt install — avoids re-downloading the GStreamer dev stack
-      # (~1 min) on every build. The package list must stay identical to
-      # check-linux so both x86_64 jobs share one apt cache entry; arm64 gets
-      # its own entry automatically (the action keys by list + runner arch).
+      # (~1 min) on every build. The two build jobs keep one package list;
+      # each arch gets its own entry (the action keys by list + runner arch).
+      # They stay on the hosted 24.04 image: they only compile and link, and
+      # check-linux runs the tests on the baseline in a container.
       - name: Install GStreamer (cached)
         uses: awalsh128/cache-apt-pkgs-action@v1.6.1
         with:
@@ -551,9 +568,10 @@ jobs:
           install -m 0755 /tmp/cargo-zigbuild-aarch64-unknown-linux-gnu/cargo-zigbuild "$HOME/.cargo/bin/cargo-zigbuild"
 
       # Cached apt install — avoids re-downloading the GStreamer dev stack
-      # (~1 min) on every build. The package list must stay identical to
-      # check-linux so both x86_64 jobs share one apt cache entry; arm64 gets
-      # its own entry automatically (the action keys by list + runner arch).
+      # (~1 min) on every build. The two build jobs keep one package list;
+      # each arch gets its own entry (the action keys by list + runner arch).
+      # They stay on the hosted 24.04 image: they only compile and link, and
+      # check-linux runs the tests on the baseline in a container.
       - name: Install GStreamer (cached)
         uses: awalsh128/cache-apt-pkgs-action@v1.6.1
         with:
@@ -780,6 +798,16 @@ jobs:
           brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav libnice-gstreamer
           echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig:$(brew --prefix gstreamer)/lib/pkgconfig:$(brew --prefix glib)/lib/pkgconfig" >> $GITHUB_ENV
           echo "LIBRARY_PATH=$(brew --prefix)/lib" >> $GITHUB_ENV
+
+      # Homebrew cannot be pinned: this is how a move past the baseline shows.
+      # Same check as check-linux.
+      - name: Check GStreamer is the baseline
+        shell: bash
+        run: |
+          gst-inspect-1.0 --version
+          version=$(gst-inspect-1.0 --version | sed -n 's/^GStreamer \([0-9.]*\).*/\1/p')
+          [[ "$version" == "$GSTREAMER_BASELINE".* ]] \
+            || { echo "::error::GStreamer is $version, the tested baseline is $GSTREAMER_BASELINE.x (#964)"; exit 1; }
 
       - name: Download frontend dist
         uses: actions/download-artifact@v8
