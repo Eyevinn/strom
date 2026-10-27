@@ -11,12 +11,20 @@
 //!   internally by a `videotestsrc` (black, 1920x1080@25 UYVY) so it can reach
 //!   PLAYING.
 //!
-//! No format conversion elements are inserted on either side — peer blocks must
-//! accept (input) or deliver (output) the card's native pixel/audio formats.
+//! DeckLink Input emits the card's native formats. DeckLink Output adapts its
+//! video input to the configured mode: an input front downloads GPU memory
+//! (`gst::download_front`), then `videoconvert`, `videoscale` and `videorate`
+//! convert the pixel format, scale and change the framerate to what
+//! `decklinkvideosink` takes. Video whose interlacing does not match the mode
+//! fails the flow with an element error: nothing here interlaces or
+//! deinterlaces.
 //!
 //! Uses GStreamer's DeckLink plugin (gst-plugins-bad) for hardware integration.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+use crate::gpu;
+use crate::gst::download_front;
+use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::hash_map::DefaultHasher;
@@ -27,7 +35,7 @@ use strom_types::{
     element::ElementPadRef,
     EnumValue, MediaType, PropertyValue,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 /// DeckLink Input block builder.
 ///
@@ -295,7 +303,7 @@ impl BlockBuilder for DeckLinkOutputBuilder {
                 },
                 name: "video_in".to_string(),
                 media_type: MediaType::Video,
-                internal_element_id: "decklinkvideosink".to_string(),
+                internal_element_id: VIDEO_INPUT_ELEMENT.to_string(),
                 internal_pad_name: "sink".to_string(),
             });
         }
@@ -376,7 +384,8 @@ impl BlockBuilder for DeckLinkOutputBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("decklinkvideosink: {}", e)))?;
 
-        let mut elements: Vec<(String, gst::Element)> = vec![(videosink_id.clone(), videosink)];
+        let mut elements: Vec<(String, gst::Element)> =
+            vec![(videosink_id.clone(), videosink.clone())];
         let mut internal_links: Vec<(ElementPadRef, ElementPadRef)> = Vec::new();
 
         // Audio-only: feed videosink with black frames so it can reach PLAYING.
@@ -422,6 +431,13 @@ impl BlockBuilder for DeckLinkOutputBuilder {
             elements.push((capsfilter_id, capsfilter));
         }
 
+        if stream_mode.has_video() {
+            let (video_elements, video_links) =
+                build_video_input(instance_id, &videosink, video_mode)?;
+            elements.extend(video_elements);
+            internal_links.extend(video_links);
+        }
+
         if stream_mode.has_audio() {
             let audiosink_id = format!("{}:decklinkaudiosink", instance_id);
             // Don't wait for a first buffer to start: an input with no data
@@ -454,9 +470,291 @@ impl BlockBuilder for DeckLinkOutputBuilder {
     }
 }
 
-/// Get metadata for DeckLink blocks (for UI/API).
-pub fn get_blocks() -> Vec<BlockDefinition> {
-    vec![decklink_input_definition(), decklink_output_definition()]
+/// The element DeckLink Output's `video_in` pad points at: its input front.
+pub const VIDEO_INPUT_ELEMENT: &str = "input";
+
+/// Elements of a block chain, by id.
+type BlockElements = Vec<(String, gst::Element)>;
+/// Internal links of a block chain.
+type BlockLinks = Vec<(ElementPadRef, ElementPadRef)>;
+
+/// DeckLink Output's video input chain, ending in `videosink`:
+/// `input` (identity front) → `videoconvert` → `videoscale` → `videorate` →
+/// `ratecaps`.
+///
+/// The front downloads GL, CUDA, D3D12 or D3D11 memory to system memory,
+/// decided from the negotiated caps (`gst::download_front`). The converters
+/// then negotiate against the caps `decklinkvideosink` answers for the
+/// configured mode, so a pixel format or size the card does not take is
+/// converted on the way in. The sink leaves the framerate open, so `ratecaps`
+/// pins the mode's own rate for `videorate` to produce.
+fn build_video_input(
+    instance_id: &str,
+    videosink: &gst::Element,
+    mode: &str,
+) -> Result<(BlockElements, BlockLinks), BlockBuildError> {
+    let make = |factory: &str, name: &str| -> Result<(String, gst::Element), BlockBuildError> {
+        let id = format!("{}:{}", instance_id, name);
+        let element = gst::ElementFactory::make(factory)
+            .name(&id)
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", factory, e)))?;
+        Ok((id, element))
+    };
+    let (input_id, input) = make("identity", VIDEO_INPUT_ELEMENT)?;
+    input.set_property("silent", true);
+    let (convert_id, convert) = make(VIDEO_CONVERT_FACTORY, "videoconvert")?;
+    let (scale_id, scale) = make("videoscale", "videoscale")?;
+    let (rate_id, rate) = make("videorate", "videorate")?;
+    let (ratecaps_id, ratecaps) = make("capsfilter", "ratecaps")?;
+    gpu::configure_video_convert(&convert);
+    gpu::configure_video_convert(&scale);
+    let framerate = mode_framerate(mode);
+    if let Some(framerate) = framerate {
+        ratecaps.set_property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("framerate", framerate)
+                .build(),
+        );
+    }
+
+    let convert_sink = convert
+        .static_pad("sink")
+        .ok_or_else(|| BlockBuildError::ElementCreation("videoconvert has no sink pad".into()))?;
+    download_front::install(&input, &convert_sink, &input_id, "DeckLink Output");
+    let card_sink = videosink.static_pad("sink").ok_or_else(|| {
+        BlockBuildError::ElementCreation("decklinkvideosink has no sink pad".into())
+    })?;
+    watch_input_caps(&input, &card_sink, mode, framerate);
+    leave_interlacing_open(&ratecaps);
+
+    let chain = [&input_id, &convert_id, &scale_id, &rate_id, &ratecaps_id];
+    let mut links: Vec<(ElementPadRef, ElementPadRef)> = chain
+        .windows(2)
+        .map(|pair| {
+            (
+                ElementPadRef::pad(pair[0], "src"),
+                ElementPadRef::pad(pair[1], "sink"),
+            )
+        })
+        .collect();
+    links.push((
+        ElementPadRef::pad(&ratecaps_id, "src"),
+        ElementPadRef::pad(videosink.name().as_str(), "sink"),
+    ));
+    Ok((
+        vec![
+            (input_id, input),
+            (convert_id, convert),
+            (scale_id, scale),
+            (rate_id, rate),
+            (ratecaps_id, ratecaps),
+        ],
+        links,
+    ))
+}
+
+/// The frame rate of a DeckLink mode name: `1080p2997` is 30000/1001,
+/// `1080i50` (50 fields) is 25/1. `None` for `auto` and names it cannot read.
+fn mode_framerate(mode: &str) -> Option<gst::Fraction> {
+    let (rate, interlaced) = match mode {
+        "ntsc" => ("5994", true),
+        "ntsc2398" => ("2398", false),
+        "pal" => ("50", true),
+        "ntsc-p" => ("5994", false),
+        "pal-p" => ("50", false),
+        _ => {
+            let at = mode.rfind(['p', 'i'])?;
+            (&mode[at + 1..], mode.as_bytes()[at] == b'i')
+        }
+    };
+    let n: i32 = rate.parse().ok()?;
+    // Four digits or more are hundredths of an NTSC-style rate: 2997 is
+    // 29.97, that is 30000/1001.
+    let (num, den) = if rate.len() >= 4 {
+        (((n + 50) / 100) * 1000, 1001)
+    } else {
+        (n, 1)
+    };
+    if num <= 0 {
+        return None;
+    }
+    Some(if interlaced {
+        gst::Fraction::new(num / 2, den)
+    } else {
+        gst::Fraction::new(num, den)
+    })
+}
+
+/// Answer caps queries arriving at `last`'s source pad, from upstream, with
+/// the card's caps and the same caps without `interlace-mode`.
+///
+/// No element in the chain changes interlacing, so the card's interlacing
+/// would otherwise travel back to the source as a requirement, and the source
+/// would fail with a bare `not-negotiated`. With it left open, the video
+/// arrives as it is and [`watch_input_caps`] fails the flow with a message.
+///
+/// A QUERY_DOWNSTREAM probe, on its way back (PULL): per query, never per
+/// buffer.
+fn leave_interlacing_open(last: &gst::Element) {
+    let Some(src) = last.static_pad("src") else {
+        return;
+    };
+    src.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, |pad, info| {
+        if !info.mask.contains(gst::PadProbeType::PULL) {
+            return gst::PadProbeReturn::Ok;
+        }
+        let Some(gst::PadProbeData::Query(ref mut query)) = info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::QueryViewMut::Caps(q) = query.view_mut() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        // Ask again without the filter: a filter that says progressive has
+        // already emptied an answer that says interleaved. Asked of the peer
+        // pad itself, since a peer query from `pad` would come back here.
+        let Some(card) = pad.peer().map(|peer| peer.query_caps(None)) else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if card.is_any() || card.is_empty() {
+            return gst::PadProbeReturn::Ok;
+        }
+        let mut open = card.clone();
+        {
+            let open = open.make_mut();
+            for (structure, features) in card.iter_with_features() {
+                if structure.has_field("interlace-mode") {
+                    let mut structure = structure.to_owned();
+                    structure.remove_field("interlace-mode");
+                    open.append_structure_full(structure, Some(features.to_owned()));
+                }
+            }
+        }
+        let answer = match q.filter() {
+            Some(filter) => filter.intersect_with_mode(&open, gst::CapsIntersectMode::First),
+            None => open,
+        };
+        q.set_result(&answer);
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// Watch the raw video arriving at `input` against `card_sink`'s caps, what
+/// the card takes for `mode`.
+///
+/// Interlacing is the one thing the chain cannot adapt: progressive video into
+/// an interlaced mode, or the reverse, fails the flow with an element error
+/// that names both. A size or framerate the chain changes is logged.
+///
+/// An EVENT_DOWNSTREAM probe: per CAPS event, never per buffer. Weak handles
+/// only, since the probe is owned by a pad of `input` itself.
+fn watch_input_caps(
+    input: &gst::Element,
+    card_sink: &gst::Pad,
+    mode: &str,
+    framerate: Option<gst::Fraction>,
+) {
+    let Some(input_sink) = input.static_pad("sink") else {
+        warn!(
+            "DeckLink Output: the video input front has no sink pad, so its caps are not checked"
+        );
+        return;
+    };
+    let input_weak = input.downgrade();
+    let card_sink = card_sink.downgrade();
+    let mode = mode.to_string();
+    input_sink.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+        let Some(gst::PadProbeData::Event(ref event)) = info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::EventView::Caps(caps_event) = event.view() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let (Some(input), Some(card_sink)) = (input_weak.upgrade(), card_sink.upgrade()) else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let card = card_sink.query_caps(None);
+        match check_input(caps_event.caps(), &card, &mode, framerate) {
+            Some(InputCheck::Refuse(reason)) => {
+                gst::element_error!(input, gst::StreamError::Format, ("{}", reason));
+            }
+            Some(InputCheck::Adapted(what)) => info!("DeckLink Output {}: {}", input.name(), what),
+            None => {}
+        }
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// What [`check_input`] found.
+#[derive(Debug, PartialEq, Eq)]
+enum InputCheck {
+    /// The chain cannot adapt this input; the reason is for the operator.
+    Refuse(String),
+    /// The chain scales or changes the framerate, as described.
+    Adapted(String),
+}
+
+/// Compare raw video `arrived` with `card`, the caps the card takes for
+/// `mode`, and `framerate`, the mode's rate. Encoded video and memory types
+/// are the input front's to report.
+fn check_input(
+    arrived: &gst::CapsRef,
+    card: &gst::Caps,
+    mode: &str,
+    framerate: Option<gst::Fraction>,
+) -> Option<InputCheck> {
+    let input = arrived.structure(0)?;
+    if input.name() != "video/x-raw" || card.is_any() || card.is_empty() {
+        return None;
+    }
+    let interlace = input.get::<&str>("interlace-mode").unwrap_or("progressive");
+    let interlaced = |mode: &str| mode != "progressive";
+    let takes = |s: &gst::StructureRef| match s.get::<&str>("interlace-mode") {
+        Ok(wanted) => interlaced(wanted) == interlaced(interlace),
+        // A list or no field: the card takes either.
+        Err(_) => true,
+    };
+    if !card.iter().any(takes) {
+        let wanted = card
+            .structure(0)
+            .and_then(|s| s.get::<&str>("interlace-mode").ok())
+            .unwrap_or("interlaced");
+        return Some(InputCheck::Refuse(format!(
+            "DeckLink Output receives {} video, and mode {} needs {} video. \
+             Nothing in the block interlaces or deinterlaces: set the block's mode \
+             to one that matches the input, or change the video upstream.",
+            interlace, mode, wanted
+        )));
+    }
+
+    let out = card.structure(0)?;
+    let mut changed = Vec::new();
+    for name in ["width", "height"] {
+        if let (Ok(from), Ok(to)) = (input.get::<i32>(name), out.get::<i32>(name)) {
+            if from != to {
+                changed.push(format!("{} {} -> {}", name, from, to));
+            }
+        }
+    }
+    if let (Ok(from), Some(to)) = (input.get::<gst::Fraction>("framerate"), framerate) {
+        if from != to {
+            changed.push(format!(
+                "framerate {}/{} -> {}/{}",
+                from.numer(),
+                from.denom(),
+                to.numer(),
+                to.denom()
+            ));
+        }
+    }
+    (!changed.is_empty()).then(|| {
+        InputCheck::Adapted(format!(
+            "adapting the input to mode {}: {}",
+            mode,
+            changed.join(", ")
+        ))
+    })
 }
 
 /// Common video mode enum values for DeckLink
@@ -916,7 +1214,7 @@ fn decklink_output_definition() -> BlockDefinition {
                     label: Some("V".to_string()),
                     name: "video_in".to_string(),
                     media_type: MediaType::Video,
-                    internal_element_id: "decklinkvideosink".to_string(),
+                    internal_element_id: VIDEO_INPUT_ELEMENT.to_string(),
                     internal_pad_name: "sink".to_string(),
                 },
                 ExternalPad {
@@ -936,5 +1234,82 @@ fn decklink_output_definition() -> BlockDefinition {
             height: Some(1.5),
             ..Default::default()
         }),
+    }
+}
+
+/// Get metadata for DeckLink blocks (for UI/API).
+pub fn get_blocks() -> Vec<BlockDefinition> {
+    vec![decklink_input_definition(), decklink_output_definition()]
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    #[test]
+    fn mode_framerates() {
+        let rate = |m| mode_framerate(m).map(|f| (f.numer(), f.denom()));
+        assert_eq!(rate("1080p25"), Some((25, 1)));
+        assert_eq!(rate("1080p2997"), Some((30000, 1001)));
+        assert_eq!(rate("1080p2398"), Some((24000, 1001)));
+        assert_eq!(rate("1080i50"), Some((25, 1)));
+        assert_eq!(rate("1080i5994"), Some((30000, 1001)));
+        assert_eq!(rate("720p5994"), Some((60000, 1001)));
+        assert_eq!(rate("2160p60"), Some((60, 1)));
+        assert_eq!(rate("ntsc"), Some((30000, 1001)));
+        assert_eq!(rate("pal"), Some((25, 1)));
+        assert_eq!(rate("auto"), None);
+    }
+
+    fn card(interlace: &str) -> gst::Caps {
+        format!("video/x-raw,format=UYVY,width=1920,height=1080,interlace-mode={interlace}")
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn progressive_into_an_interlaced_mode_is_refused() {
+        gst::init().unwrap();
+        let arrived: gst::Caps = "video/x-raw,width=1920,height=1080,interlace-mode=progressive"
+            .parse()
+            .unwrap();
+        let found = check_input(&arrived, &card("interleaved"), "1080i50", None);
+        assert!(
+            matches!(found, Some(InputCheck::Refuse(ref m)) if m.contains("progressive") && m.contains("1080i50")),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn interlaced_into_a_progressive_mode_is_refused() {
+        gst::init().unwrap();
+        let arrived: gst::Caps = "video/x-raw,width=1920,height=1080,interlace-mode=interleaved"
+            .parse()
+            .unwrap();
+        assert!(matches!(
+            check_input(&arrived, &card("progressive"), "1080p25", None),
+            Some(InputCheck::Refuse(_))
+        ));
+    }
+
+    #[test]
+    fn a_size_and_rate_change_is_reported() {
+        gst::init().unwrap();
+        let arrived: gst::Caps = "video/x-raw,width=1280,height=720,framerate=30/1"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            check_input(
+                &arrived,
+                &card("progressive"),
+                "1080p25",
+                Some(gst::Fraction::new(25, 1))
+            ),
+            Some(InputCheck::Adapted(
+                "adapting the input to mode 1080p25: width 1280 -> 1920, height 720 -> 1080, \
+                 framerate 30/1 -> 25/1"
+                    .to_string()
+            ))
+        );
     }
 }
