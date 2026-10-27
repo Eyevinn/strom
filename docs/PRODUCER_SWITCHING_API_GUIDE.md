@@ -38,8 +38,8 @@ Four calls do all the work:
 
 `POST .../transition` takes `from_input` and `to_input`, but a vision mixer ignores them
 and swaps whatever is currently on PGM and PVW. The block's own bus state is authoritative,
-because an index you computed before the call can be stale by the time it arrives. Send `0`
-for both. What matters is `transition_type` and `duration_ms`. The same endpoint on a plain
+because an index you computed before the call can be stale by the time it arrives. The two
+fields are still required (only a stinger take may leave them out), so send `0` for both. What matters is `transition_type` and `duration_ms`. The same endpoint on a plain
 compositor block (deprecated), which has no PGM/PVW state, does use the two indices.
 
 ```bash
@@ -176,7 +176,8 @@ So the choice between editing on air and preview-then-take is editorial, not tec
 ## 4. What each take actually looks like
 
 `transition_type` accepts `cut`, `fade`, `dip_to_black`, `slide_*`, `push_*`, `stinger`
-(which plays the cued stinger clip, see §3.6 of the guide below) and, on the
+(which plays the cued stinger clip, see §3.6 of the
+[Vision Mixer Operator Guide](VISION_MIXER_OPERATOR_GUIDE.md)) and, on the
 GPU backend with Shader FX, the shader transitions (see the
 [Vision Mixer Operator Guide](VISION_MIXER_OPERATOR_GUIDE.md) §3.1). What you get depends
 on whether a PiP is involved.

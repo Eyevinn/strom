@@ -66,11 +66,23 @@ maintained; the block is listed as "Video Compositor (deprecated)". Use the **Vi
 — it's what Open Live uses. See [VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md) (the old
 compositor's writeup is in [archive/COMPOSITOR_EDITOR.md](archive/COMPOSITOR_EDITOR.md)).
 
+### How do I play and record files?
+Upload files to the media library, or download them from a URL, and play them with the
+**Media Player** block. It decodes by default; set `decode=false` to pass the encoded
+streams through. Record with the **Recorder** block, or the experimental **Live Recorder**
+(`builtin.liverecorder`), which writes fragmented MP4 where a track that stops holds up none
+of the others. See [MEDIA_LIBRARY.md](MEDIA_LIBRARY.md).
+
+### Can I use local cameras, sound cards and speakers?
+Yes. **Local Input** captures from the cameras and audio inputs the OS exposes, and
+**Local Output** plays audio on a local output device (PulseAudio/PipeWire, CoreAudio,
+WASAPI or ASIO). Pick the device from the live list in the inspector.
+
 ### Can I render web pages / HTML graphics as a video source?
 Yes, via CEF in the `strom-full` image. See [HTML_RENDER.md](HTML_RENDER.md).
 
 ### Which video encoders are supported?
-H.264/H.265/AV1/VP9 with automatic hardware acceleration (NVENC, QSV, VA-API, AMF, VideoToolbox on macOS, Media Foundation on Windows, software
+H.264/H.265/AV1/VP9 with automatic hardware acceleration (NVENC, QSV, VA-API, AMF, VideoToolbox on macOS, software
 fallback). The Video Encoder block picks the best available encoder; its properties in the
 in-app inspector are the authoritative list.
 
@@ -82,6 +94,13 @@ Strom speaks the Model Context Protocol over HTTP at `/api/mcp`. See [MCP.md](MC
 ### My input streams are out of sync.
 Align them with PTP/NTP clocks and `normalize_segment`. See
 [STREAM_SYNCHRONIZATION.md](STREAM_SYNCHRONIZATION.md).
+
+### A mixer warns "Impossible to configure latency".
+One input arrives later than another input can be held back. The flow's warning names both
+blocks, for example `'SRT Input' arrives 2000 ms late, but 'WHIP Input' can only be held back
+1000 ms`. Bring those two inputs closer: lower the late input's latency setting, or let the
+other input buffer more if it has a setting for it. Raising queue sizes in front of the mixer
+only hides the problem.
 
 ### A WHIP/WHEP connection drops after a few seconds.
 This was a known issue, now resolved: keep each `whipserversrc` in its own pipeline and set

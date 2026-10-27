@@ -162,7 +162,7 @@ cargo build
 RUST_BACKTRACE=full ./target/debug/strom
 ```
 
-Release builds strip symbols and optimize code, making backtraces harder to read.
+Release builds are optimized and carry no debug info, making backtraces harder to read.
 
 ## Additional Debug Tools
 

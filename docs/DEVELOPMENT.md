@@ -135,7 +135,7 @@ Other settings (logging, ICE servers, port pool, discovery) are set in `.strom.t
 - Linux: `~/.local/share/strom/`
 - Windows: `%APPDATA%\eyevinn\strom\data\`
 - macOS: `~/Library/Application Support/com.eyevinn.strom/`
-- Docker: `./data` (the image sets `STROM_DATA_DIR=/data`)
+- Docker: `/data` (the image sets `STROM_DATA_DIR=/data`)
 
 ### Frontend (Development)
 
@@ -254,7 +254,8 @@ cargo run -- --port 8081
 STROM_PORT=8081 cargo run
 ```
 
-Then update the frontend API URL if needed.
+The embedded frontend follows the port it is served from. A frontend from `trunk serve`
+(port 8095) always talks to a backend on port 8080, so use port 8080 when you work with trunk.
 
 ### Storage files in unexpected location
 By default, storage files go to platform-specific directories. To use current directory:
