@@ -1,16 +1,20 @@
 # Reproducible build environment for patched GStreamer plugins.
 #
-# Debian bookworm has gstreamer 1.22.x dev packages out of the box, which
-# is the ABI we pin to (see ../gstreamer-version.txt). Plugins built here
-# load in any GStreamer 1.22+ runtime via forward ABI compat.
+# One plugin per build. build.sh passes the plugin's row from plugins.conf:
+# the base image, the GStreamer source tag, and the plugin's directory in
+# gst-plugins-bad. The base image provides the GStreamer dev packages the
+# plugin links against, so it sets the oldest runtime the plugin loads in
+# (GStreamer keeps forward ABI compat within 1.x).
 #
-# The image is multi-arch via docker buildx + QEMU. TARGETARCH is set by
-# buildx to "amd64" or "arm64" and is consumed by the build steps.
+# build.sh builds both architectures in one `docker buildx build`, with
+# QEMU emulating the non-native one.
 
-FROM debian:bookworm AS builder
+ARG BASE_IMAGE=debian:bookworm
+FROM ${BASE_IMAGE} AS builder
 
-ARG GSTREAMER_VERSION=1.22.12
-ARG TARGETARCH
+ARG GSTREAMER_VERSION
+ARG PLUGIN
+ARG PLUGIN_DIR
 
 RUN apt-get update && apt-get install --no-install-recommends -y \
         build-essential \
@@ -25,6 +29,7 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Bookworm ships meson 1.0; we need >= 1.4 for the gst-plugins-bad meson.build.
+# Pinned on every base so the build does not change with the distro's meson.
 RUN pip3 install --break-system-packages --no-cache-dir 'meson==1.5.2'
 
 WORKDIR /work
@@ -37,22 +42,22 @@ RUN git clone --depth 1 --branch ${GSTREAMER_VERSION} \
     && cd src \
     && git rev-parse HEAD > /work/gstreamer-rev.txt
 
-COPY patches/ /work/patches/
+COPY patches/${PLUGIN}/ /work/patches/
 
-# Apply every patch in lexical order. Patches must be in unified diff
-# format relative to the GStreamer monorepo root.
+# Apply the plugin's patches in lexical order. Patches must be in unified
+# diff format relative to the GStreamer monorepo root.
 RUN cd src && for p in $(ls /work/patches/*.patch | sort); do \
         echo "Applying $p" && \
         git apply --check "$p" && git apply "$p" \
     ; done
 
-# Standalone gst-plugins-bad build (linked against system gstreamer 1.22),
-# decklink only. Auto-features=disabled keeps the build small.
+# Standalone gst-plugins-bad build (linked against the base image's system
+# gstreamer), this plugin only. Auto-features=disabled keeps the build small.
 RUN cd src/subprojects/gst-plugins-bad \
     && meson setup /work/build . \
         --buildtype=release \
         --auto-features=disabled \
-        -Ddecklink=enabled \
+        -D${PLUGIN}=enabled \
         -Dtests=disabled \
         -Dexamples=disabled \
         -Dnls=disabled \
@@ -60,10 +65,11 @@ RUN cd src/subprojects/gst-plugins-bad \
         -Ddoc=disabled \
         -Dorc=disabled \
         -Dgpl=enabled \
-    && meson compile -C /work/build
+    && meson compile -C /work/build \
+    && mkdir -p /out \
+    && cp /work/build/${PLUGIN_DIR}/libgst${PLUGIN}.so /work/gstreamer-rev.txt /out/
 
 # Final stage: scratch image whose only role is to expose the built
 # artifacts to `docker buildx build --output`.
 FROM scratch AS export
-COPY --from=builder /work/build/sys/decklink/libgstdecklink.so /libgstdecklink.so
-COPY --from=builder /work/gstreamer-rev.txt /gstreamer-rev.txt
+COPY --from=builder /out/ /

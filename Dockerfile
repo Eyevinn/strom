@@ -313,6 +313,46 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
+# Override the distro-shipped mpegtsdemux plugin with 1.28.2 plus upstream
+# a972093b ("Improve PTS rollover handling in ignore-pcr mode", in 1.28.5+).
+# Without it, tsdemux in ignore-pcr mode (as hlsdemux2 runs it) puts every
+# timestamp after a 33-bit PTS wrap 26.5 h ahead, and a live MPEG-TS HLS
+# Media Player freezes once per 26.5 h with no error. Drop this step once the
+# distro ships 1.28.5 or later; the check below keeps passing either way.
+ARG PATCHED_MPEGTSDEMUX_TAG=patched-plugins-mpegtsdemux-v1.0-gst1.28.2
+ARG PATCHED_MPEGTSDEMUX_SHA256_AMD64=e8f601a330b3b93e96a29b74ecfc359eb44d013706e2a69d4af8aa7608334846
+ARG PATCHED_MPEGTSDEMUX_SHA256_ARM64=56777824177152388db9c15a6caf76bb511b8385a481b56fbfa02b757a2ed682
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && case "${TARGETARCH}" in \
+         amd64) expected="${PATCHED_MPEGTSDEMUX_SHA256_AMD64}" ;; \
+         arm64) expected="${PATCHED_MPEGTSDEMUX_SHA256_ARM64}" ;; \
+         *) echo "No pinned libgstmpegtsdemux digest for TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL \
+        "https://github.com/${PATCHED_PLUGINS_REPO}/releases/download/${PATCHED_MPEGTSDEMUX_TAG}/libgstmpegtsdemux-linux-${TARGETARCH}.so" \
+        -o /tmp/libgstmpegtsdemux.so \
+    && echo "${expected}  /tmp/libgstmpegtsdemux.so" | sha256sum -c - \
+    && install -m 0644 /tmp/libgstmpegtsdemux.so \
+        "/usr/lib/$(uname -m)-linux-gnu/gstreamer-1.0/libgstmpegtsdemux.so" \
+    && rm -f /tmp/libgstmpegtsdemux.so \
+    && apt-get remove -y curl \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# Fail the image build if tsdemux still jumps an epoch at a PTS wrap. The
+# file is upstream's test for a972093b: 2 s of H.264 + AAC across the wrap.
+# tsparse timestamps the input, which puts tsdemux on its ignore-pcr path.
+# Unfixed (1.28.2) the largest step between buffers is ~95443 s; fixed, ~33 ms.
+RUN --mount=type=bind,source=tools/patched-gstreamer-plugins/testdata/test_pcr_rollover.ts,target=/tmp/test_pcr_rollover.ts \
+    gst-launch-1.0 -v filesrc location=/tmp/test_pcr_rollover.ts \
+        ! tsparse set-timestamps=true ! tsdemux ignore-pcr=true \
+        ! fakesink silent=false sync=false 2>&1 \
+    | grep -o 'pts: [0-9:.]*' \
+    | awk '{ split($2, a, ":"); t = a[1] * 3600 + a[2] * 60 + a[3]; \
+             if (n++) { d = t - p; if (d < 0) d = -d; if (d > m) m = d }; p = t } \
+           END { printf "tsdemux PTS wrap check: %d buffers, largest step %.3f s\n", n, m; \
+                 if (n < 30 || m > 0.1) { print "tsdemux does not handle the PTS wrap in ignore-pcr mode" > "/dev/stderr"; exit 1 } }'
+
 # Copy the compiled binary from backend-builder to /app
 COPY --from=backend-builder /app/target/release/strom /app/strom
 
