@@ -1,25 +1,27 @@
 //! `builtin.videoformat` fed raw video in GPU memory.
 //!
 //! Issue #969: the block built `autovideoconvert` or `videoconvert` from the
-//! global video convert mode, in front of a capsfilter that pins system
+//! global video convert mode, in front of a capsfilter that pinned system
 //! memory. CUDA memory passed through `videoscale` and `videoconvert` untouched
 //! and was refused at the capsfilter (`not-negotiated`); in the GPU mode
-//! `autovideoconvert` chose its own GPU path by rank. The block now has plain
-//! CPU elements and an input front that downloads the memory that arrives,
-//! decided from the negotiated caps.
+//! `autovideoconvert` chose its own GPU path by rank. The block now picks its
+//! scaling chain from the negotiated caps (`gst::scale_front`): GPU memory is
+//! scaled on the GPU, and downloaded after scaling only when what follows
+//! does not take it.
 //!
-//! These build the real block through `VideoFormatBuilder` and feed it from an
-//! `appsrc` whose caps say CUDA memory. Real CUDA memory needs an NVIDIA host,
-//! so a stand-in registered as `cudadownload` takes the real element's place;
-//! the frames are plain system memory under CUDA caps, which the stand-in
-//! passes through. The GL case runs `gltestsrc` on the GL runner (surfaceless
-//! EGL on Linux).
+//! These build the real block through `VideoFormatBuilder`. The GL cases run
+//! `gltestsrc` on the GL runner (surfaceless EGL on Linux), with the producer
+//! linked before the block's output, as a flow may order its links. The CUDA
+//! case feeds an `appsrc` whose caps say CUDA memory on a host without
+//! `cudaconvertscale`, so the block downloads first; a stand-in registered as
+//! `cudadownload` takes the real element's place, passing system-memory
+//! frames under CUDA caps through.
 //!
 //! The binary forces the global video convert mode to the GPU one before any
 //! block is built, and every test checks through [`add_block`] that the block
 //! still builds plain `videoconvert`.
 //!
-//! On a host with the real `cudadownload`, the CUDA tests skip: they push
+//! On a host with the real `cudadownload`, the CUDA test skips: it pushes
 //! system-memory buffers under CUDA caps, which the real element would read as
 //! CUDA memory.
 
@@ -122,14 +124,13 @@ fn count(pipeline: &gst::Pipeline, factory: &str) -> usize {
         .count()
 }
 
-/// Check what left the block: system memory, at the size and in the format
-/// the block was set to.
-fn assert_output(block_out: &gst::Pad) {
+/// Check what left the block: `memory`, at the size and in the format the
+/// block was set to.
+fn assert_output(block_out: &gst::Pad, memory: &str) {
     let caps = block_out.current_caps().expect("the block's output caps");
     assert!(
-        caps.features(0)
-            .is_some_and(|f| f.contains(gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY)),
-        "the block emitted {caps}, not system memory"
+        caps.features(0).is_some_and(|f| f.contains(memory)),
+        "the block emitted {caps}, not {memory}"
     );
     let info = gst_video::VideoInfo::from_caps(&caps).expect("raw video caps");
     assert_eq!((info.width(), info.height()), (160, 120), "{caps}");
@@ -264,10 +265,15 @@ impl Drop for Harness {
     }
 }
 
-/// CUDA memory from a hardware decoder is downloaded, then scaled and
-/// converted on the CPU.
+/// CUDA memory from a hardware decoder, on a host without `cudaconvertscale`,
+/// is downloaded, then scaled and converted on the CPU.
 #[test]
-fn cuda_memory_is_downloaded_scaled_and_converted() {
+fn cuda_memory_without_a_cuda_scaler_is_downloaded_then_scaled() {
+    gst::init().expect("GStreamer initialises");
+    if strom::gst::video_adapt::factory_available("cudaconvertscale") {
+        eprintln!("SKIP: cudaconvertscale is installed here; the block scales CUDA on the GPU");
+        return;
+    }
     let Some(harness) = Harness::start(CUDA_NV12) else {
         return;
     };
@@ -275,7 +281,7 @@ fn cuda_memory_is_downloaded_scaled_and_converted() {
     let errors = harness.errors();
     assert!(errors.is_empty(), "pipeline errors: {:?}", errors);
     assert!(produced, "no frames left the block for CUDA input");
-    assert_output(&harness.block_out);
+    assert_output(&harness.block_out, gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY);
     assert_eq!(harness.downloads(), 1, "expected one cudadownload");
 }
 
@@ -290,7 +296,7 @@ fn system_memory_is_scaled_and_converted_without_a_download() {
         "no frames: {:?}",
         harness.errors()
     );
-    assert_output(&harness.block_out);
+    assert_output(&harness.block_out, gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY);
     assert_eq!(harness.downloads(), 0);
 }
 
@@ -316,74 +322,158 @@ fn memory_nothing_downloads_fails_the_flow_with_a_message() {
 }
 
 /// GL memory into the block, as `vtdec` on macOS or a GPU Vision Mixer
-/// delivers it, is downloaded before the CPU scaler.
+/// delivers it.
 ///
 /// The producer is linked into the block before the block's output is
 /// linked, as a flow may order its links. The output link's caps check then
-/// asks through the block for what upstream offers: GL memory, which the
-/// block's system-memory capsfilter would refuse (`NoFormat`) unless the
-/// input says it delivers it in system memory once downloaded.
+/// asks through the block for what upstream offers: GL memory at 320x240,
+/// which the block's 160x120 capsfilter would refuse (`NoFormat`) unless the
+/// block answers with what it can scale that to.
 #[cfg(not(target_os = "windows"))]
-#[test]
-fn gl_memory_is_downloaded_scaled_and_converted() {
-    if !common::gl_available(&["gltestsrc", "gldownload"]) || !common::plugins_available(REQUIRED) {
-        return;
-    }
-    let pipeline = gst::Pipeline::new();
-    let (block_in, block_out) = add_block(&pipeline);
-    let src = gst::ElementFactory::make("gltestsrc")
-        .property("num-buffers", 30i32)
-        .build()
-        .unwrap();
-    let filter = gst::ElementFactory::make("capsfilter")
-        .property(
-            "caps",
-            "video/x-raw(memory:GLMemory), format=RGBA, width=320, height=240, framerate=30/1"
-                .parse::<gst::Caps>()
-                .unwrap(),
-        )
-        .build()
-        .unwrap();
-    let sink = gst::ElementFactory::make("fakesink")
-        .property("sync", false)
-        .build()
-        .unwrap();
-    pipeline.add_many([&src, &filter, &sink]).unwrap();
-    src.link(&filter).expect("link the GL source");
-    filter
-        .static_pad("src")
-        .unwrap()
-        .link(&block_in)
-        .expect("link into the block");
-    block_out
-        .link(&sink.static_pad("sink").unwrap())
-        .expect("link out of the block");
+mod gl {
+    use super::*;
 
-    let frames = Arc::new(AtomicU64::new(0));
-    let counter = Arc::clone(&frames);
-    block_out.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
-        counter.fetch_add(1, Ordering::Relaxed);
-        gst::PadProbeReturn::Ok
-    });
-    pipeline.set_state(gst::State::Playing).unwrap();
-    let msg = pipeline
-        .bus()
-        .unwrap()
-        .timed_pop_filtered(
-            gst::ClockTime::from_seconds(20),
-            &[gst::MessageType::Eos, gst::MessageType::Error],
-        )
-        .expect("EOS or an error");
-    let downloads = count(&pipeline, "gldownload");
-    if let gst::MessageView::Error(e) = msg.view() {
+    const GL_REQUIRED: &[&str] = &["gltestsrc", "glcolorconvert", "glcolorscale", "gldownload"];
+
+    /// `gltestsrc ! capsfilter(GL RGBA 320x240) ! [videoformat] ! [system
+    /// memory pin] ! fakesink`, run to EOS. Returns the frame count out of the
+    /// block, its output caps and the factories in the pipeline.
+    fn run(system_memory_downstream: bool) -> (u64, gst::Caps, Vec<String>) {
+        let pipeline = gst::Pipeline::new();
+        let (block_in, block_out) = add_block(&pipeline);
+        let src = gst::ElementFactory::make("gltestsrc")
+            .property("num-buffers", 30i32)
+            .build()
+            .unwrap();
+        let filter = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                "video/x-raw(memory:GLMemory), format=RGBA, width=320, height=240, framerate=30/1"
+                    .parse::<gst::Caps>()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            .unwrap();
+        pipeline.add_many([&src, &filter, &sink]).unwrap();
+        src.link(&filter).expect("link the GL source");
+        filter
+            .static_pad("src")
+            .unwrap()
+            .link(&block_in)
+            .expect("link into the block");
+        let downstream = if system_memory_downstream {
+            // A consumer that takes system memory only.
+            let pin = gst::ElementFactory::make("capsfilter")
+                .property("caps", gst::Caps::new_empty_simple("video/x-raw"))
+                .build()
+                .unwrap();
+            pipeline.add(&pin).unwrap();
+            pin.link(&sink).unwrap();
+            pin
+        } else {
+            sink.clone()
+        };
+        block_out
+            .link(&downstream.static_pad("sink").unwrap())
+            .expect("link out of the block");
+
+        let frames = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&frames);
+        block_out.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            gst::PadProbeReturn::Ok
+        });
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let msg = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(20),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .expect("EOS or an error");
+        let factories: Vec<String> = pipeline
+            .iterate_recurse()
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter_map(|e| e.factory().map(|f| f.name().to_string()))
+            .collect();
+        let caps = block_out.current_caps();
         pipeline.set_state(gst::State::Null).unwrap();
-        panic!("pipeline error: {} ({:?})", e.error(), e.debug());
+        if let gst::MessageView::Error(e) = msg.view() {
+            panic!("pipeline error: {} ({:?})", e.error(), e.debug());
+        }
+        (
+            frames.load(Ordering::Relaxed),
+            caps.expect("the block's output caps"),
+            factories,
+        )
     }
-    assert_output(&block_out);
-    pipeline.set_state(gst::State::Null).unwrap();
-    assert!(
-        frames.load(Ordering::Relaxed) > 0,
-        "no frames out of the block"
-    );
-    assert_eq!(downloads, 1, "expected one gldownload");
+
+    fn has(factories: &[String], factory: &str) -> bool {
+        factories.iter().any(|f| f == factory)
+    }
+
+    /// Downstream takes GL memory: the block scales and converts on the GPU
+    /// and emits GL memory, with no download and no CPU scaler.
+    #[test]
+    fn gl_memory_is_scaled_on_the_gpu_and_stays_there() {
+        if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
+            return;
+        }
+        let (frames, caps, factories) = run(false);
+        assert!(frames > 0, "no frames out of the block");
+        assert!(
+            caps.features(0)
+                .is_some_and(|f| f.contains(strom::gst::video_adapt::GL_MEMORY_FEATURE)),
+            "the block emitted {caps}, not GL memory"
+        );
+        let info = gst_video::VideoInfo::from_caps(&caps).expect("raw video caps");
+        assert_eq!((info.width(), info.height()), (160, 120), "{caps}");
+        assert_eq!(info.format(), gst_video::VideoFormat::I420, "{caps}");
+        assert!(
+            has(&factories, "glcolorscale"),
+            "no GPU scaler: {factories:?}"
+        );
+        assert!(
+            !has(&factories, "gldownload"),
+            "GL memory was downloaded: {factories:?}"
+        );
+        assert!(
+            !has(&factories, "videoscale"),
+            "scaled on the CPU: {factories:?}"
+        );
+    }
+
+    /// Downstream takes system memory only: the block scales on the GPU, then
+    /// downloads the smaller frame.
+    #[test]
+    fn gl_memory_is_scaled_on_the_gpu_then_downloaded() {
+        if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
+            return;
+        }
+        let (frames, caps, factories) = run(true);
+        assert!(frames > 0, "no frames out of the block");
+        let info = gst_video::VideoInfo::from_caps(&caps).expect("raw video caps");
+        assert_eq!((info.width(), info.height()), (160, 120), "{caps}");
+        assert_eq!(info.format(), gst_video::VideoFormat::I420, "{caps}");
+        assert!(
+            caps.features(0)
+                .is_some_and(|f| f.contains(gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY)),
+            "the block emitted {caps}, not system memory"
+        );
+        assert!(
+            has(&factories, "glcolorscale"),
+            "no GPU scaler: {factories:?}"
+        );
+        assert!(has(&factories, "gldownload"), "no download: {factories:?}");
+        assert!(
+            !has(&factories, "videoscale"),
+            "scaled on the CPU: {factories:?}"
+        );
+    }
 }

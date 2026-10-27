@@ -46,12 +46,6 @@
 //!   for, last. A producer that can choose (a decoder) still picks what the
 //!   consumer takes directly, and one that can only offer GPU memory still
 //!   links.
-//! * A CAPS query from downstream, on the front element's *source* pad, is
-//!   answered with what upstream offers, plus the same raw video in system
-//!   memory for each memory a download is installed for. The input delivers
-//!   that once the download is in, so a consumer behind it that takes system
-//!   memory only (Video Format's capsfilter) links to a GPU producer whatever
-//!   order the flow's links are made in.
 //!
 //! The adapters follow the caps both ways: a producer that switches from CUDA
 //! to system memory gets its download taken out again.
@@ -126,29 +120,6 @@ pub fn install(front: &gst::Element, consumer_sink: &gst::Pad, label: &str, cons
             return gst::PadProbeReturn::Ok;
         };
         on_query(&queries, pad, query)
-    });
-
-    // QUERY_UPSTREAM on the source pad: CAPS queries from downstream. Per
-    // query, never per buffer. Weak handle only: the probe is owned by a pad
-    // of the same element.
-    let upstream_of = front_sink.downgrade();
-    front_src.add_probe(gst::PadProbeType::QUERY_UPSTREAM, move |_, info| {
-        if info.mask.contains(gst::PadProbeType::PULL) {
-            return gst::PadProbeReturn::Ok;
-        }
-        let Some(gst::PadProbeData::Query(ref mut query)) = info.data else {
-            return gst::PadProbeReturn::Ok;
-        };
-        let gst::QueryViewMut::Caps(q) = query.view_mut() else {
-            return gst::PadProbeReturn::Ok;
-        };
-        let Some(front_sink) = upstream_of.upgrade() else {
-            return gst::PadProbeReturn::Ok;
-        };
-        let filter = q.filter_owned();
-        let offered = front_sink.peer_query_caps(None);
-        q.set_result(&with_downloads(&offered, filter.as_ref()));
-        gst::PadProbeReturn::Handled
     });
 
     // EVENT_DOWNSTREAM, not BUFFER: per event, and only CAPS is looked at.
@@ -302,49 +273,6 @@ fn downloadable(
         in_memory = filter.intersect_with_mode(&in_memory, gst::CapsIntersectMode::First);
     }
     (!in_memory.is_empty()).then_some(in_memory)
-}
-
-/// What the input can deliver when upstream offers `offered`: `offered`
-/// itself, then the raw video in each memory a download is installed for
-/// again in system memory, limited to `filter`.
-fn with_downloads(offered: &gst::Caps, filter: Option<&gst::Caps>) -> gst::Caps {
-    let mut answer = offered.clone();
-    if !offered.is_any() {
-        let mut downloaded = gst::Caps::new_empty();
-        {
-            let downloaded = downloaded.get_mut().expect("new caps are writable");
-            for (structure, features) in offered.iter_with_features() {
-                if structure.name() != "video/x-raw" || features.is_any() {
-                    continue;
-                }
-                let installed = Adapter::DOWNLOADS.iter().any(|download| {
-                    download
-                        .memory_feature()
-                        .is_some_and(|f| features.contains(f))
-                        && download
-                            .sink_template()
-                            .is_some_and(|t| t.can_intersect(&structure_caps(structure, features)))
-                });
-                if installed {
-                    downloaded.append_structure(structure.to_owned());
-                }
-            }
-        }
-        answer.merge(downloaded);
-    }
-    match filter {
-        Some(filter) => filter.intersect_with_mode(&answer, gst::CapsIntersectMode::First),
-        None => answer,
-    }
-}
-
-/// One structure with its features, as caps.
-fn structure_caps(structure: &gst::StructureRef, features: &gst::CapsFeaturesRef) -> gst::Caps {
-    let mut caps = gst::Caps::new_empty();
-    caps.get_mut()
-        .expect("new caps are writable")
-        .append_structure_full(structure.to_owned(), Some(features.to_owned()));
-    caps
 }
 
 /// A CAPS event arriving at the front element, before it handles it: bring
@@ -671,36 +599,6 @@ mod tests {
         let gl_only = caps("video/x-raw(memory:GLMemory), format=NV12");
         let answer = answer_caps(&sink, Some(&gl_only));
         assert!(!answer.is_empty(), "GL memory should be offered a download");
-    }
-
-    /// Downstream asking what the input delivers is told the GPU memory
-    /// upstream offers, then the same video in system memory, which a
-    /// download delivers.
-    #[test]
-    fn downstream_is_offered_downloadable_memory_in_system_memory() {
-        let _ = gst::init();
-        if !video_adapt::factory_available(video_adapt::GL_DOWNLOAD_FACTORY) {
-            return;
-        }
-        let offered = caps("video/x-raw(memory:GLMemory), format=RGBA, width=320, height=240");
-        let answer = with_downloads(&offered, None);
-        assert!(
-            answer
-                .features(0)
-                .is_some_and(|f| f.contains(video_adapt::GL_MEMORY_FEATURE)),
-            "what upstream offers should come first: {answer}"
-        );
-        let system = caps("video/x-raw, format=RGBA, width=320, height=240");
-        assert!(answer.can_intersect(&system), "{answer}");
-        assert_eq!(with_downloads(&offered, Some(&system)), system);
-    }
-
-    /// Memory nothing downloads is not offered in system memory.
-    #[test]
-    fn memory_nothing_downloads_is_not_offered_in_system_memory() {
-        let offered = caps("video/x-raw(memory:NVMM), format=NV12");
-        let answer = with_downloads(&offered, Some(&caps("video/x-raw")));
-        assert!(answer.is_empty(), "{answer}");
     }
 
     /// A download whose element does not take the caps is a problem, not a

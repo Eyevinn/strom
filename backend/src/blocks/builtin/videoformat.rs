@@ -6,12 +6,15 @@
 //! - Color format (pixel format) - enforced by caps
 //!
 //! All properties are optional. The block creates a fixed chain of elements:
-//! input -> videoscale -> videoconvert -> capsfilter
-//! - input: `identity` whose sink pad adapts the memory that arrives to what
-//!   the block takes, from the negotiated caps (see `gst::download_front`).
-//!   The block scales and converts on the CPU and emits system memory, so GL,
-//!   CUDA, D3D12 or D3D11 memory is downloaded first.
-//! - videoscale, videoconvert: plain CPU elements, never `autovideoconvert`.
+//! input -> videoscale -> videoconvert -> output -> capsfilter
+//! - input, output: `identity` elements between which the scaling chain is
+//!   chosen from the negotiated caps (see `gst::scale_front`). Video is scaled
+//!   and converted in the memory it arrives in: on the CPU for system memory,
+//!   on the GPU for GL, CUDA, D3D12 and D3D11 memory, downloaded after scaling
+//!   when what follows does not take that memory.
+//! - videoscale, videoconvert: the system-memory chain the block starts with,
+//!   plain CPU elements, never `autovideoconvert`.
+//! - capsfilter: the block's settings, in each of those memory types.
 //!
 //! TEMPORARY: videorate element removed to avoid frame duplication issues.
 //!
@@ -20,10 +23,9 @@
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gpu;
-use crate::gst::download_front;
+use crate::gst::scale_front;
 use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 use gstreamer as gst;
-use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom_types::{
     block::*, common_video_framerate_enum_values, common_video_pixel_format_enum_values,
@@ -110,10 +112,11 @@ impl BlockBuilder for VideoFormatBuilder {
         // Elements will just pass through if their respective properties aren't set
         //
         // The converter is plain `videoconvert` whatever the global video
-        // convert mode says: the capsfilter pins system memory, so the block
-        // works on the CPU, and the input front downloads GPU memory before
-        // the scaler instead of `autovideoconvert` choosing a GPU path.
+        // convert mode says. GPU memory is scaled by a GPU chain that the
+        // front splices in from the negotiated caps, instead of
+        // `autovideoconvert` choosing one by rank.
         let input_id = format!("{}:input", instance_id);
+        let output_id = format!("{}:output", instance_id);
         let scale_id = format!("{}:videoscale", instance_id);
         let convert_id = format!("{}:videoconvert", instance_id);
         let capsfilter_id = format!("{}:capsfilter", instance_id);
@@ -144,17 +147,36 @@ impl BlockBuilder for VideoFormatBuilder {
             })?;
         gpu::configure_video_convert(&videoconvert);
 
-        // What arrives depends on the producer, often a decoder `decodebin`
-        // picks at runtime, so the memory is adapted from the negotiated caps.
-        let scale_sink = videoscale
-            .static_pad("sink")
-            .ok_or_else(|| BlockBuildError::ElementCreation("videoscale has no sink pad".into()))?;
-        download_front::install(&input, &scale_sink, &input_id, "Video Format");
+        let output = gst::ElementFactory::make("identity")
+            .name(&output_id)
+            .property("silent", true)
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {}", e)))?;
 
-        // capsfilter with caps (only constraints specified properties)
-        let caps = caps_str.parse::<gst::Caps>().map_err(|_| {
+        // What arrives depends on the producer, often a decoder `decodebin`
+        // picks at runtime, so the chain is chosen from the negotiated caps.
+        scale_front::install(
+            &input,
+            &output,
+            &[videoscale.clone(), videoconvert.clone()],
+            &input_id,
+            "Video Format",
+        );
+
+        // capsfilter with caps (only constraints specified properties), in
+        // system memory and in each GPU memory the block scales in
+        let system_caps = caps_str.parse::<gst::Caps>().map_err(|_| {
             BlockBuildError::InvalidConfiguration(format!("Invalid caps: {}", caps_str))
         })?;
+        let mut caps = system_caps.clone();
+        for scaler in scale_front::Scaler::ALL {
+            let mut in_memory = system_caps.copy();
+            in_memory
+                .get_mut()
+                .expect("a new copy is writable")
+                .set_features_simple(Some(gst::CapsFeatures::new([scaler.memory_feature()])));
+            caps.merge(in_memory);
+        }
 
         let capsfilter = gst::ElementFactory::make("capsfilter")
             .name(&capsfilter_id)
@@ -162,9 +184,9 @@ impl BlockBuilder for VideoFormatBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
 
-        info!("VideoFormat block created (chain: input -> videoscale -> {} -> capsfilter) [videorate TEMPORARILY REMOVED]", VIDEO_CONVERT_FACTORY);
+        info!("VideoFormat block created (chain: input -> videoscale -> {} -> output -> capsfilter) [videorate TEMPORARILY REMOVED]", VIDEO_CONVERT_FACTORY);
 
-        // Chain: input -> videoscale -> videoconvert -> capsfilter (videorate temporarily removed)
+        // Chain: input -> videoscale -> videoconvert -> output -> capsfilter (videorate temporarily removed)
         let internal_links = vec![
             (
                 ElementPadRef::pad(&input_id, "src"),
@@ -176,6 +198,10 @@ impl BlockBuilder for VideoFormatBuilder {
             ),
             (
                 ElementPadRef::pad(&convert_id, "src"),
+                ElementPadRef::pad(&output_id, "sink"),
+            ),
+            (
+                ElementPadRef::pad(&output_id, "src"),
                 ElementPadRef::pad(&capsfilter_id, "sink"),
             ),
         ];
@@ -185,6 +211,7 @@ impl BlockBuilder for VideoFormatBuilder {
                 (input_id, input),
                 (scale_id, videoscale),
                 (convert_id, videoconvert),
+                (output_id, output),
                 (capsfilter_id, capsfilter),
             ],
             internal_links,
@@ -287,6 +314,7 @@ fn videoformat_definition() -> BlockDefinition {
 mod tests {
     use super::*;
     use crate::blocks::BlockBuildContext;
+    use gst::prelude::*;
 
     fn build(pairs: &[(&str, &str)]) -> BlockBuildResult {
         let _ = gst::init();
