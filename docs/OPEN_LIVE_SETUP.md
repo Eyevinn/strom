@@ -106,10 +106,10 @@ docker run -d \
   eyevinntechnology/strom-full:latest
 ```
 
-Strom logs whether interop succeeded at startup:
+Strom logs the GPU it found at startup:
 
 ```
-INFO  CUDA-GL interop works - using GPU-accelerated video conversion
+INFO  GL renderer: NVIDIA L4/PCIe/SSE2 (NVIDIA Corporation), GL 4.6.0 NVIDIA ..., GLSL 4.60 NVIDIA
 INFO  NVML initialized successfully - found 1 GPU(s)
 ```
 

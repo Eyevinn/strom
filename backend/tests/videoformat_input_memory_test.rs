@@ -17,9 +17,8 @@
 //! `cudadownload` takes the real element's place, passing system-memory
 //! frames under CUDA caps through.
 //!
-//! The binary forces the global video convert mode to the GPU one before any
-//! block is built, and every test checks through [`add_block`] that the block
-//! still builds plain `videoconvert`.
+//! Every test checks through [`add_block`] that the block builds plain
+//! `videoconvert`, never `autovideoconvert`.
 //!
 //! On a host with the real `cudadownload`, the CUDA test skips: it pushes
 //! system-memory buffers under CUDA caps, which the real element would read as
@@ -66,14 +65,8 @@ const FORMAT: &str = "I420";
 /// Build the block into `pipeline` and return its declared input and output
 /// pads.
 ///
-/// The global video convert mode is forced to the GPU one first, and the
-/// block's converter must still be plain `videoconvert`.
+/// The block's converter must be plain `videoconvert`.
 fn add_block(pipeline: &gst::Pipeline) -> (gst::Pad, gst::Pad) {
-    assert_eq!(
-        strom::gpu::force_video_convert_mode(strom::gpu::VideoConvertMode::GpuAccelerated),
-        strom::gpu::VideoConvertMode::GpuAccelerated,
-        "the convert mode was set before this test could force it"
-    );
     let props = HashMap::from([
         (
             "resolution".to_string(),
@@ -92,8 +85,8 @@ fn add_block(pipeline: &gst::Pipeline) -> (gst::Pad, gst::Pad) {
     assert_eq!(
         converter.as_deref(),
         Some("videoconvert"),
-        "in the GPU convert mode the block built {:?}; the block must not pick \
-         its conversion from the global mode (#969)",
+        "the block built {:?}; it must be plain videoconvert, with GPU memory \
+         scaled by its own chain (#969)",
         converter
     );
 

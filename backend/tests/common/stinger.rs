@@ -462,21 +462,32 @@ impl Running {
             let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(50)) else {
                 continue;
             };
-            let info = gstreamer_video::VideoInfo::from_caps(sample.caps().unwrap()).unwrap();
-            let buffer = sample.buffer().unwrap();
-            let frame =
-                gstreamer_video::VideoFrameRef::from_buffer_ref_readable(buffer, &info).unwrap();
-            let stride = frame.plane_stride()[0] as usize;
-            let src = frame.plane_data(0).unwrap();
-            let mut packed = vec![0u8; (W * H * 4) as usize];
-            for y in 0..H as usize {
-                let row = y * W as usize * 4;
-                packed[row..row + W as usize * 4]
-                    .copy_from_slice(&src[y * stride..y * stride + W as usize * 4]);
-            }
-            frames.push((buffer.pts().unwrap().nseconds(), packed));
+            frames.push(packed_frame(&sample));
         }
         frames
+    }
+
+    /// Pull PGM frames until one shows `old` on the right half, where the
+    /// take tests look for the old source. A flow's first output frames can
+    /// come before an input's first frame reaches the mixer, and a take the
+    /// test makes right after the start has those frames before it: they show
+    /// the background, not the old source. Wait for the old source, then take.
+    pub async fn wait_for_program(&self, old: Colour) {
+        let sink = self.sink().await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut last = None;
+        while std::time::Instant::now() < deadline {
+            let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(50)) else {
+                continue;
+            };
+            let (pts, frame) = packed_frame(&sample);
+            let right = px(&frame, 3 * W / 4, H / 2);
+            if colour(right) == old {
+                return;
+            }
+            last = Some((pts, right));
+        }
+        panic!("the program never showed {old:?}; last frame (pts, right half): {last:?}");
     }
 
     pub async fn wait_until_parked(&self) {
@@ -635,7 +646,7 @@ pub async fn start_edited(
             .with_test_writer()
             .try_init();
     }
-    let _ = strom::gpu::detect_gpu_capabilities();
+    strom::gpu::detect_gpu_capabilities();
 
     let state = crate::common::state::with_media(dir.path());
     let mut flow = build_flow(tag, backend, &clips);
@@ -652,6 +663,22 @@ pub async fn start_edited(
     running.wait_until_parked().await;
     running.wait_for_analysis().await;
     running
+}
+
+/// A PGM sample's timestamp and its frame as packed RGBA.
+fn packed_frame(sample: &gst::Sample) -> (u64, Vec<u8>) {
+    let info = gstreamer_video::VideoInfo::from_caps(sample.caps().unwrap()).unwrap();
+    let buffer = sample.buffer().unwrap();
+    let frame = gstreamer_video::VideoFrameRef::from_buffer_ref_readable(buffer, &info).unwrap();
+    let stride = frame.plane_stride()[0] as usize;
+    let src = frame.plane_data(0).unwrap();
+    let mut packed = vec![0u8; (W * H * 4) as usize];
+    for y in 0..H as usize {
+        let row = y * W as usize * 4;
+        packed[row..row + W as usize * 4]
+            .copy_from_slice(&src[y * stride..y * stride + W as usize * 4]);
+    }
+    (buffer.pts().unwrap().nseconds(), packed)
 }
 
 pub fn px(frame: &[u8], x: u32, y: u32) -> [u8; 4] {
@@ -713,6 +740,7 @@ pub async fn classic_take_of(r: &Running, index: usize, old: Colour, new: Colour
         )
         .await
         .unwrap();
+    r.wait_for_program(old).await;
     r.drain().await;
     let take = r
         .state

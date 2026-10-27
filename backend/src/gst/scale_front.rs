@@ -23,6 +23,9 @@
 //! downloads, a download that is not installed, or encoded video, fail the
 //! flow with an element error that names what arrived and what is missing.
 //!
+//! The chain is what [`video_adapt::decide`] calls for with
+//! [`Consumer::ScaleConvert`]; this module splices it in and answers queries.
+//!
 //! [`install`] works between two `identity` elements, `input` and `output`,
 //! with the chain spliced in between them. The probes fire per query and per
 //! event, never per buffer:
@@ -41,7 +44,9 @@
 //!   whatever order the flow's links are made in, the block links to what it
 //!   can produce.
 
-use crate::gst::video_adapt::{self, Adapter};
+use crate::gst::video_adapt::{
+    self, factory_template, in_memory, Adapter, Consumer, Refusal, Scaler,
+};
 use crate::gst::video_input_bridge::resplice;
 use gstreamer as gst;
 use gstreamer::glib;
@@ -49,9 +54,6 @@ use gstreamer::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
-
-/// The CPU scaler and converter, with the thread count the block sets.
-const SYSTEM_FACTORIES: [&str; 2] = ["videoscale", video_adapt::VIDEO_CONVERT_FACTORY];
 
 /// Fields a scaler and converter can change.
 const ADAPTABLE_FIELDS: [&str; 6] = [
@@ -63,225 +65,39 @@ const ADAPTABLE_FIELDS: [&str; 6] = [
     "chroma-site",
 ];
 
-/// A GPU scaler and converter, working in one memory type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scaler {
-    Gl,
-    Cuda,
-    D3d12,
-    D3d11,
-}
-
-impl Scaler {
-    pub const ALL: [Scaler; 4] = [Scaler::Gl, Scaler::Cuda, Scaler::D3d12, Scaler::D3d11];
-
-    /// The element factories, in link order. `glcolorscale` takes RGBA only,
-    /// so GL converts to it and back.
-    pub fn factories(self) -> &'static [&'static str] {
-        match self {
-            Scaler::Gl => &["glcolorconvert", "glcolorscale", "glcolorconvert"],
-            Scaler::Cuda => &["cudaconvertscale"],
-            Scaler::D3d12 => &["d3d12convert"],
-            Scaler::D3d11 => &["d3d11convert"],
-        }
-    }
-
-    /// The caps feature of the memory it works in.
-    pub fn memory_feature(self) -> &'static str {
-        self.download()
-            .memory_feature()
-            .expect("every scaler's memory has a download")
-    }
-
-    /// The download out of its memory.
-    pub fn download(self) -> Adapter {
-        match self {
-            Scaler::Gl => Adapter::GlDownload,
-            Scaler::Cuda => Adapter::CudaDownload,
-            Scaler::D3d12 => Adapter::D3d12Download,
-            Scaler::D3d11 => Adapter::D3d11Download,
-        }
-    }
-
-    /// The scaler for the memory `features` name, if there is one.
-    fn for_features(features: &gst::CapsFeaturesRef) -> Option<Scaler> {
-        Scaler::ALL
-            .into_iter()
-            .find(|s| features.contains(s.memory_feature()))
-    }
-
-    /// The pad template of its first (sink) or last (src) element, in its
-    /// memory only. `None` when an element is not installed.
-    fn template(self, direction: gst::PadDirection) -> Option<gst::Caps> {
-        let factories = self.factories();
-        if !factories.iter().all(|f| video_adapt::factory_available(f)) {
-            return None;
-        }
-        let factory = match direction {
-            gst::PadDirection::Sink => factories[0],
-            _ => factories[factories.len() - 1],
-        };
-        let template = factory_template(factory, direction)?;
-        Some(in_memory(&template, Some(self.memory_feature())))
-    }
-}
-
-/// The chain between `input` and `output`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Path {
-    /// `videoscale ! videoconvert`.
-    System,
-    /// The download, pinned to system memory, then `videoscale !
-    /// videoconvert`: the GPU scaler is not installed.
-    DownloadFirst(Adapter),
-    /// The GPU scaler, then, when downstream does not take its memory, the
-    /// download, pinned to system memory, and `videoconvert`.
-    Gpu {
-        scaler: Scaler,
-        download: Option<Adapter>,
-    },
-}
-
-/// Why the input cannot be taken.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Problem {
-    /// Not raw video.
-    NotRawVideo { media: String },
-    /// Raw video in a memory nothing here scales or downloads.
-    UnsupportedMemory { feature: String },
-    /// The download this memory needs is not installed.
-    MissingDownload(Adapter),
-    /// Neither the GPU scaler nor the download takes this pixel format.
-    NotDownloadable(Adapter),
-}
-
-/// Choose the chain for `caps`, given what the block's output takes now
-/// (`output_takes`: its capsfilter's caps, limited to what downstream takes).
-/// `available` says whether an element factory exists.
+/// The chain for `caps`, given what the block's output takes now
+/// (`output_takes`). `available` says whether an element factory exists.
 fn plan(
     caps: &gst::CapsRef,
     output_takes: &gst::CapsRef,
     available: impl Fn(&str) -> bool,
-) -> Result<Path, Problem> {
-    let (Some(structure), Some(features)) = (caps.structure(0), caps.features(0)) else {
-        return Err(Problem::NotRawVideo {
-            media: "empty caps".to_string(),
-        });
-    };
-    if structure.name() != "video/x-raw" {
-        return Err(Problem::NotRawVideo {
-            media: structure.name().to_string(),
-        });
-    }
-    if video_adapt::is_system_memory(features) {
-        return Ok(Path::System);
-    }
-    let Some(scaler) = Scaler::for_features(features) else {
-        let feature = features
-            .iter()
-            .find(|f| f.starts_with("memory:"))
-            .map(|f| f.to_string())
-            .unwrap_or_else(|| "an unknown memory".to_string());
-        return Err(Problem::UnsupportedMemory { feature });
-    };
-    let download = scaler.download();
-    // The GPU scaler must be installed and take this pixel format; otherwise
-    // the frame is downloaded first and scaled on the CPU.
-    let scaler_takes = scaler.factories().iter().all(|f| available(f))
-        && scaler
-            .template(gst::PadDirection::Sink)
-            .is_some_and(|sink| caps.can_intersect(&sink));
-    if !scaler_takes {
-        return if !available(download.factory()) {
-            Err(Problem::MissingDownload(download))
-        } else if download.sink_template().is_some() && !download.sink_takes(caps) {
-            Err(Problem::NotDownloadable(download))
-        } else {
-            Ok(Path::DownloadFirst(download))
-        };
-    }
-    // Downstream takes the scaler's output as it is: stay on the GPU.
-    let in_scaler_memory = in_memory(output_takes, Some(scaler.memory_feature()));
-    let producible = scaler
-        .template(gst::PadDirection::Src)
-        .is_some_and(|src| in_scaler_memory.can_intersect(&src));
-    if producible {
-        return Ok(Path::Gpu {
-            scaler,
-            download: None,
-        });
-    }
-    if available(download.factory()) {
-        Ok(Path::Gpu {
-            scaler,
-            download: Some(download),
-        })
-    } else {
-        Err(Problem::MissingDownload(download))
-    }
+) -> Result<Vec<Adapter>, Refusal> {
+    video_adapt::decide(caps, Consumer::ScaleConvert(output_takes), available)
 }
 
-impl Path {
-    /// The element factories, in link order. A capsfilter pinning system
-    /// memory is named `capsfilter`.
-    fn factories(self) -> Vec<&'static str> {
-        match self {
-            Path::System => SYSTEM_FACTORIES.to_vec(),
-            Path::DownloadFirst(download) => {
-                let mut factories = vec![download.factory(), "capsfilter"];
-                factories.extend(SYSTEM_FACTORIES);
-                factories
-            }
-            Path::Gpu { scaler, download } => {
-                let mut factories = scaler.factories().to_vec();
-                if let Some(download) = download {
-                    factories.extend([
-                        download.factory(),
-                        "capsfilter",
-                        video_adapt::VIDEO_CONVERT_FACTORY,
-                    ]);
-                }
-                factories
-            }
-        }
-    }
-
-    /// True when the first element takes `caps`.
-    fn takes(self, caps: &gst::CapsRef) -> bool {
-        match self {
-            Path::System => factory_template("videoscale", gst::PadDirection::Sink)
-                .is_some_and(|t| caps.can_intersect(&t)),
-            Path::DownloadFirst(download) => download.sink_takes(caps),
-            Path::Gpu { scaler, .. } => scaler
-                .template(gst::PadDirection::Sink)
-                .is_some_and(|t| caps.can_intersect(&t)),
-        }
-    }
+/// True when the chain's first element takes `caps`.
+fn chain_takes(chain: &[Adapter], caps: &gst::CapsRef) -> bool {
+    chain.first().is_none_or(|first| first.sink_takes(caps))
 }
 
-/// Build the elements for `path`, named `<prefix>_<factory><index>`.
-fn build(path: Path, prefix: &str) -> Result<Vec<gst::Element>, String> {
-    path.factories()
-        .into_iter()
-        .enumerate()
-        .map(|(i, factory)| {
-            let name = format!("{}_{}{}", prefix, factory, i);
-            if factory == "capsfilter" {
-                return video_adapt::system_memory_pin(&name);
-            }
-            let element = gst::ElementFactory::make(factory)
-                .name(name)
-                .build()
-                .map_err(|e| format!("{} could not be created: {}", factory, e))?;
-            crate::gpu::configure_video_convert(&element);
-            Ok(element)
-        })
-        .collect()
+/// True when `chain` downloads.
+fn downloads(chain: &[Adapter]) -> bool {
+    chain.iter().any(|a| a.memory_feature().is_some())
+}
+
+/// Build the elements for `chain`, with the thread count the block sets on
+/// its converters.
+fn build(chain: &[Adapter], prefix: &str) -> Result<Vec<gst::Element>, String> {
+    let elements = video_adapt::build_elements(chain, prefix)?;
+    for element in &elements {
+        crate::gpu::configure_video_convert(element);
+    }
+    Ok(elements)
 }
 
 /// The chain spliced in between `input` and `output`.
 struct Spliced {
-    path: Path,
+    chain: Vec<Adapter>,
     elements: Vec<glib::WeakRef<gst::Element>>,
     /// How many chains have been spliced in, so each gets its own names: the
     /// old chain is still in the bin while its replacement is linked.
@@ -339,7 +155,7 @@ pub fn install(
         input_sink: input_sink.downgrade(),
         output_sink: output_sink.downgrade(),
         spliced: Mutex::new(Spliced {
-            path: Path::System,
+            chain: video_adapt::CPU_SCALE.to_vec(),
             elements: system.iter().map(|e| e.downgrade()).collect(),
             generation: 0,
         }),
@@ -411,7 +227,7 @@ fn on_input_query(front: &Front, pad: &gst::Pad, query: &mut gst::QueryRef) -> g
         gst::QueryViewMut::AcceptCaps(q) => {
             let caps = q.caps_owned();
             let accepted = match plan(&caps, &output_takes(front), video_adapt::factory_available) {
-                Ok(path) => path.takes(&caps),
+                Ok(chain) => chain_takes(&chain, &caps),
                 Err(problem) => {
                     // A refused ACCEPT_CAPS means the CAPS event never comes,
                     // so the reason is posted here, for fixed caps only (what
@@ -441,36 +257,55 @@ fn on_input_query(front: &Front, pad: &gst::Pad, query: &mut gst::QueryRef) -> g
 /// What the block takes on its input: raw video in each memory some chain
 /// takes. First the GPU memory downstream takes as it is (a decoder that can
 /// choose keeps the frames on the GPU), then system memory, then GPU memory
-/// that is downloaded after scaling or before it.
+/// that is downloaded after scaling or before it. Each memory is offered as
+/// what its chain's first element takes, when [`video_adapt::decide`] finds a
+/// chain for it.
 fn takes(output_takes: &gst::CapsRef, available: impl Fn(&str) -> bool) -> gst::Caps {
     let mut direct = gst::Caps::new_empty();
     let mut downloaded = gst::Caps::new_empty();
     for scaler in Scaler::ALL {
-        let feature = scaler.memory_feature();
-        let download_available = available(scaler.download().factory());
-        if let Some(sink) = scaler.template(gst::PadDirection::Sink) {
-            if !in_memory(output_takes, Some(feature)).is_empty() {
-                direct.merge(sink);
-            } else if download_available {
-                downloaded.merge(sink);
-            }
-        } else if download_available {
-            if let Some(sink) = scaler.download().sink_template() {
-                downloaded.merge(in_memory(sink, Some(feature)));
-            }
+        // What the scaler takes, or else what its download takes.
+        let scaler_installed = scaler.adapter().factories().iter().all(|f| available(f));
+        let Some(candidate) = scaler
+            .adapter()
+            .sink_template()
+            .filter(|_| scaler_installed)
+            .cloned()
+            .or_else(|| {
+                scaler
+                    .download()
+                    .sink_template()
+                    .map(|t| in_memory(t, Some(scaler.memory_feature())))
+            })
+        else {
+            continue;
+        };
+        match plan(&candidate, output_takes, &available) {
+            Ok(chain) if downloads(&chain) => downloaded.merge(candidate),
+            Ok(_) => direct.merge(candidate),
+            Err(_) => {}
         }
     }
-    if let Some(system) = factory_template("videoscale", gst::PadDirection::Sink) {
-        direct.merge(in_memory(&system, None));
+    // System memory always has a chain: scaling and converting on the CPU.
+    if let Some(system) =
+        factory_template("videoscale", gst::PadDirection::Sink).map(|t| in_memory(&t, None))
+    {
+        direct.merge(system);
     }
     direct.merge(downloaded);
     direct
 }
 
 /// What the block can deliver when upstream offers `offered`: each raw video
-/// structure at any size and pixel format, in its own memory when that is
-/// system memory or a scaler for it is installed, and in system memory when
-/// it can be downloaded. Limited to `filter`.
+/// structure at any size and pixel format, in its own memory when
+/// [`video_adapt::decide`] keeps it there for an output that takes that
+/// memory, and in system memory when it finds a chain for an output that
+/// takes system memory. Limited to `filter`.
+///
+/// A GPU structure `decide()` finds no chain for at all is still offered in
+/// its own memory when its scaler is installed, and in system memory when its
+/// download is: the link then goes through, and the CAPS event fails the flow
+/// with the refusal that says why, instead of a bare NOFORMAT at link time.
 fn deliverable(
     offered: &gst::Caps,
     filter: Option<&gst::Caps>,
@@ -479,6 +314,7 @@ fn deliverable(
     if offered.is_any() {
         return filter.cloned().unwrap_or_else(gst::Caps::new_any);
     }
+    let any_system = gst::Caps::new_empty_simple("video/x-raw");
     let mut answer = gst::Caps::new_empty();
     {
         let answer = answer.get_mut().expect("new caps are writable");
@@ -486,22 +322,38 @@ fn deliverable(
             if structure.name() != "video/x-raw" || features.is_any() {
                 continue;
             }
+            let mut one = gst::Caps::new_empty();
+            one.get_mut()
+                .expect("new caps are writable")
+                .append_structure_full(structure.to_owned(), Some(features.to_owned()));
             let mut adaptable = structure.to_owned();
             adaptable.remove_fields(ADAPTABLE_FIELDS);
-            if video_adapt::is_system_memory(features) {
-                answer.append_structure(adaptable);
-                continue;
-            }
-            let Some(scaler) = Scaler::for_features(features) else {
-                continue;
+            let scaler = Scaler::for_features(features);
+            let stays = scaler.is_some_and(|scaler| {
+                let mut any_gpu = gst::Caps::new_empty_simple("video/x-raw");
+                any_gpu
+                    .get_mut()
+                    .expect("new caps are writable")
+                    .set_features_simple(Some(gst::CapsFeatures::new([scaler.memory_feature()])));
+                plan(&one, &any_gpu, &available).is_ok_and(|chain| !downloads(&chain))
+            });
+            let to_system = plan(&one, &any_system, &available).is_ok();
+            let (stays, to_system) = match scaler {
+                // No chain at all: offer what is installed, and let the CAPS
+                // event post the refusal.
+                Some(scaler) if !stays && !to_system => (
+                    scaler.adapter().factories().iter().all(|f| available(f)),
+                    available(scaler.download().factory()),
+                ),
+                _ => (stays, to_system),
             };
-            if scaler.factories().iter().all(|f| available(f)) {
+            if let (true, Some(scaler)) = (stays, scaler) {
                 answer.append_structure_full(
                     adaptable.clone(),
                     Some(gst::CapsFeatures::new([scaler.memory_feature()])),
                 );
             }
-            if available(scaler.download().factory()) {
+            if to_system {
                 answer.append_structure(adaptable);
             }
         }
@@ -513,39 +365,6 @@ fn deliverable(
     }
 }
 
-/// The raw video structures of `caps` in the memory `feature` names, or in
-/// system memory for `None`.
-fn in_memory(caps: &gst::CapsRef, feature: Option<&str>) -> gst::Caps {
-    let mut picked = gst::Caps::new_empty();
-    {
-        let picked = picked.get_mut().expect("new caps are writable");
-        for (structure, features) in caps.iter_with_features() {
-            let matches = if features.is_any() {
-                false
-            } else {
-                match feature {
-                    Some(feature) => features.contains(feature),
-                    None => video_adapt::is_system_memory(features),
-                }
-            };
-            if structure.name() == "video/x-raw" && matches {
-                picked.append_structure_full(structure.to_owned(), Some(features.to_owned()));
-            }
-        }
-    }
-    picked
-}
-
-/// The pad template of `factory` in `direction`. `None` when it is not
-/// installed.
-fn factory_template(factory: &str, direction: gst::PadDirection) -> Option<gst::Caps> {
-    gst::ElementFactory::find(factory)?
-        .static_pad_templates()
-        .into_iter()
-        .find(|t| t.direction() == direction)
-        .map(|t| t.caps())
-}
-
 /// A CAPS event arriving at the input, before it handles it: bring the chain
 /// between input and output in line with `caps`.
 fn on_caps(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef) {
@@ -555,7 +374,7 @@ fn on_caps(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef) {
         return;
     };
     let wanted = match plan(caps, &output_takes(front), video_adapt::factory_available) {
-        Ok(path) => path,
+        Ok(chain) => chain,
         Err(problem) => {
             if !front.refused.swap(true, Ordering::AcqRel) {
                 post_problem(front, pad, caps, &problem);
@@ -566,7 +385,7 @@ fn on_caps(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef) {
     front.refused.store(false, Ordering::Release);
 
     let mut spliced = front.spliced.lock().unwrap_or_else(|p| p.into_inner());
-    if wanted == spliced.path {
+    if wanted == spliced.chain {
         return;
     }
     let old: Vec<gst::Element> = spliced
@@ -579,7 +398,7 @@ fn on_caps(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef) {
         return;
     }
     let prefix = format!("{}_{}", front.label, spliced.generation + 1);
-    let new = match build(wanted, &prefix) {
+    let new = match build(&wanted, &prefix) {
         Ok(new) => new,
         Err(e) => {
             post_splice_failure(front, pad, caps, &e);
@@ -600,7 +419,7 @@ fn on_caps(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef) {
             );
             spliced.generation += 1;
             spliced.elements = new.iter().map(|e| e.downgrade()).collect();
-            spliced.path = wanted;
+            spliced.chain = wanted;
         }
         Err(e) => post_splice_failure(front, pad, caps, &e),
     }
@@ -618,14 +437,14 @@ fn memory_name(feature: &str) -> &str {
 }
 
 /// Fail the flow because nothing here can take `caps`.
-fn post_problem(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef, problem: &Problem) {
+fn post_problem(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef, problem: &Refusal) {
     let (label, block) = (&front.label, &front.block);
     let Some(element) = pad.parent_element() else {
         warn!("{}: input {} refused: {:?}", label, caps, problem);
         return;
     };
     match problem {
-        Problem::NotRawVideo { media } => gst::element_error!(
+        Refusal::NotRawVideo { media } => gst::element_error!(
             element,
             gst::CoreError::Negotiation,
             (
@@ -640,7 +459,7 @@ fn post_problem(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef, problem: &Pr
                 block
             ]
         ),
-        Problem::UnsupportedMemory { feature } => gst::element_error!(
+        Refusal::UnsupportedMemory { feature } => gst::element_error!(
             element,
             gst::CoreError::Negotiation,
             (
@@ -656,11 +475,13 @@ fn post_problem(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef, problem: &Pr
                 block
             ]
         ),
-        Problem::MissingDownload(download) => {
+        Refusal::MissingFactory { factory } => {
+            let download = Adapter::download_from(factory);
             let memory = download
-                .memory_feature()
+                .and_then(Adapter::memory_feature)
                 .map(memory_name)
                 .unwrap_or("this memory");
+            let plugin = download.map(Adapter::plugin).unwrap_or("that provides it");
             gst::element_error!(
                 element,
                 gst::CoreError::MissingPlugin,
@@ -669,7 +490,7 @@ fn post_problem(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef, problem: &Pr
                     label,
                     block,
                     memory,
-                    download.factory()
+                    factory
                 ),
                 [
                     "Arrived: {}. What follows {} does not take {}, or {} cannot scale it \
@@ -679,12 +500,13 @@ fn post_problem(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef, problem: &Pr
                     block,
                     memory,
                     block,
-                    download.factory(),
-                    download.plugin()
+                    factory,
+                    plugin
                 ]
             );
         }
-        Problem::NotDownloadable(download) => {
+        Refusal::NotDownloadable { download } => {
+            let factory = download.factory();
             let memory = download
                 .memory_feature()
                 .map(memory_name)
@@ -703,7 +525,7 @@ fn post_problem(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef, problem: &Pr
                      format here. Feed it in another format, or in system memory.",
                     caps,
                     memory,
-                    download.factory()
+                    factory
                 ]
             );
         }
@@ -773,7 +595,10 @@ mod tests {
     #[test]
     fn system_memory_is_scaled_on_the_cpu() {
         let input = caps("video/x-raw, format=NV12, width=320, height=240");
-        assert_eq!(plan(&input, &output(&[""]), all), Ok(Path::System));
+        assert_eq!(
+            plan(&input, &output(&[""]), all),
+            Ok(video_adapt::CPU_SCALE.to_vec())
+        );
     }
 
     /// GL memory stays on the GPU when downstream takes GL memory.
@@ -784,13 +609,7 @@ mod tests {
         }
         let input = caps("video/x-raw(memory:GLMemory), format=RGBA, width=320, height=240");
         let out = output(&["", video_adapt::GL_MEMORY_FEATURE]);
-        assert_eq!(
-            plan(&input, &out, all),
-            Ok(Path::Gpu {
-                scaler: Scaler::Gl,
-                download: None
-            })
-        );
+        assert_eq!(plan(&input, &out, all), Ok(vec![Adapter::GlScale]));
     }
 
     /// GL memory is scaled on the GPU, then downloaded, for a consumer that
@@ -803,10 +622,12 @@ mod tests {
         let input = caps("video/x-raw(memory:GLMemory), format=RGBA, width=320, height=240");
         assert_eq!(
             plan(&input, &output(&[""]), all),
-            Ok(Path::Gpu {
-                scaler: Scaler::Gl,
-                download: Some(Adapter::GlDownload)
-            })
+            Ok(vec![
+                Adapter::GlScale,
+                Adapter::GlDownload,
+                Adapter::SystemMemoryPin,
+                Adapter::VideoConvert
+            ])
         );
     }
 
@@ -817,11 +638,18 @@ mod tests {
         let no_scaler = |f: &str| f != "cudaconvertscale";
         assert_eq!(
             plan(&input, &output(&[""]), no_scaler),
-            Ok(Path::DownloadFirst(Adapter::CudaDownload))
+            Ok(vec![
+                Adapter::CudaDownload,
+                Adapter::SystemMemoryPin,
+                Adapter::VideoScale,
+                Adapter::VideoConvert
+            ])
         );
         assert_eq!(
             plan(&input, &output(&[""]), |_| false),
-            Err(Problem::MissingDownload(Adapter::CudaDownload))
+            Err(Refusal::MissingFactory {
+                factory: video_adapt::CUDA_DOWNLOAD_FACTORY
+            })
         );
     }
 
@@ -838,7 +666,12 @@ mod tests {
         let out = output(&["", video_adapt::CUDA_MEMORY_FEATURE]);
         assert_eq!(
             plan(&input, &out, all),
-            Ok(Path::DownloadFirst(Adapter::CudaDownload))
+            Ok(vec![
+                Adapter::CudaDownload,
+                Adapter::SystemMemoryPin,
+                Adapter::VideoScale,
+                Adapter::VideoConvert
+            ])
         );
     }
 
@@ -868,7 +701,7 @@ mod tests {
         let input = caps("video/x-raw(memory:NVMM), format=NV12, width=320, height=240");
         assert_eq!(
             plan(&input, &output(&[""]), all),
-            Err(Problem::UnsupportedMemory {
+            Err(Refusal::UnsupportedMemory {
                 feature: "memory:NVMM".to_string()
             })
         );
@@ -879,7 +712,7 @@ mod tests {
         let input = caps("video/x-h264, stream-format=byte-stream");
         assert_eq!(
             plan(&input, &output(&[""]), all),
-            Err(Problem::NotRawVideo {
+            Err(Refusal::NotRawVideo {
                 media: "video/x-h264".to_string()
             })
         );
@@ -901,6 +734,48 @@ mod tests {
 
         let nvmm = caps("video/x-raw(memory:NVMM), format=NV12");
         assert!(deliverable(&nvmm, None, all).is_empty());
+    }
+
+    /// GL memory in a pixel format the GPU scaler does not take is not
+    /// offered downstream as staying in GL memory: `decide()` downloads it
+    /// first. It is still offered in system memory.
+    #[test]
+    fn gpu_memory_the_scaler_does_not_take_is_offered_in_system_memory_only() {
+        if !gl_scaler() {
+            return;
+        }
+        // `glcolorconvert` does not list AYUV64; `gldownload` takes any GL.
+        let offered = caps("video/x-raw(memory:GLMemory), format=AYUV64, width=320, height=240");
+        let answer = deliverable(&offered, None, all);
+        assert!(
+            !answer.can_intersect(&output(&[video_adapt::GL_MEMORY_FEATURE])),
+            "{answer}"
+        );
+        assert!(answer.can_intersect(&output(&[""])), "{answer}");
+    }
+
+    /// GPU memory `decide()` finds no chain for is still offered as what is
+    /// installed, so the link goes through and the CAPS event posts the
+    /// refusal, instead of a bare NOFORMAT at link time. Here the CUDA scaler
+    /// is claimed but takes nothing (no template here), and `cudadownload` is
+    /// missing.
+    #[test]
+    fn gpu_memory_with_no_chain_still_links() {
+        let _ = gst::init();
+        if video_adapt::factory_available("cudaconvertscale") {
+            return;
+        }
+        let offered = caps("video/x-raw(memory:CUDAMemory), format=NV12, width=320, height=240");
+        let no_download = |f: &str| f != video_adapt::CUDA_DOWNLOAD_FACTORY;
+        assert!(
+            plan(&offered, &output(&[""]), no_download).is_err(),
+            "the CAPS event refuses this"
+        );
+        let answer = deliverable(&offered, None, no_download);
+        assert!(
+            answer.can_intersect(&output(&[video_adapt::CUDA_MEMORY_FEATURE])),
+            "{answer}"
+        );
     }
 
     /// A decoder that can choose is told GPU memory downstream takes first,

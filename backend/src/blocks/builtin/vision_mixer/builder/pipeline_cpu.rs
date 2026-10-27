@@ -21,8 +21,7 @@ pub(super) fn build_cpu_pipeline(
     let mut links: Vec<(ElementPadRef, ElementPadRef)> = Vec::new();
 
     // The software compositor takes system memory only, so every converter
-    // here is plain `videoconvert`, never the global video convert mode's
-    // pick. GPU memory on an input is downloaded by that input's front (see
+    // here is plain `videoconvert`, never `autovideoconvert`. GPU memory on an input is downloaded by that input's front (see
     // `input_front`), decided from its caps.
 
     let dist_comp = elements::make_dist_compositor(p.backend, p.latency_ms, p.min_upstream_ms)?;

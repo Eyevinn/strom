@@ -2,15 +2,16 @@
 #
 # Build patched GStreamer plugins for linux/amd64 and linux/arm64.
 #
-# Run this once when patches change. Output:
-#   dist/linux_amd64/libgstdecklink.so
-#   dist/linux_arm64/libgstdecklink.so
-#   dist/linux_amd64/gstreamer-rev.txt
-#   dist/linux_arm64/gstreamer-rev.txt
+# Usage: ./build.sh [plugin...]   (default: every plugin in plugins.conf)
 #
-# Then upload the dist/ files to a GitHub release in this repo, tagged
-# `patched-plugins-vX.Y-gst<gst-version>`. The strom Dockerfile pulls
-# the right .so for its target architecture from that release URL.
+# Run this once when patches change. Output, per plugin:
+#   dist/<plugin>/linux_amd64/libgst<plugin>.so
+#   dist/<plugin>/linux_arm64/libgst<plugin>.so
+#   dist/<plugin>/linux_<arch>/gstreamer-rev.txt
+#
+# Then upload the dist/ files to a GitHub release in this repo (see
+# README.md for the tag convention). The strom Dockerfile pulls the right
+# .so for its target architecture from that release URL.
 #
 # Requires: docker with buildx + QEMU (for cross-arch emulation).
 
@@ -18,14 +19,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-GSTREAMER_VERSION="$(cat gstreamer-version.txt)"
 PLATFORMS="linux/amd64,linux/arm64"
 BUILDER_NAME="patched-gstreamer-plugins-builder"
-
-echo "== Patched GStreamer plugins build =="
-echo "Pinned GStreamer source: ${GSTREAMER_VERSION}"
-echo "Target platforms:        ${PLATFORMS}"
-echo
+WANTED=("$@")
 
 # Ensure buildx + QEMU multi-arch emulation are available. Idempotent.
 if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
@@ -36,20 +32,29 @@ else
     docker buildx use "${BUILDER_NAME}"
 fi
 
-rm -rf dist
-mkdir -p dist
+while read -r plugin base_image gst_version plugin_dir; do
+    case "$plugin" in ''|'#'*) continue ;; esac
+    if [ ${#WANTED[@]} -gt 0 ] && [[ ! " ${WANTED[*]} " =~ " ${plugin} " ]]; then
+        continue
+    fi
 
-echo "== Building =="
-docker buildx build \
-    --platform "${PLATFORMS}" \
-    --build-arg "GSTREAMER_VERSION=${GSTREAMER_VERSION}" \
-    --target export \
-    --output "type=local,dest=dist" \
-    .
+    echo "== ${plugin}: GStreamer ${gst_version} on ${base_image} =="
+    rm -rf "dist/${plugin}"
+
+    docker buildx build \
+        --platform "${PLATFORMS}" \
+        --build-arg "BASE_IMAGE=${base_image}" \
+        --build-arg "GSTREAMER_VERSION=${gst_version}" \
+        --build-arg "PLUGIN=${plugin}" \
+        --build-arg "PLUGIN_DIR=${plugin_dir}" \
+        --target export \
+        --output "type=local,dest=dist/${plugin}" \
+        .
+done < plugins.conf
 
 echo
 echo "== Done =="
-find dist -type f -printf '%p (%s bytes)\n'
+find dist -type f -exec ls -l {} \;
 echo
-echo "Next: upload these files to a GitHub release in this repo,"
-echo "      e.g. tagged patched-plugins-v1.0-gst${GSTREAMER_VERSION}"
+echo "sha256 (for the strom Dockerfile):"
+find dist -name '*.so' -exec shasum -a 256 {} \;

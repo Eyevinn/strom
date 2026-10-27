@@ -89,7 +89,7 @@ carries 4 tracks per output. Cheap per instance, unmeasured in total — a good 
 
 | | Minimum | Recommended | Notes |
 |---|---|---|---|
-| OS | GStreamer 1.22 or newer (e.g. Debian 12, Ubuntu 24.04) for native installs; any Docker-capable Linux for the images | GStreamer 1.28 (e.g. Ubuntu 26.04), the version Strom is tested against | Images are built on Ubuntu 25.10 with GStreamer 1.26 |
+| OS | GStreamer 1.22 or newer (e.g. Debian 12, Ubuntu 24.04) for native installs; any Docker-capable Linux for the images | GStreamer 1.28 (e.g. Ubuntu 26.04), the version Strom is tested against | Images are built on Ubuntu 26.04 with GStreamer 1.28 |
 | Arch | x86-64 | x86-64 | `arm64` images are published; see [CROSS_COMPILE_ARM64.md](CROSS_COMPILE_ARM64.md) |
 | CPU | 4 cores | 8–16 cores | Add headroom per HTML/CEF source, for 4:2:2 or software encode, and for Opus (tracks x viewers) |
 | RAM | 8 GB | 16–32 GB | Scale with concurrent flows; CEF spawns several processes per source |
@@ -219,7 +219,7 @@ curl -s localhost:8080/api/flows/<flow-id>/debug-graph \
 nvidia-smi dmon -s u
 ```
 
-The startup log reports `CUDA-GL interop works …` (or why it failed). Encoder choices are
+The startup log reports `GL renderer: …`, and warns if NVENC is present but GL renders on another GPU. Encoder choices are
 logged when a flow with a Video Encoder block starts: `Found available encoder: …` or
 `Using software fallback encoder: …`.
 

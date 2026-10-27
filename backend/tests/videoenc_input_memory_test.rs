@@ -18,10 +18,8 @@
 //! (CUDA or system NV12 in, one pre-encoded H.264 frame out per input frame)
 //! takes its place, so the real block selects it with the hardware preference.
 //!
-//! The binary forces the global video convert mode to the GPU one before any
-//! block is built: the block used to build `autovideoconvert` in that mode,
-//! and must build plain `videoconvert` whatever the mode says. Every test here
-//! checks that through [`add_block`].
+//! The block used to build `autovideoconvert` on GPU hosts, and must build
+//! plain `videoconvert`. Every test here checks that through [`add_block`].
 //!
 //! On a host with the real `cudadownload` or `nvh264enc`, the tests that need
 //! a stand-in skip: they push system-memory buffers under CUDA caps, which the
@@ -253,14 +251,8 @@ const D3D12_NV12: &str =
 /// pads. `preference` is the block's `encoder_preference`: `software` gives
 /// `x264enc`, which takes system memory only, on every host.
 ///
-/// The global video convert mode is forced to the GPU one first, and the
-/// block's converter must still be plain `videoconvert`.
+/// The block's converter must be plain `videoconvert`.
 fn add_block(pipeline: &gst::Pipeline, preference: &str) -> (gst::Pad, gst::Pad) {
-    assert_eq!(
-        strom::gpu::force_video_convert_mode(strom::gpu::VideoConvertMode::GpuAccelerated),
-        strom::gpu::VideoConvertMode::GpuAccelerated,
-        "the convert mode was set before this test could force it"
-    );
     let props = HashMap::from([
         ("codec".to_string(), PropertyValue::String("h264".into())),
         (
@@ -279,7 +271,7 @@ fn add_block(pipeline: &gst::Pipeline, preference: &str) -> (gst::Pad, gst::Pad)
     assert_eq!(
         converter.as_deref(),
         Some("videoconvert"),
-        "in the GPU convert mode the block built {:?} in front of its encoder; \
+        "the block built {:?} in front of its encoder; \
          autovideoconvert turns CUDA memory into GL RGBA nvh264enc cannot take (#1104)",
         converter
     );
@@ -590,7 +582,7 @@ fn cuda_memory_the_encoder_lists_passes_straight_through() {
     );
 }
 
-/// System memory into the block in the GPU convert mode: no download, and the
+/// System memory into the block: no download, and the
 /// converter is plain `videoconvert` (checked in [`add_block`]).
 #[test]
 fn system_memory_is_encoded_through_plain_videoconvert() {

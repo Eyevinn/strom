@@ -78,8 +78,8 @@ container — point your MCP client at `http://<host>:8080/api/mcp`. See [MCP.md
 
 ## Building the image yourself
 
-The [`Dockerfile`](../Dockerfile) uses a multi-stage build on Ubuntu 25.10 (Questing), which
-provides GStreamer 1.26 with the nvcodec fix:
+The [`Dockerfile`](../Dockerfile) uses a multi-stage build on Ubuntu 26.04 LTS (Resolute), which
+provides GStreamer 1.28 with the nvcodec fix:
 
 1. **Frontend builder** — builds the WASM frontend (platform-independent output).
 2. **Backend builder** — builds the backend, optionally cross-compiling

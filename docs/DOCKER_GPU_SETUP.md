@@ -91,27 +91,20 @@ docker run -d \
 |---------|-------------|----------|
 | Video Encoding | `nvh264enc`, `nvh265enc`, `nvav1enc` | `x264enc`, `x265enc` |
 | Video Decoding | `nvh264dec`, `nvh265dec` | `avdec_h264` |
-| Color Conversion | `autovideoconvert` (glcolorconvert) | `videoconvert` |
+| Color Conversion | `glcolorconvert`, `cudaconvertscale` (where the video is in GL or CUDA memory) | `videoconvert` |
 | Video Scaling | `glvideomixer` | `videoscale` |
 | Compositing | `glvideomixer` | `compositor` |
 
 ### Runtime Detection
 
-Strom automatically detects GPU capabilities at startup and selects the optimal pipeline:
+Strom logs the GPU it found at startup. With the NVIDIA GPU visible to GStreamer's GL and to NVML:
 
-**GPU interop works:**
 ```
-INFO  CUDA-GL interop works - using GPU-accelerated video conversion
+INFO  GL renderer: NVIDIA L4/PCIe/SSE2 (NVIDIA Corporation), GL 4.6.0 NVIDIA ..., GLSL 4.60 NVIDIA
 INFO  NVML initialized successfully - found 1 GPU(s)
 ```
 
-**GPU interop not available (falls back gracefully):**
-```
-WARN  CUDA-GL interop failed: ... - using software video conversion
-INFO  NVML initialized successfully - found 1 GPU(s)
-```
-
-Even when CUDA-GL interop fails, hardware encoding (NVENC) is still used - only color conversion falls back to CPU.
+If NVENC is available but GL renders on another GPU, Strom warns at startup. Which elements convert or download video is decided per block from the negotiated caps, not once at startup.
 
 ## CUDA-GL Interop (Zero-Copy)
 
@@ -214,7 +207,11 @@ ls -la /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so*
 # CUDA call failed: CUDA_ERROR_OPERATING_SYSTEM
 
 # Causes:
-# 1. WSL2 - CUDA-GL interop not supported (use software fallback)
+# 1. WSL2 - CUDA-GL interop is not supported, and Strom no longer falls back
+#    on its own. It fails at the link where CUDA memory (e.g. from nvh264dec)
+#    meets a GL consumer (e.g. the GPU Vision Mixer): cudadownload hands GL
+#    memory across that link. On WSL2, feed GL consumers from a software
+#    decoder, or use the CPU Vision Mixer.
 # 2. Wrong GL backend - ensure GST_GL_WINDOW=egl-device
 # 3. Missing EGL device - check /dev/dri/card* permissions
 ```

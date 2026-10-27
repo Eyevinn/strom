@@ -11,7 +11,7 @@ use strom_types::Flow;
 
 /// Build `flow` with no ICE servers, no WHIP registry, and media under the
 /// system temp dir. Initialises GStreamer, but not GPU detection: a test whose
-/// flow has a vision mixer or video encoder calls
+/// flow has a vision mixer or compositor that picks its GL backend calls
 /// `strom::gpu::detect_gpu_capabilities()` itself.
 pub fn build(flow: &Flow) -> Result<PipelineManager, PipelineError> {
     build_with(

@@ -49,14 +49,10 @@ const REQUIRED: &[&str] = &[
     "fakesink",
 ];
 
-/// Initialises what the encoder builder needs, then see
-/// `common::plugins_available`. x264enc comes from gst-plugins-ugly and
+/// Initialises GStreamer, then see `common::plugins_available`. x264enc comes from gst-plugins-ugly and
 /// x265enc from gst-plugins-bad; the CI workflow installs both.
 fn plugins_available() -> bool {
     gst::init().expect("gst init");
-    // `VideoEncBuilder::build` reads the process-global video convert mode,
-    // which panics until this has run.
-    strom::gpu::detect_gpu_capabilities();
     common::plugins_available(REQUIRED)
 }
 
