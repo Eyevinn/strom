@@ -176,7 +176,10 @@ jobs:
           Write-Host "  GStreamerDir: $absGstDir"
           Write-Host "  GraphvizDir: $absGvDir"
 
+          # -arch x64: without it WiX builds a 32-bit package, and Windows
+          # installs it under Program Files (x86)
           wix build `
+            -arch x64 `
             -d ProductVersion="$productVersion" `
             -d StromExe="$absStromExe" `
             -d StromIcon="$absStromIcon" `
