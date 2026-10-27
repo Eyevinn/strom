@@ -3,6 +3,7 @@
 pub(crate) mod aggregator_start;
 mod block_expansion;
 pub mod buffer_age_probe;
+pub mod context_forward;
 pub(crate) mod control_bindings;
 pub(crate) mod crop;
 pub mod discovery;

@@ -247,6 +247,15 @@ impl ParkFlags {
 pub const CUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl MediaPlayerState {
+    /// The block's element in the flow that stands for it: its first video
+    /// output, else its first audio output. Finds the flow's pipeline, and is
+    /// where the internal pipeline's context messages are posted.
+    pub fn flow_anchor(&self) -> Option<&gst_app::AppSrc> {
+        self.video_appsrcs
+            .first()
+            .or_else(|| self.audio_appsrcs.first())
+    }
+
     /// `n` free slots.
     pub fn free_slots(n: usize) -> Mutex<Vec<Option<String>>> {
         Mutex::new(vec![None; n])
