@@ -281,21 +281,6 @@ fn vision_mixer_definition() -> BlockDefinition {
             live: false,
             persist: None,
         },
-        // GL download (GPU path only)
-        ExposedProperty {
-            name: "gl_download".to_string(),
-            label: "GL Download".to_string(),
-            description: "Download GPU memory to system memory on output. Disable to pass GL memory downstream (GPU path only).".to_string(),
-            property_type: PropertyType::Bool,
-            default_value: Some(PropertyValue::Bool(DEFAULT_GL_DOWNLOAD)),
-            mapping: PropertyMapping {
-                element_id: "_block".to_string(),
-                property_name: "gl_download".to_string(),
-                transform: None,
-            },
-            live: false,
-            persist: None,
-        },
         // Shader FX engine (GPU path only)
         ExposedProperty {
             name: "enable_fx".to_string(),

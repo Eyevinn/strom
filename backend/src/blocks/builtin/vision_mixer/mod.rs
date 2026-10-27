@@ -18,7 +18,9 @@
 //! ```
 //!
 //! Distribution output: `dist_comp → capsfilter_dist → [pgm_out]`
-//! Multiview output: `mv_comp → gldownload_mv → videoconvert_pre_cairo → cairooverlay → capsfilter_mv → [multiview_out]`
+//! Multiview output: `mv_comp → capsfilter_mv → [multiview_out]`
+//!
+//! Both outputs carry GL memory; each consumer adapts its own input.
 
 pub(crate) mod activity;
 mod builder;

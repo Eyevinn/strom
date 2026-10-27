@@ -155,8 +155,6 @@ impl BlockBuilder for VisionMixerBuilder {
             (0..num_pips).map(|_| Vec::new()).collect();
 
         let output_format = properties::parse_output_format(props);
-        let gl_download =
-            properties::parse_bool(props, "gl_download", vision_mixer::DEFAULT_GL_DOWNLOAD);
         let show_vu_meters = properties::parse_show_vu_meters(props);
         let enable_fx = properties::parse_bool(props, "enable_fx", vision_mixer::DEFAULT_ENABLE_FX);
         let swap_pvw_pgm =
@@ -203,7 +201,6 @@ impl BlockBuilder for VisionMixerBuilder {
             mv_framerate,
             backend,
             output_format,
-            gl_download,
             show_vu_meters,
             enable_fx,
             swap_pvw_pgm,
@@ -243,7 +240,6 @@ pub(super) struct PipelineParams<'a> {
     pub(super) mv_framerate: (i32, i32),
     pub(super) backend: CompositorBackend,
     pub(super) output_format: Option<String>,
-    pub(super) gl_download: bool,
     pub(super) show_vu_meters: bool,
     /// Build shader FX slots (GPU pipeline only; the CPU builder ignores it).
     pub(super) enable_fx: bool,

@@ -5,6 +5,7 @@
 
 pub mod block;
 pub mod bus;
+pub mod download;
 pub mod manager;
 pub mod state;
 

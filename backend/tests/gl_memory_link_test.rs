@@ -5,8 +5,8 @@
 //! `video/x-raw(memory:GLMemory)` producer and the link is refused before any
 //! caps are negotiated. Nothing retries a link that failed for want of a common
 //! format, so without the fallback the consumer and everything below it carry
-//! no data while the flow reports Playing: a GPU Vision Mixer with
-//! `gl_download` off feeds a Video Encoder nothing.
+//! no data while the flow reports Playing: a GPU Vision Mixer, which emits GL
+//! memory, feeds a Video Encoder nothing.
 //!
 //! The linker adapts such a pair with a `gldownload`, and only such a pair.
 //! These tests build a real pipeline through `PipelineManager`, which links at

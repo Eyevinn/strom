@@ -67,10 +67,6 @@ pub fn mixer_block(block_id: &str, backend: Backend) -> strom_types::BlockInstan
         "multiview_resolution".to_string(),
         PV::String(format!("{W}x{H}")),
     );
-    if backend == Backend::Gpu {
-        // Download PGM to system memory so the appsink can map pixels.
-        p.insert("gl_download".to_string(), PV::Bool(true));
-    }
     strom_types::BlockInstance {
         id: block_id.to_string(),
         block_definition_id: "builtin.vision_mixer".to_string(),
@@ -82,7 +78,9 @@ pub fn mixer_block(block_id: &str, backend: Backend) -> strom_types::BlockInstan
     }
 }
 
-/// PGM measured in RGBA, whatever the mixer negotiated.
+/// PGM measured in RGBA, whatever the mixer negotiated. The GPU mixer emits GL
+/// memory, so the tap downloads it first: a `videoconvert` accepts GL memory
+/// and passes it on unconverted.
 pub fn add_pgm_tap(flow: &mut Flow, block_id: &str) {
     flow.elements.push(elem("pgmconv", "videoconvert", vec![]));
     flow.elements.push(elem(
@@ -100,12 +98,17 @@ pub fn add_pgm_tap(flow: &mut Flow, block_id: &str) {
         ],
     ));
     for (from, to) in [
-        (format!("{block_id}:pgm_out"), "pgmconv:sink".to_string()),
         ("pgmconv:src".to_string(), "pgmcaps:sink".to_string()),
         ("pgmcaps:src".to_string(), "pgmsink:sink".to_string()),
     ] {
         flow.links.push(strom_types::Link { from, to });
     }
+    common::download::link_through_download(
+        flow,
+        "pgm",
+        &format!("{block_id}:pgm_out"),
+        "pgmconv:sink",
+    );
 }
 
 pub fn link(flow: &mut Flow, from: &str, to: &str) {
