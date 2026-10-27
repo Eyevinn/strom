@@ -9,7 +9,6 @@ use tracing::info;
 use super::super::{elements, layout};
 use super::{audio_meter, pad_layout, setup_overlay_renderer, PipelineParams};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult};
-use crate::gpu;
 use crate::gst::download_front;
 use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 
@@ -155,9 +154,7 @@ pub(super) fn build_cpu_pipeline(
         let vc_id_dsk = p.id(&format!("videoconvert_dsk_{}", i));
 
         let queue = elements::make_queue(&q_id)?;
-        let videoconvert = elements::make_element(VIDEO_CONVERT_FACTORY, &vc_id_dsk)?;
-        gpu::configure_video_convert(&videoconvert);
-        let (front_id, front) = input_front(p, &format!("dsk_in_{}", i), &videoconvert)?;
+        let (front_id, front, videoconvert) = input_front(p, &format!("dsk_in_{}", i), &vc_id_dsk)?;
 
         elems.push((q_id.clone(), queue));
         elems.push((front_id.clone(), front));
@@ -187,10 +184,8 @@ pub(super) fn build_cpu_pipeline(
         let q_id = p.id("queue_stinger");
         let vc_id = p.id("videoconvert_stinger");
         let crop_id = p.id("videocrop_stinger");
-        let videoconvert = elements::make_element(VIDEO_CONVERT_FACTORY, &vc_id)?;
-        gpu::configure_video_convert(&videoconvert);
-        let (front_id, front) =
-            input_front(p, strom_types::stinger::STINGER_INPUT_PAD, &videoconvert)?;
+        let (front_id, front, videoconvert) =
+            input_front(p, strom_types::stinger::STINGER_INPUT_PAD, &vc_id)?;
         elems.push((q_id.clone(), elements::make_queue(&q_id)?));
         elems.push((front_id.clone(), front));
         elems.push((vc_id.clone(), videoconvert));
@@ -370,8 +365,8 @@ pub(super) fn build_cpu_pipeline(
         let tee_id = p.id(&format!("tee_{}", i));
 
         let queue = elements::make_queue(&q_id)?;
-        let videoconvert = elements::make_element(VIDEO_CONVERT_FACTORY, &vc_in_id)?;
-        let (front_id, front) = input_front(p, &format!("video_in_{}", i), &videoconvert)?;
+        let (front_id, front, videoconvert) =
+            input_front(p, &format!("video_in_{}", i), &vc_in_id)?;
         let tee = elements::make_tee(&tee_id)?;
 
         elems.push((q_id.clone(), queue));
@@ -663,33 +658,25 @@ pub(super) fn build_cpu_pipeline(
     })
 }
 
-/// The front of the input `pad`: an `identity` linked between the input's
-/// queue and `videoconvert`. The software compositor takes system memory only,
-/// and what reaches an input is known only from its caps (a decoder
-/// `decodebin` picks, a GPU Vision Mixer upstream), so the front downloads GL,
-/// CUDA, D3D12 or D3D11 memory through `gst::download_front`, and fails the
-/// flow with an element error for memory nothing downloads.
+/// The front of the input `pad`, an `identity`, and the `videoconvert`
+/// (`convert_id`) behind it. Returns the front's id, the front and the
+/// converter; the caller links them. The software compositor takes system
+/// memory only, and what reaches an input is known only from its caps (a
+/// decoder `decodebin` picks, a GPU Vision Mixer upstream), so the front
+/// downloads GL, CUDA, D3D12 or D3D11 memory through `gst::download_front`,
+/// and fails the flow with an element error for memory nothing downloads.
 fn input_front(
     p: &PipelineParams,
     pad: &str,
-    videoconvert: &gst::Element,
-) -> Result<(String, gst::Element), BlockBuildError> {
+    convert_id: &str,
+) -> Result<(String, gst::Element, gst::Element), BlockBuildError> {
     let id = p.id(&format!("{}_front", pad));
-    let front = gst::ElementFactory::make("identity")
-        .name(&id)
-        .property("silent", true)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {}", e)))?;
-    let convert_sink = videoconvert
-        .static_pad("sink")
-        .ok_or_else(|| BlockBuildError::ElementCreation("videoconvert has no sink pad".into()))?;
-    download_front::install(
-        &front,
-        &convert_sink,
+    let download_front::ConvertFront { front, convert } = download_front::convert_front(
         &id,
+        convert_id,
         &format!("Vision Mixer {} (software compositor)", pad),
-    );
-    Ok((id, front))
+    )?;
+    Ok((id, front, convert))
 }
 
 /// System-memory caps `videocrop` can actually crop, read from its sink pad

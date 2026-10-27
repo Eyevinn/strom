@@ -21,7 +21,6 @@
 //! - capsfilter: Sets output caps for proper codec negotiation
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
-use crate::gpu;
 use crate::gst::download_front;
 use crate::gst::pipeline::properties::set_property_checked;
 use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
@@ -133,31 +132,16 @@ impl BlockBuilder for VideoEncBuilder {
         let encoder_id = format!("{}:encoder", instance_id);
         let capsfilter_id = format!("{}:capsfilter", instance_id);
 
-        let input = gst::ElementFactory::make("identity")
-            .name(&input_id)
-            .property("silent", true)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {}", e)))?;
-
-        let videoconvert = gst::ElementFactory::make(VIDEO_CONVERT_FACTORY)
-            .name(&convert_id)
-            .build()
-            .map_err(|e| {
-                BlockBuildError::ElementCreation(format!("{}: {}", VIDEO_CONVERT_FACTORY, e))
-            })?;
-        gpu::configure_video_convert(&videoconvert);
-
         // What arrives depends on the producer, often a decoder `decodebin`
         // picks at runtime, so the memory is adapted from the negotiated caps.
-        let convert_sink = videoconvert.static_pad("sink").ok_or_else(|| {
-            BlockBuildError::ElementCreation("videoconvert has no sink pad".into())
-        })?;
-        download_front::install(
-            &input,
-            &convert_sink,
+        let download_front::ConvertFront {
+            front: input,
+            convert: videoconvert,
+        } = download_front::convert_front(
             &input_id,
+            &convert_id,
             &format!("Video Encoder ({})", encoder_name),
-        );
+        )?;
 
         let encoder = gst::ElementFactory::make(&encoder_name)
             .name(&encoder_id)

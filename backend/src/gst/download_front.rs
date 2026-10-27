@@ -50,7 +50,8 @@
 //! The adapters follow the caps both ways: a producer that switches from CUDA
 //! to system memory gets its download taken out again.
 
-use crate::gst::video_adapt::{self, Adapter, Consumer, Refusal};
+use crate::blocks::BlockBuildError;
+use crate::gst::video_adapt::{self, Adapter, Consumer, Refusal, VIDEO_CONVERT_FACTORY};
 use crate::gst::video_input_bridge::resplice;
 use gstreamer as gst;
 use gstreamer::glib;
@@ -133,6 +134,47 @@ pub fn install(front: &gst::Element, consumer_sink: &gst::Pad, label: &str, cons
         on_caps(&state, pad, caps_event.caps());
         gst::PadProbeReturn::Ok
     });
+}
+
+/// An input's front and the `videoconvert` behind it, built by
+/// [`convert_front`]. The caller adds both to its block and links `front`'s
+/// `src` to `convert`'s `sink`.
+pub struct ConvertFront {
+    pub front: gst::Element,
+    pub convert: gst::Element,
+}
+
+/// Build the front an input with a converter behind it needs:
+/// `front_id` (`identity`, `silent=true`) and `convert_id` (plain
+/// `videoconvert`, set up by [`crate::gpu::configure_video_convert`]), with
+/// [`install`] watching the front for `consumer`.
+///
+/// Video Encoder, NDI Output and the CPU Vision Mixer's inputs build their
+/// input this way. The `videoconvert` passes GPU memory its consumer lists
+/// straight through and converts system memory; the front downloads the GPU
+/// memory the consumer leaves out. `consumer` names the consumer in errors.
+pub fn convert_front(
+    front_id: &str,
+    convert_id: &str,
+    consumer: &str,
+) -> Result<ConvertFront, BlockBuildError> {
+    let front = gst::ElementFactory::make("identity")
+        .name(front_id)
+        .property("silent", true)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {}", e)))?;
+    let convert = gst::ElementFactory::make(VIDEO_CONVERT_FACTORY)
+        .name(convert_id)
+        .build()
+        .map_err(|e| {
+            BlockBuildError::ElementCreation(format!("{}: {}", VIDEO_CONVERT_FACTORY, e))
+        })?;
+    crate::gpu::configure_video_convert(&convert);
+    let convert_sink = convert.static_pad("sink").ok_or_else(|| {
+        BlockBuildError::ElementCreation(format!("{} has no sink pad", VIDEO_CONVERT_FACTORY))
+    })?;
+    install(&front, &convert_sink, front_id, consumer);
+    Ok(ConvertFront { front, convert })
 }
 
 /// A decision, with the consumer's caps it was made against (for errors).
