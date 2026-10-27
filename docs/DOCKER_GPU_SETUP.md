@@ -207,7 +207,11 @@ ls -la /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so*
 # CUDA call failed: CUDA_ERROR_OPERATING_SYSTEM
 
 # Causes:
-# 1. WSL2 - CUDA-GL interop not supported (use software fallback)
+# 1. WSL2 - CUDA-GL interop is not supported, and Strom no longer falls back
+#    on its own. It fails at the link where CUDA memory (e.g. from nvh264dec)
+#    meets a GL consumer (e.g. the GPU Vision Mixer): cudadownload hands GL
+#    memory across that link. On WSL2, feed GL consumers from a software
+#    decoder, or use the CPU Vision Mixer.
 # 2. Wrong GL backend - ensure GST_GL_WINDOW=egl-device
 # 3. Missing EGL device - check /dev/dri/card* permissions
 ```
