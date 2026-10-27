@@ -10,7 +10,7 @@
 //! within one run), its slot is released and its decoder removed, so the
 //! stream that replaces it gets the same slot and output.
 
-use crate::blocks::builtin::whep::explicit_track_count;
+use crate::blocks::builtin::inputs::explicit_track_count;
 use crate::blocks::{BlockBuildContext, BlockBuildError};
 use gstreamer as gst;
 use gstreamer::prelude::*;
