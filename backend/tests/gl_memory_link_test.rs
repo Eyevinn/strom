@@ -48,10 +48,9 @@ fn build_manager(flow: &Flow) -> PipelineManager {
 
 /// `source` feeding a bare `videoconvert -> x264enc -> fakesink`.
 ///
-/// The consumer is spelled out rather than taken from `builtin.videoenc` so the
-/// test does not depend on which converter `video_convert_mode` picks: on a
-/// CUDA host that is `autovideoconvert`, whose sink pad accepts anything and
-/// would link to GL memory unaided.
+/// The consumer is spelled out rather than taken from `builtin.videoenc`: the
+/// block's input front lists GL memory it can download in its answer to a link
+/// check, so it links to GL memory without the linker's retry.
 fn flow_into_encoder(name: &str, source: strom_types::Element) -> Flow {
     let link = (format!("{}:src", source.id), "convert:sink".to_string());
     flow_into_encoder_via(name, source, link)
@@ -188,9 +187,10 @@ async fn a_system_memory_producer_is_left_alone() {
     );
 }
 
-/// The block the defect was reported against, with the converter its own
-/// platform picks. Asserts only that the link stands: on a CUDA host
-/// `autovideoconvert` takes GL memory directly and no download is inserted.
+/// The block the defect was reported against. Asserts only that the link
+/// stands: whether a download goes in depends on the encoder (`nvh264enc`
+/// takes GL memory directly) and is decided by the block's input front from
+/// the negotiated caps.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_gl_only_producer_reaches_the_video_encoder_block() {
     gstreamer::init().unwrap();
