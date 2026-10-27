@@ -3,12 +3,12 @@
     Prepares a minimal GStreamer runtime bundle for the Strom MSI installer.
 
 .DESCRIPTION
-    Downloads the GStreamer runtime MSI and extracts only the necessary
+    Downloads the GStreamer installer and extracts only the necessary
     components for Strom to function. This creates a smaller bundle by
     excluding development files, documentation, and unused plugins.
 
 .PARAMETER Version
-    GStreamer version to download (default: 1.26.10)
+    GStreamer version to download (default: 1.28.8)
 
 .PARAMETER OutputDir
     Directory to extract files to (default: gstreamer-bundle)
@@ -19,7 +19,7 @@
 #>
 
 param(
-    [string]$Version = "1.26.10",
+    [string]$Version = "1.28.8",
     [string]$OutputDir = "gstreamer-bundle",
     [switch]$Full
 )
@@ -28,12 +28,13 @@ $ErrorActionPreference = "Stop"
 
 # GStreamer download URL from Eyevinn mirror (freedesktop.org blocks CI)
 $BaseUrl = "https://github.com/Eyevinn/strom/releases/download/gstreamer-deps"
-$MsiFile = "gstreamer-1.0-msvc-x86_64-$Version.msi"
-$MsiUrl = "$BaseUrl/$MsiFile"
+# Since 1.28 upstream ships one Inno Setup installer instead of MSIs.
+$InstallerFile = "gstreamer-1.0-msvc-x86_64-$Version.exe"
+$InstallerUrl = "$BaseUrl/$InstallerFile"
 
 # Temporary extraction directory
 $TempDir = "gstreamer-temp"
-$GstRoot = "$TempDir\gstreamer\1.0\msvc_x86_64"
+$GstRoot = "$((Get-Location).Path)\$TempDir"
 
 Write-Host "=== Preparing GStreamer Runtime Bundle ===" -ForegroundColor Cyan
 Write-Host "Version: $Version"
@@ -50,19 +51,26 @@ if (Test-Path $OutputDir) {
     Remove-Item -Recurse -Force $OutputDir
 }
 
-# Download GStreamer MSI
-if (-not (Test-Path $MsiFile)) {
-    Write-Host "Downloading GStreamer runtime from $MsiUrl..."
-    Invoke-WebRequest -Uri $MsiUrl -OutFile $MsiFile -UseBasicParsing
-    Write-Host "Download complete: $((Get-Item $MsiFile).Length / 1MB) MB"
+# Download the GStreamer installer
+if (-not (Test-Path $InstallerFile)) {
+    Write-Host "Downloading GStreamer from $InstallerUrl..."
+    Invoke-WebRequest -Uri $InstallerUrl -OutFile $InstallerFile -UseBasicParsing
+    Write-Host "Download complete: $((Get-Item $InstallerFile).Length / 1MB) MB"
 } else {
-    Write-Host "Using existing download: $MsiFile"
+    Write-Host "Using existing download: $InstallerFile"
 }
 
-# Extract MSI using msiexec to a temp directory
-Write-Host "Extracting GStreamer MSI..."
-$installArgs = "/a `"$((Get-Location).Path)\$MsiFile`" /qn TARGETDIR=`"$((Get-Location).Path)\$TempDir`""
-Start-Process msiexec.exe -ArgumentList $installArgs -Wait -NoNewWindow
+# Unpack the runtime into a temp directory. /portable=1 writes no
+# uninstaller, environment variable or registry key and skips the Visual C++
+# Redistributable; /TYPE=runtime takes every runtime component and no
+# development files.
+Write-Host "Unpacking GStreamer..."
+$p = Start-Process ".\$InstallerFile" -Wait -NoNewWindow -PassThru `
+    -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /portable=1 /TYPE=runtime /DIR=`"$GstRoot`""
+if ($p.ExitCode -ne 0) {
+    Write-Error "GStreamer installer failed with exit code $($p.ExitCode)"
+    exit 1
+}
 
 if (-not (Test-Path $GstRoot)) {
     Write-Error "Extraction failed - GStreamer root not found at $GstRoot"

@@ -244,29 +244,33 @@ jobs:
       - name: Install GStreamer (Windows)
         if: matrix.platform == 'windows'
         run: |
-          $GSTREAMER_VERSION = "1.26.10"
+          $ErrorActionPreference = "Stop"
+          $GSTREAMER_VERSION = "1.28.8"
           $BASE_URL = "https://github.com/Eyevinn/strom/releases/download/gstreamer-deps"
+          $GST_ROOT = "D:\gstreamer\1.0\msvc_x86_64"
 
-          # Download and install runtime from our GitHub mirror
-          Write-Host "Downloading GStreamer runtime from GitHub mirror..."
-          Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer.msi
-          Write-Host "Installing GStreamer runtime..."
-          Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer.msi /quiet /qn INSTALLDIR=D:\gstreamer'
-
-          # Download and install development files from our GitHub mirror
-          Write-Host "Downloading GStreamer development files from GitHub mirror..."
-          Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-devel-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer-devel.msi
-          Write-Host "Installing GStreamer development files..."
-          Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer-devel.msi /quiet /qn INSTALLDIR=D:\gstreamer'
+          # Since 1.28 upstream ships one Inno Setup installer with the
+          # development files as components; /TYPE=devel installs every
+          # runtime component plus headers and .pc files. See ci.yml.
+          Write-Host "Downloading GStreamer $GSTREAMER_VERSION from GitHub mirror..."
+          $ProgressPreference = "SilentlyContinue"
+          Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-msvc-x86_64-$GSTREAMER_VERSION.exe" -OutFile gstreamer.exe
+          Write-Host "Installing GStreamer..."
+          $p = Start-Process .\gstreamer.exe -Wait -NoNewWindow -PassThru `
+            -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /TYPE=devel /DIR=$GST_ROOT /LOG=gstreamer-install.log"
+          if ($p.ExitCode -ne 0) {
+            Get-Content gstreamer-install.log -Tail 50
+            throw "GStreamer installer failed with exit code $($p.ExitCode)"
+          }
 
           # Install pkg-config via Chocolatey (still needed)
           # --allow-empty-checksums needed because pkgconfiglite downloads from HTTP
           choco install pkgconfiglite --yes --no-progress --allow-empty-checksums
 
           # Set environment variables
-          echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=D:\gstreamer\1.0\msvc_x86_64\" >> $env:GITHUB_ENV
-          echo "D:\gstreamer\1.0\msvc_x86_64\bin" >> $env:GITHUB_PATH
-          echo "PKG_CONFIG_PATH=D:\gstreamer\1.0\msvc_x86_64\lib\pkgconfig" >> $env:GITHUB_ENV
+          echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=$GST_ROOT\" >> $env:GITHUB_ENV
+          echo "$GST_ROOT\bin" >> $env:GITHUB_PATH
+          echo "PKG_CONFIG_PATH=$GST_ROOT\lib\pkgconfig" >> $env:GITHUB_ENV
 
       # macOS: Install GStreamer via Homebrew
       # Set PKG_CONFIG_PATH to ensure correct library paths are found

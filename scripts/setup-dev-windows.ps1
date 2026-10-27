@@ -29,7 +29,7 @@
 
 param(
     [switch]$SkipGStreamer,
-    [string]$GStreamerVersion = "1.26.10"
+    [string]$GStreamerVersion = "1.28.8"
 )
 
 $ErrorActionPreference = "Stop"
@@ -167,27 +167,28 @@ if (-not $SkipGStreamer) {
         $tempDir = "$env:TEMP\gstreamer-install"
         New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
-        # Download from Strom GitHub releases mirror (freedesktop.org blocks automated downloads)
+        # Download from Strom GitHub releases mirror (freedesktop.org blocks automated downloads).
+        # Since 1.28 upstream ships one Inno Setup installer; the development
+        # files are a component of it, not a separate devel MSI.
         $baseUrl = "https://github.com/Eyevinn/strom/releases/download/gstreamer-deps"
-        $runtimeMsi = "gstreamer-1.0-msvc-x86_64-$GStreamerVersion.msi"
-        $develMsi = "gstreamer-1.0-devel-msvc-x86_64-$GStreamerVersion.msi"
+        $installer = "gstreamer-1.0-msvc-x86_64-$GStreamerVersion.exe"
 
         # Disable progress bar for much faster downloads
         $ProgressPreference = 'SilentlyContinue'
 
-        Write-Host "Downloading GStreamer runtime from GitHub mirror..."
-        Invoke-WebRequest -Uri "$baseUrl/$runtimeMsi" -OutFile "$tempDir\$runtimeMsi"
-
-        Write-Host "Downloading GStreamer development SDK from GitHub mirror..."
-        Invoke-WebRequest -Uri "$baseUrl/$develMsi" -OutFile "$tempDir\$develMsi"
+        Write-Host "Downloading GStreamer from GitHub mirror..."
+        Invoke-WebRequest -Uri "$baseUrl/$installer" -OutFile "$tempDir\$installer"
 
         $ProgressPreference = 'Continue'
 
-        Write-Host "Installing GStreamer runtime..."
-        Start-Process msiexec.exe -ArgumentList "/i `"$tempDir\$runtimeMsi`" /quiet /norestart INSTALLDIR=C:\gstreamer" -Wait
-
-        Write-Host "Installing GStreamer development SDK..."
-        Start-Process msiexec.exe -ArgumentList "/i `"$tempDir\$develMsi`" /quiet /norestart INSTALLDIR=C:\gstreamer" -Wait
+        # /TYPE=devel: every runtime component (all plugin groups) plus headers
+        # and pkg-config files. /DIR is the msvc_x86_64 root itself.
+        Write-Host "Installing GStreamer runtime and development files..."
+        $p = Start-Process "$tempDir\$installer" -Wait -PassThru `
+            -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /TYPE=devel /DIR=`"$gstreamerRoot`""
+        if ($p.ExitCode -ne 0) {
+            throw "GStreamer installer failed with exit code $($p.ExitCode)"
+        }
 
         Remove-Item -Recurse -Force $tempDir
     }

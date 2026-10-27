@@ -20,7 +20,7 @@ on:
         default: true
 
 env:
-  GSTREAMER_VERSION: "1.26.10"
+  GSTREAMER_VERSION: "1.28.8"
 
 jobs:
   build-msi:
@@ -72,10 +72,12 @@ jobs:
           $version = "${{ env.GSTREAMER_VERSION }}"
           $baseUrl = "https://github.com/${{ github.repository }}/releases/download/gstreamer-deps"
 
-          Write-Host "Downloading GStreamer $version runtime MSI..."
-          Invoke-WebRequest -Uri "$baseUrl/gstreamer-1.0-msvc-x86_64-$version.msi" -OutFile "gstreamer.msi"
+          # Since 1.28 upstream ships one Inno Setup installer instead of MSIs.
+          Write-Host "Downloading GStreamer $version installer..."
+          $ProgressPreference = "SilentlyContinue"
+          Invoke-WebRequest -Uri "$baseUrl/gstreamer-1.0-msvc-x86_64-$version.exe" -OutFile "gstreamer.exe"
 
-          Write-Host "Download complete: $((Get-Item gstreamer.msi).Length / 1MB) MB"
+          Write-Host "Download complete: $((Get-Item gstreamer.exe).Length / 1MB) MB"
 
       - name: Install Graphviz via Chocolatey
         shell: pwsh
@@ -99,32 +101,30 @@ jobs:
           $buildDir = "installer/windows/build"
           New-Item -ItemType Directory -Path $buildDir -Force | Out-Null
 
-          # Extract GStreamer MSI
-          Write-Host "Extracting GStreamer MSI..."
-          Write-Host "MSI file size: $((Get-Item gstreamer.msi).Length / 1MB) MB"
-          $installArgs = "/a `"$((Get-Location).Path)\gstreamer.msi`" /qn TARGETDIR=`"$((Get-Location).Path)\gst-temp`""
-          $process = Start-Process msiexec.exe -ArgumentList $installArgs -Wait -NoNewWindow -PassThru
-          Write-Host "msiexec exit code: $($process.ExitCode)"
-
-          # Debug: List extracted contents
-          Write-Host "Listing gst-temp contents:"
-          if (Test-Path "gst-temp") {
-            Get-ChildItem -Path "gst-temp" -Recurse -Depth 3 | Select-Object FullName | Format-Table -AutoSize
-          } else {
-            Write-Host "ERROR: gst-temp directory does not exist!"
+          # Unpack the GStreamer runtime into a scratch directory. /portable=1
+          # is the installer's own switch for that: it writes no uninstaller,
+          # no environment variable or registry key, and skips the Visual C++
+          # Redistributable task, so the runner's system is left as it was.
+          # /TYPE=runtime selects every runtime component (all plugin groups)
+          # and no headers, .pc files or debug symbols.
+          $gstRoot = "$((Get-Location).Path)\gst-temp"
+          Write-Host "Unpacking GStreamer to $gstRoot..."
+          $p = Start-Process .\gstreamer.exe -Wait -NoNewWindow -PassThru `
+            -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /portable=1 /TYPE=runtime /DIR=`"$gstRoot`" /LOG=gstreamer-install.log"
+          if ($p.ExitCode -ne 0) {
+            Get-Content gstreamer-install.log -Tail 50
+            Write-Host "ERROR: GStreamer installer failed with exit code $($p.ExitCode)"
             exit 1
           }
 
-          # GStreamer MSI extracts to PFiles64/gstreamer/... structure
-          $gstRoot = "gst-temp\PFiles64\gstreamer\1.0\msvc_x86_64"
-
-          # Verify extraction succeeded
-          if (-not (Test-Path "$gstRoot\bin")) {
-            Write-Host "ERROR: Expected path $gstRoot\bin does not exist!"
-            Write-Host "Available directories in gst-temp:"
-            Get-ChildItem -Path "gst-temp" -Recurse -Directory | Select-Object FullName
-            exit 1
+          foreach ($d in @("bin", "lib\gstreamer-1.0", "libexec\gstreamer-1.0")) {
+            if (-not (Test-Path "$gstRoot\$d")) {
+              Write-Host "ERROR: Expected path $gstRoot\$d does not exist!"
+              Get-ChildItem -Path $gstRoot -Directory | Select-Object FullName
+              exit 1
+            }
           }
+          Write-Host "Unpacked $((Get-ChildItem "$gstRoot\bin\*.dll").Count) DLLs, $((Get-ChildItem "$gstRoot\lib\gstreamer-1.0\*.dll").Count) plugins"
 
           # Create bundle directories
           $bundleDir = "$buildDir\gstreamer-bundle"

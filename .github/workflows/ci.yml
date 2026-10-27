@@ -631,42 +631,52 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $GSTREAMER_VERSION = "1.26.10"
+          $GSTREAMER_VERSION = "1.28.8"
           $BASE_URL = "https://github.com/Eyevinn/strom/releases/download/gstreamer-deps"
+          $GST_ROOT = "D:\gstreamer\1.0\msvc_x86_64"
 
+          # Since 1.28 upstream ships one Inno Setup installer per arch, with
+          # the development files as components of it, instead of a runtime
+          # and a devel MSI.
+          Write-Host "Downloading GStreamer $GSTREAMER_VERSION..."
+          $ProgressPreference = "SilentlyContinue"
+          Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-msvc-x86_64-$GSTREAMER_VERSION.exe" -OutFile gstreamer.exe
+
+          # /TYPE=devel is "Runtime and development headers": every runtime
+          # component (x264enc's codecs-gpl-restricted group included) is a
+          # member of that type, plus the headers and .pc files. It replaces
+          # ADDLOCAL=ALL, without which the MSI left out plugin groups and
+          # both recorder tests skipped green on this runner alone. /DIR is the
+          # msvc_x86_64 root itself, not the parent INSTALLDIR the MSI took.
+          #
           # Start-Process discards the exit code without -PassThru, so a failed
           # install reads as green here and surfaces 20 minutes later as a
           # missing element, which looks like a broken test rather than a
           # broken install.
-          function Install-Msi($Path, $Label) {
-            Write-Host "Installing $Label..."
-            $p = Start-Process msiexec.exe -Wait -NoNewWindow -PassThru `
-              -ArgumentList "/i $Path /quiet /qn ADDLOCAL=ALL INSTALLDIR=D:\gstreamer"
-            if ($p.ExitCode -ne 0) {
-              throw "msiexec failed for $Label with exit code $($p.ExitCode)"
+          Write-Host "Installing GStreamer $GSTREAMER_VERSION..."
+          $p = Start-Process .\gstreamer.exe -Wait -NoNewWindow -PassThru `
+            -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /TYPE=devel /DIR=$GST_ROOT /LOG=gstreamer-install.log"
+          if ($p.ExitCode -ne 0) {
+            Get-Content gstreamer-install.log -Tail 50
+            throw "GStreamer installer failed with exit code $($p.ExitCode)"
+          }
+          # A component selection that silently shrinks fails here, not as a
+          # skipped test: x264enc stands for the optional plugin groups, the
+          # .pc file for the development files.
+          foreach ($f in @("lib\gstreamer-1.0\gstx264.dll", "lib\pkgconfig\gstreamer-1.0.pc", "include\gstreamer-1.0\gst\gst.h")) {
+            if (-not (Test-Path "$GST_ROOT\$f")) {
+              throw "GStreamer install is missing $f"
             }
           }
-
-          Write-Host "Downloading GStreamer runtime..."
-          Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer.msi
-          # ADDLOCAL=ALL: without it msiexec installs the MSI's default feature
-          # set, which leaves out plugin groups the tests need — x264enc
-          # (gst-plugins-ugly) among them, which made both recorder tests skip
-          # green on this runner alone.
-          Install-Msi "gstreamer.msi" "GStreamer runtime"
-
-          Write-Host "Downloading GStreamer development files..."
-          Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-devel-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer-devel.msi
-          Install-Msi "gstreamer-devel.msi" "GStreamer development files"
 
           choco install pkgconfiglite --yes --no-progress --allow-empty-checksums
           if ($LASTEXITCODE -ne 0) {
             throw "choco install pkgconfiglite failed with exit code $LASTEXITCODE"
           }
 
-          echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=D:\gstreamer\1.0\msvc_x86_64\" >> $env:GITHUB_ENV
-          echo "D:\gstreamer\1.0\msvc_x86_64\bin" >> $env:GITHUB_PATH
-          echo "PKG_CONFIG_PATH=D:\gstreamer\1.0\msvc_x86_64\lib\pkgconfig" >> $env:GITHUB_ENV
+          echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=$GST_ROOT\" >> $env:GITHUB_ENV
+          echo "$GST_ROOT\bin" >> $env:GITHUB_PATH
+          echo "PKG_CONFIG_PATH=$GST_ROOT\lib\pkgconfig" >> $env:GITHUB_ENV
 
       - name: Download frontend dist
         uses: actions/download-artifact@v8
