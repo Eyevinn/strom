@@ -29,7 +29,7 @@
 
 param(
     [switch]$SkipGStreamer,
-    [string]$GStreamerVersion = "1.26.10"
+    [string]$GStreamerVersion = "1.28.8"
 )
 
 $ErrorActionPreference = "Stop"
@@ -161,33 +161,62 @@ if (-not $SkipGStreamer) {
 
     $gstreamerRoot = "C:\gstreamer\1.0\msvc_x86_64"
 
+    $needInstall = $true
     if (Test-Path $gstreamerRoot) {
-        Write-Host "GStreamer already installed at $gstreamerRoot" -ForegroundColor Yellow
-    } else {
+        $installed = $null
+        $inspect = "$gstreamerRoot\bin\gst-inspect-1.0.exe"
+        if (Test-Path $inspect) {
+            $out = & $inspect --version 2>$null | Out-String
+            if ($out -match 'GStreamer (\d+\.\d+\.\d+)') { $installed = $Matches[1] }
+        }
+        if ($installed -and ([version]$installed -ge [version]$GStreamerVersion)) {
+            Write-Host "GStreamer $installed already installed at $gstreamerRoot" -ForegroundColor Yellow
+            $needInstall = $false
+        } elseif (Test-Path "$gstreamerRoot\unins000.exe") {
+            # An earlier install from the same Inno Setup installer (1.28 or
+            # later): running the newer installer upgrades it in place.
+            Write-Host "Upgrading GStreamer $installed at $gstreamerRoot to $GStreamerVersion" -ForegroundColor Yellow
+        } else {
+            # GStreamer 1.26 and older came as two MSIs (runtime and devel).
+            # The 1.28 installer does not replace them, so they have to go first.
+            $found = if ($installed) { "GStreamer $installed" } else { "A GStreamer install of unknown version" }
+            throw @"
+$found is at $gstreamerRoot, older than $GStreamerVersion and installed from the MSIs.
+Uninstall it first, then run this script again:
+  1. Settings > Apps > Installed apps: uninstall both GStreamer entries (the runtime and the development MSI).
+  2. Delete C:\gstreamer if anything is left behind.
+Or keep the old version with -SkipGStreamer.
+"@
+        }
+    }
+
+    if ($needInstall) {
         $tempDir = "$env:TEMP\gstreamer-install"
         New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
-        # Download from Strom GitHub releases mirror (freedesktop.org blocks automated downloads)
+        # Download from Strom GitHub releases mirror (freedesktop.org blocks automated downloads).
+        # Since 1.28 upstream ships one Inno Setup installer; the development
+        # files are a component of it, not a separate devel MSI.
         $baseUrl = "https://github.com/Eyevinn/strom/releases/download/gstreamer-deps"
-        $runtimeMsi = "gstreamer-1.0-msvc-x86_64-$GStreamerVersion.msi"
-        $develMsi = "gstreamer-1.0-devel-msvc-x86_64-$GStreamerVersion.msi"
+        $installer = "gstreamer-1.0-msvc-x86_64-$GStreamerVersion.exe"
 
         # Disable progress bar for much faster downloads
         $ProgressPreference = 'SilentlyContinue'
 
-        Write-Host "Downloading GStreamer runtime from GitHub mirror..."
-        Invoke-WebRequest -Uri "$baseUrl/$runtimeMsi" -OutFile "$tempDir\$runtimeMsi"
-
-        Write-Host "Downloading GStreamer development SDK from GitHub mirror..."
-        Invoke-WebRequest -Uri "$baseUrl/$develMsi" -OutFile "$tempDir\$develMsi"
+        Write-Host "Downloading GStreamer from GitHub mirror..."
+        Invoke-WebRequest -Uri "$baseUrl/$installer" -OutFile "$tempDir\$installer"
 
         $ProgressPreference = 'Continue'
 
-        Write-Host "Installing GStreamer runtime..."
-        Start-Process msiexec.exe -ArgumentList "/i `"$tempDir\$runtimeMsi`" /quiet /norestart INSTALLDIR=C:\gstreamer" -Wait
-
-        Write-Host "Installing GStreamer development SDK..."
-        Start-Process msiexec.exe -ArgumentList "/i `"$tempDir\$develMsi`" /quiet /norestart INSTALLDIR=C:\gstreamer" -Wait
+        # /TYPE=devel: every runtime component (all plugin groups) plus headers
+        # and pkg-config files. /DIR is the msvc_x86_64 root itself.
+        Write-Host "Installing GStreamer runtime and development files..."
+        $p = Start-Process "$tempDir\$installer" -Wait -PassThru `
+            -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /TYPE=devel /DIR=`"$gstreamerRoot`" /LOG=`"$tempDir\gstreamer-install.log`""
+        if ($p.ExitCode -ne 0) {
+            if (Test-Path "$tempDir\gstreamer-install.log") { Get-Content "$tempDir\gstreamer-install.log" -Tail 50 }
+            throw "GStreamer installer failed with exit code $($p.ExitCode); log: $tempDir\gstreamer-install.log"
+        }
 
         Remove-Item -Recurse -Force $tempDir
     }
