@@ -230,18 +230,6 @@ fn device_download(adapters: &[Adapter]) -> Option<Adapter> {
         .find(|a| a.downloads_device_memory())
 }
 
-/// True when `factory`'s sink pad takes `caps`. `false` when it is not
-/// installed.
-fn factory_sink_takes(factory: &str, caps: &gst::CapsRef) -> bool {
-    gst::ElementFactory::find(factory)
-        .and_then(|f| {
-            f.static_pad_templates()
-                .into_iter()
-                .find(|t| t.direction() == gst::PadDirection::Sink)
-        })
-        .is_some_and(|t| caps.can_intersect(&t.caps()))
-}
-
 /// The memory a device-memory download takes, and the GStreamer plugin that
 /// provides it, for the error that says what is missing.
 fn download_origin(factory: &str) -> (&'static str, &'static str) {
@@ -388,7 +376,7 @@ fn on_query(front: &Front, pad: &gst::Pad, info: &mut gst::PadProbeInfo) -> gst:
         if !needs_convert && convert_in {
             let accepted =
                 if let Some(download) = device_download(adapters).filter(|_| !download_in) {
-                    factory_sink_takes(download.factory(), &caps)
+                    download.sink_takes(&caps)
                 } else {
                     front
                         .behind_convert()
@@ -577,8 +565,7 @@ fn convert_sink_caps() -> Option<&'static gst::Caps> {
             for (structure, features) in template.iter_with_features() {
                 if structure.name() == "video/x-raw"
                     && !features.is_any()
-                    && (features.contains(gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY)
-                        || !features.iter().any(|f| f.starts_with("memory:")))
+                    && video_adapt::is_system_memory(features)
                 {
                     system.append_structure(structure.to_owned());
                 }

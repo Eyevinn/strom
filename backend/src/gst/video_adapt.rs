@@ -4,9 +4,10 @@
 //! block adapts its own input. Several places learn only at runtime what a
 //! producer delivers, each at its own moment: a CAPS-event probe on the WHEP
 //! Output input ([`crate::gst::video_input_bridge`]), a link the linker retries
-//! after it was refused ([`crate::gst::gl_link`]), and query and CAPS-event
-//! probes on a GL consumer's input ([`crate::gst::gl_input_front`]). They keep their own
-//! timing, and ask [`decide`] what to insert. The thumbnail tap
+//! after it was refused ([`crate::gst::gl_link`]), query and CAPS-event
+//! probes on a GL consumer's input ([`crate::gst::gl_input_front`]), and query
+//! and CAPS-event probes on an encoder's input ([`crate::gst::download_front`]).
+//! They keep their own timing, and ask [`decide`] what to insert. The thumbnail tap
 //! ([`crate::gst::thumbnail_tap`]) asks too, from the caps already on its tee,
 //! before it attaches a branch that reads frames on the CPU.
 //!
@@ -18,6 +19,10 @@
 //! | [`Consumer::GlUpload`] | anything else | none |
 //! | [`Consumer::Accepts`] | raw video in GL memory only, consumer takes system-memory raw video | [`Adapter::GlDownload`] |
 //! | [`Consumer::Accepts`] | raw video in D3D12 or D3D11 memory only, consumer takes system-memory raw video and not that memory | [`Adapter::D3d12Download`] or [`Adapter::D3d11Download`] |
+//! | [`Consumer::Exactly`] | anything the consumer's caps take as it is | none |
+//! | [`Consumer::Exactly`] | raw video in GL, CUDA, D3D12 or D3D11 memory only, which the consumer's caps leave out, consumer takes system-memory raw video | [`Adapter::GlDownload`], [`Adapter::CudaDownload`], [`Adapter::D3d12Download`] or [`Adapter::D3d11Download`] |
+//! | [`Consumer::Exactly`] | raw video in any other memory the consumer's caps leave out | [`Refusal::UnsupportedMemory`] |
+//! | [`Consumer::Exactly`] | anything but raw video, which the consumer's caps leave out | [`Refusal::NotRawVideo`] |
 //! | [`Consumer::SystemMemory`] | raw video in system memory | none |
 //! | [`Consumer::SystemMemory`] | raw video in GL memory only | [`Adapter::GlDownload`] |
 //! | [`Consumer::SystemMemory`] | raw video in CUDA, D3D12 or D3D11 memory only | [`Adapter::CudaDownload`], [`Adapter::D3d12Download`] or [`Adapter::D3d11Download`] |
@@ -26,7 +31,8 @@
 //!
 //! A CUDA or D3D download that is called for but not installed is
 //! [`Refusal::MissingFactory`]. Those elements ship with platform plugins
-//! (nvcodec, d3d12, d3d11), so a working install can lack them.
+//! (nvcodec, d3d12, d3d11), so a working install can lack them. For
+//! [`Consumer::Exactly`] the same goes for `gldownload`.
 //!
 //! Encoded video, audio, `ANY` and `EMPTY` need nothing for the other
 //! consumers, and `ANY` and `EMPTY` need nothing for any consumer. For
@@ -84,6 +90,18 @@ pub enum Consumer<'a> {
     /// where it advertises more. The producer caps are the producer's answer
     /// to the same query, or the negotiated caps.
     Accepts(&'a gst::CapsRef),
+    /// A consumer that takes exactly what these caps list, in every memory
+    /// type: what the converter in front of an encoder answers to a caps
+    /// query, which lists the GPU memory types the encoder takes and system
+    /// memory in any format. Memory it lists passes as it is (CUDA into
+    /// `nvh264enc` stays on the GPU); GL, CUDA or D3D memory it leaves out is
+    /// downloaded. The producer caps are the negotiated caps, or what an
+    /// ACCEPT_CAPS query offers.
+    ///
+    /// Unlike [`Consumer::Accepts`], this trusts the caps for every memory
+    /// type: WHEP Output's corrected caps leave out the GPU memory its sink
+    /// takes, so they cannot be read this way.
+    Exactly(&'a gst::CapsRef),
     /// A consumer that reads frames on the CPU and takes raw video in system
     /// memory only (the thumbnail tap's branch). The producer caps are the
     /// negotiated caps.
@@ -116,6 +134,75 @@ impl Adapter {
             Adapter::D3d11Download => D3D11_DOWNLOAD_FACTORY,
             Adapter::VideoConvert => VIDEO_CONVERT_FACTORY,
         }
+    }
+
+    /// The downloads, each out of one GPU memory type.
+    pub const DOWNLOADS: [Adapter; 4] = [
+        Adapter::GlDownload,
+        Adapter::CudaDownload,
+        Adapter::D3d12Download,
+        Adapter::D3d11Download,
+    ];
+
+    /// The download made from `factory`, if it is one.
+    pub fn download_from(factory: &str) -> Option<Adapter> {
+        Adapter::DOWNLOADS
+            .into_iter()
+            .find(|adapter| adapter.factory() == factory)
+    }
+
+    /// The caps feature of the memory a download takes. `None` for
+    /// [`Adapter::VideoConvert`], which takes system memory.
+    pub fn memory_feature(self) -> Option<&'static str> {
+        match self {
+            Adapter::GlDownload => Some(GL_MEMORY_FEATURE),
+            Adapter::CudaDownload => Some(CUDA_MEMORY_FEATURE),
+            Adapter::D3d12Download => Some(D3D12_MEMORY_FEATURE),
+            Adapter::D3d11Download => Some(D3D11_MEMORY_FEATURE),
+            Adapter::VideoConvert => None,
+        }
+    }
+
+    /// The GStreamer plugin the adapter's element ships with, for an error
+    /// that says what to install.
+    pub fn plugin(self) -> &'static str {
+        match self {
+            Adapter::GlDownload => "opengl",
+            Adapter::CudaDownload => "nvcodec",
+            Adapter::D3d12Download => "d3d12",
+            Adapter::D3d11Download => "d3d11",
+            Adapter::VideoConvert => "videoconvertscale",
+        }
+    }
+
+    /// What the adapter's element takes on its sink pad: its sink template.
+    /// `None` when the element is not installed. Read once per adapter, and
+    /// only once found, so a test element registered later is still seen.
+    pub fn sink_template(self) -> Option<&'static gst::Caps> {
+        static TEMPLATES: [std::sync::OnceLock<gst::Caps>; 5] = [
+            std::sync::OnceLock::new(),
+            std::sync::OnceLock::new(),
+            std::sync::OnceLock::new(),
+            std::sync::OnceLock::new(),
+            std::sync::OnceLock::new(),
+        ];
+        let slot = &TEMPLATES[self as usize];
+        if let Some(caps) = slot.get() {
+            return Some(caps);
+        }
+        let caps = gst::ElementFactory::find(self.factory())?
+            .static_pad_templates()
+            .into_iter()
+            .find(|t| t.direction() == gst::PadDirection::Sink)?
+            .caps();
+        Some(slot.get_or_init(|| caps))
+    }
+
+    /// True when the adapter's element takes `caps` on its sink pad. `false`
+    /// when it is not installed.
+    pub fn sink_takes(self, caps: &gst::CapsRef) -> bool {
+        self.sink_template()
+            .is_some_and(|template| caps.can_intersect(template))
     }
 
     /// True for the downloads out of a platform GPU memory (CUDA, D3D12,
@@ -158,8 +245,8 @@ impl std::fmt::Display for Refusal {
 /// An empty list means the input links as it is. `available` says whether an
 /// element factory exists; it is consulted only for factories that may be
 /// missing on a working install (`cudadownload`, `d3d12download`,
-/// `d3d11download`), and only when that adapter is called for. See the module
-/// docs for the rules.
+/// `d3d11download`, and `gldownload` for [`Consumer::Exactly`]), and only when
+/// that adapter is called for. See the module docs for the rules.
 pub fn decide(
     producer: &gst::CapsRef,
     consumer: Consumer<'_>,
@@ -193,6 +280,36 @@ pub fn decide(
                 // A consumer that lists D3D memory takes it as it is.
                 Some(download) if !accepted.can_intersect(producer) => require(download, available),
                 _ => Ok(Vec::new()),
+            }
+        }
+        Consumer::Exactly(takes) => {
+            if producer.is_any()
+                || producer.is_empty()
+                || takes.is_any()
+                || takes.can_intersect(producer)
+            {
+                return Ok(Vec::new());
+            }
+            if let Some(media) = offers_no_raw_video(producer) {
+                return Err(Refusal::NotRawVideo { media });
+            }
+            let download = if offers_only(producer, GL_MEMORY_FEATURE) {
+                Some(Adapter::GlDownload)
+            } else {
+                device_download(producer)
+            };
+            match download {
+                // A download produces system memory, so it helps only a
+                // consumer that takes that.
+                Some(download) if accepts_system_memory_raw_video(takes) => {
+                    require(download, available)
+                }
+                _ => match unreadable_memory(producer) {
+                    Some(feature) => Err(Refusal::UnsupportedMemory { feature }),
+                    // System memory the consumer does not take: a pixel
+                    // format, which a download does not change.
+                    None => Ok(Vec::new()),
+                },
             }
         }
         Consumer::SystemMemory => {
@@ -288,9 +405,20 @@ fn offers_no_raw_video(caps: &gst::CapsRef) -> Option<String> {
 
 /// True when `features` put the buffer in system memory: no memory feature, or
 /// the system-memory one, with or without metas next to it.
-fn is_system_memory(features: &gst::CapsFeaturesRef) -> bool {
+pub(crate) fn is_system_memory(features: &gst::CapsFeaturesRef) -> bool {
     features.contains(gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY)
         || !features.iter().any(|f| f.starts_with("memory:"))
+}
+
+/// A capsfilter named `<name_prefix>_system_memory` that pins what a download
+/// outputs to system memory: `gldownload` and `cudadownload` also output GL
+/// memory, which a consumer that lists GL memory would otherwise be handed.
+pub fn system_memory_pin(name_prefix: &str) -> Result<gst::Element, String> {
+    gst::ElementFactory::make("capsfilter")
+        .name(format!("{}_system_memory", name_prefix))
+        .property("caps", gst::Caps::new_empty_simple("video/x-raw"))
+        .build()
+        .map_err(|e| format!("capsfilter could not be created: {}", e))
 }
 
 /// True when `name` can be created from the registry.
@@ -925,6 +1053,171 @@ mod tests {
                 "{c}"
             );
         }
+    }
+
+    // --- Consumer::Exactly ----------------------------------------------
+
+    /// What `videoconvert` in front of `x264enc` answers: system memory, any
+    /// format.
+    const SOFTWARE_ENCODER: &str = "video/x-raw, width=[1, 32767], height=[1, 32767]";
+
+    /// What `videoconvert` in front of `nvh264enc` answers: CUDA and GL memory
+    /// in the formats the encoder takes, system memory in any.
+    const NVENC: &str = "video/x-raw(memory:CUDAMemory), format={ NV12, Y444, RGBA, BGRA }; \
+         video/x-raw(memory:GLMemory), format={ NV12, Y444, RGBA, BGRA }; \
+         video/x-raw";
+
+    /// The defect in #1104: `nvh264dec` decodes to CUDA memory, and an encoder
+    /// that lists CUDA memory takes it with no download and no converter.
+    #[test]
+    fn exactly_memory_the_consumer_lists_passes_as_it_is() {
+        let consumer = caps(NVENC);
+        for c in [
+            CUDA,
+            "video/x-raw(memory:GLMemory), format=RGBA, width=1280, height=720",
+            "video/x-raw, format=NV12, width=1280, height=720",
+            "video/x-raw, format=P010_10LE, width=1280, height=720",
+        ] {
+            assert_eq!(
+                decide(&caps(c), Consumer::Exactly(&consumer), none),
+                Ok(vec![]),
+                "{c}"
+            );
+        }
+    }
+
+    /// A software encoder takes system memory only: every GPU memory a
+    /// download exists for is downloaded.
+    #[test]
+    fn exactly_memory_the_consumer_leaves_out_is_downloaded() {
+        let consumer = caps(SOFTWARE_ENCODER);
+        let mut cases = vec![
+            (
+                "video/x-raw(memory:GLMemory), format=RGBA, width=1280, height=720",
+                Adapter::GlDownload,
+                GL_DOWNLOAD_FACTORY,
+            ),
+            (CUDA, Adapter::CudaDownload, CUDA_DOWNLOAD_FACTORY),
+            (
+                "video/x-raw(memory:CUDAMemory, meta:GstVideoOverlayComposition), format=NV12",
+                Adapter::CudaDownload,
+                CUDA_DOWNLOAD_FACTORY,
+            ),
+        ];
+        cases.extend(D3D);
+        for (c, download, factory) in cases {
+            assert_eq!(
+                decide(&caps(c), Consumer::Exactly(&consumer), all),
+                Ok(vec![download]),
+                "{c}"
+            );
+            assert_eq!(
+                decide(&caps(c), Consumer::Exactly(&consumer), none),
+                Err(Refusal::MissingFactory { factory }),
+                "{c}"
+            );
+        }
+    }
+
+    /// CUDA memory in a format the encoder does not take in CUDA memory is
+    /// downloaded, so the converter can change its format on the CPU.
+    #[test]
+    fn exactly_gpu_memory_in_a_format_the_consumer_does_not_list_is_downloaded() {
+        let consumer = caps(NVENC);
+        assert_eq!(
+            decide(
+                &caps("video/x-raw(memory:CUDAMemory), format=P010_10LE"),
+                Consumer::Exactly(&consumer),
+                all
+            ),
+            Ok(vec![Adapter::CudaDownload])
+        );
+    }
+
+    /// Windows: `nvh264enc` takes D3D12 memory but not D3D11.
+    #[test]
+    fn exactly_d3d_memory_follows_the_consumer_list() {
+        let consumer = caps("video/x-raw(memory:D3D12Memory), format=NV12; video/x-raw");
+        assert_eq!(
+            decide(&caps(D3D[0].0), Consumer::Exactly(&consumer), none),
+            Ok(vec![])
+        );
+        assert_eq!(
+            decide(&caps(D3D[1].0), Consumer::Exactly(&consumer), all),
+            Ok(vec![Adapter::D3d11Download])
+        );
+    }
+
+    #[test]
+    fn exactly_memory_nothing_downloads_is_refused() {
+        let consumer = caps(SOFTWARE_ENCODER);
+        for feature in ["memory:NVMM", "memory:VAMemory", "memory:DMABuf"] {
+            assert_eq!(
+                decide(
+                    &caps(&format!("video/x-raw({}), format=NV12", feature)),
+                    Consumer::Exactly(&consumer),
+                    all
+                ),
+                Err(Refusal::UnsupportedMemory {
+                    feature: feature.to_string()
+                }),
+                "{feature}"
+            );
+        }
+    }
+
+    /// A consumer that takes no system memory cannot be fed by a download.
+    #[test]
+    fn exactly_a_consumer_without_system_memory_gets_no_download() {
+        let consumer = caps("video/x-raw(memory:VAMemory), format=NV12");
+        assert_eq!(
+            decide(&caps(CUDA), Consumer::Exactly(&consumer), all),
+            Err(Refusal::UnsupportedMemory {
+                feature: CUDA_MEMORY_FEATURE.to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn exactly_encoded_video_the_consumer_leaves_out_is_refused() {
+        let consumer = caps(SOFTWARE_ENCODER);
+        assert_eq!(
+            decide(
+                &caps("video/x-h264, stream-format=avc, alignment=au"),
+                Consumer::Exactly(&consumer),
+                all
+            ),
+            Err(Refusal::NotRawVideo {
+                media: "video/x-h264".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn exactly_any_empty_and_unconstrained_need_nothing() {
+        let consumer = caps(SOFTWARE_ENCODER);
+        for c in ["ANY", "EMPTY", "video/x-raw(ANY)"] {
+            assert_eq!(
+                decide(&caps(c), Consumer::Exactly(&consumer), none),
+                Ok(vec![]),
+                "{c}"
+            );
+        }
+        let any = caps("ANY");
+        assert_eq!(
+            decide(&caps(CUDA), Consumer::Exactly(&any), none),
+            Ok(vec![])
+        );
+    }
+
+    #[test]
+    fn every_download_names_its_memory_and_plugin() {
+        for download in Adapter::DOWNLOADS {
+            assert!(download.memory_feature().is_some(), "{download:?}");
+            assert_eq!(Adapter::download_from(download.factory()), Some(download));
+        }
+        assert_eq!(Adapter::download_from(VIDEO_CONVERT_FACTORY), None);
+        assert_eq!(Adapter::CudaDownload.plugin(), "nvcodec");
     }
 
     #[test]

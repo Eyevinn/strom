@@ -62,6 +62,14 @@ pub fn video_convert_mode() -> VideoConvertMode {
         .expect("GPU capabilities not detected yet - call detect_gpu_capabilities() first")
 }
 
+/// Set the video conversion mode before detection runs, for a test that has
+/// to check a block under a mode its host would not detect (the GPU mode on a
+/// CI runner without NVIDIA). As with detection, the first mode set wins for
+/// the process; returns the mode in force. Not called by the server.
+pub fn force_video_convert_mode(mode: VideoConvertMode) -> VideoConvertMode {
+    *VIDEO_CONVERT_MODE.get_or_init(|| mode)
+}
+
 /// Check if running inside WSL (Windows Subsystem for Linux).
 #[cfg(not(target_os = "macos"))]
 fn is_wsl() -> bool {
