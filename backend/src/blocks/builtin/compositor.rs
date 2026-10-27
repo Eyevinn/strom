@@ -15,10 +15,15 @@
 //! - Automatic fallback from GPU to CPU when OpenGL is unavailable
 //!
 //! GPU backend chain: queue -> glupload -> glcolorconvert -> [thumb_tee] -> glvideomixerelement -> gldownload -> capsfilter
-//! CPU backend chain: queue -> videoconvert -> [thumb_tee] -> compositor -> capsfilter
+//! CPU backend chain: queue -> input -> videoconvert -> [thumb_tee] -> compositor -> capsfilter
+//!
+//! On the CPU backend, each input's `input` (an `identity`) downloads GL, CUDA,
+//! D3D12 or D3D11 memory before the `videoconvert`, decided from the negotiated
+//! caps (`gst::download_front`): `compositor` takes system memory only.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gpu;
+use crate::gst::download_front;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -89,7 +94,7 @@ impl BlockBuilder for CompositorBuilder {
                 // Direct connection to converter element
                 match backend {
                     CompositorBackend::OpenGL => format!("glupload_{}", i),
-                    CompositorBackend::Software => format!("videoconvert_{}", i),
+                    CompositorBackend::Software => format!("input_{}", i),
                 }
             };
 
@@ -528,6 +533,29 @@ fn build_software_compositor(
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("videoconvert_{}: {}", i, e)))?;
 
+        // The front: GPU memory is downloaded before the converter, which
+        // with `compositor` behind it takes system memory only.
+        let input_id = format!("{}:input_{}", instance_id, i);
+        let input = gst::ElementFactory::make("identity")
+            .name(&input_id)
+            .property("silent", true)
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("input_{}: {}", i, e)))?;
+        let convert_sink = convert.static_pad("sink").ok_or_else(|| {
+            BlockBuildError::ElementCreation(format!("videoconvert_{} has no sink pad", i))
+        })?;
+        download_front::install(
+            &input,
+            &convert_sink,
+            &input_id,
+            &format!("Compositor input {} (software)", i),
+        );
+        internal_links.push((
+            ElementPadRef::pad(&input_id, "src"),
+            ElementPadRef::pad(&convert_id, "sink"),
+        ));
+
+        elements.push((input_id.clone(), input));
         elements.push((convert_id.clone(), convert));
         let mixer_pad_name = sink_pad.name().to_string();
 
@@ -546,10 +574,10 @@ fn build_software_compositor(
             let queue = create_input_queue(&queue_id, i)?;
             elements.push((queue_id.clone(), queue));
 
-            // Link: queue -> videoconvert -> [thumb_tee] -> mixer
+            // Link: queue -> input -> videoconvert -> [thumb_tee] -> mixer
             internal_links.push((
                 ElementPadRef::pad(&queue_id, "src"),
-                ElementPadRef::pad(&convert_id, "sink"),
+                ElementPadRef::pad(&input_id, "sink"),
             ));
             internal_links.push((
                 ElementPadRef::pad(&convert_id, "src"),
@@ -560,7 +588,7 @@ fn build_software_compositor(
                 ElementPadRef::pad(&mixer_id, &mixer_pad_name),
             ));
         } else {
-            // Link: videoconvert -> [thumb_tee] -> mixer
+            // Link: input -> videoconvert -> [thumb_tee] -> mixer
             internal_links.push((
                 ElementPadRef::pad(&convert_id, "src"),
                 ElementPadRef::pad(&thumb_tee_id, "sink"),
