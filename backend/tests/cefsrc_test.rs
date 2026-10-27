@@ -29,35 +29,6 @@ pub mod common;
 /// several seconds on a CI runner.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Returns whether `cefsrc` can run here. Panics instead of returning false when
-/// `STROM_REQUIRE_CEF` is set, so the CI job cannot pass by skipping.
-fn cefsrc_available() -> bool {
-    gst::init().unwrap();
-    let required = strom_types::env::var_opt("STROM_REQUIRE_CEF").is_some();
-
-    // On macOS CEF needs a Cocoa run loop on the main thread, which the test
-    // harness does not provide: starting a cefsrc blocks forever.
-    if !cfg!(target_os = "linux") {
-        assert!(
-            !required,
-            "STROM_REQUIRE_CEF is set, but these tests run on Linux only"
-        );
-        eprintln!("SKIP: cefsrc tests run on Linux only");
-        return false;
-    }
-
-    if gst::ElementFactory::find("cefsrc").is_some() {
-        return true;
-    }
-    assert!(
-        !required,
-        "STROM_REQUIRE_CEF is set but the cefsrc element is not installed \
-         (check GST_PLUGIN_PATH)"
-    );
-    eprintln!("SKIP: cefsrc not installed (set STROM_REQUIRE_CEF=1 to fail instead)");
-    false
-}
-
 /// A `data:` URL for a transparent page covered by `body_css`, with a small
 /// corner square that changes every animation frame so Chromium keeps painting.
 fn animated_page_url(body_css: &str) -> String {
@@ -220,7 +191,7 @@ fn descendant_processes() -> Vec<(u32, String)> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn cefsrc_flow_restarts_without_leaking() {
-    if !cefsrc_available() {
+    if !common::cef_available() {
         return;
     }
 
@@ -341,7 +312,7 @@ async fn cefsrc_flow_restarts_without_leaking() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn cefsrc_on_dsk_input_reaches_mixer() {
-    if !cefsrc_available() {
+    if !common::cef_available() {
         return;
     }
     // The vision mixer's converters ask for the detected GPU mode, which panics
@@ -480,7 +451,7 @@ async fn cefsrc_on_dsk_input_reaches_mixer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn cefsrc_emits_premultiplied_alpha() {
-    if !cefsrc_available() {
+    if !common::cef_available() {
         return;
     }
 
