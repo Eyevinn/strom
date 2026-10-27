@@ -541,7 +541,7 @@ fn build_adapters(plan: &Plan, name_prefix: &str) -> Result<Vec<gst::Element>, S
 /// the way. On success `old` is shut down and removed.
 ///
 /// The caller makes sure no buffer moves across the link meanwhile.
-fn resplice(
+pub(crate) fn resplice(
     src_pad: &gst::Pad,
     target: &gst::Pad,
     old: &[gst::Element],
