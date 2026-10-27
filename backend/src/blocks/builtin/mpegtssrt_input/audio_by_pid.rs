@@ -138,11 +138,22 @@ impl PidOrderedAudio {
             .build()
             .map_err(|e| format!("tee: {}", e))?;
         bin.add(&tee).map_err(|e| format!("add tee: {}", e))?;
-        tee.sync_state_with_parent()
-            .map_err(|e| format!("sync tee: {}", e))?;
-        let sink = tee.static_pad("sink").ok_or("tee has no sink pad")?;
-        pad.link(&sink)
-            .map_err(|e| format!("link pad -> tee: {:?}", e))?;
+        let linked = tee
+            .sync_state_with_parent()
+            .map_err(|e| format!("sync tee: {}", e))
+            .and_then(|_| {
+                tee.static_pad("sink")
+                    .ok_or("tee has no sink pad".to_string())
+            })
+            .and_then(|sink| {
+                pad.link(&sink)
+                    .map_err(|e| format!("link pad -> tee: {:?}", e))
+            });
+        if let Err(e) = linked {
+            let _ = tee.set_state(gst::State::Null);
+            let _ = bin.remove(&tee);
+            return Err(e);
+        }
         Ok(tee)
     }
 
@@ -152,31 +163,26 @@ impl PidOrderedAudio {
         if self.open_batch.is_empty() {
             return;
         }
-        let mut ranked: Vec<&Stream> = self
+        // The new streams, in the order their pads were added.
+        let batch: Vec<&Stream> = self
             .streams
             .iter()
             .filter(|s| self.open_batch.contains(&s.id))
             .collect();
-        ranked.sort_by_key(|s| (s.pid.unwrap_or(u32::MAX), s.id));
         self.open_batch.clear();
-        if ranked.is_empty() {
+        let streams = batch.len();
+        let batch_pids: Vec<Option<u32>> = batch.iter().map(|s| s.pid).collect();
+        let assigned = assign_outputs(&batch_pids, self.outputs.len());
+        if assigned.is_empty() {
             return;
         }
 
-        self.assignment = (0..self.outputs.len())
-            .map(|k| ranked.get(k).unwrap_or(&ranked[0]).id)
+        self.assignment = assigned.iter().map(|(i, _)| batch[*i].id).collect();
+        let pids: Vec<i32> = assigned
+            .iter()
+            .map(|(i, _)| batch[*i].pid.map_or(-1, |p| p as i32))
             .collect();
-        let pids: Vec<i32> = (0..self.outputs.len())
-            .map(|k| {
-                ranked
-                    .get(k)
-                    .unwrap_or(&ranked[0])
-                    .pid
-                    .map_or(-1, |p| p as i32)
-            })
-            .collect();
-        let fallback: Vec<bool> = (0..self.outputs.len()).map(|k| k >= ranked.len()).collect();
-        let streams = ranked.len();
+        let fallback: Vec<bool> = assigned.iter().map(|(_, f)| *f).collect();
 
         for (k, output) in self.outputs.iter().enumerate() {
             if fallback[k] {
@@ -310,6 +316,27 @@ impl PidOrderedAudio {
     }
 }
 
+/// Rank one stream list and give each of `outputs` outputs its stream.
+///
+/// `pids` lists the streams in the order their pads were added. Returns, per
+/// output, the index in `pids` of the stream it carries, and whether that is
+/// a fallback: output k carries the k-th stream in ascending PID order, or
+/// the first one if there is no k-th. A stream with no known PID ranks after
+/// the others, and equal PIDs keep their pad order. Empty if `pids` is.
+fn assign_outputs(pids: &[Option<u32>], outputs: usize) -> Vec<(usize, bool)> {
+    let mut ranked: Vec<usize> = (0..pids.len()).collect();
+    ranked.sort_by_key(|&i| (pids[i].unwrap_or(u32::MAX), i));
+    let Some(&first) = ranked.first() else {
+        return Vec::new();
+    };
+    (0..outputs)
+        .map(|k| match ranked.get(k) {
+            Some(&i) => (i, false),
+            None => (first, true),
+        })
+        .collect()
+}
+
 /// The demuxer is on its way down to READY or NULL: the flow is stopping, and
 /// the tees go with the pipeline.
 fn shutting_down(demux: &gst::Element) -> bool {
@@ -379,7 +406,37 @@ fn pid_from_stream_id(stream_id: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::pid_from_stream_id;
+    use super::{assign_outputs, pid_from_stream_id};
+
+    /// The decode-mode guard: `decodebin` sorts its pads by stream-id, so a
+    /// test feed always reaches the block in PID order there.
+    #[test]
+    fn outputs_follow_pid_order_whatever_order_the_pads_arrive_in() {
+        // Pads added as 0x43, 0x41, 0x42.
+        let pids = [Some(0x43), Some(0x41), Some(0x42)];
+        assert_eq!(
+            assign_outputs(&pids, 3),
+            vec![(1, false), (2, false), (0, false)],
+            "output k must carry the k-th stream in PID order, not in pad order"
+        );
+    }
+
+    #[test]
+    fn an_output_with_no_stream_carries_the_first() {
+        // Pads added as 0x42, 0x41; three outputs.
+        let pids = [Some(0x42), Some(0x41)];
+        assert_eq!(
+            assign_outputs(&pids, 3),
+            vec![(1, false), (0, false), (1, true)]
+        );
+        assert_eq!(assign_outputs(&[], 3), vec![]);
+    }
+
+    #[test]
+    fn a_stream_with_no_pid_ranks_last() {
+        let pids = [None, Some(0x51)];
+        assert_eq!(assign_outputs(&pids, 2), vec![(1, false), (0, false)]);
+    }
 
     #[test]
     fn reads_the_pid_from_a_tsdemux_stream_id() {

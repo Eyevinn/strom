@@ -5,10 +5,13 @@
 //! more streams arrives.
 //!
 //! Each caller lists its audio streams in its PMT out of PID order
-//! (`PMT_ORDER_*` in `mpegtsmux`'s `prog-map`), so the demuxer adds the pads
-//! out of PID order too. `tsdemux` ends each stream-id with the stream's PID,
-//! and the id travels through `decodebin`, so the STREAM_START events on each
-//! output say which stream it carries, in both modes.
+//! (`PMT_ORDER_*`, and `PMT_*` before GStreamer 1.28, in `mpegtsmux`'s
+//! `prog-map`), so in passthrough `tsdemux` adds the pads out of PID order
+//! too; the test checks that it did. `decodebin` sorts its pads by stream-id,
+//! so in decode mode they always arrive in PID order: the unit tests of the
+//! ranking in `audio_by_pid` guard that mode. `tsdemux` ends each stream-id
+//! with the stream's PID, and the id travels through `decodebin`, so the
+//! STREAM_START events on each output say which stream it carries.
 //!
 //! The second caller reconnects on the same listener with three streams on
 //! new PIDs: every output moves to its own stream (the reconnect case of #877).
@@ -51,7 +54,8 @@ fn caller(port: u16, pids: &[u32]) -> gst::Pipeline {
     let order: Vec<String> = pids
         .iter()
         .enumerate()
-        .map(|(i, pid)| format!("PMT_ORDER_{pid}=(int){i}"))
+        // GStreamer 1.28 reads PMT_ORDER_<pid>; 1.24 and 1.26 read PMT_<pid>.
+        .map(|(i, pid)| format!("PMT_ORDER_{pid}=(int){i},PMT_{pid}=(int){i}"))
         .collect();
     let mut description = format!(
         "mpegtsmux name=m alignment=7 prog-map=\"progmap,{}\" \
@@ -79,6 +83,8 @@ fn caller(port: u16, pids: &[u32]) -> gst::Pipeline {
 struct Seen {
     stream_ids: Vec<Vec<String>>,
     maps: Vec<AudioMap>,
+    /// The demuxer's pads, in the order it added them.
+    pad_order: Vec<String>,
 }
 
 /// One audio map message: the PID each output carries, and which outputs
@@ -145,6 +151,16 @@ fn run(decode: bool, a: &[u32], b: &[u32]) -> (Seen, Seen, Option<String>) {
     }
 
     let maps: Arc<Mutex<Vec<AudioMap>>> = Arc::new(Mutex::new(Vec::new()));
+    let pad_order: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let demux_id = if decode { "decodebin" } else { "tsdemux" };
+    let pad_writer = pad_order.clone();
+    by_id
+        .get(&format!("{}:{}", instance_id, demux_id))
+        .unwrap_or_else(|| panic!("block has a {demux_id}"))
+        .connect_pad_added(move |_demux, pad| {
+            pad_writer.lock().unwrap().push(pad.name().to_string());
+        });
+
     let bus = pipeline.bus().expect("pipeline has a bus");
     let map_writer = maps.clone();
     bus.set_sync_handler(move |_bus, msg| {
@@ -180,6 +196,7 @@ fn run(decode: bool, a: &[u32], b: &[u32]) -> (Seen, Seen, Option<String>) {
             log.lock().unwrap().clear();
         }
         maps.lock().unwrap().clear();
+        pad_order.lock().unwrap().clear();
         let caller = caller(port, pids);
         caller
             .set_state(gst::State::Playing)
@@ -195,6 +212,7 @@ fn run(decode: bool, a: &[u32], b: &[u32]) -> (Seen, Seen, Option<String>) {
         let seen = Seen {
             stream_ids: logs.iter().map(|l| l.lock().unwrap().clone()).collect(),
             maps: maps.lock().unwrap().clone(),
+            pad_order: pad_order.lock().unwrap().clone(),
         };
         // Let the listener notice the caller is gone before the next dials.
         let found =
@@ -248,6 +266,31 @@ fn assert_outputs_follow_pid_order(decode: bool) {
             [false, false, false],
         ),
     ] {
+        // tsdemux names its pads audio_<program>_<pid>, with the PID as 4 hex
+        // digits. If the last program's pads arrived in PID order, the feed's PMT order was
+        // ignored, and the test would not show that pad order is ignored.
+        if !decode {
+            // Only the pads of the last program: a live mux can announce a
+            // partial PMT first, which tsdemux exposes as a program of its own.
+            let program = |name: &str| name.split('_').nth(1).map(str::to_string);
+            let last = seen.pad_order.last().and_then(|n| program(n));
+            let pids: Vec<&str> = seen
+                .pad_order
+                .iter()
+                .filter(|name| program(name) == last)
+                .filter_map(|name| name.rsplit('_').next())
+                .collect();
+            let mut sorted = pids.clone();
+            sorted.sort();
+            assert!(
+                pids.len() > 1 && pids != sorted,
+                "passthrough: with the {caller}, tsdemux added the last program's pads in PID order \
+                 ({:?}), so mpegtsmux ignored the PMT order in prog-map and this test \
+                 cannot show that the mapping ignores pad order",
+                seen.pad_order
+            );
+        }
+
         for (k, pid) in expected.iter().enumerate() {
             let ids = &seen.stream_ids[k];
             let want = format!("{pid:08x}");
