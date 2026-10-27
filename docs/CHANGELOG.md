@@ -19,6 +19,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Outputs: NDI, DeckLink audio and TAMS start without waiting for data (#934)
 - AES67: put a queue right after the input's audiobuffersplit (#1087)
 - Video adapt: download D3D12 and D3D11 memory for inputs that cannot take it (#1093)
+- Video Encoder: adapt the input memory to what the encoder takes. CUDA reaches `nvh264enc` with no copy, and GL, CUDA, D3D12 or D3D11 memory the encoder cannot take is downloaded first. The block no longer uses `autovideoconvert` (#1111)
 - Media Player: share the flow's GL context with the internal pipeline (#1108)
 - Media Player: hold typefind back when a stinger clip loads paused (#1076)
 - Live Recorder: index each MP4 file so browsers start it at once (#1107)
