@@ -1,4 +1,4 @@
-//! Share a flow's GStreamer contexts with a pipeline a block runs of its own.
+//! Share a flow's GL context with a pipeline a block runs of its own.
 //!
 //! A pipeline shares contexts among its elements: an element that needs one
 //! posts `NEED_CONTEXT`, and the bin answers from the contexts it has cached
@@ -17,9 +17,13 @@
 //! then answers the internal pipeline's requests from its cache and caches
 //! what the internal pipeline creates, so both sides use the same context,
 //! whichever pipeline asks first. webrtcsink does the same for its session
-//! pipelines. All context types go through, not only GL: CUDA and D3D memory
-//! cross without it, but one context per device is still what both sides
-//! should use.
+//! pipelines.
+//!
+//! Only GL context types go through. CUDA and D3D memory cross between
+//! pipelines without a shared context (measured, #1099). Their contexts are
+//! tied to a device, and a bin caches one context per type, so forwarding an
+//! internal decoder's CUDA context or D3D device would replace the flow's own
+//! on a host where the two use different GPUs.
 //!
 //! Two flows cannot share a context this way: each starts and stops on its
 //! own. See issue #1099.
@@ -27,7 +31,7 @@
 use gstreamer as gst;
 use gstreamer::prelude::*;
 
-/// Hand `internal`'s context requests and contexts to the pipeline that
+/// Hand `internal`'s GL context requests and GL contexts to the pipeline that
 /// `flow_element` is in.
 ///
 /// Holds `flow_element` weakly: once the flow is torn down, the messages stay
@@ -43,10 +47,12 @@ pub fn install(internal: &gst::Pipeline, flow_element: &impl IsA<gst::Element>) 
     };
     let target = flow_element.as_ref().downgrade();
     bus.set_sync_handler(move |_, msg| {
-        if matches!(
-            msg.view(),
-            gst::MessageView::NeedContext(..) | gst::MessageView::HaveContext(..)
-        ) {
+        let gl = match msg.view() {
+            gst::MessageView::NeedContext(m) => is_gl_context_type(m.context_type()),
+            gst::MessageView::HaveContext(m) => is_gl_context_type(m.context().context_type()),
+            _ => false,
+        };
+        if gl {
             if let Some(target) = target.upgrade() {
                 let _ = target.post_message(msg.clone());
             }
@@ -55,11 +61,22 @@ pub fn install(internal: &gst::Pipeline, flow_element: &impl IsA<gst::Element>) 
     });
 }
 
+/// The context types GStreamer's GL library asks for and posts: the GL
+/// display, the application's and the local GL context, and the window
+/// system display handles a GL display is made from.
+fn is_gl_context_type(context_type: &str) -> bool {
+    context_type.starts_with("gst.gl.")
+        || context_type == "gst.x11.display.handle"
+        || context_type == "GstWaylandDisplayHandleContextType"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const CONTEXT_TYPE: &str = "strom.test.context-forward";
+    /// A GL context type, carrying a test value instead of a display: no GL
+    /// element is in these pipelines to read it.
+    const CONTEXT_TYPE: &str = "gst.gl.app_context";
 
     fn context(value: &str) -> gst::Context {
         let mut context = gst::Context::new(CONTEXT_TYPE, true);
@@ -123,6 +140,25 @@ mod tests {
         assert_eq!(
             value(flow.context(CONTEXT_TYPE)),
             Some("from inside".into())
+        );
+    }
+
+    #[test]
+    fn a_device_context_stays_inside() {
+        let (flow, _internal, inner) = rig();
+        const CUDA: &str = "gst.cuda.context";
+
+        inner
+            .post_message(
+                gst::message::HaveContext::builder(gst::Context::new(CUDA, true))
+                    .src(&inner)
+                    .build(),
+            )
+            .unwrap();
+
+        assert!(
+            flow.context(CUDA).is_none(),
+            "the flow keeps its own device context"
         );
     }
 

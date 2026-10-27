@@ -413,11 +413,7 @@ fn connect_main_pipeline_handler(
 
     // Store main pipeline reference for timestamp offset computation in the bridge.
     // The appsrc lives in the main pipeline, so we traverse up from it to find the pipeline.
-    if let Some(appsrc) = state
-        .video_appsrcs
-        .first()
-        .or_else(|| state.audio_appsrcs.first())
-    {
+    if let Some(appsrc) = state.flow_anchor() {
         let mut current: Option<gst::Object> =
             Some(appsrc.clone().upcast::<gst::Element>().upcast());
         while let Some(obj) = current {

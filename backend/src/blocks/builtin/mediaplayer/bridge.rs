@@ -205,15 +205,17 @@ pub fn create_decode_pipeline(
     Ok(pipeline)
 }
 
-/// Let the internal pipeline use the flow's contexts (#1099). A decoder that
+/// Let the internal pipeline use the flow's GL context (#1099). A decoder that
 /// outputs GL memory, VideoToolbox on macOS, otherwise hands the flow frames
 /// from a GL context of its own, which no GL element in the flow can convert.
+///
+/// Only decode mode needs it: passthrough carries encoded media. The flow's
+/// GL elements make their display when the flow goes to READY, and the
+/// internal pipeline starts once the flow plays, so it asks for a display the
+/// flow already has. A stinger clip may preroll earlier, but its appsink takes
+/// system memory, so it makes no GL context of its own.
 fn share_flow_contexts(pipeline: &gst::Pipeline, state: &MediaPlayerState) {
-    if let Some(appsrc) = state
-        .video_appsrcs
-        .first()
-        .or_else(|| state.audio_appsrcs.first())
-    {
+    if let Some(appsrc) = state.flow_anchor() {
         context_forward::install(pipeline, appsrc);
     }
 }
@@ -327,7 +329,6 @@ pub fn create_passthrough_pipeline(
     // An `rtsp://` URI makes the source bin autoplug an RTP depayloader, so this
     // internal pipeline needs the same gstreamer#5057 workaround as the main one.
     rtp_hdrext::install(&pipeline);
-    share_flow_contexts(&pipeline, state);
 
     Ok(pipeline)
 }
@@ -1609,14 +1610,15 @@ mod tests {
         }
     }
 
-    /// The internal pipeline asks the flow for its contexts and gives the flow
-    /// the ones it makes (#1099). A GL decoder in it would otherwise make a GL
-    /// context of its own, and its frames would fail at the flow's first GL
-    /// converter. Checked with a context type of its own, so no GL is needed.
+    /// In decode mode the internal pipeline asks the flow for its GL context
+    /// and gives the flow the one it makes (#1099). A GL decoder in it would
+    /// otherwise make a GL context of its own, and its frames would fail at
+    /// the flow's first GL converter. The contexts here carry a test value, so
+    /// no GL is needed; `mediaplayer_gl_context_test` runs real GL frames.
     #[test]
-    fn the_internal_pipeline_shares_the_flows_contexts() {
+    fn the_decode_pipeline_shares_the_flows_gl_context() {
         let _ = gst::init();
-        const TYPE: &str = "strom.test.mediaplayer-context";
+        const TYPE: &str = "gst.gl.app_context";
         let context = |value: &str| {
             let mut context = gst::Context::new(TYPE, true);
             context
@@ -1630,44 +1632,38 @@ mod tests {
             context.and_then(|c| c.structure().get::<String>("value").ok())
         };
 
-        for decode in [true, false] {
-            let state = state_with_slots(1, 1);
-            let flow = gst::Pipeline::new();
-            flow.add(&state.video_appsrcs[0]).unwrap();
-            flow.set_context(&context("flow"));
-            let internal = if decode {
-                create_decode_pipeline("mp", &state, None, Decoder::Decodebin3).unwrap()
-            } else {
-                create_passthrough_pipeline("mp", &state, None).unwrap()
-            };
-            let source = internal.children().into_iter().next().unwrap();
+        let state = state_with_slots(1, 1);
+        let flow = gst::Pipeline::new();
+        flow.add(&state.video_appsrcs[0]).unwrap();
+        flow.set_context(&context("flow"));
+        let internal = create_decode_pipeline("mp", &state, None, Decoder::Decodebin3).unwrap();
+        let source = internal.by_name("mp_uridecodebin3").unwrap();
 
-            source
-                .post_message(
-                    gst::message::NeedContext::builder(TYPE)
-                        .src(&source)
-                        .build(),
-                )
-                .unwrap();
-            assert_eq!(
-                value(source.context(TYPE)),
-                Some("flow".to_string()),
-                "decode={decode}: the flow answers the internal pipeline's request"
-            );
+        source
+            .post_message(
+                gst::message::NeedContext::builder(TYPE)
+                    .src(&source)
+                    .build(),
+            )
+            .unwrap();
+        assert_eq!(
+            value(source.context(TYPE)),
+            Some("flow".to_string()),
+            "the flow answers the decoder's request"
+        );
 
-            const MADE: &str = "strom.test.mediaplayer-context-made";
-            source
-                .post_message(
-                    gst::message::HaveContext::builder(gst::Context::new(MADE, true))
-                        .src(&source)
-                        .build(),
-                )
-                .unwrap();
-            assert!(
-                flow.context(MADE).is_some(),
-                "decode={decode}: the flow keeps a context the internal pipeline made"
-            );
-        }
+        const MADE: &str = "gst.gl.GLDisplay";
+        source
+            .post_message(
+                gst::message::HaveContext::builder(gst::Context::new(MADE, true))
+                    .src(&source)
+                    .build(),
+            )
+            .unwrap();
+        assert!(
+            flow.context(MADE).is_some(),
+            "the flow keeps a GL display the internal pipeline made"
+        );
     }
 
     #[test]
