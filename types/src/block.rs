@@ -407,6 +407,10 @@ pub const DEFAULT_SRT_WAIT_FOR_CONNECTION: bool = false;
 /// jitter, so tsdemux doesn't need to add additional latency margin.
 pub const DEFAULT_TSDEMUX_LATENCY_MS: i32 = 0;
 
+/// Default for the MPEG-TS/SRT input's `map_audio_by_pid`: off, so the first
+/// audio streams to arrive take the audio outputs in order.
+pub const DEFAULT_MPEGTSSRT_MAP_AUDIO_BY_PID: bool = false;
+
 /// Default MTU for EFP fragmentation (bytes).
 pub const DEFAULT_EFP_MTU: u32 = 1400;
 

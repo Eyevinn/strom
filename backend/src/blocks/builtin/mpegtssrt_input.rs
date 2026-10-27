@@ -20,7 +20,14 @@
 //!
 //! In decode mode the `decodebin` starts with its state locked and joins the
 //! pipeline when SRT data first arrives (see `prepare_idle_decodebin`).
+//!
+//! By default the first audio streams to arrive take the audio outputs in
+//! order. With `map_audio_by_pid`, `audio_out_k` carries the k-th audio stream
+//! in PID order instead (see [`audio_by_pid`]).
 
+pub mod audio_by_pid;
+
+use self::audio_by_pid::PidOrderedAudio;
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -171,6 +178,14 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
             })
             .unwrap_or(1);
 
+        let map_audio_by_pid = properties
+            .get("map_audio_by_pid")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(DEFAULT_MPEGTSSRT_MAP_AUDIO_BY_PID);
+
         // Create srtsrc
         let src_id = format!("{}:srtsrc", instance_id);
         let srtsrc = gst::ElementFactory::make("srtsrc")
@@ -298,6 +313,8 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
 
         // Create audio output identity elements
         let mut audio_slots = OutputSlots::default();
+        let mut pid_targets = Vec::new();
+        let mut internal_links = Vec::new();
         for i in 0..num_audio_tracks {
             let element_id = format!("{}:audio_output_{}", instance_id, i);
 
@@ -308,9 +325,32 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                     BlockBuildError::ElementCreation(format!("audio identity {}: {}", i, e))
                 })?;
 
-            audio_slots.push(&identity);
+            if !map_audio_by_pid {
+                audio_slots.push(&identity);
+            } else if decode {
+                // PID-ordered outputs are fed by a tee per stream, so each
+                // output has its own fixed convert chain.
+                let (head, chain) = audio_convert_chain(instance_id, i)?;
+                internal_links.push((
+                    ElementPadRef::pad(&chain[1].0, "src"),
+                    ElementPadRef::pad(&element_id, "sink"),
+                ));
+                internal_links.push((
+                    ElementPadRef::pad(&chain[0].0, "src"),
+                    ElementPadRef::pad(&chain[1].0, "sink"),
+                ));
+                pid_targets.push((format!("audio_out_{}", i), head));
+                elements.extend(chain);
+            } else {
+                let sink = identity.static_pad("sink").ok_or_else(|| {
+                    BlockBuildError::ElementCreation(format!("audio identity {}: no sink pad", i))
+                })?;
+                pid_targets.push((format!("audio_out_{}", i), sink));
+            }
             elements.push((element_id, identity));
         }
+        let pid_audio = map_audio_by_pid
+            .then(|| Arc::new(Mutex::new(PidOrderedAudio::new(instance_id, pid_targets))));
 
         // Setup dynamic pad linking
         // Both decodebin and tsdemux emit pad-added signals for their output pads.
@@ -325,6 +365,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
         let audio_slots = Arc::new(Mutex::new(audio_slots));
         let removed_video_slots = video_slots.clone();
         let removed_audio_slots = audio_slots.clone();
+        let added_pid_audio = pid_audio.clone();
         demux_element.connect_pad_added(move |element, pad| {
             let caps = pad.current_caps().or_else(|| {
                 let query_caps = pad.query_caps(None);
@@ -359,6 +400,16 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                 caps_name.as_deref().unwrap_or("unknown")
             );
 
+            if is_audio {
+                if let Some(pid_audio) = &added_pid_audio {
+                    pid_audio
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .pad_added(element, pad);
+                    return;
+                }
+            }
+
             let (slots, first_link, media) = match (is_video, is_audio, decode) {
                 (true, _, true) => (&video_slots, link_decoded_video as FirstLink, "video"),
                 (true, _, false) => (&video_slots, link_passthrough as FirstLink, "video"),
@@ -381,7 +432,14 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
         // A removed pad is already unlinked, so the output it fed is free.
         // Its caps may be gone, so both media are checked.
         let instance_id_clone = instance_id.to_string();
+        let removed_pid_audio = pid_audio.clone();
         demux_element.connect_pad_removed(move |element, pad| {
+            if let Some(pid_audio) = &removed_pid_audio {
+                pid_audio
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pad_removed(element, pad);
+            }
             release_output(
                 &removed_video_slots,
                 element,
@@ -398,15 +456,33 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
             );
         });
 
+        // The demuxer has added every pad of a stream list: rank the audio
+        // pads by PID.
+        if let Some(pid_audio) = pid_audio {
+            demux_element.connect_no_more_pads(move |element| {
+                pid_audio
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .no_more_pads(element);
+            });
+        }
+
         // Internal link: srtsrc -> decodebin/tsdemux
-        let internal_links = vec![(
+        internal_links.push((
             ElementPadRef::pad(&src_id, "src"),
             ElementPadRef::pad(&demux_id, "sink"),
-        )];
+        ));
 
         info!(
-            "Created MPEG-TS/SRT Input block ({}) with {} video output(s) and {} audio output(s)",
-            mode_label, num_video_tracks, num_audio_tracks
+            "Created MPEG-TS/SRT Input block ({}) with {} video output(s) and {} audio output(s){}",
+            mode_label,
+            num_video_tracks,
+            num_audio_tracks,
+            if map_audio_by_pid {
+                ", audio outputs in PID order"
+            } else {
+                ""
+            }
         );
 
         Ok(BlockBuildResult {
@@ -741,6 +817,31 @@ fn link_decoded_audio(
     Ok(())
 }
 
+/// `audioconvert -> audioresample` for PID-ordered output `index` in decode
+/// mode. Returns the chain's sink pad and its elements, convert first.
+fn audio_convert_chain(
+    instance_id: &str,
+    index: usize,
+) -> Result<(gst::Pad, Vec<(String, gst::Element)>), BlockBuildError> {
+    let convert_id = format!("{}:audioconvert_out_{}", instance_id, index);
+    let resample_id = format!("{}:audioresample_out_{}", instance_id, index);
+    let audioconvert = gst::ElementFactory::make("audioconvert")
+        .name(&convert_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("audioconvert: {}", e)))?;
+    let audioresample = gst::ElementFactory::make("audioresample")
+        .name(&resample_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("audioresample: {}", e)))?;
+    let head = audioconvert.static_pad("sink").ok_or_else(|| {
+        BlockBuildError::ElementCreation("audioconvert has no sink pad".to_string())
+    })?;
+    Ok((
+        head,
+        vec![(convert_id, audioconvert), (resample_id, audioresample)],
+    ))
+}
+
 /// Get metadata for MPEG-TS/SRT input blocks (for UI/API).
 pub fn get_blocks() -> Vec<BlockDefinition> {
     vec![mpegtssrt_input_definition()]
@@ -782,6 +883,20 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 live: false,
                 persist: None,
             },            ExposedProperty {
+                name: "map_audio_by_pid".to_string(),
+                label: "Map Audio by PID".to_string(),
+                description: "Feed audio_out_k from the k-th audio stream in ascending PID order, in both modes and across reconnects. An output with no stream of its own carries the first audio stream. Off (default): the first audio streams to arrive take the outputs in order.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(DEFAULT_MPEGTSSRT_MAP_AUDIO_BY_PID)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "map_audio_by_pid".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
                 name: "srt_uri".to_string(),
                 label: "SRT URI".to_string(),
                 description: "SRT URI (e.g., 'srt://:4000?mode=listener' or 'srt://192.0.2.1:4000?mode=caller')".to_string(),
