@@ -639,7 +639,7 @@ pub async fn start_edited(
             .with_test_writer()
             .try_init();
     }
-    let _ = strom::gpu::detect_gpu_capabilities();
+    strom::gpu::detect_gpu_capabilities();
 
     let state = crate::common::state::with_media(dir.path());
     let mut flow = build_flow(tag, backend, &clips);

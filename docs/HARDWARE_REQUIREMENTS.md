@@ -219,7 +219,7 @@ curl -s localhost:8080/api/flows/<flow-id>/debug-graph \
 nvidia-smi dmon -s u
 ```
 
-The startup log reports `CUDA-GL interop works …` (or why it failed). Encoder choices are
+The startup log reports `GL renderer: …`, and warns if NVENC is present but GL renders on another GPU. Encoder choices are
 logged when a flow with a Video Encoder block starts: `Found available encoder: …` or
 `Using software fallback encoder: …`.
 

@@ -1,13 +1,10 @@
-//! GPU capability detection and video conversion mode selection.
+//! GPU capability detection and video-conversion thread tuning.
 //!
-//! The conversion mode is decided once at startup, per platform:
-//!
-//! * On CUDA platforms (Linux/Windows with NVIDIA) `autovideoconvert` gives a
-//!   real GPU path, but only where GL-CUDA interop actually works. NVENC's
-//!   presence is the gate for attempting that test, and the interop test is
-//!   the gate for using it. Where either fails we use software `videoconvert`.
-//! * On macOS there is no CUDA question to ask, so we do not ask it. See
-//!   `detect_convert_mode` for why macOS uses threaded software conversion.
+//! [`detect_gpu_capabilities`] probes the OpenGL renderer once at startup, for
+//! the compositor's backend choice and the system info API, and warns when
+//! NVENC is present but GL renders on another GPU. Which converter or download
+//! a block uses is decided per link from the negotiated caps (see
+//! `gst::video_adapt`), not here.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -15,78 +12,8 @@ use std::sync::OnceLock;
 use strom_types::GlRendererInfo;
 use tracing::{debug, info, warn};
 
-/// Video conversion mode based on detected GPU capabilities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VideoConvertMode {
-    /// Use `autovideoconvert` - GPU-accelerated when available (GL/CUDA interop works)
-    GpuAccelerated,
-    /// Use `videoconvert` - safe software fallback (interop broken or no GPU)
-    Software,
-}
-
-impl VideoConvertMode {
-    /// Returns the GStreamer element name to use for video conversion.
-    pub fn element_name(&self) -> &'static str {
-        match self {
-            VideoConvertMode::GpuAccelerated => "autovideoconvert",
-            VideoConvertMode::Software => "videoconvert",
-        }
-    }
-}
-
-/// Global detected video convert mode, set once at startup.
-static VIDEO_CONVERT_MODE: OnceLock<VideoConvertMode> = OnceLock::new();
-
 /// Global GL renderer info, probed once at startup.
 static GL_RENDERER_INFO: OnceLock<Option<GlRendererInfo>> = OnceLock::new();
-
-/// Pipeline that the CUDA-GL interop probe runs, in `gst-launch-1.0` syntax.
-#[cfg(not(target_os = "macos"))]
-const INTEROP_PROBE_PIPELINE: &str = "videotestsrc num-buffers=1 \
-    ! video/x-raw,width=160,height=64 ! glupload ! glcolorconvert \
-    ! video/x-raw(memory:GLMemory),format=NV12 ! nvh264enc ! fakesink";
-
-/// Hidden `strom` subcommand that runs [`INTEROP_PROBE_PIPELINE`] and exits.
-#[cfg(not(target_os = "macos"))]
-pub const INTEROP_PROBE_SUBCOMMAND: &str = "gpu-interop-probe";
-
-/// Executable that runs the interop probe instead of `gst-launch-1.0`.
-#[cfg(not(target_os = "macos"))]
-static INTEROP_PROBE_EXE: OnceLock<std::path::PathBuf> = OnceLock::new();
-
-/// Get the detected video conversion mode.
-/// Panics if called before `detect_gpu_capabilities()`.
-pub fn video_convert_mode() -> VideoConvertMode {
-    *VIDEO_CONVERT_MODE
-        .get()
-        .expect("GPU capabilities not detected yet - call detect_gpu_capabilities() first")
-}
-
-/// Set the video conversion mode before detection runs, for a test that has
-/// to check a block under a mode its host would not detect (the GPU mode on a
-/// CI runner without NVIDIA). As with detection, the first mode set wins for
-/// the process; returns the mode in force. Not called by the server.
-pub fn force_video_convert_mode(mode: VideoConvertMode) -> VideoConvertMode {
-    *VIDEO_CONVERT_MODE.get_or_init(|| mode)
-}
-
-/// Check if running inside WSL (Windows Subsystem for Linux).
-#[cfg(not(target_os = "macos"))]
-fn is_wsl() -> bool {
-    // Check WSL environment variable
-    if std::env::var("WSL_DISTRO_NAME").is_ok() || std::env::var("WSL_INTEROP").is_ok() {
-        return true;
-    }
-
-    // Check /proc/version for WSL signature
-    if let Ok(version) = std::fs::read_to_string("/proc/version") {
-        if version.to_lowercase().contains("microsoft") || version.to_lowercase().contains("wsl") {
-            return true;
-        }
-    }
-
-    false
-}
 
 /// Get the detected GL renderer info (None if detection failed or not yet run).
 pub fn gl_renderer_info() -> Option<GlRendererInfo> {
@@ -221,78 +148,21 @@ fn detect_gl_renderer() -> Option<GlRendererInfo> {
     Some(gl_info)
 }
 
-/// Detect GPU capabilities and set the global video conversion mode.
-/// This should be called once at startup after GStreamer is initialized.
-pub fn detect_gpu_capabilities() -> VideoConvertMode {
-    // Probe GL renderer info early (best-effort, independent of CUDA-GL interop)
+/// Probe the GPU once at startup, after GStreamer is initialised: the GL
+/// renderer ([`gl_renderer_info`], [`has_hardware_gl`]), and on CUDA platforms
+/// a warning when NVENC is present but GL renders on another GPU.
+pub fn detect_gpu_capabilities() {
+    // Best-effort; a failed probe leaves the renderer unknown.
     let gl_info = detect_gl_renderer();
     let _ = GL_RENDERER_INFO.set(gl_info);
 
-    let mode = detect_convert_mode();
-    let _ = VIDEO_CONVERT_MODE.set(mode);
-    mode
-}
-
-/// Decide the conversion mode on macOS.
-///
-/// Do not add an NVENC check here: NVENC never exists on a Mac, so the probe
-/// could only ever return one answer.
-///
-/// `Software` is right for two reasons. `autovideoconvert` offers no GPU path
-/// for the frames these call sites see — given GL memory it picks
-/// `glcolorconvert`, but our blocks feed it system memory (the GL chains in
-/// this tree download at their boundary) and it then selects
-/// `videoconvertscale` on the CPU. And being a bin it exposes no `n-threads`,
-/// so it would forfeit the threading below, which is what moves the numbers.
-#[cfg(target_os = "macos")]
-fn detect_convert_mode() -> VideoConvertMode {
-    info!(
-        "macOS - using software video conversion with n-threads={} (autovideoconvert has no GPU path for system memory here)",
-        video_convert_threads()
-    );
-    VideoConvertMode::Software
-}
-
-/// Decide the conversion mode on CUDA-capable platforms (Linux, Windows).
-///
-/// Detection strategy, unchanged:
-/// 1. If running on WSL, skip GPU test (CUDA-GL interop is known broken)
-/// 2. If NVENC is unavailable there is no CUDA stack to test, use software mode
-/// 3. Test GL→CUDA interop with a fast pipeline (no nvenc initialization)
-#[cfg(not(target_os = "macos"))]
-fn detect_convert_mode() -> VideoConvertMode {
-    // Fast path: WSL has broken CUDA-GL interop, skip expensive test
-    if is_wsl() {
-        info!("WSL detected - using software video conversion (CUDA-GL interop unsupported)");
-        return VideoConvertMode::Software;
-    }
-
-    // Check if nvh264enc is available (required for GPU-accelerated encoding)
-    let registry = gst::Registry::get();
-    let has_nvenc = registry
-        .find_feature("nvh264enc", gst::ElementFactory::static_type())
-        .is_some();
-
-    if !has_nvenc {
-        info!("NVENC not available - using software video conversion");
-        return VideoConvertMode::Software;
-    }
-
-    warn_if_gl_is_not_on_nvidia();
-
-    debug!("Testing CUDA-GL interop (this may take a moment on first run)...");
-
-    match test_cuda_gl_interop() {
-        Ok(()) => {
-            info!("CUDA-GL interop works - using GPU-accelerated video conversion");
-            VideoConvertMode::GpuAccelerated
-        }
-        Err(e) => {
-            warn!(
-                "CUDA-GL interop failed: {} - using software video conversion",
-                e
-            );
-            VideoConvertMode::Software
+    #[cfg(not(target_os = "macos"))]
+    {
+        let has_nvenc = gst::Registry::get()
+            .find_feature("nvh264enc", gst::ElementFactory::static_type())
+            .is_some();
+        if has_nvenc {
+            warn_if_gl_is_not_on_nvidia();
         }
     }
 }
@@ -480,9 +350,8 @@ fn sysctl_string(name: &str) -> Option<String> {
 ///
 /// `videoconvert` and `videoscale` ship with `n-threads=1`, so a 1080p colour
 /// conversion or resize runs on a single core however many the machine has.
-/// Every call site that builds a conversion element from
-/// [`VideoConvertMode::element_name`], and every `videoscale`, routes through
-/// here, so the default is set in exactly one place.
+/// Every `videoconvert` and `videoscale` a block builds routes through here,
+/// so the default is set in exactly one place.
 ///
 /// This is macOS-only on purpose. The thread count above is an Apple-silicon
 /// heuristic. On Linux in particular a container's visible CPU count routinely
@@ -491,8 +360,7 @@ fn sysctl_string(name: &str) -> Option<String> {
 pub fn configure_video_convert(element: &gst::Element) {
     #[cfg(target_os = "macos")]
     {
-        // Only plain `videoconvert` and `videoscale` carry the property;
-        // `autovideoconvert` is a bin with nothing to forward it to.
+        // Only plain `videoconvert` and `videoscale` carry the property.
         if element.has_property("n-threads") {
             element.set_property("n-threads", video_convert_threads());
         }
@@ -501,63 +369,6 @@ pub fn configure_video_convert(element: &gst::Element) {
     {
         let _ = element;
     }
-}
-
-/// Run the interop probe in this executable rather than `gst-launch-1.0`.
-///
-/// The probe has to see the GPU this process renders GL on. On a Windows laptop
-/// with two GPUs that choice is per executable: `strom.exe` asks for the
-/// discrete GPU, `gst-launch-1.0.exe` does not, so a probe in `gst-launch` runs
-/// GL on the integrated GPU, fails interop, and turns GPU conversion off for a
-/// process whose own GL is on the NVIDIA card. Only the `strom` binary calls
-/// this, since only it has [`INTEROP_PROBE_SUBCOMMAND`]; anything else keeps
-/// `gst-launch-1.0`.
-#[cfg(not(target_os = "macos"))]
-pub fn run_interop_probe_in_this_executable() {
-    match std::env::current_exe() {
-        Ok(exe) => {
-            let _ = INTEROP_PROBE_EXE.set(exe);
-        }
-        Err(e) => warn!(
-            "Cannot locate the Strom executable ({}) - probing CUDA-GL interop with gst-launch-1.0",
-            e
-        ),
-    }
-}
-
-/// Body of [`INTEROP_PROBE_SUBCOMMAND`]: run [`INTEROP_PROBE_PIPELINE`] to the
-/// end, as `gst-launch-1.0` would. The parent reads the verdict from the
-/// GStreamer warnings on stderr and from the exit code.
-#[cfg(not(target_os = "macos"))]
-pub fn run_interop_probe() -> Result<(), String> {
-    gst::init().map_err(|e| format!("GStreamer init failed: {}", e))?;
-
-    let pipeline = gst::parse::launch(INTEROP_PROBE_PIPELINE)
-        .map_err(|e| format!("Failed to create probe pipeline: {}", e))?;
-    let bus = pipeline.bus().ok_or("Probe pipeline has no bus")?;
-
-    let result = pipeline
-        .set_state(gst::State::Playing)
-        .map_err(|e| format!("Failed to start probe pipeline: {}", e))
-        .and_then(|_| {
-            match bus.timed_pop_filtered(
-                gst::ClockTime::from_seconds(30),
-                &[gst::MessageType::Eos, gst::MessageType::Error],
-            ) {
-                Some(msg) => match msg.view() {
-                    gst::MessageView::Error(err) => Err(format!(
-                        "Probe pipeline error from {:?}: {}",
-                        err.src().map(|s| s.path_string()),
-                        err.error()
-                    )),
-                    _ => Ok(()),
-                },
-                None => Err("Probe pipeline did not finish within 30 s".to_string()),
-            }
-        });
-
-    let _ = pipeline.set_state(gst::State::Null);
-    result
 }
 
 /// Warn when NVENC is present but OpenGL renders on another GPU.
@@ -580,81 +391,6 @@ fn warn_if_gl_is_not_on_nvidia() {
             info.renderer, info.vendor
         );
     }
-}
-
-/// Test if true zero-copy GL-CUDA interop works with nvh264enc.
-/// Runs the probe pipeline in a child process with GST_DEBUG to capture interop
-/// warnings: `strom` itself when available, otherwise `gst-launch-1.0`.
-/// Returns Ok if zero-copy works, Err if fallback copy is used.
-#[cfg(not(target_os = "macos"))]
-fn test_cuda_gl_interop() -> Result<(), String> {
-    use std::process::Command;
-
-    // Get GL window/platform from environment (for headless Docker with egl-device)
-    let gl_window = std::env::var("GST_GL_WINDOW").unwrap_or_default();
-    let gl_platform = std::env::var("GST_GL_PLATFORM").unwrap_or_default();
-
-    debug!(
-        "Testing CUDA-GL interop with GST_GL_WINDOW={:?}, GST_GL_PLATFORM={:?}",
-        gl_window, gl_platform
-    );
-
-    // Run the probe pipeline in a child process with GST_DEBUG to capture warnings
-    let mut cmd = match INTEROP_PROBE_EXE.get() {
-        Some(exe) => {
-            let mut cmd = Command::new(exe);
-            cmd.arg(INTEROP_PROBE_SUBCOMMAND);
-            cmd
-        }
-        None => {
-            let gst_launch = if cfg!(windows) {
-                "gst-launch-1.0.exe"
-            } else {
-                "gst-launch-1.0"
-            };
-            let mut cmd = Command::new(gst_launch);
-            cmd.args(INTEROP_PROBE_PIPELINE.split_whitespace());
-            cmd
-        }
-    };
-    cmd.env("GST_DEBUG", "nvenc:3,nvencoder:3,cudautils:3");
-
-    // Pass through GL environment variables for headless support
-    if !gl_window.is_empty() {
-        cmd.env("GST_GL_WINDOW", &gl_window);
-    }
-    if !gl_platform.is_empty() {
-        cmd.env("GST_GL_PLATFORM", &gl_platform);
-    }
-
-    let output = cmd.output().map_err(|e| {
-        format!(
-            "Failed to run the interop probe {:?}: {}",
-            cmd.get_program(),
-            e
-        )
-    })?;
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    // Check for interop failure indicators
-    if stderr.contains("CUDA_ERROR_OPERATING_SYSTEM")
-        || stderr.contains("failed to register")
-        || stderr.contains("Couldn't get GL context")
-        || stderr.contains("could not register resource")
-    {
-        return Err("CUDA-GL interop failed (fallback copy detected)".to_string());
-    }
-
-    // Check if pipeline succeeded
-    if !output.status.success() {
-        return Err(format!(
-            "Pipeline failed with exit code: {:?}",
-            output.status.code()
-        ));
-    }
-
-    Ok(())
 }
 
 // Every test here is macOS-only: the helpers under test are no-ops elsewhere.
@@ -691,25 +427,6 @@ mod tests {
         assert!(
             video_convert_threads() > 1,
             "every Mac this runs on is multi-core; a pool of 1 means detection failed"
-        );
-    }
-
-    /// The macOS choice of `Software` rests on `autovideoconvert` being a bin
-    /// that cannot forward a thread count to the converter it picks. If a
-    /// future GStreamer grows such a property, that trade-off is worth
-    /// re-measuring rather than silently keeping.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn autovideoconvert_cannot_be_threaded() {
-        gst::init().expect("gst init");
-
-        let auto = gst::ElementFactory::make("autovideoconvert")
-            .build()
-            .expect("autovideoconvert is in gst-plugins-base and must be present");
-
-        assert!(
-            !auto.has_property("n-threads"),
-            "autovideoconvert now exposes n-threads - re-measure Software vs GpuAccelerated on macOS"
         );
     }
 
@@ -825,48 +542,5 @@ mod tests {
                 bad
             );
         }
-    }
-
-    /// Tripwire for a VideoToolbox converter arriving in a future GStreamer.
-    ///
-    /// The macOS choice of `Software` rests on there being no hardware
-    /// converter for `autovideoconvert` to offer. `autovideoconvert` discovers
-    /// candidates by klass (`Filter/Converter/Video...`), and today no
-    /// applemedia element carries one — the plugin ships codecs, a source and a
-    /// sink, nothing that transforms raw video.
-    ///
-    /// That is a gap in GStreamer, not in the platform: Apple exposes
-    /// `VTPixelTransferSession`, which converts colour and scales, and nothing
-    /// upstream wraps it yet. If that changes, `autovideoconvert` will pick the
-    /// new element up automatically and `GpuAccelerated` becomes worth
-    /// re-measuring here — a VideoToolbox transfer session would keep frames in
-    /// `CVPixelBuffer`s and skip both the CPU stripe work and the GL round trip
-    /// that makes `glcolorconvert` unprofitable for system memory today.
-    ///
-    /// This test fails on the day that lands, so the decision gets revisited
-    /// deliberately instead of the constant above quietly going stale.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn no_applemedia_converter_to_reconsider() {
-        gst::init().expect("gst init");
-
-        let converters: Vec<String> = gst::Registry::get()
-            .features_by_plugin("applemedia")
-            .into_iter()
-            .filter_map(|f| f.downcast::<gst::ElementFactory>().ok())
-            .filter(|f| {
-                f.metadata(gst::ELEMENT_METADATA_KLASS)
-                    .map(|k| k.contains("Converter"))
-                    .unwrap_or(false)
-            })
-            .map(|f| f.name().to_string())
-            .collect();
-
-        assert!(
-            converters.is_empty(),
-            "applemedia now ships a video converter ({:?}) - autovideoconvert will \
-             discover it, so re-measure GpuAccelerated against threaded Software on macOS",
-            converters
-        );
     }
 }

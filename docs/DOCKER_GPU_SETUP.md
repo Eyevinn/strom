@@ -97,21 +97,14 @@ docker run -d \
 
 ### Runtime Detection
 
-Strom automatically detects GPU capabilities at startup and selects the optimal pipeline:
+Strom logs the GPU it found at startup. With the NVIDIA GPU visible to GStreamer's GL and to NVML:
 
-**GPU interop works:**
 ```
-INFO  CUDA-GL interop works - using GPU-accelerated video conversion
+INFO  GL renderer: NVIDIA L4/PCIe/SSE2 (NVIDIA Corporation), GL 4.6.0 NVIDIA ..., GLSL 4.60 NVIDIA
 INFO  NVML initialized successfully - found 1 GPU(s)
 ```
 
-**GPU interop not available (falls back gracefully):**
-```
-WARN  CUDA-GL interop failed: ... - using software video conversion
-INFO  NVML initialized successfully - found 1 GPU(s)
-```
-
-Even when CUDA-GL interop fails, hardware encoding (NVENC) is still used - only color conversion falls back to CPU.
+If NVENC is available but GL renders on another GPU, Strom warns at startup. Which elements convert or download video is decided per block from the negotiated caps, not once at startup.
 
 ## CUDA-GL Interop (Zero-Copy)
 

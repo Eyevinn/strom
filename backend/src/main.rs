@@ -286,10 +286,6 @@ enum Commands {
         /// Password to hash (if not provided, will read from stdin)
         password: Option<String>,
     },
-    /// Run the CUDA-GL interop probe pipeline and exit (used by Strom itself)
-    #[cfg(not(target_os = "macos"))]
-    #[command(name = strom::gpu::INTEROP_PROBE_SUBCOMMAND, hide = true)]
-    GpuInteropProbe,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -326,14 +322,6 @@ fn main() -> anyhow::Result<()> {
         match command {
             Commands::HashPassword { password } => {
                 return handle_hash_password(password.as_deref());
-            }
-            #[cfg(not(target_os = "macos"))]
-            Commands::GpuInteropProbe => {
-                if let Err(e) = strom::gpu::run_interop_probe() {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                }
-                return Ok(());
             }
         }
     }
@@ -550,10 +538,7 @@ fn run_with_gui(
         // Register GStreamer plugins statically
         strom::gst::register_static_plugins();
 
-        // Detect GPU capabilities for video conversion mode selection
-        // This tests CUDA-GL interop to determine if autovideoconvert works
-        #[cfg(not(target_os = "macos"))]
-        strom::gpu::run_interop_probe_in_this_executable();
+        // Probe the GL renderer (compositor backend choice, system info)
         strom::gpu::detect_gpu_capabilities();
 
         // Report WebRTC ICE availability. WHIP/WHEP blocks refuse to build
@@ -822,10 +807,7 @@ async fn run_headless(
     // Register GStreamer plugins statically
     strom::gst::register_static_plugins();
 
-    // Detect GPU capabilities for video conversion mode selection
-    // This tests CUDA-GL interop to determine if autovideoconvert works
-    #[cfg(not(target_os = "macos"))]
-    strom::gpu::run_interop_probe_in_this_executable();
+    // Probe the GL renderer (compositor backend choice, system info)
     strom::gpu::detect_gpu_capabilities();
 
     // Report WebRTC ICE availability. WHIP/WHEP blocks refuse to build

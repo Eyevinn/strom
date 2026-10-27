@@ -4,38 +4,12 @@
 //! runs a program on the integrated GPU unless the executable exports
 //! `NvOptimusEnablement` (`AmdPowerXpressRequestHighPerformance` for AMD).
 //! Without it GStreamer's GL lands on the integrated GPU while NVENC runs on the
-//! NVIDIA card. The CUDA-GL interop probe must also run inside `strom` itself,
-//! or it sees the integrated GPU and turns GPU conversion off.
-#![cfg(not(target_os = "macos"))]
-
-use std::process::Command;
-
-/// Exit code clap uses for a command line it cannot parse.
-const CLAP_USAGE_ERROR: i32 = 2;
-
-/// `strom gpu-interop-probe` must exist. Without it the startup probe fails
-/// with a usage error, which reads as "interop failed" and silently turns GPU
-/// conversion off. Whether the pipeline itself passes depends on the machine
-/// (no NVENC on most runners), so only the parse is asserted.
-#[test]
-fn interop_probe_subcommand_exists() {
-    let output = Command::new(env!("CARGO_BIN_EXE_strom"))
-        .arg(strom::gpu::INTEROP_PROBE_SUBCOMMAND)
-        .output()
-        .expect("run strom");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    assert_ne!(
-        output.status.code(),
-        Some(CLAP_USAGE_ERROR),
-        "strom does not accept the interop probe subcommand:\n{stderr}"
-    );
-}
+//! NVIDIA card.
+#![cfg(windows)]
 
 /// `strom.exe` must export both symbols with the value 1. Drop the statics in
 /// `main.rs` or the `/EXPORT:` arguments in `build.rs` and the driver finds
 /// nothing, so this reads the export table of the built binary.
-#[cfg(windows)]
 #[test]
 fn strom_exe_requests_the_discrete_gpu() {
     let image = std::fs::read(env!("CARGO_BIN_EXE_strom")).expect("read strom.exe");
@@ -57,7 +31,6 @@ fn strom_exe_requests_the_discrete_gpu() {
 }
 
 /// Just enough of the PE format to read named exports that point at a `u32`.
-#[cfg(windows)]
 mod pe {
     fn u16_at(b: &[u8], off: usize) -> u16 {
         u16::from_le_bytes(b[off..off + 2].try_into().unwrap())
