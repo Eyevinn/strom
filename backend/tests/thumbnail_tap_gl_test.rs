@@ -25,6 +25,9 @@ pub mod common;
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_app as gst_app;
+use gstreamer_gl as gst_gl;
+use gstreamer_gl::prelude::*;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -226,36 +229,49 @@ fn gl_nv12_gives_a_thumbnail() {
     );
 }
 
-/// True when this GL stack makes rectangle textures. A GLES context, which
-/// some hosts' surfaceless EGL gives, does not. Checked without the tap.
-fn makes_rectangle_textures() -> bool {
-    let Ok(probe) = gst::parse::launch(
-        "gltestsrc num-buffers=3 ! glcolorconvert ! \
-         video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,texture-target=rectangle ! \
-         fakesink sync=false",
-    ) else {
-        return false;
-    };
-    let _ = probe.set_state(gst::State::Playing);
-    let done = probe.bus().unwrap().timed_pop_filtered(
-        gst::ClockTime::from_seconds(10),
-        &[gst::MessageType::Eos, gst::MessageType::Error],
-    );
+/// The API of the GL context `gltestsrc` renders with here. Rectangle
+/// textures are desktop GL (`OPENGL`, `OPENGL3`); GLES has none. Read from a
+/// frame's memory, without the tap.
+fn gl_api() -> gst_gl::GLAPI {
+    let probe = gst::parse::launch(
+        "gltestsrc num-buffers=1 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64 ! \
+         appsink name=out sync=false",
+    )
+    .expect("GL probe")
+    .downcast::<gst::Pipeline>()
+    .unwrap();
+    let sink = probe
+        .by_name("out")
+        .unwrap()
+        .downcast::<gst_app::AppSink>()
+        .unwrap();
+    probe.set_state(gst::State::Playing).unwrap();
+    let sample = sink.try_pull_sample(gst::ClockTime::from_seconds(10));
     let _ = probe.set_state(gst::State::Null);
-    done.is_some_and(|msg| msg.type_() == gst::MessageType::Eos)
+    let sample = sample.expect("the GL probe made no frame");
+    let memory = sample
+        .buffer()
+        .expect("a frame")
+        .peek_memory(0)
+        .downcast_memory_ref::<gst_gl::GLBaseMemory>()
+        .expect("GL memory")
+        .to_owned();
+    memory.context().gl_api()
 }
 
 /// A rectangle texture, what VideoToolbox outputs on macOS, gave no
-/// thumbnail either. Skips where the GL stack itself makes no rectangle
-/// textures: nothing there produces them for the tap to meet.
+/// thumbnail either. Skips only on a GLES context, which has no rectangle
+/// textures, so nothing there produces them for the tap to meet. On desktop
+/// GL it runs, and a failing rectangle conversion fails it.
 #[test]
 #[serial_test::serial(gl)]
 fn gl_rectangle_texture_gives_a_thumbnail() {
     if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
         return;
     }
-    if !makes_rectangle_textures() {
-        eprintln!("SKIP: this GL stack makes no rectangle textures");
+    let api = gl_api();
+    if !api.intersects(gst_gl::GLAPI::OPENGL | gst_gl::GLAPI::OPENGL3) {
+        eprintln!("SKIP: the GL context is {api:?}, which has no rectangle textures");
         return;
     }
     expect_thumbnail(
