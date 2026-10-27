@@ -1,8 +1,8 @@
-# Dockerfile for Strom - Ubuntu 25.10 (Questing)-based multi-stage build with Zig cross-compilation
+# Dockerfile for Strom - Ubuntu 26.04 LTS (Resolute)-based multi-stage build with Zig cross-compilation
 
 # Stage 1: Frontend builder - Build WASM frontend on native platform
 # IMPORTANT: Always build on native platform - WASM output is platform-independent!
-FROM --platform=$BUILDPLATFORM ubuntu:questing AS frontend-builder
+FROM --platform=$BUILDPLATFORM ubuntu:26.04 AS frontend-builder
 WORKDIR /app
 
 # Get native build platform architecture
@@ -66,7 +66,7 @@ RUN --mount=type=secret,id=aws_access_key_id \
 
 # Stage 2: Backend builder - Build backend with Zig cross-compilation support
 # IMPORTANT: Must run on BUILD platform for cross-compilation tools (Zig) to work
-FROM --platform=$BUILDPLATFORM ubuntu:questing AS backend-builder
+FROM --platform=$BUILDPLATFORM ubuntu:26.04 AS backend-builder
 WORKDIR /app
 
 # Get build and target platform info for cross-compilation detection
@@ -151,10 +151,10 @@ RUN if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ] && [ "$TARGETARCH" = "arm64" ];
     # Block ARM64 Python packages (critical - prevents apt from removing amd64 Python!)
     mkdir -p /etc/apt/preferences.d && \
     printf 'Package: python3*:arm64\nPin: release *\nPin-Priority: -1\n' > /etc/apt/preferences.d/block-arm64-python && \
-    # Add ARM64 package sources from Ubuntu ports (questing = 25.10)
-    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports questing main universe" > /etc/apt/sources.list.d/arm64-cross.list && \
-    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports questing-updates main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
-    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports questing-security main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
+    # Add ARM64 package sources from Ubuntu ports (resolute = 26.04)
+    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports resolute main universe" > /etc/apt/sources.list.d/arm64-cross.list && \
+    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports resolute-updates main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
+    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports resolute-security main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
     apt-get update && \
     # Install ARM64 GStreamer development libraries
     apt-get install -y --no-install-recommends \
@@ -221,7 +221,7 @@ RUN --mount=type=secret,id=aws_access_key_id \
     export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig && \
     export AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu && \
     # Use C17 standard to avoid glibc 2.38+ C23 symbols (__isoc23_sscanf, __isoc23_strtol) \
-    # that aws-lc-sys would otherwise use when built on Ubuntu 25.10 \
+    # that aws-lc-sys would otherwise use when built on Ubuntu 26.04 \
     # CFLAGS/CXXFLAGS for regular builds, CMAKE_C_FLAGS/CMAKE_CXX_FLAGS for CMake (aws-lc-sys) \
     export CFLAGS="-std=gnu17 -I/usr/include -I/usr/include/aarch64-linux-gnu" && \
     export CXXFLAGS="-std=gnu++17" && \
@@ -238,8 +238,8 @@ else \
 fi && \
     { command -v sccache >/dev/null && [ -n "$RUSTC_WRAPPER" ] && sccache --show-stats || true; }
 
-# Stage 3: Runtime - Minimal runtime image with Ubuntu 25.10 (questing) for GStreamer 1.26
-FROM ubuntu:questing AS runtime
+# Stage 3: Runtime - Minimal runtime image with Ubuntu 26.04 LTS (resolute) for GStreamer 1.28
+FROM ubuntu:26.04 AS runtime
 WORKDIR /app
 
 # TARGETARCH is set automatically by docker buildx (e.g. amd64, arm64).
@@ -248,7 +248,8 @@ ARG TARGETARCH
 
 # Install GStreamer runtime dependencies
 # Note: Ubuntu Plucky (25.04) reached EOL before the nvcodec fix (Bug #2109413) was released.
-# Ubuntu Questing (25.10) includes the fix in gstreamer1.0-plugins-bad 1.26.3+.
+# Ubuntu Questing (25.10) was the first release with the fix (gstreamer1.0-plugins-bad 1.26.3+);
+# Ubuntu 26.04 ships plugins-bad 1.28, which includes it.
 #
 # IMPORTANT: gstreamer1.0-gl and EGL/GBM libraries are required for CUDA-GL interop:
 # - gstreamer1.0-gl: GL plugins (glupload, gldownload, glcolorconvert)
@@ -285,7 +286,7 @@ RUN apt-get update && apt-get install -y \
 # Override the distro-shipped decklink plugin with our patched build, which
 # adds the `capture-group` property to decklinkvideosrc for synchronized
 # capture group support (see tools/patched-gstreamer-plugins/README.md).
-# The patched .so is forward-ABI-compatible with the runtime gstreamer 1.26
+# The patched .so is forward-ABI-compatible with the runtime gstreamer 1.28
 # in this image because it was built against the 1.22 ABI.
 ARG PATCHED_PLUGINS_TAG=patched-plugins-v1.0-gst1.22.12
 ARG PATCHED_PLUGINS_REPO=Eyevinn/strom
