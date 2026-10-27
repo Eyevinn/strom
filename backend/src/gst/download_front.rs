@@ -135,20 +135,10 @@ pub fn install(front: &gst::Element, consumer_sink: &gst::Pad, label: &str, cons
     });
 }
 
-/// Why the input cannot be adapted.
-#[derive(Debug)]
-enum Problem {
-    /// [`video_adapt::decide`] refused.
-    Refused(Refusal),
-    /// The download it called for does not take the caps (a pixel format its
-    /// element does not list).
-    NotDownloadable(Adapter),
-}
-
 /// A decision, with the consumer's caps it was made against (for errors).
 struct Decision {
     takes: gst::Caps,
-    adapters: Result<Vec<Adapter>, Problem>,
+    adapters: Result<Vec<Adapter>, Refusal>,
 }
 
 /// What the consumer needs in front of it to take `caps`.
@@ -161,27 +151,8 @@ fn decide(consumer_sink: &gst::Pad, caps: &gst::CapsRef) -> Decision {
         caps,
         Consumer::Exactly(&takes),
         video_adapt::factory_available,
-    )
-    .map_err(Problem::Refused)
-    .and_then(|adapters| downloads_take(adapters, |download| download.sink_takes(caps)));
+    );
     Decision { takes, adapters }
-}
-
-/// `adapters`, when every download among them takes the caps (`takes` says
-/// whether one does). A download whose element does not list the pixel format
-/// would be accepted at ACCEPT_CAPS time and then fail not-negotiated.
-fn downloads_take(
-    adapters: Vec<Adapter>,
-    takes: impl Fn(Adapter) -> bool,
-) -> Result<Vec<Adapter>, Problem> {
-    match adapters
-        .iter()
-        .copied()
-        .find(|a| a.memory_feature().is_some() && !takes(*a))
-    {
-        Some(download) => Err(Problem::NotDownloadable(download)),
-        None => Ok(adapters),
-    }
 }
 
 fn on_query(front: &Front, pad: &gst::Pad, query: &mut gst::QueryRef) -> gst::PadProbeReturn {
@@ -346,15 +317,12 @@ fn on_caps(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef) {
     }
 }
 
-/// The elements for `adapters`, in link order, ending in a system-memory pin:
-/// `gldownload` and `cudadownload` also output GL memory, which the consumer's
-/// converter would pass through to an encoder that lists GL memory.
+/// The elements for `adapters`, in link order. A download ends in the
+/// system-memory pin `decide()` puts after it: `gldownload` and `cudadownload`
+/// also output GL memory, which the consumer's converter would pass through
+/// to an encoder that lists GL memory.
 fn build_adapters(adapters: &[Adapter], prefix: &str) -> Result<Vec<gst::Element>, String> {
-    let mut elements = video_adapt::build_elements(adapters, prefix)?;
-    if !elements.is_empty() {
-        elements.push(video_adapt::system_memory_pin(prefix)?);
-    }
-    Ok(elements)
+    video_adapt::build_elements(adapters, prefix)
 }
 
 /// The readable name of the memory a caps feature names.
@@ -408,18 +376,17 @@ fn post_problem(
     pad: &gst::Pad,
     caps: &gst::CapsRef,
     takes: &gst::CapsRef,
-    problem: &Problem,
+    refusal: &Refusal,
 ) {
     let (label, consumer) = (&front.label, &front.consumer);
     let Some(element) = pad.parent_element() else {
-        warn!("{}: input {} refused: {:?}", label, caps, problem);
+        warn!("{}: input {} refused: {:?}", label, caps, refusal);
         return;
     };
-    let refusal = match problem {
-        Problem::Refused(refusal) => refusal,
-        Problem::NotDownloadable(download) => {
-            let memory = download
-                .memory_feature()
+    match refusal {
+        Refusal::NotDownloadable { factory } => {
+            let memory = Adapter::download_from(factory)
+                .and_then(Adapter::memory_feature)
                 .map(memory_name)
                 .unwrap_or("this memory");
             gst::element_error!(
@@ -430,7 +397,7 @@ fn post_problem(
                     label,
                     consumer,
                     memory,
-                    download.factory()
+                    factory
                 ),
                 [
                     "Arrived: {}. {} takes {} and does not take this directly, and {} \
@@ -439,14 +406,11 @@ fn post_problem(
                     caps,
                     consumer,
                     memory_types(takes),
-                    download.factory(),
-                    download.factory()
+                    factory,
+                    factory
                 ]
             );
-            return;
         }
-    };
-    match refusal {
         Refusal::MissingFactory { factory } => {
             let download = Adapter::download_from(factory);
             let memory = download
@@ -601,21 +565,6 @@ mod tests {
         assert!(!answer.is_empty(), "GL memory should be offered a download");
     }
 
-    /// A download whose element does not take the caps is a problem, not a
-    /// yes that fails not-negotiated once the CAPS event arrives.
-    #[test]
-    fn a_download_that_does_not_take_the_caps_is_refused() {
-        assert!(matches!(
-            downloads_take(vec![Adapter::CudaDownload], |_| false),
-            Err(Problem::NotDownloadable(Adapter::CudaDownload))
-        ));
-        assert!(matches!(
-            downloads_take(vec![Adapter::CudaDownload], |_| true),
-            Ok(adapters) if adapters == [Adapter::CudaDownload]
-        ));
-        assert!(matches!(downloads_take(vec![], |_| false), Ok(a) if a.is_empty()));
-    }
-
     /// The memory list in a refusal says what the encoder takes, not what
     /// arrived.
     #[test]
@@ -637,7 +586,11 @@ mod tests {
     #[test]
     fn a_download_is_pinned_to_system_memory() {
         let _ = gst::init();
-        let elements = build_adapters(&[Adapter::GlDownload], "venc:input").expect("adapters");
+        let elements = build_adapters(
+            &[Adapter::GlDownload, Adapter::SystemMemoryPin],
+            "venc:input",
+        )
+        .expect("adapters");
         let factories: Vec<String> = elements
             .iter()
             .map(|e| {

@@ -169,7 +169,7 @@ impl BlockBuilder for VideoFormatBuilder {
             BlockBuildError::InvalidConfiguration(format!("Invalid caps: {}", caps_str))
         })?;
         let mut caps = system_caps.clone();
-        for scaler in scale_front::Scaler::ALL {
+        for scaler in crate::gst::video_adapt::Scaler::ALL {
             let mut in_memory = system_caps.copy();
             in_memory
                 .get_mut()

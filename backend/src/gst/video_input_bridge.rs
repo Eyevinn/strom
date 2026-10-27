@@ -458,6 +458,23 @@ fn post_refusal(pad: &gst::Pad, caps: &gst::CapsRef, name_prefix: &str, refusal:
                 factory
             ]
         ),
+        // The bridge asks with consumers that never refuse this way; it is
+        // answered all the same rather than left to a wildcard.
+        Refusal::NotDownloadable { factory } => gst::element_error!(
+            element,
+            gst::CoreError::Negotiation,
+            (
+                "{}: WHEP Output receives video that {} cannot download",
+                name_prefix,
+                factory
+            ),
+            [
+                "Arrived: {}. {} does not take this pixel format. Feed it in another \
+                 format, or in system memory.",
+                caps,
+                factory
+            ]
+        ),
     }
 }
 

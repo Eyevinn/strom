@@ -20,7 +20,8 @@
 //! | [`Consumer::Accepts`] | raw video in GL memory only, consumer takes system-memory raw video | [`Adapter::GlDownload`] |
 //! | [`Consumer::Accepts`] | raw video in D3D12 or D3D11 memory only, consumer takes system-memory raw video and not that memory | [`Adapter::D3d12Download`] or [`Adapter::D3d11Download`] |
 //! | [`Consumer::Exactly`] | anything the consumer's caps take as it is | none |
-//! | [`Consumer::Exactly`] | raw video in GL, CUDA, D3D12 or D3D11 memory only, which the consumer's caps leave out, consumer takes system-memory raw video | [`Adapter::GlDownload`], [`Adapter::CudaDownload`], [`Adapter::D3d12Download`] or [`Adapter::D3d11Download`] |
+//! | [`Consumer::Exactly`] | raw video in GL, CUDA, D3D12 or D3D11 memory only, which the consumer's caps leave out, consumer takes system-memory raw video | [`Adapter::GlDownload`], [`Adapter::CudaDownload`], [`Adapter::D3d12Download`] or [`Adapter::D3d11Download`], then [`Adapter::SystemMemoryPin`] |
+//! | [`Consumer::Exactly`] | as above, in a pixel format the download does not take | [`Refusal::NotDownloadable`] |
 //! | [`Consumer::Exactly`] | raw video in any other memory the consumer's caps leave out | [`Refusal::UnsupportedMemory`] |
 //! | [`Consumer::Exactly`] | anything but raw video, which the consumer's caps leave out | [`Refusal::NotRawVideo`] |
 //! | [`Consumer::SystemMemory`] | raw video in system memory | none |
@@ -30,9 +31,17 @@
 //! | [`Consumer::SystemMemory`] | encoded video, audio, anything but raw video | [`Refusal::NotRawVideo`] |
 //! | [`Consumer::OtherPipeline`] | raw video in GL memory only | [`Adapter::GlDownload`] |
 //! | [`Consumer::OtherPipeline`] | anything else | none |
+//! | [`Consumer::ScaleConvert`] | raw video in system memory | [`Adapter::VideoScale`], [`Adapter::VideoConvert`] |
+//! | [`Consumer::ScaleConvert`] | raw video in GL, CUDA, D3D12 or D3D11 memory, which the output takes, with that GPU scaler installed and taking the pixel format | [`Adapter::GlScale`], [`Adapter::CudaScale`], [`Adapter::D3d12Scale`] or [`Adapter::D3d11Scale`] |
+//! | [`Consumer::ScaleConvert`] | as above, but the output does not take that memory | the GPU scaler, its download, [`Adapter::SystemMemoryPin`], [`Adapter::VideoConvert`]: the smaller frame crosses the bus |
+//! | [`Consumer::ScaleConvert`] | raw video in GPU memory whose scaler is missing or does not take the pixel format | its download, [`Adapter::SystemMemoryPin`], [`Adapter::VideoScale`], [`Adapter::VideoConvert`] |
+//! | [`Consumer::ScaleConvert`] | as above, in a pixel format the download does not take | [`Refusal::NotDownloadable`] |
+//! | [`Consumer::ScaleConvert`] | raw video in any other memory | [`Refusal::UnsupportedMemory`] |
+//! | [`Consumer::ScaleConvert`] | encoded video, audio, anything but raw video | [`Refusal::NotRawVideo`] |
 //!
 //! A CUDA or D3D download that is called for but not installed is
-//! [`Refusal::MissingFactory`]. Those elements ship with platform plugins
+//! [`Refusal::MissingFactory`], and so is any download
+//! [`Consumer::ScaleConvert`] calls for. Those elements ship with platform plugins
 //! (nvcodec, d3d12, d3d11), so a working install can lack them. For
 //! [`Consumer::Exactly`] the same goes for `gldownload`.
 //!
@@ -117,6 +126,13 @@ pub enum Consumer<'a> {
     /// everything else pass as they are. The producer caps are the negotiated
     /// caps.
     OtherPipeline,
+    /// A block that scales and converts video where it arrives (Video
+    /// Format), between two passthrough elements. These caps are what its
+    /// output takes now: the block's own caps, limited to what downstream
+    /// takes. The producer caps are the negotiated caps, or what an
+    /// ACCEPT_CAPS query offers. See [`Consumer::ScaleConvert`]'s rows in the
+    /// module docs.
+    ScaleConvert(&'a gst::CapsRef),
 }
 
 /// An element to put in front of the consumer, in link order.
@@ -133,17 +149,58 @@ pub enum Adapter {
     /// `videoconvert`: a system-memory pixel format the consumer cannot take
     /// to one it can.
     VideoConvert,
+    /// `videoscale`: scales raw video in system memory.
+    VideoScale,
+    /// `glcolorconvert ! glcolorscale ! glcolorconvert`: scales and converts
+    /// in GL memory. `glcolorscale` takes RGBA only, so GL converts to it and
+    /// back.
+    GlScale,
+    /// `cudaconvertscale`: scales and converts in CUDA memory.
+    CudaScale,
+    /// `d3d12convert`: scales and converts in D3D12 memory.
+    D3d12Scale,
+    /// `d3d11convert`: scales and converts in D3D11 memory.
+    D3d11Scale,
+    /// A `capsfilter` that pins system memory after a download:
+    /// [`system_memory_pin`]. `gldownload` and `cudadownload` also output GPU
+    /// memory, which would otherwise pass through to a consumer that lists
+    /// it.
+    SystemMemoryPin,
 }
 
 impl Adapter {
-    /// The element factory the adapter is made from.
+    /// The element factory the adapter is named after: the one it is made
+    /// from, or for [`Adapter::GlScale`] the scaler among its three.
     pub fn factory(self) -> &'static str {
         match self {
+            Adapter::VideoScale => "videoscale",
+            Adapter::GlScale => "glcolorscale",
+            Adapter::CudaScale => "cudaconvertscale",
+            Adapter::D3d12Scale => "d3d12convert",
+            Adapter::D3d11Scale => "d3d11convert",
+            Adapter::SystemMemoryPin => "capsfilter",
             Adapter::GlDownload => GL_DOWNLOAD_FACTORY,
             Adapter::CudaDownload => CUDA_DOWNLOAD_FACTORY,
             Adapter::D3d12Download => D3D12_DOWNLOAD_FACTORY,
             Adapter::D3d11Download => D3D11_DOWNLOAD_FACTORY,
             Adapter::VideoConvert => VIDEO_CONVERT_FACTORY,
+        }
+    }
+
+    /// The element factories the adapter is made from, in link order.
+    pub fn factories(self) -> &'static [&'static str] {
+        match self {
+            Adapter::GlScale => &["glcolorconvert", "glcolorscale", "glcolorconvert"],
+            Adapter::GlDownload => &[GL_DOWNLOAD_FACTORY],
+            Adapter::CudaDownload => &[CUDA_DOWNLOAD_FACTORY],
+            Adapter::D3d12Download => &[D3D12_DOWNLOAD_FACTORY],
+            Adapter::D3d11Download => &[D3D11_DOWNLOAD_FACTORY],
+            Adapter::VideoConvert => &[VIDEO_CONVERT_FACTORY],
+            Adapter::VideoScale => &["videoscale"],
+            Adapter::CudaScale => &["cudaconvertscale"],
+            Adapter::D3d12Scale => &["d3d12convert"],
+            Adapter::D3d11Scale => &["d3d11convert"],
+            Adapter::SystemMemoryPin => &["capsfilter"],
         }
     }
 
@@ -162,15 +219,21 @@ impl Adapter {
             .find(|adapter| adapter.factory() == factory)
     }
 
-    /// The caps feature of the memory a download takes. `None` for
-    /// [`Adapter::VideoConvert`], which takes system memory.
+    /// The caps feature of the memory a download takes. `None` for every
+    /// adapter that is not a download.
     pub fn memory_feature(self) -> Option<&'static str> {
         match self {
             Adapter::GlDownload => Some(GL_MEMORY_FEATURE),
             Adapter::CudaDownload => Some(CUDA_MEMORY_FEATURE),
             Adapter::D3d12Download => Some(D3D12_MEMORY_FEATURE),
             Adapter::D3d11Download => Some(D3D11_MEMORY_FEATURE),
-            Adapter::VideoConvert => None,
+            Adapter::VideoConvert
+            | Adapter::VideoScale
+            | Adapter::GlScale
+            | Adapter::CudaScale
+            | Adapter::D3d12Scale
+            | Adapter::D3d11Scale
+            | Adapter::SystemMemoryPin => None,
         }
     }
 
@@ -178,30 +241,27 @@ impl Adapter {
     /// that says what to install.
     pub fn plugin(self) -> &'static str {
         match self {
-            Adapter::GlDownload => "opengl",
-            Adapter::CudaDownload => "nvcodec",
-            Adapter::D3d12Download => "d3d12",
-            Adapter::D3d11Download => "d3d11",
-            Adapter::VideoConvert => "videoconvertscale",
+            Adapter::GlDownload | Adapter::GlScale => "opengl",
+            Adapter::CudaDownload | Adapter::CudaScale => "nvcodec",
+            Adapter::D3d12Download | Adapter::D3d12Scale => "d3d12",
+            Adapter::D3d11Download | Adapter::D3d11Scale => "d3d11",
+            Adapter::VideoConvert | Adapter::VideoScale => "videoconvertscale",
+            Adapter::SystemMemoryPin => "coreelements",
         }
     }
 
-    /// What the adapter's element takes on its sink pad: its sink template.
-    /// `None` when the element is not installed. Read once per adapter, and
-    /// only once found, so a test element registered later is still seen.
+    /// What the adapter's first element takes on its sink pad: its sink
+    /// template. `None` when the element is not installed. Read once per
+    /// adapter, and only once found, so a test element registered later is
+    /// still seen.
     pub fn sink_template(self) -> Option<&'static gst::Caps> {
-        static TEMPLATES: [std::sync::OnceLock<gst::Caps>; 5] = [
-            std::sync::OnceLock::new(),
-            std::sync::OnceLock::new(),
-            std::sync::OnceLock::new(),
-            std::sync::OnceLock::new(),
-            std::sync::OnceLock::new(),
-        ];
+        static TEMPLATES: [std::sync::OnceLock<gst::Caps>; 11] =
+            [const { std::sync::OnceLock::new() }; 11];
         let slot = &TEMPLATES[self as usize];
         if let Some(caps) = slot.get() {
             return Some(caps);
         }
-        let caps = gst::ElementFactory::find(self.factory())?
+        let caps = gst::ElementFactory::find(self.factories()[0])?
             .static_pad_templates()
             .into_iter()
             .find(|t| t.direction() == gst::PadDirection::Sink)?
@@ -226,6 +286,73 @@ impl Adapter {
     }
 }
 
+/// A GPU scaler and converter, working in one memory type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scaler {
+    Gl,
+    Cuda,
+    D3d12,
+    D3d11,
+}
+
+impl Scaler {
+    pub const ALL: [Scaler; 4] = [Scaler::Gl, Scaler::Cuda, Scaler::D3d12, Scaler::D3d11];
+
+    /// The adapter that scales and converts in its memory.
+    pub fn adapter(self) -> Adapter {
+        match self {
+            Scaler::Gl => Adapter::GlScale,
+            Scaler::Cuda => Adapter::CudaScale,
+            Scaler::D3d12 => Adapter::D3d12Scale,
+            Scaler::D3d11 => Adapter::D3d11Scale,
+        }
+    }
+
+    /// The scaler an adapter is, if it is one.
+    pub fn from_adapter(adapter: Adapter) -> Option<Scaler> {
+        Scaler::ALL.into_iter().find(|s| s.adapter() == adapter)
+    }
+
+    /// The caps feature of the memory it works in.
+    pub fn memory_feature(self) -> &'static str {
+        self.download()
+            .memory_feature()
+            .expect("every scaler's memory has a download")
+    }
+
+    /// The download out of its memory.
+    pub fn download(self) -> Adapter {
+        match self {
+            Scaler::Gl => Adapter::GlDownload,
+            Scaler::Cuda => Adapter::CudaDownload,
+            Scaler::D3d12 => Adapter::D3d12Download,
+            Scaler::D3d11 => Adapter::D3d11Download,
+        }
+    }
+
+    /// The scaler for the memory `features` name, if there is one.
+    pub fn for_features(features: &gst::CapsFeaturesRef) -> Option<Scaler> {
+        Scaler::ALL
+            .into_iter()
+            .find(|s| features.contains(s.memory_feature()))
+    }
+
+    /// The pad template of its first (sink) or last (src) element, in its
+    /// memory only. `None` when an element is not installed.
+    pub fn template(self, direction: gst::PadDirection) -> Option<gst::Caps> {
+        let factories = self.adapter().factories();
+        if !factories.iter().all(|f| factory_available(f)) {
+            return None;
+        }
+        let factory = match direction {
+            gst::PadDirection::Sink => factories[0],
+            _ => factories[factories.len() - 1],
+        };
+        let template = factory_template(factory, direction)?;
+        Some(in_memory(&template, Some(self.memory_feature())))
+    }
+}
+
 /// Why the consumer cannot be adapted to take the producer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
@@ -237,6 +364,10 @@ pub enum Refusal {
     /// The producer offers no raw video at all, to a consumer that reads raw
     /// frames. `media` is the media type it offers.
     NotRawVideo { media: String },
+    /// The download called for does not take the producer's pixel format:
+    /// the link would be made on templates and the caps then refused with a
+    /// bare not-negotiated.
+    NotDownloadable { factory: &'static str },
 }
 
 impl std::fmt::Display for Refusal {
@@ -247,6 +378,9 @@ impl std::fmt::Display for Refusal {
                 write!(f, "raw video in {} cannot be read on the CPU", feature)
             }
             Refusal::NotRawVideo { media } => write!(f, "{} is not raw video", media),
+            Refusal::NotDownloadable { factory } => {
+                write!(f, "{} does not take this pixel format", factory)
+            }
         }
     }
 }
@@ -313,7 +447,7 @@ pub fn decide(
                 // A download produces system memory, so it helps only a
                 // consumer that takes that.
                 Some(download) if accepts_system_memory_raw_video(takes) => {
-                    require(download, available)
+                    pinned_download(download, producer, available)
                 }
                 _ => match unreadable_memory(producer) {
                     Some(feature) => Err(Refusal::UnsupportedMemory { feature }),
@@ -323,6 +457,7 @@ pub fn decide(
                 },
             }
         }
+        Consumer::ScaleConvert(output) => scale_convert(producer, output, available),
         Consumer::SystemMemory => {
             if offers_only(producer, GL_MEMORY_FEATURE) {
                 return Ok(vec![Adapter::GlDownload]);
@@ -343,6 +478,93 @@ pub fn decide(
             Ok(vec![Adapter::GlDownload])
         }
         Consumer::OtherPipeline => Ok(Vec::new()),
+    }
+}
+
+/// Scale and convert `producer` where it is, for an output that takes
+/// `output` (see [`Consumer::ScaleConvert`]).
+fn scale_convert(
+    producer: &gst::CapsRef,
+    output: &gst::CapsRef,
+    available: impl Fn(&str) -> bool,
+) -> Result<Vec<Adapter>, Refusal> {
+    let (Some(structure), Some(features)) = (producer.structure(0), producer.features(0)) else {
+        return Err(Refusal::NotRawVideo {
+            media: "empty caps".to_string(),
+        });
+    };
+    if structure.name() != "video/x-raw" {
+        return Err(Refusal::NotRawVideo {
+            media: structure.name().to_string(),
+        });
+    }
+    let on_the_cpu = [Adapter::VideoScale, Adapter::VideoConvert];
+    if is_system_memory(features) {
+        return Ok(on_the_cpu.to_vec());
+    }
+    let Some(scaler) = Scaler::for_features(features) else {
+        let feature = features
+            .iter()
+            .find(|f| f.starts_with("memory:"))
+            .map(|f| f.to_string())
+            .unwrap_or_else(|| "an unknown memory".to_string());
+        return Err(Refusal::UnsupportedMemory { feature });
+    };
+    let download = scaler.download();
+    // The GPU scaler must be installed and take this pixel format; otherwise
+    // the frame is downloaded first and scaled on the CPU.
+    let scaler_takes = scaler.adapter().factories().iter().all(|f| available(f))
+        && scaler
+            .template(gst::PadDirection::Sink)
+            .is_some_and(|sink| producer.can_intersect(&sink));
+    if !scaler_takes {
+        let mut adapters = pinned_download(download, producer, available)?;
+        adapters.extend(on_the_cpu);
+        return Ok(adapters);
+    }
+    // Downstream takes the scaler's output as it is: stay on the GPU.
+    let in_scaler_memory = in_memory(output, Some(scaler.memory_feature()));
+    let producible = scaler
+        .template(gst::PadDirection::Src)
+        .is_some_and(|src| in_scaler_memory.can_intersect(&src));
+    if producible {
+        return Ok(vec![scaler.adapter()]);
+    }
+    // Scaled on the GPU, then downloaded: the smaller frame crosses the bus.
+    require(download, available)?;
+    Ok(vec![
+        scaler.adapter(),
+        download,
+        Adapter::SystemMemoryPin,
+        Adapter::VideoConvert,
+    ])
+}
+
+/// `download`, pinned to system memory, when its element is installed and
+/// takes `producer`'s pixel format. A download whose template is unknown (a
+/// test claiming an element that is not registered) is trusted.
+fn pinned_download(
+    download: Adapter,
+    producer: &gst::CapsRef,
+    available: impl Fn(&str) -> bool,
+) -> Result<Vec<Adapter>, Refusal> {
+    require(download, available)?;
+    downloadable(download, download.sink_template(), producer)?;
+    Ok(vec![download, Adapter::SystemMemoryPin])
+}
+
+/// Refuse `download` when its sink template (`None`: unknown) does not take
+/// `producer`.
+fn downloadable(
+    download: Adapter,
+    template: Option<&gst::Caps>,
+    producer: &gst::CapsRef,
+) -> Result<(), Refusal> {
+    match template {
+        Some(template) if !producer.can_intersect(template) => Err(Refusal::NotDownloadable {
+            factory: download.factory(),
+        }),
+        _ => Ok(()),
     }
 }
 
@@ -448,10 +670,59 @@ pub fn build_elements(
     adapters: &[Adapter],
     name_prefix: &str,
 ) -> Result<Vec<gst::Element>, String> {
-    adapters
-        .iter()
-        .map(|adapter| make(adapter.factory(), name_prefix))
-        .collect()
+    let mut elements: Vec<gst::Element> = Vec::new();
+    let mut made: Vec<&str> = Vec::new();
+    for adapter in adapters {
+        if *adapter == Adapter::SystemMemoryPin {
+            elements.push(system_memory_pin(name_prefix)?);
+            continue;
+        }
+        for factory in adapter.factories() {
+            // A factory that repeats in the chain (GL scaling converts on
+            // both sides) gets a count, so names stay unique.
+            let earlier = made.iter().filter(|f| *f == factory).count();
+            made.push(factory);
+            let prefix = match earlier {
+                0 => name_prefix.to_string(),
+                n => format!("{}{}", name_prefix, n),
+            };
+            elements.push(make(factory, &prefix)?);
+        }
+    }
+    Ok(elements)
+}
+
+/// The raw video structures of `caps` in the memory `feature` names, or in
+/// system memory for `None`.
+pub fn in_memory(caps: &gst::CapsRef, feature: Option<&str>) -> gst::Caps {
+    let mut picked = gst::Caps::new_empty();
+    {
+        let picked = picked.get_mut().expect("new caps are writable");
+        for (structure, features) in caps.iter_with_features() {
+            let matches = if features.is_any() {
+                false
+            } else {
+                match feature {
+                    Some(feature) => features.contains(feature),
+                    None => is_system_memory(features),
+                }
+            };
+            if structure.name() == "video/x-raw" && matches {
+                picked.append_structure_full(structure.to_owned(), Some(features.to_owned()));
+            }
+        }
+    }
+    picked
+}
+
+/// The pad template of `factory` in `direction`. `None` when it is not
+/// installed.
+pub fn factory_template(factory: &str, direction: gst::PadDirection) -> Option<gst::Caps> {
+    gst::ElementFactory::find(factory)?
+        .static_pad_templates()
+        .into_iter()
+        .find(|t| t.direction() == direction)
+        .map(|t| t.caps())
 }
 
 /// An element of `factory` named `<name_prefix>_<factory>`.
@@ -1163,7 +1434,7 @@ mod tests {
         for (c, download, factory) in cases {
             assert_eq!(
                 decide(&caps(c), Consumer::Exactly(&consumer), all),
-                Ok(vec![download]),
+                Ok(vec![download, Adapter::SystemMemoryPin]),
                 "{c}"
             );
             assert_eq!(
@@ -1185,8 +1456,29 @@ mod tests {
                 Consumer::Exactly(&consumer),
                 all
             ),
-            Ok(vec![Adapter::CudaDownload])
+            Ok(vec![Adapter::CudaDownload, Adapter::SystemMemoryPin])
         );
+    }
+
+    /// A download whose element does not take the pixel format is refused,
+    /// not a yes that fails not-negotiated once the CAPS event arrives. An
+    /// unknown template (a test claiming an element that is not registered)
+    /// is trusted.
+    #[test]
+    fn a_download_that_does_not_take_the_pixel_format_is_refused() {
+        let template = caps("video/x-raw(memory:CUDAMemory), format=NV12");
+        let p010 = caps("video/x-raw(memory:CUDAMemory), format=P010_10LE");
+        assert_eq!(
+            downloadable(Adapter::CudaDownload, Some(&template), &p010),
+            Err(Refusal::NotDownloadable {
+                factory: CUDA_DOWNLOAD_FACTORY
+            })
+        );
+        assert_eq!(
+            downloadable(Adapter::CudaDownload, Some(&template), &caps(CUDA)),
+            Ok(())
+        );
+        assert_eq!(downloadable(Adapter::CudaDownload, None, &p010), Ok(()));
     }
 
     /// Windows: `nvh264enc` takes D3D12 memory but not D3D11.
@@ -1199,7 +1491,7 @@ mod tests {
         );
         assert_eq!(
             decide(&caps(D3D[1].0), Consumer::Exactly(&consumer), all),
-            Ok(vec![Adapter::D3d11Download])
+            Ok(vec![Adapter::D3d11Download, Adapter::SystemMemoryPin])
         );
     }
 
