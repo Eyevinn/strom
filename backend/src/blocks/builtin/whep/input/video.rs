@@ -3,16 +3,19 @@
 //! The block declares `num_video_tracks` slots at build time. Each slot is a
 //! static `tee` the external pad maps to (`video_out`, `video_out_1`, ...), so
 //! a consumer can link to it before any WebRTC session exists. Incoming video
-//! streams claim slots in arrival order; [`super::stream`] decodes a stream
+//! streams claim the lowest free slot; [`super::stream`] decodes a stream
 //! into its slot's tee only when that slot's output is linked, and otherwise
 //! discards it undecoded, as streams beyond the declared slots always are.
+//! When a stream's source pad goes away (a session that ends and starts again
+//! within one run), its slot is released and its decoder removed, so the
+//! stream that replaces it gets the same slot and output.
 
 use crate::blocks::builtin::whep::explicit_track_count;
 use crate::blocks::{BlockBuildContext, BlockBuildError};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use strom_types::block::ExternalPad;
 use strom_types::{MediaType, PropertyValue};
@@ -61,13 +64,13 @@ struct Slot {
     /// Whether the slot's output is linked to anything. Decided once, by the
     /// element-setup hook, after the flow is linked and before it starts.
     connected: AtomicBool,
+    /// Whether a stream holds the slot.
+    taken: AtomicBool,
 }
 
 /// The block's video slots, shared with the pad-added path.
 pub(super) struct VideoSlots {
     slots: Vec<Slot>,
-    /// Video streams seen so far; the next one claims this slot index.
-    next: AtomicUsize,
 }
 
 /// Where an incoming video stream goes.
@@ -80,10 +83,14 @@ pub(super) enum VideoRoute {
 }
 
 impl VideoSlots {
-    /// Claim the next slot for a new video stream, in arrival order.
+    /// Claim the lowest free slot for a new video stream. Streams that arrive
+    /// together take slots in arrival order.
     pub(super) fn claim(&self) -> VideoRoute {
-        let index = self.next.fetch_add(1, Ordering::SeqCst);
-        let Some(slot) = self.slots.get(index) else {
+        let Some((index, slot)) = self.slots.iter().enumerate().find(|(_, slot)| {
+            slot.taken
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        }) else {
             return VideoRoute::Discard { slot: None };
         };
         if !slot.connected.load(Ordering::SeqCst) {
@@ -92,6 +99,28 @@ impl VideoSlots {
         match slot.tee.upgrade() {
             Some(tee) => VideoRoute::Decode { slot: index, tee },
             None => VideoRoute::Discard { slot: Some(index) },
+        }
+    }
+
+    /// Slots over `tees`, each with whether its output counts as linked.
+    #[cfg(test)]
+    pub(super) fn for_test(tees: &[(&gst::Element, bool)]) -> Self {
+        VideoSlots {
+            slots: tees
+                .iter()
+                .map(|(tee, connected)| Slot {
+                    tee: tee.downgrade(),
+                    connected: AtomicBool::new(*connected),
+                    taken: AtomicBool::new(false),
+                })
+                .collect(),
+        }
+    }
+
+    /// Free `slot` for the next stream, once the stream that held it is gone.
+    pub(super) fn release(&self, slot: usize) {
+        if let Some(slot) = self.slots.get(slot) {
+            slot.taken.store(false, Ordering::SeqCst);
         }
     }
 }
@@ -130,13 +159,11 @@ pub(super) fn build_video_slots(
         slots.push(Slot {
             tee: tee.downgrade(),
             connected: AtomicBool::new(false),
+            taken: AtomicBool::new(false),
         });
         elements.push((id, tee));
     }
-    let video = Arc::new(VideoSlots {
-        slots,
-        next: AtomicUsize::new(0),
-    });
+    let video = Arc::new(VideoSlots { slots });
 
     if num > 0 {
         // Runs after the flow is linked and before the pipeline leaves NULL,
@@ -225,21 +252,10 @@ mod tests {
             .iter()
             .map(|_| gst::ElementFactory::make("tee").build().unwrap())
             .collect();
-        let slots = tees
-            .iter()
-            .zip(connected)
-            .map(|(tee, c)| Slot {
-                tee: tee.downgrade(),
-                connected: AtomicBool::new(*c),
-            })
-            .collect();
-        (
-            tees,
-            VideoSlots {
-                slots,
-                next: AtomicUsize::new(0),
-            },
-        )
+        let pairs: Vec<(&gst::Element, bool)> =
+            tees.iter().zip(connected.iter().copied()).collect();
+        let video = VideoSlots::for_test(&pairs);
+        (tees, video)
     }
 
     /// Streams take slots in arrival order; an unlinked slot still consumes
@@ -252,6 +268,18 @@ mod tests {
             VideoRoute::Discard { slot: Some(0) }
         ));
         assert!(matches!(video.claim(), VideoRoute::Decode { slot: 1, .. }));
+        assert!(matches!(video.claim(), VideoRoute::Discard { slot: None }));
+    }
+
+    /// A stream that ends frees its slot, and the stream that replaces it
+    /// takes the same slot, not one past the end.
+    #[test]
+    fn a_released_slot_is_claimed_again() {
+        let (_tees, video) = slots(&[true, true]);
+        assert!(matches!(video.claim(), VideoRoute::Decode { slot: 0, .. }));
+        assert!(matches!(video.claim(), VideoRoute::Decode { slot: 1, .. }));
+        video.release(0);
+        assert!(matches!(video.claim(), VideoRoute::Decode { slot: 0, .. }));
         assert!(matches!(video.claim(), VideoRoute::Discard { slot: None }));
     }
 }
