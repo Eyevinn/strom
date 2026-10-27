@@ -376,9 +376,10 @@ fn post_problem(
         return;
     };
     match refusal {
-        Refusal::NotDownloadable { factory } => {
-            let memory = Adapter::download_from(factory)
-                .and_then(Adapter::memory_feature)
+        Refusal::NotDownloadable { download } => {
+            let factory = download.factory();
+            let memory = download
+                .memory_feature()
                 .map(memory_name)
                 .unwrap_or("this memory");
             gst::element_error!(

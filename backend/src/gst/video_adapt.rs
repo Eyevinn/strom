@@ -31,6 +31,7 @@
 //! | [`Consumer::SystemMemory`] | encoded video, audio, anything but raw video | [`Refusal::NotRawVideo`] |
 //! | [`Consumer::OtherPipeline`] | raw video in GL memory only | [`Adapter::GlDownload`], [`Adapter::SystemMemoryPin`] |
 //! | [`Consumer::OtherPipeline`] | as above, in a pixel format `gldownload` does not take | [`Refusal::NotDownloadable`] |
+//! | [`Consumer::OtherPipeline`] | as above, `gldownload` not installed | [`Refusal::MissingFactory`] |
 //! | [`Consumer::OtherPipeline`] | anything else | none |
 //! | [`Consumer::ScaleConvert`] | raw video in system memory | [`Adapter::VideoScale`], [`Adapter::VideoConvert`] |
 //! | [`Consumer::ScaleConvert`] | raw video in GL, CUDA, D3D12 or D3D11 memory, which the output takes, with that GPU scaler installed and taking the pixel format | [`Adapter::GlScale`], [`Adapter::CudaScale`], [`Adapter::D3d12Scale`] or [`Adapter::D3d11Scale`] |
@@ -402,7 +403,7 @@ pub enum Refusal {
     /// The download called for does not take the producer's pixel format:
     /// the link would be made on templates and the caps then refused with a
     /// bare not-negotiated.
-    NotDownloadable { factory: &'static str },
+    NotDownloadable { download: Adapter },
 }
 
 impl std::fmt::Display for Refusal {
@@ -413,8 +414,8 @@ impl std::fmt::Display for Refusal {
                 write!(f, "raw video in {} cannot be read on the CPU", feature)
             }
             Refusal::NotRawVideo { media } => write!(f, "{} is not raw video", media),
-            Refusal::NotDownloadable { factory } => {
-                write!(f, "{} does not take this pixel format", factory)
+            Refusal::NotDownloadable { download } => {
+                write!(f, "{} does not take this pixel format", download.factory())
             }
         }
     }
@@ -425,11 +426,13 @@ impl std::fmt::Display for Refusal {
 /// An empty list means the input links as it is. `available` says whether an
 /// element factory exists; it is consulted only for factories that may be
 /// missing on a working install (`cudadownload`, `d3d12download`,
-/// `d3d11download`, and `gldownload` for [`Consumer::Exactly`] and
-/// [`Consumer::ScaleConvert`], and the GPU scalers' factories for
+/// `d3d11download`, and `gldownload` for [`Consumer::Exactly`],
+/// [`Consumer::OtherPipeline`] and [`Consumer::ScaleConvert`], and the GPU
+/// scalers' factories for
 /// [`Consumer::ScaleConvert`]), and only when that adapter is called for.
-/// Which pixel formats an adapter takes is read from the registry, whatever
-/// `available` says: an element `available` claims but the registry lacks has
+/// Which pixel formats an adapter takes is read from the registry (in tests,
+/// the sink templates can be stood in through `decide_with`; a scaler's src
+/// template cannot), whatever `available` says: an element `available` claims but the registry lacks has
 /// no known template, so a scaler counts as not taking anything and a
 /// download as taking everything. See the module docs for the rules.
 pub fn decide(
@@ -529,7 +532,8 @@ fn decide_with(
                 None => Ok(Vec::new()),
             }
         }
-        // `gldownload` ships with the opengl plugin that made the GL memory.
+        // `gldownload` ships with the opengl plugin that made the GL memory,
+        // so `available` refusing it is a broken install, named as such.
         Consumer::OtherPipeline if offers_only(producer, GL_MEMORY_FEATURE) => {
             pinned_download(Adapter::GlDownload, producer, available, templates)
         }
@@ -610,9 +614,9 @@ fn pinned_download(
 ) -> Result<Vec<Adapter>, Refusal> {
     require(download, available)?;
     match templates(download) {
-        Some(template) if !producer.can_intersect(&template) => Err(Refusal::NotDownloadable {
-            factory: download.factory(),
-        }),
+        Some(template) if !producer.can_intersect(&template) => {
+            Err(Refusal::NotDownloadable { download })
+        }
         _ => Ok(vec![download, Adapter::SystemMemoryPin]),
     }
 }
@@ -1528,7 +1532,7 @@ mod tests {
     fn a_download_that_does_not_take_the_pixel_format_is_refused() {
         let p010 = caps("video/x-raw(memory:CUDAMemory), format=P010_10LE, width=320, height=240");
         let refused = Err(Refusal::NotDownloadable {
-            factory: CUDA_DOWNLOAD_FACTORY,
+            download: Adapter::CudaDownload,
         });
         let encoder = caps(SOFTWARE_ENCODER);
         assert_eq!(
@@ -1559,6 +1563,23 @@ mod tests {
                 &nv12_only_cudadownload
             ),
             Ok(vec![Adapter::CudaDownload, Adapter::SystemMemoryPin])
+        );
+    }
+
+    /// Inter Input's input: GL memory in a pixel format `gldownload` does not
+    /// take is refused, not linked into a bare not-negotiated.
+    #[test]
+    fn other_pipeline_gl_memory_gldownload_does_not_take_is_refused() {
+        let rgba_only = |adapter: Adapter| {
+            (adapter == Adapter::GlDownload)
+                .then(|| caps("video/x-raw(memory:GLMemory), format=RGBA"))
+        };
+        let nv12 = caps("video/x-raw(memory:GLMemory), format=NV12, width=320, height=240");
+        assert_eq!(
+            decide_with(&nv12, Consumer::OtherPipeline, all, &rgba_only),
+            Err(Refusal::NotDownloadable {
+                download: Adapter::GlDownload
+            })
         );
     }
 

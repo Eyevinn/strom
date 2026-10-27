@@ -286,9 +286,9 @@ fn takes(output_takes: &gst::CapsRef, available: impl Fn(&str) -> bool) -> gst::
             Err(_) => {}
         }
     }
-    if let Some(system) = factory_template("videoscale", gst::PadDirection::Sink)
-        .map(|template| in_memory(&template, None))
-        .filter(|system| plan(system, output_takes, &available).is_ok())
+    // System memory always has a chain: scaling and converting on the CPU.
+    if let Some(system) =
+        factory_template("videoscale", gst::PadDirection::Sink).map(|t| in_memory(&t, None))
     {
         direct.merge(system);
     }
@@ -301,6 +301,11 @@ fn takes(output_takes: &gst::CapsRef, available: impl Fn(&str) -> bool) -> gst::
 /// [`video_adapt::decide`] keeps it there for an output that takes that
 /// memory, and in system memory when it finds a chain for an output that
 /// takes system memory. Limited to `filter`.
+///
+/// A GPU structure `decide()` finds no chain for at all is still offered in
+/// its own memory when its scaler is installed, and in system memory when its
+/// download is: the link then goes through, and the CAPS event fails the flow
+/// with the refusal that says why, instead of a bare NOFORMAT at link time.
 fn deliverable(
     offered: &gst::Caps,
     filter: Option<&gst::Caps>,
@@ -323,20 +328,32 @@ fn deliverable(
                 .append_structure_full(structure.to_owned(), Some(features.to_owned()));
             let mut adaptable = structure.to_owned();
             adaptable.remove_fields(ADAPTABLE_FIELDS);
-            if let Some(scaler) = Scaler::for_features(features) {
+            let scaler = Scaler::for_features(features);
+            let stays = scaler.is_some_and(|scaler| {
                 let mut any_gpu = gst::Caps::new_empty_simple("video/x-raw");
                 any_gpu
                     .get_mut()
                     .expect("new caps are writable")
                     .set_features_simple(Some(gst::CapsFeatures::new([scaler.memory_feature()])));
-                if plan(&one, &any_gpu, &available).is_ok_and(|chain| !downloads(&chain)) {
-                    answer.append_structure_full(
-                        adaptable.clone(),
-                        Some(gst::CapsFeatures::new([scaler.memory_feature()])),
-                    );
-                }
+                plan(&one, &any_gpu, &available).is_ok_and(|chain| !downloads(&chain))
+            });
+            let to_system = plan(&one, &any_system, &available).is_ok();
+            let (stays, to_system) = match scaler {
+                // No chain at all: offer what is installed, and let the CAPS
+                // event post the refusal.
+                Some(scaler) if !stays && !to_system => (
+                    scaler.adapter().factories().iter().all(|f| available(f)),
+                    available(scaler.download().factory()),
+                ),
+                _ => (stays, to_system),
+            };
+            if let (true, Some(scaler)) = (stays, scaler) {
+                answer.append_structure_full(
+                    adaptable.clone(),
+                    Some(gst::CapsFeatures::new([scaler.memory_feature()])),
+                );
             }
-            if plan(&one, &any_system, &available).is_ok() {
+            if to_system {
                 answer.append_structure(adaptable);
             }
         }
@@ -488,9 +505,10 @@ fn post_problem(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef, problem: &Re
                 ]
             );
         }
-        Refusal::NotDownloadable { factory } => {
-            let memory = Adapter::download_from(factory)
-                .and_then(Adapter::memory_feature)
+        Refusal::NotDownloadable { download } => {
+            let factory = download.factory();
+            let memory = download
+                .memory_feature()
                 .map(memory_name)
                 .unwrap_or("this memory");
             gst::element_error!(
@@ -716,6 +734,48 @@ mod tests {
 
         let nvmm = caps("video/x-raw(memory:NVMM), format=NV12");
         assert!(deliverable(&nvmm, None, all).is_empty());
+    }
+
+    /// GL memory in a pixel format the GPU scaler does not take is not
+    /// offered downstream as staying in GL memory: `decide()` downloads it
+    /// first. It is still offered in system memory.
+    #[test]
+    fn gpu_memory_the_scaler_does_not_take_is_offered_in_system_memory_only() {
+        if !gl_scaler() {
+            return;
+        }
+        // `glcolorconvert` does not list AYUV64; `gldownload` takes any GL.
+        let offered = caps("video/x-raw(memory:GLMemory), format=AYUV64, width=320, height=240");
+        let answer = deliverable(&offered, None, all);
+        assert!(
+            !answer.can_intersect(&output(&[video_adapt::GL_MEMORY_FEATURE])),
+            "{answer}"
+        );
+        assert!(answer.can_intersect(&output(&[""])), "{answer}");
+    }
+
+    /// GPU memory `decide()` finds no chain for is still offered as what is
+    /// installed, so the link goes through and the CAPS event posts the
+    /// refusal, instead of a bare NOFORMAT at link time. Here the CUDA scaler
+    /// is claimed but takes nothing (no template here), and `cudadownload` is
+    /// missing.
+    #[test]
+    fn gpu_memory_with_no_chain_still_links() {
+        let _ = gst::init();
+        if video_adapt::factory_available("cudaconvertscale") {
+            return;
+        }
+        let offered = caps("video/x-raw(memory:CUDAMemory), format=NV12, width=320, height=240");
+        let no_download = |f: &str| f != video_adapt::CUDA_DOWNLOAD_FACTORY;
+        assert!(
+            plan(&offered, &output(&[""]), no_download).is_err(),
+            "the CAPS event refuses this"
+        );
+        let answer = deliverable(&offered, None, no_download);
+        assert!(
+            answer.can_intersect(&output(&[video_adapt::CUDA_MEMORY_FEATURE])),
+            "{answer}"
+        );
     }
 
     /// A decoder that can choose is told GPU memory downstream takes first,
