@@ -2,6 +2,45 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.7.2] - Unreleased
+
+### Added
+- Local Output: play audio on a local output device (#1090)
+- Latency: a mixer's latency failure names the inputs behind it (#1073)
+- Vision Mixer: report take morphs and per-input media age (`input_media_age_ms`) (#803)
+
+### Fixed
+- Latency: bridge appsrcs report the latency they can hold, and repeated bus warnings are gated (#1072)
+- WHEP Output: strip the offered profile and level from every viewer's video chain (#896, #899)
+- WHEP Output: the appsink processing deadline no longer delays every viewer (#814)
+- WHIP: zero the processing deadline on whipclientsink's appsinks (#855)
+- MPEG-TS/SRT Input: play the first audio stream of a feed that carries two (#1096)
+- MPEG-TS/SRT Input: an absent SRT peer no longer holds the flow (#812)
+- Outputs: NDI, DeckLink audio and TAMS start without waiting for data (#934)
+- AES67: put a queue right after the input's audiobuffersplit (#1087)
+- Video adapt: download D3D12 and D3D11 memory for inputs that cannot take it (#1093)
+- Media Player: share the flow's GL context with the internal pipeline (#1108)
+- Media Player: hold typefind back when a stinger clip loads paused (#1076)
+- Live Recorder: index each MP4 file so browsers start it at once (#1107)
+- API: reading a pad's properties no longer requests the pad (#922)
+- macOS: keep the GUI server out of App Nap as well (#921)
+
+### Changed
+- Remove dead code (#897)
+- Agent tasks: replace the triage/fix protocol with a short triage and review (#1082)
+- Dependencies: rustls 0.23.45 (#1017)
+
+### CI
+- Tests: share AppState, PipelineManager, the block install harness and bus readers across integration tests (#935, #936, #1083)
+- Tests: pin ApiClient request and error behaviour in the frontend (#916)
+- Tests: run the GPU vision mixer tests one at a time, and all of Linux CI past a failure (#1095)
+- Tests: skip tests that fail only on the CI runners, each with the reason (#1067, #1071, #1078, #1084, #1098, #1106, #1109)
+
+### Documentation
+- Correct the pronunciation and explanation of 'Strom' (#1070)
+
+---
+
 ## [0.7.1] - 2026-10-12
 
 ### Fixed
