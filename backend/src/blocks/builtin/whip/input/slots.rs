@@ -501,16 +501,19 @@ pub fn build_whipserversrc(
                     if let Some(tee) = video_out_tee_weak.upgrade() {
                         let sink = tee.static_pad("sink").unwrap();
                         if !sink.is_linked() {
+                            let caps = src_pad
+                                .current_caps()
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "caps not negotiated yet".to_string());
                             if let Err(e) = src_pad.link(&sink) {
-                                warn!("Failed to link decodebin video pad to the output tee: {:?}", e);
+                                warn!(
+                                    "WHIP Input: failed to link the decoder's video pad to the output tee for slot {} ({}): {:?}",
+                                    slot, caps, e
+                                );
                             } else {
                                 info!(
                                     "WHIP Input: decodebin video pad linked to the output tee for slot {} ({})",
-                                    slot,
-                                    src_pad
-                                        .current_caps()
-                                        .map(|c| c.to_string())
-                                        .unwrap_or_else(|| "caps not negotiated yet".to_string())
+                                    slot, caps
                                 );
                             }
                         }

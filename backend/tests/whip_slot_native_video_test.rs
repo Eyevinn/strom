@@ -220,6 +220,22 @@ fn play(pipeline: &gst::Pipeline) {
     );
 }
 
+/// The video decoder `decodebin` has plugged, if any.
+fn video_decoder(decodebin: &gst::Element) -> Option<gst::Element> {
+    decodebin
+        .downcast_ref::<gst::Bin>()
+        .unwrap()
+        .iterate_recurse()
+        .into_iter()
+        .filter_map(Result::ok)
+        .find(|element| {
+            element.factory().is_some_and(|factory| {
+                let klass = factory.metadata(gst::ELEMENT_METADATA_KLASS).unwrap_or("");
+                klass.contains("Decoder") && klass.contains("Video")
+            })
+        })
+}
+
 /// The element the decodebin's video pad is linked to, outside the decodebin.
 fn decoder_peer(decodebin: &gst::Element) -> Option<gst::Element> {
     decodebin
@@ -249,8 +265,8 @@ fn the_decoder_feeds_the_output_tee_directly() {
     play(&pipeline);
 
     let slot = config.allocate_slot("publisher").expect("a free slot");
-    // VP8: `vp8dec` on every platform, so the decoder and its I420 output
-    // are the same on every runner.
+    // VP8, which every runner can decode. A host may plug a hardware VP8
+    // decoder; the check compares with whatever decoder was plugged.
     let publisher = start_publisher(
         config.slot_video_appsrcs[slot].clone(),
         "vp8enc deadline=1 keyframe-max-dist=15",
@@ -260,6 +276,9 @@ fn the_decoder_feeds_the_output_tee_directly() {
     let peer = decoder_peer(decodebin);
     let tee = &by_id["whip_native:video_out_tee_0"];
     let tee_caps = tee.static_pad("sink").and_then(|p| p.current_caps());
+    let decoder_caps = video_decoder(decodebin)
+        .and_then(|d| d.static_pad("src"))
+        .and_then(|p| p.current_caps());
     publisher.set_state(gst::State::Null).unwrap();
     pipeline.set_state(gst::State::Null).unwrap();
 
@@ -272,13 +291,10 @@ fn the_decoder_feeds_the_output_tee_directly() {
         peer.as_ref().map(|p| p.name())
     );
     let tee_caps = tee_caps.expect("the tee negotiated");
+    let decoder_caps = decoder_caps.expect("the decoder negotiated");
     assert_eq!(
-        tee_caps
-            .structure(0)
-            .and_then(|s| s.get::<String>("format").ok())
-            .as_deref(),
-        Some("I420"),
-        "the slot emitted {tee_caps}, not vp8dec's I420"
+        tee_caps, decoder_caps,
+        "the slot emitted {tee_caps}, not what its decoder produced ({decoder_caps})"
     );
 }
 
