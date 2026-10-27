@@ -17,7 +17,7 @@
 //! convert the pixel format, scale and change the framerate to what
 //! `decklinkvideosink` takes. Video whose interlacing does not match the mode
 //! fails the flow with an element error: nothing here interlaces or
-//! deinterlaces.
+//! deinterlaces. Audio goes to `decklinkaudiosink` as it arrives (#1068).
 //!
 //! Uses GStreamer's DeckLink plugin (gst-plugins-bad) for hardware integration.
 
@@ -479,8 +479,9 @@ type BlockElements = Vec<(String, gst::Element)>;
 type BlockLinks = Vec<(ElementPadRef, ElementPadRef)>;
 
 /// DeckLink Output's video input chain, ending in `videosink`:
-/// `input` (identity front) → `videoconvert` → `videoscale` → `videorate` →
-/// `ratecaps`.
+/// `input` (identity front) → `videorate` → `videoscale` → `videoconvert` →
+/// `ratecaps`. The rate goes first, so frames it drops are never scaled or
+/// converted.
 ///
 /// The front downloads GL, CUDA, D3D12 or D3D11 memory to system memory,
 /// decided from the negotiated caps (`gst::download_front`). The converters
@@ -519,17 +520,17 @@ fn build_video_input(
         );
     }
 
-    let convert_sink = convert
+    let rate_sink = rate
         .static_pad("sink")
-        .ok_or_else(|| BlockBuildError::ElementCreation("videoconvert has no sink pad".into()))?;
-    download_front::install(&input, &convert_sink, &input_id, "DeckLink Output");
+        .ok_or_else(|| BlockBuildError::ElementCreation("videorate has no sink pad".into()))?;
+    download_front::install(&input, &rate_sink, &input_id, "DeckLink Output");
     let card_sink = videosink.static_pad("sink").ok_or_else(|| {
         BlockBuildError::ElementCreation("decklinkvideosink has no sink pad".into())
     })?;
     watch_input_caps(&input, &card_sink, mode, framerate);
     leave_interlacing_open(&ratecaps);
 
-    let chain = [&input_id, &convert_id, &scale_id, &rate_id, &ratecaps_id];
+    let chain = [&input_id, &rate_id, &scale_id, &convert_id, &ratecaps_id];
     let mut links: Vec<(ElementPadRef, ElementPadRef)> = chain
         .windows(2)
         .map(|pair| {
@@ -555,36 +556,22 @@ fn build_video_input(
     ))
 }
 
-/// The frame rate of a DeckLink mode name: `1080p2997` is 30000/1001,
-/// `1080i50` (50 fields) is 25/1. `None` for `auto` and names it cannot read.
+/// The frame rate of a mode the block offers (see `video_mode_enum_values`):
+/// `1080p2997` is 30000/1001, `1080i50` (50 fields) is 25/1. `None` for `auto`
+/// and any mode not listed here, which leaves the framerate to the source.
 fn mode_framerate(mode: &str) -> Option<gst::Fraction> {
-    let (rate, interlaced) = match mode {
-        "ntsc" => ("5994", true),
-        "ntsc2398" => ("2398", false),
-        "pal" => ("50", true),
-        "ntsc-p" => ("5994", false),
-        "pal-p" => ("50", false),
-        _ => {
-            let at = mode.rfind(['p', 'i'])?;
-            (&mode[at + 1..], mode.as_bytes()[at] == b'i')
-        }
+    let (num, den) = match mode.trim_start_matches(|c: char| c.is_ascii_digit()) {
+        "p2398" => (24000, 1001),
+        "p24" => (24, 1),
+        "p25" | "i50" => (25, 1),
+        "p2997" | "i5994" => (30000, 1001),
+        "p30" | "i60" => (30, 1),
+        "p50" => (50, 1),
+        "p5994" => (60000, 1001),
+        "p60" => (60, 1),
+        _ => return None,
     };
-    let n: i32 = rate.parse().ok()?;
-    // Four digits or more are hundredths of an NTSC-style rate: 2997 is
-    // 29.97, that is 30000/1001.
-    let (num, den) = if rate.len() >= 4 {
-        (((n + 50) / 100) * 1000, 1001)
-    } else {
-        (n, 1)
-    };
-    if num <= 0 {
-        return None;
-    }
-    Some(if interlaced {
-        gst::Fraction::new(num / 2, den)
-    } else {
-        gst::Fraction::new(num, den)
-    })
+    Some(gst::Fraction::new(num, den))
 }
 
 /// Answer caps queries arriving at `last`'s source pad, from upstream, with
@@ -595,14 +582,14 @@ fn mode_framerate(mode: &str) -> Option<gst::Fraction> {
 /// would fail with a bare `not-negotiated`. With it left open, the video
 /// arrives as it is and [`watch_input_caps`] fails the flow with a message.
 ///
-/// A QUERY_DOWNSTREAM probe, on its way back (PULL): per query, never per
-/// buffer.
+/// A QUERY_DOWNSTREAM probe that answers the query itself: per query, never
+/// per buffer.
 fn leave_interlacing_open(last: &gst::Element) {
     let Some(src) = last.static_pad("src") else {
         return;
     };
     src.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, |pad, info| {
-        if !info.mask.contains(gst::PadProbeType::PULL) {
+        if info.mask.contains(gst::PadProbeType::PULL) {
             return gst::PadProbeReturn::Ok;
         }
         let Some(gst::PadProbeData::Query(ref mut query)) = info.data else {
@@ -611,9 +598,10 @@ fn leave_interlacing_open(last: &gst::Element) {
         let gst::QueryViewMut::Caps(q) = query.view_mut() else {
             return gst::PadProbeReturn::Ok;
         };
-        // Ask again without the filter: a filter that says progressive has
-        // already emptied an answer that says interleaved. Asked of the peer
-        // pad itself, since a peer query from `pad` would come back here.
+        // Answered here, once: the card's caps unfiltered, since a filter
+        // that says progressive empties an answer that says interleaved.
+        // Asked of the peer pad itself, since a peer query from `pad` would
+        // come back here.
         let Some(card) = pad.peer().map(|peer| peer.query_caps(None)) else {
             return gst::PadProbeReturn::Ok;
         };
@@ -626,7 +614,7 @@ fn leave_interlacing_open(last: &gst::Element) {
             for (structure, features) in card.iter_with_features() {
                 if structure.has_field("interlace-mode") {
                     let mut structure = structure.to_owned();
-                    structure.remove_field("interlace-mode");
+                    structure.remove_fields(["interlace-mode", "field-order"]);
                     open.append_structure_full(structure, Some(features.to_owned()));
                 }
             }
@@ -636,7 +624,7 @@ fn leave_interlacing_open(last: &gst::Element) {
             None => open,
         };
         q.set_result(&answer);
-        gst::PadProbeReturn::Ok
+        gst::PadProbeReturn::Handled
     });
 }
 
@@ -709,17 +697,20 @@ fn check_input(
         return None;
     }
     let interlace = input.get::<&str>("interlace-mode").unwrap_or("progressive");
-    let interlaced = |mode: &str| mode != "progressive";
+    // Exact: nothing in the chain turns `mixed` or `alternate` into the
+    // card's `interleaved` either.
     let takes = |s: &gst::StructureRef| match s.get::<&str>("interlace-mode") {
-        Ok(wanted) => interlaced(wanted) == interlaced(interlace),
-        // A list or no field: the card takes either.
+        Ok(wanted) => wanted == interlace,
+        // A list or no field: the card takes any.
         Err(_) => true,
     };
     if !card.iter().any(takes) {
-        let wanted = card
-            .structure(0)
-            .and_then(|s| s.get::<&str>("interlace-mode").ok())
-            .unwrap_or("interlaced");
+        let mut wanted: Vec<&str> = card
+            .iter()
+            .filter_map(|s| s.get::<&str>("interlace-mode").ok())
+            .collect();
+        wanted.dedup();
+        let wanted = wanted.join(" or ");
         return Some(InputCheck::Refuse(format!(
             "DeckLink Output receives {} video, and mode {} needs {} video. \
              Nothing in the block interlaces or deinterlaces: set the block's mode \
@@ -728,10 +719,17 @@ fn check_input(
         )));
     }
 
-    let out = card.structure(0)?;
     let mut changed = Vec::new();
     for name in ["width", "height"] {
-        if let (Ok(from), Ok(to)) = (input.get::<i32>(name), out.get::<i32>(name)) {
+        // Only a size every structure agrees on (a set mode, not `auto`).
+        let mut sizes = card.iter().map(|s| s.get::<i32>(name).ok());
+        let Some(Some(to)) = sizes.next() else {
+            continue;
+        };
+        if sizes.any(|size| size != Some(to)) {
+            continue;
+        }
+        if let Ok(from) = input.get::<i32>(name) {
             if from != to {
                 changed.push(format!("{} {} -> {}", name, from, to));
             }
@@ -1256,8 +1254,7 @@ mod input_tests {
         assert_eq!(rate("1080i5994"), Some((30000, 1001)));
         assert_eq!(rate("720p5994"), Some((60000, 1001)));
         assert_eq!(rate("2160p60"), Some((60, 1)));
-        assert_eq!(rate("ntsc"), Some((30000, 1001)));
-        assert_eq!(rate("pal"), Some((25, 1)));
+        assert_eq!(rate("1080i60"), Some((30, 1)));
         assert_eq!(rate("auto"), None);
     }
 
@@ -1289,6 +1286,18 @@ mod input_tests {
         assert!(matches!(
             check_input(&arrived, &card("progressive"), "1080p25", None),
             Some(InputCheck::Refuse(_))
+        ));
+    }
+
+    #[test]
+    fn mixed_into_an_interlaced_mode_is_refused() {
+        gst::init().unwrap();
+        let arrived: gst::Caps = "video/x-raw,width=1920,height=1080,interlace-mode=mixed"
+            .parse()
+            .unwrap();
+        assert!(matches!(
+            check_input(&arrived, &card("interleaved"), "1080i50", None),
+            Some(InputCheck::Refuse(ref m)) if m.contains("mixed")
         ));
     }
 

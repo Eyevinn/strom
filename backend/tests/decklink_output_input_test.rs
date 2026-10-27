@@ -4,7 +4,7 @@
 //! a GPU Vision Mixer the linker added a `gldownload`, but nothing converted
 //! the mixer's RGBA to the card's UYVY, so the link never negotiated. The
 //! block now has an input front (`gst::download_front`) and a
-//! `videoconvert → videoscale → videorate` chain in front of the sink.
+//! `videorate → videoscale → videoconvert` chain in front of the sink.
 //!
 //! CI has no DeckLink card, and `decklinkvideosink` fails to start without
 //! one. These tests build the real block through `DeckLinkOutputBuilder` and
@@ -142,12 +142,13 @@ fn assert_card_frame(caps: &gst::Caps) {
     );
 }
 
-/// The factories between the block's input front and its `videoconvert`.
+/// The factories between the block's input front and its first converter,
+/// `videorate`.
 fn spliced(pipeline: &gst::Pipeline, id: &str) -> Vec<String> {
     let front = format!("{id}:{VIDEO_INPUT_ELEMENT}");
-    let convert = pipeline.by_name(&format!("{id}:videoconvert")).unwrap();
+    let first = pipeline.by_name(&format!("{id}:videorate")).unwrap();
     let mut factories = Vec::new();
-    let mut next = convert
+    let mut next = first
         .static_pad("sink")
         .and_then(|p| p.peer())
         .and_then(|p| p.parent_element());
@@ -168,7 +169,7 @@ fn spliced(pipeline: &gst::Pipeline, id: &str) -> Vec<String> {
             .and_then(|p| p.peer())
             .and_then(|p| p.parent_element());
     }
-    panic!("videoconvert is not fed from the input front: {factories:?}");
+    panic!("videorate is not fed from the input front: {factories:?}");
 }
 
 #[test]
