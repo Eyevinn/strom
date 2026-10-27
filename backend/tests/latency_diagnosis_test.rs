@@ -133,18 +133,22 @@ async fn a_mixer_latency_failure_is_reported_once_with_its_inputs() {
         Arc::new(std::sync::Mutex::new(HashMap::new())),
     )
     .expect("build pipeline");
+    let started = Instant::now();
     manager.start().expect("start pipeline");
+    eprintln!("DIAG start() took {} ms", started.elapsed().as_millis());
 
     // The mixer warns on every cycle, hundreds of times per second. Within
     // a few seconds, well inside the gate's interval, one warning gets out.
     let mut latency_warnings = Vec::new();
     let mut other_warnings = Vec::new();
-    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+    let mut arrivals = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match event_rx.recv().await {
                 Ok(StromEvent::PipelineWarning { warning, .. })
                     if warning.contains("held back") || warning.contains("late") =>
                 {
+                    arrivals.push(started.elapsed().as_millis());
                     latency_warnings.push(warning)
                 }
                 Ok(StromEvent::PipelineWarning { warning, .. }) => other_warnings.push(warning),
@@ -155,6 +159,7 @@ async fn a_mixer_latency_failure_is_reported_once_with_its_inputs() {
     })
     .await;
     let state = manager.pipeline().current_state();
+    eprintln!("DIAG direct=false latency warnings at {arrivals:?} ms after start; state {state:?}");
     let inputs = manager
         .pipeline()
         .by_name("mix")
@@ -202,10 +207,11 @@ fn finds_both_inputs_of_a_mixer_that_cannot_configure_latency() {
     .unwrap()
     .downcast::<gst::Pipeline>()
     .unwrap();
+    let started = Instant::now();
     pipeline.set_state(gst::State::Playing).unwrap();
 
     let bus = pipeline.bus().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     let mut seen = Vec::new();
     let described = loop {
         if Instant::now() >= deadline {
@@ -238,6 +244,11 @@ fn finds_both_inputs_of_a_mixer_that_cannot_configure_latency() {
             debug
         ));
     };
+    eprintln!(
+        "DIAG direct=true latency warning at {} ms after PLAYING; state {:?}",
+        started.elapsed().as_millis(),
+        pipeline.current_state()
+    );
     let _ = pipeline.set_state(gst::State::Null);
 
     // `slow` is 2 s plus the test source's own buffer; `bridge` is the

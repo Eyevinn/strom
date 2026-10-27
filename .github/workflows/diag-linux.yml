@@ -1,0 +1,64 @@
+# TEMPORARY: issue #1136 diag. Never merge.
+name: diag-linux
+
+on:
+  push:
+    branches: ["diag/**"]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  SCCACHE_BUCKET: sccache
+  SCCACHE_ENDPOINT: https://olivedev-rustcache.minio-minio.auto.prod-se.osaas.io
+  SCCACHE_REGION: us-east-1
+  SCCACHE_S3_USE_SSL: "true"
+  AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+  RUSTC_WRAPPER: sccache
+
+jobs:
+  loop:
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04
+    timeout-minutes: 60
+    steps:
+      - name: Install build and GStreamer packages
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git pkg-config cmake libclang-dev procps \
+            libunwind-dev libssl-dev libcairo2-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice gstreamer1.0-gl \
+            gstreamer1.0-tools libsoup-3.0-0 gsettings-desktop-schemas libegl-mesa0 libgl1-mesa-dri \
+            zstd python3
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        run: |
+          CHANNEL=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain "$CHANNEL"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "RUSTUP_TOOLCHAIN=$CHANNEL" >> "$GITHUB_ENV"
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Placeholder frontend dist
+        run: mkdir -p backend/dist && echo '<html></html>' > backend/dist/index.html && touch backend/dist/placeholder.wasm
+      - name: Build test binary
+        run: |
+          cargo test --package strom --features efp --test latency_diagnosis_test --no-run --message-format=json \
+            | python3 -c 'import sys,json
+          for l in sys.stdin:
+              try: m=json.loads(l)
+              except Exception: continue
+              if m.get("reason")=="compiler-artifact" and m.get("executable") and "latency_diagnosis_test" in m["executable"]: print(m["executable"])' > exe.txt
+          cat exe.txt
+      - name: Loop
+        run: bash .github/diag/loop-1136.sh "$(cat exe.txt)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diag-1136
+          path: diag-out/
