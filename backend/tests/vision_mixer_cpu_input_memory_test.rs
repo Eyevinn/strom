@@ -114,7 +114,7 @@ async fn gl_memory_on_an_input_is_downloaded_by_its_front() {
     let mut flow = Flow::new("vm_cpu_gl_input");
     flow.blocks.push(mixer_block(block_id, Backend::Cpu));
     add_gl_source(&mut flow, "src", &format!("{block_id}:video_in_0"));
-    add_pgm_tap(&mut flow, block_id);
+    add_pgm_tap(&mut flow, block_id, Backend::Cpu);
 
     let running = Running::start(block_id, flow);
     running.wait_for_white_pgm("GL memory on video_in_0 of the CPU mixer", 3);
