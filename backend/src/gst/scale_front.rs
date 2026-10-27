@@ -68,47 +68,34 @@ const ADAPTABLE_FIELDS: [&str; 6] = [
     "chroma-site",
 ];
 
-/// The chain for `caps`, given what the block's output takes now.
-fn plan(caps: &gst::CapsRef, output_takes: &gst::CapsRef) -> Result<Vec<Adapter>, Refusal> {
-    video_adapt::decide(
-        caps,
-        Consumer::ScaleConvert(output_takes),
-        video_adapt::factory_available,
-    )
+/// The chain for `caps`, given what the block's output takes now
+/// (`output_takes`). `available` says whether an element factory exists.
+fn plan(
+    caps: &gst::CapsRef,
+    output_takes: &gst::CapsRef,
+    available: impl Fn(&str) -> bool,
+) -> Result<Vec<Adapter>, Refusal> {
+    video_adapt::decide(caps, Consumer::ScaleConvert(output_takes), available)
 }
 
 /// True when the chain's first element takes `caps`.
 fn chain_takes(chain: &[Adapter], caps: &gst::CapsRef) -> bool {
-    let Some(&first) = chain.first() else {
-        return true;
-    };
-    match Scaler::from_adapter(first) {
-        Some(scaler) => scaler
-            .template(gst::PadDirection::Sink)
-            .is_some_and(|t| caps.can_intersect(&t)),
-        None => first.sink_takes(caps),
-    }
+    chain.first().is_none_or(|first| first.sink_takes(caps))
 }
 
-/// Build the elements for `chain`, named `<prefix>_<factory><index>`.
+/// True when `chain` downloads.
+fn downloads(chain: &[Adapter]) -> bool {
+    chain.iter().any(|a| a.memory_feature().is_some())
+}
+
+/// Build the elements for `chain`, with the thread count the block sets on
+/// its converters.
 fn build(chain: &[Adapter], prefix: &str) -> Result<Vec<gst::Element>, String> {
-    chain
-        .iter()
-        .flat_map(|adapter| adapter.factories().iter().copied())
-        .enumerate()
-        .map(|(i, factory)| {
-            let name = format!("{}_{}{}", prefix, factory, i);
-            if factory == Adapter::SystemMemoryPin.factory() {
-                return video_adapt::system_memory_pin(&name);
-            }
-            let element = gst::ElementFactory::make(factory)
-                .name(name)
-                .build()
-                .map_err(|e| format!("{} could not be created: {}", factory, e))?;
-            crate::gpu::configure_video_convert(&element);
-            Ok(element)
-        })
-        .collect()
+    let elements = video_adapt::build_elements(chain, prefix)?;
+    for element in &elements {
+        crate::gpu::configure_video_convert(element);
+    }
+    Ok(elements)
 }
 
 /// The chain spliced in between `input` and `output`.
@@ -242,7 +229,7 @@ fn on_input_query(front: &Front, pad: &gst::Pad, query: &mut gst::QueryRef) -> g
     match query.view_mut() {
         gst::QueryViewMut::AcceptCaps(q) => {
             let caps = q.caps_owned();
-            let accepted = match plan(&caps, &output_takes(front)) {
+            let accepted = match plan(&caps, &output_takes(front), video_adapt::factory_available) {
                 Ok(chain) => chain_takes(&chain, &caps),
                 Err(problem) => {
                     // A refused ACCEPT_CAPS means the CAPS event never comes,
@@ -273,36 +260,50 @@ fn on_input_query(front: &Front, pad: &gst::Pad, query: &mut gst::QueryRef) -> g
 /// What the block takes on its input: raw video in each memory some chain
 /// takes. First the GPU memory downstream takes as it is (a decoder that can
 /// choose keeps the frames on the GPU), then system memory, then GPU memory
-/// that is downloaded after scaling or before it.
+/// that is downloaded after scaling or before it. Each memory is offered as
+/// what its chain's first element takes, when [`video_adapt::decide`] finds a
+/// chain for it.
 fn takes(output_takes: &gst::CapsRef, available: impl Fn(&str) -> bool) -> gst::Caps {
     let mut direct = gst::Caps::new_empty();
     let mut downloaded = gst::Caps::new_empty();
     for scaler in Scaler::ALL {
-        let feature = scaler.memory_feature();
-        let download_available = available(scaler.download().factory());
-        if let Some(sink) = scaler.template(gst::PadDirection::Sink) {
-            if !in_memory(output_takes, Some(feature)).is_empty() {
-                direct.merge(sink);
-            } else if download_available {
-                downloaded.merge(sink);
-            }
-        } else if download_available {
-            if let Some(sink) = scaler.download().sink_template() {
-                downloaded.merge(in_memory(sink, Some(feature)));
-            }
+        // What the scaler takes, or else what its download takes.
+        let scaler_installed = scaler.adapter().factories().iter().all(|f| available(f));
+        let Some(candidate) = scaler
+            .adapter()
+            .sink_template()
+            .filter(|_| scaler_installed)
+            .cloned()
+            .or_else(|| {
+                scaler
+                    .download()
+                    .sink_template()
+                    .map(|t| in_memory(t, Some(scaler.memory_feature())))
+            })
+        else {
+            continue;
+        };
+        match plan(&candidate, output_takes, &available) {
+            Ok(chain) if downloads(&chain) => downloaded.merge(candidate),
+            Ok(_) => direct.merge(candidate),
+            Err(_) => {}
         }
     }
-    if let Some(system) = factory_template("videoscale", gst::PadDirection::Sink) {
-        direct.merge(in_memory(&system, None));
+    if let Some(system) = factory_template("videoscale", gst::PadDirection::Sink)
+        .map(|template| in_memory(&template, None))
+        .filter(|system| plan(system, output_takes, &available).is_ok())
+    {
+        direct.merge(system);
     }
     direct.merge(downloaded);
     direct
 }
 
 /// What the block can deliver when upstream offers `offered`: each raw video
-/// structure at any size and pixel format, in its own memory when that is
-/// system memory or a scaler for it is installed, and in system memory when
-/// it can be downloaded. Limited to `filter`.
+/// structure at any size and pixel format, in its own memory when
+/// [`video_adapt::decide`] keeps it there for an output that takes that
+/// memory, and in system memory when it finds a chain for an output that
+/// takes system memory. Limited to `filter`.
 fn deliverable(
     offered: &gst::Caps,
     filter: Option<&gst::Caps>,
@@ -311,6 +312,7 @@ fn deliverable(
     if offered.is_any() {
         return filter.cloned().unwrap_or_else(gst::Caps::new_any);
     }
+    let any_system = gst::Caps::new_empty_simple("video/x-raw");
     let mut answer = gst::Caps::new_empty();
     {
         let answer = answer.get_mut().expect("new caps are writable");
@@ -318,22 +320,26 @@ fn deliverable(
             if structure.name() != "video/x-raw" || features.is_any() {
                 continue;
             }
+            let mut one = gst::Caps::new_empty();
+            one.get_mut()
+                .expect("new caps are writable")
+                .append_structure_full(structure.to_owned(), Some(features.to_owned()));
             let mut adaptable = structure.to_owned();
             adaptable.remove_fields(ADAPTABLE_FIELDS);
-            if video_adapt::is_system_memory(features) {
-                answer.append_structure(adaptable);
-                continue;
+            if let Some(scaler) = Scaler::for_features(features) {
+                let mut any_gpu = gst::Caps::new_empty_simple("video/x-raw");
+                any_gpu
+                    .get_mut()
+                    .expect("new caps are writable")
+                    .set_features_simple(Some(gst::CapsFeatures::new([scaler.memory_feature()])));
+                if plan(&one, &any_gpu, &available).is_ok_and(|chain| !downloads(&chain)) {
+                    answer.append_structure_full(
+                        adaptable.clone(),
+                        Some(gst::CapsFeatures::new([scaler.memory_feature()])),
+                    );
+                }
             }
-            let Some(scaler) = Scaler::for_features(features) else {
-                continue;
-            };
-            if scaler.adapter().factories().iter().all(|f| available(f)) {
-                answer.append_structure_full(
-                    adaptable.clone(),
-                    Some(gst::CapsFeatures::new([scaler.memory_feature()])),
-                );
-            }
-            if available(scaler.download().factory()) {
+            if plan(&one, &any_system, &available).is_ok() {
                 answer.append_structure(adaptable);
             }
         }
@@ -353,7 +359,7 @@ fn on_caps(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef) {
     else {
         return;
     };
-    let wanted = match plan(caps, &output_takes(front)) {
+    let wanted = match plan(caps, &output_takes(front), video_adapt::factory_available) {
         Ok(chain) => chain,
         Err(problem) => {
             if !front.refused.swap(true, Ordering::AcqRel) {

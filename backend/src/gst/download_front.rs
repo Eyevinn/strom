@@ -283,7 +283,7 @@ fn on_caps(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef) {
         0 => front.label.clone(),
         n => format!("{}_{}", front.label, n),
     };
-    let new = match build_adapters(&wanted, &prefix) {
+    let new = match video_adapt::build_elements(&wanted, &prefix) {
         Ok(new) => new,
         Err(e) => {
             post_splice_failure(front, pad, caps, &e);
@@ -315,14 +315,6 @@ fn on_caps(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef) {
         }
         Err(e) => post_splice_failure(front, pad, caps, &e),
     }
-}
-
-/// The elements for `adapters`, in link order. A download ends in the
-/// system-memory pin `decide()` puts after it: `gldownload` and `cudadownload`
-/// also output GL memory, which the consumer's converter would pass through
-/// to an encoder that lists GL memory.
-fn build_adapters(adapters: &[Adapter], prefix: &str) -> Result<Vec<gst::Element>, String> {
-    video_adapt::build_elements(adapters, prefix)
 }
 
 /// The readable name of the memory a caps feature names.
@@ -585,12 +577,16 @@ mod tests {
 
     #[test]
     fn a_download_is_pinned_to_system_memory() {
-        let _ = gst::init();
-        let elements = build_adapters(
-            &[Adapter::GlDownload, Adapter::SystemMemoryPin],
-            "venc:input",
+        // What the front builds for GL memory into a software encoder.
+        let encoder = caps("video/x-raw, format=I420");
+        let gl = caps("video/x-raw(memory:GLMemory), format=RGBA, width=320, height=240");
+        let wanted = video_adapt::decide(
+            &gl,
+            Consumer::Exactly(&encoder),
+            video_adapt::factory_available,
         )
-        .expect("adapters");
+        .expect("GL memory is downloaded");
+        let elements = video_adapt::build_elements(&wanted, "venc:input").expect("adapters");
         let factories: Vec<String> = elements
             .iter()
             .map(|e| {
@@ -604,7 +600,7 @@ mod tests {
             elements[1].property::<gst::Caps>("caps"),
             gst::Caps::new_empty_simple("video/x-raw")
         );
-        assert!(build_adapters(&[], "venc:input")
+        assert!(video_adapt::build_elements(&[], "venc:input")
             .expect("adapters")
             .is_empty());
     }

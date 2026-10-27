@@ -250,22 +250,39 @@ impl Adapter {
         }
     }
 
+    /// Every adapter. `sink_template` caches one template per entry.
+    pub const ALL: [Adapter; 11] = [
+        Adapter::GlDownload,
+        Adapter::CudaDownload,
+        Adapter::D3d12Download,
+        Adapter::D3d11Download,
+        Adapter::VideoConvert,
+        Adapter::VideoScale,
+        Adapter::GlScale,
+        Adapter::CudaScale,
+        Adapter::D3d12Scale,
+        Adapter::D3d11Scale,
+        Adapter::SystemMemoryPin,
+    ];
+
     /// What the adapter's first element takes on its sink pad: its sink
-    /// template. `None` when the element is not installed. Read once per
+    /// template, and for a GPU scaler only its entries in the scaler's own
+    /// memory. `None` when an element is not installed. Read once per
     /// adapter, and only once found, so a test element registered later is
     /// still seen.
     pub fn sink_template(self) -> Option<&'static gst::Caps> {
-        static TEMPLATES: [std::sync::OnceLock<gst::Caps>; 11] =
-            [const { std::sync::OnceLock::new() }; 11];
-        let slot = &TEMPLATES[self as usize];
+        static TEMPLATES: [std::sync::OnceLock<gst::Caps>; Adapter::ALL.len()] =
+            [const { std::sync::OnceLock::new() }; Adapter::ALL.len()];
+        // An adapter missing from `ALL` is a bug the test below catches; it
+        // gets no slot rather than a panic in a pad probe.
+        let slot = &TEMPLATES[Adapter::ALL.iter().position(|a| *a == self)?];
         if let Some(caps) = slot.get() {
             return Some(caps);
         }
-        let caps = gst::ElementFactory::find(self.factories()[0])?
-            .static_pad_templates()
-            .into_iter()
-            .find(|t| t.direction() == gst::PadDirection::Sink)?
-            .caps();
+        let caps = match Scaler::from_adapter(self) {
+            Some(scaler) => scaler.template(gst::PadDirection::Sink)?,
+            None => factory_template(self.factories()[0], gst::PadDirection::Sink)?,
+        };
         Some(slot.get_or_init(|| caps))
     }
 
@@ -390,12 +407,33 @@ impl std::fmt::Display for Refusal {
 /// An empty list means the input links as it is. `available` says whether an
 /// element factory exists; it is consulted only for factories that may be
 /// missing on a working install (`cudadownload`, `d3d12download`,
-/// `d3d11download`, and `gldownload` for [`Consumer::Exactly`]), and only when
-/// that adapter is called for. See the module docs for the rules.
+/// `d3d11download`, and `gldownload` for [`Consumer::Exactly`] and
+/// [`Consumer::ScaleConvert`], and the GPU scalers' factories for
+/// [`Consumer::ScaleConvert`]), and only when that adapter is called for.
+/// Which pixel formats an adapter takes is read from the registry, whatever
+/// `available` says: an element `available` claims but the registry lacks has
+/// no known template, so a scaler counts as not taking anything and a
+/// download as taking everything. See the module docs for the rules.
 pub fn decide(
     producer: &gst::CapsRef,
     consumer: Consumer<'_>,
     available: impl Fn(&str) -> bool,
+) -> Result<Vec<Adapter>, Refusal> {
+    decide_with(producer, consumer, available, &|adapter| {
+        adapter.sink_template().cloned()
+    })
+}
+
+/// What an adapter's first element takes, in the adapter's own memory for a
+/// scaler: [`Adapter::sink_template`], or a stand-in in tests.
+type SinkTemplates<'a> = &'a dyn Fn(Adapter) -> Option<gst::Caps>;
+
+/// [`decide`], with the adapters' sink templates from `templates`.
+fn decide_with(
+    producer: &gst::CapsRef,
+    consumer: Consumer<'_>,
+    available: impl Fn(&str) -> bool,
+    templates: SinkTemplates<'_>,
 ) -> Result<Vec<Adapter>, Refusal> {
     match consumer {
         Consumer::GlUpload(uploads) => {
@@ -447,7 +485,7 @@ pub fn decide(
                 // A download produces system memory, so it helps only a
                 // consumer that takes that.
                 Some(download) if accepts_system_memory_raw_video(takes) => {
-                    pinned_download(download, producer, available)
+                    pinned_download(download, producer, available, templates)
                 }
                 _ => match unreadable_memory(producer) {
                     Some(feature) => Err(Refusal::UnsupportedMemory { feature }),
@@ -457,7 +495,7 @@ pub fn decide(
                 },
             }
         }
-        Consumer::ScaleConvert(output) => scale_convert(producer, output, available),
+        Consumer::ScaleConvert(output) => scale_convert(producer, output, available, templates),
         Consumer::SystemMemory => {
             if offers_only(producer, GL_MEMORY_FEATURE) {
                 return Ok(vec![Adapter::GlDownload]);
@@ -487,6 +525,7 @@ fn scale_convert(
     producer: &gst::CapsRef,
     output: &gst::CapsRef,
     available: impl Fn(&str) -> bool,
+    templates: SinkTemplates<'_>,
 ) -> Result<Vec<Adapter>, Refusal> {
     let (Some(structure), Some(features)) = (producer.structure(0), producer.features(0)) else {
         return Err(Refusal::NotRawVideo {
@@ -514,11 +553,9 @@ fn scale_convert(
     // The GPU scaler must be installed and take this pixel format; otherwise
     // the frame is downloaded first and scaled on the CPU.
     let scaler_takes = scaler.adapter().factories().iter().all(|f| available(f))
-        && scaler
-            .template(gst::PadDirection::Sink)
-            .is_some_and(|sink| producer.can_intersect(&sink));
+        && templates(scaler.adapter()).is_some_and(|sink| producer.can_intersect(&sink));
     if !scaler_takes {
-        let mut adapters = pinned_download(download, producer, available)?;
+        let mut adapters = pinned_download(download, producer, &available, templates)?;
         adapters.extend(on_the_cpu);
         return Ok(adapters);
     }
@@ -547,24 +584,14 @@ fn pinned_download(
     download: Adapter,
     producer: &gst::CapsRef,
     available: impl Fn(&str) -> bool,
+    templates: SinkTemplates<'_>,
 ) -> Result<Vec<Adapter>, Refusal> {
     require(download, available)?;
-    downloadable(download, download.sink_template(), producer)?;
-    Ok(vec![download, Adapter::SystemMemoryPin])
-}
-
-/// Refuse `download` when its sink template (`None`: unknown) does not take
-/// `producer`.
-fn downloadable(
-    download: Adapter,
-    template: Option<&gst::Caps>,
-    producer: &gst::CapsRef,
-) -> Result<(), Refusal> {
-    match template {
-        Some(template) if !producer.can_intersect(template) => Err(Refusal::NotDownloadable {
+    match templates(download) {
+        Some(template) if !producer.can_intersect(&template) => Err(Refusal::NotDownloadable {
             factory: download.factory(),
         }),
-        _ => Ok(()),
+        _ => Ok(vec![download, Adapter::SystemMemoryPin]),
     }
 }
 
@@ -1460,25 +1487,79 @@ mod tests {
         );
     }
 
+    /// A `cudadownload` that takes NV12 only: a download whose element does
+    /// not list every pixel format.
+    fn nv12_only_cudadownload(adapter: Adapter) -> Option<gst::Caps> {
+        (adapter == Adapter::CudaDownload)
+            .then(|| caps("video/x-raw(memory:CUDAMemory), format=NV12"))
+    }
+
     /// A download whose element does not take the pixel format is refused,
-    /// not a yes that fails not-negotiated once the CAPS event arrives. An
-    /// unknown template (a test claiming an element that is not registered)
-    /// is trusted.
+    /// not a yes that fails not-negotiated once the CAPS event arrives: for an
+    /// encoder's input, and for a scaler that is not installed.
     #[test]
     fn a_download_that_does_not_take_the_pixel_format_is_refused() {
-        let template = caps("video/x-raw(memory:CUDAMemory), format=NV12");
-        let p010 = caps("video/x-raw(memory:CUDAMemory), format=P010_10LE");
+        let p010 = caps("video/x-raw(memory:CUDAMemory), format=P010_10LE, width=320, height=240");
+        let refused = Err(Refusal::NotDownloadable {
+            factory: CUDA_DOWNLOAD_FACTORY,
+        });
+        let encoder = caps(SOFTWARE_ENCODER);
         assert_eq!(
-            downloadable(Adapter::CudaDownload, Some(&template), &p010),
-            Err(Refusal::NotDownloadable {
-                factory: CUDA_DOWNLOAD_FACTORY
-            })
+            decide_with(
+                &p010,
+                Consumer::Exactly(&encoder),
+                all,
+                &nv12_only_cudadownload
+            ),
+            refused
         );
+        let output = caps("video/x-raw, width=160, height=120");
         assert_eq!(
-            downloadable(Adapter::CudaDownload, Some(&template), &caps(CUDA)),
-            Ok(())
+            decide_with(
+                &p010,
+                Consumer::ScaleConvert(&output),
+                all,
+                &nv12_only_cudadownload
+            ),
+            refused
         );
-        assert_eq!(downloadable(Adapter::CudaDownload, None, &p010), Ok(()));
+        // The format it does take is downloaded.
+        assert_eq!(
+            decide_with(
+                &caps(CUDA),
+                Consumer::Exactly(&encoder),
+                all,
+                &nv12_only_cudadownload
+            ),
+            Ok(vec![Adapter::CudaDownload, Adapter::SystemMemoryPin])
+        );
+    }
+
+    /// `sink_template` caches one slot per entry of `ALL`, and an adapter
+    /// left out has no template. The match fails to compile when a variant is
+    /// added, as a reminder to list it; the count catches one listed twice.
+    #[test]
+    fn every_adapter_is_listed_in_all() {
+        for adapter in Adapter::ALL {
+            assert_eq!(
+                Adapter::ALL.iter().filter(|a| **a == adapter).count(),
+                1,
+                "{adapter:?}"
+            );
+            match adapter {
+                Adapter::GlDownload
+                | Adapter::CudaDownload
+                | Adapter::D3d12Download
+                | Adapter::D3d11Download
+                | Adapter::VideoConvert
+                | Adapter::VideoScale
+                | Adapter::GlScale
+                | Adapter::CudaScale
+                | Adapter::D3d12Scale
+                | Adapter::D3d11Scale
+                | Adapter::SystemMemoryPin => {}
+            }
+        }
     }
 
     /// Windows: `nvh264enc` takes D3D12 memory but not D3D11.
