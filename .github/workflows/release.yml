@@ -133,7 +133,7 @@ jobs:
             platform: windows
             target: x86_64-pc-windows-msvc
             binary_ext: ".exe"
-            features: ""
+            features: "efp"
           - os: macos-latest
             platform: macos
             target: aarch64-apple-darwin
