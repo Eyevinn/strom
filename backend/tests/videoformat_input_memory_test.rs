@@ -329,6 +329,9 @@ fn memory_nothing_downloads_fails_the_flow_with_a_message() {
 /// asks through the block for what upstream offers: GL memory at 320x240,
 /// which the block's 160x120 capsfilter would refuse (`NoFormat`) unless the
 /// block answers with what it can scale that to.
+///
+/// The tests run one at a time (`serial(gl)`): GL contexts started in
+/// parallel race in EGL (#1095).
 #[cfg(not(target_os = "windows"))]
 mod gl {
     use super::*;
@@ -421,6 +424,7 @@ mod gl {
     /// Downstream takes GL memory: the block scales and converts on the GPU
     /// and emits GL memory, with no download and no CPU scaler.
     #[test]
+    #[serial_test::serial(gl)]
     fn gl_memory_is_scaled_on_the_gpu_and_stays_there() {
         if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
             return;
@@ -452,6 +456,7 @@ mod gl {
     /// Downstream takes system memory only: the block scales on the GPU, then
     /// downloads the smaller frame.
     #[test]
+    #[serial_test::serial(gl)]
     fn gl_memory_is_scaled_on_the_gpu_then_downloaded() {
         if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
             return;
