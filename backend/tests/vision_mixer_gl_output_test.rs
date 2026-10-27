@@ -16,6 +16,9 @@
 //!   fails if no encoded frame comes out, or if the download is not the one
 //!   the block's input front puts in: the linker's GL-download retry (#802)
 //!   would otherwise hide a block that stopped adapting.
+//!
+//! Both run one at a time with the other GL tests (`serial(gl)`): GL setup in
+//! parallel tests races on the Linux runner (#1095).
 
 pub mod common;
 
@@ -89,6 +92,7 @@ fn has_gl_memory(caps: &gst::Caps) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn a_stored_gl_download_still_emits_gl_memory() {
     gst::init().unwrap();
     if !common::gl_elements_available(GL_ELEMENTS) {
@@ -140,6 +144,7 @@ async fn a_stored_gl_download_still_emits_gl_memory() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn a_video_encoder_encodes_the_gl_output() {
     gst::init().unwrap();
     let mut required = GL_ELEMENTS.to_vec();
