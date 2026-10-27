@@ -345,6 +345,9 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           draft: false
-          prerelease: false
+          # A tag with a suffix (v0.8.0-alpha.1) is a prerelease and must not
+          # become the latest release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
           generate_release_notes: true
           files: release-assets/*
