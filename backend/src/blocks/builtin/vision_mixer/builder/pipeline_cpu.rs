@@ -10,6 +10,8 @@ use super::super::{elements, layout};
 use super::{audio_meter, pad_layout, setup_overlay_renderer, PipelineParams};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult};
 use crate::gpu;
+use crate::gst::download_front;
+use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 
 pub(super) fn build_cpu_pipeline(
     p: &PipelineParams,
@@ -18,8 +20,10 @@ pub(super) fn build_cpu_pipeline(
     let mut elems: Vec<(String, gst::Element)> = Vec::new();
     let mut links: Vec<(ElementPadRef, ElementPadRef)> = Vec::new();
 
-    // Conversion element for this host — see the DSK chain below for why.
-    let vc_factory = gpu::video_convert_mode().element_name();
+    // The software compositor takes system memory only, so every converter
+    // here is plain `videoconvert`, never the global video convert mode's
+    // pick. GPU memory on an input is downloaded by that input's front (see
+    // `input_front`), decided from its caps.
 
     let dist_comp = elements::make_dist_compositor(p.backend, p.latency_ms, p.min_upstream_ms)?;
     let mv_comp = elements::make_mv_compositor(p.backend, p.latency_ms, p.min_upstream_ms)?;
@@ -89,7 +93,7 @@ pub(super) fn build_cpu_pipeline(
                 BlockBuildError::ElementCreation(format!("capsfilter_dist_blend: {}", e))
             })?;
         let vc_dist_out_id = p.id("videoconvert_dist_out");
-        let videoconvert_dist_out = elements::make_element(vc_factory, &vc_dist_out_id)?;
+        let videoconvert_dist_out = elements::make_element(VIDEO_CONVERT_FACTORY, &vc_dist_out_id)?;
         elems.push((cf_blend_id.clone(), capsfilter_blend));
         elems.push((vc_dist_out_id.clone(), videoconvert_dist_out));
         info!(
@@ -152,18 +156,20 @@ pub(super) fn build_cpu_pipeline(
         let vc_id_dsk = p.id(&format!("videoconvert_dsk_{}", i));
 
         let queue = elements::make_queue(&q_id)?;
-        // Uses autovideoconvert on hosts with working CUDA-GL interop, plain
-        // videoconvert elsewhere — same pattern as videoenc/videoformat. Needed
-        // so that upstream GPU-memory sources (e.g. nvh264dec from efpsrt_input)
-        // negotiate correctly against the CPU compositor backend.
-        let videoconvert = elements::make_element(vc_factory, &vc_id_dsk)?;
+        let videoconvert = elements::make_element(VIDEO_CONVERT_FACTORY, &vc_id_dsk)?;
         gpu::configure_video_convert(&videoconvert);
+        let (front_id, front) = input_front(p, &format!("dsk_in_{}", i), &videoconvert)?;
 
         elems.push((q_id.clone(), queue));
+        elems.push((front_id.clone(), front));
         elems.push((vc_id_dsk.clone(), videoconvert));
 
         links.push((
             ElementPadRef::pad(&q_id, "src"),
+            ElementPadRef::pad(&front_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&front_id, "src"),
             ElementPadRef::pad(&vc_id_dsk, "sink"),
         ));
 
@@ -182,9 +188,12 @@ pub(super) fn build_cpu_pipeline(
         let q_id = p.id("queue_stinger");
         let vc_id = p.id("videoconvert_stinger");
         let crop_id = p.id("videocrop_stinger");
-        let videoconvert = elements::make_element(vc_factory, &vc_id)?;
+        let videoconvert = elements::make_element(VIDEO_CONVERT_FACTORY, &vc_id)?;
         gpu::configure_video_convert(&videoconvert);
+        let (front_id, front) =
+            input_front(p, strom_types::stinger::STINGER_INPUT_PAD, &videoconvert)?;
         elems.push((q_id.clone(), elements::make_queue(&q_id)?));
+        elems.push((front_id.clone(), front));
         elems.push((vc_id.clone(), videoconvert));
         elems.push((
             crop_id.clone(),
@@ -192,6 +201,10 @@ pub(super) fn build_cpu_pipeline(
         ));
         links.push((
             ElementPadRef::pad(&q_id, "src"),
+            ElementPadRef::pad(&front_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&front_id, "src"),
             ElementPadRef::pad(&vc_id, "sink"),
         ));
         links.push((
@@ -229,7 +242,7 @@ pub(super) fn build_cpu_pipeline(
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter_mv_blend: {}", e)))?;
         let vc_mv_out_id = p.id("videoconvert_mv_out");
-        let videoconvert_mv_out = elements::make_element(vc_factory, &vc_mv_out_id)?;
+        let videoconvert_mv_out = elements::make_element(VIDEO_CONVERT_FACTORY, &vc_mv_out_id)?;
         elems.push((cf_blend_id.clone(), capsfilter_blend));
         elems.push((vc_mv_out_id.clone(), videoconvert_mv_out));
 
@@ -284,7 +297,7 @@ pub(super) fn build_cpu_pipeline(
     let q_overlay_id = p.id("queue_overlay");
     let queue_overlay = elements::make_queue(&q_overlay_id)?;
     let vc_overlay_id = p.id("videoconvert_overlay");
-    let videoconvert_overlay = elements::make_element(vc_factory, &vc_overlay_id)?;
+    let videoconvert_overlay = elements::make_element(VIDEO_CONVERT_FACTORY, &vc_overlay_id)?;
 
     elems.push((appsrc_overlay_id.clone(), appsrc_overlay.clone().upcast()));
     elems.push((q_overlay_id.clone(), queue_overlay));
@@ -358,10 +371,12 @@ pub(super) fn build_cpu_pipeline(
         let tee_id = p.id(&format!("tee_{}", i));
 
         let queue = elements::make_queue(&q_id)?;
-        let videoconvert = elements::make_element(vc_factory, &vc_in_id)?;
+        let videoconvert = elements::make_element(VIDEO_CONVERT_FACTORY, &vc_in_id)?;
+        let (front_id, front) = input_front(p, &format!("video_in_{}", i), &videoconvert)?;
         let tee = elements::make_tee(&tee_id)?;
 
         elems.push((q_id.clone(), queue));
+        elems.push((front_id.clone(), front));
         elems.push((vc_in_id.clone(), videoconvert));
 
         // Capsfilter after videoconvert forces all inputs to the same format before tee split.
@@ -389,6 +404,10 @@ pub(super) fn build_cpu_pipeline(
 
         links.push((
             ElementPadRef::pad(&q_id, "src"),
+            ElementPadRef::pad(&front_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&front_id, "src"),
             ElementPadRef::pad(&vc_in_id, "sink"),
         ));
         links.push((
@@ -643,6 +662,35 @@ pub(super) fn build_cpu_pipeline(
         bus_message_handler,
         pad_properties,
     })
+}
+
+/// The front of the input `pad`: an `identity` linked between the input's
+/// queue and `videoconvert`. The software compositor takes system memory only,
+/// and what reaches an input is known only from its caps (a decoder
+/// `decodebin` picks, a GPU Vision Mixer upstream), so the front downloads GL,
+/// CUDA, D3D12 or D3D11 memory through `gst::download_front`, and fails the
+/// flow with an element error for memory nothing downloads.
+fn input_front(
+    p: &PipelineParams,
+    pad: &str,
+    videoconvert: &gst::Element,
+) -> Result<(String, gst::Element), BlockBuildError> {
+    let id = p.id(&format!("{}_front", pad));
+    let front = gst::ElementFactory::make("identity")
+        .name(&id)
+        .property("silent", true)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {}", e)))?;
+    let convert_sink = videoconvert
+        .static_pad("sink")
+        .ok_or_else(|| BlockBuildError::ElementCreation("videoconvert has no sink pad".into()))?;
+    download_front::install(
+        &front,
+        &convert_sink,
+        &id,
+        &format!("Vision Mixer {} (software compositor)", pad),
+    );
+    Ok((id, front))
 }
 
 /// System-memory caps `videocrop` can actually crop, read from its sink pad
