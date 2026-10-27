@@ -210,6 +210,12 @@ async fn a_video_encoder_encodes_the_gl_output() {
         })
         .collect();
     let _ = manager.stop();
+    // The element the block's video input pad points at: its input front.
+    let front = strom::blocks::builtin::videoenc::get_blocks()
+        .into_iter()
+        .next()
+        .map(|d| format!("enc:{}", d.external_pads.inputs[0].internal_element_id))
+        .expect("videoenc definition");
 
     assert_eq!(
         encoded, 5,
@@ -222,7 +228,7 @@ async fn a_video_encoder_encodes_the_gl_output() {
     assert!(
         downloads
             .iter()
-            .any(|(_, upstream)| upstream.as_deref() == Some("enc:input")),
+            .any(|(_, upstream)| upstream.as_deref() == Some(front.as_str())),
         "no download behind the Video Encoder's input front ({downloads:?}); \
          the block must adapt the GL memory itself, from the negotiated caps"
     );

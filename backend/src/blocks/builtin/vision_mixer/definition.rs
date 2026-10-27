@@ -260,8 +260,7 @@ fn vision_mixer_definition() -> BlockDefinition {
         ExposedProperty {
             name: "output_format".to_string(),
             label: "Output Pixel Format".to_string(),
-            description: "Pixel format for compositor outputs. Auto lets GStreamer negotiate."
-                .to_string(),
+            description: "Pixel format for the CPU compositor's outputs. Auto lets GStreamer negotiate. The GPU mixer emits RGBA in GL memory; a consumer converts it.".to_string(),
             property_type: PropertyType::Enum {
                 values: {
                     let mut v = vec![EnumValue {

@@ -139,12 +139,20 @@ fn build_flow(block_id: &str, backend: &str) -> Flow {
     ));
     flow.elements
         .push(elem("mvsink", "fakesink", vec![("sync", PV::Bool(false))]));
-    common::download::link_through_download(
-        &mut flow,
-        "pgm",
-        &format!("{block_id}:pgm_out"),
-        "pgmcaps:sink",
-    );
+    if backend == "gpu" {
+        // The GPU mixer emits GL memory; download it for the appsink.
+        common::download::link_through_download(
+            &mut flow,
+            "pgm",
+            &format!("{block_id}:pgm_out"),
+            "pgmcaps:sink",
+        );
+    } else {
+        flow.links.push(strom_types::Link {
+            from: format!("{block_id}:pgm_out"),
+            to: "pgmcaps:sink".to_string(),
+        });
+    }
     flow.links.push(strom_types::Link {
         from: "pgmcaps:src".to_string(),
         to: "pgmsink:sink".to_string(),
