@@ -3,12 +3,24 @@
 //! These blocks enable sharing media streams between flows:
 //! - **InterOutput**: Publishes a stream for other flows to consume
 //! - **InterInput**: Subscribes to a stream from another flow
+//!
+//! Two flows are two pipelines and share no GL context. GL memory that an
+//! Inter Output publishes belongs to its own flow's context, and the first GL
+//! converter in the subscribing flow fails on it ("input memory OpenGL
+//! context is different"). So Inter Input adapts its own output: it downloads
+//! GL memory to system memory when the negotiated caps carry it, as
+//! [`video_adapt::decide`] says for [`Consumer::OtherPipeline`]. CUDA and D3D
+//! memory cross as they are (#1099).
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+use crate::gst::video_adapt::{self, Adapter, Consumer};
+use crate::gst::video_input_bridge::resplice;
 use gstreamer as gst;
+use gstreamer::glib;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use strom_types::{block::*, EnumValue, MediaType, PropertyValue};
+use std::sync::{Arc, Mutex};
+use strom_types::{block::*, element::ElementPadRef, EnumValue, MediaType, PropertyValue};
 
 // ============================================================================
 // GStreamer Element Creation
@@ -92,6 +104,191 @@ fn create_intersrc(
     );
 
     Ok(element)
+}
+
+/// The downloads spliced in between `intersrc` and the block's front element.
+#[derive(Default)]
+struct Spliced {
+    adapters: Vec<Adapter>,
+    elements: Vec<glib::WeakRef<gst::Element>>,
+    /// How many chains have been spliced in, so each gets its own names: the
+    /// old chain is still in the bin while its replacement is linked.
+    generation: u32,
+}
+
+/// What the probe on one Inter Input knows. Weak handles only: the probe is
+/// owned by a pad of the same pipeline.
+struct OtherPipelineInput {
+    label: String,
+    front_sink: glib::WeakRef<gst::Pad>,
+    /// Taken per CAPS event only, on the streaming thread.
+    spliced: Mutex<Spliced>,
+}
+
+/// Watch the caps `intersrc` sends and splice what the input from another
+/// flow needs between `intersrc` and `front`.
+///
+/// The probes are EVENT_DOWNSTREAM, looking at CAPS only, and
+/// QUERY_DOWNSTREAM, answering ACCEPT_CAPS only, so they fire per event and
+/// per query, never per buffer.
+///
+/// `intersrc` is a bin around an `appsrc`. Before its CAPS event reaches the
+/// ghost pad, the bin's internal pad asks downstream whether it accepts the
+/// caps, through the ghost pad. Left to the front, a consumer that takes system
+/// memory only refuses GL memory, and the event that would have spliced the
+/// download in never comes. So the probe answers for the input as it will be:
+/// yes when a download goes in, and the front's own answer otherwise, whatever
+/// chain is in place now.
+///
+///  The CAPS event is handled before `intersrc`'s
+/// source pad resolves its peer, on the streaming thread that carries the
+/// buffers, so no buffer crosses the link while it is replaced and the event
+/// lands on the new chain (the same in-probe splice as
+/// [`crate::gst::video_input_bridge`]).
+fn adapt_other_pipeline_input(intersrc: &gst::Element, front: &gst::Element, label: &str) {
+    let (Some(src), Some(front_sink)) = (intersrc.static_pad("src"), front.static_pad("sink"))
+    else {
+        tracing::warn!(
+            "{}: intersrc or its front lacks a pad, so GL memory from another flow is not downloaded",
+            label
+        );
+        return;
+    };
+    let state = Arc::new(OtherPipelineInput {
+        label: label.to_string(),
+        front_sink: front_sink.downgrade(),
+        spliced: Mutex::new(Spliced::default()),
+    });
+    let queries = Arc::clone(&state);
+    src.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, move |pad, info| {
+        if info.mask.contains(gst::PadProbeType::PULL) {
+            return gst::PadProbeReturn::Ok;
+        }
+        let Some(gst::PadProbeData::Query(ref mut query)) = info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::QueryViewMut::AcceptCaps(q) = query.view_mut() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let Some(front_sink) = queries.front_sink.upgrade() else {
+            // The pipeline is being torn down.
+            return gst::PadProbeReturn::Ok;
+        };
+        let caps = q.caps_owned();
+        let accepted = match wanted(&caps) {
+            Ok(adapters) if adapters.is_empty() => front_sink.query_accept_caps(&caps),
+            // The download goes in with the CAPS event.
+            Ok(_) => true,
+            Err(e) => {
+                if caps.is_fixed() {
+                    post_failure(&queries.label, pad, &caps, &e);
+                }
+                false
+            }
+        };
+        q.set_result(accepted);
+        gst::PadProbeReturn::Handled
+    });
+    src.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+        let Some(gst::PadProbeData::Event(ref event)) = info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::EventView::Caps(caps_event) = event.view() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        on_caps(&state, pad, caps_event.caps());
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// The adapters `caps` from another flow need. An error when the download
+/// called for does not take them: the link would be made on templates and the
+/// CAPS event then refused with a bare not-negotiated.
+fn wanted(caps: &gst::CapsRef) -> Result<Vec<Adapter>, String> {
+    video_adapt::decide(
+        caps,
+        Consumer::OtherPipeline,
+        video_adapt::factory_available,
+    )
+    .map_err(|refusal| refusal.to_string())
+}
+
+/// Fail the flow: GL memory from another flow arrived and cannot be
+/// downloaded. Names what arrived and why.
+fn post_failure(label: &str, pad: &gst::Pad, caps: &gst::CapsRef, reason: &str) {
+    let message = format!(
+        "{}: GL memory from another flow could not be downloaded: {}",
+        label, reason
+    );
+    tracing::error!("{}", message);
+    if let Some(element) = pad.parent_element() {
+        gst::element_error!(
+            element,
+            gst::CoreError::Negotiation,
+            ("{}", message),
+            ["input caps {}", caps]
+        );
+    }
+}
+
+/// A CAPS event leaving `intersrc`: bring the adapters in line with `caps`.
+fn on_caps(input: &OtherPipelineInput, src: &gst::Pad, caps: &gst::CapsRef) {
+    let Some(front_sink) = input.front_sink.upgrade() else {
+        return;
+    };
+    let wanted = match wanted(caps) {
+        Ok(wanted) => wanted,
+        Err(e) => {
+            post_failure(&input.label, src, caps, &e);
+            return;
+        }
+    };
+
+    let mut spliced = input.spliced.lock().unwrap_or_else(|p| p.into_inner());
+    if wanted == spliced.adapters {
+        return;
+    }
+    let old: Vec<gst::Element> = spliced
+        .elements
+        .iter()
+        .filter_map(|weak| weak.upgrade())
+        .collect();
+    if old.len() != spliced.elements.len() {
+        // The pipeline is being torn down under us.
+        return;
+    }
+    let prefix = match spliced.generation {
+        0 => input.label.clone(),
+        n => format!("{}_{}", input.label, n),
+    };
+    // `decide()` pins system memory after `gldownload`, which also outputs
+    // GL memory: the pin keeps the other flow's context out of this one.
+    let new = video_adapt::build_elements(&wanted, &prefix);
+    match new.and_then(|new| resplice(src, &front_sink, &old, &new).map(|()| new)) {
+        Ok(new) => {
+            if new.is_empty() {
+                tracing::info!(
+                    "{}: input {} needs no download, removed the adapters",
+                    input.label,
+                    caps
+                );
+            } else {
+                tracing::info!(
+                    "{}: input {} is GL memory from another flow's context, inserted {}",
+                    input.label,
+                    caps,
+                    new.iter()
+                        .map(|e| e.name().to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ! ")
+                );
+                spliced.generation += 1;
+            }
+            spliced.elements = new.iter().map(|e| e.downgrade()).collect();
+            spliced.adapters = wanted;
+        }
+        Err(e) => post_failure(&input.label, src, caps, &e),
+    }
 }
 
 // ============================================================================
@@ -207,6 +404,16 @@ impl BlockBuilder for InterInputBuilder {
         // Create the intersrc element (rsinter is format-agnostic)
         let intersrc = create_intersrc(&element_id, &channel_name, &buffer_config)?;
 
+        // The block's output. The downloads go in between, so the flow's
+        // link to the block is never touched.
+        let front_id = format!("{}:front", instance_id);
+        let front = gst::ElementFactory::make("identity")
+            .name(&front_id)
+            .property("silent", true)
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {}", e)))?;
+        adapt_other_pipeline_input(&intersrc, &front, &format!("{}:input", instance_id));
+
         tracing::info!(
             "InterInput block created: {} <- channel '{}' (buffer: {}ms)",
             instance_id,
@@ -215,8 +422,11 @@ impl BlockBuilder for InterInputBuilder {
         );
 
         Ok(BlockBuildResult {
-            elements: vec![(element_id, intersrc)],
-            internal_links: vec![],
+            internal_links: vec![(
+                ElementPadRef::pad(&element_id, "src"),
+                ElementPadRef::pad(&front_id, "sink"),
+            )],
+            elements: vec![(element_id, intersrc), (front_id, front)],
             bus_message_handler: None,
             pad_properties: HashMap::new(),
         })
@@ -346,7 +556,7 @@ fn inter_input_definition() -> BlockDefinition {
                 label: None,
                 name: "src".to_string(),
                 media_type: MediaType::Generic,
-                internal_element_id: "intersrc".to_string(),
+                internal_element_id: "front".to_string(),
                 internal_pad_name: "src".to_string(),
             }],
         },

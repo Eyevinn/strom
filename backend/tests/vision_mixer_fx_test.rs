@@ -238,11 +238,6 @@ async fn wipe_between_letterboxed_sources_animates() {
                 "multiview_resolution".to_string(),
                 strom_types::PropertyValue::String("320x180".to_string()),
             );
-            // Download PGM to system memory so the appsink can map pixels.
-            p.insert(
-                "gl_download".to_string(),
-                strom_types::PropertyValue::Bool(true),
-            );
             p
         },
         position: strom_types::block::Position { x: 100.0, y: 100.0 },
@@ -306,13 +301,18 @@ async fn wipe_between_letterboxed_sources_animates() {
         ("caps0:src", "vmfx-letterbox:video_in_0"),
         ("src1:src", "caps1:sink"),
         ("caps1:src", "vmfx-letterbox:video_in_1"),
-        ("vmfx-letterbox:pgm_out", "pgmsink:sink"),
     ] {
         flow.links.push(strom_types::Link {
             from: from.to_string(),
             to: to.to_string(),
         });
     }
+    common::download::link_through_download(
+        &mut flow,
+        "pgm",
+        "vmfx-letterbox:pgm_out",
+        "pgmsink:sink",
+    );
 
     // The vision mixer re-fits a source's rect to its aspect once the source's
     // caps arrive, from the GLib main context (as in the running server). This

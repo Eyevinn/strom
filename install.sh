@@ -441,6 +441,32 @@ install_graphviz() {
     esac
 }
 
+# Minimum GStreamer Strom supports, and the version it is tested against.
+# Keep in step with CLAUDE.md ("GStreamer Versions") and the Cargo v1_22 feature.
+GST_FLOOR_MINOR=22
+GST_TARGET_MINOR=28
+
+# Warn when the installed GStreamer is below the floor or the target.
+# Never refuses: an older GStreamer may still work for the flows in use.
+check_gstreamer_version() {
+    if ! command -v gst-inspect-1.0 >/dev/null 2>&1; then
+        return 0
+    fi
+    local version
+    version=$(gst-inspect-1.0 --version 2>/dev/null | sed -n 's/^GStreamer \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n1)
+    if [ -z "$version" ]; then
+        return 0
+    fi
+    local minor=${version#1.}
+    if [ "$minor" -lt "$GST_FLOOR_MINOR" ] 2>/dev/null; then
+        log_warning "GStreamer $version is older than 1.$GST_FLOOR_MINOR, the oldest version Strom supports. Expect missing features or failures."
+    elif [ "$minor" -lt "$GST_TARGET_MINOR" ] 2>/dev/null; then
+        log_info "GStreamer $version found. Strom supports 1.$GST_FLOOR_MINOR and newer, and is tested against 1.$GST_TARGET_MINOR."
+    else
+        log_success "GStreamer $version found"
+    fi
+}
+
 check_path() {
     local install_dir=$1
 
@@ -624,6 +650,7 @@ main() {
     else
         log_warning "Skipping GStreamer installation (Strom requires GStreamer to run)"
     fi
+    check_gstreamer_version
 
     if [ "${SKIP_GRAPHVIZ:-false}" != "true" ]; then
         if is_graphviz_installed "$os"; then

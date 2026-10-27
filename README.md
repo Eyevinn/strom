@@ -51,6 +51,8 @@ curl -sSL https://raw.githubusercontent.com/Eyevinn/strom/main/install.sh | bash
 
 The interactive installer detects your OS, downloads the latest release, and installs GStreamer dependencies. Then run `strom` and open `http://localhost:8080`.
 
+Strom is tested against GStreamer 1.28 and supports 1.22 and newer. The installer warns when the installed GStreamer is older.
+
 ### Docker
 
 ```bash

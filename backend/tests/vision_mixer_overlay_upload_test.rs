@@ -95,8 +95,6 @@ fn build_flow(block_id: &str, inputs: Inputs) -> Flow {
             if delay_ms > 0 {
                 p.insert("latency".to_string(), PV::UInt(DELAYED_MIXER_LATENCY_MS));
             }
-            // Download so the appsinks can map pixels.
-            p.insert("gl_download".to_string(), PV::Bool(true));
             p
         },
         position: strom_types::block::Position { x: 100.0, y: 100.0 },
@@ -188,10 +186,11 @@ fn build_flow(block_id: &str, inputs: Inputs) -> Flow {
     ));
     flow.elements
         .push(elem("pgmsink", "fakesink", vec![("sync", PV::Bool(false))]));
-    link(
+    common::download::link_through_download(
         &mut flow,
-        format!("{block_id}:multiview_out"),
-        "mvsink:sink".to_string(),
+        "mv",
+        &format!("{block_id}:multiview_out"),
+        "mvsink:sink",
     );
     link(
         &mut flow,

@@ -103,7 +103,6 @@ fn build_flow(block_id: &str, num_inputs: usize, width: u32, height: u32) -> Flo
             "multiview_resolution".to_string(),
             PV::String("640x360".to_string()),
         ),
-        ("gl_download".to_string(), PV::Bool(true)),
     ]);
     let computed_external_pads = strom::blocks::builtin::get_builder("builtin.vision_mixer")
         .and_then(|builder| builder.get_external_pads(&properties));
@@ -162,10 +161,12 @@ fn build_flow(block_id: &str, num_inputs: usize, width: u32, height: u32) -> Flo
             ("drop", PV::Bool(true)),
         ],
     ));
-    flow.links.push(strom_types::Link {
-        from: format!("{}:pgm_out", block_id),
-        to: "pgmsink:sink".to_string(),
-    });
+    common::download::link_through_download(
+        &mut flow,
+        "pgm",
+        &format!("{}:pgm_out", block_id),
+        "pgmsink:sink",
+    );
     flow
 }
 

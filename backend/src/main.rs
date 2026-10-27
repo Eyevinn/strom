@@ -1,7 +1,6 @@
 //! Strom backend server.
 
 use clap::Parser;
-use gstreamer::glib;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -543,20 +542,13 @@ fn run_with_gui(
         // Initialize GStreamer INSIDE tokio runtime
         gstreamer::init().expect("Failed to initialize GStreamer");
         info!("GStreamer initialized");
+        strom::version::log_gstreamer_version();
 
         // Promote VA-API plugin ranks (gstva plugins have rank=0 by default)
         promote_va_plugin_ranks();
 
         // Register GStreamer plugins statically
-        gstwebrtchttp::plugin_register_static().expect("Could not register webrtchttp plugins");
-        gstrswebrtc::plugin_register_static().expect("Could not register webrtc plugins");
-        gstrsinter::plugin_register_static().expect("Could not register inter plugins");
-        gstrsrtp::plugin_register_static().expect("Could not register rtp plugins");
-        gstrsaudiofx::plugin_register_static().expect("Could not register audiofx plugins");
-        gstisobmff::plugin_register_static().expect("Could not register isobmff plugins");
-        gst_plugins_lsp::plugin_register_static().expect("Could not register lsp-dsp-rs plugins");
-        #[cfg(feature = "efp")]
-        gst_plugin_efp::plugin_register_static().expect("Could not register efp mux/demux plugins");
+        strom::gst::register_static_plugins();
 
         // Detect GPU capabilities for video conversion mode selection
         // This tests CUDA-GL interop to determine if autovideoconvert works
@@ -570,7 +562,7 @@ fn run_with_gui(
         strom::system_clock::log_clock_discipline();
 
         // Start GLib main loop in background thread for bus watch callbacks
-        start_glib_main_loop();
+        strom::gst::start_glib_main_loop();
         info!("GLib main loop started in background thread");
 
         info!("Configuration loaded");
@@ -822,20 +814,13 @@ async fn run_headless(
     // Initialize GStreamer INSIDE tokio runtime
     gstreamer::init()?;
     info!("GStreamer initialized");
+    strom::version::log_gstreamer_version();
 
     // Promote VA-API plugin ranks (gstva plugins have rank=0 by default)
     promote_va_plugin_ranks();
 
     // Register GStreamer plugins statically
-    gstwebrtchttp::plugin_register_static().expect("Could not register webrtchttp plugins");
-    gstrswebrtc::plugin_register_static().expect("Could not register webrtc plugins");
-    gstrsinter::plugin_register_static().expect("Could not register inter plugins");
-    gstrsrtp::plugin_register_static().expect("Could not register rtp plugins");
-    gstrsaudiofx::plugin_register_static().expect("Could not register audiofx plugins");
-    gstisobmff::plugin_register_static().expect("Could not register isobmff plugins");
-    gst_plugins_lsp::plugin_register_static().expect("Could not register lsp-dsp-rs plugins");
-    #[cfg(feature = "efp")]
-    gst_plugin_efp::plugin_register_static().expect("Could not register efp mux/demux plugins");
+    strom::gst::register_static_plugins();
 
     // Detect GPU capabilities for video conversion mode selection
     // This tests CUDA-GL interop to determine if autovideoconvert works
@@ -849,7 +834,7 @@ async fn run_headless(
     strom::system_clock::log_clock_discipline();
 
     // Start GLib main loop in background thread for bus watch callbacks
-    start_glib_main_loop();
+    strom::gst::start_glib_main_loop();
     info!("GLib main loop started in background thread");
 
     info!("Configuration loaded");
@@ -1276,27 +1261,4 @@ fn promote_va_plugin_ranks() {
             promoted_count
         );
     }
-}
-
-/// Start GLib main loop in a background thread.
-/// This is required for GStreamer bus watch callbacks to be dispatched.
-fn start_glib_main_loop() {
-    use std::sync::mpsc;
-
-    let (tx, rx) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        info!("GLib main loop thread started");
-        let main_loop = glib::MainLoop::new(None, false);
-
-        // Signal that the main loop is ready
-        tx.send(()).ok();
-
-        main_loop.run();
-        info!("GLib main loop thread exiting");
-    });
-
-    // Wait for confirmation that the GLib main loop thread has started
-    rx.recv().expect("Failed to start GLib main loop");
-    info!("GLib main loop is now running");
 }
