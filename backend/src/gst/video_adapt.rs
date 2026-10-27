@@ -28,6 +28,8 @@
 //! | [`Consumer::SystemMemory`] | raw video in CUDA, D3D12 or D3D11 memory only | [`Adapter::CudaDownload`], [`Adapter::D3d12Download`] or [`Adapter::D3d11Download`] |
 //! | [`Consumer::SystemMemory`] | raw video in any other memory | [`Refusal::UnsupportedMemory`] |
 //! | [`Consumer::SystemMemory`] | encoded video, audio, anything but raw video | [`Refusal::NotRawVideo`] |
+//! | [`Consumer::OtherPipeline`] | raw video in GL memory only | [`Adapter::GlDownload`] |
+//! | [`Consumer::OtherPipeline`] | anything else | none |
 //!
 //! A CUDA or D3D download that is called for but not installed is
 //! [`Refusal::MissingFactory`]. Those elements ship with platform plugins
@@ -106,6 +108,15 @@ pub enum Consumer<'a> {
     /// memory only (the thumbnail tap's branch). The producer caps are the
     /// negotiated caps.
     SystemMemory,
+    /// An input fed from another pipeline that shares no context with this
+    /// one (Inter Input, fed by another flow's Inter Output). GL memory there
+    /// belongs to the other pipeline's GL context, and the first GL converter
+    /// in this pipeline fails on it ("input memory OpenGL context is
+    /// different"), so it is always downloaded. CUDA, D3D12 and D3D11 memory
+    /// cross between pipelines without a shared context (#1099), so they and
+    /// everything else pass as they are. The producer caps are the negotiated
+    /// caps.
+    OtherPipeline,
 }
 
 /// An element to put in front of the consumer, in link order.
@@ -327,6 +338,11 @@ pub fn decide(
                 None => Ok(Vec::new()),
             }
         }
+        // `gldownload` ships with the opengl plugin that made the GL memory.
+        Consumer::OtherPipeline if offers_only(producer, GL_MEMORY_FEATURE) => {
+            Ok(vec![Adapter::GlDownload])
+        }
+        Consumer::OtherPipeline => Ok(Vec::new()),
     }
 }
 
@@ -915,6 +931,45 @@ mod tests {
         for c in NOT_RAW_VIDEO {
             assert_eq!(
                 decide(&caps(c), Consumer::Accepts(&consumer), none),
+                Ok(vec![]),
+                "{c}"
+            );
+        }
+    }
+
+    // --- Consumer::OtherPipeline ---------------------------------------
+
+    /// GL memory from another flow's context is downloaded, whatever is
+    /// installed: the opengl plugin that made it ships `gldownload`.
+    #[test]
+    fn other_pipeline_gl_memory_gets_gldownload() {
+        assert_eq!(
+            decide(
+                &caps("video/x-raw(memory:GLMemory), format=RGBA, width=1280, height=720"),
+                Consumer::OtherPipeline,
+                none
+            ),
+            Ok(vec![Adapter::GlDownload])
+        );
+    }
+
+    /// Only GL needs the other pipeline's context. CUDA and D3D memory cross
+    /// as they are, and so does everything that is not GPU memory.
+    #[test]
+    fn other_pipeline_passes_everything_but_gl_memory() {
+        let mut passing = vec![
+            CUDA,
+            "video/x-raw, format=NV12, width=1920, height=1080",
+            "video/x-raw(memory:GLMemory), format=RGBA; video/x-raw, format=RGBA",
+            "video/x-h264, stream-format=byte-stream",
+            "audio/x-raw, format=F32LE, rate=48000, channels=2",
+            "ANY",
+            "EMPTY",
+        ];
+        passing.extend(D3D.iter().map(|(c, _, _)| *c));
+        for c in passing {
+            assert_eq!(
+                decide(&caps(c), Consumer::OtherPipeline, none),
                 Ok(vec![]),
                 "{c}"
             );
