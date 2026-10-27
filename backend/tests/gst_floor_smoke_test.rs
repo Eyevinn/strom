@@ -2,13 +2,14 @@
 //! `strom::version::MIN_GSTREAMER_VERSION`).
 //!
 //! The `check-floor` CI job runs only this test, on Debian 12's GStreamer 1.22.
-//! It starts Strom the way `main` does (GStreamer init, the statically linked
-//! plugins, GPU detection), then drives a few core flows through the HTTP API
-//! and asserts each one reaches and holds PLAYING. It is not a feature test:
-//! it answers "does Strom still start and run ordinary flows on the floor".
+//! It starts Strom the way `main` does (see [`init_like_main`] for the steps
+//! it skips), then drives a few core flows through the HTTP API and asserts
+//! each one reaches PLAYING and holds it with no pipeline error. It is not a
+//! feature test: it answers "does Strom still start and run ordinary flows on
+//! the floor".
 //!
 //! Every element it needs is in the core, base, good, ugly and libav packages
-//! bookworm ships, and it fails rather than skips when one is missing.
+//! bookworm ships, and each test fails rather than skips when one is missing.
 
 pub mod common;
 
@@ -21,30 +22,61 @@ use axum::Router;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use strom_types::block::{BlockInstance, Position};
-use strom_types::{Element, Flow, FlowId, Link, PropertyValue as PV};
+use strom_types::{Element, Flow, FlowId, Link, PropertyValue as PV, StromEvent};
+use tokio::sync::broadcast::error::TryRecvError;
+use tokio::sync::broadcast::Receiver;
 use tower::ServiceExt;
 
-/// Elements the flows below build, directly or inside the blocks.
-const REQUIRED: &[&str] = &[
+/// Elements each flow uses, directly or inside its blocks.
+const AUDIO_MIXER_ELEMENTS: &[&str] = &[
     "audiotestsrc",
-    "videotestsrc",
     "fakesink",
-    "capsfilter",
+    "audiomixer",
     "audioconvert",
     "audioresample",
+    "audiopanorama",
+    "audiowsinclimit",
+    "audiocheblimit",
+    "volume",
+    "level",
+    "tee",
+    "queue",
+    "identity",
+    "capsfilter",
+];
+const VISION_MIXER_ELEMENTS: &[&str] = &[
+    "videotestsrc",
+    "fakesink",
+    "compositor",
     "videoconvert",
     "videoscale",
-    "compositor",
+    "videocrop",
+    "capsfilter",
+    "tee",
+    "queue",
+];
+const ENCODER_ELEMENTS: &[&str] = &[
+    "videotestsrc",
+    "audiotestsrc",
+    "fakesink",
+    "videoconvert",
+    "videoscale",
+    "capsfilter",
     "x264enc",
     "h264parse",
+    "audioconvert",
+    "audioresample",
     "avenc_aac",
     "aacparse",
 ];
+const PLAIN_ELEMENTS: &[&str] = &["videotestsrc", "fakesink"];
 
 /// How long a started flow gets to reach PLAYING.
 const START_TIMEOUT: Duration = Duration::from_secs(15);
-/// How long a flow must stay in PLAYING once there. A caps or allocation
-/// failure after the first buffers would show up as an error in this window.
+/// How long a flow must stay in PLAYING once there. A pipeline stays in
+/// PLAYING after an ERROR message, so this window watches the flow's
+/// `PipelineError` events too: a caps or allocation failure after the first
+/// buffers shows up there.
 const HOLD: Duration = Duration::from_secs(2);
 
 fn element(id: &str, ty: &str, props: &[(&str, PV)]) -> Element {
@@ -172,15 +204,33 @@ fn encoder_flow() -> Flow {
     flow
 }
 
-/// Start-up as `main` does it, minus the server socket.
+/// The simplest flow: one live test pattern into a fakesink.
+fn plain_flow() -> Flow {
+    let mut flow = Flow::new("floor-plain");
+    flow.elements.push(live_video("video"));
+    flow.elements.push(sink("out"));
+    link(&mut flow, "video:src", "out:sink");
+    flow
+}
+
+/// Start-up as `main` does it, minus the server socket: GStreamer init, the
+/// version log, the statically linked plugins, GPU detection and the GLib main
+/// loop that dispatches the flow bus watches.
+///
+/// Skipped: VA-API rank promotion (a private step in `main`; no flow here
+/// autoplugs a codec, and the CI container has no VA device), the CUDA-GL
+/// interop probe (it re-runs the `strom` binary with a probe subcommand that a
+/// test binary does not have, and no flow here uses CUDA), and the ICE and
+/// clock-discipline checks (they only log).
 fn init_like_main() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         gst::init().expect("GStreamer initialises");
         strom::version::log_gstreamer_version();
-        strom::gst::register_static_plugins();
+        common::init_webrtc_plugins();
         strom::gpu::detect_gpu_capabilities();
+        strom::gst::start_glib_main_loop();
     });
 }
 
@@ -207,64 +257,110 @@ async fn request(
     (status, json)
 }
 
-/// The flow's state as the API reports it, and the pipeline's own current
-/// GStreamer state.
-async fn states(
-    app: &Router,
-    state: &strom::state::AppState,
-    id: &FlowId,
-) -> (serde_json::Value, Option<gst::State>) {
+/// The flow's state as the API reports it (`gst_state`).
+async fn api_state(app: &Router, id: &FlowId) -> serde_json::Value {
     let (status, json) = request(app, "GET", &format!("/api/flows/{id}"), None).await;
     assert_eq!(status, StatusCode::OK, "GET flow: {json}");
-    let current = state
-        .pipelines_read()
-        .await
-        .get(id)
-        .map(|m| m.pipeline().current_state());
-    (json["flow"]["gst_state"].clone(), current)
+    json["flow"]["gst_state"].clone()
 }
 
-async fn assert_reaches_playing(flow: Flow) {
+/// The first `PipelineError` the flow has broadcast since `events` subscribed.
+fn pipeline_error(events: &mut Receiver<StromEvent>, id: &FlowId) -> Option<String> {
+    loop {
+        match events.try_recv() {
+            Ok(StromEvent::PipelineError {
+                flow_id,
+                error,
+                source,
+            }) if flow_id == *id => {
+                return Some(format!("{error} (from {})", source.unwrap_or_default()));
+            }
+            Ok(_) | Err(TryRecvError::Lagged(_)) => continue,
+            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => return None,
+        }
+    }
+}
+
+/// Create and start `flow` through the API, wait for PLAYING, and hold it for
+/// [`HOLD`]. `Err` says what went wrong; a pipeline error, at any point from
+/// the start on, is reported as `PipelineError: ...`.
+///
+/// `inject_error` makes a sink of the running pipeline post an element error
+/// once it is in PLAYING, the way a streaming failure does; only the test of
+/// the check itself sets it.
+async fn run_to_playing(flow: Flow, inject_error: bool) -> Result<(), String> {
     init_like_main();
     let test_state = common::state::new();
     let app = strom::create_app_with_state(test_state.app()).await;
+    let mut events = test_state.events().subscribe();
     let id = flow.id;
-    let name = flow.name.clone();
+    let version = strom::version::gstreamer_version_string();
 
     let (status, json) = request(&app, "POST", "/api/flows", Some(&flow)).await;
-    assert_eq!(status, StatusCode::CREATED, "create {name}: {json}");
-
+    if status != StatusCode::CREATED {
+        return Err(format!("create failed with {status}: {json}"));
+    }
     let (status, json) = request(&app, "POST", &format!("/api/flows/{id}/start"), None).await;
-    assert_eq!(status, StatusCode::OK, "start {name}: {json}");
+    if status != StatusCode::OK {
+        return Err(format!("start failed with {status}: {json}"));
+    }
 
-    let deadline = Instant::now() + START_TIMEOUT;
-    loop {
-        let (api, current) = states(&app, &test_state, &id).await;
-        if api == "Playing" && current == Some(gst::State::Playing) {
-            break;
+    let result = async {
+        let deadline = Instant::now() + START_TIMEOUT;
+        loop {
+            if let Some(e) = pipeline_error(&mut events, &id) {
+                return Err(format!("PipelineError on GStreamer {version} while starting: {e}"));
+            }
+            let state = api_state(&app, &id).await;
+            if state == "Playing" {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "did not reach PLAYING within {START_TIMEOUT:?} on GStreamer {version}: state {state}"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(
-            Instant::now() < deadline,
-            "{name} did not reach PLAYING within {START_TIMEOUT:?} on GStreamer {}: \
-             API state {api}, pipeline state {current:?}",
-            gst::version_string()
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
 
-    let held_until = Instant::now() + HOLD;
-    while Instant::now() < held_until {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        let (api, current) = states(&app, &test_state, &id).await;
-        assert!(
-            api == "Playing" && current == Some(gst::State::Playing),
-            "{name} left PLAYING on GStreamer {}: API state {api}, pipeline state {current:?}",
-            gst::version_string()
-        );
+        if inject_error {
+            let pipelines = test_state.pipelines_read().await;
+            let pipeline = pipelines.get(&id).expect("running pipeline").pipeline();
+            let sink = pipeline
+                .iterate_sinks()
+                .next()
+                .ok()
+                .flatten()
+                .expect("a sink in the pipeline");
+            gst::element_error!(sink, gst::StreamError::Failed, ["injected by the smoke test"]);
+        }
+
+        let held_until = Instant::now() + HOLD;
+        while Instant::now() < held_until {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            if let Some(e) = pipeline_error(&mut events, &id) {
+                return Err(format!("PipelineError on GStreamer {version} in PLAYING: {e}"));
+            }
+            let state = api_state(&app, &id).await;
+            if state != "Playing" {
+                return Err(format!("left PLAYING on GStreamer {version}: state {state}"));
+            }
+        }
+        Ok(())
     }
+    .await;
 
     let (status, json) = request(&app, "POST", &format!("/api/flows/{id}/stop"), None).await;
-    assert_eq!(status, StatusCode::OK, "stop {name}: {json}");
+    assert_eq!(status, StatusCode::OK, "stop {}: {json}", flow.name);
+    result
+}
+
+async fn assert_reaches_playing(flow: Flow, elements: &[&str]) {
+    common::require_elements(elements);
+    let name = flow.name.clone();
+    if let Err(e) = run_to_playing(flow, false).await {
+        panic!("{name}: {e}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -278,18 +374,27 @@ async fn health_endpoint_answers() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn audio_mixer_flow_reaches_playing() {
-    common::require_elements(REQUIRED);
-    assert_reaches_playing(audio_mixer_flow()).await;
+    assert_reaches_playing(audio_mixer_flow(), AUDIO_MIXER_ELEMENTS).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cpu_vision_mixer_flow_reaches_playing() {
-    common::require_elements(REQUIRED);
-    assert_reaches_playing(vision_mixer_flow()).await;
+    assert_reaches_playing(vision_mixer_flow(), VISION_MIXER_ELEMENTS).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn encoder_flow_reaches_playing() {
-    common::require_elements(REQUIRED);
-    assert_reaches_playing(encoder_flow()).await;
+    assert_reaches_playing(encoder_flow(), ENCODER_ELEMENTS).await;
+}
+
+/// Guards the check itself: an element error on a pipeline already in PLAYING
+/// must fail [`run_to_playing`]. A pipeline stays in PLAYING after an ERROR
+/// message, so without the `PipelineError` watch this would pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_streaming_error_fails_the_check() {
+    common::require_elements(PLAIN_ELEMENTS);
+    match run_to_playing(plain_flow(), true).await {
+        Err(e) if e.starts_with("PipelineError") => {}
+        other => panic!("expected a PipelineError, got {other:?}"),
+    }
 }

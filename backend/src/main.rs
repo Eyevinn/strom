@@ -1,7 +1,6 @@
 //! Strom backend server.
 
 use clap::Parser;
-use gstreamer::glib;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -563,7 +562,7 @@ fn run_with_gui(
         strom::system_clock::log_clock_discipline();
 
         // Start GLib main loop in background thread for bus watch callbacks
-        start_glib_main_loop();
+        strom::gst::start_glib_main_loop();
         info!("GLib main loop started in background thread");
 
         info!("Configuration loaded");
@@ -835,7 +834,7 @@ async fn run_headless(
     strom::system_clock::log_clock_discipline();
 
     // Start GLib main loop in background thread for bus watch callbacks
-    start_glib_main_loop();
+    strom::gst::start_glib_main_loop();
     info!("GLib main loop started in background thread");
 
     info!("Configuration loaded");
@@ -1262,27 +1261,4 @@ fn promote_va_plugin_ranks() {
             promoted_count
         );
     }
-}
-
-/// Start GLib main loop in a background thread.
-/// This is required for GStreamer bus watch callbacks to be dispatched.
-fn start_glib_main_loop() {
-    use std::sync::mpsc;
-
-    let (tx, rx) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        info!("GLib main loop thread started");
-        let main_loop = glib::MainLoop::new(None, false);
-
-        // Signal that the main loop is ready
-        tx.send(()).ok();
-
-        main_loop.run();
-        info!("GLib main loop thread exiting");
-    });
-
-    // Wait for confirmation that the GLib main loop thread has started
-    rx.recv().expect("Failed to start GLib main loop");
-    info!("GLib main loop is now running");
 }

@@ -32,37 +32,36 @@ pub fn below_gstreamer_floor(major: u32, minor: u32) -> bool {
 /// [`MIN_GSTREAMER_VERSION`]. Strom still starts: the warning says that what
 /// follows is untested. Call after `gst::init()`.
 pub fn log_gstreamer_version() {
-    let (major, minor, micro, nano) = gstreamer::version();
-    tracing::info!(
-        "GStreamer runtime version {}.{}.{}.{}",
-        major,
-        minor,
-        micro,
-        nano
-    );
+    let (major, minor, ..) = gstreamer::version();
+    let version = gstreamer_version_string();
+    tracing::info!("GStreamer runtime version {}", version);
     if below_gstreamer_floor(major, minor) {
         let (floor_major, floor_minor) = MIN_GSTREAMER_VERSION;
         tracing::warn!(
-            "GStreamer {}.{}.{} is older than {}.{}, the oldest version Strom supports; \
+            "GStreamer {} is older than {}.{}, the oldest version Strom supports; \
              flows may fail to build or behave wrongly",
-            major,
-            minor,
-            micro,
+            version,
             floor_major,
             floor_minor
         );
     }
 }
 
-/// Get the current system information, collecting runtime data.
-pub fn get() -> SystemInfo {
-    // Get GStreamer version at runtime
+/// The runtime GStreamer version as `major.minor.micro`, with `.nano` added
+/// only for a pre-release or git build (nano > 0).
+pub fn gstreamer_version_string() -> String {
     let (major, minor, micro, nano) = gstreamer::version();
-    let gstreamer_version = if nano > 0 {
+    if nano > 0 {
         format!("{}.{}.{}.{}", major, minor, micro, nano)
     } else {
         format!("{}.{}.{}", major, minor, micro)
-    };
+    }
+}
+
+/// Get the current system information, collecting runtime data.
+pub fn get() -> SystemInfo {
+    // Get GStreamer version at runtime
+    let gstreamer_version = gstreamer_version_string();
 
     // Get OS info
     let os_info = get_os_info();

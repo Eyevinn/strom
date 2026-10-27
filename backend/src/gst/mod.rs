@@ -46,6 +46,29 @@ pub fn register_static_plugins() {
     gst_plugin_efp::plugin_register_static().expect("Could not register efp mux/demux plugins");
 }
 
+/// Start GLib main loop in a background thread.
+/// This is required for GStreamer bus watch callbacks to be dispatched.
+pub fn start_glib_main_loop() {
+    use std::sync::mpsc;
+
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        tracing::info!("GLib main loop thread started");
+        let main_loop = gstreamer::glib::MainLoop::new(None, false);
+
+        // Signal that the main loop is ready
+        tx.send(()).ok();
+
+        main_loop.run();
+        tracing::info!("GLib main loop thread exiting");
+    });
+
+    // Wait for confirmation that the GLib main loop thread has started
+    rx.recv().expect("Failed to start GLib main loop");
+    tracing::info!("GLib main loop is now running");
+}
+
 pub use discovery::ElementDiscovery;
 pub use pipeline::{PipelineError, PipelineManager};
 pub use thread_priority::{
