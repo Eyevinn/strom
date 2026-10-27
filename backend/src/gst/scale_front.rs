@@ -151,6 +151,8 @@ enum Problem {
     UnsupportedMemory { feature: String },
     /// The download this memory needs is not installed.
     MissingDownload(Adapter),
+    /// Neither the GPU scaler nor the download takes this pixel format.
+    NotDownloadable(Adapter),
 }
 
 /// Choose the chain for `caps`, given what the block's output takes now
@@ -183,11 +185,19 @@ fn plan(
         return Err(Problem::UnsupportedMemory { feature });
     };
     let download = scaler.download();
-    if !scaler.factories().iter().all(|f| available(f)) {
-        return if available(download.factory()) {
-            Ok(Path::DownloadFirst(download))
-        } else {
+    // The GPU scaler must be installed and take this pixel format; otherwise
+    // the frame is downloaded first and scaled on the CPU.
+    let scaler_takes = scaler.factories().iter().all(|f| available(f))
+        && scaler
+            .template(gst::PadDirection::Sink)
+            .is_some_and(|sink| caps.can_intersect(&sink));
+    if !scaler_takes {
+        return if !available(download.factory()) {
             Err(Problem::MissingDownload(download))
+        } else if download.sink_template().is_some() && !download.sink_takes(caps) {
+            Err(Problem::NotDownloadable(download))
+        } else {
+            Ok(Path::DownloadFirst(download))
         };
     }
     // Downstream takes the scaler's output as it is: stay on the GPU.
@@ -437,13 +447,14 @@ fn takes(output_takes: &gst::CapsRef, available: impl Fn(&str) -> bool) -> gst::
     let mut downloaded = gst::Caps::new_empty();
     for scaler in Scaler::ALL {
         let feature = scaler.memory_feature();
+        let download_available = available(scaler.download().factory());
         if let Some(sink) = scaler.template(gst::PadDirection::Sink) {
-            if in_memory(output_takes, Some(feature)).is_empty() {
-                downloaded.merge(sink);
-            } else {
+            if !in_memory(output_takes, Some(feature)).is_empty() {
                 direct.merge(sink);
+            } else if download_available {
+                downloaded.merge(sink);
             }
-        } else if available(scaler.download().factory()) {
+        } else if download_available {
             if let Some(sink) = scaler.download().sink_template() {
                 downloaded.merge(in_memory(sink, Some(feature)));
             }
@@ -673,6 +684,29 @@ fn post_problem(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef, problem: &Pr
                 ]
             );
         }
+        Problem::NotDownloadable(download) => {
+            let memory = download
+                .memory_feature()
+                .map(memory_name)
+                .unwrap_or("this memory");
+            gst::element_error!(
+                element,
+                gst::CoreError::Negotiation,
+                (
+                    "{}: {} receives raw video in {} in a pixel format it cannot scale or download",
+                    label,
+                    block,
+                    memory
+                ),
+                [
+                    "Arrived: {}. Neither the GPU scaler for {} nor {} takes this pixel \
+                     format here. Feed it in another format, or in system memory.",
+                    caps,
+                    memory,
+                    download.factory()
+                ]
+            );
+        }
     }
 }
 
@@ -789,6 +823,44 @@ mod tests {
             plan(&input, &output(&[""]), |_| false),
             Err(Problem::MissingDownload(Adapter::CudaDownload))
         );
+    }
+
+    /// A GPU scaler that does not take the input (not installed, or not this
+    /// pixel format) means download first, never a silent refusal.
+    #[test]
+    fn a_scaler_that_does_not_take_the_caps_downloads_first() {
+        let _ = gst::init();
+        if video_adapt::factory_available("cudaconvertscale") {
+            return;
+        }
+        // `available` claims the scaler is there; its template is not.
+        let input = caps("video/x-raw(memory:CUDAMemory), format=NV12, width=320, height=240");
+        let out = output(&["", video_adapt::CUDA_MEMORY_FEATURE]);
+        assert_eq!(
+            plan(&input, &out, all),
+            Ok(Path::DownloadFirst(Adapter::CudaDownload))
+        );
+    }
+
+    /// GPU memory downstream does not take is not offered when its download
+    /// is missing: a decoder that can choose picks system memory instead.
+    #[test]
+    fn gpu_memory_without_its_download_is_not_offered() {
+        if !gl_scaler() {
+            return;
+        }
+        let no_download = |f: &str| f != video_adapt::GL_DOWNLOAD_FACTORY;
+        let answer = takes(&output(&[""]), no_download);
+        assert!(
+            answer
+                .iter_with_features()
+                .all(|(_, f)| !f.contains(video_adapt::GL_MEMORY_FEATURE)),
+            "{answer}"
+        );
+        let answer = takes(&output(&[""]), all);
+        assert!(answer.can_intersect(&caps(
+            "video/x-raw(memory:GLMemory), format=RGBA, width=320, height=240"
+        )));
     }
 
     #[test]
