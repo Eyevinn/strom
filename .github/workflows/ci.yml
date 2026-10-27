@@ -126,8 +126,13 @@ jobs:
       # libegl-mesa0 and libgl1-mesa-dri give the GL tests a surfaceless EGL
       # context (llvmpipe). libsoup-3.0-0 and gsettings-desktop-schemas are
       # what souphttpsrc loads and looks up the system proxy in.
+      # The image points apt at archive.ubuntu.com, which once took 12 minutes
+      # here and ran the job into its timeout. The Azure mirror is the one the
+      # hosted runners use, next to them.
       - name: Install build and GStreamer packages
         run: |
+          sed -i -E 's#http://(archive|security)\.ubuntu\.com/#http://azure.archive.ubuntu.com/#' /etc/apt/sources.list.d/ubuntu.sources
+          echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             build-essential ca-certificates curl git pkg-config cmake libclang-dev procps \
@@ -281,6 +286,7 @@ jobs:
       # check-linux.
       - name: Install build tools and GStreamer 1.22
         run: |
+          echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates curl git build-essential gstreamer1.0-tools \
