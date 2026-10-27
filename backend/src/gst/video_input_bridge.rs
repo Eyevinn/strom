@@ -520,13 +520,7 @@ fn build_adapters(plan: &Plan, name_prefix: &str) -> Result<Vec<gst::Element>, S
         // memory through to a peer that advertises it, and `cudadownload` can
         // output GL memory, and whepserversink advertises GL memory. Pin the
         // download's output to system memory.
-        adapters.push(
-            gst::ElementFactory::make("capsfilter")
-                .name(format!("{}_system_memory", name_prefix))
-                .property("caps", gst::Caps::new_empty_simple("video/x-raw"))
-                .build()
-                .map_err(|e| format!("capsfilter could not be created: {}", e))?,
-        );
+        adapters.push(video_adapt::system_memory_pin(name_prefix)?);
     }
 
     Ok(adapters)

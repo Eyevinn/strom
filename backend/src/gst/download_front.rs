@@ -135,14 +135,53 @@ pub fn install(front: &gst::Element, consumer_sink: &gst::Pad, label: &str, cons
     });
 }
 
+/// Why the input cannot be adapted.
+#[derive(Debug)]
+enum Problem {
+    /// [`video_adapt::decide`] refused.
+    Refused(Refusal),
+    /// The download it called for does not take the caps (a pixel format its
+    /// element does not list).
+    NotDownloadable(Adapter),
+}
+
+/// A decision, with the consumer's caps it was made against (for errors).
+struct Decision {
+    takes: gst::Caps,
+    adapters: Result<Vec<Adapter>, Problem>,
+}
+
 /// What the consumer needs in front of it to take `caps`.
-fn decide(consumer_sink: &gst::Pad, caps: &gst::CapsRef) -> Result<Vec<Adapter>, Refusal> {
+///
+/// Asked again for every ACCEPT_CAPS query and CAPS event, never cached: the
+/// consumer's answer is read as it is now, with everything linked behind it.
+fn decide(consumer_sink: &gst::Pad, caps: &gst::CapsRef) -> Decision {
     let takes = consumer_sink.query_caps(None);
-    video_adapt::decide(
+    let adapters = video_adapt::decide(
         caps,
         Consumer::Exactly(&takes),
         video_adapt::factory_available,
     )
+    .map_err(Problem::Refused)
+    .and_then(|adapters| downloads_take(adapters, |download| download.sink_takes(caps)));
+    Decision { takes, adapters }
+}
+
+/// `adapters`, when every download among them takes the caps (`takes` says
+/// whether one does). A download whose element does not list the pixel format
+/// would be accepted at ACCEPT_CAPS time and then fail not-negotiated.
+fn downloads_take(
+    adapters: Vec<Adapter>,
+    takes: impl Fn(Adapter) -> bool,
+) -> Result<Vec<Adapter>, Problem> {
+    match adapters
+        .iter()
+        .copied()
+        .find(|a| a.memory_feature().is_some() && !takes(*a))
+    {
+        Some(download) => Err(Problem::NotDownloadable(download)),
+        None => Ok(adapters),
+    }
 }
 
 fn on_query(front: &Front, pad: &gst::Pad, query: &mut gst::QueryRef) -> gst::PadProbeReturn {
@@ -153,13 +192,20 @@ fn on_query(front: &Front, pad: &gst::Pad, query: &mut gst::QueryRef) -> gst::Pa
     match query.view_mut() {
         gst::QueryViewMut::AcceptCaps(q) => {
             let caps = q.caps_owned();
-            let accepted = match decide(&consumer_sink, &caps) {
+            let decision = decide(&consumer_sink, &caps);
+            let accepted = match &decision.adapters {
                 Ok(adapters) if adapters.is_empty() => consumer_sink.query_accept_caps(&caps),
                 // The download goes in with the CAPS event.
                 Ok(_) => true,
-                Err(refusal) => {
+                Err(problem) => {
+                    // A refused ACCEPT_CAPS means the CAPS event never comes:
+                    // upstream fails not-negotiated with "Internal data stream
+                    // error" and nothing else. So the reason is posted here,
+                    // for fixed caps only (what a producer is about to send,
+                    // not a range it is exploring), as WHEP Output's bridge
+                    // does (#985).
                     if caps.is_fixed() && !front.refused.swap(true, Ordering::AcqRel) {
-                        post_refusal(front, pad, &caps, &refusal);
+                        post_problem(front, pad, &caps, &decision.takes, problem);
                     }
                     false
                 }
@@ -183,7 +229,10 @@ fn answer_caps(consumer_sink: &gst::Pad, filter: Option<&gst::Caps>) -> gst::Cap
     if filter.is_some() && !answer.is_empty() {
         return answer;
     }
-    let takes = consumer_sink.query_caps(None);
+    let takes = match filter {
+        None => answer.clone(),
+        Some(_) => consumer_sink.query_caps(None),
+    };
     for download in Adapter::DOWNLOADS {
         if let Some(alternative) = downloadable(&takes, download, filter) {
             if !alternative.is_subset(&answer) {
@@ -203,20 +252,15 @@ fn downloadable(
     filter: Option<&gst::Caps>,
 ) -> Option<gst::Caps> {
     let feature = download.memory_feature()?;
-    let factory = gst::ElementFactory::find(download.factory())?;
-    let sink_template = factory
-        .static_pad_templates()
-        .into_iter()
-        .find(|t| t.direction() == gst::PadDirection::Sink)?
-        .caps();
+    let sink_template = download.sink_template()?;
     let mut in_memory = gst::Caps::new_empty();
     {
         let in_memory = in_memory.get_mut().expect("new caps are writable");
         for (structure, features) in takes.iter_with_features() {
-            let system_memory = !features.is_any()
-                && (features.contains(gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY)
-                    || !features.iter().any(|f| f.starts_with("memory:")));
-            if structure.name() == "video/x-raw" && system_memory {
+            if structure.name() == "video/x-raw"
+                && !features.is_any()
+                && video_adapt::is_system_memory(features)
+            {
                 in_memory.append_structure_full(
                     structure.to_owned(),
                     Some(gst::CapsFeatures::new([feature])),
@@ -224,8 +268,7 @@ fn downloadable(
             }
         }
     }
-    let mut in_memory =
-        in_memory.intersect_with_mode(&sink_template, gst::CapsIntersectMode::First);
+    let mut in_memory = in_memory.intersect_with_mode(sink_template, gst::CapsIntersectMode::First);
     if let Some(filter) = filter {
         in_memory = filter.intersect_with_mode(&in_memory, gst::CapsIntersectMode::First);
     }
@@ -240,11 +283,12 @@ fn on_caps(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef) {
     else {
         return;
     };
-    let wanted = match decide(&consumer_sink, caps) {
+    let decision = decide(&consumer_sink, caps);
+    let wanted = match decision.adapters {
         Ok(wanted) => wanted,
-        Err(refusal) => {
+        Err(problem) => {
             if !front.refused.swap(true, Ordering::AcqRel) {
-                post_refusal(front, pad, caps, &refusal);
+                post_problem(front, pad, caps, &decision.takes, &problem);
             }
             return;
         }
@@ -308,13 +352,7 @@ fn on_caps(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef) {
 fn build_adapters(adapters: &[Adapter], prefix: &str) -> Result<Vec<gst::Element>, String> {
     let mut elements = video_adapt::build_elements(adapters, prefix)?;
     if !elements.is_empty() {
-        elements.push(
-            gst::ElementFactory::make("capsfilter")
-                .name(format!("{}_system_memory", prefix))
-                .property("caps", gst::Caps::new_empty_simple("video/x-raw"))
-                .build()
-                .map_err(|e| format!("capsfilter could not be created: {}", e))?,
-        );
+        elements.push(video_adapt::system_memory_pin(prefix)?);
     }
     Ok(elements)
 }
@@ -330,12 +368,83 @@ fn memory_name(feature: &str) -> &str {
     }
 }
 
-/// Fail the flow because nothing here can adapt `caps` for the consumer.
-fn post_refusal(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef, refusal: &Refusal) {
+/// The memory types `takes` lists for raw video, readable: "system memory,
+/// CUDA memory and GL memory".
+fn memory_types(takes: &gst::CapsRef) -> String {
+    if takes.is_any() {
+        return "any memory".to_string();
+    }
+    let mut names: Vec<&str> = Vec::new();
+    for (structure, features) in takes.iter_with_features() {
+        if structure.name() != "video/x-raw" {
+            continue;
+        }
+        let name = if features.is_any() {
+            "any memory"
+        } else if video_adapt::is_system_memory(features) {
+            "system memory"
+        } else {
+            features
+                .iter()
+                .find(|f| f.starts_with("memory:"))
+                .map(|f| memory_name(f.as_str()))
+                .unwrap_or("system memory")
+        };
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    match names.as_slice() {
+        [] => "no raw video".to_string(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {}", rest.join(", "), last),
+    }
+}
+
+/// Fail the flow because nothing here can adapt `caps` for the consumer, whose
+/// caps are `takes`.
+fn post_problem(
+    front: &Front,
+    pad: &gst::Pad,
+    caps: &gst::CapsRef,
+    takes: &gst::CapsRef,
+    problem: &Problem,
+) {
     let (label, consumer) = (&front.label, &front.consumer);
     let Some(element) = pad.parent_element() else {
-        warn!("{}: input {} refused: {}", label, caps, refusal);
+        warn!("{}: input {} refused: {:?}", label, caps, problem);
         return;
+    };
+    let refusal = match problem {
+        Problem::Refused(refusal) => refusal,
+        Problem::NotDownloadable(download) => {
+            let memory = download
+                .memory_feature()
+                .map(memory_name)
+                .unwrap_or("this memory");
+            gst::element_error!(
+                element,
+                gst::CoreError::Negotiation,
+                (
+                    "{}: {} receives raw video in {} that {} cannot download",
+                    label,
+                    consumer,
+                    memory,
+                    download.factory()
+                ),
+                [
+                    "Arrived: {}. {} takes {} and does not take this directly, and {} \
+                     does not take this pixel format. Feed it in a format {} takes, or in \
+                     system memory.",
+                    caps,
+                    consumer,
+                    memory_types(takes),
+                    download.factory(),
+                    download.factory()
+                ]
+            );
+            return;
+        }
     };
     match refusal {
         Refusal::MissingFactory { factory } => {
@@ -378,12 +487,13 @@ fn post_refusal(front: &Front, pad: &gst::Pad, caps: &gst::CapsRef, refusal: &Re
                 memory_name(feature)
             ),
             [
-                "Arrived: {}. {} takes raw video in system memory, or in a GPU memory its \
-                 encoder lists, and nothing here downloads {}. Feed it from a source that \
-                 outputs system, GL, CUDA, D3D12 or D3D11 memory.",
+                "Arrived: {}. {} takes raw video in {}, and nothing here turns {} into \
+                 that. Feed it from a source that outputs {}.",
                 caps,
                 consumer,
-                feature
+                memory_types(takes),
+                feature,
+                memory_types(takes)
             ]
         ),
         Refusal::NotRawVideo { media } => gst::element_error!(
@@ -489,6 +599,39 @@ mod tests {
         let gl_only = caps("video/x-raw(memory:GLMemory), format=NV12");
         let answer = answer_caps(&sink, Some(&gl_only));
         assert!(!answer.is_empty(), "GL memory should be offered a download");
+    }
+
+    /// A download whose element does not take the caps is a problem, not a
+    /// yes that fails not-negotiated once the CAPS event arrives.
+    #[test]
+    fn a_download_that_does_not_take_the_caps_is_refused() {
+        assert!(matches!(
+            downloads_take(vec![Adapter::CudaDownload], |_| false),
+            Err(Problem::NotDownloadable(Adapter::CudaDownload))
+        ));
+        assert!(matches!(
+            downloads_take(vec![Adapter::CudaDownload], |_| true),
+            Ok(adapters) if adapters == [Adapter::CudaDownload]
+        ));
+        assert!(matches!(downloads_take(vec![], |_| false), Ok(a) if a.is_empty()));
+    }
+
+    /// The memory list in a refusal says what the encoder takes, not what
+    /// arrived.
+    #[test]
+    fn memory_types_lists_what_the_consumer_takes() {
+        assert_eq!(
+            memory_types(&caps(
+                "video/x-raw(memory:VAMemory); video/x-raw(memory:DMABuf)"
+            )),
+            "memory:VAMemory and memory:DMABuf"
+        );
+        assert_eq!(
+            memory_types(&caps(
+                "video/x-raw(memory:CUDAMemory); video/x-raw(memory:GLMemory); video/x-raw"
+            )),
+            "CUDA memory, GL memory and system memory"
+        );
     }
 
     #[test]

@@ -175,6 +175,36 @@ impl Adapter {
         }
     }
 
+    /// What the adapter's element takes on its sink pad: its sink template.
+    /// `None` when the element is not installed. Read once per adapter, and
+    /// only once found, so a test element registered later is still seen.
+    pub fn sink_template(self) -> Option<&'static gst::Caps> {
+        static TEMPLATES: [std::sync::OnceLock<gst::Caps>; 5] = [
+            std::sync::OnceLock::new(),
+            std::sync::OnceLock::new(),
+            std::sync::OnceLock::new(),
+            std::sync::OnceLock::new(),
+            std::sync::OnceLock::new(),
+        ];
+        let slot = &TEMPLATES[self as usize];
+        if let Some(caps) = slot.get() {
+            return Some(caps);
+        }
+        let caps = gst::ElementFactory::find(self.factory())?
+            .static_pad_templates()
+            .into_iter()
+            .find(|t| t.direction() == gst::PadDirection::Sink)?
+            .caps();
+        Some(slot.get_or_init(|| caps))
+    }
+
+    /// True when the adapter's element takes `caps` on its sink pad. `false`
+    /// when it is not installed.
+    pub fn sink_takes(self, caps: &gst::CapsRef) -> bool {
+        self.sink_template()
+            .is_some_and(|template| caps.can_intersect(template))
+    }
+
     /// True for the downloads out of a platform GPU memory (CUDA, D3D12,
     /// D3D11), whose elements a working install can lack.
     pub fn downloads_device_memory(self) -> bool {
@@ -375,9 +405,20 @@ fn offers_no_raw_video(caps: &gst::CapsRef) -> Option<String> {
 
 /// True when `features` put the buffer in system memory: no memory feature, or
 /// the system-memory one, with or without metas next to it.
-fn is_system_memory(features: &gst::CapsFeaturesRef) -> bool {
+pub(crate) fn is_system_memory(features: &gst::CapsFeaturesRef) -> bool {
     features.contains(gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY)
         || !features.iter().any(|f| f.starts_with("memory:"))
+}
+
+/// A capsfilter named `<name_prefix>_system_memory` that pins what a download
+/// outputs to system memory: `gldownload` and `cudadownload` also output GL
+/// memory, which a consumer that lists GL memory would otherwise be handed.
+pub fn system_memory_pin(name_prefix: &str) -> Result<gst::Element, String> {
+    gst::ElementFactory::make("capsfilter")
+        .name(format!("{}_system_memory", name_prefix))
+        .property("caps", gst::Caps::new_empty_simple("video/x-raw"))
+        .build()
+        .map_err(|e| format!("capsfilter could not be created: {}", e))
 }
 
 /// True when `name` can be created from the registry.
