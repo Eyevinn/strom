@@ -623,50 +623,10 @@ jobs:
 
       - name: Install GStreamer
         # The one step in this job that cannot take the `shell: bash` default:
-        # it needs Invoke-WebRequest and Start-Process. That makes it the one
-        # step that still has to check every exit code by hand — `pwsh` fails a
-        # step on the last command's status alone, and the three GITHUB_ENV
-        # writes at the end always succeed.
+        # the script needs Invoke-WebRequest and Start-Process, so it checks
+        # every exit code by hand. Shared with release.yml.
         shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $GSTREAMER_VERSION = "1.26.10"
-          $BASE_URL = "https://github.com/Eyevinn/strom/releases/download/gstreamer-deps"
-
-          # Start-Process discards the exit code without -PassThru, so a failed
-          # install reads as green here and surfaces 20 minutes later as a
-          # missing element, which looks like a broken test rather than a
-          # broken install.
-          function Install-Msi($Path, $Label) {
-            Write-Host "Installing $Label..."
-            $p = Start-Process msiexec.exe -Wait -NoNewWindow -PassThru `
-              -ArgumentList "/i $Path /quiet /qn ADDLOCAL=ALL INSTALLDIR=D:\gstreamer"
-            if ($p.ExitCode -ne 0) {
-              throw "msiexec failed for $Label with exit code $($p.ExitCode)"
-            }
-          }
-
-          Write-Host "Downloading GStreamer runtime..."
-          Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer.msi
-          # ADDLOCAL=ALL: without it msiexec installs the MSI's default feature
-          # set, which leaves out plugin groups the tests need — x264enc
-          # (gst-plugins-ugly) among them, which made both recorder tests skip
-          # green on this runner alone.
-          Install-Msi "gstreamer.msi" "GStreamer runtime"
-
-          Write-Host "Downloading GStreamer development files..."
-          Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-devel-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer-devel.msi
-          Install-Msi "gstreamer-devel.msi" "GStreamer development files"
-
-          choco install pkgconfiglite --yes --no-progress --allow-empty-checksums
-          if ($LASTEXITCODE -ne 0) {
-            throw "choco install pkgconfiglite failed with exit code $LASTEXITCODE"
-          }
-
-          echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=D:\gstreamer\1.0\msvc_x86_64\" >> $env:GITHUB_ENV
-          echo "D:\gstreamer\1.0\msvc_x86_64\bin" >> $env:GITHUB_PATH
-          echo "PKG_CONFIG_PATH=D:\gstreamer\1.0\msvc_x86_64\lib\pkgconfig" >> $env:GITHUB_ENV
+        run: .github/scripts/install-gstreamer-windows.ps1 -Version 1.28.8
 
       - name: Download frontend dist
         uses: actions/download-artifact@v8
