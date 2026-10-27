@@ -281,7 +281,7 @@ impl Adapter {
             return Some(caps);
         }
         let caps = match Scaler::from_adapter(self) {
-            Some(scaler) => scaler.template(gst::PadDirection::Sink)?,
+            Some(scaler) => scaler.read_template(gst::PadDirection::Sink)?,
             None => factory_template(self.factories()[0], gst::PadDirection::Sink)?,
         };
         Some(slot.get_or_init(|| caps))
@@ -358,6 +358,23 @@ impl Scaler {
     /// The pad template of its first (sink) or last (src) element, in its
     /// memory only. `None` when an element is not installed.
     pub fn template(self, direction: gst::PadDirection) -> Option<gst::Caps> {
+        if direction == gst::PadDirection::Sink {
+            return self.adapter().sink_template().cloned();
+        }
+        // Asked per decision on the GPU path: read once, and only once found,
+        // so a test element registered later is still seen.
+        static SRC: [std::sync::OnceLock<gst::Caps>; Scaler::ALL.len()] =
+            [const { std::sync::OnceLock::new() }; Scaler::ALL.len()];
+        let slot = &SRC[Scaler::ALL.iter().position(|s| *s == self)?];
+        if let Some(caps) = slot.get() {
+            return Some(caps.clone());
+        }
+        let caps = self.read_template(direction)?;
+        Some(slot.get_or_init(|| caps).clone())
+    }
+
+    /// [`Scaler::template`], read from the registry.
+    fn read_template(self, direction: gst::PadDirection) -> Option<gst::Caps> {
         let factories = self.adapter().factories();
         if !factories.iter().all(|f| factory_available(f)) {
             return None;
@@ -514,11 +531,16 @@ fn decide_with(
         }
         // `gldownload` ships with the opengl plugin that made the GL memory.
         Consumer::OtherPipeline if offers_only(producer, GL_MEMORY_FEATURE) => {
-            pinned_download(Adapter::GlDownload, producer, |_| true, templates)
+            pinned_download(Adapter::GlDownload, producer, available, templates)
         }
         Consumer::OtherPipeline => Ok(Vec::new()),
     }
 }
+
+/// Scaling and converting on the CPU: what [`Consumer::ScaleConvert`] calls
+/// for in system memory, after a download first, and what a block that
+/// scales starts with.
+pub const CPU_SCALE: [Adapter; 2] = [Adapter::VideoScale, Adapter::VideoConvert];
 
 /// Scale and convert `producer` where it is, for an output that takes
 /// `output` (see [`Consumer::ScaleConvert`]).
@@ -538,9 +560,8 @@ fn scale_convert(
             media: structure.name().to_string(),
         });
     }
-    let on_the_cpu = [Adapter::VideoScale, Adapter::VideoConvert];
     if is_system_memory(features) {
-        return Ok(on_the_cpu.to_vec());
+        return Ok(CPU_SCALE.to_vec());
     }
     let Some(scaler) = Scaler::for_features(features) else {
         let feature = features
@@ -557,7 +578,7 @@ fn scale_convert(
         && templates(scaler.adapter()).is_some_and(|sink| producer.can_intersect(&sink));
     if !scaler_takes {
         let mut adapters = pinned_download(download, producer, &available, templates)?;
-        adapters.extend(on_the_cpu);
+        adapters.extend(CPU_SCALE);
         return Ok(adapters);
     }
     // Downstream takes the scaler's output as it is: stay on the GPU.
@@ -710,11 +731,13 @@ pub fn build_elements(
             // both sides) gets a count, so names stay unique.
             let earlier = made.iter().filter(|f| *f == factory).count();
             made.push(factory);
-            let prefix = match earlier {
-                0 => name_prefix.to_string(),
-                n => format!("{}{}", name_prefix, n),
-            };
-            elements.push(make(factory, &prefix)?);
+            elements.push(match earlier {
+                0 => make(factory, name_prefix)?,
+                n => gst::ElementFactory::make(factory)
+                    .name(format!("{}_{}{}", name_prefix, factory, n))
+                    .build()
+                    .map_err(|e| format!("{} could not be created: {}", factory, e))?,
+            });
         }
     }
     Ok(elements)
@@ -1238,17 +1261,20 @@ mod tests {
 
     // --- Consumer::OtherPipeline ---------------------------------------
 
-    /// GL memory from another flow's context is downloaded, whatever is
-    /// installed: the opengl plugin that made it ships `gldownload`.
+    /// GL memory from another flow's context is downloaded, and pinned to
+    /// system memory. Without `gldownload` it is refused, naming it.
     #[test]
     fn other_pipeline_gl_memory_gets_gldownload() {
+        let gl = caps("video/x-raw(memory:GLMemory), format=RGBA, width=1280, height=720");
         assert_eq!(
-            decide(
-                &caps("video/x-raw(memory:GLMemory), format=RGBA, width=1280, height=720"),
-                Consumer::OtherPipeline,
-                none
-            ),
+            decide(&gl, Consumer::OtherPipeline, all),
             Ok(vec![Adapter::GlDownload, Adapter::SystemMemoryPin])
+        );
+        assert_eq!(
+            decide(&gl, Consumer::OtherPipeline, none),
+            Err(Refusal::MissingFactory {
+                factory: GL_DOWNLOAD_FACTORY
+            })
         );
     }
 

@@ -55,9 +55,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
-/// The chain the block builds and starts with: `videoscale ! videoconvert`.
-const SYSTEM_CHAIN: [Adapter; 2] = [Adapter::VideoScale, Adapter::VideoConvert];
-
 /// Fields a scaler and converter can change.
 const ADAPTABLE_FIELDS: [&str; 6] = [
     "width",
@@ -158,7 +155,7 @@ pub fn install(
         input_sink: input_sink.downgrade(),
         output_sink: output_sink.downgrade(),
         spliced: Mutex::new(Spliced {
-            chain: SYSTEM_CHAIN.to_vec(),
+            chain: video_adapt::CPU_SCALE.to_vec(),
             elements: system.iter().map(|e| e.downgrade()).collect(),
             generation: 0,
         }),
@@ -571,15 +568,6 @@ mod tests {
         true
     }
 
-    /// The chain `decide()` calls for, for an output that takes `out`.
-    fn plan(
-        input: &gst::Caps,
-        out: &gst::Caps,
-        available: impl Fn(&str) -> bool,
-    ) -> Result<Vec<Adapter>, Refusal> {
-        video_adapt::decide(input, Consumer::ScaleConvert(out), available)
-    }
-
     /// True when the GL scaler is installed here.
     fn gl_scaler() -> bool {
         let _ = gst::init();
@@ -589,7 +577,10 @@ mod tests {
     #[test]
     fn system_memory_is_scaled_on_the_cpu() {
         let input = caps("video/x-raw, format=NV12, width=320, height=240");
-        assert_eq!(plan(&input, &output(&[""]), all), Ok(SYSTEM_CHAIN.to_vec()));
+        assert_eq!(
+            plan(&input, &output(&[""]), all),
+            Ok(video_adapt::CPU_SCALE.to_vec())
+        );
     }
 
     /// GL memory stays on the GPU when downstream takes GL memory.
