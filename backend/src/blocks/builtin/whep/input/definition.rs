@@ -7,18 +7,62 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.whep_input".to_string(),
         name: "WHEP Input".to_string(),
-        description: "Receives audio and video from a WHEP server over WebRTC. All audio tracks are mixed to audio_out. Set Number of Video Tracks to get decoded video on video_out (video_out_1, ... for more tracks); video on an output that is not linked is discarded without decoding.".to_string(),
+        description: "Receives audio and video from a WHEP server over WebRTC. All audio tracks are mixed to audio_out. Set Number of Video Tracks to get decoded video on video_out (video_out_1, ... for more tracks). A video stream keeps its output while it sends; one that goes silent gives it to the next stream. Video on an output that is not linked is discarded without decoding.".to_string(),
         category: "Inputs".to_string(),
         exposed_properties: vec![
             ExposedProperty {
                 name: "num_video_tracks".to_string(),
                 label: "Number of Video Tracks".to_string(),
-                description: "Number of video outputs (0-8). Incoming video tracks fill them in arrival order; tracks beyond this number, or on an output that is not linked, are discarded without decoding. 0 keeps the block audio-only.".to_string(),
+                description: "Number of video outputs (0-8). Incoming video streams take free outputs in the order they start sending; streams without an output wait, undecoded. 0 keeps the block audio-only.".to_string(),
                 property_type: PropertyType::UInt,
                 default_value: Some(PropertyValue::UInt(0)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "num_video_tracks".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "video_assignment".to_string(),
+                label: "Video Assignment".to_string(),
+                description: "What a new video stream does when every video output is taken. Fill: it waits until an output frees up, so parallel sources keep their outputs (for a mixer downstream). Newest: it takes over the output held longest, so a source that switches (an SFU's pinned or active-speaker video) shows at once.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: WHEP_VIDEO_ASSIGNMENT_FILL.to_string(),
+                            label: Some("Fill (keep outputs)".to_string()),
+                        },
+                        EnumValue {
+                            value: WHEP_VIDEO_ASSIGNMENT_NEWEST.to_string(),
+                            label: Some("Newest (follow the latest source)".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String(WHEP_VIDEO_ASSIGNMENT_FILL.to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "video_assignment".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "video_stream_timeout_ms".to_string(),
+                label: "Video Stream Timeout (ms)".to_string(),
+                description: format!(
+                    "How long a video stream may send nothing before it gives up its output to a waiting stream ({}-{}, default {}). SFUs leave a stream that stopped in place, so silence is how the block sees a source leave. Raise it for sources that send rarely, such as a screen share of a still screen.",
+                    MIN_WHEP_VIDEO_STREAM_TIMEOUT_MS,
+                    MAX_WHEP_VIDEO_STREAM_TIMEOUT_MS,
+                    DEFAULT_WHEP_VIDEO_STREAM_TIMEOUT_MS
+                ),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(DEFAULT_WHEP_VIDEO_STREAM_TIMEOUT_MS)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "video_stream_timeout_ms".to_string(),
                     transform: None,
                 },
                 live: false,

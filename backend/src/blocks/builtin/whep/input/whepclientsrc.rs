@@ -11,7 +11,7 @@ use strom_types::{block::*, element::ElementPadRef, PropertyValue};
 use tracing::{debug, error, info};
 
 use super::stream::{get_pipeline_from_element, setup_stream_with_caps_detection};
-use super::video::{build_video_slots, num_video_tracks};
+use super::video::build_video_slots;
 use crate::blocks::builtin::webrtc_props::parse_drop_on_latency;
 
 /// Build using the new whepclientsrc (signaller-based) implementation
@@ -167,8 +167,8 @@ pub(super) fn build_whepclientsrc(
     let probe_registry = whep_probe::setup_whep_probes(&whepclientsrc, &instance_id_owned);
 
     // Video output slots (none unless num_video_tracks is set)
-    let (video_elements, video_slots) =
-        build_video_slots(instance_id, num_video_tracks(properties), ctx)?;
+    let (video_elements, video_links, video_slots) =
+        build_video_slots(instance_id, properties, ctx)?;
 
     // Counter for unique element naming
     let stream_counter = Arc::new(AtomicUsize::new(0));
@@ -412,7 +412,7 @@ pub(super) fn build_whepclientsrc(
     // Internal links: liveadder -> capsfilter -> audioconvert -> audioresample
     // Note: No silence generator - using force-live=true on liveadder instead
     // WHEP audio streams are linked dynamically via pad-added callback
-    let internal_links = vec![
+    let mut internal_links = vec![
         (
             ElementPadRef::pad(&liveadder_id, "src"),
             ElementPadRef::pad(&capsfilter_id, "sink"),
@@ -435,6 +435,7 @@ pub(super) fn build_whepclientsrc(
         (output_audioresample_id, output_audioresample),
     ];
     elements.extend(video_elements);
+    internal_links.extend(video_links);
 
     Ok(BlockBuildResult {
         elements,
