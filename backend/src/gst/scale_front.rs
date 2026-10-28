@@ -260,6 +260,14 @@ fn on_input_query(front: &Front, pad: &gst::Pad, query: &mut gst::QueryRef) -> g
 /// that is downloaded after scaling or before it. Each memory is offered as
 /// what its chain's first element takes, when [`video_adapt::decide`] finds a
 /// chain for it.
+///
+/// Each memory that needs no download is offered first as what the output
+/// takes as it is: the block's size and format, in downstream's order. A
+/// producer that can choose (`videotestsrc`, a source with a scaler of its
+/// own) then delivers that and nothing is scaled here. Offered at any size
+/// only, such a producer fixates to its own defaults: `videotestsrc` sends
+/// 320x240 in the first format it lists, `A444_16LE`, which `videoscale`
+/// then pillarboxes into a 16:9 output (#1156, #1157).
 fn takes(output_takes: &gst::CapsRef, available: impl Fn(&str) -> bool) -> gst::Caps {
     let mut direct = gst::Caps::new_empty();
     let mut downloaded = gst::Caps::new_empty();
@@ -292,8 +300,25 @@ fn takes(output_takes: &gst::CapsRef, available: impl Fn(&str) -> bool) -> gst::
     {
         direct.merge(system);
     }
-    direct.merge(downloaded);
-    direct
+    let mut answer = gst::Caps::new_empty();
+    // An output that takes anything (unlinked, or being torn down) has no
+    // size or format to put first.
+    let preferred = if output_takes.is_any() {
+        gst::Caps::new_empty()
+    } else {
+        direct.clone()
+    };
+    for (structure, features) in preferred.iter_with_features() {
+        let mut one = gst::Caps::new_empty();
+        one.get_mut()
+            .expect("new caps are writable")
+            .append_structure_full(structure.to_owned(), Some(features.to_owned()));
+        // The output's order and values first, so its size and format win.
+        answer.merge(output_takes.intersect_with_mode(&one, gst::CapsIntersectMode::First));
+    }
+    answer.merge(direct);
+    answer.merge(downloaded);
+    answer
 }
 
 /// What the block can deliver when upstream offers `offered`: each raw video
@@ -793,5 +818,22 @@ mod tests {
         };
         assert!(first(&output(&["", video_adapt::GL_MEMORY_FEATURE])));
         assert!(!first(&output(&[""])));
+    }
+
+    /// A producer that can choose is offered the output's size and format
+    /// before any size: offered any size first, `videotestsrc` fixates to
+    /// 320x240 in `A444_16LE` and is pillarboxed (#1156, #1157).
+    #[test]
+    fn the_input_offers_the_output_size_and_format_first() {
+        let _ = gst::init();
+        let answer = takes(&output(&[""]), all);
+        let first = answer.structure(0).expect("an answer");
+        assert_eq!(first.get::<i32>("width"), Ok(160), "{answer}");
+        assert_eq!(first.get::<i32>("height"), Ok(120), "{answer}");
+        assert_eq!(first.get::<&str>("format"), Ok("I420"), "{answer}");
+        assert!(
+            answer.can_intersect(&caps("video/x-raw, format=NV12, width=320, height=240")),
+            "a producer that cannot choose still links: {answer}"
+        );
     }
 }
