@@ -265,8 +265,10 @@ pub fn suppress_latency_query(queue: &gst::Element) {
 /// the pipeline only gets there once PGM has output. A late input renegotiates
 /// both compositors mid-start, and the flow then never starts. Answered here,
 /// the branch proposes nothing and `tee_pgm` takes its allocation from the PGM
-/// output branch. Software backend only: on the GPU backend the query also
-/// carries the GL context and pools. A QUERY probe, never per buffer.
+/// output branch. Both backends: on the GPU backend the multiview shares the
+/// PGM compositor's GL context, so the PGM tile needs no pool of its own, and a
+/// PGM consumer that downloads (a software encoder) starts behind a multiview
+/// sink that has already prerolled (#1164). A QUERY probe, never per buffer.
 pub fn answer_allocation_query(queue: &gst::Element) {
     let pad = queue
         .static_pad("sink")
