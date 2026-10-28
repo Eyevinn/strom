@@ -2,6 +2,28 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.8.0-alpha.2] - 2026-10-28
+
+A prerelease. WHIP Output now sends video, and WHEP Input can decode video. Test it before you rely on it: `latest` stays on 0.7.2.
+
+### Added
+- WHIP Output: send H.264, VP8 and VP9 video alongside audio (#1086)
+- WHEP Input: decode video to `video_out` outputs (#1085)
+
+### Fixed
+- Video Format: offer the output size and format to a producer that can choose (#1159)
+- MPEG-TS/SRT Output: build one video input per track (#1150, #1169)
+- Audio outputs: adapt DeckLink Output's audio, and hold Local Input's audio in a queue (#1068, #1168)
+- Windows: ship GIO's TLS backend and license texts, and report Media Player errors (#1079, #1170)
+- Windows installer: build the MSI as a 64-bit package (#1155)
+- API: the element and pad property endpoints answer 404 for a missing flow, element or pad, as documented, instead of 400 (#1162)
+- Frontend: text fields look editable in every theme (#1167)
+
+### Changed
+- Dependencies: monthly round 2026-10 (#1002)
+
+---
+
 ## [0.8.0-alpha.1] - 2026-10-27
 
 A prerelease. The Docker images move to Ubuntu 26.04 and GStreamer 1.28, and most blocks now emit video in the memory they produce it in (GL, CUDA, D3D) and adapt their own inputs. Test it before you rely on it: `latest` stays on 0.7.2.
