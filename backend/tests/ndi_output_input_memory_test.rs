@@ -323,6 +323,46 @@ fn assert_ndi_takes(caps: &gst::Caps) {
     );
 }
 
+/// The block in video mode, sink included, reaches PLAYING before any frame
+/// arrives (#1150).
+///
+/// Its `ndisink` was left async in video mode, unlike the combined and audio
+/// modes, so it held the flow in PAUSED until it prerolled. Behind an SRT input
+/// with four video tracks, two NDI Outputs prerolled, blocked, and starved the
+/// other two of frames: the receiving flow stayed in PAUSED. With nothing
+/// linked to its input this sink never prerolls, so the pipeline reaches
+/// PLAYING only when the sink does not wait. Here the sink is the real
+/// `ndisink` where installed, the stand-in (a `BaseSink`, async by default)
+/// on CI.
+#[test]
+fn video_mode_reaches_playing_with_no_frame() {
+    ndisink_stand_in::register();
+    if !common::plugins_available(REQUIRED) {
+        return;
+    }
+    let props = HashMap::from([
+        ("mode".to_string(), PropertyValue::String("video".into())),
+        (
+            "ndi_name".to_string(),
+            PropertyValue::String("strom-test-idle".into()),
+        ),
+    ]);
+    let built = NDIOutputBuilder
+        .build(INSTANCE, &props, &common::block::context())
+        .expect("ndi output block builds");
+    let pipeline = gst::Pipeline::new();
+    common::block::install(&pipeline, &built);
+
+    let _ = pipeline.set_state(gst::State::Playing);
+    let (_, state, pending) = pipeline.state(gst::ClockTime::from_seconds(3));
+    let _ = pipeline.set_state(gst::State::Null);
+    assert_eq!(
+        (state, pending),
+        (gst::State::Playing, gst::State::VoidPending),
+        "an NDI Output with no frame yet must not hold the flow out of PLAYING"
+    );
+}
+
 /// CUDA memory from a hardware decoder is downloaded before NDI.
 #[test]
 fn cuda_memory_is_downloaded_for_ndi() {

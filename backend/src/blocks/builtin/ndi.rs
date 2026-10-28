@@ -566,9 +566,15 @@ impl BlockBuilder for NDIOutputBuilder {
                     ndi_video_input(instance_id, &mut elements, &mut internal_links)?;
                 let ndisink_id = format!("{}:ndisink", instance_id);
 
+                // Don't wait for a first buffer to start, as in the other
+                // modes. An async sink holds the flow in PAUSED until it
+                // prerolls, and an upstream that has no frame for it yet
+                // (an SRT input whose sender is not up, a track that never
+                // arrives) keeps the whole flow from reaching PLAYING (#1150).
                 let ndisink = gst::ElementFactory::make("ndisink")
                     .name(&ndisink_id)
                     .property("ndi-name", &ndi_name)
+                    .property("async", false)
                     .build()
                     .map_err(|e| BlockBuildError::ElementCreation(format!("ndisink: {}", e)))?;
 
