@@ -95,7 +95,7 @@ C:\Program Files\Strom\
 │   ├── bin\                 # GStreamer DLLs and tools
 │   ├── lib\gstreamer-1.0\   # GStreamer plugins
 │   ├── lib\gio\modules\     # GIO TLS backend (https:// sources)
-│   ├── libexec\             # gst-ptp-helper.exe
+│   ├── libexec\             # gst-plugin-scanner.exe, gst-ptp-helper.exe
 │   └── share\licenses\      # License texts of GStreamer and its libraries
 └── graphviz\
     └── bin\                 # Graphviz executables
