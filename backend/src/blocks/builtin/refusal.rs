@@ -6,6 +6,8 @@
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Refuse the stream arriving at `input`, an output block's input `identity`.
 ///
@@ -30,6 +32,58 @@ pub(crate) fn accept_input(input: &gst::Element) {
     if input.find_property("drop-probability").is_some() {
         input.set_property("drop-probability", 0.0f32);
     }
+}
+
+/// Answer upstream's caps and accept-caps queries at `sink`, an output block's
+/// input `identity` sink pad, accepting anything.
+///
+/// A block that decides its adaptation on the Caps event needs the caps to
+/// arrive first. Left to the chain behind the input, the queries would be
+/// answered from what the device takes before the block has adapted to the
+/// input, and upstream would fail with `not-negotiated` before the block
+/// could adapt or say why. Per query, never per buffer.
+pub(crate) fn accept_any_caps(sink: &gst::Pad) {
+    sink.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, |_pad, info| {
+        let Some(gst::PadProbeData::Query(query)) = info.data.as_mut() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        match query.view_mut() {
+            gst::QueryViewMut::Caps(q) => {
+                let caps = q
+                    .filter()
+                    .map(|f| f.to_owned())
+                    .unwrap_or_else(gst::Caps::new_any);
+                q.set_result(&caps);
+                gst::PadProbeReturn::Handled
+            }
+            gst::QueryViewMut::AcceptCaps(q) => {
+                q.set_result(true);
+                gst::PadProbeReturn::Handled
+            }
+            _ => gst::PadProbeReturn::Ok,
+        }
+    });
+}
+
+/// Drop gap events leaving `src`, an output block's input `identity` source
+/// pad, while `refused` is set.
+///
+/// A refused stream's buffers are dropped by [`refuse_input`], and `identity`
+/// sends a gap in each one's place. A device sink that gets a gap before any
+/// caps posts "Sink not negotiated before gap event", and that error would
+/// follow the block's own. Per event, never per buffer.
+pub(crate) fn drop_gaps_while_refused(src: &gst::Pad, refused: Arc<AtomicBool>) {
+    src.add_probe(
+        gst::PadProbeType::EVENT_DOWNSTREAM,
+        move |_pad, info| match info.data.as_ref() {
+            Some(gst::PadProbeData::Event(e))
+                if e.type_() == gst::EventType::Gap && refused.load(Ordering::SeqCst) =>
+            {
+                gst::PadProbeReturn::Drop
+            }
+            _ => gst::PadProbeReturn::Ok,
+        },
+    );
 }
 
 /// The reason to give when an output block that needs encoded video gets

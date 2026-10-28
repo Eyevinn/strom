@@ -252,6 +252,13 @@ In `Audio only` mode `decklinkvideosink` is still created internally and fed
 black frames at 1080p25/UYVY — required for `decklinkaudiosink` to operate. The
 `Video Mode` and `Video Format` properties are ignored in this case.
 
+Audio may arrive with any channel count, rate and sample format. The block
+converts it to 48 kHz and to the smallest channel count the card takes (2, 8 or
+16) that holds every input channel: input channel N plays on output channel N,
+and the remaining channels are silent. Mono plays on both channels of a stereo pair.
+More channels than the card takes fail the flow with a message; reduce them
+with an Audio Router block first.
+
 ### Testing Inside Container
 
 ```bash
