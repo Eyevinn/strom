@@ -127,7 +127,7 @@ pub(super) fn build_gpu_pipeline(
     let q_pgm_mv_id = p.id("queue_pgm_mv");
     let queue_pgm_mv = elements::make_queue(&q_pgm_mv_id)?;
     elements::suppress_latency_query(&queue_pgm_mv);
-    elements::answer_allocation_query(&queue_pgm_mv);
+    elements::answer_allocation_query(&queue_pgm_mv, p.backend);
     elems.push((q_pgm_mv_id.clone(), queue_pgm_mv));
 
     // DSK input element chains (elements only, links to mixer added later after video inputs)
