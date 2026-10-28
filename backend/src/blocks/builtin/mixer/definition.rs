@@ -1,3 +1,4 @@
+use super::RUST_DSP_AVAILABLE;
 use strom_types::mixer::*;
 use strom_types::{block::*, EnumValue, MediaType, PropertyValue};
 
@@ -6,15 +7,50 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
     vec![mixer_definition()]
 }
 
+/// The `dsp_backend` property. A build without the Rust DSP (the `lsp`
+/// feature) offers only LV2, so no mixer defaults to a backend that would
+/// pass every gate, compressor, EQ and limiter through unprocessed.
+pub(super) fn dsp_backend_property(rust_available: bool) -> ExposedProperty {
+    let mut values = Vec::new();
+    if rust_available {
+        values.push(EnumValue {
+            value: "rust".to_string(),
+            label: Some("Rust".to_string()),
+        });
+    }
+    values.push(EnumValue {
+        value: "lv2".to_string(),
+        label: Some("LV2".to_string()),
+    });
+    let (description, default) = if rust_available {
+        (
+            "LV2 uses external C++ LSP plugins, Rust uses built-in lsp-plugins-rs",
+            "rust",
+        )
+    } else {
+        (
+            "LV2 uses external C++ LSP plugins (the built-in Rust DSP is not in this build)",
+            "lv2",
+        )
+    };
+    ExposedProperty {
+        name: "dsp_backend".to_string(),
+        label: "DSP Backend".to_string(),
+        description: description.to_string(),
+        property_type: PropertyType::Enum { values },
+        default_value: Some(PropertyValue::String(default.to_string())),
+        mapping: PropertyMapping {
+            element_id: "_block".to_string(),
+            property_name: "dsp_backend".to_string(),
+            transform: None,
+        },
+        live: false,
+        persist: None,
+    }
+}
+
 /// Get Mixer block definition (metadata only).
 pub(super) fn mixer_definition() -> BlockDefinition {
-    // Without the `lsp` feature the Rust DSP stages are passthrough: say so.
-    #[cfg(feature = "lsp")]
-    let dsp_backend_description =
-        "LV2 uses external C++ LSP plugins, Rust uses built-in lsp-plugins-rs";
-    #[cfg(not(feature = "lsp"))]
-    let dsp_backend_description =
-        "LV2 uses external C++ LSP plugins; Rust DSP is not in this build (passthrough)";
     // Generate channel properties
     let mut exposed_properties = vec![
         // Global: number of channels — construction-time only, defines how the
@@ -35,31 +71,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         },
         // DSP Backend selection — construction-time only; switches which set of
         // LV2/Rust DSP elements the builder instantiates.
-        ExposedProperty {
-            name: "dsp_backend".to_string(),
-            label: "DSP Backend".to_string(),
-            description: dsp_backend_description.to_string(),
-            property_type: PropertyType::Enum {
-                values: vec![
-                    EnumValue {
-                        value: "rust".to_string(),
-                        label: Some("Rust".to_string()),
-                    },
-                    EnumValue {
-                        value: "lv2".to_string(),
-                        label: Some("LV2".to_string()),
-                    },
-                ],
-            },
-            default_value: Some(PropertyValue::String("rust".to_string())),
-            mapping: PropertyMapping {
-                element_id: "_block".to_string(),
-                property_name: "dsp_backend".to_string(),
-                transform: None,
-            },
-            live: false,
-            persist: None,
-        },
+        dsp_backend_property(RUST_DSP_AVAILABLE),
         // Main fader
         ExposedProperty {
             name: "main_fader".to_string(),

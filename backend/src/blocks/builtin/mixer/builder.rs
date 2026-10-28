@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 use super::elements::*;
 use super::metering::connect_mixer_meter_handler;
 use super::properties::*;
-use super::{METER_INTERVAL_NS, MIN_KNEE_LINEAR};
+use super::{METER_INTERVAL_NS, MIN_KNEE_LINEAR, RUST_DSP_AVAILABLE};
 use strom_types::mixer::{
     DEFAULT_INTERNAL_BUS_LATENCY_MS, DEFAULT_LATENCY_MS, DEFAULT_MIN_UPSTREAM_LATENCY_MS,
 };
@@ -112,18 +112,10 @@ impl BlockBuilder for MixerBuilder {
         let num_aux_buses = parse_num_aux_buses(properties);
         let num_groups = parse_num_groups(properties);
         let sample_rate = parse_sample_rate(properties);
-        let dsp_backend = get_string_prop(properties, "dsp_backend", "rust");
-        if dsp_backend != "rust" && dsp_backend != "lv2" {
-            warn!(
-                "Unrecognized dsp_backend '{}', falling back to 'rust'",
-                dsp_backend
-            );
-        }
-        let dsp_backend = if dsp_backend == "rust" || dsp_backend == "lv2" {
-            dsp_backend
-        } else {
-            "rust"
-        };
+        let dsp_backend = resolve_dsp_backend(
+            get_string_prop(properties, "dsp_backend", ""),
+            RUST_DSP_AVAILABLE,
+        );
         info!(
             "Mixer config: {} channels, {} aux buses, {} groups, dsp={}, rate={}",
             num_channels, num_aux_buses, num_groups, dsp_backend, sample_rate,
@@ -1298,5 +1290,30 @@ impl BlockBuilder for MixerBuilder {
             bus_message_handler,
             pad_properties: HashMap::new(),
         })
+    }
+}
+
+/// The DSP backend a mixer is built with. An empty request takes the build's
+/// default. A request for `rust` in a build without the Rust DSP (the `lsp`
+/// feature) gets LV2: a saved flow that names `rust` keeps its dynamics and
+/// EQ wherever the LV2 plugins are installed, instead of passing audio
+/// through unprocessed.
+pub(super) fn resolve_dsp_backend(requested: &str, rust_available: bool) -> &'static str {
+    let default = if rust_available { "rust" } else { "lv2" };
+    match requested {
+        "" => default,
+        "lv2" => "lv2",
+        "rust" if rust_available => "rust",
+        "rust" => {
+            warn!("dsp_backend 'rust' is not in this build (built without the lsp feature), using 'lv2'");
+            "lv2"
+        }
+        other => {
+            warn!(
+                "Unrecognized dsp_backend '{}', falling back to '{}'",
+                other, default
+            );
+            default
+        }
     }
 }
