@@ -14,7 +14,9 @@
 //! sink out: the block's `videoconvert` feeds an `appsink` whose caps are
 //! `ndisink`'s video sink template (system memory, the nine formats NDI
 //! takes). Where `ndisink` is not installed, a stand-in registered under that
-//! name lets the block build; it is never linked. CUDA memory comes from an
+//! name lets the block build; only `video_mode_reaches_playing_with_no_frame`
+//! starts it, and that test runs the real `ndisink` only on opt-in
+//! (`STROM_TEST_NDI_SDK=1`). CUDA memory comes from an
 //! `appsrc` under CUDA caps with the `cudadownload` stand-in; GL memory from
 //! `gltestsrc` on the GL runner.
 
@@ -105,12 +107,13 @@ mod ndisink_stand_in {
     }
 
     /// Register the stand-in as `ndisink` where the real one is missing.
-    pub fn register() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
+    /// Returns whether `ndisink` is the real element.
+    pub fn register() -> bool {
+        static REAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *REAL.get_or_init(|| {
             gst::init().expect("GStreamer initialises");
             if gst::ElementFactory::find("ndisink").is_some() {
-                return;
+                return true;
             }
             gst::Element::register(
                 None,
@@ -119,7 +122,8 @@ mod ndisink_stand_in {
                 NdiSinkStandIn::static_type(),
             )
             .expect("register the ndisink stand-in");
-        });
+            false
+        })
     }
 }
 
@@ -331,12 +335,19 @@ fn assert_ndi_takes(caps: &gst::Caps) {
 /// with four video tracks, two NDI Outputs prerolled, blocked, and starved the
 /// other two of frames: the receiving flow stayed in PAUSED. With nothing
 /// linked to its input this sink never prerolls, so the pipeline reaches
-/// PLAYING only when the sink does not wait. Here the sink is the real
-/// `ndisink` where installed, the stand-in (a `BaseSink`, async by default)
-/// on CI.
+/// PLAYING only when the sink does not wait. Here the sink is the stand-in
+/// (a `BaseSink`, async by default) where `ndisink` is not installed. The real
+/// `ndisink` needs the NDI SDK runtime, which GStreamer's NDI plugin does not
+/// bring along, so the test runs it only on opt-in: `STROM_TEST_NDI_SDK=1`.
 #[test]
 fn video_mode_reaches_playing_with_no_frame() {
-    ndisink_stand_in::register();
+    if ndisink_stand_in::register() && strom_types::env::var_opt("STROM_TEST_NDI_SDK").is_none() {
+        eprintln!(
+            "SKIP: the real ndisink is installed and needs the NDI SDK runtime; \
+             set STROM_TEST_NDI_SDK=1 to run against it"
+        );
+        return;
+    }
     if !common::plugins_available(REQUIRED) {
         return;
     }
