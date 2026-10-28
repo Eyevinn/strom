@@ -531,6 +531,7 @@ fn run_with_gui(
         gstreamer::init().expect("Failed to initialize GStreamer");
         info!("GStreamer initialized");
         strom::version::log_gstreamer_version();
+        strom::gst::tls::log_tls_support();
 
         // Promote VA-API plugin ranks (gstva plugins have rank=0 by default)
         promote_va_plugin_ranks();
@@ -800,6 +801,7 @@ async fn run_headless(
     gstreamer::init()?;
     info!("GStreamer initialized");
     strom::version::log_gstreamer_version();
+    strom::gst::tls::log_tls_support();
 
     // Promote VA-API plugin ranks (gstva plugins have rank=0 by default)
     promote_va_plugin_ranks();

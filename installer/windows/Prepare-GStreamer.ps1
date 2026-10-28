@@ -16,6 +16,7 @@
 .PARAMETER Full
     If specified, copies all of bin, lib\gstreamer-1.0, share and libexec
     (larger bundle, ~320MB). This is what the released MSI ships.
+    Both modes copy lib\gio\modules (the GIO TLS backend).
     Otherwise, includes every DLL in bin but only the essential plugins listed
     below, and fails if one of them is missing from the installer.
 #>
@@ -236,6 +237,19 @@ if ($pluginFiles) {
 }
 Write-Host "  Copied $copiedPlugins plugins"
 
+# Copy GIO modules, in both modes. GIO gets TLS from gioopenssl.dll, loaded
+# from lib\gio\modules next to the GLib in bin. Without it every https://
+# request fails with "TLS support is not available": souphttpsrc, and with it
+# HLS and DASH in the Media Player, cannot open any https URL (issue #1079).
+Write-Host "Copying GIO modules..."
+$gioModules = "$GstRoot\lib\gio\modules"
+if (-not (Test-Path "$gioModules\gioopenssl.dll")) {
+    throw "GStreamer $Version has no $gioModules\gioopenssl.dll: GIO would have no TLS backend, and no https:// source would open"
+}
+New-Item -ItemType Directory -Path "$OutputDir\lib\gio\modules" -Force | Out-Null
+Copy-Item "$gioModules\*.dll" "$OutputDir\lib\gio\modules\" -Force
+Write-Host "  Copied $((Get-ChildItem "$OutputDir\lib\gio\modules\*.dll").Count) GIO modules"
+
 # Copy share files (GStreamer registry, etc.)
 Write-Host "Copying share files..."
 if ($Full) {
@@ -276,6 +290,6 @@ Write-Host "Location: $OutputDir"
 Write-Host ""
 Write-Host "Contents:"
 Write-Host "  bin/     - GStreamer tools and DLLs"
-Write-Host "  lib/     - GStreamer plugins"
+Write-Host "  lib/     - GStreamer plugins, GIO modules (TLS)"
 Write-Host "  libexec/ - GStreamer helper executables (gst-ptp-helper.exe)"
 Write-Host "  share/   - GStreamer data files"
