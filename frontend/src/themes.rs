@@ -1,8 +1,34 @@
 //! Custom color themes for the application.
 //!
-//! Provides Nord, Tokyo Night, and Claude inspired themes.
+//! Provides Nord, Tokyo Night, and Claude inspired themes, plus the stock
+//! egui themes with the same text field styling.
+//!
+//! Text fields: egui fills a `TextEdit` with `extreme_bg_color` unless
+//! `text_edit_bg_color` is set. In dark themes that is near-black, which makes
+//! every field look read-only. Each theme sets `text_edit_bg_color` to a fill
+//! that stands apart from the panel, and an inactive widget stroke the field
+//! outline is drawn with. `extreme_bg_color` is left alone: plots and meters
+//! use it as their backdrop.
 
 use egui::{Color32, Stroke, Visuals};
+
+/// Standard egui dark theme, with text fields that look editable.
+pub fn egui_dark() -> Visuals {
+    let mut visuals = Visuals::dark();
+    // Panel is gray 27 and buttons gray 60: sit the field between them.
+    visuals.text_edit_bg_color = Some(Color32::from_gray(48));
+    // egui draws no inactive stroke by default, so fields have no outline.
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_gray(90));
+    visuals
+}
+
+/// Standard egui light theme, with text fields that look editable.
+pub fn egui_light() -> Visuals {
+    let mut visuals = Visuals::light();
+    visuals.text_edit_bg_color = Some(Color32::WHITE);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_gray(170));
+    visuals
+}
 
 /// Claude/Anthropic color palette
 mod claude {
@@ -12,11 +38,15 @@ mod claude {
     pub const BG_DARK: Color32 = Color32::from_rgb(0x1f, 0x1e, 0x1d);
     pub const BG_DARK_ELEVATED: Color32 = Color32::from_rgb(0x2a, 0x28, 0x26);
     pub const BG_DARK_SURFACE: Color32 = Color32::from_rgb(0x35, 0x32, 0x2f);
+    /// Outline of inactive widgets (text fields, buttons)
+    pub const BORDER_DARK: Color32 = Color32::from_rgb(0x4a, 0x45, 0x41);
 
     // Light backgrounds - warm cream
     pub const BG_LIGHT: Color32 = Color32::from_rgb(0xfa, 0xf9, 0xf5);
     pub const BG_LIGHT_ELEVATED: Color32 = Color32::from_rgb(0xf4, 0xf3, 0xee);
     pub const BG_LIGHT_SURFACE: Color32 = Color32::from_rgb(0xeb, 0xe9, 0xe4);
+    /// Outline of inactive widgets (text fields, buttons)
+    pub const BORDER_LIGHT: Color32 = Color32::from_rgb(0xd6, 0xd1, 0xc7);
 
     // Text colors
     pub const TEXT_CREAM: Color32 = Color32::from_rgb(0xf5, 0xe6, 0xd3);
@@ -93,6 +123,7 @@ pub fn nord_dark() -> Visuals {
     visuals.panel_fill = nord::NORD0;
     visuals.faint_bg_color = nord::NORD1;
     visuals.extreme_bg_color = nord::NORD1;
+    visuals.text_edit_bg_color = Some(nord::NORD1);
 
     // Text colors
     visuals.override_text_color = Some(nord::NORD4);
@@ -149,6 +180,7 @@ pub fn nord_light() -> Visuals {
     visuals.panel_fill = nord::NORD6;
     visuals.faint_bg_color = nord::NORD5;
     visuals.extreme_bg_color = nord::NORD4;
+    visuals.text_edit_bg_color = Some(Color32::WHITE);
 
     // Text colors
     visuals.override_text_color = Some(nord::NORD0);
@@ -172,7 +204,8 @@ pub fn nord_light() -> Visuals {
 
     visuals.widgets.inactive.bg_fill = nord::NORD5;
     visuals.widgets.inactive.weak_bg_fill = nord::NORD5;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, nord::NORD4);
+    // Between NORD4 and NORD3: NORD4 alone barely shows on the NORD6 panel.
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(0xc2, 0xc9, 0xd6));
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, nord::NORD2);
 
     visuals.widgets.hovered.bg_fill = nord::NORD4;
@@ -205,6 +238,7 @@ pub fn tokyo_night() -> Visuals {
     visuals.panel_fill = tokyo::BG_NIGHT;
     visuals.faint_bg_color = tokyo::SELECTION;
     visuals.extreme_bg_color = Color32::from_rgb(0x16, 0x16, 0x1e);
+    visuals.text_edit_bg_color = Some(tokyo::BG_STORM);
 
     // Text colors
     visuals.override_text_color = Some(tokyo::FG_DARK);
@@ -261,6 +295,7 @@ pub fn tokyo_night_storm() -> Visuals {
     visuals.panel_fill = tokyo::BG_STORM;
     visuals.faint_bg_color = Color32::from_rgb(0x2a, 0x2e, 0x45);
     visuals.extreme_bg_color = tokyo::BG_NIGHT;
+    visuals.text_edit_bg_color = Some(Color32::from_rgb(0x2d, 0x32, 0x4a));
 
     // Text colors
     visuals.override_text_color = Some(tokyo::FG_BRIGHT);
@@ -317,6 +352,7 @@ pub fn tokyo_night_light() -> Visuals {
     visuals.panel_fill = tokyo::BG_LIGHT;
     visuals.faint_bg_color = Color32::from_rgb(0xd0, 0xd1, 0xd6);
     visuals.extreme_bg_color = Color32::from_rgb(0xc8, 0xc9, 0xce);
+    visuals.text_edit_bg_color = Some(Color32::from_rgb(0xe6, 0xe7, 0xec));
 
     // Text colors
     visuals.override_text_color = Some(tokyo::FG_LIGHT);
@@ -379,6 +415,7 @@ pub fn claude_dark() -> Visuals {
     visuals.panel_fill = claude::BG_DARK;
     visuals.faint_bg_color = claude::BG_DARK_ELEVATED;
     visuals.extreme_bg_color = Color32::from_rgb(0x18, 0x17, 0x16);
+    visuals.text_edit_bg_color = Some(claude::BG_DARK_SURFACE);
 
     // Text colors - cream on brown
     visuals.override_text_color = Some(claude::TEXT_CREAM);
@@ -402,7 +439,7 @@ pub fn claude_dark() -> Visuals {
 
     visuals.widgets.inactive.bg_fill = claude::BG_DARK_ELEVATED;
     visuals.widgets.inactive.weak_bg_fill = claude::BG_DARK_ELEVATED;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, claude::BG_DARK_SURFACE);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, claude::BORDER_DARK);
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, claude::TEXT_MUTED);
 
     visuals.widgets.hovered.bg_fill = claude::BG_DARK_SURFACE;
@@ -438,6 +475,7 @@ pub fn claude_light() -> Visuals {
     visuals.panel_fill = claude::BG_LIGHT;
     visuals.faint_bg_color = claude::BG_LIGHT_ELEVATED;
     visuals.extreme_bg_color = claude::BG_LIGHT_SURFACE;
+    visuals.text_edit_bg_color = Some(Color32::WHITE);
 
     // Text colors
     visuals.override_text_color = Some(claude::TEXT_DARK);
@@ -461,7 +499,7 @@ pub fn claude_light() -> Visuals {
 
     visuals.widgets.inactive.bg_fill = claude::BG_LIGHT_ELEVATED;
     visuals.widgets.inactive.weak_bg_fill = claude::BG_LIGHT_ELEVATED;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, claude::BG_LIGHT_SURFACE);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, claude::BORDER_LIGHT);
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, claude::TEXT_DARK_MUTED);
 
     visuals.widgets.hovered.bg_fill = claude::BG_LIGHT_SURFACE;
@@ -483,4 +521,92 @@ pub fn claude_light() -> Visuals {
     visuals.window_stroke = Stroke::new(1.0_f32, claude::BG_LIGHT_SURFACE);
 
     visuals
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG relative luminance of an opaque sRGB colour.
+    fn luminance(c: Color32) -> f32 {
+        let lin = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.039_28 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+    }
+
+    /// WCAG contrast ratio between two colours (1.0 = identical, 21.0 = black on white).
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    fn all_themes() -> Vec<(&'static str, Visuals)> {
+        vec![
+            ("egui dark", egui_dark()),
+            ("egui light", egui_light()),
+            ("nord dark", nord_dark()),
+            ("nord light", nord_light()),
+            ("tokyo night", tokyo_night()),
+            ("tokyo night storm", tokyo_night_storm()),
+            ("tokyo night light", tokyo_night_light()),
+            ("claude dark", claude_dark()),
+            ("claude light", claude_light()),
+        ]
+    }
+
+    /// Issue #1074: text fields looked read-only because the dark themes
+    /// filled them near-black, darker than the panel, with no outline.
+    #[test]
+    fn text_fields_look_editable_in_every_theme() {
+        let mut failures = Vec::new();
+        for (name, v) in all_themes() {
+            let Some(field) = v.text_edit_bg_color else {
+                failures.push(format!("{name}: text_edit_bg_color must be set"));
+                continue;
+            };
+            let panel = v.panel_fill;
+            let stroke = v.widgets.inactive.bg_stroke;
+            let text = v
+                .override_text_color
+                .unwrap_or(v.widgets.inactive.fg_stroke.color);
+
+            let fill_vs_panel = contrast(field, panel);
+            let outline_vs_field = contrast(stroke.color, field);
+            let outline_vs_panel = contrast(stroke.color, panel);
+            let text_vs_field = contrast(text, field);
+            println!(
+                "{name:18} fill/panel {fill_vs_panel:.2}  outline/fill {outline_vs_field:.2}  \
+                 outline/panel {outline_vs_panel:.2}  text/fill {text_vs_field:.2}"
+            );
+
+            // A dark field reads as a recessed, read-only well: it must be
+            // raised above the panel, like the buttons next to it.
+            if v.dark_mode && (luminance(field) <= luminance(panel) || fill_vs_panel < 1.15) {
+                failures.push(format!(
+                    "{name}: field {field:?} must be clearly lighter than panel {panel:?} \
+                     ({fill_vs_panel:.2})"
+                ));
+            }
+            // The outline must show against both the field and the panel
+            // around it (light themes rely on it: white on near-white).
+            if stroke.width < 1.0 || outline_vs_field < 1.25 || outline_vs_panel < 1.25 {
+                failures.push(format!(
+                    "{name}: outline {stroke:?} not visible (on field {outline_vs_field:.2}, \
+                     on panel {outline_vs_panel:.2})"
+                ));
+            }
+            if text_vs_field < 4.5 {
+                failures.push(format!(
+                    "{name}: text {text:?} on field {field:?} below WCAG AA ({text_vs_field:.2})"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 }
