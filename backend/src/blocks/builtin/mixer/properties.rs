@@ -270,6 +270,7 @@ mod clamping_tests {
         );
     }
 
+    #[cfg(feature = "lsp")]
     fn live_knee(linear: f64) -> f64 {
         let _ = gst::init();
         let _ = gst_plugins_lsp::plugin_register_static();
@@ -284,6 +285,7 @@ mod clamping_tests {
     }
 
     #[test]
+    #[cfg(feature = "lsp")]
     fn live_knee_is_clamped_like_the_build_path() {
         // The builder clamps the knee to MIN_KNEE_LINEAR..=1.0. A live write
         // must land on the same value: otherwise -30 dB is applied live but

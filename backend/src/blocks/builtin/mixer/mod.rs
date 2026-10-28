@@ -80,6 +80,19 @@ use strom_types::mixer::{
 const METER_INTERVAL_NS: u64 = 100_000_000;
 /// EQ band type for Peaking/Bell filter (lsp-rs-equalizer enum value)
 const EQ_BAND_TYPE_BELL: i32 = 7;
+/// Whether this build has the Rust DSP backend (lsp-plugins-rs, the `lsp`
+/// feature). Without it the mixer defaults to LV2.
+const RUST_DSP_AVAILABLE: bool = cfg!(feature = "lsp");
+
+/// The DSP backend a mixer uses when none is set: Rust when the build has
+/// it, otherwise LV2.
+fn default_dsp_backend(rust_available: bool) -> &'static str {
+    if rust_available {
+        "rust"
+    } else {
+        "lv2"
+    }
+}
 
 // Public API
 pub use builder::MixerBuilder;
