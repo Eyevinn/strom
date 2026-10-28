@@ -1,4 +1,4 @@
-use super::RUST_DSP_AVAILABLE;
+use super::{default_dsp_backend, RUST_DSP_AVAILABLE};
 use strom_types::mixer::*;
 use strom_types::{block::*, EnumValue, MediaType, PropertyValue};
 
@@ -8,31 +8,32 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 }
 
 /// The `dsp_backend` property. A build without the Rust DSP (the `lsp`
-/// feature) offers only LV2, so no mixer defaults to a backend that would
-/// pass every gate, compressor, EQ and limiter through unprocessed.
+/// feature) defaults to LV2, and still lists Rust so a flow saved with it
+/// shows its stored value; the label says the build uses LV2 instead. LV2
+/// only processes audio where the LV2 LSP plugins are installed: without
+/// them every DSP stage is passthrough.
 pub(super) fn dsp_backend_property(rust_available: bool) -> ExposedProperty {
-    let mut values = Vec::new();
-    if rust_available {
-        values.push(EnumValue {
-            value: "rust".to_string(),
-            label: Some("Rust".to_string()),
-        });
-    }
-    values.push(EnumValue {
-        value: "lv2".to_string(),
-        label: Some("LV2".to_string()),
-    });
-    let (description, default) = if rust_available {
-        (
-            "LV2 uses external C++ LSP plugins, Rust uses built-in lsp-plugins-rs",
-            "rust",
-        )
+    let rust_label = if rust_available {
+        "Rust"
     } else {
-        (
-            "LV2 uses external C++ LSP plugins (the built-in Rust DSP is not in this build)",
-            "lv2",
-        )
+        "Rust (not in this build, uses LV2)"
     };
+    let values = vec![
+        EnumValue {
+            value: "rust".to_string(),
+            label: Some(rust_label.to_string()),
+        },
+        EnumValue {
+            value: "lv2".to_string(),
+            label: Some("LV2".to_string()),
+        },
+    ];
+    let description = if rust_available {
+        "LV2 uses external C++ LSP plugins, Rust uses built-in lsp-plugins-rs"
+    } else {
+        "LV2 uses external C++ LSP plugins. The built-in Rust DSP is not in this build"
+    };
+    let default = default_dsp_backend(rust_available);
     ExposedProperty {
         name: "dsp_backend".to_string(),
         label: "DSP Backend".to_string(),

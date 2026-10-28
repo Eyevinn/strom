@@ -3,13 +3,14 @@ use crate::events::EventBroadcaster;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use strom_types::{block::*, element::ElementPadRef, FlowId, MediaType, PropertyValue};
 use tracing::{debug, info, warn};
 
 use super::elements::*;
 use super::metering::connect_mixer_meter_handler;
 use super::properties::*;
-use super::{METER_INTERVAL_NS, MIN_KNEE_LINEAR, RUST_DSP_AVAILABLE};
+use super::{default_dsp_backend, METER_INTERVAL_NS, MIN_KNEE_LINEAR, RUST_DSP_AVAILABLE};
 use strom_types::mixer::{
     DEFAULT_INTERNAL_BUS_LATENCY_MS, DEFAULT_LATENCY_MS, DEFAULT_MIN_UPSTREAM_LATENCY_MS,
 };
@@ -1293,19 +1294,27 @@ impl BlockBuilder for MixerBuilder {
     }
 }
 
+/// Set once the "rust backend not in this build" warning has been logged, so
+/// a saved flow does not repeat it on every start.
+static RUST_DSP_MISSING_WARNED: AtomicBool = AtomicBool::new(false);
+
 /// The DSP backend a mixer is built with. An empty request takes the build's
 /// default. A request for `rust` in a build without the Rust DSP (the `lsp`
-/// feature) gets LV2: a saved flow that names `rust` keeps its dynamics and
-/// EQ wherever the LV2 plugins are installed, instead of passing audio
-/// through unprocessed.
+/// feature) gets LV2, which processes audio only where the LV2 LSP plugins
+/// are installed. Without them the DSP stages are passthrough, and each
+/// stage logs that.
 pub(super) fn resolve_dsp_backend(requested: &str, rust_available: bool) -> &'static str {
-    let default = if rust_available { "rust" } else { "lv2" };
+    let default = default_dsp_backend(rust_available);
     match requested {
         "" => default,
         "lv2" => "lv2",
         "rust" if rust_available => "rust",
         "rust" => {
-            warn!("dsp_backend 'rust' is not in this build (built without the lsp feature), using 'lv2'");
+            if !RUST_DSP_MISSING_WARNED.swap(true, Ordering::Relaxed) {
+                warn!("dsp_backend 'rust' is not in this build (built without the lsp feature), using 'lv2'");
+            } else {
+                debug!("dsp_backend 'rust' is not in this build, using 'lv2'");
+            }
             "lv2"
         }
         other => {

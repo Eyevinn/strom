@@ -296,17 +296,16 @@ fn test_mixer_config_properties_not_live() {
 }
 
 #[test]
-fn test_dsp_backend_without_rust_offers_and_defaults_to_lv2() {
-    // A build without the `lsp` feature has no lsp-rs elements. The mixer
-    // must not default to, or offer, a backend that passes every gate,
-    // compressor, EQ and limiter through unprocessed.
+fn test_dsp_backend_without_rust_defaults_to_lv2() {
+    // A build without the `lsp` feature has no lsp-rs elements. Its mixers
+    // must default to LV2, not to a backend whose stages are all passthrough.
+    // Rust stays listed so a flow saved with it shows a known value.
     let enum_values = |prop: &ExposedProperty| -> Vec<String> {
         match &prop.property_type {
             PropertyType::Enum { values } => values.iter().map(|v| v.value.clone()).collect(),
             other => panic!("dsp_backend should be an enum, got {:?}", other),
         }
     };
-
     let default = |prop: &ExposedProperty| match &prop.default_value {
         Some(PropertyValue::String(v)) => v.clone(),
         other => panic!("dsp_backend default should be a string, got {:?}", other),
@@ -317,14 +316,14 @@ fn test_dsp_backend_without_rust_offers_and_defaults_to_lv2() {
     assert_eq!(default(&with_rust), "rust");
 
     let without_rust = definition::dsp_backend_property(false);
-    assert_eq!(enum_values(&without_rust), vec!["lv2"]);
+    assert_eq!(enum_values(&without_rust), vec!["rust", "lv2"]);
     assert_eq!(default(&without_rust), "lv2");
 
-    // The block definition uses what this build has.
+    // The block definition and the builder agree on this build's default.
     let def = mixer_definition();
     assert_eq!(
         default(exposed(&def, "dsp_backend")),
-        if RUST_DSP_AVAILABLE { "rust" } else { "lv2" }
+        builder::resolve_dsp_backend("", RUST_DSP_AVAILABLE)
     );
 }
 
@@ -336,7 +335,7 @@ fn test_dsp_backend_resolves_to_what_the_build_has() {
     assert_eq!(resolve_dsp_backend("rust", true), "rust");
     assert_eq!(resolve_dsp_backend("lv2", true), "lv2");
     assert_eq!(resolve_dsp_backend("bogus", true), "rust");
-    // Without it: a saved flow that names rust gets LV2, never passthrough.
+    // Without it: a saved flow that names rust gets LV2.
     assert_eq!(resolve_dsp_backend("", false), "lv2");
     assert_eq!(resolve_dsp_backend("rust", false), "lv2");
     assert_eq!(resolve_dsp_backend("lv2", false), "lv2");

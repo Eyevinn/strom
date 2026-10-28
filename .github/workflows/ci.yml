@@ -179,9 +179,13 @@ jobs:
         run: cargo clippy --package strom --all-targets --features efp -- -D warnings
 
       # The `lsp` feature (LGPL lsp-plugins-rs) is on by default and can be
-      # left out. Check that build too, so an ungated use fails here.
+      # left out. Check that build too, with every other feature still on,
+      # so an ungated use fails here.
       - name: Run Clippy on backend without lsp
-        run: cargo clippy --package strom --all-targets --no-default-features --features no-gui -- -D warnings
+        run: cargo clippy --package strom --all-targets --no-default-features --features nvidia,efp -- -D warnings
+
+      - name: Run mixer tests on backend without lsp
+        run: cargo test --package strom --no-default-features --features nvidia,efp --lib blocks::builtin::mixer
 
       # --no-fail-fast: without it cargo stops at the first failing test
       # binary, and every binary after it alphabetically never runs, so one
