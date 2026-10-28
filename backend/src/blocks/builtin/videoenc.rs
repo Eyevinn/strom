@@ -32,9 +32,9 @@
 //!   H.264 level (see `level`)
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+use crate::gpu;
 use crate::gst::download_front;
 use crate::gst::pipeline::properties::set_property_checked;
-use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -241,7 +241,7 @@ impl BlockBuilder for VideoEncBuilder {
 
         info!(
             "VideoEncoder block created (chain: input -> {} -> {} -> {} -> capsfilter [{}])",
-            VIDEO_CONVERT_FACTORY,
+            gpu::video_convert_factory(),
             encoder_name,
             parser_name.unwrap_or("no parser"),
             caps_str

@@ -51,7 +51,7 @@
 //! to system memory gets its download taken out again.
 
 use crate::blocks::BlockBuildError;
-use crate::gst::video_adapt::{self, Adapter, Consumer, Refusal, VIDEO_CONVERT_FACTORY};
+use crate::gst::video_adapt::{self, Adapter, Consumer, Refusal};
 use crate::gst::video_input_bridge::resplice;
 use gstreamer as gst;
 use gstreamer::glib;
@@ -176,16 +176,15 @@ pub fn convert_front(
         .property("silent", true)
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {}", e)))?;
-    let convert = gst::ElementFactory::make(VIDEO_CONVERT_FACTORY)
+    let factory = crate::gpu::video_convert_factory();
+    let convert = gst::ElementFactory::make(factory)
         .name(convert_id)
         .build()
-        .map_err(|e| {
-            BlockBuildError::ElementCreation(format!("{}: {}", VIDEO_CONVERT_FACTORY, e))
-        })?;
+        .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", factory, e)))?;
     crate::gpu::configure_video_convert(&convert);
-    let convert_sink = convert.static_pad("sink").ok_or_else(|| {
-        BlockBuildError::ElementCreation(format!("{} has no sink pad", VIDEO_CONVERT_FACTORY))
-    })?;
+    let convert_sink = convert
+        .static_pad("sink")
+        .ok_or_else(|| BlockBuildError::ElementCreation(format!("{} has no sink pad", factory)))?;
     install(&front, &convert_sink, front_id, consumer);
     Ok(ConvertFront {
         front_id: front_id.to_string(),
@@ -659,7 +658,7 @@ mod tests {
                 .factory()
                 .map(|f| f.name().to_string())
                 .as_deref(),
-            Some(VIDEO_CONVERT_FACTORY)
+            Some(crate::gpu::video_convert_factory())
         );
         #[cfg(target_os = "macos")]
         assert_eq!(

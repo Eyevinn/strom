@@ -9,8 +9,8 @@ use tracing::info;
 use super::super::{elements, layout};
 use super::{audio_meter, pad_layout, setup_overlay_renderer, PipelineParams};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult};
+use crate::gpu;
 use crate::gst::download_front;
-use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 
 pub(super) fn build_cpu_pipeline(
     p: &PipelineParams,
@@ -91,7 +91,8 @@ pub(super) fn build_cpu_pipeline(
                 BlockBuildError::ElementCreation(format!("capsfilter_dist_blend: {}", e))
             })?;
         let vc_dist_out_id = p.id("videoconvert_dist_out");
-        let videoconvert_dist_out = elements::make_element(VIDEO_CONVERT_FACTORY, &vc_dist_out_id)?;
+        let videoconvert_dist_out =
+            elements::make_element(gpu::video_convert_factory(), &vc_dist_out_id)?;
         elems.push((cf_blend_id.clone(), capsfilter_blend));
         elems.push((vc_dist_out_id.clone(), videoconvert_dist_out));
         info!(
@@ -233,7 +234,8 @@ pub(super) fn build_cpu_pipeline(
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter_mv_blend: {}", e)))?;
         let vc_mv_out_id = p.id("videoconvert_mv_out");
-        let videoconvert_mv_out = elements::make_element(VIDEO_CONVERT_FACTORY, &vc_mv_out_id)?;
+        let videoconvert_mv_out =
+            elements::make_element(gpu::video_convert_factory(), &vc_mv_out_id)?;
         elems.push((cf_blend_id.clone(), capsfilter_blend));
         elems.push((vc_mv_out_id.clone(), videoconvert_mv_out));
 
@@ -288,7 +290,8 @@ pub(super) fn build_cpu_pipeline(
     let q_overlay_id = p.id("queue_overlay");
     let queue_overlay = elements::make_queue(&q_overlay_id)?;
     let vc_overlay_id = p.id("videoconvert_overlay");
-    let videoconvert_overlay = elements::make_element(VIDEO_CONVERT_FACTORY, &vc_overlay_id)?;
+    let videoconvert_overlay =
+        elements::make_element(gpu::video_convert_factory(), &vc_overlay_id)?;
 
     elems.push((appsrc_overlay_id.clone(), appsrc_overlay.clone().upcast()));
     elems.push((q_overlay_id.clone(), queue_overlay));

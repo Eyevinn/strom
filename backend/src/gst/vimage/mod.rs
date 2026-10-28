@@ -46,7 +46,7 @@ glib::wrapper! {
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     // Rank NONE: this element is selected by name through
-    // `VideoConvertMode`, never autoplugged.
+    // `gpu::video_convert_factory`, never autoplugged.
     gst::Element::register(
         Some(plugin),
         ELEMENT_NAME,
@@ -69,7 +69,7 @@ gst::plugin_define!(
 /// Register the plugin with the GStreamer registry, once per process.
 ///
 /// Returns whether `stromvimageconvert` is available afterwards. A `false`
-/// here is not fatal: [`crate::gpu::detect_convert_mode`] treats it as "stay
+/// here is not fatal: [`crate::gpu::video_convert_factory`] treats it as "stay
 /// on `videoconvert`".
 ///
 /// Callers must have initialised GStreamer first.
