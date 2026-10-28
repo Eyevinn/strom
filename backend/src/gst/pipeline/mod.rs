@@ -141,6 +141,10 @@ pub enum PipelineError {
     #[error("Flow not found: {0}")]
     FlowNotFound(String),
 
+    /// The flow exists, or might, but has no running pipeline.
+    #[error("Flow not running: {0}")]
+    FlowNotRunning(String),
+
     #[error("Property {property} on element {element} cannot be changed in {state:?} state")]
     PropertyNotMutable {
         element: String,
