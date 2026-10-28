@@ -623,7 +623,12 @@ fn exactly_memory_the_consumer_leaves_out_is_downloaded() {
     cases.extend(D3D);
     for (c, download, factory) in cases {
         assert_eq!(
-            decide(&caps(c), Consumer::Exactly(&consumer), all),
+            decide_with(
+                &caps(c),
+                Consumer::Exactly(&consumer),
+                all,
+                &cuda_download_template_unknown
+            ),
             Ok(vec![download, Adapter::SystemMemoryPin]),
             "{c}"
         );
@@ -647,6 +652,37 @@ fn exactly_gpu_memory_in_a_format_the_consumer_does_not_list_is_downloaded() {
             all
         ),
         Ok(vec![Adapter::CudaDownload, Adapter::SystemMemoryPin])
+    );
+}
+
+/// `cudadownload` as on a host without it, where its template is unknown and
+/// a download counts as taking everything; every other adapter's template as
+/// installed. Keeps a test of `cudadownload` the same on a host with the real
+/// element, whose template lists CUDA memory without meta features (#1166).
+fn cuda_download_template_unknown(adapter: Adapter) -> Option<gst::Caps> {
+    (adapter != Adapter::CudaDownload)
+        .then(|| adapter.sink_template().cloned())
+        .flatten()
+}
+
+/// The real `cudadownload` lists CUDA memory with no meta feature, so CUDA
+/// memory that carries an overlay meta is refused with a reason, not a yes
+/// that fails not-negotiated once the CAPS event arrives (#1166).
+#[test]
+fn a_cuda_download_that_does_not_take_the_meta_feature_is_refused() {
+    let encoder = caps(SOFTWARE_ENCODER);
+    let with_meta =
+        caps("video/x-raw(memory:CUDAMemory, meta:GstVideoOverlayComposition), format=NV12");
+    assert_eq!(
+        decide_with(
+            &with_meta,
+            Consumer::Exactly(&encoder),
+            all,
+            &nv12_only_cudadownload
+        ),
+        Err(Refusal::NotDownloadable {
+            download: Adapter::CudaDownload,
+        })
     );
 }
 
