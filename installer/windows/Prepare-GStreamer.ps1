@@ -16,7 +16,8 @@
 .PARAMETER Full
     If specified, copies all of bin, lib\gstreamer-1.0, share and libexec
     (larger bundle, ~320MB). This is what the released MSI ships.
-    Both modes copy GIO's TLS backend (lib\gio\modules\gioopenssl.dll).
+    Both modes copy GIO's TLS backend (lib\gio\modules\gioopenssl.dll) and
+    the license texts (share\licenses).
     Otherwise, includes every DLL in bin but only the essential plugins listed
     below, and fails if one of them is missing from the installer.
 #>
@@ -261,6 +262,18 @@ if ($Full) {
 } elseif (Test-Path "$GstRoot\share\gstreamer-1.0") {
     Copy-Item "$GstRoot\share\gstreamer-1.0" "$OutputDir\share\" -Recurse -Force
 }
+
+# Copy the license texts of GStreamer and the libraries it bundles, in both
+# modes. The bundle carries LGPL and GPL code (x264, x265, ...), whose licenses
+# must ship with it.
+Write-Host "Copying license texts..."
+if (-not (Test-Path "$GstRoot\share\licenses")) {
+    throw "GStreamer $Version has no $GstRoot\share\licenses: the bundle would ship without its license texts"
+}
+if (-not $Full) {
+    Copy-Item "$GstRoot\share\licenses" "$OutputDir\share\" -Recurse -Force
+}
+Write-Host "  Copied $((Get-ChildItem "$OutputDir\share\licenses" -Directory).Count) license folders"
 
 # Copy libexec files (contains gst-ptp-helper.exe for PTP clock support)
 Write-Host "Copying libexec files..."

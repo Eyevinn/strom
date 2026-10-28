@@ -41,6 +41,11 @@
             </Directory>
           </Directory>
           <Directory Id="GstLibexecFolder" Name="libexec" />
+          <!-- License texts of GStreamer and the libraries it bundles
+               (LGPL, and GPL for x264, x265, ...). -->
+          <Directory Id="GstShareFolder" Name="share">
+            <Directory Id="GstLicensesFolder" Name="licenses" />
+          </Directory>
         </Directory>
         <Directory Id="GraphvizFolder" Name="graphviz">
           <Directory Id="GvBinFolder" Name="bin" />
@@ -103,6 +108,10 @@
       <Files Include="$(var.GStreamerDir)\libexec\**\*.*" />
     </ComponentGroup>
 
+    <ComponentGroup Id="GStreamerLicenseFiles" Directory="GstLicensesFolder">
+      <Files Include="$(var.GStreamerDir)\share\licenses\**\*.*" />
+    </ComponentGroup>
+
     <!-- Graphviz files -->
     <ComponentGroup Id="GraphvizBinFiles" Directory="GvBinFolder">
       <Files Include="$(var.GraphvizDir)\bin\**\*.*" />
@@ -119,6 +128,7 @@
         <ComponentGroupRef Id="GStreamerPluginFiles" />
         <ComponentGroupRef Id="GStreamerGioModuleFiles" />
         <ComponentGroupRef Id="GStreamerLibexecFiles" />
+        <ComponentGroupRef Id="GStreamerLicenseFiles" />
       </Feature>
 
       <Feature Id="GraphvizFeature" Title="Graphviz" Description="Graph visualization tools for debug pipeline graphs (recommended)" Level="1">
