@@ -1759,9 +1759,9 @@ impl AppState {
 
         let pipelines = self.inner.pipelines.read().await;
 
-        let manager = pipelines.get(flow_id).ok_or_else(|| {
-            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
-        })?;
+        let manager = pipelines
+            .get(flow_id)
+            .ok_or_else(|| PipelineError::FlowNotRunning(flow_id.to_string()))?;
 
         manager.update_element_property(element_id, property_name, &value, ramp_ms)?;
 
@@ -2803,9 +2803,9 @@ impl AppState {
     ) -> Result<HashMap<String, PropertyValue>, PipelineError> {
         let pipelines = self.inner.pipelines.read().await;
 
-        let manager = pipelines.get(flow_id).ok_or_else(|| {
-            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
-        })?;
+        let manager = pipelines
+            .get(flow_id)
+            .ok_or_else(|| PipelineError::FlowNotRunning(flow_id.to_string()))?;
 
         manager.get_element_properties(element_id)
     }
@@ -2828,9 +2828,9 @@ impl AppState {
         // Update the running pipeline
         {
             let pipelines = self.inner.pipelines.read().await;
-            let manager = pipelines.get(flow_id).ok_or_else(|| {
-                PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
-            })?;
+            let manager = pipelines
+                .get(flow_id)
+                .ok_or_else(|| PipelineError::FlowNotRunning(flow_id.to_string()))?;
             manager.update_pad_property(element_id, pad_name, property_name, &value)?;
         }
 
@@ -2891,9 +2891,9 @@ impl AppState {
     ) -> Result<HashMap<String, PropertyValue>, PipelineError> {
         let pipelines = self.inner.pipelines.read().await;
 
-        let manager = pipelines.get(flow_id).ok_or_else(|| {
-            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
-        })?;
+        let manager = pipelines
+            .get(flow_id)
+            .ok_or_else(|| PipelineError::FlowNotRunning(flow_id.to_string()))?;
 
         manager.get_pad_properties(element_id, pad_name)
     }
