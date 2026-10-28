@@ -256,3 +256,26 @@ pub fn upload_path(
         UploadPath::ConverterOnly
     }
 }
+
+/// What a pad answers to an ALLOCATION query for `caps`: the meta APIs it
+/// supports, sorted, and the minimum buffers of its first pool.
+#[derive(Debug, PartialEq)]
+pub struct AllocationProposal {
+    pub metas: Vec<String>,
+    pub min_buffers: Option<u32>,
+}
+
+/// Ask `pad` for its ALLOCATION proposal. A sink pad behind a running
+/// aggregator answers once its queue is empty, so this waits for that.
+pub fn allocation_proposal(pad: &gst::Pad, caps: &gst::Caps) -> AllocationProposal {
+    use gst::prelude::*;
+    let mut query = gst::query::Allocation::new(Some(caps), false);
+    assert!(pad.query(&mut query), "{} refused ALLOCATION", pad.name());
+    let mut metas: Vec<String> = query
+        .allocation_metas()
+        .map(|(api, _)| api.name().to_string())
+        .collect();
+    metas.sort();
+    let min_buffers = query.allocation_pools().next().map(|(_, _, min, _)| min);
+    AllocationProposal { metas, min_buffers }
+}
