@@ -431,7 +431,7 @@ fn flat_source(info: &VideoInfo, colour: [u8; 3]) -> gst::Buffer {
     let mut buffer = gst::Buffer::with_size(rgba.size()).expect("allocate");
     {
         let mut map = buffer.get_mut().unwrap().map_writable().expect("map");
-        for px in map.as_mut_slice().chunks_exact_mut(4) {
+        for px in map.as_mut_slice().as_chunks_mut::<4>().0 {
             px[..3].copy_from_slice(&colour);
             px[3] = 255;
         }
