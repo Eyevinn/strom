@@ -407,18 +407,16 @@ fn test_encoder_property_setting_nvenc() {
         let bitrate: u32 = encoder.property("bitrate");
         assert_eq!(bitrate, 4000, "Bitrate should be set for {}", encoder_name);
 
-        // Verify rate control property exists and is set correctly
-        let rc_property = if encoder_name.starts_with("nvautogpu") {
-            "rate-control"
-        } else {
-            "rc-mode"
-        };
-
+        // The rate control property is `rate-control` or `rc-mode`, depending
+        // on the encoder and the GStreamer build: `nvautogpuh264enc` has
+        // `rc-mode` in the Windows 1.28.8 build (#1166). The block takes
+        // whichever exists, so the encoder must have one of them.
         assert!(
-            encoder.has_property(rc_property),
-            "{} should have {} property",
-            encoder_name,
-            rc_property
+            ["rate-control", "rc-mode"]
+                .iter()
+                .any(|p| encoder.has_property(p)),
+            "{} has neither rate-control nor rc-mode",
+            encoder_name
         );
     }
 }

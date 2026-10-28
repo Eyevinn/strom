@@ -200,7 +200,13 @@ fn tap_config() -> ThumbnailTapConfig {
 fn thumbnail_on_a_cuda_memory_tee_downloads_first_and_keeps_the_stream_flowing() {
     gst::init().unwrap();
     common::require_elements(ELEMENTS);
-    stand_in::register();
+    if !stand_in::register() {
+        // The harness pushes system-memory buffers under CUDA caps, which
+        // the real element would read as CUDA memory (#1166), as in
+        // videoformat_input_memory_test.
+        eprintln!("SKIP: the real cudadownload is installed; these buffers are not CUDA memory");
+        return;
+    }
 
     let harness = Harness::start(CUDA_CAPS);
     harness.wait_until_flowing();
