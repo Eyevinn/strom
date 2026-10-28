@@ -16,7 +16,16 @@ use strom_types::FlowId;
 /// hour), so offsets sampled at different moments would put two recorders' files
 /// out of step by that drift. One anchor keeps every recorder in the run on the
 /// same mapping; only the absolute time drifts.
-type RunAnchor = (gst::glib::WeakRef<gst::Clock>, gst::ClockTime, i128);
+///
+/// The pipeline is held weakly so a stopped flow's entry can be told from a running
+/// one's and dropped when the next anchor is taken: the clock cannot say, because
+/// the system clock outlives every pipeline.
+type RunAnchor = (
+    gst::glib::WeakRef<gst::Clock>,
+    gst::glib::WeakRef<gst::Object>,
+    gst::ClockTime,
+    i128,
+);
 static RUNNING_ZERO_UTC_NS: OnceLock<Mutex<HashMap<FlowId, RunAnchor>>> = OnceLock::new();
 
 /// Wall-clock time, in microseconds since the Unix epoch, of `running_time` in the
@@ -35,7 +44,7 @@ pub fn running_time_to_utc_us(
         .lock()
         .ok()?;
     let zero_ns = match anchors.get(&flow_id) {
-        Some((anchor_clock, base, zero_ns))
+        Some((anchor_clock, _, base, zero_ns))
             if *base == base_time && anchor_clock.upgrade().as_ref() == Some(&clock) =>
         {
             *zero_ns
@@ -48,9 +57,59 @@ pub fn running_time_to_utc_us(
             let after = clock.time();
             let clock_now = (before.nseconds() as i128 + after.nseconds() as i128) / 2;
             let zero_ns = wall.as_nanos() as i128 - (clock_now - base_time.nseconds() as i128);
-            anchors.insert(flow_id, (clock.downgrade(), base_time, zero_ns));
+            anchors.retain(|_, (_, pipeline, _, _)| pipeline.upgrade().is_some());
+            anchors.insert(
+                flow_id,
+                (
+                    clock.downgrade(),
+                    top_level(element).downgrade(),
+                    base_time,
+                    zero_ns,
+                ),
+            );
             zero_ns
         }
     };
     u64::try_from((zero_ns + running_time.nseconds() as i128).div_euclid(1000)).ok()
+}
+
+/// The outermost parent of `element`: the flow's pipeline once it is in one.
+fn top_level(element: &gst::Element) -> gst::Object {
+    let mut top: gst::Object = element.clone().upcast();
+    while let Some(parent) = top.parent() {
+        top = parent;
+    }
+    top
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn playing_pipeline() -> (gst::Pipeline, gst::Element) {
+        let pipeline = gst::Pipeline::new();
+        let element = gst::ElementFactory::make("identity").build().unwrap();
+        pipeline.add(&element).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        (pipeline, element)
+    }
+
+    #[test]
+    fn a_stopped_flow_leaves_no_anchor_behind() {
+        gst::init().unwrap();
+        let stopped = FlowId::new_v4();
+        let running = FlowId::new_v4();
+
+        let (pipeline, element) = playing_pipeline();
+        assert!(running_time_to_utc_us(stopped, &element, gst::ClockTime::ZERO).is_some());
+        pipeline.set_state(gst::State::Null).unwrap();
+        drop((pipeline, element));
+
+        let (_pipeline, element) = playing_pipeline();
+        assert!(running_time_to_utc_us(running, &element, gst::ClockTime::ZERO).is_some());
+
+        let anchors = RUNNING_ZERO_UTC_NS.get().unwrap().lock().unwrap();
+        assert!(!anchors.contains_key(&stopped));
+        assert!(anchors.contains_key(&running));
+    }
 }
