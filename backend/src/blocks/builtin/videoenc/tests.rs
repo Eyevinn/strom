@@ -710,3 +710,30 @@ fn test_block_encoder_preference() {
         }
     }
 }
+
+/// #1163: on Windows the Intel QSV encoders corrupt the process heap, so
+/// once `demote_qsv_encoders` has run, the block never selects one, whatever
+/// else the host has. Elsewhere QSV keeps its rank and this checks nothing.
+#[test]
+fn qsv_encoders_are_never_selected_on_windows() {
+    init_gst();
+    crate::gst::demote_qsv_encoders();
+    if !cfg!(windows) {
+        return;
+    }
+    for name in crate::gst::QSV_ENCODERS {
+        if let Some(factory) = gst::ElementFactory::find(name) {
+            assert_eq!(factory.rank(), gst::Rank::NONE, "{name} kept its rank");
+        }
+    }
+    for codec in [Codec::H264, Codec::H265, Codec::AV1, Codec::VP9] {
+        for preference in [EncoderPreference::Auto, EncoderPreference::HardwareOnly] {
+            if let Ok(encoder) = select_encoder(codec, preference) {
+                assert!(
+                    !encoder.starts_with("qsv"),
+                    "{codec:?} {preference:?} selected {encoder}"
+                );
+            }
+        }
+    }
+}

@@ -780,6 +780,7 @@ mod tests {
     /// registered by the binary. Tests must register it themselves.
     fn init_gst() {
         let _ = gst::init();
+        crate::gst::demote_qsv_encoders();
         let _ = gstrswebrtc::plugin_register_static();
     }
 
