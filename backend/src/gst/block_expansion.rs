@@ -170,7 +170,10 @@ pub async fn expand_blocks(
         let to = resolve_pad(link.to.as_str(), blocks).await?;
 
         info!("Resolved external link: {} -> {}", from, to);
-        all_links.push(Link { from, to });
+        let link = Link { from, to };
+        ctx.flow_link_targets()
+            .insert(link.to_pad_refs().1.element_id);
+        all_links.push(link);
     }
 
     // Collect element signal setup functions from context

@@ -3,9 +3,9 @@
 //! `whepserversink` hosts the HTTP endpoint; clients connect via WHEP to receive.
 
 pub(crate) mod definition;
-mod profile_filter;
 mod whepserversink;
 
+use crate::blocks::builtin::inputs::explicit_track_count;
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gst::ice_preflight;
 use std::collections::HashMap;
@@ -148,17 +148,6 @@ pub(super) fn resolve_track_counts(properties: &HashMap<String, PropertyValue>) 
     };
 
     (num_audio, num_video)
-}
-
-pub(crate) fn explicit_track_count(
-    properties: &HashMap<String, PropertyValue>,
-    name: &str,
-) -> Option<usize> {
-    properties.get(name).and_then(|v| match v {
-        PropertyValue::UInt(u) => Some((*u as usize).min(8)),
-        PropertyValue::Int(i) => Some((*i).clamp(0, 8) as usize),
-        _ => None,
-    })
 }
 
 /// Migrate a legacy `mode` property on a WHEP Output block to explicit

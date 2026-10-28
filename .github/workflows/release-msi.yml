@@ -122,6 +122,8 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.version }}"
+          # WiX only takes a numeric version, so 0.8.0-alpha.1 installs as 0.8.0
+          $productVersion = $version -replace '-.*$', ''
           $buildDir = "installer/windows/build"
 
           # Copy WiX source files and assets
@@ -168,14 +170,17 @@ jobs:
           Push-Location $buildDir
 
           Write-Host "Building MSI with WiX..."
-          Write-Host "  ProductVersion: $version"
+          Write-Host "  ProductVersion: $productVersion"
           Write-Host "  StromExe: $absStromExe"
           Write-Host "  StromIcon: $absStromIcon"
           Write-Host "  GStreamerDir: $absGstDir"
           Write-Host "  GraphvizDir: $absGvDir"
 
+          # -arch x64: without it WiX builds a 32-bit package, and Windows
+          # installs it under Program Files (x86)
           wix build `
-            -d ProductVersion="$version" `
+            -arch x64 `
+            -d ProductVersion="$productVersion" `
             -d StromExe="$absStromExe" `
             -d StromIcon="$absStromIcon" `
             -d GStreamerDir="$absGstDir" `
@@ -204,6 +209,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.version.outputs.version }}
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
           files: installer/windows/build/strom-${{ steps.version.outputs.version }}-windows-x86_64.msi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

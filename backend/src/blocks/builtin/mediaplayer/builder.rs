@@ -29,7 +29,7 @@ pub struct MediaPlayerBuilder;
 /// beyond these, and tracks that are neither video nor audio, are discarded
 /// rather than left unlinked, which would stop playback.
 pub(super) fn track_counts(properties: &HashMap<String, PropertyValue>) -> (usize, usize) {
-    use crate::blocks::builtin::whep::explicit_track_count;
+    use crate::blocks::builtin::inputs::explicit_track_count;
     (
         explicit_track_count(properties, "num_video_tracks").unwrap_or(1),
         explicit_track_count(properties, "num_audio_tracks").unwrap_or(1),

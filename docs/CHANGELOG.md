@@ -2,6 +2,40 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.8.0-alpha.1] - 2026-10-27
+
+A prerelease. The Docker images move to Ubuntu 26.04 and GStreamer 1.28, and most blocks now emit video in the memory they produce it in (GL, CUDA, D3D) and adapt their own inputs. Test it before you rely on it: `latest` stays on 0.7.2.
+
+### Added
+- Video Format: scale video where it is, with GPU memory scaled on the GPU (#1117)
+- MPEG-TS/SRT Input: map audio outputs to streams in PID order (#1120)
+- EFP: enabled on Windows, with gst-plugin-efp v0.4.1 (#1094)
+
+### Fixed
+- Vision Mixer: emit GL memory, and retire `gl_download` (#1119)
+- Vision Mixer: download GPU memory on the CPU mixer's own inputs (#1121)
+- Compositor: download GPU memory on the CPU backend's own inputs (#1138)
+- Inter Input: download GL memory that arrives from another flow (#1118)
+- WHIP Input: emit the decoder's video without a converter (#1128)
+- Local Input: emit video as the source delivers it (#1129)
+- NDI: adapt NDI Output's video input, and emit NDI Input's video as it arrives (#1134)
+- DeckLink Output: adapt the video input to the configured mode (#1131)
+- Thumbnail tap: scale GL memory in any format or texture target (#1140)
+
+### Changed
+- Docker: the images move from Ubuntu 25.10 to 26.04 LTS (#1124), and carry the tsdemux PTS rollover fix (#1132)
+- GStreamer: 1.28 is the target and 1.22 the floor; `install.sh` warns below it (#1122)
+- Video adapt: one planner decides scaling, downloads and pins (#1137), split into decide, adapters and tests (#1141)
+- GPU: retire the global `VideoConvertMode` (#1142)
+- Release: a suffixed tag (`v0.8.0-alpha.1`) is published as a prerelease, not as latest (#1148)
+
+### CI
+- Check that Strom builds and runs on GStreamer 1.22, the floor (#1125)
+- Windows: install GStreamer 1.28.8 from the Inno Setup installer (#1126)
+- Tests: Vision Mixer and Stinger test fixes (#1133, #1143)
+
+---
+
 ## [0.7.2] - 2026-10-27
 
 ### Added

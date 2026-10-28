@@ -149,7 +149,10 @@ try {
 
     $msiName = "strom-$Version-windows-x86_64.msi"
 
+    # -arch x64: without it WiX builds a 32-bit package, and Windows
+    # installs it under Program Files (x86)
     wix build `
+        -arch x64 `
         -d ProductVersion="$Version" `
         -d StromExe="$absStromExe" `
         -d GStreamerDir="$absGstDir" `
