@@ -371,6 +371,16 @@ pub struct BlockCategoriesResponse {
 /// GStreamer's default is 200ms; we use 40ms for lower latency on LAN.
 pub const DEFAULT_JITTERBUFFER_LATENCY_MS: i64 = 40;
 
+/// WHEP Input: how long a video stream may send nothing before it gives up
+/// its video output, in milliseconds. Default, and the range the block clamps to.
+pub const DEFAULT_WHEP_VIDEO_STREAM_TIMEOUT_MS: u64 = 2000;
+pub const MIN_WHEP_VIDEO_STREAM_TIMEOUT_MS: u64 = 100;
+pub const MAX_WHEP_VIDEO_STREAM_TIMEOUT_MS: u64 = 60_000;
+
+/// WHEP Input `video_assignment` values.
+pub const WHEP_VIDEO_ASSIGNMENT_FILL: &str = "fill";
+pub const WHEP_VIDEO_ASSIGNMENT_NEWEST: &str = "newest";
+
 /// Default SRT URI for output (listener mode).
 pub const DEFAULT_SRT_OUTPUT_URI: &str = "srt://:5000?mode=listener";
 

@@ -364,10 +364,7 @@ fn unlinked_video_out_is_discarded_undecoded() {
         "an unlinked video_out must not create a video decoder"
     );
     assert!(
-        !client.by_id["cli:video_out_tee_0"]
-            .static_pad("sink")
-            .unwrap()
-            .is_linked(),
+        client.by_id["cli:video_selector_0"].sink_pads().is_empty(),
         "nothing should feed the unlinked video_out"
     );
 

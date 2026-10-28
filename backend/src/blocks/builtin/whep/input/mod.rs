@@ -5,10 +5,12 @@
 //!
 //! Handles dynamic pad creation: every audio stream is decoded into a
 //! liveadder mixer that feeds `audio_out`. Video streams take the declared
-//! video outputs (`num_video_tracks`) in arrival order and are decoded only
-//! when that output is linked; any other video is discarded undecoded.
+//! video outputs (`num_video_tracks`) as the video module routes them, and
+//! are decoded only into an output that is linked; any other video is
+//! discarded undecoded.
 
 pub(crate) mod definition;
+mod slot_plan;
 mod stream;
 mod video;
 mod whepclientsrc;

@@ -1,8 +1,7 @@
 //! WHEP Input stream handling: audio is decoded into the liveadder, video is
-//! decoded into its slot's output tee when that output is linked, and
-//! discarded undecoded otherwise.
+//! handed to [`VideoSlots`], which routes it to a video output.
 
-use super::video::{configure_keyframe_recovery, VideoRoute, VideoSlots};
+use super::video::VideoSlots;
 use crate::gst::whep_probe::{self, WhepProbeRegistry};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -14,9 +13,8 @@ use tracing::{error, info, warn};
 /// Uses an identity element to immediately claim the pad (preventing auto-tee),
 /// then a pad probe to detect actual caps before deciding how to handle the stream:
 /// - Audio: decode and route to liveadder
-/// - Video: claim the next video slot (arrival order). Decode into the slot's
-///   tee if its output is linked; otherwise, or when every slot is taken,
-///   discard via fakesink without decoding.
+/// - Video: register with the video slots, which decide whether and where it
+///   is decoded.
 pub(super) fn setup_stream_with_caps_detection(
     src: &gst::Element,
     src_pad: &gst::Pad,
@@ -138,56 +136,17 @@ pub(super) fn setup_stream_with_caps_detection(
                                 }
                             }
                         } else if is_video {
-                            let (claimed, chain) = match video.claim() {
-                                VideoRoute::Decode { slot, tee } => {
-                                    info!(
-                                        "WHEP: Stream {} is video, decoding into video slot {}",
-                                        stream_num, slot
-                                    );
-                                    let chain = setup_video_decode_chain(
-                                        pad,
-                                        &pipeline,
-                                        &tee,
-                                        &instance_id_owned,
-                                        stream_num,
-                                    )
-                                    .inspect_err(|e| {
-                                        error!("WHEP: Failed to setup video decode chain: {}", e)
-                                    });
-                                    (Some(slot), chain.ok())
-                                }
-                                VideoRoute::Discard { slot } => {
-                                    match slot {
-                                        Some(slot) => info!(
-                                            "WHEP: Stream {} is video for slot {}, whose output is not linked; discarding via fakesink (no decode)",
-                                            stream_num, slot
-                                        ),
-                                        None => info!(
-                                            "WHEP: Stream {} is video beyond the declared video tracks; discarding via fakesink (no decode)",
-                                            stream_num
-                                        ),
+                            match pad.parent_element() {
+                                Some(identity) => {
+                                    if let Err(e) = video.register(&identity, &pipeline, stream_num)
+                                    {
+                                        error!(
+                                            "WHEP: Stream {} failed to set up video: {}",
+                                            stream_num, e
+                                        );
                                     }
-                                    let chain = setup_video_discard(
-                                        pad,
-                                        &pipeline,
-                                        &instance_id_owned,
-                                        stream_num,
-                                    )
-                                    .inspect_err(|e| {
-                                        error!("WHEP: Failed to setup video discard: {}", e)
-                                    });
-                                    (slot, chain.ok())
                                 }
-                            };
-                            if let Some(identity) = pad.parent_element() {
-                                release_when_stream_ends(
-                                    &identity,
-                                    &pipeline,
-                                    &video,
-                                    claimed,
-                                    chain,
-                                    stream_num,
-                                );
+                                None => error!("WHEP: Stream {} identity is gone", stream_num),
                             }
                         } else {
                             warn!(
@@ -427,206 +386,57 @@ fn setup_audio_decode_chain(
     Ok(())
 }
 
-/// Setup video decode chain: decodebin -> slot tee.
-///
-/// The decoder's output goes to the tee as it is, in whatever memory the
-/// decoder produced: the consuming block adapts its own input.
-fn setup_video_decode_chain(
-    src_pad: &gst::Pad,
-    pipeline: &gst::Pipeline,
-    tee: &gst::Element,
-    instance_id: &str,
-    stream_num: usize,
-) -> Result<gst::Element, String> {
-    let decodebin_name = format!("{}:video_decodebin_{}", instance_id, stream_num);
-    let decodebin = gst::ElementFactory::make("decodebin")
-        .name(&decodebin_name)
-        .build()
-        .map_err(|e| format!("Failed to create video decodebin: {}", e))?;
-
-    // Ask the sender for a keyframe after loss; see configure_keyframe_recovery.
-    // The element arrives as a signal argument, so nothing is captured.
-    decodebin.connect("deep-element-added", false, |values| {
-        if let Ok(element) = values[2].get::<gst::Element>() {
-            configure_keyframe_recovery(&element);
-        }
-        None
-    });
-
-    // Weak: the decodebin owns this handler, and the tee is its sibling.
-    let tee_weak = tee.downgrade();
-    decodebin.connect_pad_added(move |_decodebin, pad| {
-        let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
-        let is_video = caps
-            .structure(0)
-            .is_some_and(|s| s.name().starts_with("video/"));
-        if !is_video {
-            warn!(
-                "WHEP: Stream {} video decodebin exposed a non-video pad ({}), leaving it unlinked",
-                stream_num, caps
-            );
-            return;
-        }
-        let Some(tee) = tee_weak.upgrade() else {
-            return;
-        };
-        let Some(tee_sink) = tee.static_pad("sink") else {
-            error!("WHEP: Stream {} video tee has no sink pad", stream_num);
-            return;
-        };
-        if tee_sink.is_linked() {
-            error!(
-                "WHEP: Stream {} video tee {} is already fed, cannot link a second decoder output",
-                stream_num,
-                tee.name()
-            );
-            return;
-        }
-        match pad.link(&tee_sink) {
-            Ok(_) => info!(
-                "WHEP: Stream {} decoded video linked to {} ({})",
-                stream_num,
-                tee.name(),
-                caps
-            ),
-            Err(e) => error!(
-                "WHEP: Stream {} failed to link decoded video to {}: {:?}",
-                stream_num,
-                tee.name(),
-                e
-            ),
-        }
-    });
-
-    pipeline
-        .add(&decodebin)
-        .map_err(|e| format!("Failed to add video decodebin to pipeline: {}", e))?;
-    let decodebin_sink = decodebin
-        .static_pad("sink")
-        .ok_or("Video decodebin has no sink pad")?;
-    src_pad
-        .link(&decodebin_sink)
-        .map_err(|e| format!("Failed to link to video decodebin: {:?}", e))?;
-    decodebin
-        .sync_state_with_parent()
-        .map_err(|e| format!("Failed to sync video decodebin state: {}", e))?;
-
-    info!(
-        "WHEP: Video decode chain setup complete for stream {}",
-        stream_num
-    );
-    Ok(decodebin)
-}
-
-/// Setup video discard: fakesink (no decoding, just discard the video stream)
-fn setup_video_discard(
-    src_pad: &gst::Pad,
-    pipeline: &gst::Pipeline,
-    instance_id: &str,
-    stream_num: usize,
-) -> Result<gst::Element, String> {
-    let fakesink_name = format!("{}:video_fakesink_{}", instance_id, stream_num);
-
-    // Create fakesink to discard video without decoding
-    let fakesink = gst::ElementFactory::make("fakesink")
-        .name(&fakesink_name)
-        .property("sync", false) // Don't sync, just drop
-        .property("async", false)
-        .build()
-        .map_err(|e| format!("Failed to create fakesink: {}", e))?;
-
-    // Add to pipeline
-    pipeline
-        .add(&fakesink)
-        .map_err(|e| format!("Failed to add fakesink to pipeline: {}", e))?;
-
-    // Link src_pad to fakesink
-    let fakesink_sink = fakesink
-        .static_pad("sink")
-        .ok_or("Fakesink has no sink pad")?;
-    src_pad
-        .link(&fakesink_sink)
-        .map_err(|e| format!("Failed to link to fakesink: {:?}", e))?;
-
-    // Sync fakesink state with pipeline
-    fakesink
-        .sync_state_with_parent()
-        .map_err(|e| format!("Failed to sync fakesink state: {}", e))?;
-
-    info!(
-        "WHEP: Video discard (fakesink) setup complete for stream {}",
-        stream_num
-    );
-    Ok(fakesink)
-}
-
-/// When a video stream's source pad goes away, free its slot and remove the
-/// elements this block added for it, so the stream that replaces it can claim
-/// the slot and feed its tee.
-///
-/// The source unlinks the pad from `identity` when it removes it. The removal
-/// runs from the pipeline's async call thread, not the source's thread that
-/// emits `unlinked`. Everything is held weakly: the handler belongs to the
-/// identity's pad, and the pipeline and the chain are its siblings.
-fn release_when_stream_ends(
-    identity: &gst::Element,
-    pipeline: &gst::Pipeline,
-    video: &Arc<VideoSlots>,
-    slot: Option<usize>,
-    chain: Option<gst::Element>,
-    stream_num: usize,
-) {
-    let Some(sink) = identity.static_pad("sink") else {
-        return;
-    };
-    let pipeline_weak = pipeline.downgrade();
-    let video = Arc::clone(video);
-    let stream_elements = [Some(identity.downgrade()), chain.map(|c| c.downgrade())];
-    sink.connect_unlinked(move |_, _| {
-        if let Some(slot) = slot {
-            video.release(slot);
-        }
-        // The source also unlinks its pads when the flow stops. The pipeline
-        // removes everything then, and an async call here would hold it past
-        // its drop.
-        let Some(pipeline) = pipeline_weak.upgrade() else {
-            return;
-        };
-        if pipeline.current_state() < gst::State::Paused
-            || matches!(
-                pipeline.pending_state(),
-                gst::State::Null | gst::State::Ready
-            )
-        {
-            return;
-        }
-        info!(
-            "WHEP: Stream {} ended, freeing video slot {:?}",
-            stream_num, slot
-        );
-        let stream_elements = stream_elements.clone();
-        pipeline.call_async(move |pipeline| {
-            for element in stream_elements.iter().flatten().filter_map(|e| e.upgrade()) {
-                let _ = element.set_state(gst::State::Null);
-                let _ = pipeline.remove(&element);
-            }
-        });
-    });
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::slot_plan::Assignment;
+    use super::super::video::make_selector;
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::time::{Duration, Instant};
 
-    /// A source bin that exposes RTP VP8 through ghost pads the test adds and
-    /// removes, as whepsrc does with a session's pads. The tee keeps the live
-    /// source running while no pad is exposed.
-    fn rtp_source() -> (gst::Bin, gst::Element) {
+    const REQUIRED: [&str; 7] = [
+        "videotestsrc",
+        "vp8enc",
+        "rtpvp8pay",
+        "vp8dec",
+        "rtpvp8depay",
+        "input-selector",
+        "valve",
+    ];
+
+    fn plugins_available() -> bool {
+        gst::init().unwrap();
+        for factory in REQUIRED {
+            if gst::ElementFactory::find(factory).is_none() {
+                assert!(
+                    std::env::var("STROM_REQUIRE_GST_PLUGINS").is_err(),
+                    "{factory} is missing"
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    /// A source bin that exposes RTP VP8 at `width` x 180 through ghost pads
+    /// the test adds and removes, as whepsrc does with a session's pads. The
+    /// tee keeps the live source running while no pad is exposed; closing the
+    /// valve makes the stream go silent while its pad stays, as an SFU does.
+    fn rtp_source(width: i32) -> (gst::Bin, gst::Element, gst::Element) {
         let bin = gst::Bin::new();
         let src = gst::ElementFactory::make("videotestsrc")
             .property("is-live", true)
+            .build()
+            .unwrap();
+        let caps = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                gst::Caps::builder("video/x-raw")
+                    .field("width", width)
+                    .field("height", 180i32)
+                    .field("framerate", gst::Fraction::new(30, 1))
+                    .build(),
+            )
             .build()
             .unwrap();
         let enc = gst::ElementFactory::make("vp8enc")
@@ -635,13 +445,15 @@ mod tests {
             .build()
             .unwrap();
         let pay = gst::ElementFactory::make("rtpvp8pay").build().unwrap();
+        let valve = gst::ElementFactory::make("valve").build().unwrap();
         let tee = gst::ElementFactory::make("tee")
             .property("allow-not-linked", true)
             .build()
             .unwrap();
-        bin.add_many([&src, &enc, &pay, &tee]).unwrap();
-        gst::Element::link_many([&src, &enc, &pay, &tee]).unwrap();
-        (bin, tee)
+        bin.add_many([&src, &caps, &enc, &pay, &valve, &tee])
+            .unwrap();
+        gst::Element::link_many([&src, &caps, &enc, &pay, &valve, &tee]).unwrap();
+        (bin, tee, valve)
     }
 
     fn expose(bin: &gst::Bin, tee: &gst::Element) -> gst::Pad {
@@ -670,91 +482,214 @@ mod tests {
         }
     }
 
-    /// A session that ends and starts again within one run: the new video
-    /// stream must decode into the same output, not be discarded because the
-    /// slot still counts as taken or the old decoder still feeds the tee.
-    #[test]
-    fn a_video_stream_that_comes_back_decodes_into_its_slot_again() {
-        gst::init().unwrap();
-        for factory in [
-            "videotestsrc",
-            "vp8enc",
-            "rtpvp8pay",
-            "vp8dec",
-            "rtpvp8depay",
-        ] {
-            if gst::ElementFactory::find(factory).is_none() {
-                assert!(
-                    std::env::var("STROM_REQUIRE_GST_PLUGINS").is_err(),
-                    "{factory} is missing"
-                );
-                return;
+    /// One video output (selector -> tee -> fakesink) in a pipeline, with a
+    /// count of decoded frames and the width of the frames that reach it.
+    struct Output {
+        pipeline: gst::Pipeline,
+        liveadder: gst::Element,
+        sink: gst::Element,
+        decoded: Arc<AtomicUsize>,
+        video: Arc<VideoSlots>,
+    }
+
+    impl Output {
+        fn new(policy: Assignment, timeout_ms: u64) -> Self {
+            let pipeline = gst::Pipeline::new();
+            let liveadder = gst::ElementFactory::make("identity").build().unwrap();
+            let selector = make_selector("selector").unwrap();
+            let tee = gst::ElementFactory::make("tee")
+                .property("allow-not-linked", true)
+                .build()
+                .unwrap();
+            let sink = gst::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .property("async", false)
+                .build()
+                .unwrap();
+            pipeline
+                .add_many([&liveadder, &selector, &tee, &sink])
+                .unwrap();
+            gst::Element::link_many([&selector, &tee, &sink]).unwrap();
+            let decoded = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&decoded);
+            sink.static_pad("sink")
+                .unwrap()
+                .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    gst::PadProbeReturn::Ok
+                });
+            let video = VideoSlots::for_test(&[(&selector, &tee, true)], policy, timeout_ms);
+            Output {
+                pipeline,
+                liveadder,
+                sink,
+                decoded,
+                video,
             }
         }
-        let pipeline = gst::Pipeline::new();
-        let (bin, source_tee) = rtp_source();
-        let liveadder = gst::ElementFactory::make("identity").build().unwrap();
-        let tee = gst::ElementFactory::make("tee")
-            .property("allow-not-linked", true)
-            .build()
+
+        fn add_source(&self, width: i32) -> (gst::Bin, gst::Element, gst::Element) {
+            let (bin, tee, valve) = rtp_source(width);
+            self.pipeline.add(&bin).unwrap();
+            bin.sync_state_with_parent().unwrap();
+            (bin, tee, valve)
+        }
+
+        fn connect(&self, bin: &gst::Bin, pad: &gst::Pad, stream: usize) {
+            setup_stream_with_caps_detection(
+                bin.upcast_ref(),
+                pad,
+                &self.liveadder,
+                &self.video,
+                "whep",
+                stream,
+                &None,
+            )
             .unwrap();
-        let sink = gst::ElementFactory::make("fakesink")
-            .property("sync", false)
-            .property("async", false)
-            .build()
-            .unwrap();
-        pipeline
-            .add_many([bin.upcast_ref(), &liveadder, &tee, &sink])
-            .unwrap();
-        tee.link(&sink).unwrap();
-        let decoded = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&decoded);
-        sink.static_pad("sink")
-            .unwrap()
-            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
-                counter.fetch_add(1, Ordering::Relaxed);
-                gst::PadProbeReturn::Ok
-            });
-        let video = Arc::new(VideoSlots::for_test(&[(&tee, true)]));
-        pipeline.set_state(gst::State::Playing).unwrap();
+        }
+
+        fn decoded(&self) -> usize {
+            self.decoded.load(Ordering::Relaxed)
+        }
+
+        fn width(&self) -> Option<i32> {
+            self.sink
+                .static_pad("sink")
+                .unwrap()
+                .current_caps()
+                .and_then(|c| c.structure(0).and_then(|s| s.get::<i32>("width").ok()))
+        }
+
+        /// Wait until frames of `width` keep arriving at the output.
+        fn wait_for_width(&self, what: &str, width: i32) {
+            wait_until(what, || self.width() == Some(width));
+            let before = self.decoded();
+            wait_until(what, || self.decoded() >= before + 5);
+        }
+    }
+
+    impl Drop for Output {
+        fn drop(&mut self) {
+            let _ = self.pipeline.set_state(gst::State::Null);
+        }
+    }
+
+    /// A session that ends and starts again within one run: the new video
+    /// stream must decode into the same output, not be discarded because the
+    /// slot still counts as taken or the old decoder still feeds it.
+    #[test]
+    fn a_video_stream_that_comes_back_decodes_into_its_slot_again() {
+        if !plugins_available() {
+            return;
+        }
+        let out = Output::new(Assignment::Fill, 1000);
+        let (bin, source_tee, _valve) = out.add_source(320);
+        out.pipeline.set_state(gst::State::Playing).unwrap();
 
         let first = expose(&bin, &source_tee);
-        setup_stream_with_caps_detection(
-            bin.upcast_ref(),
-            &first,
-            &liveadder,
-            &video,
-            "whep",
-            0,
-            &None,
-        )
-        .unwrap();
-        wait_until("the first stream to decode", || {
-            decoded.load(Ordering::Relaxed) >= 5
-        });
+        out.connect(&bin, &first, 0);
+        out.wait_for_width("the first stream to decode", 320);
 
-        // The session ends: its pad goes away.
+        // The session ends: its pad goes away, and its decoder with it.
         unexpose(&bin, &source_tee, &first);
-        let tee_sink = tee.static_pad("sink").unwrap();
-        wait_until("the old decoder to leave the tee", || !tee_sink.is_linked());
+        wait_until("the old decoder to be removed", || {
+            !out.pipeline
+                .children()
+                .iter()
+                .any(|e| e.name().starts_with("whep:video_decodebin_0_"))
+        });
 
         // A new session: a new pad, a new stream.
-        let before = decoded.load(Ordering::Relaxed);
         let second = expose(&bin, &source_tee);
-        setup_stream_with_caps_detection(
-            bin.upcast_ref(),
-            &second,
-            &liveadder,
-            &video,
-            "whep",
-            1,
-            &None,
-        )
-        .unwrap();
+        out.connect(&bin, &second, 1);
+        let before = out.decoded();
         wait_until("the second stream to decode into the same slot", || {
-            decoded.load(Ordering::Relaxed) >= before + 5
+            out.decoded() >= before + 5
         });
+    }
 
-        pipeline.set_state(gst::State::Null).unwrap();
+    /// A decoder added to a running flow must not put the flow back to
+    /// PAUSED. Its preroll would reach the pipeline, which then waits for
+    /// every sink to preroll; in a flow the sink of an output no stream feeds
+    /// never does, and the flow hangs in PAUSED.
+    #[test]
+    fn adding_a_decoder_keeps_the_flow_playing() {
+        if !plugins_available() {
+            return;
+        }
+        let out = Output::new(Assignment::Fill, 1000);
+        let (bin, source_tee, _valve) = out.add_source(320);
+        out.pipeline.set_state(gst::State::Playing).unwrap();
+        wait_until("the flow to play", || {
+            out.pipeline.current_state() == gst::State::Playing
+        });
+        let bus = out.pipeline.bus().unwrap();
+        while bus.pop().is_some() {}
+
+        let pad = expose(&bin, &source_tee);
+        out.connect(&bin, &pad, 0);
+        out.wait_for_width("the stream to decode", 320);
+
+        while let Some(msg) = bus.pop() {
+            if let gst::MessageView::StateChanged(sc) = msg.view() {
+                let from_pipeline = msg.src() == Some(out.pipeline.upcast_ref::<gst::Object>());
+                assert!(
+                    !(from_pipeline && sc.current() == gst::State::Paused),
+                    "the flow went back to PAUSED when the decoder was added"
+                );
+            }
+        }
+    }
+
+    /// Fill: a second stream waits while the first holds the only output.
+    /// When the first goes silent, its pad still in place as an SFU leaves
+    /// it, the second takes the output after the timeout.
+    #[test]
+    fn fill_hands_the_output_to_a_waiting_stream_when_the_holder_goes_silent() {
+        if !plugins_available() {
+            return;
+        }
+        let out = Output::new(Assignment::Fill, 300);
+        let (bin_a, tee_a, valve_a) = out.add_source(320);
+        let (bin_b, tee_b, _valve_b) = out.add_source(160);
+        out.pipeline.set_state(gst::State::Playing).unwrap();
+
+        let pad_a = expose(&bin_a, &tee_a);
+        out.connect(&bin_a, &pad_a, 0);
+        out.wait_for_width("stream A to decode", 320);
+
+        let pad_b = expose(&bin_b, &tee_b);
+        out.connect(&bin_b, &pad_b, 1);
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(out.width(), Some(320), "B must wait while A sends");
+
+        valve_a.set_property("drop", true);
+        out.wait_for_width("stream B to take over after A went silent", 160);
+    }
+
+    /// Newest: a second stream takes the only output at once, well before
+    /// the timeout, as when an SFU switches its pinned source to a new SSRC.
+    #[test]
+    fn newest_hands_the_output_to_a_new_stream_at_once() {
+        if !plugins_available() {
+            return;
+        }
+        let out = Output::new(Assignment::Newest, 5000);
+        let (bin_a, tee_a, _valve_a) = out.add_source(320);
+        let (bin_b, tee_b, _valve_b) = out.add_source(160);
+        out.pipeline.set_state(gst::State::Playing).unwrap();
+
+        let pad_a = expose(&bin_a, &tee_a);
+        out.connect(&bin_a, &pad_a, 0);
+        out.wait_for_width("stream A to decode", 320);
+
+        let started = Instant::now();
+        let pad_b = expose(&bin_b, &tee_b);
+        out.connect(&bin_b, &pad_b, 1);
+        out.wait_for_width("stream B to take over", 160);
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "B took over through the timeout, not at once"
+        );
     }
 }
