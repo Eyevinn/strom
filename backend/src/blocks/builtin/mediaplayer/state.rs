@@ -653,8 +653,10 @@ impl MediaPlayerState {
         // Set the new URI on source element
         if self.stinger.enabled {
             super::bridge::apply_stinger_decoding(&source_element, &uri);
+            source_element.set_property("uri", super::stinger_source_uri(&uri));
+        } else {
+            source_element.set_property("uri", &uri);
         }
-        source_element.set_property("uri", &uri);
         *self
             .stinger
             .loaded_file
