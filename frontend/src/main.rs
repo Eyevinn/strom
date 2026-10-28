@@ -146,7 +146,7 @@ fn main() {
                 web_options,
                 Box::new(move |cc| {
                     // Force dark theme immediately before app creation
-                    cc.egui_ctx.set_visuals(egui::Visuals::dark());
+                    cc.egui_ctx.set_visuals(themes::egui_dark());
                     // Create app with the parsed mode
                     Ok(Box::new(StromApp::new_with_mode(cc, app_mode)))
                 }),

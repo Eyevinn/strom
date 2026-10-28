@@ -369,8 +369,38 @@ impl StromApp {
         }
     }
 
+    /// Open the flow properties dialog, filling its buffers from the flow.
+    fn open_flow_properties(&mut self, flow_id: strom_types::FlowId, focus_name: bool) {
+        let Some(flow) = self.flows.iter().find(|f| f.id == flow_id) else {
+            return;
+        };
+        let props = &flow.properties;
+        self.properties_name_buffer = flow.name.clone();
+        self.properties_description_buffer = props.description.clone().unwrap_or_default();
+        self.properties_clock_type_buffer = props.clock_type;
+        self.properties_ptp_domain_buffer = props
+            .ptp_domain
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "0".to_string());
+        self.properties_ntp_server_buffer = props.ntp_server.clone().unwrap_or_default();
+        self.properties_ntp_port_buffer = props
+            .ntp_port
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "123".to_string());
+        self.properties_direct_media_timing_buffer = props.direct_media_timing;
+        self.properties_thread_priority_buffer = props.thread_priority;
+        self.properties_cpu_affinity_buffer = props.cpu_affinity;
+        self.properties_ephemeral_buffer = props.ephemeral;
+        self.properties_focus_name = focus_name;
+        self.editing_properties_flow_id = Some(flow_id);
+    }
+
     /// Render the flow properties dialog.
     pub(super) fn render_flow_properties_dialog(&mut self, ui: &mut egui::Ui) {
+        if let Some((flow_id, focus_name)) = self.pending_flow_properties.take() {
+            self.open_flow_properties(flow_id, focus_name);
+        }
+
         let flow_id = match self.editing_properties_flow_id {
             Some(id) => id,
             None => return,
@@ -408,7 +438,18 @@ impl StromApp {
 
                 // Name
                 ui.label("Name");
-                ui.text_edit_singleline(&mut self.properties_name_buffer);
+                let mut name_edit =
+                    egui::TextEdit::singleline(&mut self.properties_name_buffer).show(ui);
+                if std::mem::take(&mut self.properties_focus_name) {
+                    // Rename: focus the field with the whole name selected
+                    let len = self.properties_name_buffer.chars().count();
+                    name_edit.state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(len),
+                    )));
+                    name_edit.state.store(ui.ctx(), name_edit.response.id);
+                    name_edit.response.request_focus();
+                }
                 ui.add_space(10.0);
 
                 // Description
