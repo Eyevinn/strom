@@ -71,8 +71,10 @@ if (-not (Test-Path $InstallerFile)) {
 # development files.
 Write-Host "Unpacking GStreamer..."
 $LogFile = "$((Get-Location).Path)\gstreamer-install.log"
+# The components /TYPE=runtime picked, saved to find their license texts below.
+$InfFile = "$((Get-Location).Path)\gstreamer-install.inf"
 $p = Start-Process ".\$InstallerFile" -Wait -NoNewWindow -PassThru `
-    -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /portable=1 /TYPE=runtime /DIR=`"$GstRoot`" /LOG=`"$LogFile`""
+    -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /portable=1 /TYPE=runtime /DIR=`"$GstRoot`" /LOG=`"$LogFile`" /SAVEINF=`"$InfFile`""
 if ($p.ExitCode -ne 0) {
     if (Test-Path $LogFile) { Get-Content $LogFile -Tail 50 }
     throw "GStreamer installer failed with exit code $($p.ExitCode)"
@@ -265,14 +267,30 @@ if ($Full) {
 
 # Copy the license texts of GStreamer and the libraries it bundles, in both
 # modes. The bundle carries LGPL and GPL code (x264, x265, ...), whose licenses
-# must ship with it.
-Write-Host "Copying license texts..."
-if (-not (Test-Path "$GstRoot\share\licenses")) {
-    throw "GStreamer $Version has no $GstRoot\share\licenses: the bundle would ship without its license texts"
+# must ship with it. The installer puts share\licenses only in the "devel"
+# half of each component, not in "runtime", so the devel half of every
+# component the runtime unpack took is unpacked into a second temp directory,
+# and only share\licenses is taken from it. Nothing else from devel reaches
+# the bundle.
+Write-Host "Unpacking license texts..."
+$runtimeComponents = ((Get-Content $InfFile | Select-String '^Components=').Line -replace '^Components=', '') -split ','
+$develComponents = @($runtimeComponents | Where-Object { $_ -like '*\runtime' } | ForEach-Object { $_ -replace '\\runtime$', '\devel' })
+if ($develComponents.Count -eq 0) {
+    throw "Found no runtime components in $InfFile to take the license texts from"
 }
-if (-not $Full) {
-    Copy-Item "$GstRoot\share\licenses" "$OutputDir\share\" -Recurse -Force
+$LicenseRoot = "$((Get-Location).Path)\$TempDir-licenses"
+if (Test-Path $LicenseRoot) { Remove-Item -Recurse -Force $LicenseRoot }
+$p = Start-Process ".\$InstallerFile" -Wait -NoNewWindow -PassThru `
+    -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /portable=1 /COMPONENTS=`"$($develComponents -join ',')`" /DIR=`"$LicenseRoot`" /LOG=`"$LogFile.licenses`""
+if ($p.ExitCode -ne 0) {
+    if (Test-Path "$LogFile.licenses") { Get-Content "$LogFile.licenses" -Tail 50 }
+    throw "GStreamer installer failed with exit code $($p.ExitCode) unpacking the license texts"
 }
+if (-not (Test-Path "$LicenseRoot\share\licenses\x264")) {
+    throw "GStreamer $Version has no share\licenses (checked for x264) in its devel components: the bundle would ship without its license texts"
+}
+Copy-Item "$LicenseRoot\share\licenses" "$OutputDir\share\" -Recurse -Force
+Remove-Item -Recurse -Force $LicenseRoot
 Write-Host "  Copied $((Get-ChildItem "$OutputDir\share\licenses" -Directory).Count) license folders"
 
 # Copy libexec files (contains gst-ptp-helper.exe for PTP clock support)
