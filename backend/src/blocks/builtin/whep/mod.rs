@@ -9,7 +9,6 @@ pub mod output;
 use strom_types::block::BlockDefinition;
 
 pub use input::WHEPInputBuilder;
-pub(crate) use output::explicit_track_count;
 pub use output::{migrate_legacy_mode, WHEPOutputBuilder};
 
 /// Get metadata for WHEP blocks (for UI/API).

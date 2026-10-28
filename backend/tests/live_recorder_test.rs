@@ -265,6 +265,72 @@ fn largest_gap(pts: &[gst::ClockTime]) -> (gst::ClockTime, gst::ClockTime) {
     (gap, span)
 }
 
+/// An MP4 file's index must list every fragment, from right after it to the
+/// last byte of the file. Otherwise FFmpeg, and with it Chrome's `<video>`,
+/// reads the whole file before it plays.
+fn assert_indexed(path: &Path) {
+    let data = std::fs::read(path).unwrap();
+    let be32 = |at: usize| u32::from_be_bytes(data[at..at + 4].try_into().unwrap());
+    let mut boxes = Vec::new();
+    let mut pos = 0;
+    while pos + 8 <= data.len() {
+        let size = be32(pos) as usize;
+        assert!(size >= 8 && pos + size <= data.len(), "bad box at {}", pos);
+        boxes.push((data[pos + 4..pos + 8].to_vec(), pos, size));
+        pos += size;
+    }
+    assert_eq!(pos, data.len(), "{} ends inside a box", path.display());
+    let kinds: Vec<&[u8]> = boxes.iter().map(|(k, _, _)| k.as_slice()).collect();
+    let Some(sidx) = kinds.iter().position(|k| k == b"sidx") else {
+        panic!("{} has no index", path.display());
+    };
+    let first_moof = kinds.iter().position(|k| k == b"moof").unwrap();
+    assert!(
+        kinds.iter().position(|k| k == b"moov").unwrap() < sidx && sidx < first_moof,
+        "{}: index out of place in {:?}",
+        path.display(),
+        kinds
+            .iter()
+            .map(|k| String::from_utf8_lossy(k))
+            .collect::<Vec<_>>()
+    );
+    let (_, start, size) = boxes[sidx];
+    assert_eq!(data[start + 8], 1, "sidx version");
+    let first_offset = u64::from_be_bytes(data[start + 28..start + 36].try_into().unwrap());
+    let count = u16::from_be_bytes(data[start + 38..start + 40].try_into().unwrap()) as usize;
+    let mut offset = start + size + first_offset as usize;
+    for i in 0..count {
+        let entry = start + 40 + i * 12;
+        let kind = &data[offset + 4..offset + 8];
+        assert!(
+            kind == b"styp" || kind == b"moof",
+            "{}: entry {} points at {:?}",
+            path.display(),
+            i,
+            String::from_utf8_lossy(kind)
+        );
+        assert!(
+            be32(entry + 4) > 0,
+            "{}: entry {} has no duration",
+            path.display(),
+            i
+        );
+        offset += (be32(entry) & 0x7fff_ffff) as usize;
+    }
+    assert_eq!(
+        offset,
+        data.len(),
+        "{}: index ends short of the file",
+        path.display()
+    );
+    assert_eq!(
+        count,
+        kinds.iter().filter(|k| *k == b"moof").count(),
+        "{}: index count",
+        path.display()
+    );
+}
+
 fn file_size(files: &[PathBuf]) -> u64 {
     recorder::total_bytes(files)
 }
@@ -528,6 +594,7 @@ fn split_files_each_play_on_their_own() {
             file.display(),
             first
         );
+        assert_indexed(file);
     }
 }
 
@@ -727,6 +794,7 @@ fn a_stop_without_eos_still_writes_the_last_fragment() {
     );
     let files = recorder::recordings(dir.path(), "rec");
     assert_eq!(files.len(), 1, "{:?}", files);
+    assert_indexed(&files[0]);
     let samples = demux(&files[0]);
     for (kind, pts) in &samples {
         let (_, span) = largest_gap(pts);

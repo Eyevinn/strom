@@ -7,7 +7,7 @@ pub(crate) fn whip_output_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.whip_output".to_string(),
         name: "WHIP Output".to_string(),
-        description: "Sends audio via WebRTC WHIP protocol. Default uses stable whipsink element.".to_string(),
+        description: "Publishes audio and, optionally, video to a WHIP server over WebRTC. Audio arrives raw and is encoded to Opus here; video must arrive encoded as H.264, VP8 or VP9, so place a Video Encoder block before the video input. Default uses the stable whipsink element.".to_string(),
         category: "Outputs".to_string(),
         exposed_properties: vec![
             ExposedProperty {
@@ -30,6 +30,34 @@ pub(crate) fn whip_output_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "implementation".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "num_audio_tracks".to_string(),
+                label: "Number of Audio Tracks".to_string(),
+                description: "Number of audio inputs (0 = no audio). Each is encoded to Opus and sent as its own track.".to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(1)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "num_audio_tracks".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "num_video_tracks".to_string(),
+                label: "Number of Video Tracks".to_string(),
+                description: "Number of video inputs (0 = audio only, the default). Video must arrive encoded as H.264, VP8 or VP9: place a Video Encoder block before each video input.".to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(0)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "num_video_tracks".to_string(),
                     transform: None,
                 },
                 live: false,
@@ -122,6 +150,8 @@ pub(crate) fn whip_output_definition() -> BlockDefinition {
                 persist: None,
             },
         ],
+        // Defaults only: the pads are computed from num_audio_tracks and
+        // num_video_tracks by WHIPOutputBuilder::get_external_pads.
         external_pads: ExternalPads {
             inputs: vec![ExternalPad {
                 label: None,

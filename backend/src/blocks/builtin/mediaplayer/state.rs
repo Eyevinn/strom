@@ -247,6 +247,15 @@ impl ParkFlags {
 pub const CUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl MediaPlayerState {
+    /// The block's element in the flow that stands for it: its first video
+    /// output, else its first audio output. Finds the flow's pipeline, and is
+    /// where the internal pipeline's context messages are posted.
+    pub fn flow_anchor(&self) -> Option<&gst_app::AppSrc> {
+        self.video_appsrcs
+            .first()
+            .or_else(|| self.audio_appsrcs.first())
+    }
+
     /// `n` free slots.
     pub fn free_slots(n: usize) -> Mutex<Vec<Option<String>>> {
         Mutex::new(vec![None; n])
@@ -644,8 +653,10 @@ impl MediaPlayerState {
         // Set the new URI on source element
         if self.stinger.enabled {
             super::bridge::apply_stinger_decoding(&source_element, &uri);
+            source_element.set_property("uri", super::stinger_source_uri(&uri));
+        } else {
+            source_element.set_property("uri", &uri);
         }
-        source_element.set_property("uri", &uri);
         *self
             .stinger
             .loaded_file

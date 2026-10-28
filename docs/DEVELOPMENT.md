@@ -48,23 +48,25 @@ Make sure you have the following installed:
 | Feature | Description | Extra dependencies |
 |---------|-------------|--------------------|
 | `nvidia` | NVIDIA GPU monitoring (default) | None |
-| `lsp` | Built-in lsp-plugins-rs gate, compressor, EQ and limiter for the mixer's Rust DSP backend (default; LGPL-3.0-or-later). Without it those Rust-backend stages pass audio through unprocessed; the LV2 backend is unchanged | None |
-| `efp` | EFP/SRT input and output blocks | `cmake`, `libclang-dev` (Linux) / `cmake` (macOS, via Homebrew) |
+| `lsp` | Built-in lsp-plugins-rs gate, compressor, EQ and limiter for the mixer's Rust DSP backend (default; LGPL-3.0-or-later). Without it the mixer offers only the LV2 backend (external LSP plugins), and a flow saved with the Rust backend is built with LV2 | None |
+| `efp` | EFP/SRT input and output blocks | `cmake` |
 | `no-gui` | Build without the native GUI (server only; used by the Docker image) | None |
 
 ```bash
 # Build with EFP support (Linux)
-sudo apt install cmake libclang-dev
+sudo apt install cmake
 cargo run --release --features efp
 
 # Build with EFP support (macOS)
 brew install cmake
 cargo run --release --features efp
+
+# Build with EFP support (Windows, MSVC; CMake ships with Visual Studio)
+cargo run --release --features efp
 ```
 
-Pre-built Linux and macOS binaries, plus the Docker images, ship with the `efp`
-feature enabled. Windows binaries currently ship without EFP because
-`gst-plugin-efp` has not been validated on that platform yet.
+Pre-built Linux, macOS and Windows binaries, plus the Docker images, ship with
+the `efp` feature enabled.
 
 ## Project Structure
 
@@ -136,7 +138,7 @@ Other settings (logging, ICE servers, port pool, discovery) are set in `.strom.t
 - Linux: `~/.local/share/strom/`
 - Windows: `%APPDATA%\eyevinn\strom\data\`
 - macOS: `~/Library/Application Support/com.eyevinn.strom/`
-- Docker: `./data` (the image sets `STROM_DATA_DIR=/data`)
+- Docker: `/data` (the image sets `STROM_DATA_DIR=/data`)
 
 ### Frontend (Development)
 
@@ -255,7 +257,8 @@ cargo run -- --port 8081
 STROM_PORT=8081 cargo run
 ```
 
-Then update the frontend API URL if needed.
+The embedded frontend follows the port it is served from. A frontend from `trunk serve`
+(port 8095) always talks to a backend on port 8080, so use port 8080 when you work with trunk.
 
 ### Storage files in unexpected location
 By default, storage files go to platform-specific directories. To use current directory:

@@ -583,6 +583,54 @@ mod keyed_alpha {
             frames
         );
     }
+
+    /// `queue_pgm_mv` answers ALLOCATION with what the multiview's PGM tile
+    /// proposes. `tee_pgm` keeps only metas every branch reports, so an empty
+    /// answer drops the PGM compositor's video meta.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_pgm_tile_answers_allocation_like_the_multiview() {
+        use gstreamer::prelude::*;
+        let block_id = "vmk_alloc_answer";
+        let mut manager = build_cpu_manager(&build_flow(block_id, ""));
+        manager.start().expect("start CPU pipeline");
+        let pgm_sink = manager
+            .pipeline()
+            .by_name("pgmsink")
+            .expect("pgmsink in pipeline")
+            .downcast::<gstreamer_app::AppSink>()
+            .expect("appsink type");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while pgm_sink
+            .try_pull_sample(gstreamer::ClockTime::from_mseconds(100))
+            .is_none()
+        {
+            assert!(std::time::Instant::now() < deadline, "PGM never ran");
+        }
+
+        let queue = manager
+            .pipeline()
+            .by_name(&format!("{}:queue_pgm_mv", block_id))
+            .expect("queue_pgm_mv in pipeline");
+        let queue_sink = queue.static_pad("sink").expect("queue sink pad");
+        let tile = queue
+            .static_pad("src")
+            .and_then(|p| p.peer())
+            .expect("the branch into the multiview's PGM tile");
+        let caps = queue
+            .static_pad("src")
+            .and_then(|p| p.current_caps())
+            .expect("PGM tile negotiated");
+
+        let multiview = common::allocation_proposal(&tile, &caps);
+        let answer = common::allocation_proposal(&queue_sink, &caps);
+        manager.stop().expect("stop");
+        drop(manager);
+
+        assert_eq!(
+            answer, multiview,
+            "queue_pgm_mv answers ALLOCATION differently from the multiview's PGM tile"
+        );
+    }
 }
 
 /// Regression tests: the `/pip` write path must reject a zone whose source

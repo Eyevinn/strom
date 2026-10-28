@@ -10,15 +10,20 @@
 //! - AV1
 //! - VP9
 //!
-//! The block creates a chain: videoconvert -> encoder -> parser -> capsfilter
-//! - videoconvert: Ensures compatible pixel format for the encoder
+//! The block creates a chain: input -> videoconvert -> encoder -> parser -> capsfilter
+//! - input: `identity` whose sink pad adapts the memory that arrives to what the
+//!   encoder takes, from the negotiated caps (see `gst::download_front`)
+//! - videoconvert: Ensures compatible pixel format for the encoder. Plain
+//!   `videoconvert`, never `autovideoconvert`: it passes GPU memory the encoder
+//!   takes straight through, and converts system memory on the CPU
 //! - encoder: Selected hardware or software encoder
 //! - parser: Codec-specific parser (h264parse, h265parse, etc.) for proper stream formatting
 //! - capsfilter: Sets output caps for proper codec negotiation
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
-use crate::gpu::{self, video_convert_mode};
+use crate::gst::download_front;
 use crate::gst::pipeline::properties::set_property_checked;
+use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -114,23 +119,26 @@ impl BlockBuilder for VideoEncBuilder {
 
         let profile = parse_profile(properties);
 
-        // Create elements
-        // Use detected video convert mode (autovideoconvert if GPU interop works, videoconvert otherwise)
-        // Note: We always use "videoconvert" as the element ID for consistent external pad references,
-        // even when the actual GStreamer element is "autovideoconvert"
-        let convert_mode = video_convert_mode();
-        let convert_element_name = convert_mode.element_name();
+        // Create elements.
+        //
+        // The converter is plain `videoconvert`, never `autovideoconvert`.
+        // `autovideoconvert` turned CUDA memory from
+        // `nvh264dec` into GL RGBA that `nvh264enc` never negotiates from
+        // (#1104). `videoconvert` passes GPU memory through untouched when the
+        // encoder lists it, and converts system memory; the input front puts
+        // a download in front of it for GPU memory the encoder does not take.
+        let input_id = format!("{}:input", instance_id);
         let convert_id = format!("{}:videoconvert", instance_id);
         let encoder_id = format!("{}:encoder", instance_id);
         let capsfilter_id = format!("{}:capsfilter", instance_id);
 
-        let videoconvert = gst::ElementFactory::make(convert_element_name)
-            .name(&convert_id)
-            .build()
-            .map_err(|e| {
-                BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
-            })?;
-        gpu::configure_video_convert(&videoconvert);
+        // What arrives depends on the producer, often a decoder `decodebin`
+        // picks at runtime, so the memory is adapted from the negotiated caps.
+        let front = download_front::convert_front(
+            &input_id,
+            &convert_id,
+            &format!("Video Encoder ({})", encoder_name),
+        )?;
 
         let encoder = gst::ElementFactory::make(&encoder_name)
             .name(&encoder_id)
@@ -174,12 +182,13 @@ impl BlockBuilder for VideoEncBuilder {
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
 
         info!(
-            "VideoEncoder block created (chain: {} -> {} -> {} -> capsfilter [{}])",
-            convert_element_name, encoder_name, parser_name, caps_str
+            "VideoEncoder block created (chain: input -> {} -> {} -> {} -> capsfilter [{}])",
+            VIDEO_CONVERT_FACTORY, encoder_name, parser_name, caps_str
         );
 
-        // Chain: videoconvert/autovideoconvert -> encoder -> parser -> capsfilter
+        // Chain: input -> videoconvert -> encoder -> parser -> capsfilter
         let internal_links = vec![
+            front.link(),
             (
                 ElementPadRef::pad(&convert_id, "src"),
                 ElementPadRef::pad(&encoder_id, "sink"),
@@ -196,7 +205,8 @@ impl BlockBuilder for VideoEncBuilder {
 
         Ok(BlockBuildResult {
             elements: vec![
-                (convert_id, videoconvert),
+                (input_id, front.front),
+                (convert_id, front.convert),
                 (encoder_id, encoder),
                 (parser_id, parser),
                 (capsfilter_id, capsfilter),
@@ -1119,7 +1129,7 @@ fn videoenc_definition() -> BlockDefinition {
                 label: None,
                 name: "video_in".to_string(),
                 media_type: MediaType::Video,
-                internal_element_id: "videoconvert".to_string(),
+                internal_element_id: "input".to_string(),
                 internal_pad_name: "sink".to_string(),
             }],
             outputs: vec![ExternalPad {

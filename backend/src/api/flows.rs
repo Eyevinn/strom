@@ -1122,6 +1122,19 @@ pub async fn get_block_sdp(
         .into_response())
 }
 
+/// The status for a failed element or pad property call: 404 when the flow,
+/// its pipeline, the element or the pad is not there, 400 for everything else
+/// (a bad value, a property that cannot change in this state).
+fn property_error_status(e: &PipelineError) -> StatusCode {
+    match e {
+        PipelineError::FlowNotFound(_)
+        | PipelineError::FlowNotRunning(_)
+        | PipelineError::ElementNotFound(_)
+        | PipelineError::PadNotFound { .. } => StatusCode::NOT_FOUND,
+        _ => StatusCode::BAD_REQUEST,
+    }
+}
+
 /// Get current property values from a running element.
 ///
 /// Returns all readable properties and their current values from an element
@@ -1155,7 +1168,7 @@ pub async fn get_element_properties(
         .map_err(|e| {
             error!("Failed to get element properties: {}", e);
             (
-                StatusCode::BAD_REQUEST,
+                property_error_status(&e),
                 Json(ErrorResponse::with_details(
                     "Failed to get element properties",
                     e.to_string(),
@@ -1208,7 +1221,7 @@ pub async fn update_element_property(
         .map_err(|e| {
             error!("Failed to update property: {}", e);
             (
-                StatusCode::BAD_REQUEST,
+                property_error_status(&e),
                 Json(ErrorResponse::with_details(
                     "Failed to update property",
                     e.to_string(),
@@ -1272,7 +1285,7 @@ pub async fn get_pad_properties(
         .map_err(|e| {
             error!("Failed to get pad properties: {}", e);
             (
-                StatusCode::BAD_REQUEST,
+                property_error_status(&e),
                 Json(ErrorResponse::with_details(
                     "Failed to get pad properties",
                     e.to_string(),
@@ -1336,7 +1349,7 @@ pub async fn update_pad_property(
         .map_err(|e| {
             error!("Failed to update pad property: {}", e);
             (
-                StatusCode::BAD_REQUEST,
+                property_error_status(&e),
                 Json(ErrorResponse::with_details(
                     "Failed to update pad property",
                     e.to_string(),

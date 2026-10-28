@@ -33,6 +33,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   TRUNK_VERSION: "0.21.14"
+  # The GStreamer minor version the Linux and macOS test jobs test (#964):
+  # .github/scripts/check-gst-baseline.sh fails below it and warns above it.
+  GSTREAMER_BASELINE: "1.28"
   CARGO_INCREMENTAL: 0
   # Line tables only in dev/test builds: backtraces keep file and line, but
   # the full debuginfo that made test builds slow to link and the sccache
@@ -106,50 +109,62 @@ jobs:
     # for push and workflow_dispatch, so it is a no-op there.
     if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
     needs: preflight
+    # The tests run on the GStreamer baseline (#964), not on the runner's
+    # Ubuntu 24.04 GStreamer 1.24.2, which fails on bugs the shipped versions
+    # do not have (avdec dropping an intra-only clip's last frame, fixed in
+    # 1.24.4). ubuntu:26.04 carries 1.28, the base the Docker images move to (#1101).
     runs-on: ubuntu-24.04
+    container: ubuntu:26.04
     timeout-minutes: 25
     env:
       RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
     steps:
+      # The container has none of the hosted runner's tools, and no sudo.
+      # Plain apt-get, not cache-apt-pkgs-action: a real install runs the
+      # postinst scripts and triggers (the libblas alternatives, the GSettings
+      # schemas) that a restored package cache skips.
+      # libegl-mesa0 and libgl1-mesa-dri give the GL tests a surfaceless EGL
+      # context (llvmpipe). libsoup-3.0-0 and gsettings-desktop-schemas are
+      # what souphttpsrc loads and looks up the system proxy in.
+      - name: Install build and GStreamer packages
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git pkg-config cmake libclang-dev procps \
+            libunwind-dev libssl-dev libcairo2-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice gstreamer1.0-gl \
+            gstreamer1.0-tools libsoup-3.0-0 gsettings-desktop-schemas libegl-mesa0 libgl1-mesa-dri \
+            zstd
+
       - uses: actions/checkout@v6
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Check GStreamer is the baseline
+        run: .github/scripts/check-gst-baseline.sh
 
-      # Package list must stay identical to build-linux-x86_64 so both jobs
-      # share one apt cache entry (the action keys by package list + arch).
-      - name: Cache apt packages
-        uses: awalsh128/cache-apt-pkgs-action@v1.6.1
-        with:
-          packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-gl gstreamer1.0-plugins-good libsoup-3.0-0 gsettings-desktop-schemas gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice libegl-mesa0 libgl1-mesa-dri pkg-config cmake libclang-dev
-          version: 1.5
-
-      # cache-apt-pkgs-action restores package files but does not run postinst,
-      # so update-alternatives links such as /usr/lib/*/libblas.so.3 never get
-      # created. gst-libav then fails to load ("libblas.so.3: cannot open shared
-      # object file"), avenc_aac goes missing, and every test requiring it skips
-      # green. Reinstalling runs postinst; ldconfig then picks the links up.
-      # The GSettings schemas are compiled by a trigger too: without
-      # org.gnome.system.proxy in gschemas.compiled, GIO aborts any test
-      # process whose souphttpsrc looks up the system proxy (SIGTRAP).
-      # Only needed here: the build jobs never load a plugin.
-      - name: Repair alternatives for cached libraries
+      # The channel rust-toolchain.toml pins, with the rustfmt and clippy this
+      # job uses but without the wasm32 target it also lists (check-wasm's).
+      # RUSTUP_TOOLCHAIN overrides the file, so rustup installs nothing more.
+      - name: Install Rust
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --reinstall libblas3 liblapack3
-          sudo ldconfig
-          sudo glib-compile-schemas /usr/share/glib-2.0/schemas
+          CHANNEL=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          test -n "$CHANNEL"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain "$CHANNEL" --component rustfmt,clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "RUSTUP_TOOLCHAIN=$CHANNEL" >> "$GITHUB_ENV"
 
       # save-if main: PR runs restore the main-branch cache (GHA cache scoping
       # falls back to the base branch) but don't save their own per-branch
       # copy — that copy doubled every rust-cache entry against the 10 GB
       # repo ceiling. Changed workspace crates rebuild on PRs but hit sccache.
+      # Its own key: the build scripts here link against the container's
+      # libraries, not the hosted runner's.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: linux-x86_64
+          shared-key: linux-x86_64-ubuntu-26.04
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -243,6 +258,70 @@ jobs:
           name: frontend-dist
           path: backend/dist
           retention-days: 1
+
+  # The GStreamer floor: Strom must still build and run on the oldest GStreamer
+  # it supports, 1.22 from Debian 12 bookworm (see MIN_GSTREAMER_VERSION in
+  # backend/src/version.rs and the `v1_22` crate features in Cargo.toml). Build
+  # plus a smoke test only, not the full suite: the suite would chase 1.22 bugs
+  # production never sees. A failure here means a newer GStreamer API slipped in
+  # ungated; gate it on gst::version() rather than raising the floor.
+  check-floor:
+    name: Check GStreamer floor (Debian 12, GStreamer 1.22)
+    if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
+    needs: preflight
+    runs-on: ubuntu-24.04
+    container: debian:bookworm
+    timeout-minutes: 30
+    env:
+      RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
+    steps:
+      # The check-linux package list, as far as bookworm has it (all of it,
+      # today), plus what a bare container lacks. No trunk: the build script
+      # then embeds a placeholder page instead of the WASM frontend, as in
+      # check-linux.
+      - name: Install build tools and GStreamer 1.22
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential gstreamer1.0-tools \
+            libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-gl gstreamer1.0-plugins-good libsoup-3.0-0 gsettings-desktop-schemas gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice libegl-mesa0 libgl1-mesa-dri pkg-config cmake libclang-dev
+          gst-inspect-1.0 --version
+          pkg-config --modversion gstreamer-1.0
+
+      - uses: actions/checkout@v6
+
+      # The channel rust-toolchain.toml pins, without the rustfmt, clippy and
+      # wasm32 extras it lists: this job only builds and tests the backend.
+      # RUSTUP_TOOLCHAIN overrides the file, so rustup installs nothing more.
+      - name: Install Rust
+        run: |
+          CHANNEL=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          test -n "$CHANNEL"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$CHANNEL"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "RUSTUP_TOOLCHAIN=$CHANNEL" >> "$GITHUB_ENV"
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: floor-bookworm
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Setup sccache
+        if: needs.preflight.outputs.cache_ok == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      # The features the shipped Linux binary has (release.yml), so the EFP
+      # plugin's static registration runs on 1.22 too.
+      - name: Build
+        run: cargo build --features efp
+
+      # Starts Strom the way main does and drives a few core flows to PLAYING
+      # through the API. The test fails, never skips, when an element it needs
+      # is missing, so STROM_REQUIRE_GST_PLUGINS is not needed here.
+      - name: Smoke test on GStreamer 1.22
+        run: cargo test --features efp --test gst_floor_smoke_test
 
   # OpenAPI breaking change detection (PRs only)
   api-contract:
@@ -384,9 +463,10 @@ jobs:
           install -m 0755 /tmp/cargo-zigbuild-x86_64-unknown-linux-gnu/cargo-zigbuild "$HOME/.cargo/bin/cargo-zigbuild"
 
       # Cached apt install — avoids re-downloading the GStreamer dev stack
-      # (~1 min) on every build. The package list must stay identical to
-      # check-linux so both x86_64 jobs share one apt cache entry; arm64 gets
-      # its own entry automatically (the action keys by list + runner arch).
+      # (~1 min) on every build. The two build jobs keep one package list;
+      # each arch gets its own entry (the action keys by list + runner arch).
+      # They stay on the hosted 24.04 image: they only compile and link, and
+      # check-linux runs the tests on the baseline in a container.
       - name: Install GStreamer (cached)
         uses: awalsh128/cache-apt-pkgs-action@v1.6.1
         with:
@@ -487,9 +567,10 @@ jobs:
           install -m 0755 /tmp/cargo-zigbuild-aarch64-unknown-linux-gnu/cargo-zigbuild "$HOME/.cargo/bin/cargo-zigbuild"
 
       # Cached apt install — avoids re-downloading the GStreamer dev stack
-      # (~1 min) on every build. The package list must stay identical to
-      # check-linux so both x86_64 jobs share one apt cache entry; arm64 gets
-      # its own entry automatically (the action keys by list + runner arch).
+      # (~1 min) on every build. The two build jobs keep one package list;
+      # each arch gets its own entry (the action keys by list + runner arch).
+      # They stay on the hosted 24.04 image: they only compile and link, and
+      # check-linux runs the tests on the baseline in a container.
       - name: Install GStreamer (cached)
         uses: awalsh128/cache-apt-pkgs-action@v1.6.1
         with:
@@ -559,50 +640,10 @@ jobs:
 
       - name: Install GStreamer
         # The one step in this job that cannot take the `shell: bash` default:
-        # it needs Invoke-WebRequest and Start-Process. That makes it the one
-        # step that still has to check every exit code by hand — `pwsh` fails a
-        # step on the last command's status alone, and the three GITHUB_ENV
-        # writes at the end always succeed.
+        # the script needs Invoke-WebRequest and Start-Process, so it checks
+        # every exit code by hand. Shared with release.yml.
         shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $GSTREAMER_VERSION = "1.26.10"
-          $BASE_URL = "https://github.com/Eyevinn/strom/releases/download/gstreamer-deps"
-
-          # Start-Process discards the exit code without -PassThru, so a failed
-          # install reads as green here and surfaces 20 minutes later as a
-          # missing element, which looks like a broken test rather than a
-          # broken install.
-          function Install-Msi($Path, $Label) {
-            Write-Host "Installing $Label..."
-            $p = Start-Process msiexec.exe -Wait -NoNewWindow -PassThru `
-              -ArgumentList "/i $Path /quiet /qn ADDLOCAL=ALL INSTALLDIR=D:\gstreamer"
-            if ($p.ExitCode -ne 0) {
-              throw "msiexec failed for $Label with exit code $($p.ExitCode)"
-            }
-          }
-
-          Write-Host "Downloading GStreamer runtime..."
-          Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer.msi
-          # ADDLOCAL=ALL: without it msiexec installs the MSI's default feature
-          # set, which leaves out plugin groups the tests need — x264enc
-          # (gst-plugins-ugly) among them, which made both recorder tests skip
-          # green on this runner alone.
-          Install-Msi "gstreamer.msi" "GStreamer runtime"
-
-          Write-Host "Downloading GStreamer development files..."
-          Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-devel-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer-devel.msi
-          Install-Msi "gstreamer-devel.msi" "GStreamer development files"
-
-          choco install pkgconfiglite --yes --no-progress --allow-empty-checksums
-          if ($LASTEXITCODE -ne 0) {
-            throw "choco install pkgconfiglite failed with exit code $LASTEXITCODE"
-          }
-
-          echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=D:\gstreamer\1.0\msvc_x86_64\" >> $env:GITHUB_ENV
-          echo "D:\gstreamer\1.0\msvc_x86_64\bin" >> $env:GITHUB_PATH
-          echo "PKG_CONFIG_PATH=D:\gstreamer\1.0\msvc_x86_64\lib\pkgconfig" >> $env:GITHUB_ENV
+        run: .github/scripts/install-gstreamer-windows.ps1 -Version 1.28.8
 
       - name: Download frontend dist
         uses: actions/download-artifact@v8
@@ -620,7 +661,7 @@ jobs:
 
       - name: Run Clippy
         run: |
-          cargo clippy --package strom -- -D warnings
+          cargo clippy --package strom --features efp -- -D warnings
 
       - name: Run tests
         run: |
@@ -638,7 +679,7 @@ jobs:
             done
           done < <(echo "$PATH" | tr ':' '\n')
           export PATH="$gst_bin:$PATH"
-          cargo test --no-fail-fast --package strom
+          cargo test --no-fail-fast --package strom --features efp
           cargo test --package strom-types
         env:
           # Turn a missing-element skip into a failure — see plugins_available().
@@ -655,7 +696,7 @@ jobs:
       - name: Build
         if: github.event_name != 'pull_request'
         run: |
-          cargo build --release --package strom
+          cargo build --release --package strom --features efp
 
       - name: Upload backend binary
         if: github.event_name != 'pull_request'
@@ -716,6 +757,11 @@ jobs:
           brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav libnice-gstreamer
           echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig:$(brew --prefix gstreamer)/lib/pkgconfig:$(brew --prefix glib)/lib/pkgconfig" >> $GITHUB_ENV
           echo "LIBRARY_PATH=$(brew --prefix)/lib" >> $GITHUB_ENV
+
+      # Homebrew cannot be pinned: this is how a move past the baseline shows
+      # (a warning, so the release build still runs).
+      - name: Check GStreamer is the baseline
+        run: .github/scripts/check-gst-baseline.sh
 
       - name: Download frontend dist
         uses: actions/download-artifact@v8

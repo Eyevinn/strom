@@ -1,4 +1,5 @@
-//! Just enough ISO BMFF box reading to make each split file start at zero.
+//! Just enough ISO BMFF box reading to make each split file start at zero,
+//! and to index each file when it closes.
 //!
 //! The muxer numbers time through the whole recording, so the second file's
 //! first fragment says it starts at, say, 38 s, and players show a 46 s file
@@ -6,6 +7,12 @@
 //! that time per track, in the track's own timescale. The sink subtracts the
 //! file's start from every `tfdt` it writes, the same instant for every track
 //! so they stay in sync. Values change in place; no box changes size.
+//!
+//! A fragmented file with no `sidx` (segment index) makes FFmpeg's demuxer,
+//! and so Chrome's `<video>`, read every `moof` in the file before it reports
+//! metadata: over HTTP that is the whole file. One `sidx` ahead of the first
+//! fragment that covers every fragment to the end of the file stops that. An
+//! `mfra` at the end does not; FFmpeg skips it by default.
 
 use std::collections::HashMap;
 
@@ -50,7 +57,18 @@ fn read_u32(data: &[u8], at: usize) -> Option<u32> {
 
 /// Track id → timescale, from an init segment (`ftyp` + `moov`).
 pub fn track_timescales(init: &[u8]) -> HashMap<u32, u32> {
-    let mut result = HashMap::new();
+    tracks(init).into_iter().collect()
+}
+
+/// The first track in an init segment, as (track id, timescale): the track a
+/// `sidx` refers to.
+pub fn first_track(init: &[u8]) -> Option<(u32, u32)> {
+    tracks(init).into_iter().next()
+}
+
+/// (track id, timescale) of each track, in `moov` order.
+fn tracks(init: &[u8]) -> Vec<(u32, u32)> {
+    let mut result = Vec::new();
     let Some(moov) = child(init, b"moov") else {
         return result;
     };
@@ -72,8 +90,27 @@ pub fn track_timescales(init: &[u8]) -> HashMap<u32, u32> {
             });
         if let (Some(id), Some(ts)) = (track_id, timescale) {
             if ts > 0 {
-                result.insert(id, ts);
+                result.push((id, ts));
             }
+        }
+    }
+    result
+}
+
+/// Track id → default sample duration, from the `trex` boxes of an init
+/// segment. A fragment whose `tfhd` and `trun` give no duration uses it.
+pub fn default_sample_durations(init: &[u8]) -> HashMap<u32, u32> {
+    let mut result = HashMap::new();
+    let Some(mvex) = child(init, b"moov").and_then(|moov| child(moov, b"mvex")) else {
+        return result;
+    };
+    for (kind, start, end) in boxes(mvex) {
+        if &kind != b"trex" {
+            continue;
+        }
+        let trex = &mvex[start..end];
+        if let (Some(id), Some(duration)) = (read_u32(trex, 4), read_u32(trex, 12)) {
+            result.insert(id, duration);
         }
     }
     result
@@ -125,6 +162,138 @@ pub fn fragment_start_ns(fragment: &[u8], timescales: &HashMap<u32, u32>) -> Opt
             Some((value * 1_000_000_000 / ts) as u64)
         })
         .min()
+}
+
+/// Where a fragment ends, in nanoseconds: the latest track's decode time plus
+/// the duration of its samples.
+pub fn fragment_end_ns(
+    fragment: &[u8],
+    timescales: &HashMap<u32, u32>,
+    default_durations: &HashMap<u32, u32>,
+) -> Option<u64> {
+    let mut end = None;
+    for (kind, moof_start, moof_end) in boxes(fragment) {
+        if &kind != b"moof" {
+            continue;
+        }
+        let moof = &fragment[moof_start..moof_end];
+        for (kind, traf_start, traf_end) in boxes(moof) {
+            if &kind != b"traf" {
+                continue;
+            }
+            let traf = &moof[traf_start..traf_end];
+            let tfhd = child(traf, b"tfhd")?;
+            let track_id = read_u32(tfhd, 4)?;
+            let ts = *timescales.get(&track_id)? as u128;
+            let tfdt = child(traf, b"tfdt")?;
+            let decode_time = if tfdt.first() == Some(&1) {
+                u64::from_be_bytes(tfdt.get(4..12)?.try_into().ok()?)
+            } else {
+                read_u32(tfdt, 4)? as u64
+            };
+            let default = tfhd_default_duration(tfhd)
+                .or_else(|| default_durations.get(&track_id).copied())
+                .unwrap_or(0);
+            let mut duration = 0u64;
+            for (kind, start, run_end) in boxes(traf) {
+                if &kind == b"trun" {
+                    duration += trun_duration(&traf[start..run_end], default)?;
+                }
+            }
+            let ns = ((decode_time + duration) as u128 * 1_000_000_000 / ts) as u64;
+            end = end.max(Some(ns));
+        }
+    }
+    end
+}
+
+/// `default_sample_duration` of a `tfhd`, when its flags say it is there.
+fn tfhd_default_duration(tfhd: &[u8]) -> Option<u32> {
+    let flags = read_u32(tfhd, 0)? & 0x00ff_ffff;
+    if flags & 0x08 == 0 {
+        return None;
+    }
+    // After version/flags and track_ID: base_data_offset, then
+    // sample_description_index, each only when flagged.
+    let mut at = 8;
+    if flags & 0x01 != 0 {
+        at += 8;
+    }
+    if flags & 0x02 != 0 {
+        at += 4;
+    }
+    read_u32(tfhd, at)
+}
+
+/// The summed sample durations of a `trun`, in its track's timescale.
+fn trun_duration(trun: &[u8], default: u32) -> Option<u64> {
+    let flags = read_u32(trun, 0)? & 0x00ff_ffff;
+    let count = read_u32(trun, 4)? as u64;
+    if flags & 0x100 == 0 {
+        return Some(count * default as u64);
+    }
+    let mut at = 8;
+    if flags & 0x01 != 0 {
+        at += 4; // data_offset
+    }
+    if flags & 0x04 != 0 {
+        at += 4; // first_sample_flags
+    }
+    let per_sample = 4 * [0x100, 0x200, 0x400, 0x800]
+        .iter()
+        .filter(|&&f| flags & f != 0)
+        .count();
+    let mut total = 0u64;
+    for i in 0..count as usize {
+        total += read_u32(trun, at + i * per_sample)? as u64;
+    }
+    Some(total)
+}
+
+/// One fragment as a `sidx` lists it: its size in bytes from `styp` to the
+/// end of its `mdat`, and its duration in the index's timescale.
+pub struct IndexEntry {
+    pub size: u32,
+    pub duration: u32,
+}
+
+/// Size of a `sidx` with `entries` references.
+pub fn sidx_len(entries: usize) -> usize {
+    40 + 12 * entries
+}
+
+/// A `sidx` (version 1) for `track_id`, whose first fragment starts right
+/// after it.
+pub fn sidx(track_id: u32, timescale: u32, earliest: u64, entries: &[IndexEntry]) -> Vec<u8> {
+    let len = sidx_len(entries.len());
+    let mut v = Vec::with_capacity(len);
+    v.extend_from_slice(&(len as u32).to_be_bytes());
+    v.extend_from_slice(b"sidx");
+    v.extend_from_slice(&[1, 0, 0, 0]);
+    v.extend_from_slice(&track_id.to_be_bytes());
+    v.extend_from_slice(&timescale.to_be_bytes());
+    v.extend_from_slice(&earliest.to_be_bytes());
+    // first_offset: nothing between the index and the first fragment.
+    v.extend_from_slice(&0u64.to_be_bytes());
+    v.extend_from_slice(&0u16.to_be_bytes());
+    v.extend_from_slice(&(entries.len() as u16).to_be_bytes());
+    for entry in entries {
+        // reference_type 0: the reference is media, not another index.
+        v.extend_from_slice(&(entry.size & 0x7fff_ffff).to_be_bytes());
+        v.extend_from_slice(&entry.duration.to_be_bytes());
+        // starts_with_SAP 0, SAP_type 0: not stated. A fragment cut while the
+        // video stalls starts without a keyframe.
+        v.extend_from_slice(&0u32.to_be_bytes());
+    }
+    v
+}
+
+/// A `free` box `len` bytes long, at least 8.
+pub fn free(len: usize) -> Vec<u8> {
+    let mut v = vec![0u8; len];
+    v[..4].copy_from_slice(&(len as u32).to_be_bytes());
+    v[4..8].copy_from_slice(b"free");
+    v
 }
 
 fn read_decode_time(data: &[u8], dt: &DecodeTime) -> Option<u64> {
@@ -236,5 +405,110 @@ mod tests {
             .collect();
         // video 10 ms after the file start, audio at zero.
         assert_eq!(times, vec![900, 0]);
+    }
+
+    /// A `traf` whose `trun` gives each sample's duration.
+    fn traf_with_durations(id: u32, tfdt: u64, durations: &[u32]) -> Vec<u8> {
+        let mut body = bx(b"tfhd", &full(0, &id.to_be_bytes()));
+        body.extend(bx(b"tfdt", &full(1, &tfdt.to_be_bytes())));
+        // flags: data_offset, sample_duration, sample_size
+        let mut trun = vec![0, 0, 0x03, 0x01];
+        trun.extend_from_slice(&(durations.len() as u32).to_be_bytes());
+        trun.extend_from_slice(&0u32.to_be_bytes());
+        for d in durations {
+            trun.extend_from_slice(&d.to_be_bytes());
+            trun.extend_from_slice(&100u32.to_be_bytes());
+        }
+        body.extend(bx(b"trun", &trun));
+        bx(b"traf", &body)
+    }
+
+    /// A `traf` whose samples take their duration from a default.
+    fn traf_with_default(id: u32, tfdt: u64, samples: u32, in_tfhd: Option<u32>) -> Vec<u8> {
+        let mut tfhd = match in_tfhd {
+            Some(_) => vec![0, 0, 0, 0x08],
+            None => vec![0, 0, 0, 0],
+        };
+        tfhd.extend_from_slice(&id.to_be_bytes());
+        if let Some(d) = in_tfhd {
+            tfhd.extend_from_slice(&d.to_be_bytes());
+        }
+        let mut body = bx(b"tfhd", &tfhd);
+        body.extend(bx(b"tfdt", &full(1, &tfdt.to_be_bytes())));
+        let mut trun = full(0, &samples.to_be_bytes());
+        trun[3] = 0;
+        body.extend(bx(b"trun", &trun));
+        bx(b"traf", &body)
+    }
+
+    fn init_with_trex(audio_default: u32) -> Vec<u8> {
+        let mut moov = trak(1, 90_000);
+        moov.extend(trak(2, 48_000));
+        let mut trex = 2u32.to_be_bytes().to_vec();
+        trex.extend_from_slice(&1u32.to_be_bytes());
+        trex.extend_from_slice(&audio_default.to_be_bytes());
+        trex.extend_from_slice(&[0; 8]);
+        moov.extend(bx(b"mvex", &bx(b"trex", &full(0, &trex))));
+        let mut v = bx(b"ftyp", b"iso6");
+        v.extend(bx(b"moov", &moov));
+        v
+    }
+
+    fn moof(trafs: &[Vec<u8>]) -> Vec<u8> {
+        let mut moof = bx(b"mfhd", &full(0, &7u32.to_be_bytes()));
+        for traf in trafs {
+            moof.extend_from_slice(traf);
+        }
+        let mut v = bx(b"styp", b"msdh");
+        v.extend(bx(b"moof", &moof));
+        v
+    }
+
+    #[test]
+    fn the_first_track_is_the_one_the_index_refers_to() {
+        assert_eq!(first_track(&init()), Some((1, 90_000)));
+        assert_eq!(first_track(b"INIT;"), None);
+    }
+
+    #[test]
+    fn a_fragment_ends_where_its_longest_track_ends() {
+        let init = init_with_trex(1024);
+        let ts = track_timescales(&init);
+        let defaults = default_sample_durations(&init);
+        // video: 2 s from 10 s; audio: 48 frames of 1024 from 10 s, 1.024 s.
+        let f = moof(&[
+            traf_with_durations(1, 900_000, &[90_000, 90_000]),
+            traf_with_default(2, 480_000, 48, None),
+        ]);
+        assert_eq!(fragment_end_ns(&f, &ts, &defaults), Some(12_000_000_000));
+        // A default in the tfhd wins over the trex one.
+        let f = moof(&[traf_with_default(2, 480_000, 48, Some(2048))]);
+        assert_eq!(fragment_end_ns(&f, &ts, &defaults), Some(12_048_000_000));
+    }
+
+    #[test]
+    fn the_index_lists_each_fragment_after_its_header() {
+        let entries = [
+            IndexEntry {
+                size: 1000,
+                duration: 90_000,
+            },
+            IndexEntry {
+                size: 2000,
+                duration: 45_000,
+            },
+        ];
+        let sidx = sidx(1, 90_000, 0, &entries);
+        assert_eq!(sidx.len(), sidx_len(2));
+        assert_eq!(&sidx[4..8], b"sidx");
+        assert_eq!(read_u32(&sidx, 0), Some(sidx_len(2) as u32));
+        assert_eq!(read_u32(&sidx, 12), Some(1));
+        assert_eq!(read_u32(&sidx, 16), Some(90_000));
+        assert_eq!(&sidx[36..40], &[0, 0, 0, 2]);
+        assert_eq!(read_u32(&sidx, 40), Some(1000));
+        assert_eq!(read_u32(&sidx, 44), Some(90_000));
+        assert_eq!(read_u32(&sidx, 52), Some(2000));
+        let free = free(20);
+        assert_eq!((read_u32(&free, 0), &free[4..8]), (Some(20), &b"free"[..]));
     }
 }

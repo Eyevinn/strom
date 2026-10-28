@@ -956,6 +956,19 @@ impl StromApp {
                                         ui.menu_button(egui_phosphor::regular::DOTS_THREE_VERTICAL, |ui| {
                                             ui.set_min_width(150.0);
 
+                                            // Rename: the Properties dialog with Name focused
+                                            if ui
+                                                .button(format!(
+                                                    "{} Rename…",
+                                                    egui_phosphor::regular::PENCIL_SIMPLE
+                                                ))
+                                                .clicked()
+                                            {
+                                                self.pending_flow_properties =
+                                                    Some((flow.id, true));
+                                                ui.close();
+                                            }
+
                                             // Properties
                                             if ui
                                                 .button(format!(
@@ -964,38 +977,8 @@ impl StromApp {
                                                 ))
                                                 .clicked()
                                             {
-                                                self.editing_properties_flow_id = Some(flow.id);
-                                                self.properties_name_buffer = flow.name.clone();
-                                                self.properties_description_buffer = flow
-                                                    .properties
-                                                    .description
-                                                    .clone()
-                                                    .unwrap_or_default();
-                                                self.properties_clock_type_buffer =
-                                                    flow.properties.clock_type;
-                                                self.properties_ptp_domain_buffer = flow
-                                                    .properties
-                                                    .ptp_domain
-                                                    .map(|d| d.to_string())
-                                                    .unwrap_or_else(|| "0".to_string());
-                                                self.properties_ntp_server_buffer = flow
-                                                    .properties
-                                                    .ntp_server
-                                                    .clone()
-                                                    .unwrap_or_default();
-                                                self.properties_ntp_port_buffer = flow
-                                                    .properties
-                                                    .ntp_port
-                                                    .map(|p| p.to_string())
-                                                    .unwrap_or_else(|| "123".to_string());
-                                                self.properties_direct_media_timing_buffer =
-                                                    flow.properties.direct_media_timing;
-                                                self.properties_thread_priority_buffer =
-                                                    flow.properties.thread_priority;
-                                                self.properties_cpu_affinity_buffer =
-                                                    flow.properties.cpu_affinity;
-                                                self.properties_ephemeral_buffer =
-                                                    flow.properties.ephemeral;
+                                                self.pending_flow_properties =
+                                                    Some((flow.id, false));
                                                 ui.close();
                                             }
 

@@ -884,6 +884,14 @@ stdout_log_format = ""
         let config =
             Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap();
 
+        // The default with no config file at all. It depends on the
+        // environment: inside a container it is ./data, elsewhere the
+        // platform's data directory.
+        let empty_dir = TempDir::new().unwrap();
+        std::env::set_current_dir(&empty_dir).unwrap();
+        let default =
+            Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap();
+
         let _ = std::env::set_current_dir(original_dir);
 
         assert_eq!(
@@ -906,10 +914,9 @@ stdout_log_format = ""
             LogFormat::Compact,
             "a blank stdout_log_format must fall back to the default instead of failing to parse"
         );
-        assert!(
-            config.flows_path.is_absolute(),
-            "a blank data dir must fall back to the default location, got {:?}",
-            config.flows_path
+        assert_eq!(
+            config.flows_path, default.flows_path,
+            "a blank data dir must fall back to the default location"
         );
     }
 

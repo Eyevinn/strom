@@ -4,6 +4,8 @@ use crate::blocks::BlockBuildError;
 use crate::gpu;
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_gl as gst_gl;
+use gstreamer_video as gst_video;
 use tracing::{debug, info, trace};
 
 /// Compositor backend selection result.
@@ -260,24 +262,51 @@ pub fn suppress_latency_query(queue: &gst::Element) {
 ///
 /// `tee_pgm` asks every branch when the PGM compositor negotiates, and on this
 /// branch the query waits until mv_comp's own streaming thread takes it. That
-/// thread can itself be waiting in its ALLOCATION query behind the multiview
-/// sink, which holds a prerolled frame until the pipeline reaches PLAYING — and
-/// the pipeline only gets there once PGM has output. A late input renegotiates
-/// both compositors mid-start, and the flow then never starts. Answered here,
-/// the branch proposes nothing and `tee_pgm` takes its allocation from the PGM
-/// output branch. Software backend only: on the GPU backend the query also
-/// carries the GL context and pools. A QUERY probe, never per buffer.
-pub fn answer_allocation_query(queue: &gst::Element) {
+/// thread can be held: at start it waits in its own ALLOCATION query, or on a
+/// full queue, behind the multiview sink, which holds a prerolled frame until
+/// the pipeline reaches PLAYING — and the pipeline only gets there once PGM
+/// has output. A late input renegotiates both compositors mid-start, and the
+/// flow then never starts (#1029 on the software backend, #1164 on GL behind a
+/// PGM consumer that downloads).
+///
+/// The answer is what mv_comp's sink pad itself proposes, so `tee_pgm` keeps
+/// the metas both branches support. An empty answer would leave the PGM
+/// compositor without them: `tee_pgm` keeps only metas every branch reports,
+/// and on GL that drops the sync meta a PGM consumer in another GL thread
+/// needs to wait for the draw. `glvideomixer` proposes GL sync and affine
+/// transformation metas with one buffer, `compositor` video meta with none.
+/// A QUERY probe, never per buffer.
+pub fn answer_allocation_query(queue: &gst::Element, backend: CompositorBackend) {
     let pad = queue
         .static_pad("sink")
         .expect("queue must have a sink pad");
-    pad.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, |_pad, info| {
-        if let Some(query) = info.query() {
-            if let gst::QueryView::Allocation(_) = query.view() {
-                return gst::PadProbeReturn::Handled;
+    pad.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, move |_pad, info| {
+        let Some(query) = info.query_mut() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::QueryViewMut::Allocation(allocation) = query.view_mut() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let size = allocation
+            .get()
+            .0
+            .and_then(|caps| gst_video::VideoInfo::from_caps(caps).ok())
+            .map_or(0, |info| info.size() as u32);
+        let min_buffers = match backend {
+            CompositorBackend::OpenGL => {
+                allocation.add_allocation_meta::<gst_gl::GLSyncMeta>(None);
+                allocation.add_allocation_meta::<gst_video::VideoAffineTransformationMeta>(None);
+                1
             }
+            CompositorBackend::Software => {
+                allocation.add_allocation_meta::<gst_video::VideoMeta>(None);
+                0
+            }
+        };
+        if size > 0 {
+            allocation.add_allocation_pool(None::<&gst::BufferPool>, size, min_buffers, 0);
         }
-        gst::PadProbeReturn::Ok
+        gst::PadProbeReturn::Handled
     });
 }
 

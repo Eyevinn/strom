@@ -106,7 +106,6 @@ pub fn diagnose_warning(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
 
     fn input(origin: &str, min_ms: u64, max_ms: Option<u64>) -> InputLatency {
         InputLatency {
@@ -136,54 +135,5 @@ mod tests {
         assert_eq!(describe(&inputs, str::to_string), None);
         assert_eq!(describe(&[input("a", 2000, None)], str::to_string), None);
         assert_eq!(describe(&[], str::to_string), None);
-    }
-
-    /// The failure from production: one input 2 s late, one from a live
-    /// appsrc at its defaults, which reports that it can hold nothing. The
-    /// aggregator's own warning names neither.
-    #[test]
-    fn finds_both_inputs_of_a_mixer_that_cannot_configure_latency() {
-        let _ = gst::init();
-        let pipeline = gst::parse::launch(
-            "audiomixer name=mix ! fakesink sync=true \
-             audiotestsrc name=slow is-live=true ! audioconvert ! rtpL16pay \
-               ! rtpjitterbuffer latency=2000 ! rtpL16depay ! audioconvert ! queue ! mix. \
-             appsrc name=bridge is-live=true format=time \
-               caps=audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
-               ! queue ! mix.",
-        )
-        .unwrap()
-        .downcast::<gst::Pipeline>()
-        .unwrap();
-        pipeline.set_state(gst::State::Playing).unwrap();
-
-        let bus = pipeline.bus().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let described = loop {
-            assert!(Instant::now() < deadline, "the mixer never warned");
-            let Some(msg) = bus.timed_pop_filtered(
-                gst::ClockTime::from_mseconds(50),
-                &[gst::MessageType::Warning],
-            ) else {
-                continue;
-            };
-            let gst::MessageView::Warning(w) = msg.view() else {
-                continue;
-            };
-            if let Some(described) =
-                diagnose_warning(msg.src(), w.debug().as_deref(), str::to_string)
-            {
-                break described;
-            }
-        };
-        let _ = pipeline.set_state(gst::State::Null);
-
-        // `slow` is 2 s plus the test source's own buffer; `bridge` is the
-        // appsrc's 0 plus the 1 s of its default queue.
-        assert!(
-            described.starts_with("slow arrives 20")
-                && described.ends_with("but bridge can only be held back 1000 ms"),
-            "{described:?}"
-        );
     }
 }

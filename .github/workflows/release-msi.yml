@@ -20,7 +20,7 @@ on:
         default: true
 
 env:
-  GSTREAMER_VERSION: "1.26.10"
+  GSTREAMER_VERSION: "1.28.8"
 
 jobs:
   build-msi:
@@ -66,17 +66,6 @@ jobs:
           Write-Host "Downloaded binaries:"
           Get-ChildItem binaries/
 
-      - name: Download GStreamer runtime
-        shell: pwsh
-        run: |
-          $version = "${{ env.GSTREAMER_VERSION }}"
-          $baseUrl = "https://github.com/${{ github.repository }}/releases/download/gstreamer-deps"
-
-          Write-Host "Downloading GStreamer $version runtime MSI..."
-          Invoke-WebRequest -Uri "$baseUrl/gstreamer-1.0-msvc-x86_64-$version.msi" -OutFile "gstreamer.msi"
-
-          Write-Host "Download complete: $((Get-Item gstreamer.msi).Length / 1MB) MB"
-
       - name: Install Graphviz via Chocolatey
         shell: pwsh
         run: |
@@ -95,65 +84,24 @@ jobs:
 
       - name: Prepare GStreamer bundle
         shell: pwsh
+        # The same script a local MSI build uses (Build-Installer.ps1). -Full
+        # bundles all of bin, lib\gstreamer-1.0, share and libexec (with
+        # gst-ptp-helper.exe), unpacked from the GStreamer installer.
         run: |
-          $buildDir = "installer/windows/build"
-          New-Item -ItemType Directory -Path $buildDir -Force | Out-Null
-
-          # Extract GStreamer MSI
-          Write-Host "Extracting GStreamer MSI..."
-          Write-Host "MSI file size: $((Get-Item gstreamer.msi).Length / 1MB) MB"
-          $installArgs = "/a `"$((Get-Location).Path)\gstreamer.msi`" /qn TARGETDIR=`"$((Get-Location).Path)\gst-temp`""
-          $process = Start-Process msiexec.exe -ArgumentList $installArgs -Wait -NoNewWindow -PassThru
-          Write-Host "msiexec exit code: $($process.ExitCode)"
-
-          # Debug: List extracted contents
-          Write-Host "Listing gst-temp contents:"
-          if (Test-Path "gst-temp") {
-            Get-ChildItem -Path "gst-temp" -Recurse -Depth 3 | Select-Object FullName | Format-Table -AutoSize
-          } else {
-            Write-Host "ERROR: gst-temp directory does not exist!"
-            exit 1
+          installer/windows/Prepare-GStreamer.ps1 -Full `
+            -Version "${{ env.GSTREAMER_VERSION }}" `
+            -OutputDir "installer/windows/build/gstreamer-bundle"
+          if (-not (Test-Path "installer/windows/build/gstreamer-bundle/libexec/gstreamer-1.0/gst-ptp-helper.exe")) {
+            throw "GStreamer bundle has no gst-ptp-helper.exe"
           }
-
-          # GStreamer MSI extracts to PFiles64/gstreamer/... structure
-          $gstRoot = "gst-temp\PFiles64\gstreamer\1.0\msvc_x86_64"
-
-          # Verify extraction succeeded
-          if (-not (Test-Path "$gstRoot\bin")) {
-            Write-Host "ERROR: Expected path $gstRoot\bin does not exist!"
-            Write-Host "Available directories in gst-temp:"
-            Get-ChildItem -Path "gst-temp" -Recurse -Directory | Select-Object FullName
-            exit 1
+          # GIO's TLS backend: without it no https:// URL opens (#1079).
+          if (-not (Test-Path "installer/windows/build/gstreamer-bundle/lib/gio/modules/gioopenssl.dll")) {
+            throw "GStreamer bundle has no lib/gio/modules/gioopenssl.dll"
           }
-
-          # Create bundle directories
-          $bundleDir = "$buildDir\gstreamer-bundle"
-          New-Item -ItemType Directory -Path "$bundleDir\bin" -Force | Out-Null
-          New-Item -ItemType Directory -Path "$bundleDir\lib\gstreamer-1.0" -Force | Out-Null
-
-          # Copy all bin files (DLLs and tools)
-          Write-Host "Copying GStreamer bin files..."
-          Copy-Item "$gstRoot\bin\*" "$bundleDir\bin\" -Force
-
-          # Copy all plugins
-          Write-Host "Copying GStreamer plugins..."
-          Copy-Item "$gstRoot\lib\gstreamer-1.0\*.dll" "$bundleDir\lib\gstreamer-1.0\" -Force
-
-          # Copy share files if they exist
-          if (Test-Path "$gstRoot\share") {
-            New-Item -ItemType Directory -Path "$bundleDir\share" -Force | Out-Null
-            Copy-Item "$gstRoot\share\*" "$bundleDir\share\" -Recurse -Force
+          # License texts of GStreamer and the libraries it bundles (LGPL, GPL).
+          if (-not (Test-Path "installer/windows/build/gstreamer-bundle/share/licenses/x264")) {
+            throw "GStreamer bundle has no share/licenses"
           }
-
-          # Copy libexec files (contains gst-ptp-helper.exe for PTP clock support)
-          if (Test-Path "$gstRoot\libexec") {
-            New-Item -ItemType Directory -Path "$bundleDir\libexec" -Force | Out-Null
-            Copy-Item "$gstRoot\libexec\*" "$bundleDir\libexec\" -Recurse -Force
-            Write-Host "Copied GStreamer libexec files (including gst-ptp-helper.exe)"
-          }
-
-          $size = (Get-ChildItem -Recurse "$bundleDir" | Measure-Object -Property Length -Sum).Sum / 1MB
-          Write-Host "GStreamer bundle size: $([math]::Round($size, 2)) MB"
 
       - name: Prepare Graphviz bundle
         shell: pwsh
@@ -182,6 +130,8 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.version }}"
+          # WiX only takes a numeric version, so 0.8.0-alpha.1 installs as 0.8.0
+          $productVersion = $version -replace '-.*$', ''
           $buildDir = "installer/windows/build"
 
           # Copy WiX source files and assets
@@ -228,14 +178,17 @@ jobs:
           Push-Location $buildDir
 
           Write-Host "Building MSI with WiX..."
-          Write-Host "  ProductVersion: $version"
+          Write-Host "  ProductVersion: $productVersion"
           Write-Host "  StromExe: $absStromExe"
           Write-Host "  StromIcon: $absStromIcon"
           Write-Host "  GStreamerDir: $absGstDir"
           Write-Host "  GraphvizDir: $absGvDir"
 
+          # -arch x64: without it WiX builds a 32-bit package, and Windows
+          # installs it under Program Files (x86)
           wix build `
-            -d ProductVersion="$version" `
+            -arch x64 `
+            -d ProductVersion="$productVersion" `
             -d StromExe="$absStromExe" `
             -d StromIcon="$absStromIcon" `
             -d GStreamerDir="$absGstDir" `
@@ -264,6 +217,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.version.outputs.version }}
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
           files: installer/windows/build/strom-${{ steps.version.outputs.version }}-windows-x86_64.msi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

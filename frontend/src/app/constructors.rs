@@ -103,6 +103,8 @@ impl StromApp {
             pending_flow_selection: None,
             connection_state: ConnectionState::Disconnected,
             channels,
+            pending_flow_properties: None,
+            properties_focus_name: false,
             editing_properties_flow_id: None,
             properties_name_buffer: String::new(),
             properties_description_buffer: String::new(),
@@ -282,6 +284,8 @@ impl StromApp {
             pending_flow_selection: None,
             connection_state: ConnectionState::Disconnected,
             channels,
+            pending_flow_properties: None,
+            properties_focus_name: false,
             editing_properties_flow_id: None,
             properties_name_buffer: String::new(),
             properties_description_buffer: String::new(),
@@ -436,8 +440,8 @@ impl StromApp {
         tracing::debug!("Applying theme: {:?}", self.settings.theme);
 
         let visuals = match self.settings.theme {
-            ThemePreference::EguiDark => egui::Visuals::dark(),
-            ThemePreference::EguiLight => egui::Visuals::light(),
+            ThemePreference::EguiDark => themes::egui_dark(),
+            ThemePreference::EguiLight => themes::egui_light(),
             ThemePreference::NordDark => themes::nord_dark(),
             ThemePreference::NordLight => themes::nord_light(),
             ThemePreference::TokyoNight => themes::tokyo_night(),

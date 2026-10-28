@@ -8,7 +8,7 @@ use super::state::MediaPlayerState;
 use super::timing;
 use crate::blocks::BlockBuildError;
 use crate::events::EventBroadcaster;
-use crate::gst::rtp_hdrext;
+use crate::gst::{context_forward, rtp_hdrext};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -151,8 +151,10 @@ pub fn create_decode_pipeline(
     if let Some(uri) = initial_uri {
         if state.stinger.enabled {
             apply_stinger_decoding(&source, uri);
+            source.set_property("uri", super::stinger_source_uri(uri));
+        } else {
+            source.set_property("uri", uri);
         }
-        source.set_property("uri", uri);
     }
 
     // Store weak ref to source element in state
@@ -200,8 +202,24 @@ pub fn create_decode_pipeline(
     // An `rtsp://` URI makes the source bin autoplug an RTP depayloader, so this
     // internal pipeline needs the same gstreamer#5057 workaround as the main one.
     rtp_hdrext::install(&pipeline);
+    share_flow_contexts(&pipeline, state);
 
     Ok(pipeline)
+}
+
+/// Let the internal pipeline use the flow's GL context (#1099). A decoder that
+/// outputs GL memory, VideoToolbox on macOS, otherwise hands the flow frames
+/// from a GL context of its own, which no GL element in the flow can convert.
+///
+/// Only decode mode needs it: passthrough carries encoded media. The flow's
+/// GL elements make their display when the flow goes to READY, and the
+/// internal pipeline starts once the flow plays, so it asks for a display the
+/// flow already has. A stinger clip may preroll earlier, but its appsink takes
+/// system memory, so it makes no GL context of its own.
+fn share_flow_contexts(pipeline: &gst::Pipeline, state: &MediaPlayerState) {
+    if let Some(appsrc) = state.flow_anchor() {
+        context_forward::install(pipeline, appsrc);
+    }
 }
 
 /// Create the internal pipeline for passthrough mode.
@@ -975,6 +993,22 @@ fn link_pad_through_clocksync(
     Ok(())
 }
 
+/// What the operator is told when the internal pipeline fails on `file`.
+/// An `https://` stream on a host whose GIO has no TLS backend fails with only
+/// `Internal data stream error` from `souphttpsrc`, so the reason is added.
+fn internal_error_text(file: Option<&str>, error: &str, tls_available: bool) -> String {
+    let error = error.trim_end_matches('.');
+    let mut text = match file {
+        Some(file) => format!("Media Player could not play {}: {}", file, error),
+        None => format!("Media Player: {}", error),
+    };
+    if !tls_available && file.is_some_and(crate::gst::tls::needs_tls) {
+        text.push_str(". ");
+        text.push_str(crate::gst::tls::NO_TLS_HINT);
+    }
+    text
+}
+
 /// Advance the playlist when the internal pipeline reaches EOS.
 ///
 /// The EOS is seen as it is posted, on the streaming thread that posts it,
@@ -1097,6 +1131,19 @@ pub fn watch_internal_bus(
                     err.error(),
                     err.debug()
                 );
+                // The internal pipeline's bus is not the flow's, so its errors
+                // reach no one unless they are sent on here. Left in the log
+                // only, a file or stream that cannot play shows as playing,
+                // with nothing on the outputs and no reason (issue #1079).
+                events.broadcast(StromEvent::PipelineError {
+                    flow_id,
+                    error: internal_error_text(
+                        state_for_bus.current_file().as_deref(),
+                        &err.error().to_string(),
+                        crate::gst::tls::tls_available(),
+                    ),
+                    source: Some(block_id.clone()),
+                });
             }
             _ => {}
         }
@@ -1594,6 +1641,62 @@ mod tests {
         }
     }
 
+    /// In decode mode the internal pipeline asks the flow for its GL context
+    /// and gives the flow the one it makes (#1099). A GL decoder in it would
+    /// otherwise make a GL context of its own, and its frames would fail at
+    /// the flow's first GL converter. The contexts here carry a test value, so
+    /// no GL is needed; `mediaplayer_gl_context_test` runs real GL frames.
+    #[test]
+    fn the_decode_pipeline_shares_the_flows_gl_context() {
+        let _ = gst::init();
+        const TYPE: &str = "gst.gl.app_context";
+        let context = |value: &str| {
+            let mut context = gst::Context::new(TYPE, true);
+            context
+                .get_mut()
+                .unwrap()
+                .structure_mut()
+                .set("value", value);
+            context
+        };
+        let value = |context: Option<gst::Context>| {
+            context.and_then(|c| c.structure().get::<String>("value").ok())
+        };
+
+        let state = state_with_slots(1, 1);
+        let flow = gst::Pipeline::new();
+        flow.add(&state.video_appsrcs[0]).unwrap();
+        flow.set_context(&context("flow"));
+        let internal = create_decode_pipeline("mp", &state, None, Decoder::Decodebin3).unwrap();
+        let source = internal.by_name("mp_uridecodebin3").unwrap();
+
+        source
+            .post_message(
+                gst::message::NeedContext::builder(TYPE)
+                    .src(&source)
+                    .build(),
+            )
+            .unwrap();
+        assert_eq!(
+            value(source.context(TYPE)),
+            Some("flow".to_string()),
+            "the flow answers the decoder's request"
+        );
+
+        const MADE: &str = "gst.gl.GLDisplay";
+        source
+            .post_message(
+                gst::message::HaveContext::builder(gst::Context::new(MADE, true))
+                    .src(&source)
+                    .build(),
+            )
+            .unwrap();
+        assert!(
+            flow.context(MADE).is_some(),
+            "the flow keeps a GL display the internal pipeline made"
+        );
+    }
+
     #[test]
     fn decodebin3_is_the_default_and_classic_stays_on_request() {
         assert_eq!(Decoder::from_property(None), Decoder::Decodebin3);
@@ -2021,5 +2124,29 @@ mod tests {
         let state = test_state();
         let pipeline = create_passthrough_pipeline("test", &state, None).unwrap();
         assert_hdrext_disabled_on_late_depayloader(&pipeline);
+    }
+
+    /// An https stream on a host without a GIO TLS backend fails with only
+    /// `Internal data stream error`; the operator is told why (issue #1079).
+    #[test]
+    fn an_https_failure_without_tls_names_the_missing_tls_backend() {
+        let url = "https://example.com/live/index.m3u8";
+        let error = "Internal data stream error.";
+        let without = internal_error_text(Some(url), error, false);
+        assert!(without.contains(url), "{}", without);
+        assert!(without.contains(error), "{}", without);
+        assert!(
+            without.contains(crate::gst::tls::NO_TLS_HINT),
+            "{}",
+            without
+        );
+
+        for text in [
+            internal_error_text(Some(url), error, true),
+            internal_error_text(Some("http://example.com/index.m3u8"), error, false),
+            internal_error_text(Some("clip.mp4"), error, false),
+        ] {
+            assert!(!text.contains("TLS"), "{}", text);
+        }
     }
 }

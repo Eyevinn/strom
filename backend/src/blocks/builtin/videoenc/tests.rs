@@ -10,11 +10,9 @@
 use super::*;
 use gstreamer as gst;
 
-/// Initialize GStreamer and GPU detection for tests
+/// Initialize GStreamer for tests
 fn init_gst() {
     let _ = gst::init();
-    // Initialize GPU detection (required for video conversion mode)
-    crate::gpu::detect_gpu_capabilities();
 }
 
 /// Check if an encoder is available on the system
@@ -409,18 +407,16 @@ fn test_encoder_property_setting_nvenc() {
         let bitrate: u32 = encoder.property("bitrate");
         assert_eq!(bitrate, 4000, "Bitrate should be set for {}", encoder_name);
 
-        // Verify rate control property exists and is set correctly
-        let rc_property = if encoder_name.starts_with("nvautogpu") {
-            "rate-control"
-        } else {
-            "rc-mode"
-        };
-
+        // The rate control property is `rate-control` or `rc-mode`, depending
+        // on the encoder and the GStreamer build: `nvautogpuh264enc` has
+        // `rc-mode` in the Windows 1.28.8 build (#1166). The block takes
+        // whichever exists, so the encoder must have one of them.
         assert!(
-            encoder.has_property(rc_property),
-            "{} should have {} property",
-            encoder_name,
-            rc_property
+            ["rate-control", "rc-mode"]
+                .iter()
+                .any(|p| encoder.has_property(p)),
+            "{} has neither rate-control nor rc-mode",
+            encoder_name
         );
     }
 }
@@ -709,6 +705,33 @@ fn test_block_encoder_preference() {
                 encoder.has_property("speed-preset"),
                 "Software encoder should be x264enc with speed-preset property"
             );
+        }
+    }
+}
+
+/// #1163: on Windows the Intel QSV encoders corrupt the process heap, so
+/// once `demote_qsv_encoders` has run, the block never selects one, whatever
+/// else the host has. Elsewhere QSV keeps its rank and this checks nothing.
+#[test]
+fn qsv_encoders_are_never_selected_on_windows() {
+    init_gst();
+    crate::gst::demote_qsv_encoders();
+    if !cfg!(windows) {
+        return;
+    }
+    for name in crate::gst::QSV_ENCODERS {
+        if let Some(factory) = gst::ElementFactory::find(name) {
+            assert_eq!(factory.rank(), gst::Rank::NONE, "{name} kept its rank");
+        }
+    }
+    for codec in [Codec::H264, Codec::H265, Codec::AV1, Codec::VP9] {
+        for preference in [EncoderPreference::Auto, EncoderPreference::HardwareOnly] {
+            if let Ok(encoder) = select_encoder(codec, preference) {
+                assert!(
+                    !encoder.starts_with("qsv"),
+                    "{codec:?} {preference:?} selected {encoder}"
+                );
+            }
         }
     }
 }

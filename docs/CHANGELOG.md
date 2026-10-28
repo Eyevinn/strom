@@ -2,6 +2,102 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.8.0-alpha.2] - 2026-10-28
+
+A prerelease. WHIP Output now sends video, and WHEP Input can decode video. Test it before you rely on it: `latest` stays on 0.7.2.
+
+### Added
+- WHIP Output: send H.264, VP8 and VP9 video alongside audio (#1086)
+- WHEP Input: decode video to `video_out` outputs (#1085)
+
+### Fixed
+- Video Format: offer the output size and format to a producer that can choose (#1159)
+- MPEG-TS/SRT Output: build one video input per track (#1150, #1169)
+- Audio outputs: adapt DeckLink Output's audio, and hold Local Input's audio in a queue (#1068, #1168)
+- Windows: ship GIO's TLS backend and license texts, and report Media Player errors (#1079, #1170)
+- Windows installer: build the MSI as a 64-bit package (#1155)
+- API: the element and pad property endpoints answer 404 for a missing flow, element or pad, as documented, instead of 400 (#1162)
+- Frontend: text fields look editable in every theme (#1167)
+
+### Changed
+- Dependencies: monthly round 2026-10 (#1002)
+
+---
+
+## [0.8.0-alpha.1] - 2026-10-27
+
+A prerelease. The Docker images move to Ubuntu 26.04 and GStreamer 1.28, and most blocks now emit video in the memory they produce it in (GL, CUDA, D3D) and adapt their own inputs. Test it before you rely on it: `latest` stays on 0.7.2.
+
+### Added
+- Video Format: scale video where it is, with GPU memory scaled on the GPU (#1117)
+- MPEG-TS/SRT Input: map audio outputs to streams in PID order (#1120)
+- EFP: enabled on Windows, with gst-plugin-efp v0.4.1 (#1094)
+
+### Fixed
+- Vision Mixer: emit GL memory, and retire `gl_download` (#1119)
+- Vision Mixer: download GPU memory on the CPU mixer's own inputs (#1121)
+- Compositor: download GPU memory on the CPU backend's own inputs (#1138)
+- Inter Input: download GL memory that arrives from another flow (#1118)
+- WHIP Input: emit the decoder's video without a converter (#1128)
+- Local Input: emit video as the source delivers it (#1129)
+- NDI: adapt NDI Output's video input, and emit NDI Input's video as it arrives (#1134)
+- DeckLink Output: adapt the video input to the configured mode (#1131)
+- Thumbnail tap: scale GL memory in any format or texture target (#1140)
+
+### Changed
+- Docker: the images move from Ubuntu 25.10 to 26.04 LTS (#1124), and carry the tsdemux PTS rollover fix (#1132)
+- GStreamer: 1.28 is the target and 1.22 the floor; `install.sh` warns below it (#1122)
+- Video adapt: one planner decides scaling, downloads and pins (#1137), split into decide, adapters and tests (#1141)
+- GPU: retire the global `VideoConvertMode` (#1142)
+- Release: a suffixed tag (`v0.8.0-alpha.1`) is published as a prerelease, not as latest (#1148)
+
+### CI
+- Check that Strom builds and runs on GStreamer 1.22, the floor (#1125)
+- Windows: install GStreamer 1.28.8 from the Inno Setup installer (#1126)
+- Tests: Vision Mixer and Stinger test fixes (#1133, #1143)
+
+---
+
+## [0.7.2] - 2026-10-27
+
+### Added
+- Local Output: play audio on a local output device (#1090)
+- Latency: a mixer's latency failure names the inputs behind it (#1073)
+- Vision Mixer: report take morphs and per-input media age (`input_media_age_ms`) (#803)
+
+### Fixed
+- Latency: bridge appsrcs report the latency they can hold, and repeated bus warnings are gated (#1072)
+- WHEP Output: strip the offered profile and level from every viewer's video chain (#896, #899)
+- WHEP Output: the appsink processing deadline no longer delays every viewer (#814)
+- WHIP: zero the processing deadline on whipclientsink's appsinks (#855)
+- MPEG-TS/SRT Input: play the first audio stream of a feed that carries two (#1096)
+- MPEG-TS/SRT Input: an absent SRT peer no longer holds the flow (#812)
+- Outputs: NDI, DeckLink audio and TAMS start without waiting for data (#934)
+- AES67: put a queue right after the input's audiobuffersplit (#1087)
+- Video adapt: download D3D12 and D3D11 memory for inputs that cannot take it (#1093)
+- Video Encoder: adapt the input memory to what the encoder takes. CUDA reaches `nvh264enc` with no copy, and GL, CUDA, D3D12 or D3D11 memory the encoder cannot take is downloaded first. The block no longer uses `autovideoconvert` (#1111)
+- Media Player: share the flow's GL context with the internal pipeline (#1108)
+- Media Player: hold typefind back when a stinger clip loads paused (#1076)
+- Live Recorder: index each MP4 file so browsers start it at once (#1107)
+- API: reading a pad's properties no longer requests the pad (#922)
+- macOS: keep the GUI server out of App Nap as well (#921)
+
+### Changed
+- Remove dead code (#897)
+- Agent tasks: replace the triage/fix protocol with a short triage and review (#1082)
+- Dependencies: rustls 0.23.45 (#1017)
+
+### CI
+- Tests: share AppState, PipelineManager, the block install harness and bus readers across integration tests (#935, #936, #1083)
+- Tests: pin ApiClient request and error behaviour in the frontend (#916)
+- Tests: run the GPU vision mixer tests one at a time, and all of Linux CI past a failure (#1095)
+- Tests: skip tests that fail only on the CI runners, each with the reason (#1067, #1071, #1078, #1084, #1098, #1106, #1109)
+
+### Documentation
+- Correct the pronunciation and explanation of 'Strom' (#1070)
+
+---
+
 ## [0.7.1] - 2026-10-12
 
 ### Fixed

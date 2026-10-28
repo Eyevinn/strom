@@ -1,5 +1,9 @@
 //! WHIP Output using the legacy `whipsink`.
 
+use super::video::{build_video_input, CodecChains, OnAccept};
+use super::{
+    element_id, make, register_sink_pad_requests, resolve_track_counts, Sink, Track, TrackKind,
+};
 use crate::blocks::{
     set_ice_transport_policy, BlockBuildContext, BlockBuildError, BlockBuildResult,
 };
@@ -50,21 +54,8 @@ pub(super) fn build_whipsink(
     let stun_server = ctx.stun_server();
     let turn_server = ctx.turn_server();
 
+    let (num_audio_tracks, num_video_tracks) = resolve_track_counts(properties);
     let whipsink_id = format!("{}:whipsink", instance_id);
-    let audioconvert_id = format!("{}:audioconvert", instance_id);
-    let audioresample_id = format!("{}:audioresample", instance_id);
-    let opusenc_id = format!("{}:opusenc", instance_id);
-    let rtpopuspay_id = format!("{}:rtpopuspay", instance_id);
-
-    let audioconvert = gst::ElementFactory::make("audioconvert")
-        .name(&audioconvert_id)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("audioconvert: {}", e)))?;
-
-    let audioresample = gst::ElementFactory::make("audioresample")
-        .name(&audioresample_id)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("audioresample: {}", e)))?;
 
     let opus_complexity = properties
         .get("opus_complexity")
@@ -82,22 +73,10 @@ pub(super) fn build_whipsink(
         })
         .unwrap_or(DEFAULT_OPUS_BITRATE);
 
-    let opusenc = gst::ElementFactory::make("opusenc")
-        .name(&opusenc_id)
-        .property("complexity", opus_complexity)
-        .property("bitrate", opus_bitrate)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("opusenc: {}", e)))?;
-
     info!(
         "WHIP Output opusenc: complexity={}, bitrate={}",
         opus_complexity, opus_bitrate
     );
-
-    let rtpopuspay = gst::ElementFactory::make("rtpopuspay")
-        .name(&rtpopuspay_id)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("rtpopuspay: {}", e)))?;
 
     let whipsink = gst::ElementFactory::make("whipsink")
         .name(&whipsink_id)
@@ -132,33 +111,117 @@ pub(super) fn build_whipsink(
 
     setup_incoming_rtp_handler(&whipsink, instance_id, &ice_transport_policy);
 
-    let internal_links = vec![
-        (
-            ElementPadRef::pad(&audioconvert_id, "src"),
-            ElementPadRef::pad(&audioresample_id, "sink"),
-        ),
-        (
-            ElementPadRef::pad(&audioresample_id, "src"),
-            ElementPadRef::pad(&opusenc_id, "sink"),
-        ),
-        (
-            ElementPadRef::pad(&opusenc_id, "src"),
-            ElementPadRef::pad(&rtpopuspay_id, "sink"),
-        ),
-        (
-            ElementPadRef::pad(&rtpopuspay_id, "src"),
-            ElementPadRef::pad(&whipsink_id, "sink_0"),
-        ),
-    ];
+    let mut elements: Vec<(String, gst::Element)> = Vec::new();
+    let mut internal_links: Vec<(ElementPadRef, ElementPadRef)> = Vec::new();
+    let mut tracks: Vec<Track> = Vec::new();
+
+    // Audio: raw in, audioconvert -> audioresample -> opusenc -> rtpopuspay.
+    for slot in 0..num_audio_tracks {
+        let chain = [
+            (
+                "audioconvert",
+                element_id(instance_id, "audioconvert", slot),
+            ),
+            (
+                "audioresample",
+                element_id(instance_id, "audioresample", slot),
+            ),
+            ("opusenc", element_id(instance_id, "opusenc", slot)),
+            ("rtpopuspay", element_id(instance_id, "rtpopuspay", slot)),
+        ];
+        let mut built = Vec::new();
+        for (factory, id) in &chain {
+            built.push(make(factory, id)?);
+        }
+        built[2].set_property("complexity", opus_complexity);
+        built[2].set_property("bitrate", opus_bitrate);
+        for pair in chain.windows(2) {
+            internal_links.push((
+                ElementPadRef::pad(&pair[0].1, "src"),
+                ElementPadRef::pad(&pair[1].1, "sink"),
+            ));
+        }
+        tracks.push(Track {
+            kind: TrackKind::Audio,
+            slot,
+            input: built[0].downgrade(),
+            tail: built[3].downgrade(),
+            payloaders: vec![built[3].downgrade()],
+        });
+        elements.extend(chain.into_iter().map(|(_, id)| id).zip(built));
+    }
+
+    // Video: encoded in, checked by the input probe, which links it on to the
+    // chain for the codec that arrived. Each codec's payloader feeds a funnel,
+    // so the track has one tail for the setup hook whatever the codec.
+    for slot in 0..num_video_tracks {
+        let parse_id = element_id(instance_id, "h264parse", slot);
+        let parse = make("h264parse", &parse_id)?;
+        let h264_pay_id = element_id(instance_id, "rtph264pay", slot);
+        let h264_pay = make("rtph264pay", &h264_pay_id)?;
+        // SPS and PPS with every IDR, so the receiver can start decoding at
+        // any keyframe it asks for, not only the first.
+        h264_pay.set_property("config-interval", -1i32);
+        // Send each access unit as soon as it is packetised, without waiting
+        // for the next one: the mode webrtcsink uses for WebRTC.
+        if h264_pay.find_property("aggregate-mode").is_some() {
+            h264_pay.set_property_from_str("aggregate-mode", "zero-latency");
+        }
+        let vp8_pay_id = element_id(instance_id, "rtpvp8pay", slot);
+        let vp8_pay = make("rtpvp8pay", &vp8_pay_id)?;
+        let vp9_pay_id = element_id(instance_id, "rtpvp9pay", slot);
+        let vp9_pay = make("rtpvp9pay", &vp9_pay_id)?;
+        let funnel_id = element_id(instance_id, "video_funnel", slot);
+        let funnel = make("funnel", &funnel_id)?;
+
+        let (input_id, input) = build_video_input(
+            instance_id,
+            slot,
+            OnAccept::LinkTo(CodecChains {
+                h264: parse.downgrade(),
+                vp8: vp8_pay.downgrade(),
+                vp9: vp9_pay.downgrade(),
+            }),
+        )?;
+        internal_links.push((
+            ElementPadRef::pad(&parse_id, "src"),
+            ElementPadRef::pad(&h264_pay_id, "sink"),
+        ));
+        for pay_id in [&h264_pay_id, &vp8_pay_id, &vp9_pay_id] {
+            internal_links.push((
+                ElementPadRef::pad(pay_id, "src"),
+                ElementPadRef::pad(&funnel_id, "sink_%u"),
+            ));
+        }
+        tracks.push(Track {
+            kind: TrackKind::Video,
+            slot,
+            input: input.downgrade(),
+            tail: funnel.downgrade(),
+            payloaders: vec![
+                h264_pay.downgrade(),
+                vp8_pay.downgrade(),
+                vp9_pay.downgrade(),
+            ],
+        });
+        elements.push((input_id, input));
+        elements.push((parse_id, parse));
+        elements.push((h264_pay_id, h264_pay));
+        elements.push((vp8_pay_id, vp8_pay));
+        elements.push((vp9_pay_id, vp9_pay));
+        elements.push((funnel_id, funnel));
+    }
+
+    info!(
+        "WHIP Output {} (whipsink): {} audio and {} video track(s) declared",
+        instance_id, num_audio_tracks, num_video_tracks
+    );
+
+    register_sink_pad_requests(ctx, instance_id, &whipsink, Sink::WhipSink, tracks);
+    elements.push((whipsink_id, whipsink));
 
     Ok(BlockBuildResult {
-        elements: vec![
-            (audioconvert_id, audioconvert),
-            (audioresample_id, audioresample),
-            (opusenc_id, opusenc),
-            (rtpopuspay_id, rtpopuspay),
-            (whipsink_id, whipsink),
-        ],
+        elements,
         internal_links,
         bus_message_handler: None,
         pad_properties: HashMap::new(),

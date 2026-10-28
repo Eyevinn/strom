@@ -124,10 +124,14 @@ glib::wrapper! {
 /// Make `cudadownload` available for the rest of the process. On an
 /// NVIDIA host the real element is left in place and used.
 ///
+/// Returns true when the stand-in is the `cudadownload` in the registry.
+/// A test that pushes system-memory buffers under CUDA caps must skip when it
+/// is not: the real element would read them as CUDA memory.
+///
 /// Registered once and never removed: `Registry::remove_feature` frees the
 /// factory while the element class keeps a plain pointer to it, so a later
 /// lookup or registration under the same name reads freed memory.
-pub fn register() {
+pub fn register() -> bool {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         gst::init().expect("GStreamer initialises");
@@ -142,4 +146,6 @@ pub fn register() {
         )
         .expect("register the cudadownload stand-in");
     });
+    gst::ElementFactory::find(strom::gst::video_adapt::CUDA_DOWNLOAD_FACTORY)
+        .is_some_and(|f| f.element_type() == CudaDownloadStandIn::static_type())
 }

@@ -558,6 +558,11 @@ pub struct StromApp {
     connection_state: ConnectionState,
     /// Channel-based state management
     channels: AppStateChannels,
+    /// Flow properties dialog to open next (flow ID, focus the Name field).
+    /// Set from the flow menu, which cannot fill the buffers while it borrows the flow list.
+    pending_flow_properties: Option<(strom_types::FlowId, bool)>,
+    /// Focus and select the Name field when the properties dialog next renders
+    properties_focus_name: bool,
     /// Flow properties being edited (flow ID)
     editing_properties_flow_id: Option<strom_types::FlowId>,
     /// Temporary name buffer for properties dialog

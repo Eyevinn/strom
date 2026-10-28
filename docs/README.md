@@ -16,7 +16,7 @@ Common questions are answered in the [FAQ](FAQ.md).
 
 ## Using Strom
 
-- [VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md) — broadcast PVW/PGM switcher: transitions, DSK, PiP, multiview.
+- [VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md) — broadcast PVW/PGM switcher: transitions, stingers, DSK, PiP, multiview.
 - [PRODUCER_SWITCHING_API_GUIDE.md](PRODUCER_SWITCHING_API_GUIDE.md) — driving the vision mixer over HTTP: PiP layout recipes, on-air edits, failure modes.
 - [AUDIO_MIXER_OPERATOR_GUIDE.md](AUDIO_MIXER_OPERATOR_GUIDE.md) — audio mixing console signal flow and operation.
 - [MEDIA_LIBRARY.md](MEDIA_LIBRARY.md) — the media library: upload, download from a URL, and the Media Player.

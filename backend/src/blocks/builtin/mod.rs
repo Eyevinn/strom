@@ -15,6 +15,7 @@ pub mod efpsrt;
 #[cfg(feature = "efp")]
 pub mod efpsrt_input;
 pub mod html_input;
+pub(crate) mod inputs;
 pub mod inter;
 pub mod latency;
 pub mod live_recorder;
@@ -38,6 +39,7 @@ pub mod videoenc;
 pub mod videoformat;
 pub mod vision_mixer;
 pub(crate) mod webrtc_props;
+pub(crate) mod webrtcsink_profile_filter;
 pub mod whep;
 pub mod whip;
 

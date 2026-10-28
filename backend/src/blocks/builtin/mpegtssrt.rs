@@ -6,7 +6,7 @@
 //! Features:
 //! - Dynamic parser insertion for video (h264parse/h265parse with config-interval=1)
 //! - Dynamic audio chain: supports raw audio (encodes to AAC) and all encoded formats
-//! - Configurable inputs: 1 video input + 1-32 audio inputs (default: 1 audio)
+//! - Configurable inputs: video and audio track counts (default: 1 video, 1 audio)
 //! - Optimized for UDP streaming (alignment=7 on mpegtsmux)
 //! - SRT with auto-reconnect and configurable latency
 //!
@@ -138,11 +138,10 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
                     format!("video_in_{}", i)
                 },
                 media_type: MediaType::Video,
-                internal_element_id: if num_video_tracks == 1 {
-                    "video_input".to_string()
-                } else {
-                    format!("video_input_{}", i)
-                },
+                internal_element_id: format!(
+                    "video_input{}",
+                    video_track_suffix(num_video_tracks, i)
+                ),
                 internal_pad_name: "sink".to_string(),
             });
         }
@@ -344,12 +343,17 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
 
         let mut elements = vec![(mux_id.clone(), mux), (sink_id.clone(), srtsink)];
 
-        // Create video input chain if requested
+        // Create one video input chain per track.
         // Video linking is DYNAMIC - we don't link to mpegtsmux at construction time.
         // Instead, we use a pad probe to detect the codec and insert the appropriate parser.
         // This prevents mpegtsmux's byte-stream requirement from propagating upstream.
-        if num_video_tracks > 0 {
-            let video_input_id = format!("{}:video_input", instance_id);
+        //
+        // The element names must match `get_external_pads`: a flow link to a
+        // video pad resolves to the element named there, and one that names a
+        // missing element waits in the pending links forever, with no error.
+        for i in 0..num_video_tracks {
+            let suffix = video_track_suffix(num_video_tracks, i);
+            let video_input_id = format!("{}:video_input{}", instance_id, suffix);
 
             let video_input = gst::ElementFactory::make("identity")
                 .name(&video_input_id)
@@ -447,7 +451,8 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
                     };
 
                     // Create the parser with config-interval=1 for SPS/PPS insertion
-                    let parser_element_name = format!("{}:video_parser", instance_id_clone);
+                    let parser_element_name =
+                        format!("{}:video_parser{}", instance_id_clone, suffix);
                     let parser = match gst::ElementFactory::make(parser_factory)
                         .name(&parser_element_name)
                         .property("config-interval", 1i32)
@@ -557,7 +562,8 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
             }
 
             info!(
-                "Video input: dynamic parser insertion enabled (H.264/H.265 with config-interval=1)"
+                "Video input {}: dynamic parser insertion enabled (H.264/H.265 with config-interval=1)",
+                i
             );
 
             // NOTE: No internal_links for video - linking happens dynamically in the pad probe
@@ -775,6 +781,17 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
             bus_message_handler: None,
             pad_properties: HashMap::new(),
         })
+    }
+}
+
+/// The suffix of a video track's element names, matching the internal element
+/// ids `get_external_pads` gives the video pads: none for a single track
+/// (`video_input`), `_{index}` otherwise (`video_input_0`, `video_input_1`, ...).
+fn video_track_suffix(num_video_tracks: usize, index: usize) -> String {
+    if num_video_tracks == 1 {
+        String::new()
+    } else {
+        format!("_{}", index)
     }
 }
 

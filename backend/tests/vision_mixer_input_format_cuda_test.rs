@@ -246,7 +246,7 @@ fn appsrc_flow(block_id: &str) -> Flow {
     flow.blocks.push(mixer_block(block_id, Backend::Gpu));
     flow.elements.push(elem("src", "appsrc", vec![]));
     link(&mut flow, "src:src", &format!("{block_id}:video_in_0"));
-    add_pgm_tap(&mut flow, block_id);
+    add_pgm_tap(&mut flow, block_id, Backend::Gpu);
     flow
 }
 
@@ -323,14 +323,7 @@ async fn cuda_after_a_converted_format_bypasses_the_converter() {
         .unwrap_or_else(|| panic!("the input does not offer CUDA memory: {answer}"));
     let first_converted = answer
         .iter_with_features()
-        .position(|(s, f)| {
-            if f.contains("memory:GLMemory") || f.contains("memory:CUDAMemory") {
-                return false;
-            }
-            let mut one = gst::Caps::new_empty();
-            one.make_mut().append_structure(s.to_owned());
-            !s.has_field("format") || !one.is_subset(&uploads)
-        })
+        .position(|(s, f)| common::upload_path(s, f, &uploads) == common::UploadPath::ConverterOnly)
         .unwrap_or_else(|| panic!("the answer lists nothing only the converter takes: {answer}"));
     assert!(
         first_cuda < first_converted,
@@ -471,7 +464,7 @@ async fn nvdec_cuda_after_a_converted_format_stays_on_the_gpu() {
         link(&mut flow, from, to);
     }
     link(&mut flow, "sel:src", &format!("{block_id}:video_in_0"));
-    add_pgm_tap(&mut flow, block_id);
+    add_pgm_tap(&mut flow, block_id, Backend::Gpu);
 
     let running = Running::start(block_id, flow);
     let sel = running.element("sel");

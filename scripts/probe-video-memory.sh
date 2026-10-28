@@ -96,12 +96,12 @@ for e in x264enc nvh264enc nvh264device0enc vtenc_h264 vtenc_h264_hw mfh264enc d
 done
 printf '  %s\n' "${line:- none}"
 
-# Strom picks its process-wide converter from these two facts (backend/src/gpu.rs).
-# Reporting them here means the table says what Strom would decide on this host.
+# Strom no longer picks a process-wide converter: each block adapts its own
+# input from the negotiated caps. NVENC's presence still decides the encoders.
 echo
-echo "=== what Strom's probe would see"
-have nvh264enc && echo "  nvh264enc present    -> VideoConvertMode::GpuAccelerated (autovideoconvert)" \
-               || echo "  nvh264enc absent     -> VideoConvertMode::Software (plain videoconvert)"
+echo "=== encoders"
+have nvh264enc && echo "  nvh264enc present    -> hardware H.264 encoding available" \
+               || echo "  nvh264enc absent     -> software H.264 encoding"
 
 for feature in memory:GLMemory memory:CUDAMemory memory:D3D11Memory memory:VAMemory; do
     src=$(producer_for "$feature")

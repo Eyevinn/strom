@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.7.1"
+    "version": "0.8.0-alpha.2"
   },
   "paths": {
     "/api/auth/status": {
@@ -6370,11 +6370,11 @@
           "ui_metadata": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/BlockUIMetadata",
                 "description": "Visual representation settings"
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -6397,11 +6397,11 @@
           "computed_external_pads": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ExternalPads",
                 "description": "Computed external pads for this instance based on properties\nIf None, falls back to the pads from the block definition\nThis allows blocks to have dynamic pads based on their configuration"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -6767,10 +6767,10 @@
           "ui_metadata": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/BlockUIMetadata"
               },
               {
-                "$ref": "#/components/schemas/BlockUIMetadata"
+                "type": "null"
               }
             ]
           }
@@ -7507,11 +7507,11 @@
           "default_value": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/PropertyValue",
                 "description": "Default value"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -7661,11 +7661,11 @@
           "gst_state": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/PipelineState",
                 "description": "Raw GStreamer pipeline state, exposed for diagnostics.\n\nPrefer [`running`](Self::running) for logic and display."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -7836,11 +7836,11 @@
           "clock_sync_status": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ClockSyncStatus",
                 "description": "Clock synchronization status (updated by backend for running pipelines)"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -7887,11 +7887,11 @@
           "ntp_info": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/NtpInfo",
                 "description": "NTP clock information (updated by backend when clock_type is NTP)"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -7923,11 +7923,11 @@
           "ptp_info": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/PtpInfo",
                 "description": "PTP clock information (updated by backend when clock_type is PTP)"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -7945,11 +7945,11 @@
           "thread_priority_status": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ThreadPriorityStatus",
                 "description": "Status of thread priority configuration (updated by backend when pipeline starts)"
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -9418,11 +9418,11 @@
           "default_value": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/PropertyValue",
                 "description": "Default value"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -9636,11 +9636,11 @@
           "stats": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/PtpStats",
                 "description": "PTP synchronization statistics (updated periodically)"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -10353,11 +10353,11 @@
           "mode": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/SrtMode",
                 "description": "Connection mode (`caller`/`listener`/`rendezvous`)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -10642,11 +10642,11 @@
           "settings": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/StingerClipSettings",
                 "description": "Settings to store with it. Defaults detect everything."
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -10688,11 +10688,11 @@
           "downgraded_from": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/StingerVariant",
                 "description": "Set when the variant the clip asks for cannot run here."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -10708,11 +10708,11 @@
           "info": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/StingerClipInfo",
                 "description": "Analysis, once it has run."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -10727,11 +10727,11 @@
           "variant": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/StingerVariant",
                 "description": "How this clip plays on this mixer, after detection and any downgrade."
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -10967,10 +10967,10 @@
           "last_take": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/StingerTakeReport"
               },
               {
-                "$ref": "#/components/schemas/StingerTakeReport"
+                "type": "null"
               }
             ]
           },
@@ -11046,10 +11046,10 @@
           "downgraded_from": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/StingerVariant"
               },
               {
-                "$ref": "#/components/schemas/StingerVariant"
+                "type": "null"
               }
             ]
           },
@@ -11159,10 +11159,10 @@
           "downgraded_from": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/StingerVariant"
               },
               {
-                "$ref": "#/components/schemas/StingerVariant"
+                "type": "null"
               }
             ]
           },
@@ -13178,10 +13178,10 @@
                   "downgraded_from": {
                     "oneOf": [
                       {
-                        "type": "null"
+                        "$ref": "#/components/schemas/StingerVariant"
                       },
                       {
-                        "$ref": "#/components/schemas/StingerVariant"
+                        "type": "null"
                       }
                     ]
                   },
@@ -13474,11 +13474,11 @@
           "gl_renderer": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/GlRendererInfo",
                 "description": "OpenGL renderer info from GStreamer (if available)"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -14339,10 +14339,10 @@
             "items": {
               "oneOf": [
                 {
-                  "type": "null"
+                  "$ref": "#/components/schemas/InputResolution"
                 },
                 {
-                  "$ref": "#/components/schemas/InputResolution"
+                  "type": "null"
                 }
               ]
             },
@@ -14418,11 +14418,11 @@
           "ice_candidates": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/IceCandidateStats",
                 "description": "ICE candidate pair statistics"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -14453,11 +14453,11 @@
           "transport": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/TransportStats",
                 "description": "Transport statistics"
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -14547,11 +14547,11 @@
           "border": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ZoneBorder",
                 "description": "Border drawn around each source box in this zone (None = no border).\nRendered live on the PGM overlay — follows morphs/takes/punch-ins."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -14566,11 +14566,11 @@
           "rect": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/NormRect",
                 "description": "Where the zone sits within the parent PiP region.\n`None` = fill the entire PiP region."
+              },
+              {
+                "type": "null"
               }
             ]
           },

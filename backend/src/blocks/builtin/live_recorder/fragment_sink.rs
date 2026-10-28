@@ -18,6 +18,12 @@
 //! moves each file's times back to start at zero; MPEG-TS players expect a
 //! running PTS.
 //!
+//! An MP4 file gets room for a segment index (`sidx`) after its init segment,
+//! held by a `free` box. When the file closes, the sink seeks back and writes
+//! the index there, so a browser reads only the start of the file before it
+//! plays. A file that never closes, as after a crash, plays as before: players
+//! skip the `free` box.
+//!
 //! It is a plain element with a sink pad, not a `BaseSink`: it does not sync to
 //! the clock and has nothing to preroll. A `BaseSink` that has not had a buffer
 //! by PLAYING still counts as not prerolled, and a first buffer arriving while
@@ -34,7 +40,7 @@ use gst::subclass::prelude::*;
 use gstreamer as gst;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -47,6 +53,17 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 /// while the video is stalled there are none, and the audio still has to reach
 /// the disk.
 const FLUSH_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Most fragments a second the index makes room for. The muxer cuts at a
+/// keyframe near its 1 s fragment duration: a 2 s GOP gives one fragment
+/// every 2 s, but short GOPs, audio alone or a stalled video track give two a
+/// second and more.
+const INDEX_ENTRIES_PER_SECOND: u64 = 5;
+
+/// Fragments an MP4 file without a split duration has room to index, for
+/// 196 KB at the start of the file: 9 hours with a 2 s GOP, under an hour at
+/// five fragments a second.
+const UNSPLIT_INDEX_ENTRIES: usize = 16_384;
 
 /// Called with the index and path of every file the sink opens.
 pub type FileOpenedFn = Arc<dyn Fn(u32, &std::path::Path) + Send + Sync>;
@@ -160,6 +177,29 @@ mod imp {
         /// Matroska: cluster timestamp the current file starts at.
         file_base: Option<u64>,
         last_flush: Option<Instant>,
+        /// MP4: track id → default sample duration, from the init segment.
+        default_durations: HashMap<u32, u32>,
+        /// MP4: the room for the current file's index and what goes in it.
+        index: Option<FileIndex>,
+    }
+
+    /// The segment index of the MP4 file being written.
+    struct FileIndex {
+        /// Where the room for it starts in the file, after the init segment.
+        at: u64,
+        /// How many fragments that room holds.
+        capacity: usize,
+        /// The track the index refers to, and its timescale.
+        track_id: u32,
+        timescale: u32,
+        fragments: Vec<IndexedFragment>,
+    }
+
+    /// Where a fragment starts in the file, and its span in nanoseconds.
+    struct IndexedFragment {
+        offset: u64,
+        start: u64,
+        end: u64,
     }
 
     /// One buffer's bytes, and whether the muxer flagged it as a header.
@@ -275,7 +315,7 @@ mod imp {
             if transition == gst::StateChange::PausedToReady {
                 let mut state = self.state.lock().unwrap();
                 self.flush_held(&mut state);
-                state.file = None;
+                self.finish_file(&mut state);
             }
             Ok(result)
         }
@@ -294,9 +334,7 @@ mod imp {
         /// Close the current file, if any, and open the next one with the
         /// container header at its start.
         fn open_next_file(&self, state: &mut State) -> Result<(u32, PathBuf), gst::ErrorMessage> {
-            if let Some(mut file) = state.file.take() {
-                let _ = file.flush();
-            }
+            self.finish_file(state);
             let index = state.next_index;
             let path = self.path_for(index);
             if let Some(dir) = path.parent() {
@@ -309,22 +347,79 @@ mod imp {
                 )
             })?;
             let mut file = BufWriter::with_capacity(256 * 1024, file);
+            let write_error = |e: std::io::Error| {
+                gst::error_msg!(
+                    gst::ResourceError::Write,
+                    ["Could not write to {}: {}", path.display(), e]
+                )
+            };
             let mut written = 0u64;
+            let mut file_index = None;
             if let Some(header) = &state.header {
-                file.write_all(header).map_err(|e| {
-                    gst::error_msg!(
-                        gst::ResourceError::Write,
-                        ["Could not write to {}: {}", path.display(), e]
-                    )
-                })?;
+                file.write_all(header).map_err(write_error)?;
                 written = header.len() as u64;
+                let track = match self.format() {
+                    Format::FragmentedMp4 => mp4_boxes::first_track(header),
+                    _ => None,
+                };
+                if let Some((track_id, timescale)) = track {
+                    let capacity = self.index_capacity();
+                    let room = mp4_boxes::free(index_room(capacity));
+                    file.write_all(&room).map_err(write_error)?;
+                    file_index = Some(FileIndex {
+                        at: written,
+                        capacity,
+                        track_id,
+                        timescale,
+                        fragments: Vec::new(),
+                    });
+                    written += room.len() as u64;
+                }
             }
             state.file = Some(file);
+            state.index = file_index;
             state.next_index += 1;
             state.file_start = None;
             state.file_base = None;
             state.bytes_in_file = written;
             Ok((index, path))
+        }
+
+        /// How many fragments a file's index has room for. A split file can
+        /// run past its split duration until the next cut point, hence the
+        /// margin. One `sidx` holds at most `u16::MAX` entries.
+        fn index_capacity(&self) -> usize {
+            let max_duration = self.settings.lock().unwrap().policy.max_duration;
+            match max_duration {
+                Some(max) => {
+                    (max.seconds() * INDEX_ENTRIES_PER_SECOND + 16).min(u16::MAX as u64) as usize
+                }
+                None => UNSPLIT_INDEX_ENTRIES,
+            }
+        }
+
+        /// Close the current file. An MP4 file gets its index written into the
+        /// room left for it; if that fails, it still plays, only slower to start.
+        fn finish_file(&self, state: &mut State) {
+            let index = state.index.take();
+            let Some(mut file) = state.file.take() else {
+                return;
+            };
+            if let Err(e) = file.flush() {
+                gst::warning!(CAT, imp = self, "Could not finish the file: {}", e);
+                return;
+            }
+            let Some(index) = index else {
+                return;
+            };
+            if let Err(reason) = write_index(file.get_mut(), &index, state.bytes_in_file) {
+                gst::warning!(
+                    CAT,
+                    imp = self,
+                    "File closed without an index; a browser reads all of it before it plays: {}",
+                    reason
+                );
+            }
         }
 
         fn split_due(&self, state: &State, pts: Option<gst::ClockTime>) -> bool {
@@ -371,7 +466,34 @@ mod imp {
                     if let Some(base) = state.file_base {
                         mp4_boxes::shift_decode_times(&mut bytes, &state.timescales, base);
                     }
-                    self.write(state, &bytes)
+                    let offset = state.bytes_in_file;
+                    let times = state.index.as_ref().map(|_| {
+                        let start = mp4_boxes::fragment_start_ns(&bytes, &state.timescales);
+                        let end = mp4_boxes::fragment_end_ns(
+                            &bytes,
+                            &state.timescales,
+                            &state.default_durations,
+                        );
+                        start.zip(end)
+                    });
+                    self.write(state, &bytes)?;
+                    match times {
+                        Some(Some((start, end))) => {
+                            if let Some(index) = state.index.as_mut() {
+                                index.fragments.push(IndexedFragment { offset, start, end });
+                            }
+                        }
+                        Some(None) => {
+                            gst::warning!(
+                                CAT,
+                                imp = self,
+                                "Could not read a fragment's times; the file gets no index"
+                            );
+                            state.index = None;
+                        }
+                        None => {}
+                    }
+                    Ok(())
                 }
                 Format::Matroska => {
                     let Some(ts) = mkv_cluster::cluster_timestamp(bytes) else {
@@ -491,6 +613,7 @@ mod imp {
                 self.flush_held(&mut state);
                 state.header = Some(bytes.to_vec());
                 state.timescales = mp4_boxes::track_timescales(bytes);
+                state.default_durations = mp4_boxes::default_sample_durations(bytes);
                 opened = Some(self.open_next_file(&mut state)?);
                 return Ok(opened);
             }
@@ -592,7 +715,10 @@ mod imp {
                     }
                 }
                 gst::EventView::Eos(_) => {
-                    self.flush_held(&mut self.state.lock().unwrap());
+                    let mut state = self.state.lock().unwrap();
+                    self.flush_held(&mut state);
+                    self.finish_file(&mut state);
+                    drop(state);
                     *self.eos.lock().unwrap() = true;
                     self.eos_cond.notify_all();
                     // The bin counts a sink's EOS message to post its own.
@@ -603,6 +729,145 @@ mod imp {
             }
             // A sink consumes every event that reaches it.
             true
+        }
+    }
+
+    /// Bytes left after the init segment for an index of `capacity` fragments:
+    /// the index plus at least a minimal `free` box ahead of it, so the room
+    /// left over can always be filled.
+    fn index_room(capacity: usize) -> usize {
+        mp4_boxes::sidx_len(capacity) + 8
+    }
+
+    /// Write the index of a closed file into the room left for it, right
+    /// before the first fragment, with a `free` box filling the rest.
+    fn write_index(file: &mut File, index: &FileIndex, file_len: u64) -> Result<(), String> {
+        let Some(first) = index.fragments.first() else {
+            return Ok(());
+        };
+        let room = index_room(index.capacity);
+        if first.offset != index.at + room as u64 {
+            return Err("data between the init segment and the first fragment".into());
+        }
+        if index.fragments.len() > index.capacity {
+            return Err(format!(
+                "{} fragments, room for {}",
+                index.fragments.len(),
+                index.capacity
+            ));
+        }
+        let to_ts = |ns: u64| (ns as u128 * index.timescale as u128 / 1_000_000_000) as u64;
+        let mut entries = Vec::with_capacity(index.fragments.len());
+        for (i, fragment) in index.fragments.iter().enumerate() {
+            let (next_offset, next_start) = match index.fragments.get(i + 1) {
+                Some(next) => (next.offset, next.start),
+                None => (file_len, fragment.end.max(fragment.start)),
+            };
+            let size = u32::try_from(next_offset - fragment.offset)
+                .ok()
+                .filter(|&size| size <= 0x7fff_ffff)
+                .ok_or("a fragment over 2 GB")?;
+            let duration = u32::try_from(to_ts(next_start).saturating_sub(to_ts(fragment.start)))
+                .map_err(|_| "a fragment too long for its timescale")?;
+            entries.push(mp4_boxes::IndexEntry { size, duration });
+        }
+        let sidx = mp4_boxes::sidx(
+            index.track_id,
+            index.timescale,
+            to_ts(first.start),
+            &entries,
+        );
+        // The index goes in first, at the end of the room, while the room's
+        // own `free` header still covers it: a write that stops short, on a
+        // full disk or a crash, leaves the file as it was. Shortening that
+        // header to end where the index starts is the last write. The room
+        // was written as zeros, so the header is all the new `free` needs.
+        let free_len = room - sidx.len();
+        let mut header = (free_len as u32).to_be_bytes().to_vec();
+        header.extend_from_slice(b"free");
+        file.seek(SeekFrom::Start(index.at + free_len as u64))
+            .and_then(|_| file.write_all(&sidx))
+            .and_then(|_| file.sync_data())
+            .and_then(|_| file.seek(SeekFrom::Start(index.at)))
+            .and_then(|_| file.write_all(&header))
+            .map_err(|e| e.to_string())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::io::Read;
+
+        /// A file as the sink leaves it before the close: the init segment,
+        /// the room, and `sizes.len()` fragments of those sizes, 1 s each.
+        fn file_with(capacity: usize, sizes: &[u64]) -> (tempfile::NamedTempFile, FileIndex, u64) {
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            let init = vec![0xAAu8; 100];
+            tmp.write_all(&init).unwrap();
+            tmp.write_all(&mp4_boxes::free(index_room(capacity)))
+                .unwrap();
+            let mut offset = (init.len() + index_room(capacity)) as u64;
+            let mut fragments = Vec::new();
+            for (i, &size) in sizes.iter().enumerate() {
+                let i = i as u64;
+                fragments.push(IndexedFragment {
+                    offset,
+                    start: i * 1_000_000_000,
+                    end: (i + 1) * 1_000_000_000,
+                });
+                tmp.write_all(&vec![0xBB; size as usize]).unwrap();
+                offset += size;
+            }
+            let index = FileIndex {
+                at: init.len() as u64,
+                capacity,
+                track_id: 1,
+                timescale: 90_000,
+                fragments,
+            };
+            (tmp, index, offset)
+        }
+
+        fn contents(tmp: &tempfile::NamedTempFile) -> Vec<u8> {
+            let mut data = Vec::new();
+            File::open(tmp.path())
+                .unwrap()
+                .read_to_end(&mut data)
+                .unwrap();
+            data
+        }
+
+        fn be32(data: &[u8], at: usize) -> u32 {
+            u32::from_be_bytes(data[at..at + 4].try_into().unwrap())
+        }
+
+        #[test]
+        fn the_index_ends_where_the_first_fragment_starts_and_covers_the_file() {
+            let (tmp, index, len) = file_with(8, &[1000, 2000, 500]);
+            write_index(tmp.as_file().try_clone().as_mut().unwrap(), &index, len).unwrap();
+            let data = contents(&tmp);
+            assert_eq!(data.len() as u64, len);
+            let free_len = be32(&data, 100) as usize;
+            assert_eq!(&data[104..108], b"free");
+            let sidx = 100 + free_len;
+            assert_eq!(&data[sidx + 4..sidx + 8], b"sidx");
+            assert_eq!(
+                sidx + be32(&data, sidx) as usize,
+                index.fragments[0].offset as usize
+            );
+            let sizes: Vec<u32> = (0..3).map(|i| be32(&data, sidx + 40 + i * 12)).collect();
+            assert_eq!(sizes, vec![1000, 2000, 500]);
+            let durations: Vec<u32> = (0..3).map(|i| be32(&data, sidx + 44 + i * 12)).collect();
+            assert_eq!(durations, vec![90_000; 3]);
+        }
+
+        #[test]
+        fn more_fragments_than_room_leaves_the_file_untouched() {
+            let (tmp, index, len) = file_with(2, &[1000, 2000, 500]);
+            let before = contents(&tmp);
+            let result = write_index(tmp.as_file().try_clone().as_mut().unwrap(), &index, len);
+            assert!(result.is_err());
+            assert_eq!(contents(&tmp), before);
         }
     }
 }

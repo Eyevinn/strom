@@ -90,6 +90,78 @@ pub(super) fn file_uri(path: &Path) -> String {
         .unwrap_or_else(|_| format!("file://{}", path.display()))
 }
 
+/// The URI a stinger clip source plays `uri` from.
+///
+/// On Windows a file that a process holds open cannot be renamed over or
+/// deleted. A parked clip holds its file open until the next cue, so an
+/// operator could not re-export a clip under the same name while the flow
+/// ran (#1165). There the source plays a private copy (see [`private_copy`])
+/// and the original stays free. Elsewhere, for anything but a local file, or
+/// when the copy cannot be made, `uri` itself.
+///
+/// Whatever the source plays, the stamp ([`file_stamp`]) and the clip
+/// analysis are taken from `uri`: a rewrite of the original is what
+/// counts.
+pub(super) fn stinger_source_uri(uri: &str) -> String {
+    if cfg!(windows) {
+        let dir = std::env::temp_dir().join("strom-stinger-clips");
+        if let Some(copy) = private_copy(uri, &dir) {
+            return copy;
+        }
+    }
+    uri.to_string()
+}
+
+/// A copy of the local file `uri` in `dir`, as a `file://` URI, named after
+/// the file's path and its [`file_stamp`]: a rewritten file gets a new copy,
+/// and an unchanged one reuses the copy it has. Older copies of the same file
+/// are removed, unless something still holds them open. `None` for a URI
+/// that is not a local file, or a copy that fails.
+pub(super) fn private_copy(uri: &str, dir: &Path) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+
+    let (path, _) = gstreamer::glib::filename_from_uri(uri).ok()?;
+    let (mtime, len) = file_stamp(uri)?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    let prefix = format!("{:016x}-", hasher.finish());
+    let extension = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let name = format!("{prefix}{mtime}-{len}{extension}");
+    let copy = dir.join(&name);
+
+    if !copy.exists() {
+        std::fs::create_dir_all(dir).ok()?;
+        // Copied under a temporary name, then renamed: a source never opens
+        // a half-written copy.
+        let partial = dir.join(format!("{name}.partial"));
+        if let Err(e) =
+            std::fs::copy(&path, &partial).and_then(|_| std::fs::rename(&partial, &copy))
+        {
+            debug!(
+                "Could not copy {} to {}: {}",
+                path.display(),
+                copy.display(),
+                e
+            );
+            let _ = std::fs::remove_file(&partial);
+            return None;
+        }
+        // Older copies of the same file. One a player still plays stays.
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let other = entry.file_name().to_string_lossy().to_string();
+                if other.starts_with(&prefix) && other != name {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+    Some(file_uri(&copy))
+}
+
 /// A local file's modification time (nanoseconds since the epoch) and length,
 /// as it is on disk now. `None` for a URI that is not a local file, or a file
 /// that is not there.
@@ -166,6 +238,54 @@ mod tests {
         let (back, _) = gstreamer::glib::filename_from_uri(&uri)
             .unwrap_or_else(|e| panic!("{} is not a valid file URI: {}", uri, e));
         assert_eq!(back, path, "{}", uri);
+    }
+
+    /// A stinger clip source on Windows plays a private copy, so the original
+    /// can be renamed over while the clip is parked (#1165). The copy follows
+    /// the original's stamp: unchanged, it is reused; rewritten, a new copy
+    /// replaces the old one.
+    #[test]
+    fn a_private_copy_follows_the_file_and_leaves_it_free() {
+        let root = std::env::temp_dir().join(format!("strom-private-copy-{}", Uuid::new_v4()));
+        let dir = root.join("copies");
+        std::fs::create_dir_all(&root).unwrap();
+        let clip = root.join("clip.mov");
+        std::fs::write(&clip, b"first").unwrap();
+        let uri = file_uri(&clip);
+
+        let first = private_copy(&uri, &dir).expect("a copy of a local file");
+        let (first_path, _) = gstreamer::glib::filename_from_uri(&first).unwrap();
+        assert_ne!(first_path, clip);
+        assert_eq!(std::fs::read(&first_path).unwrap(), b"first");
+        assert_eq!(
+            private_copy(&uri, &dir),
+            Some(first.clone()),
+            "unchanged file"
+        );
+
+        // Held open, as a parked clip holds its source: the original can still
+        // be replaced the way an operator's export does it.
+        let held = std::fs::File::open(&first_path).unwrap();
+        let tmp = root.join("rewrite.tmp.mov");
+        std::fs::write(&tmp, b"second, longer").unwrap();
+        std::fs::rename(&tmp, &clip).expect("the original is not held open");
+
+        let second = private_copy(&uri, &dir).expect("a copy of the rewritten file");
+        assert_ne!(second, first, "a rewritten file gets a new copy");
+        let (second_path, _) = gstreamer::glib::filename_from_uri(&second).unwrap();
+        assert_eq!(std::fs::read(&second_path).unwrap(), b"second, longer");
+
+        // Once nothing holds the old copy, the next copy removes it.
+        drop(held);
+        std::fs::write(&clip, b"third, longer still").unwrap();
+        let third = private_copy(&uri, &dir).expect("a third copy");
+        let (third_path, _) = gstreamer::glib::filename_from_uri(&third).unwrap();
+        assert!(!first_path.exists(), "the old copy was left behind");
+        assert!(!second_path.exists(), "the old copy was left behind");
+        assert!(third_path.exists());
+
+        assert_eq!(private_copy("https://example.com/clip.mov", &dir), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
