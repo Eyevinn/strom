@@ -34,8 +34,18 @@
           <Directory Id="GstBinFolder" Name="bin" />
           <Directory Id="GstLibFolder" Name="lib">
             <Directory Id="GstPluginsFolder" Name="gstreamer-1.0" />
+            <!-- GIO loads its TLS backend (gioopenssl.dll) from here; without
+                 it no https:// URL opens (issue #1079). -->
+            <Directory Id="GstGioFolder" Name="gio">
+              <Directory Id="GstGioModulesFolder" Name="modules" />
+            </Directory>
           </Directory>
           <Directory Id="GstLibexecFolder" Name="libexec" />
+          <!-- License texts of GStreamer and the libraries it bundles
+               (LGPL, and GPL for x264, x265, ...). -->
+          <Directory Id="GstShareFolder" Name="share">
+            <Directory Id="GstLicensesFolder" Name="licenses" />
+          </Directory>
         </Directory>
         <Directory Id="GraphvizFolder" Name="graphviz">
           <Directory Id="GvBinFolder" Name="bin" />
@@ -90,8 +100,16 @@
       <Files Include="$(var.GStreamerDir)\lib\gstreamer-1.0\**\*.dll" />
     </ComponentGroup>
 
+    <ComponentGroup Id="GStreamerGioModuleFiles" Directory="GstGioModulesFolder">
+      <Files Include="$(var.GStreamerDir)\lib\gio\modules\*.dll" />
+    </ComponentGroup>
+
     <ComponentGroup Id="GStreamerLibexecFiles" Directory="GstLibexecFolder">
       <Files Include="$(var.GStreamerDir)\libexec\**\*.*" />
+    </ComponentGroup>
+
+    <ComponentGroup Id="GStreamerLicenseFiles" Directory="GstLicensesFolder">
+      <Files Include="$(var.GStreamerDir)\share\licenses\**\*.*" />
     </ComponentGroup>
 
     <!-- Graphviz files -->
@@ -108,7 +126,9 @@
       <Feature Id="GStreamerFeature" Title="GStreamer Runtime" Description="GStreamer multimedia framework (required for Strom to function)" Level="1" AllowAbsent="no">
         <ComponentGroupRef Id="GStreamerBinFiles" />
         <ComponentGroupRef Id="GStreamerPluginFiles" />
+        <ComponentGroupRef Id="GStreamerGioModuleFiles" />
         <ComponentGroupRef Id="GStreamerLibexecFiles" />
+        <ComponentGroupRef Id="GStreamerLicenseFiles" />
       </Feature>
 
       <Feature Id="GraphvizFeature" Title="Graphviz" Description="Graph visualization tools for debug pipeline graphs (recommended)" Level="1">

@@ -991,6 +991,22 @@ fn link_pad_through_clocksync(
     Ok(())
 }
 
+/// What the operator is told when the internal pipeline fails on `file`.
+/// An `https://` stream on a host whose GIO has no TLS backend fails with only
+/// `Internal data stream error` from `souphttpsrc`, so the reason is added.
+fn internal_error_text(file: Option<&str>, error: &str, tls_available: bool) -> String {
+    let error = error.trim_end_matches('.');
+    let mut text = match file {
+        Some(file) => format!("Media Player could not play {}: {}", file, error),
+        None => format!("Media Player: {}", error),
+    };
+    if !tls_available && file.is_some_and(crate::gst::tls::needs_tls) {
+        text.push_str(". ");
+        text.push_str(crate::gst::tls::NO_TLS_HINT);
+    }
+    text
+}
+
 /// Advance the playlist when the internal pipeline reaches EOS.
 ///
 /// The EOS is seen as it is posted, on the streaming thread that posts it,
@@ -1113,6 +1129,19 @@ pub fn watch_internal_bus(
                     err.error(),
                     err.debug()
                 );
+                // The internal pipeline's bus is not the flow's, so its errors
+                // reach no one unless they are sent on here. Left in the log
+                // only, a file or stream that cannot play shows as playing,
+                // with nothing on the outputs and no reason (issue #1079).
+                events.broadcast(StromEvent::PipelineError {
+                    flow_id,
+                    error: internal_error_text(
+                        state_for_bus.current_file().as_deref(),
+                        &err.error().to_string(),
+                        crate::gst::tls::tls_available(),
+                    ),
+                    source: Some(block_id.clone()),
+                });
             }
             _ => {}
         }
@@ -2093,5 +2122,29 @@ mod tests {
         let state = test_state();
         let pipeline = create_passthrough_pipeline("test", &state, None).unwrap();
         assert_hdrext_disabled_on_late_depayloader(&pipeline);
+    }
+
+    /// An https stream on a host without a GIO TLS backend fails with only
+    /// `Internal data stream error`; the operator is told why (issue #1079).
+    #[test]
+    fn an_https_failure_without_tls_names_the_missing_tls_backend() {
+        let url = "https://example.com/live/index.m3u8";
+        let error = "Internal data stream error.";
+        let without = internal_error_text(Some(url), error, false);
+        assert!(without.contains(url), "{}", without);
+        assert!(without.contains(error), "{}", without);
+        assert!(
+            without.contains(crate::gst::tls::NO_TLS_HINT),
+            "{}",
+            without
+        );
+
+        for text in [
+            internal_error_text(Some(url), error, true),
+            internal_error_text(Some("http://example.com/index.m3u8"), error, false),
+            internal_error_text(Some("clip.mp4"), error, false),
+        ] {
+            assert!(!text.contains("TLS"), "{}", text);
+        }
     }
 }

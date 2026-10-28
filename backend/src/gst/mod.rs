@@ -24,6 +24,7 @@ pub mod software_decoder;
 pub mod thread_priority;
 pub mod thumbnail;
 pub mod thumbnail_tap;
+pub mod tls;
 pub mod transitions;
 pub(crate) mod underlay;
 pub mod video_adapt;

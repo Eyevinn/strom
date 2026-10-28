@@ -94,6 +94,14 @@ jobs:
           if (-not (Test-Path "installer/windows/build/gstreamer-bundle/libexec/gstreamer-1.0/gst-ptp-helper.exe")) {
             throw "GStreamer bundle has no gst-ptp-helper.exe"
           }
+          # GIO's TLS backend: without it no https:// URL opens (#1079).
+          if (-not (Test-Path "installer/windows/build/gstreamer-bundle/lib/gio/modules/gioopenssl.dll")) {
+            throw "GStreamer bundle has no lib/gio/modules/gioopenssl.dll"
+          }
+          # License texts of GStreamer and the libraries it bundles (LGPL, GPL).
+          if (-not (Test-Path "installer/windows/build/gstreamer-bundle/share/licenses/x264")) {
+            throw "GStreamer bundle has no share/licenses"
+          }
 
       - name: Prepare Graphviz bundle
         shell: pwsh

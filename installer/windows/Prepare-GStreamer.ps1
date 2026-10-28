@@ -16,6 +16,8 @@
 .PARAMETER Full
     If specified, copies all of bin, lib\gstreamer-1.0, share and libexec
     (larger bundle, ~320MB). This is what the released MSI ships.
+    Both modes copy GIO's TLS backend (lib\gio\modules\gioopenssl.dll) and
+    the license texts (share\licenses).
     Otherwise, includes every DLL in bin but only the essential plugins listed
     below, and fails if one of them is missing from the installer.
 #>
@@ -236,6 +238,23 @@ if ($pluginFiles) {
 }
 Write-Host "  Copied $copiedPlugins plugins"
 
+# Copy GIO's TLS backend, in both modes. GIO gets TLS from gioopenssl.dll,
+# loaded from lib\gio\modules next to the GLib in bin. Without it every
+# https:// request fails with "TLS support is not available": souphttpsrc, and
+# with it HLS and DASH in the Media Player, cannot open any https URL (issue
+# #1079). Root certificates come from the Windows certificate store.
+# Only this module: giolibproxy.dll, the other one there, fails to load on
+# GStreamer 1.28.8 (it cannot find pxbackend-1.0.dll, in the official install
+# too), and GIO would print "Failed to load module" at every start.
+Write-Host "Copying the GIO TLS module..."
+$gioModules = "$GstRoot\lib\gio\modules"
+if (-not (Test-Path "$gioModules\gioopenssl.dll")) {
+    throw "GStreamer $Version has no $gioModules\gioopenssl.dll: GIO would have no TLS backend, and no https:// source would open"
+}
+New-Item -ItemType Directory -Path "$OutputDir\lib\gio\modules" -Force | Out-Null
+Copy-Item "$gioModules\gioopenssl.dll" "$OutputDir\lib\gio\modules\" -Force
+Write-Host "  Copied gioopenssl.dll"
+
 # Copy share files (GStreamer registry, etc.)
 Write-Host "Copying share files..."
 if ($Full) {
@@ -243,6 +262,18 @@ if ($Full) {
 } elseif (Test-Path "$GstRoot\share\gstreamer-1.0") {
     Copy-Item "$GstRoot\share\gstreamer-1.0" "$OutputDir\share\" -Recurse -Force
 }
+
+# Copy the license texts of GStreamer and the libraries it bundles, in both
+# modes. The bundle carries LGPL and GPL code (x264, x265, ...), whose licenses
+# must ship with it.
+Write-Host "Copying license texts..."
+if (-not (Test-Path "$GstRoot\share\licenses")) {
+    throw "GStreamer $Version has no $GstRoot\share\licenses: the bundle would ship without its license texts"
+}
+if (-not $Full) {
+    Copy-Item "$GstRoot\share\licenses" "$OutputDir\share\" -Recurse -Force
+}
+Write-Host "  Copied $((Get-ChildItem "$OutputDir\share\licenses" -Directory).Count) license folders"
 
 # Copy libexec files (contains gst-ptp-helper.exe for PTP clock support)
 Write-Host "Copying libexec files..."
@@ -276,6 +307,6 @@ Write-Host "Location: $OutputDir"
 Write-Host ""
 Write-Host "Contents:"
 Write-Host "  bin/     - GStreamer tools and DLLs"
-Write-Host "  lib/     - GStreamer plugins"
+Write-Host "  lib/     - GStreamer plugins, GIO modules (TLS)"
 Write-Host "  libexec/ - GStreamer helper executables (gst-ptp-helper.exe)"
 Write-Host "  share/   - GStreamer data files"
