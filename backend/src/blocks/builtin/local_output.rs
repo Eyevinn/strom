@@ -21,7 +21,7 @@
 use super::devicesrc::{
     asio_channel_list, make_device_element, max_channels, relabel_caps, MAX_AUDIO_CHANNELS,
 };
-use super::refusal::{accept_input, refuse_input};
+use super::refusal::{accept_any_caps, accept_input, drop_gaps_while_refused, refuse_input};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -409,7 +409,7 @@ fn device_refusal(channels: u32, device: &gst::Caps) -> String {
 /// An empty matrix does not mean "none": `audioconvert` takes it as set, and
 /// then plays mono on the left channel only. What clears a matrix set before
 /// is one whose first row is empty, so that is set only when one is there.
-fn set_mix_matrix(convert: &gst::Element, matrix: Option<&[Vec<f32>]>) {
+pub(super) fn set_mix_matrix(convert: &gst::Element, matrix: Option<&[Vec<f32>]>) {
     match matrix {
         Some(matrix) => convert.set_property("mix-matrix", matrix_value(matrix)),
         None if !convert.property::<gst::Array>("mix-matrix").is_empty() => {
@@ -454,50 +454,17 @@ fn adapt_input(
     let sink_pad = input
         .static_pad("sink")
         .ok_or_else(|| BlockBuildError::ElementCreation("identity has no sink pad".into()))?;
-    sink_pad.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, |_pad, info| {
-        let Some(gst::PadProbeData::Query(query)) = info.data.as_mut() else {
-            return gst::PadProbeReturn::Ok;
-        };
-        match query.view_mut() {
-            gst::QueryViewMut::Caps(q) => {
-                let caps = q
-                    .filter()
-                    .map(|f| f.to_owned())
-                    .unwrap_or_else(gst::Caps::new_any);
-                q.set_result(&caps);
-                gst::PadProbeReturn::Handled
-            }
-            gst::QueryViewMut::AcceptCaps(q) => {
-                q.set_result(true);
-                gst::PadProbeReturn::Handled
-            }
-            _ => gst::PadProbeReturn::Ok,
-        }
-    });
+    accept_any_caps(&sink_pad);
 
     let convert_weak = convert.downgrade();
     let outcaps_weak = outcaps.downgrade();
     let instance_id = instance_id.to_string();
-    // Set while the stream is refused. The identity then drops every buffer
-    // and sends a gap in its place, and those gaps are dropped too: a device
-    // sink that gets a gap before any caps posts "Sink not negotiated before
-    // gap event", and that error would follow the block's own.
+    // Set while the stream is refused.
     let refused = Arc::new(AtomicBool::new(false));
-    let refused_gaps = refused.clone();
     let src_pad = input
         .static_pad("src")
         .ok_or_else(|| BlockBuildError::ElementCreation("identity has no src pad".into()))?;
-    src_pad.add_probe(
-        gst::PadProbeType::EVENT_DOWNSTREAM,
-        move |_pad, info| match info.data.as_ref() {
-            Some(gst::PadProbeData::Event(e))
-                if e.type_() == gst::EventType::Gap && refused_gaps.load(Ordering::SeqCst) =>
-            {
-                gst::PadProbeReturn::Drop
-            }
-            _ => gst::PadProbeReturn::Ok,
-        },
-    );
+    drop_gaps_while_refused(&src_pad, refused.clone());
 
     sink_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
         let Some(gst::PadProbeData::Event(event)) = info.data.as_ref() else {

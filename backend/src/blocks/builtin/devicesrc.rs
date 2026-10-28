@@ -16,7 +16,8 @@
 //! Video leaves the block as the source delivers it, in system memory or GL
 //! memory (an AVFoundation camera prefers GL), at the configured resolution
 //! and framerate: each consumer adapts its own input (BLOCK_GUIDELINES).
-//! Audio is normalised through `audioconvert` + `audioresample` + an
+//! Audio goes through a queue that holds what the source captures (see
+//! `audio_source_queue`), then `audioconvert` + `audioresample` + an
 //! `audio/x-raw` capsfilter.
 //!
 //! `stream_mode` chooses which pads are exposed (`audio_video`, `video`,
@@ -240,6 +241,7 @@ impl BlockBuilder for LocalInputBuilder {
 
             let audiosrc_id = format!("{}:audiosrc", instance_id);
             let audiosrc_caps_id = format!("{}:audiosrc_caps", instance_id);
+            let audiosrc_queue_id = format!("{}:{}", instance_id, AUDIO_SOURCE_QUEUE);
             let audioconvert_id = format!("{}:audioconvert", instance_id);
             let audioresample_id = format!("{}:audioresample", instance_id);
             let audiocaps_id = format!("{}:audiocapsfilter", instance_id);
@@ -339,8 +341,14 @@ impl BlockBuilder for LocalInputBuilder {
                 ElementPadRef::pad(&audiosrc_id, "src"),
                 ElementPadRef::pad(&audiosrc_caps_id, "sink"),
             ));
+            let audiosrc_queue = audio_source_queue(&audiosrc_queue_id)?;
+
             internal_links.push((
                 ElementPadRef::pad(&audiosrc_caps_id, "src"),
+                ElementPadRef::pad(&audiosrc_queue_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&audiosrc_queue_id, "src"),
                 ElementPadRef::pad(&audioconvert_id, "sink"),
             ));
             internal_links.push((
@@ -354,6 +362,7 @@ impl BlockBuilder for LocalInputBuilder {
 
             elements.push((audiosrc_id, audiosrc));
             elements.push((audiosrc_caps_id, audiosrc_caps));
+            elements.push((audiosrc_queue_id, audiosrc_queue));
             elements.push((audioconvert_id, audioconvert));
             elements.push((audioresample_id, audioresample));
             elements.push((audiocaps_id, audiocaps));
@@ -478,6 +487,36 @@ pub(super) fn make_device_element(
 
 /// Factory name of GStreamer's ASIO capture element (gst-plugins-bad, Windows).
 const ASIO_SOURCE_FACTORY: &str = "asiosrc";
+
+/// The queue right behind the audio source, inside the block (#1068).
+pub const AUDIO_SOURCE_QUEUE: &str = "audiosrc_queue";
+
+/// The queue that holds the audio source's data while the flow waits on it.
+///
+/// An audio capture source reports as its maximum latency the ring buffer it
+/// captures into, and loses data past that. For `asiosrc` that is two ASIO
+/// buffers (`segtotal = 2` in `gstasioringbuffer.cpp`): 5.3 ms at 128 samples
+/// and 48 kHz. A sink that syncs adds its processing deadline (20 ms by
+/// default) to the minimum, so an ASIO source fed straight into `ndisink`
+/// failed the sink's latency check ("Pipeline construction is invalid, please
+/// add queues") until the ASIO buffer was 1024 samples (min 21.3 ms, max
+/// 42.7 ms). The same holds for any input a mixer lines up with others.
+///
+/// This queue is the buffering the block itself has, and it reports it: a
+/// non-leaky queue adds its `max-size-time` (1 s, the default) to the
+/// maximum, and leaves the minimum alone, so no latency is added. Its buffer
+/// and byte limits are off: with small ASIO buffers (32 samples = 0.67 ms
+/// each) the default 200 buffers would fill in 133 ms, well short of the 1 s
+/// the queue reports, and the source would then lose data inside the latency
+/// it reported (BLOCK_GUIDELINES, Reported Latency).
+fn audio_source_queue(id: &str) -> Result<gst::Element, BlockBuildError> {
+    gst::ElementFactory::make("queue")
+        .name(id)
+        .property("max-size-buffers", 0u32)
+        .property("max-size-bytes", 0u32)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("queue ({}): {}", id, e)))
+}
 
 /// Widest channel count GStreamer's channel mixer takes. `audioconvert`
 /// segfaults above it on GStreamer 1.24 (`gst_audio_channel_mixer_new`

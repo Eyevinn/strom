@@ -17,9 +17,14 @@
 //! change the framerate, scale and convert the pixel format to what
 //! `decklinkvideosink` takes. Video whose interlacing does not match the mode
 //! fails the flow with an element error: nothing here interlaces or
-//! deinterlaces. Audio goes to `decklinkaudiosink` as it arrives (#1068).
+//! deinterlaces. Audio in any channel count, rate and sample format is
+//! adapted to what `decklinkaudiosink` takes (see `audio_input`).
 //!
 //! Uses GStreamer's DeckLink plugin (gst-plugins-bad) for hardware integration.
+
+mod audio_input;
+
+pub use audio_input::{AUDIO_CARD_CAPS_ELEMENT, AUDIO_INPUT_ELEMENT};
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gpu;
@@ -316,7 +321,7 @@ impl BlockBuilder for DeckLinkOutputBuilder {
                 },
                 name: "audio_in".to_string(),
                 media_type: MediaType::Audio,
-                internal_element_id: "decklinkaudiosink".to_string(),
+                internal_element_id: AUDIO_INPUT_ELEMENT.to_string(),
                 internal_pad_name: "sink".to_string(),
             });
         }
@@ -450,7 +455,11 @@ impl BlockBuilder for DeckLinkOutputBuilder {
                 .map_err(|e| {
                     BlockBuildError::ElementCreation(format!("decklinkaudiosink: {}", e))
                 })?;
+            let (audio_elements, audio_links) =
+                audio_input::build_audio_input(instance_id, &audiosink)?;
             elements.push((audiosink_id, audiosink));
+            elements.extend(audio_elements);
+            internal_links.extend(audio_links);
         }
 
         info!(
@@ -1124,7 +1133,7 @@ fn decklink_output_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.decklink_output".to_string(),
         name: "DeckLink Output".to_string(),
-        description: "Outputs video and/or audio to a Blackmagic DeckLink SDI/HDMI card. Accepts the card's native pixel and audio formats only — no internal conversion. In audio-only mode the videosink is internally driven with black frames so it can reach PLAYING.".to_string(),
+        description: "Outputs video and/or audio to a Blackmagic DeckLink SDI/HDMI card. Converts video to the configured mode, and audio to 48 kHz and a channel count the card takes (2, 8 or 16: input channel N plays on card channel N, the rest stay silent). In audio-only mode the videosink is internally driven with black frames so it can reach PLAYING.".to_string(),
         category: "Outputs".to_string(),
         exposed_properties: vec![
             ExposedProperty {
@@ -1219,7 +1228,7 @@ fn decklink_output_definition() -> BlockDefinition {
                     label: Some("A".to_string()),
                     name: "audio_in".to_string(),
                     media_type: MediaType::Audio,
-                    internal_element_id: "decklinkaudiosink".to_string(),
+                    internal_element_id: AUDIO_INPUT_ELEMENT.to_string(),
                     internal_pad_name: "sink".to_string(),
                 },
             ],
