@@ -60,6 +60,38 @@ pub fn register_static_plugins() {
     gst_plugin_efp::plugin_register_static().expect("Could not register efp mux/demux plugins");
 }
 
+/// The Intel Quick Sync Video encoders from GStreamer's `qsv` plugin.
+pub const QSV_ENCODERS: [&str; 4] = ["qsvh264enc", "qsvh265enc", "qsvvp9enc", "qsvav1enc"];
+
+/// Drop the Intel Quick Sync Video encoders' rank to NONE on Windows, so
+/// nothing picks them: neither the Video Encoder block, which skips an
+/// encoder of rank NONE, nor `webrtcsink`'s encoder discovery in WHEP Output.
+///
+/// On Windows with GStreamer 1.28.8, a plain `videotestsrc ! qsvh264enc !
+/// fakesink` corrupts the process heap (STATUS_HEAP_CORRUPTION) in about one
+/// run in three, with no Strom code involved (#1163). Inside Strom that takes
+/// the whole server down. Elsewhere the encoders keep their rank. Call after
+/// `gst::init()`, before any pipeline is built. Lift this once a GStreamer or
+/// Intel driver release fixes the crash.
+pub fn demote_qsv_encoders() {
+    use gstreamer::prelude::PluginFeatureExtManual;
+
+    if !cfg!(windows) {
+        return;
+    }
+    for name in QSV_ENCODERS {
+        if let Some(factory) = gstreamer::ElementFactory::find(name) {
+            if factory.rank() != gstreamer::Rank::NONE {
+                factory.set_rank(gstreamer::Rank::NONE);
+                tracing::info!(
+                    "{} disabled on Windows: the Intel QSV encoders corrupt the heap (#1163)",
+                    name
+                );
+            }
+        }
+    }
+}
+
 /// Start GLib main loop in a background thread.
 /// This is required for GStreamer bus watch callbacks to be dispatched.
 pub fn start_glib_main_loop() {

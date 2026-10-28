@@ -536,6 +536,10 @@ fn run_with_gui(
         // Promote VA-API plugin ranks (gstva plugins have rank=0 by default)
         promote_va_plugin_ranks();
 
+        // Intel QSV encoders corrupt the heap on Windows (#1163). Before the
+        // static plugins: webrtcsink reads encoder ranks when it registers.
+        strom::gst::demote_qsv_encoders();
+
         // Register GStreamer plugins statically
         strom::gst::register_static_plugins();
 
@@ -805,6 +809,10 @@ async fn run_headless(
 
     // Promote VA-API plugin ranks (gstva plugins have rank=0 by default)
     promote_va_plugin_ranks();
+
+    // Intel QSV encoders corrupt the heap on Windows (#1163). Before the
+    // static plugins: webrtcsink reads encoder ranks when it registers.
+    strom::gst::demote_qsv_encoders();
 
     // Register GStreamer plugins statically
     strom::gst::register_static_plugins();
