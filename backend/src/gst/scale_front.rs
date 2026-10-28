@@ -301,7 +301,14 @@ fn takes(output_takes: &gst::CapsRef, available: impl Fn(&str) -> bool) -> gst::
         direct.merge(system);
     }
     let mut answer = gst::Caps::new_empty();
-    for (structure, features) in direct.iter_with_features() {
+    // An output that takes anything (unlinked, or being torn down) has no
+    // size or format to put first.
+    let preferred = if output_takes.is_any() {
+        gst::Caps::new_empty()
+    } else {
+        direct.clone()
+    };
+    for (structure, features) in preferred.iter_with_features() {
         let mut one = gst::Caps::new_empty();
         one.get_mut()
             .expect("new caps are writable")
