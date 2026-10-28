@@ -413,9 +413,8 @@ pub fn video_convert_factory() -> &'static str {
 pub fn configure_video_convert(element: &gst::Element) {
     #[cfg(target_os = "macos")]
     {
-        // `videoconvert`, `videoscale` and `stromvimageconvert` carry the
-        // property; `autovideoconvert` is a bin with nothing to forward it to.
-        // On `stromvimageconvert` it sizes the `GstVideoConverter` fallback —
+        // Only `videoconvert`, `videoscale` and `stromvimageconvert` carry the
+        // property. On `stromvimageconvert` it sizes the `GstVideoConverter` fallback —
         // the vImage path runs Accelerate's own pool and ignores it.
         if element.has_property("n-threads") {
             element.set_property("n-threads", video_convert_threads());

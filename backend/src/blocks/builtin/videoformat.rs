@@ -24,7 +24,6 @@
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gpu;
 use crate::gst::scale_front;
-use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 use gstreamer as gst;
 use std::collections::HashMap;
 use strom_types::{
@@ -138,12 +137,11 @@ impl BlockBuilder for VideoFormatBuilder {
         //     .build()
         //     .map_err(|e| BlockBuildError::ElementCreation(format!("videorate: {}", e)))?;
 
-        let videoconvert = gst::ElementFactory::make(VIDEO_CONVERT_FACTORY)
+        let convert_factory = gpu::video_convert_factory();
+        let videoconvert = gst::ElementFactory::make(convert_factory)
             .name(&convert_id)
             .build()
-            .map_err(|e| {
-                BlockBuildError::ElementCreation(format!("{}: {}", VIDEO_CONVERT_FACTORY, e))
-            })?;
+            .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", convert_factory, e)))?;
         gpu::configure_video_convert(&videoconvert);
 
         let output = gst::ElementFactory::make("identity")
@@ -183,7 +181,7 @@ impl BlockBuilder for VideoFormatBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
 
-        info!("VideoFormat block created (chain: input -> videoscale -> {} -> output -> capsfilter) [videorate TEMPORARILY REMOVED]", VIDEO_CONVERT_FACTORY);
+        info!("VideoFormat block created (chain: input -> videoscale -> {} -> output -> capsfilter) [videorate TEMPORARILY REMOVED]", convert_factory);
 
         // Chain: input -> videoscale -> videoconvert -> output -> capsfilter (videorate temporarily removed)
         let internal_links = vec![
@@ -360,6 +358,11 @@ mod tests {
         for format in ["NV12", "I420"] {
             let result = build(&[("resolution", "1280x720"), ("format", format)]);
             let elements: HashMap<String, gst::Element> = result.elements.into_iter().collect();
+            assert_eq!(
+                elements["vf0:videoconvert"].factory().map(|f| f.name()),
+                Some(crate::gpu::video_convert_factory().into()),
+                "the block must build the converter this test is about"
+            );
 
             let pipeline = gst::Pipeline::new();
             let in_info = VideoInfo::builder(gstreamer_video::VideoFormat::Rgba, 1080, 1920)
@@ -386,7 +389,7 @@ mod tests {
                     )
                     .expect("internal link");
             }
-            src.link(&elements["vf0:videoscale"]).expect("link input");
+            src.link(&elements["vf0:input"]).expect("link input");
             elements["vf0:capsfilter"].link(&sink).expect("link output");
 
             pipeline.set_state(gst::State::Playing).expect("play");

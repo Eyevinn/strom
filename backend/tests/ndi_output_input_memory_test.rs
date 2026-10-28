@@ -173,9 +173,9 @@ fn add_block(pipeline: &gst::Pipeline) -> (gst::Pad, gst_app::AppSink) {
     let converter = by_id[&format!("{}:videoconvert", INSTANCE)].clone();
     assert_eq!(
         converter.factory().map(|f| f.name().to_string()).as_deref(),
-        Some("videoconvert"),
-        "the block built another converter in front of ndisink; it must be plain \
-         videoconvert, with GPU memory left to the input front (#969)"
+        Some(strom::gpu::video_convert_factory()),
+        "the block built another converter in front of ndisink; it must be the \
+         one gpu::video_convert_factory() names, with GPU memory left to the input front (#969)"
     );
 
     let appsink = gst_app::AppSink::builder()
