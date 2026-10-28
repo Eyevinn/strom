@@ -145,9 +145,9 @@ jobs:
   # or touching the gstcefsrc pin, and on demand. It downloads a ~450 MB plugin
   # tarball and starts Chromium, which most diffs have no reason to pay for.
   #
-  # The container is ubuntu:questing, the strom-full base: the prebuilt plugin
-  # is built against its glibc, and production loads it into its GStreamer 1.26,
-  # not the runner's 1.24.
+  # The container is ubuntu:26.04, the strom-full base: the prebuilt plugin is
+  # built on it, and production loads it into its GStreamer 1.28, not the
+  # runner's 1.24.
   test-cef:
     name: Test (Linux, cefsrc)
     needs: [preflight, cef-changes]
@@ -160,7 +160,7 @@ jobs:
                   || needs.cef-changes.outputs.touched == 'true'))
           || (github.event_name == 'workflow_dispatch' && inputs.cef))
     runs-on: ubuntu-24.04
-    container: ubuntu:questing
+    container: ubuntu:26.04
     timeout-minutes: 45
     env:
       RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
@@ -226,7 +226,7 @@ jobs:
           GST_PLUGIN_PATH: /usr/local/lib/gstreamer-1.0
           LD_LIBRARY_PATH: /usr/local/lib/cef
           GST_CEF_SUBPROCESS_PATH: /usr/local/lib/gstreamer-1.0/gstcefsubprocess
-          # Turn a missing cefsrc into a failure — see cefsrc_available().
+          # Turn a missing cefsrc into a failure — see common::cef_available().
           STROM_REQUIRE_CEF: 1
         # Explicit bash turns on pipefail, so the tee cannot hide a test failure.
         shell: bash
