@@ -151,8 +151,10 @@ pub fn create_decode_pipeline(
     if let Some(uri) = initial_uri {
         if state.stinger.enabled {
             apply_stinger_decoding(&source, uri);
+            source.set_property("uri", super::stinger_source_uri(uri));
+        } else {
+            source.set_property("uri", uri);
         }
-        source.set_property("uri", uri);
     }
 
     // Store weak ref to source element in state
