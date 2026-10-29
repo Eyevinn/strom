@@ -97,6 +97,19 @@ impl BlockBuilder for MixerBuilder {
             });
         }
 
+        // Add per-channel direct outputs
+        if get_bool_prop(properties, "direct_outs", false) {
+            for ch in 0..num_channels {
+                outputs.push(ExternalPad {
+                    name: format!("direct_out_{}", ch + 1),
+                    label: Some(format!("D{}", ch + 1)),
+                    media_type: MediaType::Audio,
+                    internal_element_id: format!("direct_out_tee_{}", ch),
+                    internal_pad_name: "src_%u".to_string(),
+                });
+            }
+        }
+
         Some(ExternalPads { inputs, outputs })
     }
 
@@ -112,6 +125,7 @@ impl BlockBuilder for MixerBuilder {
         let num_aux_buses = parse_num_aux_buses(properties);
         let num_groups = parse_num_groups(properties);
         let sample_rate = parse_sample_rate(properties);
+        let direct_outs = get_bool_prop(properties, "direct_outs", false);
         let dsp_backend = get_string_prop(properties, "dsp_backend", "rust");
         if dsp_backend != "rust" && dsp_backend != "lv2" {
             warn!(
@@ -1213,10 +1227,83 @@ impl BlockBuilder for MixerBuilder {
                 ElementPadRef::element(&routing_tee_id),
                 ElementPadRef::pad(&to_main_vol_id, "sink"),
             ));
-            internal_links.push((
-                ElementPadRef::pad(&to_main_vol_id, "src"),
-                ElementPadRef::pad(&to_main_queue_id, "sink"),
-            ));
+            if direct_outs {
+                // Direct out: what this channel contributes to Main, with
+                // fader, mute and the to-main switch applied, before the sum.
+                //   to_main_vol → direct_tee → to_main_queue
+                //                 direct_tee → direct_queue → direct_out_tee → direct_out_N
+                let direct_tee_id = format!("{}:direct_tee_{}", instance_id, ch);
+                let direct_tee = gst::ElementFactory::make("tee")
+                    .name(&direct_tee_id)
+                    .property("allow-not-linked", true)
+                    .build()
+                    .map_err(|e| {
+                        BlockBuildError::ElementCreation(format!("direct_tee ch{}: {}", ch_num, e))
+                    })?;
+                elements.push((direct_tee_id.clone(), direct_tee));
+
+                // The tee pushes to both branches on the channel's streaming
+                // thread, so a direct-out consumer that stops pulling would
+                // block it and silence the channel on Main. The leaky queue
+                // drops direct-out audio instead.
+                //
+                // A consumer that syncs to the clock holds each buffer for the
+                // flow's latency, so the queue must hold that much audio or it
+                // leaks nearly all of it. The default limits (1 s, 200
+                // buffers) are below a 1-2 s flow latency, or below 400 ms
+                // with 1 ms buffers. A consumer that stalls and resumes
+                // first gets up to this much old audio.
+                let direct_queue_id = format!("{}:direct_queue_{}", instance_id, ch);
+                let direct_queue = gst::ElementFactory::make("queue")
+                    .name(&direct_queue_id)
+                    .property_from_str("leaky", "downstream")
+                    .property("max-size-time", 3 * gst::ClockTime::SECOND.nseconds())
+                    .property("max-size-buffers", 0u32)
+                    .property("max-size-bytes", 0u32)
+                    .build()
+                    .map_err(|e| {
+                        BlockBuildError::ElementCreation(format!(
+                            "direct_queue ch{}: {}",
+                            ch_num, e
+                        ))
+                    })?;
+                elements.push((direct_queue_id.clone(), direct_queue));
+
+                let direct_out_tee_id = format!("{}:direct_out_tee_{}", instance_id, ch);
+                let direct_out_tee = gst::ElementFactory::make("tee")
+                    .name(&direct_out_tee_id)
+                    .property("allow-not-linked", true)
+                    .build()
+                    .map_err(|e| {
+                        BlockBuildError::ElementCreation(format!(
+                            "direct_out_tee ch{}: {}",
+                            ch_num, e
+                        ))
+                    })?;
+                elements.push((direct_out_tee_id.clone(), direct_out_tee));
+
+                internal_links.push((
+                    ElementPadRef::pad(&to_main_vol_id, "src"),
+                    ElementPadRef::pad(&direct_tee_id, "sink"),
+                ));
+                internal_links.push((
+                    ElementPadRef::element(&direct_tee_id),
+                    ElementPadRef::pad(&to_main_queue_id, "sink"),
+                ));
+                internal_links.push((
+                    ElementPadRef::element(&direct_tee_id),
+                    ElementPadRef::pad(&direct_queue_id, "sink"),
+                ));
+                internal_links.push((
+                    ElementPadRef::pad(&direct_queue_id, "src"),
+                    ElementPadRef::pad(&direct_out_tee_id, "sink"),
+                ));
+            } else {
+                internal_links.push((
+                    ElementPadRef::pad(&to_main_vol_id, "src"),
+                    ElementPadRef::pad(&to_main_queue_id, "sink"),
+                ));
+            }
             internal_links.push((
                 ElementPadRef::pad(&to_main_queue_id, "src"),
                 ElementPadRef::element(&mixer_id),
