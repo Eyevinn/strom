@@ -2200,14 +2200,16 @@ impl eframe::App for StromApp {
 }
 
 /// How far a file's start may lie before the event announcing it and still be
-/// believed. The event trails the file by up to one MP4 fragment; a larger gap
-/// means the GUI and the server disagree about the time of day. Skew inside the
+/// believed. The event trails the file by one MP4 fragment: 1 s, or a GOP when
+/// that is longer, because the muxer cuts only at keyframes. A larger gap means
+/// the GUI and the server disagree about the time of day, or the GOP is longer
+/// than the window; either way the timer starts at arrival. Skew inside the
 /// window is not detected: a GUI clock ahead by up to the window reads the timer
 /// that much long.
 const MAX_ANNOUNCE_LAG: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// When a recording began, for the elapsed timer. The event for an MP4 file
-/// arrives with its first fragment, up to a second after the file opened, so
+/// arrives with its first fragment, up to a GOP after the file opened, so
 /// the timer starts from the file's own start time when that is plausible.
 fn recording_started_at(
     now: instant::Instant,
