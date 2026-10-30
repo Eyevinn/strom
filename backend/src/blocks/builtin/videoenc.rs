@@ -21,9 +21,9 @@
 //! - capsfilter: Sets output caps for proper codec negotiation
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+use crate::gpu;
 use crate::gst::download_front;
 use crate::gst::pipeline::properties::set_property_checked;
-use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -183,7 +183,10 @@ impl BlockBuilder for VideoEncBuilder {
 
         info!(
             "VideoEncoder block created (chain: input -> {} -> {} -> {} -> capsfilter [{}])",
-            VIDEO_CONVERT_FACTORY, encoder_name, parser_name, caps_str
+            gpu::video_convert_factory(),
+            encoder_name,
+            parser_name,
+            caps_str
         );
 
         // Chain: input -> videoconvert -> encoder -> parser -> capsfilter

@@ -24,7 +24,6 @@
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gpu;
 use crate::gst::scale_front;
-use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 use gstreamer as gst;
 use std::collections::HashMap;
 use strom_types::{
@@ -138,12 +137,11 @@ impl BlockBuilder for VideoFormatBuilder {
         //     .build()
         //     .map_err(|e| BlockBuildError::ElementCreation(format!("videorate: {}", e)))?;
 
-        let videoconvert = gst::ElementFactory::make(VIDEO_CONVERT_FACTORY)
+        let convert_factory = gpu::video_convert_factory();
+        let videoconvert = gst::ElementFactory::make(convert_factory)
             .name(&convert_id)
             .build()
-            .map_err(|e| {
-                BlockBuildError::ElementCreation(format!("{}: {}", VIDEO_CONVERT_FACTORY, e))
-            })?;
+            .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", convert_factory, e)))?;
         gpu::configure_video_convert(&videoconvert);
 
         let output = gst::ElementFactory::make("identity")
@@ -183,7 +181,7 @@ impl BlockBuilder for VideoFormatBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
 
-        info!("VideoFormat block created (chain: input -> videoscale -> {} -> output -> capsfilter) [videorate TEMPORARILY REMOVED]", VIDEO_CONVERT_FACTORY);
+        info!("VideoFormat block created (chain: input -> videoscale -> {} -> output -> capsfilter) [videorate TEMPORARILY REMOVED]", convert_factory);
 
         // Chain: input -> videoscale -> videoconvert -> output -> capsfilter (videorate temporarily removed)
         let internal_links = vec![
@@ -308,7 +306,8 @@ fn videoformat_definition() -> BlockDefinition {
     }
 }
 
-// The only test checks thread counts, which are only raised on macOS.
+// macOS only: thread counts are only raised there, and the converter under
+// the letterbox test is only stromvimageconvert there.
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
@@ -342,6 +341,90 @@ mod tests {
                 crate::gpu::video_convert_threads(),
                 "configure_video_convert did not reach '{}'",
                 id
+            );
+        }
+    }
+
+    /// A resize with a format change must still letterbox. The converter
+    /// after `videoscale` has no borders to add, so if it ever offers to
+    /// resize, `videoscale` negotiates passthrough and a portrait source comes
+    /// out stretched to the target shape.
+    #[test]
+    fn a_portrait_source_is_letterboxed_when_the_format_also_changes() {
+        use gstreamer_app as gst_app;
+        use gstreamer_video::prelude::*;
+        use gstreamer_video::VideoInfo;
+
+        for format in ["NV12", "I420"] {
+            let result = build(&[("resolution", "1280x720"), ("format", format)]);
+            let elements: HashMap<String, gst::Element> = result.elements.into_iter().collect();
+            assert_eq!(
+                elements["vf0:videoconvert"].factory().map(|f| f.name()),
+                Some(crate::gpu::video_convert_factory().into()),
+                "the block must build the converter this test is about"
+            );
+
+            let pipeline = gst::Pipeline::new();
+            let in_info = VideoInfo::builder(gstreamer_video::VideoFormat::Rgba, 1080, 1920)
+                .fps(gst::Fraction::new(30, 1))
+                .build()
+                .expect("input info");
+            let src = gst_app::AppSrc::builder()
+                .caps(&in_info.to_caps().expect("input caps"))
+                .format(gst::Format::Time)
+                .build();
+            let sink = gst_app::AppSink::builder().sync(false).build();
+            pipeline
+                .add_many([src.upcast_ref::<gst::Element>(), sink.upcast_ref()])
+                .expect("add endpoints");
+            for element in elements.values() {
+                pipeline.add(element).expect("add block element");
+            }
+            for (from, to) in &result.internal_links {
+                elements[&from.element_id]
+                    .link_pads(
+                        from.pad_name.as_deref(),
+                        &elements[&to.element_id],
+                        to.pad_name.as_deref(),
+                    )
+                    .expect("internal link");
+            }
+            src.link(&elements["vf0:input"]).expect("link input");
+            elements["vf0:capsfilter"].link(&sink).expect("link output");
+
+            pipeline.set_state(gst::State::Playing).expect("play");
+            let mut white = gst::Buffer::with_size(in_info.size()).expect("allocate");
+            white
+                .get_mut()
+                .unwrap()
+                .map_writable()
+                .expect("map")
+                .as_mut_slice()
+                .fill(255);
+            src.push_buffer(white).expect("push");
+            let sample = sink
+                .try_pull_sample(gst::ClockTime::from_seconds(10))
+                .expect("the block produced no output");
+            let out_info = VideoInfo::from_caps(sample.caps().expect("caps")).expect("info");
+            let frame = gstreamer_video::VideoFrameRef::from_buffer_ref_readable(
+                sample.buffer().expect("buffer"),
+                &out_info,
+            )
+            .expect("map output");
+            let luma = frame.plane_data(0).expect("luma plane");
+            let row = out_info.height() as usize / 2 * frame.plane_stride()[0] as usize;
+            let border = (0..out_info.width() as usize)
+                .filter(|&x| luma[row + x] < 32)
+                .count();
+            pipeline.set_state(gst::State::Null).expect("stop");
+
+            assert_eq!((out_info.width(), out_info.height()), (1280, 720));
+            // 1080x1920 fitted into 720 lines is 405 pixels wide, leaving 875
+            // of the 1280 columns as border.
+            assert!(
+                (870..=880).contains(&border),
+                "format={format}: {border} border pixels in the middle row, expected ~875; \
+                 the portrait source was stretched instead of letterboxed"
             );
         }
     }
