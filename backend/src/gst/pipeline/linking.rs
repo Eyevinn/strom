@@ -34,6 +34,20 @@ fn adapt_element_link(
     }
 }
 
+/// Whether `name` is one a pad template such as `src_%u` would produce.
+fn name_fits_template(name: &str, template: &str) -> bool {
+    let Some((prefix, conversion)) = template.split_once('%') else {
+        return name == template;
+    };
+    let Some(rest) = name.strip_prefix(prefix) else {
+        return false;
+    };
+    match conversion {
+        "u" | "d" => !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()),
+        _ => !rest.is_empty(),
+    }
+}
+
 impl PipelineManager {
     /// Try to link two elements according to a link definition.
     /// Returns Ok if successful, Err if pads don't exist yet (dynamic pads).
@@ -372,7 +386,13 @@ impl PipelineManager {
     /// 1. Dynamic pads with pending links - link them when they appear
     /// 2. Dynamic pads WITHOUT links - auto-attach a tee with allow-not-linked=true
     ///    so unlinked streams don't block the pipeline
-    pub(super) fn setup_dynamic_pad_handlers(&mut self) {
+    ///
+    /// `tees` maps each auto-tee construction inserted to the source it stands
+    /// in for, so an attempt is recorded against the link the flow declares.
+    pub(super) fn setup_dynamic_pad_handlers(
+        &mut self,
+        tees: &std::collections::HashMap<String, String>,
+    ) {
         info!(
             "Setting up dynamic pad handlers ({} pending link(s))",
             self.pending_links.len()
@@ -390,6 +410,11 @@ impl PipelineManager {
         let pending_links = self.pending_links.clone();
         let pipeline_weak: gst::glib::WeakRef<gst::Pipeline> = self.pipeline.downgrade();
         let dynamic_pad_tees = self.dynamic_pad_tees.clone();
+        let declared_links: Vec<Link> = pending_links
+            .iter()
+            .map(|link| Self::declared_link(link, tees))
+            .collect();
+        let unformed_links = self.unformed_links.clone();
 
         for (element_id, element) in &self.elements {
             let element_id = element_id.clone();
@@ -397,6 +422,8 @@ impl PipelineManager {
             let pending_links = pending_links.clone();
             let pipeline_weak = pipeline_weak.clone();
             let dynamic_pad_tees = dynamic_pad_tees.clone();
+            let declared_links = declared_links.clone();
+            let unformed_links = unformed_links.clone();
 
             // Connect to pad-added signal
             element.connect_pad_added(move |_elem, new_pad| {
@@ -411,7 +438,7 @@ impl PipelineManager {
 
                 // Check if any pending links match this pad
                 let mut found_link = false;
-                for link in &pending_links {
+                for (link, declared) in pending_links.iter().zip(&declared_links) {
                     let (from_elem, from_pad) = Self::parse_element_pad(&link.from);
                     let (to_elem, to_pad) = Self::parse_element_pad(&link.to);
 
@@ -464,6 +491,7 @@ impl PipelineManager {
                                                 "Sink pad {} not found on {}",
                                                 sink_pad_name, to_elem
                                             );
+                                            unformed_links.record(declared, &new_pad_name, false);
                                             continue;
                                         };
 
@@ -475,12 +503,14 @@ impl PipelineManager {
                                                     link.from, link.to
                                                 );
                                                 found_link = true;
+                                                unformed_links.record(declared, &new_pad_name, true);
                                             }
                                             Err(e) => {
                                                 error!(
                                                     "Failed to link dynamic pad {} -> {}: {}",
                                                     link.from, link.to, e
                                                 );
+                                                unformed_links.record(declared, &new_pad_name, false);
                                             }
                                         }
                                     }
@@ -685,6 +715,42 @@ impl PipelineManager {
                 }
             }
         }
+    }
+
+    /// The link as the flow declares it, for a link construction may have
+    /// rewritten to start from an auto-tee.
+    pub(super) fn declared_link(
+        link: &Link,
+        tees: &std::collections::HashMap<String, String>,
+    ) -> Link {
+        let (from_ref, _) = link.to_pad_refs();
+        match tees.get(&from_ref.element_id) {
+            Some(source) => Link {
+                from: source.clone(),
+                to: link.to.clone(),
+            },
+            None => link.clone(),
+        }
+    }
+
+    /// Whether `src` has, or can be asked for, a source pad named `pad_name`.
+    ///
+    /// A refused link to such a pad is never retried: the `pad-added` handler
+    /// only runs for pads that appear later, and a request pad that failed to
+    /// link was released again. A pad that only appears on its own, such as
+    /// `decodebin`'s `src_%u`, is still to come.
+    pub(super) fn source_pad_is_available(src: &gst::Element, pad_name: &str) -> bool {
+        if src
+            .static_pad(pad_name)
+            .is_some_and(|pad| pad.direction() == gst::PadDirection::Src)
+        {
+            return true;
+        }
+        src.pad_template_list().iter().any(|template| {
+            template.direction() == gst::PadDirection::Src
+                && template.presence() == gst::PadPresence::Request
+                && name_fits_template(pad_name, template.name_template())
+        })
     }
 
     /// Analyze links and insert tee elements where multiple links share the same source.
