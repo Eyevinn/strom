@@ -93,11 +93,12 @@ impl MixerEditor {
                 ui.add_space(8.0);
 
                 egui::Grid::new(format!("ch_processing_{}", index))
-                    .num_columns(5)
+                    .num_columns(6)
                     .spacing([8.0, 0.0])
                     .show(ui, |ui| {
                         self.render_gain_section(ui, ctx, index);
                         self.render_hpf_section(ui, ctx, index);
+                        self.render_voice_isolation_section(ui, ctx, index);
                         self.render_gate_section(ui, ctx, index);
                         self.render_comp_section(ui, ctx, index);
                         self.render_eq_section(ui, ctx, index);
@@ -512,6 +513,64 @@ impl MixerEditor {
                     self.channels[index].hpf_enabled = false;
                     self.channels[index].hpf_freq = DEFAULT_HPF_FREQ;
                     self.update_processing_param(ctx, index, "hpf", "enabled");
+                }
+            });
+        });
+    }
+
+    pub(super) fn render_voice_isolation_section(
+        &mut self,
+        ui: &mut Ui,
+        ctx: &Context,
+        index: usize,
+    ) {
+        let color = Color32::from_rgb(60, 140, 170);
+        let enabled = self.channels[index].voice_isolation;
+
+        section_frame(color, enabled).show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.set_min_height(SECTION_MIN_HEIGHT);
+                // Keeps speech and suppresses music, fans, typing and other
+                // background sound; delays the channel 60 ms while on.
+                if section_toggle(ui, "Voice", color, enabled) {
+                    self.channels[index].voice_isolation = !self.channels[index].voice_isolation;
+                    self.update_processing_param(ctx, index, "voice", "enabled");
+                }
+
+                ui.add_space(4.0);
+                if !enabled {
+                    ui.disable();
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label("Max cut:");
+                    let limit = &mut self.channels[index].voice_isolation_limit;
+                    let none = *limit >= VOICE_ISOLATION_NO_LIMIT_DB;
+                    if ui
+                        .add(
+                            egui::DragValue::new(limit)
+                                .range(6.0..=VOICE_ISOLATION_NO_LIMIT_DB)
+                                .suffix(if none { " dB (none)" } else { " dB" })
+                                .speed(1.0)
+                                .fixed_decimals(0),
+                        )
+                        .on_hover_text("Most it may reduce any frequency; 100 dB means no limit")
+                        .changed()
+                    {
+                        self.update_processing_param(ctx, index, "voice", "limit");
+                    }
+                });
+
+                ui.add_space(4.0);
+                if ui
+                    .small_button(egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE)
+                    .on_hover_text("Reset")
+                    .clicked()
+                {
+                    self.channels[index].voice_isolation = false;
+                    self.channels[index].voice_isolation_limit = VOICE_ISOLATION_NO_LIMIT_DB;
+                    self.update_processing_param(ctx, index, "voice", "enabled");
+                    self.update_processing_param(ctx, index, "voice", "limit");
                 }
             });
         });

@@ -234,6 +234,17 @@ impl MixerEditor {
             {
                 ch.hpf_freq = *f as f32;
             }
+            // Voice isolation
+            if let Some(PropertyValue::Bool(b)) =
+                properties.get(&format!("ch{}_voice_isolation", ch_num))
+            {
+                ch.voice_isolation = *b;
+            }
+            if let Some(PropertyValue::Float(f)) =
+                properties.get(&format!("ch{}_voice_isolation_limit", ch_num))
+            {
+                ch.voice_isolation_limit = *f as f32;
+            }
             // Gate
             if let Some(PropertyValue::Bool(b)) =
                 properties.get(&format!("ch{}_gate_enabled", ch_num))
@@ -470,6 +481,17 @@ impl MixerEditor {
             // HPF
             set_b!(format!("ch{}_hpf_enabled", n), ch.hpf_enabled, false);
             set_f!(format!("ch{}_hpf_freq", n), ch.hpf_freq, DEFAULT_HPF_FREQ);
+            // Voice isolation
+            set_b!(
+                format!("ch{}_voice_isolation", n),
+                ch.voice_isolation,
+                false
+            );
+            set_f!(
+                format!("ch{}_voice_isolation_limit", n),
+                ch.voice_isolation_limit,
+                VOICE_ISOLATION_NO_LIMIT_DB
+            );
             // Gate
             set_b!(format!("ch{}_gate_enabled", n), ch.gate_enabled, false);
             set_f!(
@@ -581,6 +603,8 @@ impl MixerEditor {
             ch.aux_pre = DEFAULT_AUX_PRE;
             ch.hpf_enabled = false;
             ch.hpf_freq = DEFAULT_HPF_FREQ;
+            ch.voice_isolation = false;
+            ch.voice_isolation_limit = VOICE_ISOLATION_NO_LIMIT_DB;
             ch.gate_enabled = false;
             ch.gate_threshold = DEFAULT_GATE_THRESHOLD;
             ch.gate_attack = DEFAULT_GATE_ATTACK;

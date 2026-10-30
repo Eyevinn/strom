@@ -29,13 +29,16 @@ pub mod transitions;
 pub(crate) mod underlay;
 pub mod video_adapt;
 pub mod video_input_bridge;
+#[cfg(feature = "voice-isolation")]
+pub mod voice_isolation;
 pub mod volume_ramp;
 pub mod whep_probe;
 
 /// Register the GStreamer plugins Strom links in statically (gst-plugins-rs
-/// WebRTC, inter, RTP, audiofx, isobmff, lsp-dsp-rs, and EFP with the `efp`
-/// feature). Call once, after `gst::init()`, before any flow is built. Panics
-/// when a plugin fails to register: the blocks that use it could not work.
+/// WebRTC, inter, RTP, audiofx, isobmff, lsp-dsp-rs, voice isolation with the
+/// `voice-isolation` feature, and EFP with the `efp` feature). Call once, after
+/// `gst::init()`, before any flow is built. Panics when a plugin fails to
+/// register: the blocks that use it could not work.
 ///
 /// isobmff is the exception. GStreamer 1.28 installs its own `isobmff` plugin
 /// with the same element names as Strom's fork (`isofmp4mux`, `cmafmux`, ...).
@@ -56,6 +59,8 @@ pub fn register_static_plugins() {
         );
     }
     gst_plugins_lsp::plugin_register_static().expect("Could not register lsp-dsp-rs plugins");
+    #[cfg(feature = "voice-isolation")]
+    voice_isolation::register().expect("Could not register the voice isolation element");
     #[cfg(feature = "efp")]
     gst_plugin_efp::plugin_register_static().expect("Could not register efp mux/demux plugins");
 }

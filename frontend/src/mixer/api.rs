@@ -93,6 +93,14 @@ impl MixerEditor {
                 format!("ch{}_hpf_freq", ch1),
                 PropertyValue::Float(channel.hpf_freq as f64),
             ),
+            ("voice", "enabled") => (
+                format!("ch{}_voice_isolation", ch1),
+                PropertyValue::Bool(channel.voice_isolation),
+            ),
+            ("voice", "limit") => (
+                format!("ch{}_voice_isolation_limit", ch1),
+                PropertyValue::Float(channel.voice_isolation_limit as f64),
+            ),
             ("gate", "threshold") => (
                 format!("ch{}_gate_threshold", ch1),
                 PropertyValue::Float(channel.gate_threshold as f64),
