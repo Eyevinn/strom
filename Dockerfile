@@ -228,7 +228,7 @@ RUN --mount=type=secret,id=aws_access_key_id \
     export CMAKE_C_FLAGS="-std=gnu17" && \
     export CMAKE_CXX_FLAGS="-std=gnu++17" && \
     export RUSTFLAGS="-L /usr/lib/aarch64-linux-gnu" && \
-    cargo zigbuild --release --package strom --no-default-features --features no-gui,efp --target aarch64-unknown-linux-gnu.2.36 && \
+    cargo zigbuild --release --package strom --no-default-features --features no-gui,efp,voice-isolation --target aarch64-unknown-linux-gnu.2.36 && \
     # Move the binary to expected location (cargo-zigbuild puts it in target/aarch64-unknown-linux-gnu/release)
     mkdir -p target/release && \
     cp target/aarch64-unknown-linux-gnu/release/strom target/release/strom; \
