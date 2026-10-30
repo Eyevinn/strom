@@ -399,21 +399,6 @@ impl ThumbnailTap {
                 })?;
             }
 
-            // Request a high-numbered pad (src_999) to avoid colliding with
-            // pipeline-assigned pads (src_0, src_1, ...) regardless of activation order.
-            // This is intentional — auto-assigned pads would work but a fixed name
-            // makes the branch easily identifiable in debug graphs and logs.
-            let tee_pad = self
-                .tee
-                .request_pad_simple("src_999")
-                .ok_or_else(|| ThumbnailError::PadNotFound("tee src_999".to_string()))?;
-            let queue_sink = queue
-                .static_pad("sink")
-                .ok_or_else(|| ThumbnailError::PadNotFound("queue sink".to_string()))?;
-            tee_pad.link(&queue_sink).map_err(|e| {
-                ThumbnailError::FrameMapping(format!("Failed to link tee→queue: {}", e))
-            })?;
-
             // Rate-limit via pad probe on queue src: drop buffers that arrive
             // sooner than update_interval since the last passed buffer.
             // This is invisible to caps negotiation (unlike videorate).
@@ -433,8 +418,12 @@ impl ThumbnailTap {
                 gst::PadProbeReturn::Ok
             });
 
-            // Sync all elements to parent state
-            for elem in &elements {
+            // Start the branch from the sink up, and only then let the tee
+            // feed it. An element not running yet answers a push with
+            // FLUSHING, and the tee hands that upstream (allow-not-linked
+            // forgives only NOT_LINKED): the tapped chain's source pauses its
+            // task without an error, and picture and thumbnail stand still.
+            for elem in elements.iter().rev() {
                 elem.sync_state_with_parent().map_err(|e| {
                     ThumbnailError::FrameMapping(format!(
                         "Failed to sync {} state: {}",
@@ -443,6 +432,21 @@ impl ThumbnailTap {
                     ))
                 })?;
             }
+
+            // Request a high-numbered pad (src_999) to avoid colliding with
+            // pipeline-assigned pads (src_0, src_1, ...) regardless of activation order.
+            // This is intentional — auto-assigned pads would work but a fixed name
+            // makes the branch easily identifiable in debug graphs and logs.
+            let tee_pad = self
+                .tee
+                .request_pad_simple("src_999")
+                .ok_or_else(|| ThumbnailError::PadNotFound("tee src_999".to_string()))?;
+            let queue_sink = queue
+                .static_pad("sink")
+                .ok_or_else(|| ThumbnailError::PadNotFound("queue sink".to_string()))?;
+            tee_pad.link(&queue_sink).map_err(|e| {
+                ThumbnailError::FrameMapping(format!("Failed to link tee→queue: {}", e))
+            })?;
 
             Ok(())
         })();
@@ -699,6 +703,67 @@ mod tests {
             matches!(picture, Err(ThumbnailError::Timeout)),
             "reattached tap answered {:?} without a new frame",
             picture.map(|jpeg| jpeg.len())
+        );
+    }
+
+    /// Attaching the branch must never stop the chain it taps. A tee pad
+    /// linked to a branch that is not running yet answers the tee's push
+    /// with FLUSHING, and the tee hands that upstream: the source pauses
+    /// its task without an error, the chain stands still and the branch,
+    /// active, waits for a frame that never comes (504 for as long as it is
+    /// polled). A source that never waits makes the window between
+    /// linking and starting the branch easy to hit.
+    #[test]
+    fn test_attaching_never_stops_the_tapped_chain() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(
+            "videotestsrc ! video/x-raw,width=64,height=36 ! \
+             tee name=t allow-not-linked=true ! queue ! fakesink name=out sync=false",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let passed = Arc::new(AtomicU64::new(0));
+        let counter = passed.clone();
+        pipeline
+            .by_name("out")
+            .unwrap()
+            .static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            });
+        let tee = pipeline.by_name("t").unwrap();
+        let tap = ThumbnailTap::new_with_tee(&pipeline, "attach_test", tee, Default::default());
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let (res, _, _) = pipeline.state(gst::ClockTime::from_seconds(5));
+        assert!(res.is_ok());
+
+        let flows = |passed: &AtomicU64| {
+            let before = passed.load(Ordering::Relaxed);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while passed.load(Ordering::Relaxed) == before && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            passed.load(Ordering::Relaxed) != before
+        };
+        let mut stopped_at = None;
+        for attempt in 0..200 {
+            tap.activate_branch().unwrap();
+            if !flows(&passed) {
+                stopped_at = Some(attempt);
+                break;
+            }
+            tap.deactivate_branch().unwrap();
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+
+        assert_eq!(
+            stopped_at, None,
+            "the chain stopped after attaching the branch"
         );
     }
 }
