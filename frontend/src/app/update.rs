@@ -2201,7 +2201,9 @@ impl eframe::App for StromApp {
 
 /// How far a file's start may lie before the event announcing it and still be
 /// believed. The event trails the file by up to one MP4 fragment; a larger gap
-/// means the GUI and the server disagree about the time of day.
+/// means the GUI and the server disagree about the time of day. Skew inside the
+/// window is not detected: a GUI clock ahead by up to the window reads the timer
+/// that much long.
 const MAX_ANNOUNCE_LAG: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// When a recording began, for the elapsed timer. The event for an MP4 file

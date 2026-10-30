@@ -7,9 +7,10 @@ use std::sync::{Mutex, OnceLock};
 use strom_types::FlowId;
 
 /// Wall-clock time of running time zero, in nanoseconds since the Unix epoch, per
-/// flow run: the flow, its pipeline clock and its base time. The clock is part of
-/// the key because a flow with direct media timing keeps base time 0 on every run,
-/// whatever clock it runs on.
+/// flow run: the flow, its pipeline, its pipeline clock and its base time. The
+/// pipeline and clock are part of the key because a flow with direct media timing
+/// keeps base time 0 on every run, and a Monotonic one shares the singleton clock
+/// across runs.
 ///
 /// Sampled once per run rather than per file. The pipeline clock and the system
 /// wall clock drift apart (the monotonic clock on macOS by a few ppm, about 10 ms an
@@ -44,8 +45,10 @@ pub fn running_time_to_utc_us(
         .lock()
         .ok()?;
     let zero_ns = match anchors.get(&flow_id) {
-        Some((anchor_clock, _, base, zero_ns))
-            if *base == base_time && anchor_clock.upgrade().as_ref() == Some(&clock) =>
+        Some((anchor_clock, anchor_pipeline, base, zero_ns))
+            if *base == base_time
+                && anchor_clock.upgrade().as_ref() == Some(&clock)
+                && anchor_pipeline.upgrade().as_ref() == Some(&top_level(element)) =>
         {
             *zero_ns
         }
@@ -111,5 +114,35 @@ mod tests {
         let anchors = RUNNING_ZERO_UTC_NS.get().unwrap().lock().unwrap();
         assert!(!anchors.contains_key(&stopped));
         assert!(anchors.contains_key(&running));
+    }
+
+    #[test]
+    fn a_rerun_with_the_same_clock_and_base_time_takes_its_own_anchor() {
+        gst::init().unwrap();
+        let flow = FlowId::new_v4();
+
+        // Direct media timing on the Monotonic singleton clock: base time 0 and the
+        // same clock on every run.
+        let run = || {
+            let pipeline = gst::Pipeline::new();
+            pipeline.set_start_time(gst::ClockTime::NONE);
+            pipeline.set_base_time(gst::ClockTime::ZERO);
+            let element = gst::ElementFactory::make("identity").build().unwrap();
+            pipeline.add(&element).unwrap();
+            pipeline.set_state(gst::State::Playing).unwrap();
+            (pipeline, element)
+        };
+
+        let (first, element) = run();
+        assert!(running_time_to_utc_us(flow, &element, gst::ClockTime::ZERO).is_some());
+        first.set_state(gst::State::Null).unwrap();
+        drop((first, element));
+
+        let (_second, element) = run();
+        assert!(running_time_to_utc_us(flow, &element, gst::ClockTime::ZERO).is_some());
+
+        let anchors = RUNNING_ZERO_UTC_NS.get().unwrap().lock().unwrap();
+        let (_, pipeline, _, _) = &anchors[&flow];
+        assert_eq!(pipeline.upgrade(), Some(top_level(&element)));
     }
 }
