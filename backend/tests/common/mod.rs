@@ -27,6 +27,7 @@ pub fn missing_elements<'a>(required: &[&'a str]) -> Vec<&'a str> {
 /// Skipping on a missing element passes green and guards nothing, so CI sets
 /// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure. Every skip on a
 /// missing element goes through here, so none can quietly opt out of that.
+/// The exception is [`cef_available`], which has its own `STROM_REQUIRE_CEF`.
 pub fn require_or_skip(missing: &[&str]) -> bool {
     if missing.is_empty() {
         return true;
@@ -191,6 +192,39 @@ pub fn gl_available(required: &[&str]) -> bool {
         error
     );
     eprintln!("SKIP: GL environment unavailable ({})", error);
+    false
+}
+
+/// Returns whether `cefsrc` can run here. Panics instead of returning false when
+/// `STROM_REQUIRE_CEF` is set, so the CI job cannot pass by skipping.
+///
+/// The one skip that does not go through [`require_or_skip`], on purpose: the
+/// Linux jobs set `STROM_REQUIRE_GST_PLUGINS` but only `Test (Linux, cefsrc)` has
+/// the element, so `cefsrc` needs its own switch.
+pub fn cef_available() -> bool {
+    gst::init().unwrap();
+    let required = strom_types::env::var_opt("STROM_REQUIRE_CEF").is_some();
+
+    // On macOS CEF needs a Cocoa run loop on the main thread, which the test
+    // harness does not provide: starting a cefsrc blocks forever.
+    if !cfg!(target_os = "linux") {
+        assert!(
+            !required,
+            "STROM_REQUIRE_CEF is set, but these tests run on Linux only"
+        );
+        eprintln!("SKIP: cefsrc tests run on Linux only");
+        return false;
+    }
+
+    if gst::ElementFactory::find("cefsrc").is_some() {
+        return true;
+    }
+    assert!(
+        !required,
+        "STROM_REQUIRE_CEF is set but the cefsrc element is not installed \
+         (check GST_PLUGIN_PATH)"
+    );
+    eprintln!("SKIP: cefsrc not installed (set STROM_REQUIRE_CEF=1 to fail instead)");
     false
 }
 
