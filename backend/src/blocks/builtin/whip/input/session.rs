@@ -5,7 +5,7 @@ use crate::gst::orphan_guard;
 use crate::gst::pipeline_bridge::SessionBridge;
 use crate::gst::rtp_hdrext;
 use crate::whip_session_manager::{
-    SessionActivity, SessionCleanupRequest, SlotOutput, WhipEndpointConfig, WhipSessionManager,
+    SessionActivity, SessionCleanupRequest, WhipEndpointConfig, WhipSessionManager,
 };
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -372,20 +372,7 @@ pub fn create_whipserversrc_for_session(
     // has to tell a slot that still has a publisher producing media behind it
     // from one whose publisher went away without a WHIP DELETE, or whose media
     // arrives but never comes out of the slot's chain.
-    let slot_output = match config.slot_output.get(slot) {
-        Some(stamp) => stamp.clone(),
-        None => {
-            // Unreachable: one stamp is built per slot. The orphan below is
-            // never written, so this session would be reaped once its decode
-            // grace ran out; this line is what makes that diagnosable.
-            warn!(
-                "WHIP Input: no output stamp for slot {}, its liveness cannot be tracked",
-                slot
-            );
-            Arc::new(SlotOutput::new(Instant::now()))
-        }
-    };
-    let activity = Arc::new(SessionActivity::new(Instant::now(), slot_output));
+    let activity = config.start_session_activity(slot);
 
     // Inactivity watchdog. A background thread triggers cleanup once the session
     // has gone INACTIVITY_TIMEOUT without producing usable media — which covers
