@@ -344,12 +344,12 @@ fn unsupported_pair_falls_back_and_still_converts() {
 }
 
 /// The reverse direction, decoded Y'CbCr into RGB, checked against the colours
-/// the frame was made from rather than against `videoconvert`: the two
-/// upsample chroma differently (vImage repeats each sample, `videoconvert`
-/// interpolates for some formats and not others), so they part by tens of
-/// levels at every hard colour edge while both being right. Flat colours have
+/// the frame was made from rather than against `videoconvert`: vImage repeats
+/// each chroma sample and ignores the siting, `videoconvert` interpolates, so
+/// the two part by tens of levels at every hard colour edge. Flat colours have
 /// no edges, and a wrong permute map or chroma plane still misses by far more
-/// than rounding.
+/// than rounding. [`cosited_yuv_input_stays_close_to_videoconvert`] bounds the
+/// edge difference.
 #[test]
 fn yuv_to_rgb_recovers_the_source_colours() {
     init();
@@ -841,4 +841,104 @@ fn caps_features_link_like_videoconvert() {
         !offers_conversion(&gl_caps),
         "GL memory cannot be mapped here and must only pass through"
     );
+}
+
+/// Peak signal-to-noise ratio of two RGBA frames over the colour channels, in
+/// dB. Higher is closer; identical frames give 99.
+fn psnr_rgb(info: &VideoInfo, a: &gst::Buffer, b: &gst::Buffer) -> f64 {
+    let a = gst_video::VideoFrameRef::from_buffer_ref_readable(a.as_ref(), info).expect("map a");
+    let b = gst_video::VideoFrameRef::from_buffer_ref_readable(b.as_ref(), info).expect("map b");
+    let (a_data, b_data) = (
+        a.plane_data(0).expect("plane a"),
+        b.plane_data(0).expect("plane b"),
+    );
+    let stride = a.plane_stride()[0] as usize;
+    let (mut squared, mut samples) = (0f64, 0f64);
+    for y in 0..info.height() as usize {
+        for x in 0..info.width() as usize {
+            for c in 0..3 {
+                let idx = y * stride + x * 4 + c;
+                let delta = a_data[idx] as f64 - b_data[idx] as f64;
+                squared += delta * delta;
+                samples += 1.0;
+            }
+        }
+    }
+    if squared == 0.0 {
+        99.0
+    } else {
+        10.0 * (255.0f64 * 255.0 * samples / squared).log10()
+    }
+}
+
+/// Decoded HD video is left-cosited (`mpeg2`), and vImage treats it as
+/// centred. On hard colour edges that costs up to about 1.3 dB against
+/// `videoconvert`, measured on colour bars at 1080p; this bounds it at 2 dB so
+/// a real regression (a swapped chroma plane, a half-height chroma) still
+/// fails by a wide margin. On smooth content vImage is the closer of the two,
+/// so only the bars are checked.
+#[test]
+fn cosited_yuv_input_stays_close_to_videoconvert() {
+    init();
+
+    const MAX_LOSS_DB: f64 = 2.0;
+    let (width, height) = (1920, 1080);
+
+    let rgba = VideoInfo::builder(VideoFormat::Rgba, width, height)
+        .fps(gst::Fraction::new(30, 1))
+        .build()
+        .expect("rgba info");
+    let pipeline = gst::parse::launch(&format!(
+        "videotestsrc num-buffers=1 pattern=smpte ! \
+         video/x-raw,format=RGBA,width={width},height={height},framerate=30/1 ! \
+         appsink name=sink sync=false"
+    ))
+    .expect("source pipeline")
+    .downcast::<gst::Pipeline>()
+    .expect("pipeline");
+    let sink = pipeline
+        .by_name("sink")
+        .expect("sink")
+        .downcast::<gst_app::AppSink>()
+        .expect("appsink");
+    pipeline.set_state(gst::State::Playing).expect("play");
+    let truth = sink
+        .try_pull_sample(gst::ClockTime::from_seconds(10))
+        .expect("bars frame")
+        .buffer()
+        .expect("bars buffer")
+        .copy();
+    pipeline.set_state(gst::State::Null).expect("null");
+
+    for format in [VideoFormat::Nv12, VideoFormat::Yuy2] {
+        let mut yuv_caps = VideoInfo::builder(format, width, height)
+            .fps(gst::Fraction::new(30, 1))
+            .build()
+            .expect("yuv info")
+            .to_caps()
+            .expect("yuv caps");
+        yuv_caps.make_mut().set("chroma-site", "mpeg2");
+        let rgba_caps = rgba.to_caps().expect("rgba caps");
+
+        // Encoded by `videoconvert` with the same siting it is decoded with,
+        // so the reference decoder starts from a matched source.
+        let yuv = convert_one("videoconvert", &rgba_caps, &yuv_caps, &truth).buffer;
+        let ours = convert_one(super::ELEMENT_NAME, &yuv_caps, &rgba_caps, &yuv);
+        let reference = convert_one("videoconvert", &yuv_caps, &rgba_caps, &yuv);
+
+        assert_eq!(
+            ours.path.as_deref(),
+            Some(PATH_VIMAGE),
+            "{format:?} did not take the vImage path"
+        );
+
+        let ours_db = psnr_rgb(&rgba, &ours.buffer, &truth);
+        let reference_db = psnr_rgb(&rgba, &reference.buffer, &truth);
+        assert!(
+            ours_db >= reference_db - MAX_LOSS_DB,
+            "{format:?}: vImage is {ours_db:.2} dB from the source, videoconvert \
+             {reference_db:.2} dB; the gap is more than the {MAX_LOSS_DB} dB that \
+             unsited chroma upsampling explains"
+        );
+    }
 }
