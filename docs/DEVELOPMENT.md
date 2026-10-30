@@ -49,6 +49,7 @@ Make sure you have the following installed:
 |---------|-------------|--------------------|
 | `nvidia` | NVIDIA GPU monitoring (default) | None |
 | `efp` | EFP/SRT input and output blocks | `cmake` |
+| `voice-isolation` | Per-channel voice isolation in the mixer (default). `build.rs` downloads the 10.6 MB model with `curl` and embeds it; set `STROM_VOICE_ISOLATION_MODEL` to a local copy for offline builds, or build without default features to leave it out | `curl` and network access, or a local model file |
 | `no-gui` | Build without the native GUI (server only; used by the Docker image) | None |
 
 ```bash
