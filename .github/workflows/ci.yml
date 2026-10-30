@@ -145,9 +145,10 @@ jobs:
   # or touching the gstcefsrc pin, and on demand. It downloads a ~450 MB plugin
   # tarball and starts Chromium, which most diffs have no reason to pay for.
   #
-  # The container is ubuntu:26.04, the strom-full base: the prebuilt plugin is
-  # built on it, and production loads it into its GStreamer 1.28, not the
-  # runner's 1.24.
+  # The container is ubuntu:26.04 because that is what strom-full ships, with
+  # GStreamer 1.28, not the runner's 1.24. The plugin assets published so far
+  # (gstcefsrc-deps 144.0.21-strom5) were built on ubuntu:questing and load on
+  # 26.04; build-gstcefsrc builds on 26.04 from the next rebuild.
   test-cef:
     name: Test (Linux, cefsrc)
     needs: [preflight, cef-changes]
