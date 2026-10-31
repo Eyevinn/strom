@@ -709,20 +709,48 @@ fn test_block_encoder_preference() {
     }
 }
 
-/// #1163: on Windows the Intel QSV encoders corrupt the process heap, so
-/// once `demote_qsv_encoders` has run, the block never selects one, whatever
-/// else the host has. Elsewhere QSV keeps its rank and this checks nothing.
+/// #1163: QSV is only safe from Intel driver 32.0.101.9150 on. An unknown
+/// version (no Intel adapter, or unreadable) is not.
 #[test]
-fn qsv_encoders_are_never_selected_on_windows() {
+fn qsv_needs_intel_driver_9150_or_later() {
+    use crate::gst::intel_driver_has_qsv_fix as fixed;
+    assert!(!fixed(None));
+    assert!(!fixed(Some([32, 0, 101, 8991])));
+    assert!(!fixed(Some([32, 0, 101, 8247])));
+    assert!(!fixed(Some([31, 0, 101, 9999])));
+    assert!(fixed(Some([32, 0, 101, 9150])));
+    assert!(fixed(Some([32, 0, 101, 9151])));
+    assert!(fixed(Some([32, 0, 102, 1])));
+    assert!(fixed(Some([33, 0, 0, 0])));
+}
+
+/// #1163: on Windows with an Intel driver older than 32.0.101.9150, the QSV
+/// encoders corrupt the process heap, so once `demote_qsv_encoders` has run
+/// the block never selects one. With 9150 or later they keep their rank.
+/// Elsewhere QSV keeps its rank and this checks nothing.
+#[test]
+fn qsv_encoders_follow_the_intel_driver_on_windows() {
     init_gst();
     crate::gst::demote_qsv_encoders();
     if !cfg!(windows) {
         return;
     }
+    let version = crate::gst::intel_driver_version();
+    let safe = crate::gst::intel_driver_has_qsv_fix(version);
+    eprintln!("Intel driver {version:?}: QSV safe = {safe}");
     for name in crate::gst::QSV_ENCODERS {
         if let Some(factory) = gst::ElementFactory::find(name) {
-            assert_eq!(factory.rank(), gst::Rank::NONE, "{name} kept its rank");
+            assert_eq!(
+                factory.rank() == gst::Rank::NONE,
+                !safe,
+                "{name} has rank {:?} with the Intel driver {} the fix",
+                factory.rank(),
+                if safe { "with" } else { "without" }
+            );
         }
+    }
+    if safe {
+        return;
     }
     for codec in [Codec::H264, Codec::H265, Codec::AV1, Codec::VP9] {
         for preference in [EncoderPreference::Auto, EncoderPreference::HardwareOnly] {
