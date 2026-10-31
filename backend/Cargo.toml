@@ -160,6 +160,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSString",
 ] }
 
+[target.'cfg(windows)'.dependencies]
+# Intel graphics driver version via DXGI (gst::demote_qsv_encoders, #1163).
+# Already in the tree through wgpu, so this adds no new crate.
+windows = { version = "0.62", features = ["Win32_Graphics_Dxgi"] }
+
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 

@@ -63,33 +63,113 @@ pub fn register_static_plugins() {
 /// The Intel Quick Sync Video encoders from GStreamer's `qsv` plugin.
 pub const QSV_ENCODERS: [&str; 4] = ["qsvh264enc", "qsvh265enc", "qsvvp9enc", "qsvav1enc"];
 
-/// Drop the Intel Quick Sync Video encoders' rank to NONE on Windows, so
-/// nothing picks them: neither the Video Encoder block, which skips an
-/// encoder of rank NONE, nor `webrtcsink`'s encoder discovery in WHEP Output.
+/// The first Intel graphics driver for Windows whose D3D11 driver no longer
+/// corrupts the heap when it refuses an encode query (#1163).
+pub const QSV_FIXED_INTEL_DRIVER: [u16; 4] = [32, 0, 101, 9150];
+
+/// Where to get it.
+const INTEL_DRIVER_DOWNLOAD: &str =
+    "https://www.intel.com/content/www/us/en/download/785597/intel-arc-graphics-windows.html";
+
+/// True when Intel driver `version` has the fix for #1163. `None` (no Intel
+/// adapter found, or its version could not be read) counts as not fixed.
+pub fn intel_driver_has_qsv_fix(version: Option<[u16; 4]>) -> bool {
+    version.is_some_and(|v| v >= QSV_FIXED_INTEL_DRIVER)
+}
+
+/// Drop the Intel Quick Sync Video encoders' rank to NONE on Windows when the
+/// Intel graphics driver is older than [`QSV_FIXED_INTEL_DRIVER`], so nothing
+/// picks them: neither the Video Encoder block, which skips an encoder of rank
+/// NONE, nor `webrtcsink`'s encoder discovery in WHEP Output.
 ///
-/// On Windows with GStreamer 1.28.8, a plain `videotestsrc ! qsvh264enc !
-/// fakesink` corrupts the process heap (STATUS_HEAP_CORRUPTION) in about one
-/// run in three, with no Strom code involved (#1163). Inside Strom that takes
-/// the whole server down. Elsewhere the encoders keep their rank. Call after
-/// `gst::init()`, before any pipeline is built. Lift this once a GStreamer or
-/// Intel driver release fixes the crash.
+/// Before 32.0.101.9150, Intel's D3D11 driver corrupts the process heap
+/// (STATUS_HEAP_CORRUPTION) when it refuses a VP9 or AV1 encode query. The
+/// `qsv` plugin probes sizes it refuses when it loads, so a plain
+/// `videotestsrc ! qsvh264enc ! fakesink` crashed about one run in three on
+/// Core Ultra, and inside Strom that takes the whole server down (#1163).
+/// With 32.0.101.9150 or later, or on other platforms, the encoders keep their
+/// rank. Call after `gst::init()` and before `register_static_plugins()`:
+/// `webrtcsink` reads encoder ranks when it registers.
 pub fn demote_qsv_encoders() {
     use gstreamer::prelude::PluginFeatureExtManual;
 
     if !cfg!(windows) {
         return;
     }
-    for name in QSV_ENCODERS {
-        if let Some(factory) = gstreamer::ElementFactory::find(name) {
-            if factory.rank() != gstreamer::Rank::NONE {
-                factory.set_rank(gstreamer::Rank::NONE);
-                tracing::info!(
-                    "{} disabled on Windows: the Intel QSV encoders corrupt the heap (#1163)",
-                    name
-                );
-            }
-        }
+    let version = intel_driver_version();
+    let shown = version
+        .map(|v| format!("{}.{}.{}.{}", v[0], v[1], v[2], v[3]))
+        .unwrap_or_else(|| "unknown".to_string());
+    if intel_driver_has_qsv_fix(version) {
+        tracing::info!("Intel graphics driver {}: QSV encoders enabled", shown);
+        return;
     }
+    let installed: Vec<&str> = QSV_ENCODERS
+        .into_iter()
+        .filter(|name| {
+            gstreamer::ElementFactory::find(name)
+                .map(|factory| {
+                    let ranked = factory.rank() != gstreamer::Rank::NONE;
+                    factory.set_rank(gstreamer::Rank::NONE);
+                    ranked
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    if !installed.is_empty() {
+        let [a, b, c, d] = QSV_FIXED_INTEL_DRIVER;
+        tracing::warn!(
+            "Intel QSV encoders disabled ({}): Intel graphics driver {} corrupts the heap \
+             when QSV probes its encoders (#1163). Install {}.{}.{}.{} or later to use them: {}",
+            installed.join(", "),
+            shown,
+            a,
+            b,
+            c,
+            d,
+            INTEL_DRIVER_DOWNLOAD
+        );
+    }
+}
+
+/// The lowest driver version among the Intel display adapters, from DXGI.
+/// `None` when there is no Intel adapter or its version cannot be read.
+#[cfg(windows)]
+pub fn intel_driver_version() -> Option<[u16; 4]> {
+    use windows::core::Interface;
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIDevice, IDXGIFactory1};
+
+    const INTEL: u32 = 0x8086;
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+    let mut lowest: Option<[u16; 4]> = None;
+    for index in 0.. {
+        let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else {
+            break;
+        };
+        let Ok(desc) = (unsafe { adapter.GetDesc1() }) else {
+            continue;
+        };
+        if desc.VendorId != INTEL {
+            continue;
+        }
+        // The user-mode driver version, packed as four 16-bit parts.
+        let Ok(packed) = (unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }) else {
+            continue;
+        };
+        let v = [
+            (packed >> 48) as u16,
+            (packed >> 32) as u16,
+            (packed >> 16) as u16,
+            packed as u16,
+        ];
+        lowest = Some(lowest.map_or(v, |l| l.min(v)));
+    }
+    lowest
+}
+
+#[cfg(not(windows))]
+pub fn intel_driver_version() -> Option<[u16; 4]> {
+    None
 }
 
 /// Start GLib main loop in a background thread.
