@@ -846,11 +846,19 @@ impl eframe::App for StromApp {
                             flow_id,
                             block_id,
                             filename,
+                            start_utc_us,
+                            ..
                         } => {
                             let key = (flow_id, block_id);
                             self.recorder_start_times
                                 .entry(key.clone())
-                                .or_insert_with(instant::Instant::now);
+                                .or_insert_with(|| {
+                                    recording_started_at(
+                                        instant::Instant::now(),
+                                        crate::info_page::current_time_millis(),
+                                        start_utc_us,
+                                    )
+                                });
                             self.recorder_filenames.insert(key, filename);
                         }
                         StromEvent::RecorderAutoStop { flow_id, block_id } => {
@@ -2188,5 +2196,61 @@ impl eframe::App for StromApp {
     /// Auto-save interval - save every second to ensure persistence on iOS PWA
     fn auto_save_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(1)
+    }
+}
+
+/// How far a file's start may lie before the event announcing it and still be
+/// believed. The event trails the file by one MP4 fragment: 1 s, or a GOP when
+/// that is longer, because the muxer cuts only at keyframes. A larger gap means
+/// the GUI and the server disagree about the time of day, or the GOP is longer
+/// than the window; either way the timer starts at arrival. Skew inside the
+/// window is not detected: a GUI clock ahead by up to the window reads the timer
+/// that much long.
+const MAX_ANNOUNCE_LAG: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// When a recording began, for the elapsed timer. The event for an MP4 file
+/// arrives with its first fragment, up to a GOP after the file opened, so
+/// the timer starts from the file's own start time when that is plausible.
+fn recording_started_at(
+    now: instant::Instant,
+    now_unix_ms: i64,
+    start_utc_us: Option<u64>,
+) -> instant::Instant {
+    let lag_ms = start_utc_us
+        .and_then(|us| i64::try_from(us / 1000).ok())
+        .map(|start_ms| now_unix_ms - start_ms);
+    match lag_ms {
+        Some(ms) if (0..=MAX_ANNOUNCE_LAG.as_millis() as i64).contains(&ms) => now
+            .checked_sub(std::time::Duration::from_millis(ms as u64))
+            .unwrap_or(now),
+        _ => now,
+    }
+}
+
+#[cfg(test)]
+mod recording_started_at_tests {
+    use super::*;
+
+    fn lag(now_unix_ms: i64, start_utc_us: Option<u64>) -> std::time::Duration {
+        let now = instant::Instant::now();
+        now - recording_started_at(now, now_unix_ms, start_utc_us)
+    }
+
+    #[test]
+    fn starts_from_the_file_start_when_the_event_is_late() {
+        assert_eq!(
+            lag(10_000, Some(9_000_000)),
+            std::time::Duration::from_millis(1000)
+        );
+    }
+
+    #[test]
+    fn ignores_a_start_that_is_missing_or_implausible() {
+        let zero = std::time::Duration::ZERO;
+        assert_eq!(lag(10_000, None), zero);
+        // Start in the future: the clocks disagree.
+        assert_eq!(lag(10_000, Some(12_000_000)), zero);
+        // Start far in the past: the clocks disagree.
+        assert_eq!(lag(100_000, Some(9_000_000)), zero);
     }
 }
