@@ -7056,6 +7056,7 @@ dependencies = [
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
+ "windows",
  "winresource",
 ]
 
