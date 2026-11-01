@@ -1212,3 +1212,143 @@ fn activity_probes_stamp_buffers_from_a_running_compositor() {
     // Input 1 was never linked, so it stays unstamped.
     assert_eq!(state.input_media_age_ms(1), None);
 }
+
+/// The multiview only shows the inputs: when it falls behind (a busy CPU
+/// scaling every input for its tiles), it must drop its own frames, not
+/// hold up the inputs' tees and with them program. Here the multiview
+/// output stops for good; program's input pads must keep getting frames.
+/// Seen as a program that stayed black after a source came back, while
+/// the multiview compositor scaled on a starved CPU.
+#[test]
+fn a_stalled_multiview_does_not_hold_up_program() {
+    use crate::blocks::{builtin::get_builder, BlockBuildContext};
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use strom_types::MediaType;
+
+    gst::init().unwrap();
+    crate::gpu::detect_gpu_capabilities();
+
+    let mut props = HashMap::new();
+    for (k, v) in [
+        ("compositor_preference", PropertyValue::String("cpu".into())),
+        ("num_inputs", PropertyValue::UInt(2)),
+        ("pgm_resolution", PropertyValue::String("320x180".into())),
+        (
+            "multiview_resolution",
+            PropertyValue::String("320x180".into()),
+        ),
+    ] {
+        props.insert(k.to_string(), v);
+    }
+    let builder = get_builder("builtin.vision_mixer").expect("vision mixer has a builder");
+    let pads = builder.get_external_pads(&props).expect("external pads");
+    let ctx = BlockBuildContext::new(vec![], "all".to_string());
+    let built = builder
+        .build("vm", &props, &ctx)
+        .expect("CPU vision mixer builds");
+
+    let pipeline = gst::Pipeline::new();
+    let element = |id: &str| {
+        built
+            .elements
+            .iter()
+            .find(|(eid, _)| eid == id)
+            .map(|(_, e)| e.clone())
+            .unwrap_or_else(|| panic!("builder produced no element {id}"))
+    };
+    for (_, e) in &built.elements {
+        pipeline.add(e).unwrap();
+    }
+    for (from, to) in &built.internal_links {
+        element(&from.element_id)
+            .link_pads(
+                from.pad_name.as_deref(),
+                &element(&to.element_id),
+                to.pad_name.as_deref(),
+            )
+            .unwrap_or_else(|e| panic!("link {from:?} -> {to:?}: {e}"));
+    }
+
+    // Live video into every video input; the rest stays unlinked.
+    for input in pads
+        .inputs
+        .iter()
+        .filter(|p| p.media_type == MediaType::Video && p.name.starts_with("video_in_"))
+    {
+        let src = gst::parse::bin_from_description(
+            "videotestsrc is-live=true ! \
+             capsfilter caps=video/x-raw,width=320,height=180,framerate=30/1",
+            true,
+        )
+        .unwrap();
+        pipeline.add(&src).unwrap();
+        src.static_pad("src")
+            .unwrap()
+            .link(
+                &element(&format!("vm:{}", input.internal_element_id))
+                    .static_pad(&input.internal_pad_name)
+                    .unwrap(),
+            )
+            .expect("video input links");
+    }
+
+    // Program runs freely; the multiview output stops taking frames once
+    // everything runs.
+    let mut multiview = None;
+    for output in &pads.outputs {
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .property("async", false)
+            .build()
+            .unwrap();
+        pipeline.add(&sink).unwrap();
+        let sink_pad = sink.static_pad("sink").unwrap();
+        element(&format!("vm:{}", output.internal_element_id))
+            .static_pad(&output.internal_pad_name)
+            .unwrap()
+            .link(&sink_pad)
+            .expect("output links");
+        if output.name == "multiview_out" {
+            multiview = Some(sink_pad);
+        }
+    }
+
+    // Frames reaching program's compositor from input 0.
+    let reached = Arc::new(AtomicU64::new(0));
+    let counter = reached.clone();
+    element("vm:mixer")
+        .static_pad("sink_0")
+        .expect("program pad of input 0")
+        .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            gst::PadProbeReturn::Ok
+        });
+
+    pipeline.set_state(gst::State::Playing).unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        reached.load(Ordering::Relaxed) > 0,
+        "program got no frame of input 0 before the multiview stalled"
+    );
+    multiview.expect("a multiview output").add_probe(
+        gst::PadProbeType::BLOCK | gst::PadProbeType::BUFFER,
+        |_, _| gst::PadProbeReturn::Ok,
+    );
+    // Long enough for every queue in front of the multiview to fill up.
+    std::thread::sleep(Duration::from_secs(3));
+    let before = reached.load(Ordering::Relaxed);
+    std::thread::sleep(Duration::from_secs(2));
+    let after = reached.load(Ordering::Relaxed);
+    pipeline.set_state(gst::State::Null).unwrap();
+
+    // 2 s at 30 fps is 60 frames; half of that leaves room for a busy runner.
+    assert!(
+        after - before >= 30,
+        "program got {} frames of input 0 in 2 s with the multiview stalled",
+        after - before
+    );
+}

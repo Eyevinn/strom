@@ -146,6 +146,24 @@ pub fn make_queue(name: &str) -> Result<gst::Element, BlockBuildError> {
         .map_err(|e| BlockBuildError::ElementCreation(format!("queue: {}", e)))
 }
 
+/// Frames a multiview branch may hold before it drops its oldest.
+const MONITOR_QUEUE_BUFFERS: u32 = 2;
+
+/// Create the queue between an input's tee and the multiview compositor.
+///
+/// The tee pushes into all its branches in turn, so a branch that blocks
+/// holds up the others, program included. The multiview only shows the
+/// inputs: when it falls behind (a busy CPU scaling every tile), it drops
+/// its own oldest frames instead.
+pub fn make_monitor_queue(name: &str) -> Result<gst::Element, BlockBuildError> {
+    let queue = make_queue(name)?;
+    queue.set_property_from_str("leaky", "downstream");
+    queue.set_property("max-size-buffers", MONITOR_QUEUE_BUFFERS);
+    queue.set_property("max-size-bytes", 0u32);
+    queue.set_property("max-size-time", 0u64);
+    Ok(queue)
+}
+
 /// Create a `level` audio-metering element configured with the standard interval.
 pub fn make_level(name: &str) -> Result<gst::Element, BlockBuildError> {
     gst::ElementFactory::make("level")
