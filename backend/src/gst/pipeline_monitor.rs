@@ -69,7 +69,7 @@ async fn check_all(state: &AppState, over: &mut OverQueues) {
         );
     }
     for (flow_id, queue) in left {
-        debug!(flow = %flow_id, queue = %queue, "Queue level back below threshold");
+        debug!(flow = %flow_id, queue = %queue, "Queue level back below threshold, or queue gone");
     }
 }
 
@@ -113,7 +113,8 @@ fn queues_over(pipeline: &gst::Pipeline) -> Vec<QueueLevel> {
         }
 
         over.push(QueueLevel {
-            name: element.name().to_string(),
+            // The path, not the name: names are unique only within a bin.
+            name: element.path_string().to_string(),
             kind: factory_name,
             current_ns,
             threshold_ns,
@@ -124,7 +125,7 @@ fn queues_over(pipeline: &gst::Pipeline) -> Vec<QueueLevel> {
     over
 }
 
-/// A queue, by flow and element name.
+/// A queue, by flow and element path.
 type QueueKey = (FlowId, String);
 
 /// The queues over threshold at the last poll.
