@@ -6,7 +6,7 @@
 //!
 //! Pipeline structure (decode=true, default):
 //! ```text
-//! srtsrc -> efpdemux -> h264parse -> nvh264dec/avdec_h264 -> video_output (identity)
+//! srtsrc -> efpdemux -> h264parse -> H.264 decoder -> video_output (identity)
 //!                    -> opusdec -> audioconvert -> audioresample -> audio_output_0 (identity)
 //! ```
 //!
@@ -417,7 +417,7 @@ impl BlockBuilder for EfpSrtInputBuilder {
 
                     if let Some(identity) = weak_identity.upgrade() {
                         if decode {
-                            // Decode mode: h264parse -> nvh264dec/avdec_h264 -> identity
+                            // Decode mode: h264parse -> H.264 decoder -> identity
                             // No videoconvert to preserve GPU memory from hardware decoders.
                             if let Err(e) =
                                 link_decoded_video(element, pad, &identity, &instance_id_clone)
@@ -615,7 +615,12 @@ impl BlockBuilder for EfpSrtInputBuilder {
 }
 
 /// Dynamically insert h264parse + video decoder between an efpdemux video pad and identity.
-/// efpdemux pad -> h264parse -> nvh264dec/avdec_h264 -> deinterlace -> identity
+/// efpdemux pad -> h264parse -> H.264 decoder -> deinterlace -> identity
+///
+/// The decoder is picked once `h264parse` knows the stream (profile, chroma
+/// format, bit depth): the host's highest-ranked decoder that takes those
+/// caps, by rank. A 4:2:2 or 10-bit stream thereby skips a hardware decoder
+/// that cannot take it instead of failing to negotiate.
 fn link_decoded_video(
     element: &gst::Element,
     src_pad: &gst::Pad,
@@ -634,44 +639,53 @@ fn link_decoded_video(
         .build()
         .map_err(|e| format!("h264parse: {}", e))?;
 
-    // Try hardware decoder first (nvh264dec), fall back to software (avdec_h264)
-    let decoder_name = format!("{}:video_decoder_{}", instance_id, src_pad.name());
-    let decoder = gst::ElementFactory::make("nvh264dec")
-        .name(&decoder_name)
-        .build()
-        .or_else(|_| {
-            gst::ElementFactory::make("avdec_h264")
-                .name(&decoder_name)
-                .build()
-        })
-        .map_err(|e| format!("video decoder (nvh264dec/avdec_h264): {}", e))?;
-
-    bin.add_many([&parser, &decoder])
-        .map_err(|e| format!("add video decode chain: {}", e))?;
-
-    // Link downstream: h264parse -> decoder
-    parser
-        .link(&decoder)
-        .map_err(|e| format!("link h264parse -> decoder: {}", e))?;
-
+    bin.add(&parser)
+        .map_err(|e| format!("add h264parse: {}", e))?;
     parser
         .sync_state_with_parent()
         .map_err(|e| format!("sync h264parse: {}", e))?;
-    decoder
-        .sync_state_with_parent()
-        .map_err(|e| format!("sync decoder: {}", e))?;
 
-    // decoder -> deinterlace -> identity. Interlaced broadcast feeds (e.g.
-    // 1080i50) must be deinterlaced before the GL vision mixer; the helper's
-    // caps probe forces deinterlacing only when the source is interlaced/mixed.
-    let decoder_src = decoder.static_pad("src").ok_or("decoder has no src pad")?;
-    super::decode_chain::link_raw_video_through_deinterlace(
-        &bin,
-        &decoder_src,
-        identity,
-        instance_id,
-        &src_pad.name(),
-    )?;
+    // One-shot CAPS probe on the parser's output: fires per event, never per
+    // buffer, and captures only weak references and owned strings. It runs
+    // before the event goes to a peer, so the decoder linked here gets the
+    // CAPS event itself, and the sticky events before it.
+    let parser_src = parser.static_pad("src").ok_or("h264parse has no src pad")?;
+    let weak_bin = bin.downgrade();
+    let weak_identity = identity.downgrade();
+    let decoder_name = format!("{}:video_decoder_{}", instance_id, src_pad.name());
+    let label = src_pad.name().to_string();
+    let instance = instance_id.to_string();
+    parser_src.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+        let Some(gst::PadProbeData::Event(event)) = &info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::EventView::Caps(caps_event) = event.view() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let (Some(bin), Some(identity)) = (weak_bin.upgrade(), weak_identity.upgrade()) else {
+            return gst::PadProbeReturn::Remove;
+        };
+        if let Err(e) = link_decoder(
+            &bin,
+            pad,
+            caps_event.caps_owned(),
+            &identity,
+            &decoder_name,
+            &instance,
+            &label,
+        ) {
+            error!("EFPSRT Input {}: {}", instance, e);
+            // Name the reason in the flow's error, not only a later not-linked.
+            if let Some(parser) = pad.parent_element() {
+                gst::element_error!(
+                    parser,
+                    gst::StreamError::CodecNotFound,
+                    ("EFPSRT Input {}: {}", instance, e)
+                );
+            }
+        }
+        gst::PadProbeReturn::Remove
+    });
 
     // Link source pad last
     let parser_sink = parser
@@ -682,16 +696,106 @@ fn link_decoded_video(
         .map_err(|e| format!("link efpdemux -> h264parse: {:?}", e))?;
 
     debug!(
-        "EFPSRT Input {}: Linked video decode chain: {} -> h264parse -> {} -> {}",
+        "EFPSRT Input {}: Linked {} -> h264parse; the decoder follows the stream's caps",
         instance_id,
         src_pad.name(),
+    );
+    Ok(())
+}
+
+/// Build the best decoder for `caps` and link `parser_src` -> decoder ->
+/// deinterlace -> `identity`. Tries the candidates by rank and takes the
+/// first that opens: a hardware decoder whose CUDA context or VA display
+/// cannot be opened fails on the way to READY, and the next candidate is
+/// tried (see `start_decoder`).
+fn link_decoder(
+    bin: &gst::Bin,
+    parser_src: &gst::Pad,
+    caps: gst::Caps,
+    identity: &gst::Element,
+    decoder_name: &str,
+    instance_id: &str,
+    pad_label: &str,
+) -> Result<(), String> {
+    let decoder = crate::gst::software_decoder::decoders_for(&caps)
+        .into_iter()
+        .find_map(|factory| start_decoder(bin, &factory, decoder_name))
+        .ok_or_else(|| format!("no usable H.264 decoder takes {}", caps))?;
+
+    // decoder -> deinterlace -> identity. Interlaced broadcast feeds (e.g.
+    // 1080i50) must be deinterlaced before the GL vision mixer; the helper's
+    // caps probe forces deinterlacing only when the source is interlaced/mixed.
+    let decoder_src = decoder.static_pad("src").ok_or("decoder has no src pad")?;
+    super::decode_chain::link_raw_video_through_deinterlace(
+        bin,
+        &decoder_src,
+        identity,
+        instance_id,
+        pad_label,
+    )?;
+    let decoder_sink = decoder
+        .static_pad("sink")
+        .ok_or("decoder has no sink pad")?;
+    parser_src
+        .link(&decoder_sink)
+        .map_err(|e| format!("link h264parse -> decoder: {:?}", e))?;
+
+    debug!(
+        "EFPSRT Input {}: {} decodes with {}",
+        instance_id,
+        pad_label,
         decoder
             .factory()
             .map(|f| f.name().to_string())
             .unwrap_or_default(),
-        identity.name()
     );
     Ok(())
+}
+
+/// Make a decoder with `factory`, open it and add it to `bin` in the bin's
+/// state; `None` when it cannot be built or opened.
+///
+/// The decoder is taken to READY (where a hardware decoder opens its CUDA
+/// context or VA display) before it is added: without a parent its error
+/// message goes nowhere, while in the bin it would reach the pipeline bus and
+/// fail the whole flow although the next candidate works. The top-level
+/// bin's contexts are set on it first, so it shares the pipeline's GPU
+/// contexts as it would when added.
+fn start_decoder(
+    bin: &gst::Bin,
+    factory: &gst::ElementFactory,
+    name: &str,
+) -> Option<gst::Element> {
+    let decoder = match factory.create().name(name).build() {
+        Ok(decoder) => decoder,
+        Err(e) => {
+            debug!("{}: {} unusable: {}", name, factory.name(), e);
+            return None;
+        }
+    };
+    let mut top: gst::Element = bin.clone().upcast();
+    while let Some(parent) = top.parent().and_then(|p| p.downcast::<gst::Element>().ok()) {
+        top = parent;
+    }
+    for context in top.contexts() {
+        decoder.set_context(&context);
+    }
+    if let Err(e) = decoder.set_state(gst::State::Ready) {
+        debug!("{}: {} does not open: {}", name, factory.name(), e);
+        let _ = decoder.set_state(gst::State::Null);
+        return None;
+    }
+    if bin.add(&decoder).is_err() {
+        let _ = decoder.set_state(gst::State::Null);
+        return None;
+    }
+    if let Err(e) = decoder.sync_state_with_parent() {
+        debug!("{}: {} does not start: {}", name, factory.name(), e);
+        let _ = decoder.set_state(gst::State::Null);
+        let _ = bin.remove(&decoder);
+        return None;
+    }
+    Some(decoder)
 }
 
 /// Dynamically insert opusdec + audioconvert + audioresample between an efpdemux audio pad and identity.
@@ -1264,5 +1368,175 @@ mod tests {
             }
             other => panic!("expected InvalidProperty, got {:?}", other),
         }
+    }
+
+    /// Decode `format` H.264 through the block's own decode chain
+    /// (`link_decoded_video`) and count the frames that reach its output.
+    fn frames_through_decode_chain(format: &str) -> Result<u64, String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(&format!(
+            "videotestsrc num-buffers=10 ! \
+             video/x-raw,format={format},width=320,height=240,framerate=30/1 ! \
+             x264enc name=enc tune=zerolatency \
+             identity name=out ! fakesink sync=false"
+        ))
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let encoder = pipeline.by_name("enc").unwrap();
+        let identity = pipeline.by_name("out").unwrap();
+        let frames = Arc::new(AtomicU64::new(0));
+        let counter = frames.clone();
+        identity
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            });
+        link_decoded_video(
+            &encoder,
+            &encoder.static_pad("src").unwrap(),
+            &identity,
+            "efp",
+        )?;
+
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let msg = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(20),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .ok_or("timed out")?;
+        pipeline.set_state(gst::State::Null).unwrap();
+        if let gst::MessageView::Error(e) = msg.view() {
+            return Err(format!("{} ({:?})", e.error(), e.debug()));
+        }
+        Ok(frames.load(Ordering::Relaxed))
+    }
+
+    /// A 4:2:2 10-bit stream (High 4:2:2) is decoded by a decoder that takes
+    /// it. NVDEC, VA and D3D advertise only the profiles their hardware has;
+    /// picked without the parsed caps, such a decoder fails with
+    /// not-negotiated.
+    #[test]
+    fn a_422_10_bit_stream_gets_a_decoder_that_takes_it() {
+        let frames = frames_through_decode_chain("I422_10LE").expect("decodes");
+        assert_eq!(frames, 10);
+    }
+
+    /// An ordinary 8-bit 4:2:0 stream still decodes, on the host's best
+    /// decoder for it.
+    #[test]
+    fn an_8_bit_420_stream_decodes() {
+        let frames = frames_through_decode_chain("I420").expect("decodes");
+        assert_eq!(frames, 10);
+    }
+
+    /// A test element that fails to open (NULL -> READY) with an error
+    /// message, as a hardware decoder does without its device.
+    mod fail_open {
+        use gst::glib;
+        use gst::prelude::*;
+        use gst::subclass::prelude::*;
+        use gstreamer as gst;
+
+        glib::wrapper! {
+            pub struct FailOpen(ObjectSubclass<imp::FailOpen>)
+                @extends gst::Element, gst::Object;
+        }
+
+        pub fn factory() -> gst::ElementFactory {
+            gst::init().unwrap();
+            if gst::ElementFactory::find("stromtestfailopen").is_none() {
+                gst::Element::register(
+                    None,
+                    "stromtestfailopen",
+                    gst::Rank::NONE,
+                    FailOpen::static_type(),
+                )
+                .unwrap();
+            }
+            gst::ElementFactory::find("stromtestfailopen").unwrap()
+        }
+
+        mod imp {
+            use super::*;
+            use std::sync::LazyLock;
+
+            #[derive(Default)]
+            pub struct FailOpen;
+
+            #[glib::object_subclass]
+            impl ObjectSubclass for FailOpen {
+                const NAME: &'static str = "StromTestFailOpen";
+                type Type = super::FailOpen;
+                type ParentType = gst::Element;
+            }
+            impl ObjectImpl for FailOpen {}
+            impl GstObjectImpl for FailOpen {}
+            impl ElementImpl for FailOpen {
+                fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
+                    static META: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
+                        gst::subclass::ElementMetadata::new(
+                            "Fail open",
+                            "Codec/Decoder/Video",
+                            "Fails to open its device (test)",
+                            "Strom",
+                        )
+                    });
+                    Some(&META)
+                }
+                fn change_state(
+                    &self,
+                    transition: gst::StateChange,
+                ) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
+                    if transition == gst::StateChange::NullToReady {
+                        gst::element_imp_error!(self, gst::ResourceError::OpenRead, ["no device"]);
+                        return Err(gst::StateChangeError);
+                    }
+                    self.parent_change_state(transition)
+                }
+            }
+        }
+    }
+
+    /// A candidate that cannot open is skipped without touching the running
+    /// pipeline: no ERROR on its bus, its state stays settled.
+    #[test]
+    fn a_candidate_that_cannot_open_leaves_the_pipeline_alone() {
+        let failing = fail_open::factory();
+        let pipeline = gst::parse::launch("fakesrc is-live=true ! fakesink")
+            .unwrap()
+            .downcast::<gst::Pipeline>()
+            .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let (res, state, _) = pipeline.state(gst::ClockTime::from_seconds(5));
+        assert!(
+            res.is_ok() && state == gst::State::Playing,
+            "{res:?} {state:?}"
+        );
+        let bin = pipeline.clone().upcast::<gst::Bin>();
+
+        assert!(start_decoder(&bin, &failing, "dec").is_none());
+        assert!(pipeline.by_name("dec").is_none());
+
+        let identity = gst::ElementFactory::find("identity").unwrap();
+        let started = start_decoder(&bin, &identity, "dec").expect("identity starts");
+        assert_eq!(started.current_state(), gst::State::Playing);
+
+        let error = pipeline
+            .bus()
+            .unwrap()
+            .pop_filtered(&[gst::MessageType::Error]);
+        let (res, _, _) = pipeline.state(gst::ClockTime::ZERO);
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert!(error.is_none(), "error on the bus: {error:?}");
+        assert!(res.is_ok(), "pipeline state: {res:?}");
     }
 }
