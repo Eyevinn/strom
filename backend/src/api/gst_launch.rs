@@ -79,7 +79,10 @@ pub async fn parse_gst_launch(
     State(_state): State<AppState>,
     ValidatedJson(req): ValidatedJson<ParseGstLaunchRequest>,
 ) -> Result<Json<ParseGstLaunchResponse>, (StatusCode, Json<ErrorResponse>)> {
-    info!("Parsing gst-launch pipeline: {}", req.pipeline);
+    info!(
+        "Parsing gst-launch pipeline: {}",
+        crate::redact::text(&req.pipeline)
+    );
     parse_pipeline(&req.pipeline).map(Json)
 }
 
@@ -90,13 +93,19 @@ fn parse_pipeline(
 ) -> Result<ParseGstLaunchResponse, (StatusCode, Json<ErrorResponse>)> {
     // Preprocess the pipeline string (strip gst-launch-1.0, handle line continuations)
     let cleaned_pipeline = preprocess_pipeline_string(input);
-    debug!("Cleaned pipeline: {}", cleaned_pipeline);
+    debug!(
+        "Cleaned pipeline: {}",
+        crate::redact::text(&cleaned_pipeline)
+    );
 
     // Parse the pipeline using GStreamer's native parser
     let pipeline = match gst::parse::launch(&cleaned_pipeline) {
         Ok(p) => p,
         Err(e) => {
-            warn!("Failed to parse pipeline: {}", e);
+            warn!(
+                "Failed to parse pipeline: {}",
+                crate::redact::text(&e.to_string())
+            );
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::with_details(
@@ -424,7 +433,7 @@ fn extract_non_default_properties(gst_elem: &gst::Element) -> HashMap<String, Pr
                     "Element {}: Property '{}' differs from default -> {:?}",
                     gst_elem.name(),
                     prop_name,
-                    prop_value
+                    crate::redact::value(prop_name, &prop_value)
                 );
                 properties.insert(prop_name.to_string(), prop_value);
             } else {

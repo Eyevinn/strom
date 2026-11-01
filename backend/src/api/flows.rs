@@ -501,7 +501,7 @@ pub async fn create_flow(
     }
 
     info!("Received create flow request: name='{}'", flow.name);
-    debug!("Create flow request body: {:?}", flow);
+    debug!("Create flow request body: {:?}", crate::redact::flow(&flow));
 
     // Honour the client-supplied id. The schema requires it, so silently replacing
     // it left callers unable to POST a flow and then start it by the id they chose.
@@ -600,7 +600,7 @@ pub async fn update_flow(
     ))?;
 
     info!("Updating flow: {} ({})", flow.name, flow.id);
-    debug!("Update flow request body: {:?}", flow);
+    debug!("Update flow request body: {:?}", crate::redact::flow(&flow));
 
     if let Err(details) = prepare_flow(&mut flow) {
         return Err((
@@ -648,7 +648,10 @@ pub async fn update_flow(
                         for (prop_name, prop_value) in properties {
                             info!(
                                 "Applying live update: {}:{}:{} = {:?}",
-                                element.id, pad_name, prop_name, prop_value
+                                element.id,
+                                pad_name,
+                                prop_name,
+                                crate::redact::value(prop_name, prop_value)
                             );
 
                             // Try to update the pad property - ignore errors since some properties

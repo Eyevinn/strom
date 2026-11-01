@@ -471,7 +471,11 @@ pub fn try_apply_live_url(
         Err(reason) => return Some(Err(reason)),
     };
     crate::cef_pages::load_url(element, &url);
-    info!("Loaded {} into HTML source {}", url, element_id);
+    info!(
+        "Loaded {} into HTML source {}",
+        crate::redact::text(&url),
+        element_id
+    );
     Some(Ok(()))
 }
 
