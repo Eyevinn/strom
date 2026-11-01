@@ -136,6 +136,8 @@
 use super::inputs::input_is_connected;
 use super::refusal::refuse_input;
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+// Masks `user:pass@`, the stream key and the query; fails closed.
+use crate::redact::rtmp_url as redact_location;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -222,60 +224,6 @@ struct RtmpLocation {
     /// Handing the sink the untrimmed original instead let a stray space reach
     /// `rtmp2sink`, which mangled it to `rtmp:/` while the log still claimed TLS.
     pub location: String,
-}
-
-/// Strip everything secret from a URL so it can be logged.
-///
-/// Two secrets live in an RTMP URL, not one. The obvious one is `user:pass@`.
-/// The other is the **stream key**, the last path segment, which for most RTMP
-/// servers is the entire authorisation: this module's own docs call it the only
-/// thing protecting the programme feed, so logging it verbatim would contradict
-/// them. A query string can carry a token for the same purpose. All three are
-/// masked; the host and the application are kept, because an operator still has
-/// to be able to tell which output a log line belongs to.
-///
-/// **Fails closed, and that is the whole point.** An earlier version isolated the
-/// authority as "everything up to the first `/`" and returned the input unchanged
-/// when it found no credentials there. A password containing an unencoded `/`,
-/// which any base64 secret hits about a quarter of the time per character, then
-/// put the whole credential into an `info!` line. So userinfo is taken to end at
-/// the **last** `@` wherever it sits, including in a string this module cannot
-/// otherwise parse, because the reason it cannot parse may be the credential
-/// itself. Over-redaction is the acceptable direction: a stream name containing
-/// `@` loses some of the log line, and a password never does.
-fn redact_location(raw: &str) -> String {
-    // 1. userinfo, by the last '@' anywhere.
-    let without_creds = match raw.rfind('@') {
-        Some(at) => {
-            let after_scheme = raw.find("://").map(|i| i + 3).unwrap_or(0);
-            if after_scheme > at {
-                // An '@' inside the scheme is not a URL this block should echo.
-                return "<redacted>".to_string();
-            }
-            format!("{}REDACTED{}", &raw[..after_scheme], &raw[at..])
-        }
-        None => raw.to_string(),
-    };
-    // 2. a query string, which may carry a token.
-    let (path_part, had_query) = match without_creds.split_once('?') {
-        Some((head, _)) => (head.to_string(), true),
-        None => (without_creds, false),
-    };
-    // 3. the last path segment, the stream key. Only when there is a path to
-    //    speak of, so a bare host is left alone.
-    let after_scheme = path_part.find("://").map(|i| i + 3).unwrap_or(0);
-    let masked = match path_part[after_scheme..].rfind('/') {
-        Some(rel) if rel > 0 => {
-            let cut = after_scheme + rel + 1;
-            format!("{}STREAMKEY", &path_part[..cut])
-        }
-        _ => path_part,
-    };
-    if had_query {
-        format!("{}?QUERY", masked)
-    } else {
-        masked
-    }
 }
 
 /// Check a `location` and say what it is, or refuse it.

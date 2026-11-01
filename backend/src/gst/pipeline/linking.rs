@@ -679,7 +679,10 @@ impl PipelineManager {
                     } else {
                         info!(
                             "Set pad property {}:{}:{} = {:?}",
-                            element_id, pad_name, prop_name, prop_value
+                            element_id,
+                            pad_name,
+                            prop_name,
+                            crate::redact::value(prop_name, prop_value)
                         );
                     }
                 }

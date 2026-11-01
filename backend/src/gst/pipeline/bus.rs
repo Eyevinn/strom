@@ -116,8 +116,11 @@ impl PipelineManager {
                         return;
                     }
 
-                    let error_msg = err.error().to_string();
-                    let debug_info = err.debug();
+                    // GStreamer may quote a URI with its passphrase or stream key.
+                    let error_msg = crate::redact::text(&err.error().to_string()).into_owned();
+                    let debug_info = err
+                        .debug()
+                        .map(|d| crate::redact::text(&d).into_owned());
                     let source = err.src().map(|s| s.name().to_string());
 
                     error!(
@@ -132,8 +135,11 @@ impl PipelineManager {
                     });
                 }
                 MessageView::Warning(warn) => {
-                    let warning_msg = warn.error().to_string();
-                    let debug_info = warn.debug();
+                    // GStreamer may quote a URI with its passphrase or stream key.
+                    let warning_msg = crate::redact::text(&warn.error().to_string()).into_owned();
+                    let debug_info = warn
+                        .debug()
+                        .map(|d| crate::redact::text(&d).into_owned());
                     let source = warn.src().map(|s| s.name().to_string());
 
                     // The source name is kept as it is: queue3 and queue4 are
@@ -152,7 +158,7 @@ impl PipelineManager {
                     // itself. Ask its inputs which ones disagree.
                     let warning_msg = match crate::gst::latency_diagnosis::diagnose_warning(
                         msg.src(),
-                        debug_info.as_ref().map(|d| d.as_str()),
+                        debug_info.as_deref(),
                         &label,
                     ) {
                         Some(diagnosis) => format!("{} {}.", warning_msg, diagnosis),
@@ -181,7 +187,8 @@ impl PipelineManager {
                     });
                 }
                 MessageView::Info(inf) => {
-                    let info_msg = inf.error().to_string();
+                    // GStreamer may quote a URI with its passphrase or stream key.
+                    let info_msg = crate::redact::text(&inf.error().to_string()).into_owned();
                     let source = inf.src().map(|s| s.name().to_string());
 
                     info!(

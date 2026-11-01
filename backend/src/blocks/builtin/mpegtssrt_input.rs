@@ -234,7 +234,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
 
         info!(
             "SRT source configured: uri={}, latency={}ms, tsdemux_latency={}ms, ignore_pcr={}, keep-listening={}, auto-reconnect={}, wait-for-connection={}",
-            srt_uri, latency, tsdemux_latency, ignore_pcr, keep_listening, auto_reconnect, wait_for_connection
+            crate::redact::url(&srt_uri), latency, tsdemux_latency, ignore_pcr, keep_listening, auto_reconnect, wait_for_connection
         );
 
         // Create demux/decode element

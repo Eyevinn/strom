@@ -106,7 +106,10 @@ pub(super) fn build_whipsink(
 
     debug!(
         "WHIP Output (whipsink legacy) configured: endpoint={}, stun={:?}, turn={:?}, ice_transport_policy={}",
-        whip_endpoint, stun_server, turn_server, ice_transport_policy
+        crate::redact::origin(&whip_endpoint),
+        stun_server,
+        turn_server.as_deref().map(crate::redact::url),
+        ice_transport_policy
     );
 
     setup_incoming_rtp_handler(&whipsink, instance_id, &ice_transport_policy);

@@ -336,7 +336,11 @@ fn build_media_player(
         .map(|f| normalize_uri(f, &media_path));
 
     if let Some(ref uri) = initial_uri {
-        info!("Media Player {}: Initial URI: {}", instance_id, uri);
+        info!(
+            "Media Player {}: Initial URI: {}",
+            instance_id,
+            crate::redact::text(uri)
+        );
     }
     *state
         .stinger

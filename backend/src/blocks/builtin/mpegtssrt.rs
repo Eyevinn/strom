@@ -308,12 +308,12 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
         if has_auto_reconnect {
             info!(
                 "SRT sink configured: uri={}, latency={}ms, wait={}, auto-reconnect={}, sync={}, qos=true",
-                srt_uri, latency, wait_for_connection, auto_reconnect, sync
+                crate::redact::url(&srt_uri), latency, wait_for_connection, auto_reconnect, sync
             );
         } else {
             info!(
                 "SRT sink configured: uri={}, latency={}ms, wait={}, sync={}, qos=true (auto-reconnect not available)",
-                srt_uri, latency, wait_for_connection, sync
+                crate::redact::url(&srt_uri), latency, wait_for_connection, sync
             );
         }
 

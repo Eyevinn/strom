@@ -94,7 +94,10 @@ impl PipelineManager {
     ) -> Result<(), PipelineError> {
         debug!(
             "Setting property: {}.{} = {:?} (ramp_ms={:?})",
-            element_id, prop_name, prop_value, ramp_ms
+            element_id,
+            prop_name,
+            crate::redact::value(prop_name, prop_value),
+            ramp_ms
         );
 
         // Audio volume element: route through the ramp manager to avoid
@@ -185,7 +188,10 @@ impl PipelineManager {
     ) -> Result<(), PipelineError> {
         debug!(
             "Updating property {}.{} to {:?} on running pipeline (ramp_ms={:?})",
-            element_id, property_name, value, ramp_ms
+            element_id,
+            property_name,
+            crate::redact::value(property_name, value),
+            ramp_ms
         );
 
         // Get element reference
@@ -277,7 +283,9 @@ impl PipelineManager {
 
         info!(
             "Successfully updated element property {}.{} to {:?}",
-            element_id, property_name, value
+            element_id,
+            property_name,
+            crate::redact::value(property_name, value)
         );
 
         Ok(())
@@ -378,7 +386,10 @@ impl PipelineManager {
     ) -> Result<(), PipelineError> {
         debug!(
             "Updating pad property {}:{}:{} to {:?}",
-            element_id, pad_name, property_name, value
+            element_id,
+            pad_name,
+            property_name,
+            crate::redact::value(property_name, value)
         );
 
         // Get element reference
@@ -410,7 +421,10 @@ impl PipelineManager {
 
         info!(
             "Successfully updated pad property {}:{}:{} to {:?}",
-            element_id, pad_name, property_name, value
+            element_id,
+            pad_name,
+            property_name,
+            crate::redact::value(property_name, value)
         );
 
         Ok(())
@@ -511,7 +525,10 @@ impl PipelineManager {
     ) -> Result<(), PipelineError> {
         debug!(
             "Setting pad property: {}:{}:{} = {:?}",
-            element_id, pad_name, prop_name, prop_value
+            element_id,
+            pad_name,
+            prop_name,
+            crate::redact::value(prop_name, prop_value)
         );
 
         // Some pad properties are version- or backend-specific. The clearest
