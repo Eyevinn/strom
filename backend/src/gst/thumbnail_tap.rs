@@ -59,7 +59,8 @@ pub struct ThumbnailTapConfig {
     /// Timeout instead of passing it off as live. A few `update_interval`s,
     /// so a late grab or two do not make the picture flicker. Sources that
     /// stand still but keep sending (a paused player repeats its frame) stay
-    /// fresh.
+    /// fresh. Raised to at least two `update_interval`s, the tap's own gap
+    /// between pictures.
     pub max_age: Duration,
 }
 
@@ -127,8 +128,11 @@ impl ThumbnailTap {
         pipeline: &gst::Pipeline,
         name_prefix: &str,
         tee: gst::Element,
-        config: ThumbnailTapConfig,
+        mut config: ThumbnailTapConfig,
     ) -> Self {
+        // A picture is grabbed once per update_interval; a shorter max_age
+        // would answer Timeout between two grabs of a running source.
+        config.max_age = config.max_age.max(config.update_interval.saturating_mul(2));
         Self {
             tee,
             pipeline: pipeline.clone(),
@@ -583,6 +587,20 @@ pub fn new_tap_store() -> ThumbnailTapStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `max_age` never undercuts the tap's own grab interval.
+    #[test]
+    fn test_max_age_covers_two_grabs() {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let tee = gst::ElementFactory::make("tee").build().unwrap();
+        let config = ThumbnailTapConfig {
+            update_interval: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let tap = ThumbnailTap::new_with_tee(&pipeline, "age_floor", tee, config);
+        assert_eq!(tap.config.max_age, Duration::from_secs(10));
+    }
 
     /// Poll `tap` until it serves a picture or `within` passes.
     fn first_picture(tap: &ThumbnailTap, within: Duration) -> Result<Vec<u8>, ThumbnailError> {
