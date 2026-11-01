@@ -54,6 +54,14 @@ pub struct ThumbnailTapConfig {
     pub idle_timeout: Duration,
     /// Minimum interval between frame captures in the appsink callback.
     pub update_interval: Duration,
+    /// Oldest picture the tap still serves. A source that stops sending
+    /// frames leaves its last picture behind; past this age the tap answers
+    /// Timeout instead of passing it off as live. A few `update_interval`s,
+    /// so a late grab or two do not make the picture flicker. Sources that
+    /// stand still but keep sending (a paused player repeats its frame) stay
+    /// fresh. Raised to at least two `update_interval`s, the tap's own gap
+    /// between pictures.
+    pub max_age: Duration,
 }
 
 impl Default for ThumbnailTapConfig {
@@ -64,6 +72,7 @@ impl Default for ThumbnailTapConfig {
             jpeg_quality: 75,
             idle_timeout: Duration::from_secs(10),
             update_interval: Duration::from_secs(1),
+            max_age: Duration::from_secs(3),
         }
     }
 }
@@ -119,8 +128,11 @@ impl ThumbnailTap {
         pipeline: &gst::Pipeline,
         name_prefix: &str,
         tee: gst::Element,
-        config: ThumbnailTapConfig,
+        mut config: ThumbnailTapConfig,
     ) -> Self {
+        // A picture is grabbed once per update_interval; a shorter max_age
+        // would answer Timeout between two grabs of a running source.
+        config.max_age = config.max_age.max(config.update_interval.saturating_mul(2));
         Self {
             tee,
             pipeline: pipeline.clone(),
@@ -143,13 +155,16 @@ impl ThumbnailTap {
             return Err(ThumbnailError::Timeout);
         }
 
-        // Return cached JPEG — even if slightly stale, a 1-2s old thumbnail
-        // is better than returning Timeout and causing a visual flicker.
-        if let Some((ref jpeg, _)) = state.cached_jpeg {
-            return Ok(jpeg.clone());
+        // Return the cached JPEG while it is younger than `max_age`: a grab
+        // or two late is better than a flicker, but a picture from a source
+        // that stopped would pass for a live one.
+        if let Some((ref jpeg, captured)) = state.cached_jpeg {
+            if captured.elapsed() <= self.config.max_age {
+                return Ok(jpeg.clone());
+            }
         }
 
-        // Branch active but no frame captured yet
+        // Branch active but no frame captured yet, or none for `max_age`
         Err(ThumbnailError::Timeout)
     }
 
@@ -567,4 +582,90 @@ use std::collections::HashMap;
 /// Create a new empty thumbnail tap store.
 pub fn new_tap_store() -> ThumbnailTapStore {
     Arc::new(Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `max_age` never undercuts the tap's own grab interval.
+    #[test]
+    fn test_max_age_covers_two_grabs() {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let tee = gst::ElementFactory::make("tee").build().unwrap();
+        let config = ThumbnailTapConfig {
+            update_interval: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let tap = ThumbnailTap::new_with_tee(&pipeline, "age_floor", tee, config);
+        assert_eq!(tap.config.max_age, Duration::from_secs(10));
+    }
+
+    /// Poll `tap` until it serves a picture or `within` passes.
+    fn first_picture(tap: &ThumbnailTap, within: Duration) -> Result<Vec<u8>, ThumbnailError> {
+        let deadline = Instant::now() + within;
+        let mut picture = tap.get_thumbnail();
+        while picture.is_err() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            picture = tap.get_thumbnail();
+        }
+        picture
+    }
+
+    /// A tap that is attached and polled must not keep serving its last
+    /// picture once the source stops sending frames: the picture would pass
+    /// for a live one. A source that keeps sending stays served past
+    /// `max_age`.
+    #[test]
+    fn test_tap_does_not_serve_a_picture_after_frames_stop() {
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(
+            "videotestsrc is-live=true ! video/x-raw,width=320,height=180,framerate=30/1 ! \
+             tee name=t allow-not-linked=true ! queue ! fakesink sync=true",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let tee = pipeline.by_name("t").unwrap();
+        let config = ThumbnailTapConfig {
+            update_interval: Duration::from_millis(100),
+            max_age: Duration::from_millis(1000),
+            ..Default::default()
+        };
+        let tap = ThumbnailTap::new_with_tee(&pipeline, "age_test", tee.clone(), config);
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let picture = first_picture(&tap, Duration::from_secs(5));
+        assert!(picture.is_ok(), "no picture while the chain runs");
+
+        // Frames keep coming: served well past max_age.
+        let mut gaps = 0;
+        let until = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < until {
+            if tap.get_thumbnail().is_err() {
+                gaps += 1;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // The source stops: no frame reaches the tee any more.
+        tee.static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, |_, _| gst::PadProbeReturn::Drop);
+        let until = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < until {
+            let _ = tap.get_thumbnail();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let stale = tap.get_thumbnail();
+        pipeline.set_state(gst::State::Null).unwrap();
+
+        assert_eq!(gaps, 0, "a running source went without a picture");
+        assert!(
+            matches!(stale, Err(ThumbnailError::Timeout)),
+            "tap answered {:?} with no frame for longer than max_age",
+            stale.map(|jpeg| jpeg.len())
+        );
+    }
 }
