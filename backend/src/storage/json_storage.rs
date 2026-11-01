@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use strom_types::{Flow, FlowId};
 use tokio::fs;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 /// JSON file storage format.
@@ -30,6 +30,9 @@ impl Default for StorageFormat {
 pub struct JsonFileStorage {
     path: PathBuf,
     cache: RwLock<Option<HashMap<FlowId, Flow>>>,
+    /// Held across each read-modify-write: concurrent writers would share
+    /// the temp file (one rename fails with ENOENT) and drop each other's flows.
+    write_lock: Mutex<()>,
 }
 
 impl JsonFileStorage {
@@ -38,6 +41,7 @@ impl JsonFileStorage {
         Self {
             path: path.as_ref().to_path_buf(),
             cache: RwLock::new(None),
+            write_lock: Mutex::new(()),
         }
     }
 
@@ -129,22 +133,25 @@ impl Storage for JsonFileStorage {
     }
 
     async fn save_all(&self, flows: &HashMap<FlowId, Flow>) -> Result<()> {
+        let _write = self.write_lock.lock().await;
         self.write_to_file(flows).await
     }
 
     async fn save_flow(&self, flow: &Flow) -> Result<()> {
-        let mut flows = self.load_all().await?;
+        let _write = self.write_lock.lock().await;
+        let mut flows = self.load_from_file().await?;
         flows.insert(flow.id, flow.clone());
-        self.save_all(&flows).await
+        self.write_to_file(&flows).await
     }
 
     async fn delete_flow(&self, id: &FlowId) -> Result<()> {
-        let mut flows = self.load_all().await?;
+        let _write = self.write_lock.lock().await;
+        let mut flows = self.load_from_file().await?;
         if flows.remove(id).is_none() {
             warn!("Attempted to delete non-existent flow: {}", id);
             return Err(StorageError::NotFound(*id));
         }
-        self.save_all(&flows).await
+        self.write_to_file(&flows).await
     }
 }
 
@@ -197,5 +204,31 @@ mod tests {
         // Verify it's gone
         let flows = storage.load_all().await.unwrap();
         assert_eq!(flows.len(), 0);
+    }
+
+    /// Saves of different flows at the same time (nothing above the
+    /// storage orders them) must all succeed and all reach the file.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_saves_keep_every_flow() {
+        const FLOWS: usize = 32;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("flows.json");
+        let storage = std::sync::Arc::new(JsonFileStorage::new(&path));
+
+        let saves: Vec<_> = (0..FLOWS)
+            .map(|i| {
+                let storage = storage.clone();
+                let flow = Flow::new(format!("Flow {i}"));
+                tokio::spawn(async move { storage.save_flow(&flow).await })
+            })
+            .collect();
+        for save in saves {
+            save.await.unwrap().unwrap();
+        }
+
+        // A fresh storage reads the file, not the cache.
+        let on_disk = JsonFileStorage::new(&path).load_all().await.unwrap();
+        assert_eq!(on_disk.len(), FLOWS);
     }
 }
