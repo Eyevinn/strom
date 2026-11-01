@@ -223,8 +223,9 @@ pub(super) fn pads_for_source(
 
 /// Apply a single-input source layout (aspect-fitted into the region) to a
 /// contiguous range of compositor sink pads. Pads not equal to the active
-/// input are hidden. Plain inputs never have borders, so the region's
-/// underlay pads (when it has any) are all hidden too.
+/// input are hidden, after it shows: a frame between two writes shows the
+/// old or the new picture, never neither. Plain inputs never have borders,
+/// so the region's underlay pads (when it has any) are all hidden too.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_input_group_to_region(
     compositor: &gst::Element,
@@ -238,17 +239,19 @@ pub(crate) fn apply_input_group_to_region(
     underlay: Option<UnderlayCtx>,
 ) {
     let (rx, ry, rw, rh) = region;
+    let mut hidden = Vec::new();
     for i in 0..num_inputs {
         let pad_name = format!("sink_{}", pad_base + i);
         let Some(pad) = find_pad(compositor, &pad_name) else {
             continue;
         };
-        // Plain-input mode never crops — wipe any crop left by a PiP render.
-        set_pad_crop(&pad, &Default::default());
         // Clear any lingering control bindings from a previous morph/fade so
         // our set_property writes aren't silently overridden by stale values.
         clear_layout_bindings(&pad);
         if Some(i) == active {
+            // Plain-input mode never crops — wipe any crop left by a PiP
+            // render: before it shows here, after it is off for the others.
+            set_pad_crop(&pad, &Default::default());
             let aspect = src_aspects.get(&i).copied().unwrap_or(fallback_aspect);
             let (x, y, w, h) = strom_types::vision_mixer::aspect_fit_rect(rx, ry, rw, rh, aspect);
             pad.set_property("xpos", x);
@@ -258,11 +261,15 @@ pub(crate) fn apply_input_group_to_region(
             pad.set_property("alpha", 1.0f64);
             pad.set_property("zorder", fg_zorder);
         } else {
-            pad.set_property("alpha", 0.0f64);
+            hidden.push(pad);
         }
         if let Some(u) = underlay {
             hide_underlay(compositor, u.base + i);
         }
+    }
+    for pad in hidden {
+        pad.set_property("alpha", 0.0f64);
+        set_pad_crop(&pad, &Default::default());
     }
 }
 
@@ -271,7 +278,8 @@ pub(crate) fn apply_input_group_to_region(
 ///
 /// Each pad whose input index matches `bg` becomes the background; each pad whose
 /// input is found in `overlays` is positioned at its corresponding tile; all other
-/// pads in the range are hidden (alpha=0).
+/// pads in the range are hidden (alpha=0) after those show, so a frame between two
+/// writes never shows neither the old nor the new picture.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_pip_layout_to_region(
     compositor: &gst::Element,
@@ -303,6 +311,7 @@ pub(crate) fn apply_pip_layout_to_region(
     let layout_map: std::collections::HashMap<usize, &strom_types::vision_mixer::ZonePadLayout> =
         layouts.iter().map(|l| (l.input, l)).collect();
 
+    let mut hidden = Vec::new();
     for i in 0..num_inputs {
         let pad_name = format!("sink_{}", pad_base + i);
         let Some(pad) = find_pad(compositor, &pad_name) else {
@@ -312,6 +321,15 @@ pub(crate) fn apply_pip_layout_to_region(
         // they keep driving the property and our set_property calls below would
         // be invisible until the next take rebuilds bindings.
         clear_layout_bindings(&pad);
+        // Crop applies to the source wherever it renders in this PiP —
+        // including hidden pads, whose retained transform stays staged so the
+        // source returns pre-framed. Non-PiP reveal paths wipe crop
+        // themselves (apply_input_group_to_region, the classic-take reset).
+        // A shown pad is cropped before it shows, a hidden one once it is off.
+        let crop = transforms.get(&i).copied().unwrap_or_default();
+        if Some(i) == bg || layout_map.contains_key(&i) {
+            set_pad_crop(&pad, &crop);
+        }
         // Border underlay for this input: shown only for a zone source whose
         // zone has a visible border; hidden otherwise (incl. bg + hidden pads).
         let mut underlay_shown = false;
@@ -354,18 +372,16 @@ pub(crate) fn apply_pip_layout_to_region(
                 underlay_shown = true;
             }
         } else {
-            pad.set_property("alpha", 0.0f64);
+            hidden.push((pad.clone(), crop));
         }
         if let Some(u) = underlay {
             if !underlay_shown {
                 hide_underlay(compositor, u.base + i);
             }
         }
-        // Crop applies to the source wherever it renders in this PiP —
-        // including hidden pads, whose retained transform stays staged so the
-        // source returns pre-framed. Non-PiP reveal paths wipe crop
-        // themselves (apply_input_group_to_region, the classic-take reset).
-        let crop = transforms.get(&i).copied().unwrap_or_default();
+    }
+    for (pad, crop) in hidden {
+        pad.set_property("alpha", 0.0f64);
         set_pad_crop(&pad, &crop);
     }
 }
