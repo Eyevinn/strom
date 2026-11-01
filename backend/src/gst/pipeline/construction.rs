@@ -68,6 +68,7 @@ impl PipelineManager {
         let pipeline = gst::Pipeline::builder()
             .name(format!("flow-{}", flow.id))
             .build();
+        crate::gst::encoder_delay::compensate_all(&pipeline);
         info!("Created GStreamer pipeline object");
 
         // Create shared storage for dynamically created webrtcbins (from consumer-added callbacks)
