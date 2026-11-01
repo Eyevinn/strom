@@ -126,12 +126,17 @@ fn measure_buffer_age(
     }
     let pipeline_rt = clock_time - base_time;
 
-    if pipeline_rt >= buffer_rt {
-        let age_ns = (pipeline_rt - buffer_rt).nseconds();
-        Some(age_ns / 1_000_000)
-    } else {
-        None
-    }
+    Some(age_ms(pipeline_rt, buffer_rt))
+}
+
+/// Age in ms of a buffer with running time `buffer_rt` at `pipeline_rt`.
+///
+/// A buffer ahead of the clock is not late: age 0. Such buffers are normal
+/// downstream of sources with configured latency (SRT, tsdemux), where
+/// timestamps lead the clock until the sink; dropping them would also drop
+/// them from the sample count, i.e. the frame rate.
+fn age_ms(pipeline_rt: gst::ClockTime, buffer_rt: gst::ClockTime) -> u64 {
+    pipeline_rt.saturating_sub(buffer_rt).mseconds()
 }
 
 /// Resolve a pad on an element by name, with fallback to first sink pad.
@@ -911,6 +916,57 @@ mod tests {
         let pm = ProbeManager::new(flow_id, events);
 
         assert!(pm.deactivate("nonexistent").is_err());
+    }
+
+    #[test]
+    fn early_buffers_have_age_zero() {
+        let ms = gst::ClockTime::from_mseconds;
+
+        assert_eq!(age_ms(ms(150), ms(100)), 50);
+        assert_eq!(age_ms(ms(100), ms(100)), 0);
+        assert_eq!(age_ms(ms(100), ms(225)), 0);
+    }
+
+    /// Buffers that lead the clock still count as samples, with age 0.
+    /// Downstream of a source with latency (SRT, tsdemux) that is the
+    /// normal case; here a non-live source runs ahead of a syncing sink,
+    /// which waits for each buffer's time after the probe has seen it.
+    #[tokio::test]
+    async fn buffers_ahead_of_the_clock_are_counted() {
+        init_gst();
+        let pipeline = gst::parse::launch(
+            "videotestsrc ! video/x-raw,framerate=30/1 ! \
+             fakesink name=sink sync=true",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let sink = pipeline.by_name("sink").unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        wait_for_pipeline_playing(&pipeline);
+
+        let pm = ProbeManager::new(
+            FlowId::from(uuid::Uuid::new_v4()),
+            EventBroadcaster::default(),
+        );
+        let probe_id = pm
+            .activate(&pipeline, &sink, "sink".into(), "sink".into(), None, 1, 60)
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let (latest, max, count) = pm
+            .probes
+            .lock()
+            .unwrap()
+            .get(&probe_id)
+            .unwrap()
+            .slot
+            .read_and_reset();
+        pm.deactivate_all();
+        pipeline.set_state(gst::State::Null).unwrap();
+
+        assert!(count > 0, "no samples for buffers ahead of the clock");
+        assert_eq!((latest, max), (0, 0));
     }
 
     #[test]
