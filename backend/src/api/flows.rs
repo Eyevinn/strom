@@ -593,12 +593,6 @@ pub async fn update_flow(
         ));
     }
 
-    // Get old flow to compare for live updates
-    let old_flow = state.get_flow(&id).await.ok_or((
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse::new("Flow not found")),
-    ))?;
-
     info!("Updating flow: {} ({})", flow.name, flow.id);
     debug!("Update flow request body: {:?}", flow);
 
@@ -614,22 +608,19 @@ pub async fn update_flow(
 
     // Update last_modified timestamp (preserve created_at from old flow)
     flow.properties.last_modified = Some(Local::now().to_rfc3339());
-    if flow.properties.created_at.is_none() {
-        flow.properties.created_at = old_flow.properties.created_at.clone();
-    }
+    let (old_flow, flow) = state
+        .update_flow_with(&id, |stored| {
+            if flow.properties.created_at.is_none() {
+                flow.properties.created_at = stored.properties.created_at.clone();
+            }
+            *stored = flow;
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .await
+        .map_err(|e| flow_update_error(e, "Failed to save flow"))?;
 
     // Check if the flow is currently running
     let is_running = old_flow.running;
-
-    if let Err(e) = state.upsert_flow(flow.clone()).await {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::with_details(
-                "Failed to save flow",
-                e.to_string(),
-            )),
-        ));
-    }
 
     // If the flow is running, apply pad property changes live
     if is_running {
@@ -1507,32 +1498,19 @@ pub async fn update_flow_properties(
     info!("Updating properties for flow {}", id);
     debug!("Update flow properties request body: {:?}", req);
 
-    // Get the flow
-    let mut flow = state.get_flow(&id).await.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Flow not found")),
-        )
-    })?;
-
     // Update properties while preserving timestamps
-    let old_created_at = flow.properties.created_at.clone();
-    let old_started_at = flow.properties.started_at.clone();
-    flow.properties = req.properties;
-    flow.properties.created_at = old_created_at;
-    flow.properties.started_at = old_started_at;
-    flow.properties.last_modified = Some(Local::now().to_rfc3339());
-
-    // Save the updated flow
-    if let Err(e) = state.upsert_flow(flow.clone()).await {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::with_details(
-                "Failed to save flow properties",
-                e.to_string(),
-            )),
-        ));
-    }
+    let (_, flow) = state
+        .update_flow_with(&id, |flow| {
+            let old_created_at = flow.properties.created_at.clone();
+            let old_started_at = flow.properties.started_at.clone();
+            flow.properties = req.properties;
+            flow.properties.created_at = old_created_at;
+            flow.properties.started_at = old_started_at;
+            flow.properties.last_modified = Some(Local::now().to_rfc3339());
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .await
+        .map_err(|e| flow_update_error(e, "Failed to save flow properties"))?;
 
     info!("Successfully updated properties for flow {}", id);
 
@@ -2629,6 +2607,30 @@ pub async fn get_block_thumbnail(
         jpeg_bytes,
     )
         .into_response())
+}
+
+/// The response for a failed `AppState::update_flow_with` (`saving`: what
+/// a failed save says).
+fn flow_update_error(
+    error: crate::state::FlowUpdateError<std::convert::Infallible>,
+    saving: &str,
+) -> (StatusCode, Json<ErrorResponse>) {
+    use crate::state::FlowUpdateError;
+    match error {
+        FlowUpdateError::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new("Flow not found")),
+        ),
+        FlowUpdateError::IdChanged => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new("Flow ID mismatch")),
+        ),
+        FlowUpdateError::Rejected(never) => match never {},
+        FlowUpdateError::Save(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::with_details(saving, e.to_string())),
+        ),
+    }
 }
 
 #[cfg(test)]
