@@ -107,6 +107,10 @@ pub struct ThumbnailTap {
     pipeline: gst::Pipeline,
     config: ThumbnailTapConfig,
     state: Arc<Mutex<TapState>>,
+    /// Orders attaching and detaching. Detaching stops the branch without
+    /// the state lock: the appsink callback takes that lock to store a frame,
+    /// and stopping waits for the callback.
+    lifecycle: Mutex<()>,
     name_prefix: String,
 }
 
@@ -126,6 +130,7 @@ impl ThumbnailTap {
             pipeline: pipeline.clone(),
             config,
             state: Arc::new(Mutex::new(TapState::new())),
+            lifecycle: Mutex::new(()),
             name_prefix: name_prefix.to_string(),
         }
     }
@@ -169,6 +174,7 @@ impl ThumbnailTap {
 
     /// Attach the processing branch to the tee on the running pipeline.
     fn activate_branch(&self) -> Result<(), ThumbnailError> {
+        let _lifecycle = self.lifecycle.lock().unwrap();
         let mut state = self.state.lock().unwrap();
         if state.active {
             return Ok(());
@@ -473,15 +479,27 @@ impl ThumbnailTap {
 
     /// Detach the processing branch from the tee.
     fn deactivate_branch(&self) -> Result<(), ThumbnailError> {
-        let mut state = self.state.lock().unwrap();
-        if !state.active {
-            return Ok(());
-        }
+        let _lifecycle = self.lifecycle.lock().unwrap();
+
+        // Take the branch out of the state and release the state lock before
+        // stopping it: a frame still in the branch reaches the appsink
+        // callback, which needs that lock, and stopping waits for it.
+        let (branch_elements, tee_src_pad) = {
+            let mut state = self.state.lock().unwrap();
+            if !state.active {
+                return Ok(());
+            }
+            state.active = false;
+            (
+                std::mem::take(&mut state.branch_elements),
+                state.tee_src_pad.take(),
+            )
+        };
 
         debug!("Deactivating thumbnail branch for {}", self.name_prefix);
 
         // Unlink tee src pad from queue sink
-        if let Some(ref tee_src_pad) = state.tee_src_pad {
+        if let Some(ref tee_src_pad) = tee_src_pad {
             if let Some(peer) = tee_src_pad.peer() {
                 let _ = tee_src_pad.unlink(&peer);
             }
@@ -490,16 +508,12 @@ impl ThumbnailTap {
         }
 
         // Set all branch elements to Null and remove from pipeline
-        for elem in &state.branch_elements {
+        for elem in &branch_elements {
             let _ = elem.set_state(gst::State::Null);
         }
-        for elem in &state.branch_elements {
+        for elem in &branch_elements {
             let _ = self.pipeline.remove(elem);
         }
-
-        state.branch_elements.clear();
-        state.tee_src_pad = None;
-        state.active = false;
 
         debug!("Thumbnail branch deactivated for {}", self.name_prefix);
         Ok(())
@@ -567,4 +581,71 @@ use std::collections::HashMap;
 /// Create a new empty thumbnail tap store.
 pub fn new_tap_store() -> ThumbnailTapStore {
     Arc::new(Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Detaching must not wait on a frame the branch is still encoding.
+    /// The appsink callback stores its JPEG under the tap's state lock; a
+    /// detach that held that lock while stopping the branch waited for
+    /// the streaming thread, which waited for the lock: the tap, and every
+    /// request for it, hung for good. A source that never waits and no
+    /// rate limit keep a frame in the branch at every detach.
+    #[test]
+    fn test_detaching_never_waits_on_the_branch() {
+        const ATTACHES: usize = 20;
+
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(
+            "videotestsrc ! video/x-raw,width=320,height=180 ! \
+             tee name=t allow-not-linked=true ! queue ! fakesink sync=false",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let tee = pipeline.by_name("t").unwrap();
+        let config = ThumbnailTapConfig {
+            update_interval: Duration::ZERO,
+            ..Default::default()
+        };
+        let tap = Arc::new(ThumbnailTap::new_with_tee(
+            &pipeline,
+            "detach_test",
+            tee,
+            config,
+        ));
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let (res, _, _) = pipeline.state(gst::ClockTime::from_seconds(5));
+        assert!(res.is_ok());
+
+        let mut hung_at = None;
+        for attempt in 0..ATTACHES {
+            tap.activate_branch().unwrap();
+
+            // Detach once frames reach the callback.
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while tap.state.lock().unwrap().cached_jpeg.is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            tap.state.lock().unwrap().cached_jpeg = None;
+
+            let (done, detached) = std::sync::mpsc::channel();
+            let detaching = tap.clone();
+            std::thread::spawn(move || {
+                let _ = detaching.deactivate_branch();
+                let _ = done.send(());
+            });
+            if detached.recv_timeout(Duration::from_secs(5)).is_err() {
+                hung_at = Some(attempt);
+                break;
+            }
+        }
+        if hung_at.is_none() {
+            pipeline.set_state(gst::State::Null).unwrap();
+        }
+
+        assert_eq!(hung_at, None, "detaching the branch hung");
+    }
 }
