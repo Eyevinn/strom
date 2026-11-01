@@ -127,6 +127,9 @@ fn apply_post_build_properties(
         mixer.set_property_from_str("start-time-selection", "zero");
     }
     crate::gst::aggregator_start::disarm_start_time_selection(mixer);
+    // Under CPU overload, skip late output frames instead of falling
+    // behind the clock for good.
+    crate::gst::aggregator_catch_up::install(mixer);
 }
 
 /// Create a tee element for splitting input to multiple consumers.
