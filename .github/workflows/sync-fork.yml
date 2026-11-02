@@ -20,10 +20,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Install OSC CLI
-        run: npm install -g @osaas/cli
+        run: npm install -g @osaas/cli@4.35.0
 
       - name: Trigger sync fork
         env:
           OSC_ACCESS_TOKEN: unused
           OSC_API_KEY: ${{ secrets.OSC_API_KEY }}
-        run: osc --env ${{ inputs.environment }} admin sync-fork eyevinn-strom
+        run: osc --env ${{ inputs.environment }} admin sync-fork --repository-url https://github.com/Eyevinn/strom
