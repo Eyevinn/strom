@@ -220,3 +220,54 @@ async fn gl_memory_on_a_dsk_or_stinger_input_is_downloaded_by_its_front() {
     }
     running.stop();
 }
+
+/// A premultiplied DSK's converter feeds `stromunpremultiply`, which takes
+/// system memory only, so the front has to download GL memory on this chain too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
+async fn gl_memory_on_a_premultiplied_dsk_input_is_downloaded_by_its_front() {
+    gst::init().unwrap();
+    let mut required = CPU_ELEMENTS.to_vec();
+    required.extend(["gltestsrc", "gldownload"]);
+    if !common::gl_available(&required) {
+        return;
+    }
+    let block_id = "vm_cpu_gl_dsk_premul";
+    let mut flow = testsrc_flow(block_id, Backend::Cpu, Front::Direct);
+    let mixer = &mut flow.blocks[0].properties;
+    mixer.insert("num_dsk_inputs".to_string(), PV::String("1".into()));
+    mixer.insert(
+        "dsk_0_alpha_mode".to_string(),
+        PV::String("premultiplied".into()),
+    );
+    flow.blocks[0].computed_external_pads =
+        strom::blocks::builtin::get_builder("builtin.vision_mixer")
+            .and_then(|builder| builder.get_external_pads(&flow.blocks[0].properties));
+    add_gl_source(&mut flow, "dsksrc", &format!("{block_id}:dsk_in_0"));
+
+    let running = Running::start(block_id, flow);
+    running.wait_for_white_pgm("video_in_0 beside a GL premultiplied DSK", 3);
+    let convert = "videoconvert_unpremultiply_dsk_0";
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut adapters = input_adapters(&running, block_id, "dsk_in_0", convert);
+    while adapters != ["gldownload", "capsfilter"] && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        adapters = input_adapters(&running, block_id, "dsk_in_0", convert);
+    }
+    assert_eq!(
+        adapters,
+        ["gldownload", "capsfilter"],
+        "a premultiplied DSK's front must download the GL memory itself, pinned to system memory"
+    );
+
+    let caps = running
+        .mixer_element("unpremultiply_dsk_0")
+        .static_pad("sink")
+        .and_then(|pad| pad.current_caps())
+        .expect("stromunpremultiply negotiated its sink");
+    assert!(
+        !caps.to_string().contains("memory:"),
+        "stromunpremultiply takes system memory only, got {caps}"
+    );
+    running.stop();
+}
