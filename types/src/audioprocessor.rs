@@ -1,12 +1,18 @@
 //! Default values for the Audio Processor block (`builtin.audioprocessor`).
 //!
-//! The block wraps strom-dsp's `stromdsp-broadcastprocessor` (loudness AGC,
-//! multiband compressor, true-peak limiter). With a named preset the element's
+//! The block wraps strom-dsp's `stromdsp-broadcastprocessor` (spike guard,
+//! loudness AGC, multiband compressor with expander and bass clipper, final
+//! clipper, true-peak limiter). With a named preset the element's
 //! own preset tuning applies. With the `custom` preset the block sets every
 //! element property itself, from these values or the operator's, so Strom's
 //! sound never depends on the element's defaults.
 //!
 //! Single source of truth shared by both backend and frontend.
+
+use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "openapi")]
+use utoipa::ToSchema;
 
 /// Block definition id.
 pub const BLOCK_ID: &str = "builtin.audioprocessor";
@@ -27,8 +33,17 @@ pub const CUSTOM_ONLY_PROPERTIES: &[&str] = &[
     "agc_rate_up",
     "agc_rate_down",
     "agc_gate",
+    "spike_guard_enabled",
+    "spike_threshold",
     "multiband_enabled",
     "multiband_drive",
+    "expander_hold",
+    "bass_clipper_enabled",
+    "bass_clip_threshold",
+    "clipper_enabled",
+    "clipper_bandwidth",
+    "governor_enabled",
+    "clip_budget",
     "limiter_enabled",
     "limiter_release",
 ];
@@ -59,6 +74,14 @@ pub const MAX_NUM_BANDS: u32 = 5;
 /// How often the element posts its meter message (ms). 0 turns meters off.
 pub const DEFAULT_METER_INTERVAL_MS: u32 = 100;
 
+/// Latency modes, as the element's `latency-mode` enum nicks, with a label
+/// for the dropdown. Construction-time only; presets do not set it.
+pub const LATENCY_MODES: &[(&str, &str)] = &[
+    ("standard", "Standard (about 5.6 ms)"),
+    ("low", "Low (about 2.8 ms)"),
+];
+pub const DEFAULT_LATENCY_MODE: &str = "standard";
+
 // ── Custom preset: exposed settings ─────────────────────────────────
 pub const DEFAULT_INPUT_GAIN_DB: f32 = 0.0;
 pub const DEFAULT_TARGET_LOUDNESS_LUFS: f32 = -23.0;
@@ -80,11 +103,38 @@ pub const DEFAULT_MULTIBAND_ENABLED: bool = true;
 /// Gain into the multiband compressor (dB). More drive, more compression.
 pub const DEFAULT_MULTIBAND_DRIVE_DB: f32 = 0.0;
 
+/// Spike guard: removes short, isolated peaks (clicks) ahead of the AGC.
+pub const DEFAULT_SPIKE_GUARD_ENABLED: bool = true;
+/// How far over the programme's own peak envelope a peak must be to count
+/// as a spike (dB).
+pub const DEFAULT_SPIKE_THRESHOLD_DB: f32 = 8.0;
+
+/// Hold of the per-band downward expander before it closes (ms).
+pub const DEFAULT_EXPANDER_HOLD_MS: f32 = 100.0;
+
+/// Bass clipper on the lowest band.
+pub const DEFAULT_BASS_CLIPPER_ENABLED: bool = true;
+/// Bass clipper threshold (dB, band 0 envelope): the target + 9 dB, as the
+/// element's presets set it.
+pub const DEFAULT_BASS_CLIP_THRESHOLD_DB: f32 = -14.0;
+
+/// Final clipper ahead of the limiter.
+pub const DEFAULT_CLIPPER_ENABLED: bool = true;
+/// Bandwidth of what the final clipper removes (Hz).
+pub const DEFAULT_CLIPPER_BANDWIDTH_HZ: f32 = 20000.0;
+
+/// Clip budget governor.
+pub const DEFAULT_GOVERNOR_ENABLED: bool = true;
+/// How much clipper and limiter work the governor allows (dB of budget).
+pub const DEFAULT_CLIP_BUDGET_DB: f32 = 2.0;
+
 pub const DEFAULT_LIMITER_ENABLED: bool = true;
 pub const DEFAULT_LIMITER_RELEASE_MS: f32 = 80.0;
-/// Limiter lookahead (ms). Construction-time only. Presets do not set it
-/// (they all assume 5 ms), so the block sets it with every preset.
-pub const DEFAULT_LIMITER_LOOKAHEAD_MS: f32 = 5.0;
+/// Limiter lookahead (ms) of the standard latency mode. Construction-time
+/// only. `latency-mode` sets the lookahead itself (1.5 ms standard, 0.6 ms
+/// low), so the block writes `limiter_lookahead` only when the flow stores
+/// a value, as an override after the latency mode.
+pub const DEFAULT_LIMITER_LOOKAHEAD_MS: f32 = 1.5;
 
 // ── Custom preset: band settings the block sets but does not expose ──
 // Gentle starting points: low ratios, no makeup, slower time constants in
@@ -98,9 +148,69 @@ pub const DEFAULT_BAND_RATIO: [f32; 5] = [2.0, 2.0, 2.0, 1.8, 1.5];
 pub const DEFAULT_BAND_ATTACK_MS: [f32; 5] = [40.0, 20.0, 10.0, 5.0, 3.0];
 pub const DEFAULT_BAND_RELEASE_MS: [f32; 5] = [400.0, 250.0, 150.0, 100.0, 80.0];
 pub const DEFAULT_BAND_MAKEUP_DB: [f32; 5] = [0.0; 5];
+/// Per-band downward expander: threshold (dB, band level), ratio (1 = off)
+/// and floor (largest attenuation, dB). The element's `ebu-r128` values.
+pub const DEFAULT_BAND_EXPANDER_THRESHOLD_DB: [f32; 5] = [-47.0; 5];
+pub const DEFAULT_BAND_EXPANDER_RATIO: [f32; 5] = [1.5; 5];
+pub const DEFAULT_BAND_EXPANDER_FLOOR_DB: [f32; 5] = [4.0; 5];
 
 /// Meter value the element reports for silence (LUFS, dBTP, dB).
 pub const METER_SILENCE: f64 = -200.0;
+
+/// What the clip budget governor is doing, from the element's
+/// `governor-state` meter field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum AudioProcessorGovernorState {
+    /// The governor is turned off.
+    Off,
+    /// Frozen: a pause, below the AGC gate, or a stage bypassed.
+    Frozen,
+    /// Within the budget, nothing to do.
+    Free,
+    /// Near the budget, or holding density.
+    Hold,
+    /// Adding density: the target is out of reach otherwise.
+    Density,
+    /// On target, the trim held, and the clipper and limiter over budget.
+    OverBudget,
+    /// Giving density back.
+    Release,
+    /// A state this version of Strom does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+impl AudioProcessorGovernorState {
+    /// The state for the element's `governor-state` string.
+    pub fn from_nick(nick: &str) -> Self {
+        match nick {
+            "off" => Self::Off,
+            "frozen" => Self::Frozen,
+            "free" => Self::Free,
+            "hold" => Self::Hold,
+            "density" => Self::Density,
+            "over-budget" => Self::OverBudget,
+            "release" => Self::Release,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Short label for the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Frozen => "frozen",
+            Self::Free => "free",
+            Self::Hold => "hold",
+            Self::Density => "density",
+            Self::OverBudget => "over budget",
+            Self::Release => "release",
+            Self::Unknown => "unknown",
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -119,7 +229,36 @@ mod tests {
         assert!(PRESETS.iter().any(|p| p.0 == DEFAULT_PRESET));
     }
 
-    /// The element's ranges (strom-dsp phase 2 spec, 3.1). A default outside
+    /// Every state round-trips through its element nick and its JSON form,
+    /// and a state Strom does not know reads as `Unknown`.
+    #[test]
+    fn governor_states_follow_the_element_nicks() {
+        for nick in [
+            "off",
+            "frozen",
+            "free",
+            "hold",
+            "density",
+            "over-budget",
+            "release",
+        ] {
+            let state = AudioProcessorGovernorState::from_nick(nick);
+            assert_ne!(state, AudioProcessorGovernorState::Unknown, "{nick}");
+            assert_eq!(
+                serde_json::to_value(state).unwrap(),
+                serde_json::Value::String(nick.to_string())
+            );
+        }
+        assert_eq!(
+            AudioProcessorGovernorState::from_nick("sideways"),
+            AudioProcessorGovernorState::Unknown
+        );
+        let parsed: AudioProcessorGovernorState =
+            serde_json::from_value(serde_json::json!("sideways")).unwrap();
+        assert_eq!(parsed, AudioProcessorGovernorState::Unknown);
+    }
+
+    /// The element's ranges (strom-dsp `docs/elements/broadcastprocessor.md`). A default outside
     /// them would fail every flow that uses the custom preset.
     #[test]
     fn defaults_are_inside_the_element_ranges() {
@@ -135,6 +274,12 @@ mod tests {
         assert!(within(DEFAULT_MULTIBAND_DRIVE_DB, -12.0, 12.0));
         assert!(within(DEFAULT_LIMITER_RELEASE_MS, 1.0, 2000.0));
         assert!(within(DEFAULT_LIMITER_LOOKAHEAD_MS, 0.5, 20.0));
+        assert!(within(DEFAULT_SPIKE_THRESHOLD_DB, 6.0, 30.0));
+        assert!(within(DEFAULT_EXPANDER_HOLD_MS, 0.0, 1000.0));
+        assert!(within(DEFAULT_BASS_CLIP_THRESHOLD_DB, -40.0, 0.0));
+        assert!(within(DEFAULT_CLIPPER_BANDWIDTH_HZ, 8000.0, 22000.0));
+        assert!(within(DEFAULT_CLIP_BUDGET_DB, 0.0, 6.0));
+        assert!(LATENCY_MODES.iter().any(|m| m.0 == DEFAULT_LATENCY_MODE));
         assert!((MIN_NUM_BANDS..=MAX_NUM_BANDS).contains(&DEFAULT_NUM_BANDS));
         const { assert!(DEFAULT_METER_INTERVAL_MS <= 10_000) };
         for f in DEFAULT_CROSSOVER_FREQUENCIES_HZ {
@@ -146,6 +291,9 @@ mod tests {
             assert!(within(DEFAULT_BAND_ATTACK_MS[n], 0.1, 500.0));
             assert!(within(DEFAULT_BAND_RELEASE_MS[n], 5.0, 5000.0));
             assert!(within(DEFAULT_BAND_MAKEUP_DB[n], -12.0, 24.0));
+            assert!(within(DEFAULT_BAND_EXPANDER_THRESHOLD_DB[n], -80.0, 0.0));
+            assert!(within(DEFAULT_BAND_EXPANDER_RATIO[n], 1.0, 10.0));
+            assert!(within(DEFAULT_BAND_EXPANDER_FLOOR_DB[n], 0.0, 40.0));
         }
     }
 }

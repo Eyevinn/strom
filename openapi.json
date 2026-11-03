@@ -6226,6 +6226,20 @@
           }
         }
       },
+      "AudioProcessorGovernorState": {
+        "type": "string",
+        "description": "What the clip budget governor is doing, from the element's\n`governor-state` meter field.",
+        "enum": [
+          "off",
+          "frozen",
+          "free",
+          "hold",
+          "density",
+          "over-budget",
+          "release",
+          "unknown"
+        ]
+      },
       "AuthStatusResponse": {
         "type": "object",
         "description": "Authentication status response.",
@@ -11904,6 +11918,85 @@
                 "type": "string",
                 "enum": [
                   "AudioProcessorData"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Stage meters from an Audio Processor block: spike guard, expander, bass\nclipper, final clipper and clip budget governor. Sent from the same\nelement message as `AudioProcessorData`, right after it, when the\nelement reports these stages (strom-dsp v0.2.0 and later).\nSilence reads -200.0, never NaN or infinity.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "Stage meters from an Audio Processor block: spike guard, expander, bass\nclipper, final clipper and clip budget governor. Sent from the same\nelement message as `AudioProcessorData`, right after it, when the\nelement reports these stages (strom-dsp v0.2.0 and later).\nSilence reads -200.0, never NaN or infinity.",
+                "required": [
+                  "flow_id",
+                  "element_id",
+                  "spike_events",
+                  "band_expander_gain_reduction",
+                  "bass_clip_gain_reduction",
+                  "clip_depth",
+                  "loudness_deficit",
+                  "budget_excess",
+                  "governor_state"
+                ],
+                "properties": {
+                  "band_expander_gain_reduction": {
+                    "type": "array",
+                    "items": {
+                      "type": "number",
+                      "format": "double"
+                    },
+                    "description": "Downward expander attenuation per active band, in dB (positive =\nattenuation)"
+                  },
+                  "bass_clip_gain_reduction": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Bass clipper reduction on the lowest band, in dB (positive =\nreduction), the largest since the previous message"
+                  },
+                  "budget_excess": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "How far the clipper's and limiter's work is over the clip budget at\nthe target loudness, in dB of budget (>= 0)"
+                  },
+                  "clip_depth": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Energy the final clipper removed relative to its input since the\nprevious message, in dB (-200.0 when nothing)"
+                  },
+                  "element_id": {
+                    "type": "string",
+                    "description": "The block instance id."
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "governor_state": {
+                    "$ref": "#/components/schemas/AudioProcessorGovernorState",
+                    "description": "What the clip budget governor is doing"
+                  },
+                  "loudness_deficit": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "How far the output stays under the target with all of the\ngovernor's density used, in LU (>= 0)"
+                  },
+                  "spike_events": {
+                    "type": "integer",
+                    "format": "int64",
+                    "description": "Spikes the spike guard removed since the previous message (0 while\nit is off)",
+                    "minimum": 0
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "AudioProcessorStageData"
                 ]
               }
             }

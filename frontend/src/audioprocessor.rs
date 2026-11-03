@@ -1,10 +1,13 @@
-//! Audio Processor meters: input/output loudness, AGC gain and gain reduction.
+//! Audio Processor meters: input/output loudness, AGC gain and gain reduction,
+//! and the stage meters (spike guard, expander, bass clipper, final clipper,
+//! clip budget governor).
 
 use crate::meter::BlockDataKey;
 use egui::{Color32, Rect, Stroke, Ui, Vec2};
 use instant::Instant;
 use std::collections::HashMap;
 use std::time::Duration;
+use strom_types::audioprocessor::AudioProcessorGovernorState;
 use strom_types::FlowId;
 
 /// Time-to-live for meter data before it's considered stale.
@@ -35,16 +38,43 @@ pub struct AudioProcessorData {
     pub limiter_gain_reduction: f64,
 }
 
+/// Stage meter values from one Audio Processor block. Sent by strom-dsp
+/// v0.2.0 and later, in a separate event from the same element message.
 #[derive(Debug, Clone)]
-struct Timestamped {
-    data: AudioProcessorData,
+pub struct AudioProcessorStageData {
+    pub spike_events: u64,
+    pub band_expander_gain_reduction: Vec<f64>,
+    pub bass_clip_gain_reduction: f64,
+    pub clip_depth: f64,
+    pub loudness_deficit: f64,
+    pub budget_excess: f64,
+    pub governor_state: AudioProcessorGovernorState,
+}
+
+#[derive(Debug, Clone)]
+struct Timestamped<T> {
+    data: T,
     updated_at: Instant,
+}
+
+impl<T> Timestamped<T> {
+    fn new(data: T) -> Self {
+        Self {
+            data,
+            updated_at: Instant::now(),
+        }
+    }
+
+    fn fresh(&self) -> Option<&T> {
+        (self.updated_at.elapsed() < DATA_TTL).then_some(&self.data)
+    }
 }
 
 /// Storage for the meter data of every Audio Processor block.
 #[derive(Debug, Clone, Default)]
 pub struct AudioProcessorDataStore {
-    data: HashMap<BlockDataKey, Timestamped>,
+    data: HashMap<BlockDataKey, Timestamped<AudioProcessorData>>,
+    stages: HashMap<BlockDataKey, Timestamped<AudioProcessorStageData>>,
 }
 
 impl AudioProcessorDataStore {
@@ -58,23 +88,49 @@ impl AudioProcessorDataStore {
                 flow_id,
                 element_id,
             },
-            Timestamped {
-                data,
-                updated_at: Instant::now(),
-            },
+            Timestamped::new(data),
         );
+    }
+
+    pub fn update_stages(
+        &mut self,
+        flow_id: FlowId,
+        element_id: String,
+        data: AudioProcessorStageData,
+    ) {
+        self.stages.insert(
+            BlockDataKey {
+                flow_id,
+                element_id,
+            },
+            Timestamped::new(data),
+        );
+    }
+
+    fn key(flow_id: &FlowId, element_id: &str) -> BlockDataKey {
+        BlockDataKey {
+            flow_id: *flow_id,
+            element_id: element_id.to_string(),
+        }
     }
 
     /// Meter data for a block, or `None` when it is stale.
     pub fn get(&self, flow_id: &FlowId, element_id: &str) -> Option<&AudioProcessorData> {
-        let key = BlockDataKey {
-            flow_id: *flow_id,
-            element_id: element_id.to_string(),
-        };
         self.data
-            .get(&key)
-            .filter(|t| t.updated_at.elapsed() < DATA_TTL)
-            .map(|t| &t.data)
+            .get(&Self::key(flow_id, element_id))
+            .and_then(Timestamped::fresh)
+    }
+
+    /// Stage meter data for a block, or `None` when it is stale or the
+    /// element does not report its stages.
+    pub fn get_stages(
+        &self,
+        flow_id: &FlowId,
+        element_id: &str,
+    ) -> Option<&AudioProcessorStageData> {
+        self.stages
+            .get(&Self::key(flow_id, element_id))
+            .and_then(Timestamped::fresh)
     }
 }
 
@@ -147,8 +203,21 @@ pub fn show_compact(ui: &mut Ui, data: &AudioProcessorData) {
     );
 }
 
-/// Full view for the property inspector.
-pub fn show_full(ui: &mut Ui, data: &AudioProcessorData) {
+/// Governor state colour: amber when over budget or short of the target.
+fn governor_color(stages: &AudioProcessorStageData) -> Color32 {
+    if stages.budget_excess > 0.0
+        || stages.loudness_deficit > 0.0
+        || stages.governor_state == AudioProcessorGovernorState::OverBudget
+    {
+        REDUCTION_COLOR
+    } else {
+        Color32::from_gray(180)
+    }
+}
+
+/// Full view for the property inspector. `stages` is `None` until the first
+/// stage event (and always with strom-dsp before v0.2.0).
+pub fn show_full(ui: &mut Ui, data: &AudioProcessorData, stages: Option<&AudioProcessorStageData>) {
     ui.heading("Audio Processor");
     ui.separator();
 
@@ -217,6 +286,68 @@ pub fn show_full(ui: &mut Ui, data: &AudioProcessorData) {
         );
         ui.label(format!("{:.1} dB", data.limiter_gain_reduction));
     });
+
+    if let Some(stages) = stages {
+        show_stages(ui, stages, width);
+    }
+}
+
+/// The stage meters, compactly: one line per stage, with bars only for
+/// the per-band expander and the bass clipper.
+fn show_stages(ui: &mut Ui, stages: &AudioProcessorStageData, width: f32) {
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Bass clip");
+        bar(
+            ui,
+            Vec2::new(width, 8.0),
+            reduction_fraction(stages.bass_clip_gain_reduction),
+            REDUCTION_COLOR,
+        );
+        ui.label(format!("{:.1} dB", stages.bass_clip_gain_reduction));
+    });
+
+    if !stages.band_expander_gain_reduction.is_empty() {
+        ui.add_space(4.0);
+        ui.label("Expander:");
+        ui.horizontal(|ui| {
+            // One short bar per band, side by side.
+            let n = stages.band_expander_gain_reduction.len() as f32;
+            let band_width = ((width - 4.0 * (n - 1.0)) / n).max(10.0);
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for gr in &stages.band_expander_gain_reduction {
+                bar(
+                    ui,
+                    Vec2::new(band_width, 8.0),
+                    reduction_fraction(*gr),
+                    REDUCTION_COLOR,
+                );
+            }
+            ui.label(fmt_band_list(&stages.band_expander_gain_reduction));
+        });
+    }
+
+    ui.add_space(4.0);
+    ui.label(format!(
+        "Spikes removed: {}   Clip depth: {}",
+        stages.spike_events,
+        fmt_level(stages.clip_depth, "dB")
+    ));
+    ui.colored_label(
+        governor_color(stages),
+        format!(
+            "Governor: {}   Budget excess: {:.1} dB   Deficit: {:.1} LU",
+            stages.governor_state.label(),
+            stages.budget_excess,
+            stages.loudness_deficit
+        ),
+    );
+}
+
+/// Per-band values as "a / b / c dB".
+fn fmt_band_list(values: &[f64]) -> String {
+    let parts: Vec<String> = values.iter().map(|v| format!("{v:.1}")).collect();
+    format!("{} dB", parts.join(" / "))
 }
 
 #[cfg(test)]
@@ -227,6 +358,25 @@ mod tests {
     fn silence_reads_as_no_value() {
         assert_eq!(fmt_level(-200.0, "LUFS"), "---");
         assert_eq!(fmt_level(-23.04, "LUFS"), "-23.0 LUFS");
+    }
+
+    #[test]
+    fn band_lists_and_governor_colour() {
+        assert_eq!(fmt_band_list(&[2.0, 0.0, 4.25]), "2.0 / 0.0 / 4.2 dB");
+        let mut stages = AudioProcessorStageData {
+            spike_events: 0,
+            band_expander_gain_reduction: vec![],
+            bass_clip_gain_reduction: 0.0,
+            clip_depth: -200.0,
+            loudness_deficit: 0.0,
+            budget_excess: 0.0,
+            governor_state: AudioProcessorGovernorState::Free,
+        };
+        assert_eq!(governor_color(&stages), Color32::from_gray(180));
+        stages.budget_excess = 0.5;
+        assert_eq!(governor_color(&stages), REDUCTION_COLOR);
+        // Nothing clipped reads as no value, not as -200 dB.
+        assert_eq!(fmt_level(stages.clip_depth, "dB"), "---");
     }
 
     #[test]

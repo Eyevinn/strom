@@ -669,6 +669,31 @@ impl eframe::App for StromApp {
                                 },
                             );
                         }
+                        StromEvent::AudioProcessorStageData {
+                            flow_id,
+                            element_id,
+                            spike_events,
+                            band_expander_gain_reduction,
+                            bass_clip_gain_reduction,
+                            clip_depth,
+                            loudness_deficit,
+                            budget_excess,
+                            governor_state,
+                        } => {
+                            self.audioprocessor_data.update_stages(
+                                flow_id,
+                                element_id,
+                                crate::audioprocessor::AudioProcessorStageData {
+                                    spike_events,
+                                    band_expander_gain_reduction,
+                                    bass_clip_gain_reduction,
+                                    clip_depth,
+                                    loudness_deficit,
+                                    budget_excess,
+                                    governor_state,
+                                },
+                            );
+                        }
                         StromEvent::LatencyData {
                             flow_id,
                             element_id,
