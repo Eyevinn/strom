@@ -1450,3 +1450,165 @@ fn media_foundation_max_bitrate_follows_pcvbr_only() {
         Some("cbr")
     );
 }
+
+/// Run `videotestsrc` through the real block into a `fakesink` and return the
+/// caps on the block's output. `videotestsrc` negotiates `Y444` when the
+/// encoder accepts it, which is the 4:4:4 input of #1176.
+fn encode_test_pattern(codec: &str, profile: &str) -> gst::Caps {
+    let mut properties = HashMap::new();
+    properties.insert("codec".to_string(), PropertyValue::String(codec.into()));
+    properties.insert(
+        "encoder_preference".to_string(),
+        PropertyValue::String("software".into()),
+    );
+    properties.insert("profile".to_string(), PropertyValue::String(profile.into()));
+    let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+    let result = VideoEncBuilder
+        .build("enc", &properties, &ctx)
+        .expect("build the block");
+
+    let pipeline = gst::Pipeline::new();
+    let by_id: HashMap<&str, &gst::Element> = result
+        .elements
+        .iter()
+        .map(|(id, element)| (id.as_str(), element))
+        .collect();
+    for element in by_id.values() {
+        pipeline.add(*element).expect("add element");
+    }
+    for (from, to) in &result.internal_links {
+        let src = by_id[from.element_id.as_str()]
+            .static_pad(from.pad_name.as_deref().unwrap_or("src"))
+            .expect("source pad");
+        let sink = by_id[to.element_id.as_str()]
+            .static_pad(to.pad_name.as_deref().unwrap_or("sink"))
+            .expect("sink pad");
+        src.link(&sink).expect("internal link");
+    }
+    let source = gst::ElementFactory::make("videotestsrc")
+        .property("num-buffers", 3)
+        .build()
+        .unwrap();
+    let source_caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("width", 320)
+                .field("height", 240)
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let sink = gst::ElementFactory::make("fakesink").build().unwrap();
+    pipeline.add_many([&source, &source_caps, &sink]).unwrap();
+    gst::Element::link_many([&source, &source_caps, by_id["enc:input"]]).unwrap();
+    by_id["enc:capsfilter"].link(&sink).unwrap();
+
+    pipeline.set_state(gst::State::Playing).unwrap();
+    let bus = pipeline.bus().unwrap();
+    let message = bus
+        .timed_pop_filtered(
+            gst::ClockTime::from_seconds(30),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        )
+        .expect("EOS or error within 30 s");
+    if let gst::MessageView::Error(err) = message.view() {
+        pipeline.set_state(gst::State::Null).unwrap();
+        panic!(
+            "{} pipeline failed: {} ({:?})",
+            codec,
+            err.error(),
+            err.debug()
+        );
+    }
+    let caps = by_id["enc:capsfilter"]
+        .static_pad("src")
+        .unwrap()
+        .current_caps()
+        .expect("output caps");
+    pipeline.set_state(gst::State::Null).unwrap();
+    caps
+}
+
+/// #1176: with the default profile, a 4:4:4 input into VP9 comes out as
+/// profile 0, which WHIP Output and WebRTC receivers take. Fails if the
+/// 4:2:0 input constraint in front of the encoder is removed (profile 1).
+#[test]
+fn vp9_from_444_input_is_profile_0_by_default() {
+    init_gst();
+    if !require_element("vp9enc") || !require_element("vp9parse") {
+        return;
+    }
+    let caps = encode_test_pattern("vp9", "auto");
+    let profile = caps.structure(0).unwrap().get::<String>("profile");
+    assert_eq!(profile.as_deref(), Ok("0"), "output caps {caps}");
+}
+
+/// The counterpart of the test above: with profile "none" the encoder still
+/// follows the input, so the test pattern really is 4:4:4 there.
+#[test]
+fn vp9_profile_none_follows_the_input() {
+    init_gst();
+    if !require_element("vp9enc") || !require_element("vp9parse") {
+        return;
+    }
+    let caps = encode_test_pattern("vp9", "none");
+    let profile = caps.structure(0).unwrap().get::<String>("profile");
+    assert_ne!(profile.as_deref(), Ok("0"), "output caps {caps}");
+}
+
+/// The input constraint keeps only 8-bit 4:2:0 in system memory, and leaves
+/// GPU-memory structures of the encoder's template alone (#1104). The
+/// template has the shape the hardware encoders register.
+#[test]
+fn base_profile_constraint_keeps_gpu_memory() {
+    init_gst();
+    let template: gst::Caps =
+        "video/x-raw(memory:CUDAMemory), format=(string){ NV12, P010_10LE, Y444 }; \
+         video/x-raw, format=(string){ NV12, P010_10LE, Y444 }"
+            .parse()
+            .unwrap();
+    let caps = constrain_to_base_profile(&template).expect("NV12 is 4:2:0");
+    assert_eq!(caps.size(), 2, "{caps}");
+    assert!(
+        caps.features(0).unwrap().contains("memory:CUDAMemory"),
+        "{caps}"
+    );
+    assert_eq!(caps.structure(0), template.structure(0), "{caps}");
+    let formats: Vec<String> = caps
+        .structure(1)
+        .unwrap()
+        .get::<gst::List>("format")
+        .unwrap()
+        .iter()
+        .map(|v| v.get::<String>().unwrap())
+        .collect();
+    assert_eq!(formats, ["NV12"], "{caps}");
+}
+
+/// An encoder with no 8-bit 4:2:0 input in system memory gets no constraint,
+/// rather than a filter that can never negotiate.
+#[test]
+fn base_profile_constraint_skips_encoders_without_420() {
+    init_gst();
+    let template: gst::Caps = "video/x-raw, format=(string){ Y444, P010_10LE }"
+        .parse()
+        .unwrap();
+    assert!(constrain_to_base_profile(&template).is_none());
+}
+
+/// libaom's `av1enc` takes `Y444` as well, so AV1 needs the same constraint;
+/// without it a 4:4:4 input gives AV1 High.
+#[test]
+fn av1enc_input_is_limited_to_420() {
+    init_gst();
+    if !is_encoder_available("av1enc") {
+        println!("av1enc not available, skipping test");
+        return;
+    }
+    let encoder = gst::ElementFactory::make("av1enc").build().unwrap();
+    let caps =
+        base_profile_input_caps(Codec::AV1, Profile::Auto, &encoder).expect("av1enc takes I420");
+    assert!(!caps.to_string().contains("Y444"), "{caps}");
+    assert!(base_profile_input_caps(Codec::AV1, Profile::None, &encoder).is_none());
+}
