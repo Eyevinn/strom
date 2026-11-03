@@ -16,7 +16,13 @@ use gstreamer::prelude::*;
 pub fn is_hardware(factory: &gst::ElementFactory) -> bool {
     factory
         .metadata(gst::ELEMENT_METADATA_KLASS)
-        .is_some_and(|klass| klass.split('/').any(|part| part == "Hardware"))
+        .is_some_and(klass_is_hardware)
+}
+
+/// Whether an element klass (`Codec/Encoder/Video/Hardware`, ...) marks
+/// dedicated hardware.
+pub fn klass_is_hardware(klass: &str) -> bool {
+    klass.split('/').any(|part| part == "Hardware")
 }
 
 /// Video and image decoders.

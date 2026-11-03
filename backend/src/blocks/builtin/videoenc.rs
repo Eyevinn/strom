@@ -1,8 +1,13 @@
 //! Video encoder block with automatic hardware encoder selection.
 //!
 //! This block automatically selects the best available video encoder for the chosen codec,
-//! with priority given to hardware-accelerated encoders (NVIDIA NVENC, Intel QSV, VA-API, AMD AMF)
-//! and fallback to software encoders when hardware is not available.
+//! with priority given to hardware-accelerated encoders (NVIDIA NVENC, Intel QSV, VA-API,
+//! Apple VideoToolbox, AMD AMF, Windows Media Foundation, V4L2) and fallback to software
+//! encoders when hardware is not available.
+//!
+//! Media Foundation (`mfh264enc`, `mfh265enc`, `mfvp9enc`) comes after the vendor-native
+//! encoders, which expose more control. Older Windows systems expose their hardware encoder
+//! only as a Media Foundation transform; only hardware ones are selected (see `mediafoundation`).
 //!
 //! Supported codecs:
 //! - H.264 / AVC
@@ -73,8 +78,11 @@ impl BlockBuilder for VideoEncBuilder {
         // Parse encoder preference (optional, default: auto)
         let preference = parse_encoder_preference(properties);
 
+        // The profile the capsfilter pins; the encoder must be able to produce it
+        let profile = parse_profile(properties);
+
         // Select best available encoder
-        let encoder_name = select_encoder(codec, preference)?;
+        let encoder_name = select_encoder(codec, preference, profile)?;
         info!(
             "Selected encoder '{}' for codec {:?} with preference {:?}",
             encoder_name, codec, preference
@@ -116,8 +124,6 @@ impl BlockBuilder for VideoEncBuilder {
                 _ => None,
             })
             .unwrap_or(60);
-
-        let profile = parse_profile(properties);
 
         // Create elements.
         //
@@ -313,28 +319,23 @@ fn parse_rate_control(properties: &HashMap<String, PropertyValue>) -> RateContro
         .unwrap_or(RateControl::VBR)
 }
 
-/// Select the best available encoder for the given codec and preference.
-fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String, BlockBuildError> {
+/// Select the best available encoder for the given codec, preference and
+/// profile. An encoder whose source template cannot produce the profile the
+/// block pins on its capsfilter is skipped (see `selection::choose_encoder`).
+fn select_encoder(
+    codec: Codec,
+    preference: EncoderPreference,
+    profile: Profile,
+) -> Result<String, BlockBuildError> {
+    let wanted = EncoderOutput {
+        media_type: codec_media_type(codec),
+        profile: pinned_profile(codec, profile),
+    };
     // Get priority list of encoders to try
     let encoder_list = get_encoder_priority_list(codec, preference);
-
-    // Try each encoder in priority order
-    for encoder_name in &encoder_list {
-        if let Some(factory) = gst::ElementFactory::find(encoder_name) {
-            // Check if element is disabled via GST_PLUGIN_FEATURE_RANK (rank = 0/NONE)
-            if factory.rank() == gst::Rank::NONE {
-                info!("Encoder disabled (rank=0): {}", encoder_name);
-                continue;
-            }
-            info!(
-                "Found available encoder: {} (rank={:?})",
-                encoder_name,
-                factory.rank()
-            );
-            return Ok(encoder_name.to_string());
-        } else {
-            info!("Encoder not available: {}", encoder_name);
-        }
+    let factories = registry_snapshot(&encoder_list);
+    if let Some(encoder_name) = choose_encoder(&encoder_list, &wanted, &factories) {
+        return Ok(encoder_name);
     }
 
     // If we get here, no encoder from the priority list was found
@@ -355,16 +356,11 @@ fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String,
         }
         EncoderPreference::Auto => {
             // Try software encoders as fallback
-            let software_list = get_software_encoder_list(codec);
-            for encoder_name in &software_list {
-                if let Some(factory) = gst::ElementFactory::find(encoder_name) {
-                    if factory.rank() == gst::Rank::NONE {
-                        info!("Software encoder disabled (rank=0): {}", encoder_name);
-                        continue;
-                    }
-                    warn!("Using software fallback encoder: {}", encoder_name);
-                    return Ok(encoder_name.to_string());
-                }
+            let software_list = named(&get_software_encoder_list(codec));
+            let factories = registry_snapshot(&software_list);
+            if let Some(encoder_name) = choose_encoder(&software_list, &wanted, &factories) {
+                warn!("Using software fallback encoder: {}", encoder_name);
+                return Ok(encoder_name);
             }
             Err(BlockBuildError::InvalidConfiguration(format!(
                 "No encoder available for {:?} (tried hardware and software)",
@@ -375,9 +371,9 @@ fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String,
 }
 
 /// Get priority-ordered list of encoders to try for the given codec and preference.
-fn get_encoder_priority_list(codec: Codec, preference: EncoderPreference) -> Vec<&'static str> {
+fn get_encoder_priority_list(codec: Codec, preference: EncoderPreference) -> Vec<Candidate> {
     match preference {
-        EncoderPreference::SoftwareOnly => get_software_encoder_list(codec),
+        EncoderPreference::SoftwareOnly => named(&get_software_encoder_list(codec)),
         EncoderPreference::HardwareOnly | EncoderPreference::Auto => {
             get_hardware_encoder_list(codec)
         }
@@ -385,63 +381,73 @@ fn get_encoder_priority_list(codec: Codec, preference: EncoderPreference) -> Vec
 }
 
 /// Get priority-ordered list of hardware encoders for the given codec.
-fn get_hardware_encoder_list(codec: Codec) -> Vec<&'static str> {
+fn get_hardware_encoder_list(codec: Codec) -> Vec<Candidate> {
+    use Candidate::{Named, Plugin};
     match codec {
         Codec::H264 => vec![
             // NVIDIA (best for NVIDIA GPUs)
             // NOTE: nvh264enc is prioritized over nvautogpuh264enc due to keyframe bug in nvautogpu*
             // nvautogpuh264enc has a bug where it doesn't generate keyframes regardless of gop-size settings
-            "nvh264enc",        // CUDA mode - WORKS correctly for keyframes
-            "nvautogpuh264enc", // Auto GPU select mode - HAS KEYFRAME BUG (doesn't respect gop-size)
-            "nvd3d11h264enc",   // Direct3D11 mode (Windows)
+            Named("nvh264enc"),        // CUDA mode - WORKS correctly for keyframes
+            Named("nvautogpuh264enc"), // Auto GPU select mode - HAS KEYFRAME BUG (doesn't respect gop-size)
+            Named("nvd3d11h264enc"),   // Direct3D11 mode (Windows)
             // Intel QSV
-            "qsvh264enc",
+            Named("qsvh264enc"),
             // VA-API (Intel/AMD on Linux)
-            "vah264enc",
-            "vah264lpenc", // Low power variant
+            Named("vah264enc"),
+            Named("vah264lpenc"), // Low power variant
             // Apple VideoToolbox (macOS)
-            "vtenc_h264_hw", // Hardware-only variant
-            "vtenc_h264",    // May use software fallback
+            Named("vtenc_h264_hw"), // Hardware-only variant
+            Named("vtenc_h264"),    // May use software fallback
             // AMD AMF (Windows)
-            "amfh264enc",
+            Named("amfh264enc"),
+            // Windows Media Foundation hardware MFTs (any vendor; older Windows
+            // systems with no NVENC/QSV/AMF element)
+            Plugin(MEDIA_FOUNDATION_PLUGIN),
             // V4L2 (Raspberry Pi, embedded Linux)
-            "v4l2h264enc",
+            Named("v4l2h264enc"),
         ],
         Codec::H265 => vec![
             // NVIDIA
-            "nvautogpuh265enc",
-            "nvh265enc",
-            "nvd3d11h265enc",
+            Named("nvautogpuh265enc"),
+            Named("nvh265enc"),
+            Named("nvd3d11h265enc"),
             // Intel QSV
-            "qsvh265enc",
+            Named("qsvh265enc"),
             // VA-API
-            "vah265enc",
-            "vah265lpenc",
+            Named("vah265enc"),
+            Named("vah265lpenc"),
             // Apple VideoToolbox (macOS)
-            "vtenc_h265_hw", // Hardware-only variant
-            "vtenc_h265",    // May use software fallback
+            Named("vtenc_h265_hw"), // Hardware-only variant
+            Named("vtenc_h265"),    // May use software fallback
             // AMD AMF
-            "amfh265enc",
+            Named("amfh265enc"),
+            // Windows Media Foundation hardware MFTs
+            Plugin(MEDIA_FOUNDATION_PLUGIN),
             // V4L2 (Raspberry Pi 4+, embedded Linux)
-            "v4l2h265enc",
+            Named("v4l2h265enc"),
         ],
         Codec::AV1 => vec![
             // NVIDIA
-            "nvautogpuav1enc",
-            "nvav1enc",
-            "nvd3d11av1enc",
+            Named("nvautogpuav1enc"),
+            Named("nvav1enc"),
+            Named("nvd3d11av1enc"),
             // Intel QSV
-            "qsvav1enc",
+            Named("qsvav1enc"),
             // VA-API
-            "vaav1enc",
+            Named("vaav1enc"),
             // AMD AMF
-            "amfav1enc",
+            Named("amfav1enc"),
+            // No Media Foundation entry: GStreamer's `mediafoundation` plugin
+            // has no AV1 encoder (H.264, H.265 and VP9 only, through 1.28).
         ],
         Codec::VP9 => vec![
             // Intel QSV
-            "qsvvp9enc",
+            Named("qsvvp9enc"),
             // VA-API
-            "vavp9enc",
+            Named("vavp9enc"),
+            // Windows Media Foundation hardware MFTs
+            Plugin(MEDIA_FOUNDATION_PLUGIN),
         ],
     }
 }
@@ -521,7 +527,19 @@ fn set_encoder_properties(
     let keyframe_str = keyframe_interval.to_string();
 
     // Bitrate mapping (different encoders use different property names and units)
-    if encoder_name.starts_with("x264") || encoder_name.starts_with("x265") {
+    let plugin_name = encoder.factory().and_then(|f| f.plugin_name());
+    if is_media_foundation_plugin(plugin_name.as_deref()) {
+        // Identified by plugin, not name: the plugin names its features per
+        // device, `mf{codec}enc` and `mf{codec}device{N}enc`.
+        set_mf_encoder_properties(
+            encoder,
+            encoder_name,
+            bitrate,
+            quality_preset,
+            tune,
+            rate_control,
+        )?;
+    } else if encoder_name.starts_with("x264") || encoder_name.starts_with("x265") {
         // x264/x265: bitrate in kbps
         set_encoder_property(encoder, "bitrate", &bitrate_str)?;
         // x264/x265: speed-preset
@@ -534,7 +552,11 @@ fn set_encoder_properties(
         // the target bitrate — large frame bursts overflow shallow buffers on
         // constrained viewer paths (observed as bursty packet loss on WebRTC).
         if encoder.has_property("vbv-buf-capacity") {
-            set_encoder_property(encoder, "vbv-buf-capacity", "500")?;
+            set_encoder_property(
+                encoder,
+                "vbv-buf-capacity",
+                &BURST_VBV_WINDOW_MS.to_string(),
+            )?;
         }
     } else if encoder_name.starts_with("nv") {
         // NVENC encoders: bitrate in kbps
@@ -577,17 +599,18 @@ fn set_encoder_properties(
         // spike to ~10x the average frame size. Those frames leave the NIC as
         // line-rate packet bursts that overflow shallow buffers on constrained
         // viewer paths (observed as bursty packet loss on WebRTC outputs).
-        // - max-bitrate: cap VBR at 1.2x target (ignored in CBR mode)
-        // - vbv-buffer-size (kbits): 0.5 s worth of target bitrate, bounding
-        //   how large any single frame can get
+        // - max-bitrate (kbit/s): cap VBR at the peak (ignored in CBR mode)
+        // - vbv-buffer-size (kbits): one VBV window of target bitrate,
+        //   bounding how large any single frame can get
+        let limits = BurstLimits::for_bitrate_kbps(bitrate);
         if encoder.has_property("max-bitrate") {
             let max_bitrate =
-                clamp_to_property_range(encoder, "max-bitrate", u64::from(bitrate) * 12 / 10);
+                clamp_to_property_range(encoder, "max-bitrate", limits.peak_bits_per_sec / 1000);
             set_encoder_property(encoder, "max-bitrate", &max_bitrate.to_string())?;
         }
         if encoder.has_property("vbv-buffer-size") {
             let vbv_size =
-                clamp_to_property_range(encoder, "vbv-buffer-size", u64::from(bitrate / 2));
+                clamp_to_property_range(encoder, "vbv-buffer-size", limits.vbv_bits / 1000);
             set_encoder_property(encoder, "vbv-buffer-size", &vbv_size.to_string())?;
         }
 
@@ -757,15 +780,8 @@ fn set_encoder_properties(
 
     // Keyframe interval (GOP size) - try different property names
     if keyframe_interval > 0 {
-        if encoder.has_property("key-int-max") {
-            set_encoder_property(encoder, "key-int-max", &keyframe_str)?;
-        } else if encoder.has_property("gop-size") {
-            set_encoder_property(encoder, "gop-size", &keyframe_str)?;
-        } else if encoder.has_property("keyint-max") {
-            set_encoder_property(encoder, "keyint-max", &keyframe_str)?;
-        } else if encoder.has_property("max-keyframe-interval") {
-            // Apple VideoToolbox
-            set_encoder_property(encoder, "max-keyframe-interval", &keyframe_str)?;
+        if let Some(property) = keyframe_interval_property(|name| encoder.has_property(name)) {
+            set_encoder_property(encoder, property, &keyframe_str)?;
         }
     }
 
@@ -789,6 +805,61 @@ fn set_encoder_properties(
     );
 
     Ok(())
+}
+
+/// Peak bitrate allowed in VBR, as a percentage of the target.
+const BURST_PEAK_PERCENT: u64 = 120;
+
+/// VBV (HRD) window: how much of the target bitrate one burst may take.
+const BURST_VBV_WINDOW_MS: u64 = 500;
+
+/// The block's burst policy in explicit units, for encoders whose defaults
+/// leave single-frame excursions unbounded. Frames far above the average
+/// leave the NIC as line-rate packet bursts that overflow shallow buffers on
+/// constrained viewer paths (observed as bursty packet loss on WebRTC). Each
+/// encoder branch converts these to its own property units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BurstLimits {
+    /// VBR peak cap, bits per second (1000-based, as the block's `bitrate`).
+    peak_bits_per_sec: u64,
+    /// VBV buffer, bits: one [`BURST_VBV_WINDOW_MS`] window of target bitrate.
+    vbv_bits: u64,
+}
+
+impl BurstLimits {
+    fn for_bitrate_kbps(bitrate_kbps: u32) -> Self {
+        let bits_per_sec = u64::from(bitrate_kbps) * 1000;
+        Self {
+            peak_bits_per_sec: bits_per_sec * BURST_PEAK_PERCENT / 100,
+            vbv_bits: bits_per_sec * BURST_VBV_WINDOW_MS / 1000,
+        }
+    }
+}
+
+/// The encoded media type `codec` produces, as it appears in an encoder's
+/// source pad template.
+fn codec_media_type(codec: Codec) -> &'static str {
+    match codec {
+        Codec::H264 => "video/x-h264",
+        Codec::H265 => "video/x-h265",
+        Codec::AV1 => "video/x-av1",
+        Codec::VP9 => "video/x-vp9",
+    }
+}
+
+/// The property that takes the keyframe interval in frames, by the names
+/// encoders use for it: `key-int-max` (x264/x265, VA-API), `gop-size` (NVENC,
+/// QSV, AMF, Media Foundation), `keyint-max`, and `max-keyframe-interval`
+/// (Apple VideoToolbox).
+fn keyframe_interval_property(has_property: impl Fn(&str) -> bool) -> Option<&'static str> {
+    [
+        "key-int-max",
+        "gop-size",
+        "keyint-max",
+        "max-keyframe-interval",
+    ]
+    .into_iter()
+    .find(|name| has_property(name))
 }
 
 /// Map quality preset to x264/x265 speed-preset enum nick (string value for enum lookup).
@@ -918,23 +989,33 @@ fn map_quality_preset_vp9enc(quality_preset: &str) -> i32 {
 /// produce the profile; without it the encoder follows whatever pixel format
 /// arrives and a 4:2:2, 4:4:4 or 10-bit input escalates the output profile.
 fn get_codec_caps_string(codec: Codec, profile: Profile) -> String {
-    let (media_type, auto) = match codec {
+    let media_type = codec_media_type(codec);
+    if matches!(codec, Codec::AV1 | Codec::VP9) {
+        return media_type.to_string();
+    }
+    match pinned_profile(codec, profile) {
+        None => format!("{},alignment=au", media_type),
+        Some(p) => format!("{},alignment=au,profile={}", media_type, p),
+    }
+}
+
+/// The `profile` caps value the capsfilter pins for `codec`, if any.
+/// [`Profile::Auto`] resolves to the codec's 8-bit 4:2:0 profile; AV1 and
+/// VP9 pin none.
+fn pinned_profile(codec: Codec, profile: Profile) -> Option<&'static str> {
+    let auto = match codec {
         // High rather than Main: same 8-bit 4:2:0, better compression, and
         // every H.264 target that takes Main takes High.
-        Codec::H264 => ("video/x-h264", Profile::High),
-        Codec::H265 => ("video/x-h265", Profile::Main),
-        Codec::AV1 => return "video/x-av1".to_string(),
-        Codec::VP9 => return "video/x-vp9".to_string(),
+        Codec::H264 => Profile::High,
+        Codec::H265 => Profile::Main,
+        Codec::AV1 | Codec::VP9 => return None,
     };
     let effective = if profile == Profile::Auto {
         auto
     } else {
         profile
     };
-    match effective.as_caps_str() {
-        None => format!("{},alignment=au", media_type),
-        Some(p) => format!("{},alignment=au,profile={}", media_type, p),
-    }
+    effective.as_caps_str()
 }
 
 /// Parse the `profile` property. Unknown / missing values fall back to the
@@ -968,7 +1049,7 @@ fn videoenc_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.videoenc".to_string(),
         name: "Video Encoder".to_string(),
-        description: "Video encoder with automatic hardware acceleration selection. Supports H.264, H.265, AV1, and VP9 with automatic selection of NVIDIA NVENC, Intel QSV, VA-API, AMD AMF, or software encoders.".to_string(),
+        description: "Video encoder with automatic hardware acceleration selection. Supports H.264, H.265, AV1, and VP9 with automatic selection of NVIDIA NVENC, Intel QSV, VA-API, Apple VideoToolbox, AMD AMF, Windows Media Foundation, V4L2, or software encoders.".to_string(),
         category: "Video".to_string(),
         exposed_properties: vec![
             ExposedProperty {
@@ -1149,6 +1230,13 @@ fn videoenc_definition() -> BlockDefinition {
         }),
     }
 }
+
+mod mediafoundation;
+mod selection;
+use mediafoundation::{
+    is_media_foundation_plugin, set_mf_encoder_properties, MEDIA_FOUNDATION_PLUGIN,
+};
+use selection::{choose_encoder, named, registry_snapshot, Candidate, EncoderOutput};
 
 #[cfg(test)]
 mod tests;
