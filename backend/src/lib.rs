@@ -12,6 +12,10 @@ use axum::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tower_http::classify::{
+    ClassifiedResponse, ClassifyResponse, MakeClassifier, NeverClassifyEos, ServerErrorsAsFailures,
+    ServerErrorsFailureClass,
+};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use utoipa_swagger_ui::SwaggerUi;
@@ -628,7 +632,7 @@ pub async fn create_app_with_config(
             }
         })
         .layer(
-            TraceLayer::new_for_http().make_span_with(|req: &axum::http::Request<_>| {
+            TraceLayer::new(HttpClassifier).make_span_with(|req: &axum::http::Request<_>| {
                 let peer = req
                     .extensions()
                     .get::<ConnectInfo<SocketAddr>>()
@@ -644,6 +648,50 @@ pub async fn create_app_with_config(
         .with_state(state)
         // Serve embedded frontend for all other routes
         .fallback(assets::serve_static)
+}
+
+/// Classifies HTTP responses for the trace layer like `ServerErrorsAsFailures`,
+/// except a 504 from a block thumbnail. That 504 means the tap has no fresh
+/// picture (a source that is down or not sending), a normal state that a polling
+/// client would otherwise log at ERROR once per poll. It is logged at DEBUG.
+#[derive(Clone, Copy)]
+struct HttpClassifier;
+
+impl MakeClassifier for HttpClassifier {
+    type Classifier = ResponseClassifier;
+    type FailureClass = ServerErrorsFailureClass;
+    type ClassifyEos = NeverClassifyEos<ServerErrorsFailureClass>;
+
+    fn make_classifier<B>(&self, req: &axum::http::Request<B>) -> Self::Classifier {
+        let path = req.uri().path();
+        ResponseClassifier {
+            thumbnail: path.starts_with("/api/flows/") && path.ends_with("/thumbnail"),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ResponseClassifier {
+    thumbnail: bool,
+}
+
+impl ClassifyResponse for ResponseClassifier {
+    type FailureClass = ServerErrorsFailureClass;
+    type ClassifyEos = NeverClassifyEos<ServerErrorsFailureClass>;
+
+    fn classify_response<B>(
+        self,
+        res: &axum::http::Response<B>,
+    ) -> ClassifiedResponse<Self::FailureClass, Self::ClassifyEos> {
+        if self.thumbnail && res.status() == axum::http::StatusCode::GATEWAY_TIMEOUT {
+            return ClassifiedResponse::Ready(Ok(()));
+        }
+        ServerErrorsAsFailures::new().classify_response(res)
+    }
+
+    fn classify_error<E: std::fmt::Display + 'static>(self, error: &E) -> Self::FailureClass {
+        ServerErrorsAsFailures::new().classify_error(error)
+    }
 }
 
 /// Health check endpoint.
@@ -667,5 +715,37 @@ fn serve_embedded_asset<T: rust_embed::RustEmbed>(
             .status(axum::http::StatusCode::NOT_FOUND)
             .body(axum::body::Body::from("Not found"))
             .unwrap(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{Request, Response, StatusCode};
+
+    fn is_failure(path: &str, status: StatusCode) -> bool {
+        let req = Request::get(path).body(()).unwrap();
+        let res = Response::builder().status(status).body(()).unwrap();
+        match HttpClassifier.make_classifier(&req).classify_response(&res) {
+            ClassifiedResponse::Ready(result) => result.is_err(),
+            ClassifiedResponse::RequiresEos(_) => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn thumbnail_timeout_is_not_a_failure() {
+        let thumbnail = "/api/flows/f1/blocks/b1/thumbnail";
+        assert!(!is_failure(thumbnail, StatusCode::GATEWAY_TIMEOUT));
+        assert!(!is_failure(thumbnail, StatusCode::OK));
+        assert!(is_failure(thumbnail, StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_failure(
+            "/api/media/download",
+            StatusCode::GATEWAY_TIMEOUT
+        ));
+        assert!(is_failure("/api/flows/f1", StatusCode::GATEWAY_TIMEOUT));
+        assert!(is_failure(
+            "/api/media/file/clips/thumbnail",
+            StatusCode::GATEWAY_TIMEOUT
+        ));
     }
 }

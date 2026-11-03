@@ -172,6 +172,13 @@ fn main() -> eframe::Result<()> {
 
     tracing::info!("Starting Strom frontend in native mode");
 
+    // The app spawns tokio tasks (e.g. the WebSocket client in ws.rs) that need
+    // an active reactor. Embedded in the backend, its tokio runtime already
+    // provides one; this standalone binary must create and enter its own,
+    // kept alive for the process lifetime.
+    let runtime = tokio::runtime::Runtime::new().expect("failed to create Tokio runtime");
+    let _runtime_guard = runtime.enter();
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 720.0])
         .with_title("Strom");
