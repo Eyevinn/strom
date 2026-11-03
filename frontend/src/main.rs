@@ -9,6 +9,7 @@
 mod api;
 mod app;
 mod audioanalyzer;
+mod audioprocessor;
 mod audiorouter;
 mod buffer_age;
 mod clipboard;

@@ -11813,6 +11813,91 @@
           },
           {
             "type": "object",
+            "description": "Meter data from an Audio Processor block (`stromdsp-broadcastprocessor`).\nSilence reads -200.0, never NaN or infinity.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "Meter data from an Audio Processor block (`stromdsp-broadcastprocessor`).\nSilence reads -200.0, never NaN or infinity.",
+                "required": [
+                  "flow_id",
+                  "element_id",
+                  "input_momentary",
+                  "input_short_term",
+                  "output_momentary",
+                  "output_short_term",
+                  "output_true_peak",
+                  "agc_gain",
+                  "band_gain_reduction",
+                  "limiter_gain_reduction"
+                ],
+                "properties": {
+                  "agc_gain": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Gain the loudness AGC applies, in dB"
+                  },
+                  "band_gain_reduction": {
+                    "type": "array",
+                    "items": {
+                      "type": "number",
+                      "format": "double"
+                    },
+                    "description": "Gain reduction per active multiband band, in dB"
+                  },
+                  "element_id": {
+                    "type": "string",
+                    "description": "The block instance id."
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "input_momentary": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Input momentary loudness in LUFS (400 ms window)"
+                  },
+                  "input_short_term": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Input short-term loudness in LUFS (3 s window)"
+                  },
+                  "limiter_gain_reduction": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Gain reduction of the true-peak limiter, in dB"
+                  },
+                  "output_momentary": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Output momentary loudness in LUFS"
+                  },
+                  "output_short_term": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Output short-term loudness in LUFS"
+                  },
+                  "output_true_peak": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Output true peak in dBTP, the maximum since the previous message"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "AudioProcessorData"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
             "description": "Audio latency measurement data from GStreamer audiolatency element",
             "required": [
               "data",

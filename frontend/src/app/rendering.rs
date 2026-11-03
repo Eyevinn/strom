@@ -1430,6 +1430,7 @@ impl StromApp {
                             &self.meter_data,
                             &self.spectrum_data,
                             &self.loudness_data,
+                            &self.audioprocessor_data,
                             &self.latency_data,
                             &self.mediaplayer_data,
                             &self.webrtc_stats,
@@ -1878,6 +1879,31 @@ impl StromApp {
                                     additional_height: height + 10.0,
                                     render_callback: Some(Box::new(move |ui, _rect| {
                                         crate::loudness::show_compact(ui, &loudness_data_clone);
+                                    })),
+                                },
+                            );
+                        }
+                    }
+
+                    // Setup dynamic content for Audio Processor blocks
+                    let processor_blocks: Vec<_> = self
+                        .graph
+                        .blocks
+                        .iter()
+                        .filter(|b| b.block_definition_id == strom_types::audioprocessor::BLOCK_ID)
+                        .map(|b| b.id.clone())
+                        .collect();
+
+                    for block_id in processor_blocks {
+                        if let Some(data) = self.audioprocessor_data.get(&flow_id, &block_id) {
+                            let data = data.clone();
+                            let height = crate::audioprocessor::calculate_compact_height();
+                            self.graph.set_block_content(
+                                block_id,
+                                crate::graph::BlockContentInfo {
+                                    additional_height: height + 10.0,
+                                    render_callback: Some(Box::new(move |ui, _rect| {
+                                        crate::audioprocessor::show_compact(ui, &data);
                                     })),
                                 },
                             );

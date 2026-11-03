@@ -126,6 +126,30 @@ pub enum StromEvent {
         /// True peak per channel in dBTP
         true_peak: Vec<f64>,
     },
+    /// Meter data from an Audio Processor block (`stromdsp-broadcastprocessor`).
+    /// Silence reads -200.0, never NaN or infinity.
+    AudioProcessorData {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+        flow_id: FlowId,
+        /// The block instance id.
+        element_id: String,
+        /// Input momentary loudness in LUFS (400 ms window)
+        input_momentary: f64,
+        /// Input short-term loudness in LUFS (3 s window)
+        input_short_term: f64,
+        /// Output momentary loudness in LUFS
+        output_momentary: f64,
+        /// Output short-term loudness in LUFS
+        output_short_term: f64,
+        /// Output true peak in dBTP, the maximum since the previous message
+        output_true_peak: f64,
+        /// Gain the loudness AGC applies, in dB
+        agc_gain: f64,
+        /// Gain reduction per active multiband band, in dB
+        band_gain_reduction: Vec<f64>,
+        /// Gain reduction of the true-peak limiter, in dB
+        limiter_gain_reduction: f64,
+    },
     /// Audio latency measurement data from GStreamer audiolatency element
     LatencyData {
         #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
@@ -565,6 +589,18 @@ impl StromEvent {
                 format!(
                     "Loudness data from {} in flow {}: M={:.1} LUFS, I={} LUFS",
                     element_id, flow_id, momentary, i_str
+                )
+            }
+            StromEvent::AudioProcessorData {
+                flow_id,
+                element_id,
+                output_short_term,
+                agc_gain,
+                ..
+            } => {
+                format!(
+                    "Audio processor data from {} in flow {}: S={:.1} LUFS, AGC={:.1} dB",
+                    element_id, flow_id, output_short_term, agc_gain
                 )
             }
             StromEvent::LatencyData {
@@ -1011,6 +1047,7 @@ impl StromEvent {
             StromEvent::MeterData { .. } => "MeterData",
             StromEvent::SpectrumData { .. } => "SpectrumData",
             StromEvent::LoudnessData { .. } => "LoudnessData",
+            StromEvent::AudioProcessorData { .. } => "AudioProcessorData",
             StromEvent::LatencyData { .. } => "LatencyData",
             StromEvent::SystemStats(_) => "SystemStats",
             StromEvent::ThreadStats(_) => "ThreadStats",
@@ -1069,6 +1106,7 @@ impl StromEvent {
             | StromEvent::MeterData { flow_id, .. }
             | StromEvent::SpectrumData { flow_id, .. }
             | StromEvent::LoudnessData { flow_id, .. }
+            | StromEvent::AudioProcessorData { flow_id, .. }
             | StromEvent::LatencyData { flow_id, .. }
             | StromEvent::PtpStats { flow_id, .. }
             | StromEvent::QoSStats { flow_id, .. }
@@ -1126,6 +1164,7 @@ impl StromEvent {
             StromEvent::MeterData { .. }
             | StromEvent::SpectrumData { .. }
             | StromEvent::LoudnessData { .. }
+            | StromEvent::AudioProcessorData { .. }
             | StromEvent::LatencyData { .. }
             | StromEvent::SystemStats(_)
             | StromEvent::ThreadStats(_)
@@ -1340,6 +1379,18 @@ mod event_accessor_tests {
                 integrated: None,
                 loudness_range: None,
                 true_peak: vec![],
+            },
+            StromEvent::AudioProcessorData {
+                flow_id: id,
+                element_id: "proc0".to_string(),
+                input_momentary: -23.0,
+                input_short_term: -23.0,
+                output_momentary: -23.0,
+                output_short_term: -23.0,
+                output_true_peak: -3.0,
+                agc_gain: 0.0,
+                band_gain_reduction: vec![0.0; 4],
+                limiter_gain_reduction: 0.0,
             },
             StromEvent::LatencyData {
                 flow_id: id,
@@ -1576,7 +1627,7 @@ mod event_accessor_tests {
     fn every_variant_event_type_matches_its_serde_wire_tag() {
         let events = one_of_each_variant();
 
-        let variant_count = 48;
+        let variant_count = 49;
         assert_eq!(
             events.len(),
             variant_count,
