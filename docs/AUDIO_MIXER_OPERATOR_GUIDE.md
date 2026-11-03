@@ -365,11 +365,35 @@ built and require restarting the flow to change:
 - channel, aux-bus and group counts
 - aux send pre/post-fader
 - sample rate
-- DSP backend (Rust or LV2)
+- DSP backend (strom-dsp, Rust or LV2, see below)
 - Force Live, Latency, Internal Bus Latency and Min Upstream Latency
 
 Everything else (faders, mutes, send levels, processing parameters,
 routing switches, PFL/AFL) is live-editable.
+
+### DSP backend
+
+The gate, compressor, EQ and limiter come from one of three DSP backends,
+chosen with the mixer's **DSP Backend** property:
+
+| Backend | What it is |
+|---|---|
+| **strom-dsp** (default) | Built into Strom. |
+| **Rust** | Built into Strom: lsp-plugins-rs. |
+| **LV2** | The external LSP plugins. They must be installed on the host. |
+
+A mixer with no DSP Backend set, or with a value Strom does not know, uses
+strom-dsp. A flow that names Rust or LV2 keeps it.
+
+On strom-dsp, compared with the other backends:
+
+- **Compressor threshold**: the same scale. A threshold sounds the same as
+  it did on Rust or LV2.
+- **Limiter**: holds its threshold as a ceiling, with a 20 ms release.
+- **Latency**: the main limiter looks ahead 5 ms, also while it is disabled,
+  so the main output is 5 ms later than on the other backends.
+- **Enable / disable**: switching gate, compressor, EQ or limiter on or off
+  fades instead of switching hard.
 
 ---
 

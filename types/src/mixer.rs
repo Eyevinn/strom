@@ -27,6 +27,12 @@ pub const DEFAULT_COMP_ATTACK: f32 = 10.0;
 pub const DEFAULT_COMP_RELEASE: f32 = 100.0;
 pub const DEFAULT_COMP_MAKEUP: f32 = 0.0;
 pub const DEFAULT_COMP_KNEE: f32 = -6.0;
+/// DSP backend a mixer uses when its `dsp_backend` property is missing or
+/// not one of [`DSP_BACKENDS`].
+pub const DEFAULT_DSP_BACKEND: &str = "stromdsp";
+/// The mixer's DSP backends: strom-dsp, lsp-plugins-rs (`rust`) and the
+/// external LV2 plugins.
+pub const DSP_BACKENDS: [&str; 3] = ["stromdsp", "rust", "lv2"];
 /// Compressor level detector for DSP elements that offer a choice (`peak` or
 /// `rms`). RMS follows perceived level and compresses programme and speech
 /// more gently than a peak detector.

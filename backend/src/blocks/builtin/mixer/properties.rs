@@ -282,8 +282,8 @@ mod clamping_tests {
     }
 
     fn live_knee(linear: f64) -> f64 {
-        let _ = gst::init();
-        let _ = gst_plugins_lsp::plugin_register_static();
+        gst::init().expect("GStreamer initialises");
+        crate::gst::register_dsp_plugins();
         let comp = gst::ElementFactory::make("lsp-rs-compressor")
             .build()
             .expect("lsp-rs-compressor is statically registered");

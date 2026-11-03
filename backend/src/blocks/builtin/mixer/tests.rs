@@ -14,9 +14,8 @@ use strom_types::mixer::{
 use strom_types::PropertyValue;
 
 fn init_gst() {
-    let _ = gst::init();
-    let _ = gst_plugins_lsp::plugin_register_static();
-    let _ = gststromdsp::plugin_register_static();
+    gst::init().expect("GStreamer initialises");
+    crate::gst::register_dsp_plugins();
 }
 
 /// GObject type name. `factory()` can SIGSEGV when static and LV2 plugins
@@ -1664,6 +1663,65 @@ fn test_stromdsp_backend_builds_stromdsp_elements() {
     assert_eq!(type_name(m.element("comp_0")), "StromDspCompressor");
     assert_eq!(type_name(m.element("eq_0")), "StromDspEqualizer");
     assert_eq!(type_name(m.element("main_limiter")), "StromDspLimiter");
+}
+
+fn assert_stromdsp_elements(m: &Assembled, what: &str) {
+    assert_eq!(type_name(m.element("gate_0")), "StromDspGate", "{what}");
+    assert_eq!(
+        type_name(m.element("comp_0")),
+        "StromDspCompressor",
+        "{what}"
+    );
+    assert_eq!(type_name(m.element("eq_0")), "StromDspEqualizer", "{what}");
+    assert_eq!(
+        type_name(m.element("main_comp")),
+        "StromDspCompressor",
+        "{what}"
+    );
+    assert_eq!(
+        type_name(m.element("main_eq")),
+        "StromDspEqualizer",
+        "{what}"
+    );
+    assert_eq!(
+        type_name(m.element("main_limiter")),
+        "StromDspLimiter",
+        "{what}"
+    );
+}
+
+#[test]
+fn test_mixer_without_dsp_backend_builds_stromdsp_elements() {
+    // strom-dsp is the default: a mixer saved without dsp_backend, or with a
+    // value this version does not know, gets strom-dsp elements.
+    let mut missing = small_mixer_props(&[("main_limiter_enabled", PropertyValue::Bool(true))]);
+    missing.remove("dsp_backend");
+    assert_stromdsp_elements(&assemble(&missing), "dsp_backend missing");
+
+    let unknown = small_mixer_props(&[
+        (
+            "dsp_backend",
+            PropertyValue::String("no-such-backend".to_string()),
+        ),
+        ("main_limiter_enabled", PropertyValue::Bool(true)),
+    ]);
+    assert_stromdsp_elements(&assemble(&unknown), "dsp_backend unknown");
+}
+
+#[test]
+fn test_mixer_definition_defaults_to_stromdsp() {
+    let def = mixer_definition();
+    let prop = exposed(&def, "dsp_backend");
+    assert!(
+        matches!(&prop.default_value, Some(PropertyValue::String(v)) if v == "stromdsp"),
+        "dsp_backend should default to stromdsp, got {:?}",
+        prop.default_value
+    );
+    let strom_types::block::PropertyType::Enum { values } = &prop.property_type else {
+        panic!("dsp_backend should be an enum");
+    };
+    let values: Vec<&str> = values.iter().map(|v| v.value.as_str()).collect();
+    assert_eq!(values, ["stromdsp", "rust", "lv2"]);
 }
 
 #[test]
