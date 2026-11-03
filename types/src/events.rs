@@ -154,17 +154,6 @@ pub enum StromEvent {
         band_gain_reduction: Vec<f64>,
         /// Gain reduction of the true-peak limiter, in dB (positive = reduction)
         limiter_gain_reduction: f64,
-    },
-    /// Stage meters from an Audio Processor block: spike guard, expander, bass
-    /// clipper, final clipper and clip budget governor. Sent from the same
-    /// element message as `AudioProcessorData`, right after it, when the
-    /// element reports these stages (strom-dsp v0.2.0 and later).
-    /// Silence reads -200.0, never NaN or infinity.
-    AudioProcessorStageData {
-        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
-        flow_id: FlowId,
-        /// The block instance id.
-        element_id: String,
         /// Spikes the spike guard removed since the previous message (0 while
         /// it is off)
         spike_events: u64,
@@ -639,21 +628,6 @@ impl StromEvent {
                     element_id, flow_id, output_short_term, agc_gain
                 )
             }
-            StromEvent::AudioProcessorStageData {
-                flow_id,
-                element_id,
-                budget_excess,
-                governor_state,
-                ..
-            } => {
-                format!(
-                    "Audio processor stage data from {} in flow {}: governor {}, budget excess {:.1} dB",
-                    element_id,
-                    flow_id,
-                    governor_state.label(),
-                    budget_excess
-                )
-            }
             StromEvent::LatencyData {
                 flow_id,
                 element_id,
@@ -1099,7 +1073,6 @@ impl StromEvent {
             StromEvent::SpectrumData { .. } => "SpectrumData",
             StromEvent::LoudnessData { .. } => "LoudnessData",
             StromEvent::AudioProcessorData { .. } => "AudioProcessorData",
-            StromEvent::AudioProcessorStageData { .. } => "AudioProcessorStageData",
             StromEvent::LatencyData { .. } => "LatencyData",
             StromEvent::SystemStats(_) => "SystemStats",
             StromEvent::ThreadStats(_) => "ThreadStats",
@@ -1159,7 +1132,6 @@ impl StromEvent {
             | StromEvent::SpectrumData { flow_id, .. }
             | StromEvent::LoudnessData { flow_id, .. }
             | StromEvent::AudioProcessorData { flow_id, .. }
-            | StromEvent::AudioProcessorStageData { flow_id, .. }
             | StromEvent::LatencyData { flow_id, .. }
             | StromEvent::PtpStats { flow_id, .. }
             | StromEvent::QoSStats { flow_id, .. }
@@ -1218,7 +1190,6 @@ impl StromEvent {
             | StromEvent::SpectrumData { .. }
             | StromEvent::LoudnessData { .. }
             | StromEvent::AudioProcessorData { .. }
-            | StromEvent::AudioProcessorStageData { .. }
             | StromEvent::LatencyData { .. }
             | StromEvent::SystemStats(_)
             | StromEvent::ThreadStats(_)
@@ -1447,10 +1418,6 @@ mod event_accessor_tests {
                 agc_gain: 0.0,
                 band_gain_reduction: vec![0.0; 4],
                 limiter_gain_reduction: 0.0,
-            },
-            StromEvent::AudioProcessorStageData {
-                flow_id: id,
-                element_id: "proc0".to_string(),
                 spike_events: 0,
                 band_expander_gain_reduction: vec![0.0; 4],
                 bass_clip_gain_reduction: 0.0,
@@ -1694,7 +1661,7 @@ mod event_accessor_tests {
     fn every_variant_event_type_matches_its_serde_wire_tag() {
         let events = one_of_each_variant();
 
-        let variant_count = 50;
+        let variant_count = 49;
         assert_eq!(
             events.len(),
             variant_count,

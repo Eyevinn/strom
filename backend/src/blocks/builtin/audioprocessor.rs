@@ -571,6 +571,13 @@ pub fn meter_event(s: &gst::StructureRef, flow_id: FlowId, element_id: &str) -> 
         .filter_map(|v| v.get::<f64>().ok())
         .map(finite_or_silence)
         .collect();
+    let band_expander_gain_reduction = s
+        .get::<gst::Array>("band-expander-gain-reduction")
+        .ok()?
+        .iter()
+        .filter_map(|v| v.get::<f64>().ok())
+        .map(finite_or_silence)
+        .collect();
     Some(StromEvent::AudioProcessorData {
         flow_id,
         element_id: element_id.to_string(),
@@ -584,6 +591,15 @@ pub fn meter_event(s: &gst::StructureRef, flow_id: FlowId, element_id: &str) -> 
         agc_gain: f("agc-gain")?,
         band_gain_reduction,
         limiter_gain_reduction: f("limiter-gain-reduction")?,
+        spike_events: s.get::<u64>("spike-events").ok()?,
+        band_expander_gain_reduction,
+        bass_clip_gain_reduction: f("bass-clip-gr")?,
+        clip_depth: f("clip-depth")?,
+        loudness_deficit: f("loudness-deficit")?,
+        budget_excess: f("budget-excess")?,
+        governor_state: AudioProcessorGovernorState::from_nick(
+            s.get::<&str>("governor-state").ok()?,
+        ),
     })
 }
 
@@ -596,40 +612,6 @@ fn finite_or_silence(v: f64) -> f64 {
     } else {
         METER_SILENCE
     }
-}
-
-/// Read the stage meters of an element meter message into an event. `None`
-/// when the structure is not the processor's meter message or a field is
-/// missing (strom-dsp before v0.2.0 does not report these stages).
-pub fn stage_meter_event(
-    s: &gst::StructureRef,
-    flow_id: FlowId,
-    element_id: &str,
-) -> Option<StromEvent> {
-    if s.name() != METER_MESSAGE {
-        return None;
-    }
-    let f = |name: &str| s.get::<f64>(name).ok().map(finite_or_silence);
-    let band_expander_gain_reduction = s
-        .get::<gst::Array>("band-expander-gain-reduction")
-        .ok()?
-        .iter()
-        .filter_map(|v| v.get::<f64>().ok())
-        .map(finite_or_silence)
-        .collect();
-    Some(StromEvent::AudioProcessorStageData {
-        flow_id,
-        element_id: element_id.to_string(),
-        spike_events: s.get::<u64>("spike-events").ok()?,
-        band_expander_gain_reduction,
-        bass_clip_gain_reduction: f("bass-clip-gr")?,
-        clip_depth: f("clip-depth")?,
-        loudness_deficit: f("loudness-deficit")?,
-        budget_excess: f("budget-excess")?,
-        governor_state: AudioProcessorGovernorState::from_nick(
-            s.get::<&str>("governor-state").ok()?,
-        ),
-    })
 }
 
 fn connect_meter_handler(
@@ -663,14 +645,6 @@ fn connect_meter_handler(
             Some(event) => events.broadcast(event),
             None => trace!(
                 "Audio Processor {}: meter message missing fields: {}",
-                block_id,
-                s
-            ),
-        }
-        match stage_meter_event(s, flow_id, &block_id) {
-            Some(event) => events.broadcast(event),
-            None => trace!(
-                "Audio Processor {}: meter message missing stage fields: {}",
                 block_id,
                 s
             ),
@@ -1183,61 +1157,9 @@ mod tests {
         assert!(err.contains("ebu-r128"), "{err}");
     }
 
-    #[test]
-    fn meter_message_becomes_an_event() {
-        gst::init().unwrap();
-        let s = gst::Structure::builder(METER_MESSAGE)
-            .field("running-time", 1_000_000_000u64)
-            .field("stream-time", 1_000_000_000u64)
-            .field("input-momentary", -30.0f64)
-            .field("input-short-term", -31.0f64)
-            .field("output-momentary", -23.5f64)
-            .field("output-short-term", -23.1f64)
-            .field("output-integrated", -23.2f64)
-            .field("input-true-peak", -0.5f64)
-            .field("output-true-peak", -1.2f64)
-            .field("agc-gain", 7.0f64)
-            .field(
-                "band-gain-reduction",
-                gst::Array::new([0.5f64, 1.0, 1.5, 2.0]),
-            )
-            .field("limiter-gain-reduction", 0.3f64)
-            .build();
-        let flow_id = FlowId::new_v4();
-        match meter_event(&s, flow_id, "proc") {
-            Some(StromEvent::AudioProcessorData {
-                flow_id: f,
-                element_id,
-                input_momentary,
-                input_short_term,
-                output_momentary,
-                output_short_term,
-                output_integrated,
-                input_true_peak,
-                output_true_peak,
-                agc_gain,
-                band_gain_reduction,
-                limiter_gain_reduction,
-            }) => {
-                assert_eq!(output_integrated, -23.2);
-                assert_eq!(input_true_peak, -0.5);
-                assert_eq!(f, flow_id);
-                assert_eq!(element_id, "proc");
-                assert_eq!(input_momentary, -30.0);
-                assert_eq!(input_short_term, -31.0);
-                assert_eq!(output_momentary, -23.5);
-                assert_eq!(output_short_term, -23.1);
-                assert_eq!(output_true_peak, -1.2);
-                assert_eq!(agc_gain, 7.0);
-                assert_eq!(band_gain_reduction, vec![0.5, 1.0, 1.5, 2.0]);
-                assert_eq!(limiter_gain_reduction, 0.3);
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    /// The full v0.2.0 meter message: the old fields and the stage fields.
-    fn stage_meter_message() -> gst::Structure {
+    /// The full v0.2.0 meter message: loudness, AGC, multiband, limiter and
+    /// the stage fields.
+    fn meter_message() -> gst::Structure {
         gst::Structure::builder(METER_MESSAGE)
             .field("running-time", 1_000_000_000u64)
             .field("stream-time", 1_000_000_000u64)
@@ -1265,19 +1187,24 @@ mod tests {
     }
 
     #[test]
-    fn stage_meters_become_their_own_event() {
+    fn meter_message_becomes_an_event() {
         gst::init().unwrap();
-        let s = stage_meter_message();
+        let s = meter_message();
         let flow_id = FlowId::new_v4();
-        // The same message still makes the unchanged AudioProcessorData.
-        assert!(matches!(
-            meter_event(&s, flow_id, "proc"),
-            Some(StromEvent::AudioProcessorData { .. })
-        ));
-        match stage_meter_event(&s, flow_id, "proc") {
-            Some(StromEvent::AudioProcessorStageData {
+        match meter_event(&s, flow_id, "proc") {
+            Some(StromEvent::AudioProcessorData {
                 flow_id: f,
                 element_id,
+                input_momentary,
+                input_short_term,
+                output_momentary,
+                output_short_term,
+                output_integrated,
+                input_true_peak,
+                output_true_peak,
+                agc_gain,
+                band_gain_reduction,
+                limiter_gain_reduction,
                 spike_events,
                 band_expander_gain_reduction,
                 bass_clip_gain_reduction,
@@ -1288,6 +1215,16 @@ mod tests {
             }) => {
                 assert_eq!(f, flow_id);
                 assert_eq!(element_id, "proc");
+                assert_eq!(input_momentary, -30.0);
+                assert_eq!(input_short_term, -31.0);
+                assert_eq!(output_momentary, -23.5);
+                assert_eq!(output_short_term, -23.1);
+                assert_eq!(output_integrated, -23.2);
+                assert_eq!(input_true_peak, -0.5);
+                assert_eq!(output_true_peak, -1.2);
+                assert_eq!(agc_gain, 7.0);
+                assert_eq!(band_gain_reduction, vec![0.5, 1.0, 1.5]);
+                assert_eq!(limiter_gain_reduction, 0.3);
                 assert_eq!(spike_events, 3);
                 assert_eq!(band_expander_gain_reduction, vec![2.0, 0.0, 4.0]);
                 assert_eq!(bass_clip_gain_reduction, 1.25);
@@ -1300,15 +1237,24 @@ mod tests {
         }
     }
 
-    /// strom-dsp before v0.2.0 sends no stage fields: the old event still
-    /// comes, the stage event does not. A stage field missing from a newer
-    /// message drops only the stage event, and an unknown governor state
-    /// reads as `Unknown`, not as a dropped message.
+    /// strom-dsp v0.2.0 always sends every field: any one missing, stage
+    /// fields included, drops the event. An unknown governor state reads as
+    /// `Unknown`, not as a dropped message.
     #[test]
-    fn stage_meters_with_a_missing_field_are_ignored() {
+    fn meter_message_with_any_field_missing_is_ignored() {
         gst::init().unwrap();
         let flow_id = FlowId::new_v4();
         for field in [
+            "input-momentary",
+            "input-short-term",
+            "output-momentary",
+            "output-short-term",
+            "output-integrated",
+            "input-true-peak",
+            "output-true-peak",
+            "agc-gain",
+            "band-gain-reduction",
+            "limiter-gain-reduction",
             "spike-events",
             "band-expander-gain-reduction",
             "bass-clip-gr",
@@ -1317,30 +1263,23 @@ mod tests {
             "budget-excess",
             "governor-state",
         ] {
-            let mut s = stage_meter_message();
+            let mut s = meter_message();
             s.remove_field(field);
             assert!(
-                stage_meter_event(&s, flow_id, "proc").is_none(),
-                "{field} missing"
-            );
-            assert!(
-                meter_event(&s, flow_id, "proc").is_some(),
+                meter_event(&s, flow_id, "proc").is_none(),
                 "{field} missing"
             );
         }
 
-        let mut s = stage_meter_message();
+        let mut s = meter_message();
         s.set("governor-state", "sideways");
         assert!(matches!(
-            stage_meter_event(&s, flow_id, "proc"),
-            Some(StromEvent::AudioProcessorStageData {
+            meter_event(&s, flow_id, "proc"),
+            Some(StromEvent::AudioProcessorData {
                 governor_state: AudioProcessorGovernorState::Unknown,
                 ..
             })
         ));
-
-        let s = gst::Structure::builder("ebur128-level").build();
-        assert!(stage_meter_event(&s, flow_id, "proc").is_none());
     }
 
     #[test]

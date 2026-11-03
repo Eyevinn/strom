@@ -267,7 +267,8 @@ fn standard_latency_mode_is_the_default() {
 }
 
 /// The element's meter message reaches clients as `AudioProcessorData`, keyed
-/// by the block id, with one gain reduction per band.
+/// by the block id, with one gain reduction and one expander reduction per
+/// band.
 #[test]
 fn meter_messages_become_events() {
     init();
@@ -294,23 +295,26 @@ fn meter_messages_become_events() {
     a.pipeline.set_state(gst::State::Playing).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut got = None;
-    let mut stages = None;
-    while got.is_none() || stages.is_none() {
+    while got.is_none() {
         match rx.try_recv() {
             Ok(StromEvent::AudioProcessorData {
                 flow_id: f,
                 element_id,
                 band_gain_reduction,
                 output_true_peak,
-                ..
-            }) => got = Some((f, element_id, band_gain_reduction, output_true_peak)),
-            Ok(StromEvent::AudioProcessorStageData {
-                flow_id: f,
-                element_id,
                 band_expander_gain_reduction,
                 clip_depth,
                 ..
-            }) => stages = Some((f, element_id, band_expander_gain_reduction, clip_depth)),
+            }) => {
+                got = Some((
+                    f,
+                    element_id,
+                    band_gain_reduction,
+                    output_true_peak,
+                    band_expander_gain_reduction,
+                    clip_depth,
+                ))
+            }
             Ok(_) => {}
             Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             Err(_) => break,
@@ -321,16 +325,12 @@ fn meter_messages_become_events() {
     bus.remove_signal_watch();
     main_loop.quit();
 
-    let (f, element_id, bands, tp) = got.expect("an AudioProcessorData event within 10 s");
+    let (f, element_id, bands, tp, expander, clip_depth) =
+        got.expect("an AudioProcessorData event within 10 s");
     assert_eq!(f, flow_id);
     assert_eq!(element_id, "proc");
     assert_eq!(bands.len(), 3);
     assert!(tp.is_finite());
-
-    let (f, element_id, expander, clip_depth) =
-        stages.expect("an AudioProcessorStageData event within 10 s");
-    assert_eq!(f, flow_id);
-    assert_eq!(element_id, "proc");
     assert_eq!(expander.len(), 3);
     assert!(clip_depth.is_finite());
 }

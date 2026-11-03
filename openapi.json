@@ -11848,94 +11848,7 @@
                   "output_true_peak",
                   "agc_gain",
                   "band_gain_reduction",
-                  "limiter_gain_reduction"
-                ],
-                "properties": {
-                  "agc_gain": {
-                    "type": "number",
-                    "format": "double",
-                    "description": "Gain the loudness AGC applies, in dB (positive = boost)"
-                  },
-                  "band_gain_reduction": {
-                    "type": "array",
-                    "items": {
-                      "type": "number",
-                      "format": "double"
-                    },
-                    "description": "Gain reduction per active multiband band, in dB (positive = reduction)"
-                  },
-                  "element_id": {
-                    "type": "string",
-                    "description": "The block instance id."
-                  },
-                  "flow_id": {
-                    "type": "string",
-                    "format": "uuid"
-                  },
-                  "input_momentary": {
-                    "type": "number",
-                    "format": "double",
-                    "description": "Input momentary loudness in LUFS (400 ms window)"
-                  },
-                  "input_short_term": {
-                    "type": "number",
-                    "format": "double",
-                    "description": "Input short-term loudness in LUFS (3 s window)"
-                  },
-                  "input_true_peak": {
-                    "type": "number",
-                    "format": "double",
-                    "description": "Input true peak in dBTP, the maximum since the previous message"
-                  },
-                  "limiter_gain_reduction": {
-                    "type": "number",
-                    "format": "double",
-                    "description": "Gain reduction of the true-peak limiter, in dB (positive = reduction)"
-                  },
-                  "output_integrated": {
-                    "type": "number",
-                    "format": "double",
-                    "description": "Output integrated loudness in LUFS (gated BS.1770), since the start\nor the last reset"
-                  },
-                  "output_momentary": {
-                    "type": "number",
-                    "format": "double",
-                    "description": "Output momentary loudness in LUFS"
-                  },
-                  "output_short_term": {
-                    "type": "number",
-                    "format": "double",
-                    "description": "Output short-term loudness in LUFS"
-                  },
-                  "output_true_peak": {
-                    "type": "number",
-                    "format": "double",
-                    "description": "Output true peak in dBTP, the maximum since the previous message"
-                  }
-                }
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "AudioProcessorData"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Stage meters from an Audio Processor block: spike guard, expander, bass\nclipper, final clipper and clip budget governor. Sent from the same\nelement message as `AudioProcessorData`, right after it, when the\nelement reports these stages (strom-dsp v0.2.0 and later).\nSilence reads -200.0, never NaN or infinity.",
-            "required": [
-              "data",
-              "type"
-            ],
-            "properties": {
-              "data": {
-                "type": "object",
-                "description": "Stage meters from an Audio Processor block: spike guard, expander, bass\nclipper, final clipper and clip budget governor. Sent from the same\nelement message as `AudioProcessorData`, right after it, when the\nelement reports these stages (strom-dsp v0.2.0 and later).\nSilence reads -200.0, never NaN or infinity.",
-                "required": [
-                  "flow_id",
-                  "element_id",
+                  "limiter_gain_reduction",
                   "spike_events",
                   "band_expander_gain_reduction",
                   "bass_clip_gain_reduction",
@@ -11945,6 +11858,11 @@
                   "governor_state"
                 ],
                 "properties": {
+                  "agc_gain": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Gain the loudness AGC applies, in dB (positive = boost)"
+                  },
                   "band_expander_gain_reduction": {
                     "type": "array",
                     "items": {
@@ -11952,6 +11870,14 @@
                       "format": "double"
                     },
                     "description": "Downward expander attenuation per active band, in dB (positive =\nattenuation)"
+                  },
+                  "band_gain_reduction": {
+                    "type": "array",
+                    "items": {
+                      "type": "number",
+                      "format": "double"
+                    },
+                    "description": "Gain reduction per active multiband band, in dB (positive = reduction)"
                   },
                   "bass_clip_gain_reduction": {
                     "type": "number",
@@ -11980,10 +11906,50 @@
                     "$ref": "#/components/schemas/AudioProcessorGovernorState",
                     "description": "What the clip budget governor is doing"
                   },
+                  "input_momentary": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Input momentary loudness in LUFS (400 ms window)"
+                  },
+                  "input_short_term": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Input short-term loudness in LUFS (3 s window)"
+                  },
+                  "input_true_peak": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Input true peak in dBTP, the maximum since the previous message"
+                  },
+                  "limiter_gain_reduction": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Gain reduction of the true-peak limiter, in dB (positive = reduction)"
+                  },
                   "loudness_deficit": {
                     "type": "number",
                     "format": "double",
                     "description": "How far the output stays under the target with all of the\ngovernor's density used, in LU (>= 0)"
+                  },
+                  "output_integrated": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Output integrated loudness in LUFS (gated BS.1770), since the start\nor the last reset"
+                  },
+                  "output_momentary": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Output momentary loudness in LUFS"
+                  },
+                  "output_short_term": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Output short-term loudness in LUFS"
+                  },
+                  "output_true_peak": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Output true peak in dBTP, the maximum since the previous message"
                   },
                   "spike_events": {
                     "type": "integer",
@@ -11996,7 +11962,7 @@
               "type": {
                 "type": "string",
                 "enum": [
-                  "AudioProcessorStageData"
+                  "AudioProcessorData"
                 ]
               }
             }

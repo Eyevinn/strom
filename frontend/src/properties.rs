@@ -1110,13 +1110,7 @@ impl PropertyInspector {
                             }
                         }
                         match flow_id.and_then(|fid| audioprocessor_data_store.get(&fid, &block.id)) {
-                            Some(data) => crate::audioprocessor::show_full(
-                                ui,
-                                data,
-                                flow_id.and_then(|fid| {
-                                    audioprocessor_data_store.get_stages(&fid, &block.id)
-                                }),
-                            ),
+                            Some(data) => crate::audioprocessor::show_full(ui, data),
                             None => {
                                 ui.colored_label(
                                     Color32::from_rgb(200, 200, 100),
