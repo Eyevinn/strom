@@ -113,13 +113,13 @@ impl BlockBuilder for MixerBuilder {
         let num_groups = parse_num_groups(properties);
         let sample_rate = parse_sample_rate(properties);
         let dsp_backend = get_string_prop(properties, "dsp_backend", "rust");
-        if dsp_backend != "rust" && dsp_backend != "lv2" {
+        if !matches!(dsp_backend, "rust" | "stromdsp" | "lv2") {
             warn!(
                 "Unrecognized dsp_backend '{}', falling back to 'rust'",
                 dsp_backend
             );
         }
-        let dsp_backend = if dsp_backend == "rust" || dsp_backend == "lv2" {
+        let dsp_backend = if matches!(dsp_backend, "rust" | "stromdsp" | "lv2") {
             dsp_backend
         } else {
             "rust"

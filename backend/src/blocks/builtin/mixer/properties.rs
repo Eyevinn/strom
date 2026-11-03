@@ -156,7 +156,7 @@ pub fn translate_property_for_element(
     // when static plugins and LV2 plugins coexist.
     let type_name = element.type_().name();
 
-    if type_name == "LspRsGate" {
+    if type_name == "LspRsGate" || type_name == "StromDspGate" {
         let pairs = match prop_name {
             "gt" => {
                 // LV2: gt is linear (already transformed by db_to_linear).
@@ -178,7 +178,7 @@ pub fn translate_property_for_element(
         return pairs;
     }
 
-    if type_name == "LspRsCompressor" {
+    if type_name == "LspRsCompressor" || type_name == "StromDspCompressor" {
         let pair = match prop_name {
             "al" => ("threshold".to_string(), value.clone()),
             "cr" => ("ratio".to_string(), value.clone()),
@@ -200,7 +200,7 @@ pub fn translate_property_for_element(
         return vec![pair];
     }
 
-    if type_name == "LspRsEqualizer" {
+    if type_name == "LspRsEqualizer" || type_name == "StromDspEqualizer" {
         // EQ band properties: f-N -> bandN-frequency, g-N -> bandN-gain, q-N -> bandN-q
         if let Some(band) = prop_name.strip_prefix("f-") {
             return vec![(format!("band{}-frequency", band), value.clone())];
@@ -220,7 +220,7 @@ pub fn translate_property_for_element(
         return vec![];
     }
 
-    if type_name == "LspRsLimiter" {
+    if type_name == "LspRsLimiter" || type_name == "StromDspLimiter" {
         let pair = match prop_name {
             "th" => {
                 // LV2: th is linear (already transformed by db_to_linear).

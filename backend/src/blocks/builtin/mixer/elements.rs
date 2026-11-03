@@ -6,6 +6,10 @@ use tracing::{error, warn};
 
 use super::properties::db_to_linear;
 use super::EQ_BAND_TYPE_BELL;
+use strom_types::mixer::{
+    DEFAULT_COMP_AUTO_MAKEUP, DEFAULT_COMP_DETECTOR, DEFAULT_GATE_HOLD, DEFAULT_GATE_REDUCTION,
+    DEFAULT_LIMITER_ATTACK, DEFAULT_LIMITER_LOOKAHEAD, DEFAULT_LIMITER_RELEASE,
+};
 
 /// Cached result of checking whether audiomixer supports the force-live property.
 static AUDIOMIXER_HAS_FORCE_LIVE: OnceLock<bool> = OnceLock::new();
@@ -125,6 +129,22 @@ pub(super) fn make_rate_pin(name: &str, rate: u32) -> Result<gst::Element, Block
         .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter {}: {}", name, e)))
 }
 
+/// Element factory for one of the built-in Rust DSP elements: `stromdsp-*`
+/// for the `stromdsp` backend, `lsp-rs-*` for `rust`. Both sets have the same
+/// property interface.
+fn rust_factory(backend: &str, kind: &str) -> &'static str {
+    match (backend, kind) {
+        ("stromdsp", "gate") => "stromdsp-gate",
+        ("stromdsp", "compressor") => "stromdsp-compressor",
+        ("stromdsp", "equalizer") => "stromdsp-equalizer",
+        ("stromdsp", "limiter") => "stromdsp-limiter",
+        (_, "gate") => "lsp-rs-gate",
+        (_, "compressor") => "lsp-rs-compressor",
+        (_, "equalizer") => "lsp-rs-equalizer",
+        _ => "lsp-rs-limiter",
+    }
+}
+
 /// Create a gate element, falling back to identity passthrough if unavailable.
 pub(super) fn make_gate_element(
     name: &str,
@@ -134,16 +154,25 @@ pub(super) fn make_gate_element(
     release_ms: f64,
     backend: &str,
 ) -> Result<gst::Element, BlockBuildError> {
-    if backend == "rust" {
-        if let Ok(gate) = gst::ElementFactory::make("lsp-rs-gate").name(name).build() {
+    if backend == "rust" || backend == "stromdsp" {
+        if let Ok(gate) = gst::ElementFactory::make(rust_factory(backend, "gate"))
+            .name(name)
+            .build()
+        {
             gate.set_property("enabled", enabled);
             gate.set_property("open-threshold", threshold_db as f32);
             gate.set_property("close-threshold", threshold_db as f32);
             gate.set_property("attack", attack_ms as f32);
             gate.set_property("release", release_ms as f32);
+            gate.set_property("hold", DEFAULT_GATE_HOLD);
+            gate.set_property("reduction", DEFAULT_GATE_REDUCTION);
             return Ok(gate);
         }
-        error!("lsp-rs-gate not available for {}, using passthrough", name);
+        error!(
+            "{} not available for {}, using passthrough",
+            rust_factory(backend, "gate"),
+            name
+        );
     } else if let Ok(gate) = gst::ElementFactory::make("lsp-plug-in-plugins-lv2-gate-stereo")
         .name(name)
         .build()
@@ -183,8 +212,8 @@ pub(super) fn make_compressor_element(
     makeup_db: f64,
     backend: &str,
 ) -> Result<gst::Element, BlockBuildError> {
-    if backend == "rust" {
-        if let Ok(comp) = gst::ElementFactory::make("lsp-rs-compressor")
+    if backend == "rust" || backend == "stromdsp" {
+        if let Ok(comp) = gst::ElementFactory::make(rust_factory(backend, "compressor"))
             .name(name)
             .build()
         {
@@ -194,10 +223,18 @@ pub(super) fn make_compressor_element(
             comp.set_property("attack", attack_ms as f32);
             comp.set_property("release", release_ms as f32);
             comp.set_property("makeup-gain", db_to_linear(makeup_db) as f32);
+            // Only strom-dsp offers a detector choice and auto makeup.
+            if comp.find_property("detector").is_some() {
+                comp.set_property_from_str("detector", DEFAULT_COMP_DETECTOR);
+            }
+            if comp.find_property("auto-makeup").is_some() {
+                comp.set_property("auto-makeup", DEFAULT_COMP_AUTO_MAKEUP);
+            }
             return Ok(comp);
         }
         error!(
-            "lsp-rs-compressor not available for {}, using passthrough",
+            "{} not available for {}, using passthrough",
+            rust_factory(backend, "compressor"),
             name
         );
     } else if let Ok(comp) = gst::ElementFactory::make("lsp-plug-in-plugins-lv2-compressor-stereo")
@@ -245,8 +282,8 @@ pub(super) fn make_eq_element(
     bands: &[(f64, f64, f64); 4],
     backend: &str,
 ) -> Result<gst::Element, BlockBuildError> {
-    if backend == "rust" {
-        if let Ok(eq) = gst::ElementFactory::make("lsp-rs-equalizer")
+    if backend == "rust" || backend == "stromdsp" {
+        if let Ok(eq) = gst::ElementFactory::make(rust_factory(backend, "equalizer"))
             .name(name)
             .build()
         {
@@ -262,7 +299,8 @@ pub(super) fn make_eq_element(
             return Ok(eq);
         }
         error!(
-            "lsp-rs-equalizer not available for {}, using passthrough",
+            "{} not available for {}, using passthrough",
+            rust_factory(backend, "equalizer"),
             name
         );
     } else if let Ok(eq) =
@@ -309,17 +347,21 @@ pub(super) fn make_limiter_element(
     threshold_db: f64,
     backend: &str,
 ) -> Result<gst::Element, BlockBuildError> {
-    if backend == "rust" {
-        if let Ok(lim) = gst::ElementFactory::make("lsp-rs-limiter")
+    if backend == "rust" || backend == "stromdsp" {
+        if let Ok(lim) = gst::ElementFactory::make(rust_factory(backend, "limiter"))
             .name(name)
             .build()
         {
             lim.set_property("enabled", enabled);
             lim.set_property("threshold", threshold_db as f32); // dB directly
+            lim.set_property("attack", DEFAULT_LIMITER_ATTACK);
+            lim.set_property("release", DEFAULT_LIMITER_RELEASE);
+            lim.set_property("lookahead", DEFAULT_LIMITER_LOOKAHEAD);
             return Ok(lim);
         }
         error!(
-            "lsp-rs-limiter not available for {}, using passthrough",
+            "{} not available for {}, using passthrough",
+            rust_factory(backend, "limiter"),
             name
         );
     } else if let Ok(lim) = gst::ElementFactory::make("lsp-plug-in-plugins-lv2-limiter-stereo")

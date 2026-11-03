@@ -31,13 +31,17 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         ExposedProperty {
             name: "dsp_backend".to_string(),
             label: "DSP Backend".to_string(),
-            description: "LV2 uses external C++ LSP plugins, Rust uses built-in lsp-plugins-rs"
+            description: "LV2 uses external C++ LSP plugins, Rust uses built-in lsp-plugins-rs, strom-dsp uses built-in strom-dsp"
                 .to_string(),
             property_type: PropertyType::Enum {
                 values: vec![
                     EnumValue {
                         value: "rust".to_string(),
                         label: Some("Rust".to_string()),
+                    },
+                    EnumValue {
+                        value: "stromdsp".to_string(),
+                        label: Some("strom-dsp".to_string()),
                     },
                     EnumValue {
                         value: "lv2".to_string(),

@@ -14,6 +14,11 @@ pub const DEFAULT_HPF_FREQ: f32 = 80.0;
 pub const DEFAULT_GATE_THRESHOLD: f32 = -40.0;
 pub const DEFAULT_GATE_ATTACK: f32 = 5.0;
 pub const DEFAULT_GATE_RELEASE: f32 = 100.0;
+/// Hold before the gate starts closing (ms). Set explicitly so the gate does
+/// not depend on the DSP element's own default.
+pub const DEFAULT_GATE_HOLD: f32 = 50.0;
+/// Attenuation when the gate is closed (dB).
+pub const DEFAULT_GATE_REDUCTION: f32 = -60.0;
 
 // Compressor (shared between channel and main bus)
 pub const DEFAULT_COMP_THRESHOLD: f32 = -20.0;
@@ -22,6 +27,12 @@ pub const DEFAULT_COMP_ATTACK: f32 = 10.0;
 pub const DEFAULT_COMP_RELEASE: f32 = 100.0;
 pub const DEFAULT_COMP_MAKEUP: f32 = 0.0;
 pub const DEFAULT_COMP_KNEE: f32 = -6.0;
+/// Compressor level detector for DSP elements that offer a choice (`peak` or
+/// `rms`). RMS follows perceived level and compresses programme and speech
+/// more gently than a peak detector.
+pub const DEFAULT_COMP_DETECTOR: &str = "rms";
+/// Automatic makeup gain, for DSP elements that offer it.
+pub const DEFAULT_COMP_AUTO_MAKEUP: bool = false;
 
 // EQ bands: (freq Hz, gain dB, Q)
 pub const DEFAULT_EQ_BANDS: [(f32, f32, f32); 4] = [
@@ -33,6 +44,11 @@ pub const DEFAULT_EQ_BANDS: [(f32, f32, f32); 4] = [
 
 // Limiter
 pub const DEFAULT_LIMITER_THRESHOLD: f32 = -3.0;
+/// Limiter attack, release and lookahead (ms). Set explicitly so the limiter
+/// does not depend on the DSP element's own defaults.
+pub const DEFAULT_LIMITER_ATTACK: f32 = 1.0;
+pub const DEFAULT_LIMITER_RELEASE: f32 = 100.0;
+pub const DEFAULT_LIMITER_LOOKAHEAD: f32 = 5.0;
 
 // ── Structural defaults ─────────────────────────────────────────────
 pub const DEFAULT_CHANNELS: usize = 8;

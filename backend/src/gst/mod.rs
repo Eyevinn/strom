@@ -57,6 +57,7 @@ pub fn register_static_plugins() {
         );
     }
     gst_plugins_lsp::plugin_register_static().expect("Could not register lsp-dsp-rs plugins");
+    gststromdsp::plugin_register_static().expect("Could not register strom-dsp plugins");
     #[cfg(feature = "efp")]
     gst_plugin_efp::plugin_register_static().expect("Could not register efp mux/demux plugins");
 }
