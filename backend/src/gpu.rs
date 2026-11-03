@@ -36,7 +36,8 @@ pub fn has_hardware_gl() -> bool {
 
 /// Probe the OpenGL renderer via GStreamer's GL context API.
 ///
-/// Creates a minimal in-process pipeline (`videotestsrc ! glupload ! appsink`),
+/// Creates a minimal in-process pipeline
+/// (`videotestsrc ! glupload ! video/x-raw(memory:GLMemory) ! appsink`),
 /// runs it to produce one buffer, extracts the `GstGLContext` from the GL memory,
 /// then queries `glGetString` on the GL thread via `thread_add`.
 fn detect_gl_renderer() -> Option<GlRendererInfo> {
@@ -49,8 +50,12 @@ fn detect_gl_renderer() -> Option<GlRendererInfo> {
     const GL_VERSION: u32 = 0x1F02;
     const GL_SHADING_LANGUAGE_VERSION: u32 = 0x8B8C;
 
+    // The GLMemory capsfilter is required: without it, GStreamer 1.28's
+    // glupload negotiates DMABuf output towards an unconstrained appsink,
+    // the buffer carries no GL context and the probe reports "no GL".
     let pipeline = gst::parse::launch(
-        "videotestsrc num-buffers=1 ! video/x-raw,width=64,height=64 ! glupload ! appsink name=sink",
+        "videotestsrc num-buffers=1 ! video/x-raw,width=64,height=64 ! glupload ! \
+         video/x-raw(memory:GLMemory) ! appsink name=sink",
     )
     .map_err(|e| warn!("GL probe: failed to create pipeline: {}", e))
     .ok()?;
