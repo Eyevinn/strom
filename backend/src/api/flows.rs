@@ -2402,7 +2402,7 @@ pub async fn set_vision_mixer_effect(
     }))
 }
 
-/// Reset accumulated loudness measurements on an EBU R128 meter block.
+/// Reset the loudness measurements of a Loudness Meter or Audio Processor block.
 #[utoipa::path(
     post,
     path = "/api/flows/{flow_id}/blocks/{block_id}/loudness/reset",

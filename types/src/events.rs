@@ -141,13 +141,18 @@ pub enum StromEvent {
         output_momentary: f64,
         /// Output short-term loudness in LUFS
         output_short_term: f64,
+        /// Output integrated loudness in LUFS (gated BS.1770), since the start
+        /// or the last reset
+        output_integrated: f64,
+        /// Input true peak in dBTP, the maximum since the previous message
+        input_true_peak: f64,
         /// Output true peak in dBTP, the maximum since the previous message
         output_true_peak: f64,
-        /// Gain the loudness AGC applies, in dB
+        /// Gain the loudness AGC applies, in dB (positive = boost)
         agc_gain: f64,
-        /// Gain reduction per active multiband band, in dB
+        /// Gain reduction per active multiband band, in dB (positive = reduction)
         band_gain_reduction: Vec<f64>,
-        /// Gain reduction of the true-peak limiter, in dB
+        /// Gain reduction of the true-peak limiter, in dB (positive = reduction)
         limiter_gain_reduction: f64,
     },
     /// Audio latency measurement data from GStreamer audiolatency element
@@ -1387,6 +1392,8 @@ mod event_accessor_tests {
                 input_short_term: -23.0,
                 output_momentary: -23.0,
                 output_short_term: -23.0,
+                output_integrated: -23.0,
+                input_true_peak: -2.0,
                 output_true_peak: -3.0,
                 agc_gain: 0.0,
                 band_gain_reduction: vec![0.0; 4],

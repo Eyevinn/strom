@@ -31,7 +31,6 @@ pub const CUSTOM_ONLY_PROPERTIES: &[&str] = &[
     "multiband_drive",
     "limiter_enabled",
     "limiter_release",
-    "limiter_lookahead",
 ];
 
 /// Preset that applies the block's own (Strom's) values for every setting.
@@ -80,7 +79,8 @@ pub const DEFAULT_MULTIBAND_DRIVE_DB: f32 = 0.0;
 
 pub const DEFAULT_LIMITER_ENABLED: bool = true;
 pub const DEFAULT_LIMITER_RELEASE_MS: f32 = 80.0;
-/// Limiter lookahead (ms). Construction-time only.
+/// Limiter lookahead (ms). Construction-time only. Presets do not set it
+/// (they all assume 5 ms), so the block sets it with every preset.
 pub const DEFAULT_LIMITER_LOOKAHEAD_MS: f32 = 5.0;
 
 // ── Custom preset: band settings the block sets but does not expose ──

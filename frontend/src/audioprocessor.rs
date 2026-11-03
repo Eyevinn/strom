@@ -27,6 +27,8 @@ pub struct AudioProcessorData {
     pub input_short_term: f64,
     pub output_momentary: f64,
     pub output_short_term: f64,
+    pub output_integrated: f64,
+    pub input_true_peak: f64,
     pub output_true_peak: f64,
     pub agc_gain: f64,
     pub band_gain_reduction: Vec<f64>,
@@ -80,7 +82,7 @@ fn fmt_level(v: f64, unit: &str) -> String {
     if v <= SILENCE_FLOOR {
         "---".to_string()
     } else {
-        format!("{v:.1} {unit}")
+        format!("{v:.1} {unit}").trim_end().to_string()
     }
 }
 
@@ -88,8 +90,9 @@ fn lufs_fraction(lufs: f64) -> f32 {
     ((lufs - MIN_LUFS) / (MAX_LUFS - MIN_LUFS)).clamp(0.0, 1.0) as f32
 }
 
+/// Gain reduction is positive dB of reduction.
 fn reduction_fraction(db: f64) -> f32 {
-    (db.abs() / MAX_REDUCTION_DB).clamp(0.0, 1.0) as f32
+    (db / MAX_REDUCTION_DB).clamp(0.0, 1.0) as f32
 }
 
 /// One horizontal bar filled to `fraction` of its width.
@@ -135,9 +138,10 @@ pub fn show_compact(ui: &mut Ui, data: &AudioProcessorData) {
     );
     ui.label(
         egui::RichText::new(format!(
-            "AGC {:+.1} dB  LIM {:.1} dB",
+            "I {}  AGC {:+.1}  LIM {:.1}",
+            fmt_level(data.output_integrated, ""),
             data.agc_gain,
-            -data.limiter_gain_reduction.abs()
+            data.limiter_gain_reduction
         ))
         .size(10.0),
     );
@@ -167,14 +171,21 @@ pub fn show_full(ui: &mut Ui, data: &AudioProcessorData) {
             ui.label(fmt_level(data.output_short_term, "LUFS"));
             ui.end_row();
 
-            ui.label("True peak:");
+            ui.label("Integrated:");
             ui.label("");
+            ui.label(fmt_level(data.output_integrated, "LUFS"));
+            ui.end_row();
+
+            ui.label("True peak:");
+            ui.label(fmt_level(data.input_true_peak, "dBTP"));
             ui.label(fmt_level(data.output_true_peak, "dBTP"));
             ui.end_row();
         });
 
     ui.add_space(8.0);
-    let width = ui.available_width().clamp(80.0, 240.0);
+    // Room for the label in front of a bar and the value after it. The
+    // inspector scrolls sideways, so its available width is no limit.
+    let width = (ui.available_width() - 110.0).clamp(40.0, 120.0);
 
     ui.label(format!("AGC gain: {:+.1} dB", data.agc_gain));
 
@@ -190,7 +201,7 @@ pub fn show_full(ui: &mut Ui, data: &AudioProcessorData) {
                     reduction_fraction(*gr),
                     REDUCTION_COLOR,
                 );
-                ui.label(format!("{:.1} dB", -gr.abs()));
+                ui.label(format!("{:.1} dB", *gr));
             });
         }
     }
@@ -204,7 +215,7 @@ pub fn show_full(ui: &mut Ui, data: &AudioProcessorData) {
             reduction_fraction(data.limiter_gain_reduction),
             REDUCTION_COLOR,
         );
-        ui.label(format!("{:.1} dB", -data.limiter_gain_reduction.abs()));
+        ui.label(format!("{:.1} dB", data.limiter_gain_reduction));
     });
 }
 
@@ -222,7 +233,8 @@ mod tests {
     fn bars_clamp_to_their_scale() {
         assert_eq!(lufs_fraction(-200.0), 0.0);
         assert_eq!(lufs_fraction(0.0), 1.0);
-        assert_eq!(reduction_fraction(-24.0), 1.0);
-        assert_eq!(reduction_fraction(-6.0), 0.5);
+        assert_eq!(reduction_fraction(24.0), 1.0);
+        assert_eq!(reduction_fraction(6.0), 0.5);
+        assert_eq!(reduction_fraction(-1.0), 0.0);
     }
 }

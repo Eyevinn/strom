@@ -1103,6 +1103,12 @@ impl PropertyInspector {
                     // Show meters for Audio Processor blocks
                     if definition.id == strom_types::audioprocessor::BLOCK_ID {
                         ui.separator();
+                        if let Some(flow_id) = flow_id {
+                            if ui.button("Reset Integrated Loudness").clicked() {
+                                result.loudness_reset_requested =
+                                    Some((flow_id, block.id.clone()));
+                            }
+                        }
                         match flow_id.and_then(|fid| audioprocessor_data_store.get(&fid, &block.id)) {
                             Some(data) => crate::audioprocessor::show_full(ui, data),
                             None => {

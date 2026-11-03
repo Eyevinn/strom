@@ -241,7 +241,7 @@ const SETTINGS: &[Setting] = &[
         name: "limiter_lookahead",
         element_property: "limiter-lookahead",
         label: "Limiter Lookahead (ms)",
-        description: "Limiter lookahead (0.5 to 20 ms). Adds to the block's latency. Construction-time only.",
+        description: "Limiter lookahead (0.5 to 20 ms). Adds to the block's latency. Applies with every preset. Construction-time only.",
         default: Kind::Float(DEFAULT_LIMITER_LOOKAHEAD_MS),
         live: false,
     },
@@ -301,14 +301,12 @@ pub fn custom_writes(
         }
         writes.push((s.element_property.to_string(), s.value(properties)?));
     }
-    // Ascending, starting from the lowest, so no write lands above the next
-    // crossover's current value while the element still has its own values.
-    for (n, f) in DEFAULT_CROSSOVER_FREQUENCIES_HZ.iter().enumerate() {
-        writes.push((
-            format!("crossover{n}-frequency"),
-            PropertyValue::Float(*f as f64),
-        ));
-    }
+    // All crossovers in one write: one at a time, a write can land on the
+    // wrong side of a neighbour that still has its old value.
+    writes.push((
+        CROSSOVERS_PROPERTY.to_string(),
+        PropertyValue::String(crossover_array(&DEFAULT_CROSSOVER_FREQUENCIES_HZ)),
+    ));
     for n in 0..MAX_NUM_BANDS as usize {
         for (suffix, value) in [
             ("threshold", DEFAULT_BAND_THRESHOLD_DB[n]),
@@ -326,6 +324,17 @@ pub fn custom_writes(
     Ok(writes)
 }
 
+/// Element property that sets every crossover at once (a GstValueArray of
+/// gfloat Hz).
+const CROSSOVERS_PROPERTY: &str = "crossover-frequencies";
+
+/// `frequencies` in GStreamer's serialized array form, which the checked
+/// setter deserializes into the element's GstValueArray.
+fn crossover_array(frequencies: &[f32]) -> String {
+    let items: Vec<String> = frequencies.iter().map(|f| format!("(float){f}")).collect();
+    format!("< {} >", items.join(", "))
+}
+
 /// Every element property write the block makes at build time, in order.
 pub fn build_writes(
     properties: &HashMap<String, PropertyValue>,
@@ -334,8 +343,14 @@ pub fn build_writes(
     let mut writes = Vec::new();
 
     // The settings no preset touches come first, `num-bands` before anything
-    // that addresses a band.
-    for name in ["num_bands", "enabled", "meter_interval"] {
+    // that addresses a band. The preset comes after them, so they do not
+    // turn it into custom.
+    for name in [
+        "num_bands",
+        "limiter_lookahead",
+        "enabled",
+        "meter_interval",
+    ] {
         let s = setting(name).expect("always-applied setting exists");
         writes.push((s.element_property.to_string(), s.value(properties)?));
     }
@@ -455,6 +470,8 @@ pub fn meter_event(s: &gst::StructureRef, flow_id: FlowId, element_id: &str) -> 
         input_short_term: f("input-short-term")?,
         output_momentary: f("output-momentary")?,
         output_short_term: f("output-short-term")?,
+        output_integrated: f("output-integrated")?,
+        input_true_peak: f("input-true-peak")?,
         output_true_peak: f("output-true-peak")?,
         agc_gain: f("agc-gain")?,
         band_gain_reduction,
@@ -738,7 +755,13 @@ mod tests {
         .unwrap();
         assert_eq!(
             names(&writes),
-            ["num-bands", "enabled", "meter-interval", "preset"]
+            [
+                "num-bands",
+                "limiter-lookahead",
+                "enabled",
+                "meter-interval",
+                "preset"
+            ]
         );
         assert_pv!(
             value(&writes, "preset"),
@@ -781,9 +804,7 @@ mod tests {
             .iter()
             .map(|s| s.element_property.to_string())
             .collect();
-        for n in 0..4 {
-            expected.push(format!("crossover{n}-frequency"));
-        }
+        expected.push("crossover-frequencies".to_string());
         for n in 0..5 {
             for p in ["threshold", "ratio", "attack", "release", "makeup"] {
                 expected.push(format!("band{n}-{p}"));
@@ -817,6 +838,7 @@ mod tests {
         let written = names(&writes);
         assert!(!written.contains(&"limiter-lookahead"));
         assert!(!written.contains(&"num-bands"));
+        assert!(written.contains(&"crossover-frequencies"));
         assert!(written.contains(&"target-loudness"));
         assert!(written.contains(&"band4-makeup"));
     }
@@ -863,6 +885,8 @@ mod tests {
             .field("input-short-term", -31.0f64)
             .field("output-momentary", -23.5f64)
             .field("output-short-term", -23.1f64)
+            .field("output-integrated", -23.2f64)
+            .field("input-true-peak", -0.5f64)
             .field("output-true-peak", -1.2f64)
             .field("agc-gain", 7.0f64)
             .field(
@@ -880,11 +904,15 @@ mod tests {
                 input_short_term,
                 output_momentary,
                 output_short_term,
+                output_integrated,
+                input_true_peak,
                 output_true_peak,
                 agc_gain,
                 band_gain_reduction,
                 limiter_gain_reduction,
             }) => {
+                assert_eq!(output_integrated, -23.2);
+                assert_eq!(input_true_peak, -0.5);
                 assert_eq!(f, flow_id);
                 assert_eq!(element_id, "proc");
                 assert_eq!(input_momentary, -30.0);
@@ -924,6 +952,14 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("stromdsp-broadcastprocessor"), "{msg}");
         assert!(msg.contains("strom-dsp"), "{msg}");
+    }
+
+    #[test]
+    fn crossovers_are_serialized_as_a_float_array() {
+        assert_eq!(
+            crossover_array(&[120.0, 800.5]),
+            "< (float)120, (float)800.5 >"
+        );
     }
 
     #[test]

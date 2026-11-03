@@ -2744,7 +2744,8 @@ impl AppState {
             .unwrap_or(false)
     }
 
-    /// Reset accumulated loudness measurements on an EBU R128 meter block.
+    /// Reset accumulated loudness measurements on a Loudness Meter block, or the
+    /// integrated loudness of an Audio Processor block.
     pub async fn reset_loudness(
         &self,
         flow_id: &FlowId,

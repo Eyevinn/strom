@@ -4,14 +4,11 @@
 //! strom-dsp statically, so the element is part of every build and these
 //! tests never skip on it: a build without it fails them.
 //!
-//! Tests marked `#[ignore]` need the element, which strom-dsp has not shipped
-//! yet. Remove the `ignore` once the strom-dsp dependency carries it.
 
 pub mod common;
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use gstreamer_app as gst_app;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use strom::blocks::builtin::audioprocessor::{AudioProcessorBuilder, ELEMENT_FACTORY};
@@ -23,9 +20,14 @@ use strom_types::{Flow, Link, PropertyValue, StromEvent};
 
 const NEEDS_ELEMENT: &str = "needs stromdsp-broadcastprocessor from strom-dsp (phase 2)";
 
+/// Initialise GStreamer and register strom-dsp once per process: tests run
+/// in parallel, and registering a plugin from two threads at once races.
 fn init() {
-    gst::init().expect("GStreamer initialises");
-    let _ = gststromdsp::plugin_register_static();
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        gst::init().expect("GStreamer initialises");
+        gststromdsp::plugin_register_static().expect("strom-dsp registers");
+    });
 }
 
 fn props(pairs: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
@@ -54,11 +56,11 @@ fn preset_nick(element: &gst::Element) -> String {
         .expect("preset is an enum")
 }
 
-/// The block between `src` and an appsink, built and linked.
+/// The block between `src` and a sink, built and linked.
 struct Assembled {
     pipeline: gst::Pipeline,
     processor: gst::Element,
-    sink: gst_app::AppSink,
+    sink: gst::Element,
     built: strom::blocks::BlockBuildResult,
 }
 
@@ -70,7 +72,12 @@ fn assemble(src: &str, properties: &HashMap<String, PropertyValue>) -> Assembled
     let pipeline = gst::Pipeline::new();
     let elements = common::block::install(&pipeline, &built);
     let src = gst::parse::bin_from_description(src, true).expect("source");
-    let sink = gst_app::AppSink::builder().sync(false).build();
+    // A fakesink, not an appsink: an appsink holds EOS back until every
+    // queued sample has been pulled.
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .expect("fakesink");
     pipeline.add(&src).unwrap();
     pipeline.add(&sink).unwrap();
     src.link(&elements["proc:convert"]).expect("link source");
@@ -101,7 +108,6 @@ fn run_to_eos(pipeline: &gst::Pipeline) {
 }
 
 #[test]
-#[ignore = "needs stromdsp-broadcastprocessor from strom-dsp (phase 2)"]
 fn strom_registers_the_broadcast_processor() {
     init();
     assert!(
@@ -115,11 +121,10 @@ fn strom_registers_the_broadcast_processor() {
 /// goes through, at the rate it arrived in. Fails with not-negotiated if the
 /// converter is taken out.
 #[test]
-#[ignore = "needs stromdsp-broadcastprocessor from strom-dsp (phase 2)"]
 fn s16_input_is_converted_and_its_rate_kept() {
     init();
     let a = assemble(
-        "audiotestsrc num-buffers=50 ! audio/x-raw,format=S16LE,rate=44100,channels=2",
+        "audiotestsrc num-buffers=50 ! capsfilter caps=\"audio/x-raw,format=S16LE,rate=44100,channels=2\"",
         &HashMap::new(),
     );
     run_to_eos(&a.pipeline);
@@ -137,7 +142,6 @@ fn s16_input_is_converted_and_its_rate_kept() {
 
 /// With Custom the block writes every setting itself.
 #[test]
-#[ignore = "needs stromdsp-broadcastprocessor from strom-dsp (phase 2)"]
 fn custom_preset_writes_the_block_settings() {
     init();
     let a = assemble(
@@ -180,7 +184,6 @@ fn custom_preset_writes_the_block_settings() {
 /// A named preset is applied by the element, and the block's own settings do
 /// not override it.
 #[test]
-#[ignore = "needs stromdsp-broadcastprocessor from strom-dsp (phase 2)"]
 fn named_preset_is_applied_by_the_element() {
     init();
     let a = assemble(
@@ -189,10 +192,14 @@ fn named_preset_is_applied_by_the_element() {
             ("preset", s("streaming")),
             ("target_loudness", PropertyValue::Float(-30.0)),
             ("meter_interval", PropertyValue::UInt(250)),
+            ("limiter_lookahead", PropertyValue::Float(10.0)),
         ]),
     );
     let p = &a.processor;
+    // Presets do not set the lookahead, so the block sets it with every
+    // preset, and doing so leaves the preset in place.
     assert_eq!(preset_nick(p), "streaming");
+    assert_eq!(p.property::<f32>("limiter-lookahead"), 10.0);
     // The streaming preset's target (strom-dsp phase 2 spec, 3.2).
     assert_eq!(p.property::<f32>("target-loudness"), -16.0);
     assert_eq!(p.property::<u32>("meter-interval"), 250);
@@ -201,11 +208,10 @@ fn named_preset_is_applied_by_the_element() {
 /// The element's meter message reaches clients as `AudioProcessorData`, keyed
 /// by the block id, with one gain reduction per band.
 #[test]
-#[ignore = "needs stromdsp-broadcastprocessor from strom-dsp (phase 2)"]
 fn meter_messages_become_events() {
     init();
     let mut a = assemble(
-        "audiotestsrc is-live=true wave=pink-noise ! audio/x-raw,rate=48000,channels=2",
+        "audiotestsrc is-live=true wave=pink-noise ! capsfilter caps=\"audio/x-raw,rate=48000,channels=2\"",
         &props(&[
             ("num_bands", PropertyValue::UInt(3)),
             ("meter_interval", PropertyValue::UInt(100)),
@@ -299,7 +305,7 @@ fn flow(preset: &str, extra: &[(&str, PropertyValue)]) -> Flow {
 /// Sending Custom in the same batch lets it through. Needs no running flow.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn custom_only_setting_is_refused_under_a_named_preset() {
-    gst::init().unwrap();
+    init();
     let state = common::state::new();
     let flow = flow("ebu-r128", &[]);
     let flow_id = flow.id;
@@ -342,7 +348,6 @@ async fn custom_only_setting_is_refused_under_a_named_preset() {
 /// which the element alone would not do: writing `custom` to it changes
 /// nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs stromdsp-broadcastprocessor from strom-dsp (phase 2)"]
 async fn switching_to_custom_live_applies_the_stored_settings() {
     init();
     let state = common::state::new();
@@ -385,6 +390,13 @@ async fn switching_to_custom_live_applies_the_stored_settings() {
         float(after.get("agc_max_gain")),
         Some(DEFAULT_AGC_MAX_GAIN_DB as f64)
     );
+
+    // The loudness reset endpoint restarts the processor's integrated
+    // measurement too.
+    state
+        .reset_loudness(&flow_id, "proc")
+        .await
+        .expect("reset integrated loudness");
 
     state.stop_flow(&flow_id).await.expect("stop_flow");
 }

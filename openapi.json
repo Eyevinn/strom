@@ -1230,7 +1230,7 @@
         "tags": [
           "flows"
         ],
-        "summary": "Reset accumulated loudness measurements on an EBU R128 meter block.",
+        "summary": "Reset the loudness measurements of a Loudness Meter or Audio Processor block.",
         "operationId": "reset_loudness",
         "parameters": [
           {
@@ -11829,6 +11829,8 @@
                   "input_short_term",
                   "output_momentary",
                   "output_short_term",
+                  "output_integrated",
+                  "input_true_peak",
                   "output_true_peak",
                   "agc_gain",
                   "band_gain_reduction",
@@ -11838,7 +11840,7 @@
                   "agc_gain": {
                     "type": "number",
                     "format": "double",
-                    "description": "Gain the loudness AGC applies, in dB"
+                    "description": "Gain the loudness AGC applies, in dB (positive = boost)"
                   },
                   "band_gain_reduction": {
                     "type": "array",
@@ -11846,7 +11848,7 @@
                       "type": "number",
                       "format": "double"
                     },
-                    "description": "Gain reduction per active multiband band, in dB"
+                    "description": "Gain reduction per active multiband band, in dB (positive = reduction)"
                   },
                   "element_id": {
                     "type": "string",
@@ -11866,10 +11868,20 @@
                     "format": "double",
                     "description": "Input short-term loudness in LUFS (3 s window)"
                   },
+                  "input_true_peak": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Input true peak in dBTP, the maximum since the previous message"
+                  },
                   "limiter_gain_reduction": {
                     "type": "number",
                     "format": "double",
-                    "description": "Gain reduction of the true-peak limiter, in dB"
+                    "description": "Gain reduction of the true-peak limiter, in dB (positive = reduction)"
+                  },
+                  "output_integrated": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Output integrated loudness in LUFS (gated BS.1770), since the start\nor the last reset"
                   },
                   "output_momentary": {
                     "type": "number",

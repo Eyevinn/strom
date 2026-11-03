@@ -57,12 +57,20 @@ impl PipelineManager {
         Ok(())
     }
 
-    /// Reset accumulated loudness measurements on an EBU R128 meter block.
+    /// Reset accumulated loudness measurements on a Loudness Meter block, or
+    /// the integrated loudness of an Audio Processor block. Both elements
+    /// take a `reset` action signal.
     pub fn reset_loudness(&self, block_instance_id: &str) -> Result<(), PipelineError> {
         let element_id = format!("{}:ebur128level", block_instance_id);
+        let processor_id = format!(
+            "{}:{}",
+            block_instance_id,
+            crate::blocks::builtin::audioprocessor::PROCESSOR_ELEMENT
+        );
         let element = self
             .elements
             .get(&element_id)
+            .or_else(|| self.elements.get(&processor_id))
             .ok_or_else(|| PipelineError::ElementNotFound(element_id.clone()))?;
         element.emit_by_name::<()>("reset", &[]);
         info!("Reset loudness measurements on {}", block_instance_id);
