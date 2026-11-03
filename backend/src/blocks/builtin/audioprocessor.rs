@@ -583,10 +583,12 @@ fn audioprocessor_definition() -> BlockDefinition {
 
     BlockDefinition {
         id: BLOCK_ID.to_string(),
-        name: "Audio Processor".to_string(),
-        description: "Broadcast/streaming final processor: loudness AGC, multiband compressor \
-                      and true-peak limiter, with presets for EBU R 128, ATSC A/85, streaming \
-                      and speech. Put it on the programme output, before the encoder."
+        name: "Audio Processor (experimental)".to_string(),
+        description: "Experimental. Broadcast/streaming final processor: loudness AGC, \
+                      multiband compressor and true-peak limiter, with presets for EBU R 128, \
+                      ATSC A/85, streaming and speech. Put it on the programme output, before \
+                      the encoder. Known limitation: very peaky programme can land below the \
+                      target, by up to about 2.7 LU on the streaming preset."
             .to_string(),
         category: "Audio".to_string(),
         exposed_properties,
@@ -650,6 +652,8 @@ mod tests {
         let def = audioprocessor_definition();
         assert_eq!(def.id, "builtin.audioprocessor");
         assert_eq!(def.category, "Audio");
+        // No framework-wide flag exists for this; the name says it.
+        assert!(def.name.contains("experimental"), "{}", def.name);
         assert_eq!(def.external_pads.inputs.len(), 1);
         assert_eq!(def.external_pads.outputs.len(), 1);
         assert_eq!(def.external_pads.inputs[0].media_type, MediaType::Audio);
