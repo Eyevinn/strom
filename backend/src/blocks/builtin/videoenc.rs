@@ -28,7 +28,6 @@
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gst::download_front;
 use crate::gst::pipeline::properties::set_property_checked;
-use crate::gst::software_decoder::is_hardware;
 use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -321,41 +320,12 @@ fn parse_rate_control(properties: &HashMap<String, PropertyValue>) -> RateContro
 
 /// Select the best available encoder for the given codec and preference.
 fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String, BlockBuildError> {
+    let media_type = codec_media_type(codec);
     // Get priority list of encoders to try
     let encoder_list = get_encoder_priority_list(codec, preference);
-
-    // Try each encoder in priority order
-    for candidate in &encoder_list {
-        let mut found = false;
-        for feature_name in candidate_feature_names(candidate) {
-            // Device-numbered features are registered in sequence, so the
-            // first missing one ends the list.
-            let Some(factory) = gst::ElementFactory::find(&feature_name) else {
-                break;
-            };
-            found = true;
-            // Check if element is disabled via GST_PLUGIN_FEATURE_RANK (rank = 0/NONE)
-            if factory.rank() == gst::Rank::NONE {
-                info!("Encoder disabled (rank=0): {}", feature_name);
-                continue;
-            }
-            if !hardware_candidate_accepted(&feature_name, is_hardware(&factory)) {
-                info!(
-                    "Skipping {}: a software Media Foundation transform, not a hardware encoder",
-                    feature_name
-                );
-                continue;
-            }
-            info!(
-                "Found available encoder: {} (rank={:?})",
-                feature_name,
-                factory.rank()
-            );
-            return Ok(feature_name);
-        }
-        if !found {
-            info!("Encoder not available: {}", candidate);
-        }
+    let factories = registry_snapshot(&encoder_list);
+    if let Some(encoder_name) = choose_encoder(&encoder_list, media_type, &factories) {
+        return Ok(encoder_name);
     }
 
     // If we get here, no encoder from the priority list was found
@@ -377,15 +347,10 @@ fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String,
         EncoderPreference::Auto => {
             // Try software encoders as fallback
             let software_list = get_software_encoder_list(codec);
-            for encoder_name in &software_list {
-                if let Some(factory) = gst::ElementFactory::find(encoder_name) {
-                    if factory.rank() == gst::Rank::NONE {
-                        info!("Software encoder disabled (rank=0): {}", encoder_name);
-                        continue;
-                    }
-                    warn!("Using software fallback encoder: {}", encoder_name);
-                    return Ok(encoder_name.to_string());
-                }
+            let factories = registry_snapshot(&software_list);
+            if let Some(encoder_name) = choose_encoder(&software_list, media_type, &factories) {
+                warn!("Using software fallback encoder: {}", encoder_name);
+                return Ok(encoder_name);
             }
             Err(BlockBuildError::InvalidConfiguration(format!(
                 "No encoder available for {:?} (tried hardware and software)",
@@ -425,9 +390,9 @@ fn get_hardware_encoder_list(codec: Codec) -> Vec<&'static str> {
             "vtenc_h264",    // May use software fallback
             // AMD AMF (Windows)
             "amfh264enc",
-            // Windows Media Foundation hardware MFT (any vendor; older Windows
+            // Windows Media Foundation hardware MFTs (any vendor; older Windows
             // systems with no NVENC/QSV/AMF element)
-            "mfh264enc",
+            MEDIA_FOUNDATION_CANDIDATE,
             // V4L2 (Raspberry Pi, embedded Linux)
             "v4l2h264enc",
         ],
@@ -446,8 +411,8 @@ fn get_hardware_encoder_list(codec: Codec) -> Vec<&'static str> {
             "vtenc_h265",    // May use software fallback
             // AMD AMF
             "amfh265enc",
-            // Windows Media Foundation hardware MFT
-            "mfh265enc",
+            // Windows Media Foundation hardware MFTs
+            MEDIA_FOUNDATION_CANDIDATE,
             // V4L2 (Raspberry Pi 4+, embedded Linux)
             "v4l2h265enc",
         ],
@@ -470,8 +435,8 @@ fn get_hardware_encoder_list(codec: Codec) -> Vec<&'static str> {
             "qsvvp9enc",
             // VA-API
             "vavp9enc",
-            // Windows Media Foundation hardware MFT
-            "mfvp9enc",
+            // Windows Media Foundation hardware MFTs
+            MEDIA_FOUNDATION_CANDIDATE,
         ],
     }
 }
@@ -551,7 +516,19 @@ fn set_encoder_properties(
     let keyframe_str = keyframe_interval.to_string();
 
     // Bitrate mapping (different encoders use different property names and units)
-    if encoder_name.starts_with("x264") || encoder_name.starts_with("x265") {
+    let plugin_name = encoder.factory().and_then(|f| f.plugin_name());
+    if is_media_foundation_plugin(plugin_name.as_deref()) {
+        // Identified by plugin, not name: the plugin names its features per
+        // device, `mf{codec}enc` and `mf{codec}device{N}enc`.
+        set_mf_encoder_properties(
+            encoder,
+            encoder_name,
+            bitrate,
+            quality_preset,
+            tune,
+            rate_control,
+        )?;
+    } else if encoder_name.starts_with("x264") || encoder_name.starts_with("x265") {
         // x264/x265: bitrate in kbps
         set_encoder_property(encoder, "bitrate", &bitrate_str)?;
         // x264/x265: speed-preset
@@ -564,7 +541,11 @@ fn set_encoder_properties(
         // the target bitrate — large frame bursts overflow shallow buffers on
         // constrained viewer paths (observed as bursty packet loss on WebRTC).
         if encoder.has_property("vbv-buf-capacity") {
-            set_encoder_property(encoder, "vbv-buf-capacity", "500")?;
+            set_encoder_property(
+                encoder,
+                "vbv-buf-capacity",
+                &BURST_VBV_WINDOW_MS.to_string(),
+            )?;
         }
     } else if encoder_name.starts_with("nv") {
         // NVENC encoders: bitrate in kbps
@@ -607,17 +588,18 @@ fn set_encoder_properties(
         // spike to ~10x the average frame size. Those frames leave the NIC as
         // line-rate packet bursts that overflow shallow buffers on constrained
         // viewer paths (observed as bursty packet loss on WebRTC outputs).
-        // - max-bitrate: cap VBR at 1.2x target (ignored in CBR mode)
-        // - vbv-buffer-size (kbits): 0.5 s worth of target bitrate, bounding
-        //   how large any single frame can get
+        // - max-bitrate (kbit/s): cap VBR at the peak (ignored in CBR mode)
+        // - vbv-buffer-size (kbits): one VBV window of target bitrate,
+        //   bounding how large any single frame can get
+        let limits = BurstLimits::for_bitrate_kbps(bitrate);
         if encoder.has_property("max-bitrate") {
             let max_bitrate =
-                clamp_to_property_range(encoder, "max-bitrate", u64::from(bitrate) * 12 / 10);
+                clamp_to_property_range(encoder, "max-bitrate", limits.peak_bits_per_sec / 1000);
             set_encoder_property(encoder, "max-bitrate", &max_bitrate.to_string())?;
         }
         if encoder.has_property("vbv-buffer-size") {
             let vbv_size =
-                clamp_to_property_range(encoder, "vbv-buffer-size", u64::from(bitrate / 2));
+                clamp_to_property_range(encoder, "vbv-buffer-size", limits.vbv_bits / 1000);
             set_encoder_property(encoder, "vbv-buffer-size", &vbv_size.to_string())?;
         }
 
@@ -652,15 +634,6 @@ fn set_encoder_properties(
         if encoder.has_property("usage") {
             set_encoder_property(encoder, "usage", usage)?;
         }
-    } else if is_media_foundation(encoder_name) {
-        set_mf_encoder_properties(
-            encoder,
-            encoder_name,
-            bitrate,
-            quality_preset,
-            tune,
-            rate_control,
-        )?;
     } else if encoder_name.starts_with("vtenc") {
         // Apple VideoToolbox (macOS): bitrate property is in kbps
         set_encoder_property(encoder, "bitrate", &bitrate_str)?;
@@ -821,6 +794,46 @@ fn set_encoder_properties(
     );
 
     Ok(())
+}
+
+/// Peak bitrate allowed in VBR, as a percentage of the target.
+const BURST_PEAK_PERCENT: u64 = 120;
+
+/// VBV (HRD) window: how much of the target bitrate one burst may take.
+const BURST_VBV_WINDOW_MS: u64 = 500;
+
+/// The block's burst policy in explicit units, for encoders whose defaults
+/// leave single-frame excursions unbounded. Frames far above the average
+/// leave the NIC as line-rate packet bursts that overflow shallow buffers on
+/// constrained viewer paths (observed as bursty packet loss on WebRTC). Each
+/// encoder branch converts these to its own property units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BurstLimits {
+    /// VBR peak cap, bits per second (1000-based, as the block's `bitrate`).
+    peak_bits_per_sec: u64,
+    /// VBV buffer, bits: one [`BURST_VBV_WINDOW_MS`] window of target bitrate.
+    vbv_bits: u64,
+}
+
+impl BurstLimits {
+    fn for_bitrate_kbps(bitrate_kbps: u32) -> Self {
+        let bits_per_sec = u64::from(bitrate_kbps) * 1000;
+        Self {
+            peak_bits_per_sec: bits_per_sec * BURST_PEAK_PERCENT / 100,
+            vbv_bits: bits_per_sec * BURST_VBV_WINDOW_MS / 1000,
+        }
+    }
+}
+
+/// The encoded media type `codec` produces, as it appears in an encoder's
+/// source pad template.
+fn codec_media_type(codec: Codec) -> &'static str {
+    match codec {
+        Codec::H264 => "video/x-h264",
+        Codec::H265 => "video/x-h265",
+        Codec::AV1 => "video/x-av1",
+        Codec::VP9 => "video/x-vp9",
+    }
 }
 
 /// The property that takes the keyframe interval in frames, by the names
@@ -1198,10 +1211,11 @@ fn videoenc_definition() -> BlockDefinition {
 }
 
 mod mediafoundation;
+mod selection;
 use mediafoundation::{
-    candidate_feature_names, hardware_candidate_accepted, is_media_foundation,
-    set_mf_encoder_properties,
+    is_media_foundation_plugin, set_mf_encoder_properties, MEDIA_FOUNDATION_CANDIDATE,
 };
+use selection::{choose_encoder, registry_snapshot};
 
 #[cfg(test)]
 mod tests;
