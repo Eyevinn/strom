@@ -20,14 +20,11 @@ use strom_types::{Flow, Link, PropertyValue, StromEvent};
 
 const NEEDS_ELEMENT: &str = "needs stromdsp-broadcastprocessor from strom-dsp (phase 2)";
 
-/// Initialise GStreamer and register strom-dsp once per process: tests run
-/// in parallel, and registering a plugin from two threads at once races.
+/// Initialise GStreamer and register strom-dsp, through the same once-per-
+/// process helper the mixer tests use.
 fn init() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        gst::init().expect("GStreamer initialises");
-        gststromdsp::plugin_register_static().expect("strom-dsp registers");
-    });
+    gst::init().expect("GStreamer initialises");
+    strom::gst::register_dsp_plugins();
 }
 
 fn props(pairs: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
