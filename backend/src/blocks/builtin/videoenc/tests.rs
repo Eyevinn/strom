@@ -709,47 +709,76 @@ fn test_block_encoder_preference() {
     }
 }
 
-/// #1163: QSV is only safe from Intel driver 32.0.101.9150 on. An unknown
-/// version (no Intel adapter, or unreadable) is not.
-#[test]
-fn qsv_needs_intel_driver_9150_or_later() {
-    use crate::gst::intel_driver_has_qsv_fix as fixed;
-    assert!(!fixed(None));
-    assert!(!fixed(Some([32, 0, 101, 8991])));
-    assert!(!fixed(Some([32, 0, 101, 8247])));
-    assert!(!fixed(Some([31, 0, 101, 9999])));
-    assert!(fixed(Some([32, 0, 101, 9150])));
-    assert!(fixed(Some([32, 0, 101, 9151])));
-    assert!(fixed(Some([32, 0, 102, 1])));
-    assert!(fixed(Some([33, 0, 0, 0])));
-}
-
-/// #1163: on Windows with an Intel driver older than 32.0.101.9150, the QSV
-/// encoders corrupt the process heap, so once `demote_qsv_encoders` has run
-/// the block never selects one. With 9150 or later they keep their rank.
-/// Elsewhere QSV keeps its rank and this checks nothing.
+/// #1163: on Windows with a Core Ultra GPU and an Intel driver older than
+/// 32.0.101.9150, the QSV encoders corrupt the process heap, so once
+/// `demote_qsv_plugin` has run the block never selects one. With 9150 or
+/// later, or on other GPUs, they keep their rank. Elsewhere QSV keeps its rank
+/// and this checks nothing.
+///
+/// The independent check: when the `qsv` plugin registered features, DXGI
+/// must have found the Intel adapter behind them, with a real device id. The
+/// rank checks reuse `qsv_at_risk`, so they show the demotion was applied to
+/// every feature of the qsv plugin (decoders and per-device ones included)
+/// and set the refusal, not that the decision is right; the unit tests in
+/// `gst::intel_qsv` cover that.
 #[test]
 fn qsv_encoders_follow_the_intel_driver_on_windows() {
+    use crate::gst::intel_qsv::{self, QsvMode};
+
     init_gst();
-    crate::gst::demote_qsv_encoders();
+    crate::gst::demote_qsv_plugin();
     if !cfg!(windows) {
         return;
     }
-    let version = crate::gst::intel_driver_version();
-    let safe = crate::gst::intel_driver_has_qsv_fix(version);
-    eprintln!("Intel driver {version:?}: QSV safe = {safe}");
-    for name in crate::gst::QSV_ENCODERS {
-        if let Some(factory) = gst::ElementFactory::find(name) {
+    let features = intel_qsv::qsv_plugin_features();
+    let scan = intel_qsv::intel_adapters();
+    let names: Vec<String> = features.iter().map(|f| f.name().to_string()).collect();
+    eprintln!("QSV plugin features {names:?}, adapter scan {scan:?}");
+    if features.is_empty() {
+        return;
+    }
+    assert!(
+        !scan.intel.is_empty(),
+        "qsv registered {names:?} but DXGI found no Intel adapter: {scan:?}"
+    );
+    for adapter in &scan.intel {
+        assert_ne!(
+            adapter.device_id, 0,
+            "Intel adapter without a device id: {scan:?}"
+        );
+    }
+    let demote = match intel_qsv::qsv_mode_from_env() {
+        QsvMode::Off => true,
+        QsvMode::On => false,
+        QsvMode::Auto => intel_qsv::qsv_at_risk(&scan.intel).is_some(),
+    };
+    assert_eq!(
+        intel_qsv::qsv_blocked(),
+        demote,
+        "qsv_blocked() on {scan:?}"
+    );
+    for factory in &features {
+        let name = factory.name();
+        assert_eq!(
+            crate::gst::qsv_refusal(&name).is_some(),
+            demote,
+            "{name} refusal on {scan:?}"
+        );
+        if demote {
             assert_eq!(
-                factory.rank() == gst::Rank::NONE,
-                !safe,
-                "{name} has rank {:?} with the Intel driver {} the fix",
                 factory.rank(),
-                if safe { "with" } else { "without" }
+                gst::Rank::NONE,
+                "{name} kept its rank on {scan:?}"
+            );
+        } else if crate::gst::QSV_ENCODERS.contains(&name.as_str()) {
+            assert_ne!(
+                factory.rank(),
+                gst::Rank::NONE,
+                "{name} was demoted on {scan:?}"
             );
         }
     }
-    if safe {
+    if !demote {
         return;
     }
     for codec in [Codec::H264, Codec::H265, Codec::AV1, Codec::VP9] {

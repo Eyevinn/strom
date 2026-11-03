@@ -99,7 +99,7 @@ pub fn init_webrtc_plugins() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         gst::init().expect("GStreamer initialises");
-        strom::gst::demote_qsv_encoders();
+        strom::gst::demote_qsv_plugin();
         strom::gst::register_static_plugins();
     });
 }

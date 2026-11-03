@@ -166,6 +166,12 @@ impl ElementDiscovery {
             return None;
         };
 
+        // Loading the qsv plugin crashes on some Intel drivers (#1163).
+        if let Some(refusal) = crate::gst::qsv_refusal(name) {
+            warn!("Skipping pad properties: {}", refusal);
+            return Some(element_info);
+        }
+
         // Create temporary element with error handling
         let element = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             factory.create().build()
@@ -613,6 +619,11 @@ impl ElementDiscovery {
         use strom_types::element::{PropertyInfo, PropertyType, PropertyValue};
 
         debug!("Lazy-loading properties for {}", factory.name());
+
+        // Loading the qsv plugin crashes on some Intel drivers (#1163).
+        if let Some(refusal) = crate::gst::qsv_refusal(&factory.name()) {
+            anyhow::bail!(refusal);
+        }
 
         // Create a temporary element instance to introspect properties
         // Wrap in catch_unwind to prevent crashes from problematic elements
