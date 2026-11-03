@@ -17,8 +17,8 @@
 //! memory (an AVFoundation camera prefers GL), at the configured resolution
 //! and framerate: each consumer adapts its own input (BLOCK_GUIDELINES). It
 //! goes through a queue that holds what the source captures (see
-//! `source_queue`). Audio goes through the same kind of queue, then `audioconvert` + `audioresample` + an
-//! `audio/x-raw` capsfilter.
+//! `source_queue`). Audio goes through the same kind of queue, then
+//! `audioconvert` + `audioresample` + an `audio/x-raw` capsfilter.
 //!
 //! `stream_mode` chooses which pads are exposed (`audio_video`, `video`,
 //! `audio`) the same way the DeckLink and WHEP blocks do.
@@ -178,11 +178,12 @@ impl BlockBuilder for LocalInputBuilder {
             )?;
 
             // The capture front, followed only by the source queue, which is
-            // the block's video output: the source must deliver the configured resolution / framerate at
-            // capture time (AVFoundation, v4l2 and Media Foundation pick the
-            // device mode that matches) rather than running at the device's
-            // default mode. Nothing in the block scales; a consumer that needs
-            // another size scales on its own input.
+            // the block's video output: the source must deliver the
+            // configured resolution / framerate at capture time
+            // (AVFoundation, v4l2 and Media Foundation pick the device mode
+            // that matches) rather than running at the device's default mode.
+            // Nothing in the block scales; a consumer that needs another size
+            // scales on its own input.
             // Both memory types are offered, system memory first so a device
             // that can deliver either keeps producing what it does today. A
             // capsfilter naming only `video/x-raw` means SystemMemory, not

@@ -16,10 +16,11 @@
 
 pub mod common;
 
+use common::latency;
+
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 use strom::blocks::builtin::devicesrc::LocalInputBuilder;
 use strom::blocks::BlockBuilder;
 use strom_types::PropertyValue;
@@ -42,19 +43,7 @@ fn camera_like_source() -> gst::Element {
         .build()
         .expect("videotestsrc");
     let frame = gst::ClockTime::from_nseconds(1_000_000_000 / 30);
-    src.static_pad("src").unwrap().add_probe(
-        gst::PadProbeType::QUERY_UPSTREAM,
-        move |_pad, info| {
-            let Some(gst::PadProbeData::Query(query)) = info.data.as_mut() else {
-                return gst::PadProbeReturn::Ok;
-            };
-            let gst::QueryViewMut::Latency(q) = query.view_mut() else {
-                return gst::PadProbeReturn::Ok;
-            };
-            q.set(true, frame, frame);
-            gst::PadProbeReturn::Handled
-        },
-    );
+    latency::report_latency(&src, frame, frame);
     src
 }
 
@@ -63,45 +52,6 @@ fn caps_filter() -> gst::Element {
         .property("caps", CAPS.parse::<gst::Caps>().unwrap())
         .build()
         .expect("capsfilter")
-}
-
-/// A sink that syncs, with the default 20 ms processing deadline, as
-/// `srtsink` has.
-fn syncing_sink() -> gst::Element {
-    gst::ElementFactory::make("fakesink")
-        .property("sync", true)
-        .build()
-        .expect("fakesink")
-}
-
-/// Play `pipeline` for a second and return the warnings it posted.
-fn warnings(pipeline: &gst::Pipeline) -> Vec<String> {
-    let bus = pipeline.bus().unwrap();
-    pipeline.set_state(gst::State::Playing).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(1);
-    let mut warnings = Vec::new();
-    while Instant::now() < deadline {
-        let Some(msg) = bus.timed_pop_filtered(
-            gst::ClockTime::from_mseconds(50),
-            &[gst::MessageType::Warning, gst::MessageType::Error],
-        ) else {
-            continue;
-        };
-        match msg.view() {
-            gst::MessageView::Warning(w) => warnings.push(w.error().to_string()),
-            gst::MessageView::Error(e) => panic!("the pipeline failed: {}", e.error()),
-            _ => {}
-        }
-    }
-    pipeline.set_state(gst::State::Null).unwrap();
-    warnings
-}
-
-fn add_queues_warnings(warnings: &[String]) -> usize {
-    warnings
-        .iter()
-        .filter(|w| w.contains("please add queues"))
-        .count()
 }
 
 #[test]
@@ -113,12 +63,12 @@ fn the_stand_in_alone_trips_a_syncing_sink() {
     let pipeline = gst::Pipeline::new();
     let src = camera_like_source();
     let filter = caps_filter();
-    let sink = syncing_sink();
+    let sink = latency::syncing_sink();
     pipeline.add_many([&src, &filter, &sink]).unwrap();
     gst::Element::link_many([&src, &filter, &sink]).unwrap();
-    let warnings = warnings(&pipeline);
+    let warnings = latency::warnings(&pipeline);
     assert!(
-        add_queues_warnings(&warnings) > 0,
+        latency::add_queues_warnings(&warnings) > 0,
         "a camera-like source straight into a syncing sink should warn: {warnings:?}"
     );
 }
@@ -167,7 +117,7 @@ fn a_camera_like_source_through_local_input_does_not_trip_a_syncing_sink() {
 
     let src = camera_like_source();
     let filter = caps_filter();
-    let sink = syncing_sink();
+    let sink = latency::syncing_sink();
     pipeline.add_many([&src, &filter, &sink]).unwrap();
     src.link(&filter).unwrap();
     filter
@@ -179,9 +129,9 @@ fn a_camera_like_source_through_local_input_does_not_trip_a_syncing_sink() {
         .link(&sink.static_pad("sink").unwrap())
         .expect("the block's video output links to the sink");
 
-    let warnings = warnings(&pipeline);
+    let warnings = latency::warnings(&pipeline);
     assert_eq!(
-        add_queues_warnings(&warnings),
+        latency::add_queues_warnings(&warnings),
         0,
         "Local Input must report the latency it can hold: {warnings:?}"
     );
