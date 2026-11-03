@@ -1,4 +1,4 @@
-//! Keep the Intel Quick Sync Video encoders away from the Intel driver bug in #1163.
+//! Keep the Intel Quick Sync Video plugin away from the Intel driver bug in #1163.
 //!
 //! Before 32.0.101.9150, Intel's D3D11 driver for Core Ultra graphics corrupts
 //! the process heap (STATUS_HEAP_CORRUPTION) when it refuses a VP9 or AV1
@@ -8,24 +8,41 @@
 //!
 //! The bug is reported on Core Ultra Series 1 (Meteor Lake) and Series 2
 //! (Arrow Lake, Lunar Lake) integrated graphics, and not on Raptor Lake
-//! (intel/vpl-gpu-rt#383). So the QSV encoders are demoted only when such an
+//! (intel/vpl-gpu-rt#383). So the `qsv` plugin is blocked only when such an
 //! adapter runs a driver older than [`QSV_FIXED_INTEL_DRIVER`], or one whose
-//! version cannot be read. Everywhere else they keep their rank.
+//! version cannot be read. Everywhere else it is left alone.
+//!
+//! Loading any feature of the plugin runs its `plugin_init`, which is where
+//! the driver crashes. So blocking has two parts:
+//! - every feature of the `qsv` plugin (encoders, decoders, anything else)
+//!   drops to rank NONE, so nothing autoplugs or auto-selects one;
+//! - [`qsv_blocked`] is set, and the places that create an element by name
+//!   (generic flow elements, element introspection, gst-launch import) refuse
+//!   a `qsv` factory with [`qsv_refusal`].
 //!
 //! Policy: [`QSV_AFFECTED_DEVICES`] lists the GPUs the bug is known on. It is
-//! deliberately not inverted into "demote every GPU not known to be safe": an
-//! unknown GPU keeps its QSV encoders. When another GPU is reported affected,
-//! its PCI ids are added to the list. Until then the operator can force the
-//! decision with [`QSV_ENV`].
+//! deliberately not inverted into "block every GPU not known to be safe": an
+//! unknown GPU keeps QSV. When another GPU is reported affected, its PCI ids
+//! are added to the list. Until then the operator can force the decision with
+//! [`QSV_ENV`].
 
 /// Environment variable that overrides the detection: `auto` (or unset),
-/// `on`/`enable` (never demote), `off`/`disable` (always demote, on every
+/// `on`/`enable` (never block), `off`/`disable` (always block, on every
 /// platform).
+///
+/// It covers GStreamer's `qsv` plugin only. Intel's hardware Media Foundation
+/// encoders (`mfh264enc`, `mfh265enc`, `mfvp9enc`, Intel's own Quick Sync
+/// MFTs) are not affected by it, and were not seen to crash in #1163. To
+/// disable them as well, set
+/// `GST_PLUGIN_FEATURE_RANK=mfh264enc:0,mfh265enc:0,mfvp9enc:0`.
 pub const QSV_ENV: &str = "STROM_QSV";
+
+/// The GStreamer plugin #1163 crashes in.
+const QSV_PLUGIN: &str = "qsv";
 
 /// The Intel Quick Sync Video encoders from GStreamer's `qsv` plugin, for its
 /// first device. Further devices register `qsvh264device1enc` and so on, which
-/// [`qsv_encoder_features`] finds in the registry.
+/// [`qsv_plugin_features`] finds in the registry with the rest of the plugin.
 pub const QSV_ENCODERS: [&str; 4] = ["qsvh264enc", "qsvh265enc", "qsvvp9enc", "qsvav1enc"];
 
 /// The first Intel graphics driver for Windows whose D3D11 driver no longer
@@ -43,7 +60,7 @@ const INTEL_DRIVER_DOWNLOAD: &str =
 /// Discrete Arc (Alchemist, Battlemage), Panther Lake and Raptor Lake and
 /// older are not listed: the bug is not reported on them. This is a list of
 /// known affected GPUs, not of known safe ones (see the module docs).
-pub const QSV_AFFECTED_DEVICES: [(u16, &str); 13] = [
+pub const QSV_AFFECTED_DEVICES: [(u32, &str); 13] = [
     // INTEL_MTL_IDS (Core Ultra Series 1)
     (0x7D40, "Meteor Lake"),
     (0x7D45, "Meteor Lake"),
@@ -65,10 +82,9 @@ pub const QSV_AFFECTED_DEVICES: [(u16, &str); 13] = [
 /// The GPU family of PCI `device_id` when it is one the #1163 driver bug is
 /// reported on, `None` otherwise.
 pub fn qsv_affected_family(device_id: u32) -> Option<&'static str> {
-    let id = u16::try_from(device_id).ok()?;
     QSV_AFFECTED_DEVICES
         .iter()
-        .find(|(affected, _)| *affected == id)
+        .find(|(affected, _)| *affected == device_id)
         .map(|(_, family)| *family)
 }
 
@@ -87,8 +103,8 @@ pub struct IntelAdapter {
     pub driver: Option<[u16; 4]>,
 }
 
-/// Something the adapter scan could not read. Unknown hardware keeps its QSV
-/// encoders, but the operator is told.
+/// Something the adapter scan could not read. Unknown hardware keeps QSV, but
+/// the operator is told.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanIssue {
     /// DXGI could not be opened, so no adapter was seen at all.
@@ -115,9 +131,9 @@ pub struct AdapterScan {
     pub issues: Vec<ScanIssue>,
 }
 
-/// The first adapter that puts the QSV encoders at risk of #1163: an affected
-/// GPU whose driver is older than [`QSV_FIXED_INTEL_DRIVER`] or unknown.
-/// `None` means the QSV encoders can keep their rank.
+/// The first adapter that puts QSV at risk of #1163: an affected GPU whose
+/// driver is older than [`QSV_FIXED_INTEL_DRIVER`] or unknown. `None` means
+/// QSV can be left alone.
 pub fn qsv_at_risk(adapters: &[IntelAdapter]) -> Option<&IntelAdapter> {
     adapters
         .iter()
@@ -127,11 +143,11 @@ pub fn qsv_at_risk(adapters: &[IntelAdapter]) -> Option<&IntelAdapter> {
 /// The operator's choice in [`QSV_ENV`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QsvMode {
-    /// Demote only on an affected GPU with an old driver (the default).
+    /// Block only on an affected GPU with an old driver (the default).
     Auto,
-    /// Never demote.
+    /// Never block.
     On,
-    /// Always demote, on every platform.
+    /// Always block, on every platform.
     Off,
 }
 
@@ -163,34 +179,95 @@ pub fn qsv_mode_from_env() -> QsvMode {
     })
 }
 
-/// True when an element factory of class `klass` is an encoder.
-fn is_encoder_klass(klass: &str) -> bool {
-    klass.split('/').any(|part| part == "Encoder")
+/// What [`demote_qsv_plugin`] does for a [`QsvMode`] on a platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QsvPlan {
+    /// Block the plugin without looking at the hardware (`STROM_QSV=off`).
+    Block,
+    /// Leave the plugin alone without looking at the hardware.
+    Keep,
+    /// Scan the adapters and block when one is at risk (`auto` on Windows).
+    Detect,
+    /// Scan the adapters only to warn, and leave the plugin alone
+    /// (`STROM_QSV=on` on Windows).
+    Override,
 }
 
-/// Every QSV encoder feature in the registry: [`QSV_ENCODERS`] and the
-/// per-device features (`qsvh264device1enc`, ...) of the `qsv` plugin.
+impl QsvPlan {
+    /// Whether the plan blocks the plugin, given whether an adapter is at risk.
+    pub fn blocks(self, at_risk: bool) -> bool {
+        match self {
+            Self::Block => true,
+            Self::Keep | Self::Override => false,
+            Self::Detect => at_risk,
+        }
+    }
+}
+
+/// The plan for `mode`. `off` blocks on every platform: it is the operator's
+/// explicit choice. Detection runs on Windows only, where the bug is.
+pub fn qsv_plan(mode: QsvMode, windows: bool) -> QsvPlan {
+    match (mode, windows) {
+        (QsvMode::Off, _) => QsvPlan::Block,
+        (QsvMode::On, true) => QsvPlan::Override,
+        (QsvMode::Auto, true) => QsvPlan::Detect,
+        (QsvMode::On | QsvMode::Auto, false) => QsvPlan::Keep,
+    }
+}
+
+/// Every feature of the `qsv` plugin in the registry (encoders, decoders,
+/// per-device features), plus [`QSV_ENCODERS`].
 ///
-/// Reads registry metadata only. Neither listing a plugin's features nor
-/// reading a factory's class loads the plugin, and loading it is what
-/// triggers #1163.
-pub fn qsv_encoder_features() -> Vec<gstreamer::ElementFactory> {
+/// Reads registry metadata only: listing a plugin's features does not load
+/// the plugin, and loading it is what triggers #1163.
+pub fn qsv_plugin_features() -> Vec<gstreamer::PluginFeature> {
     use gstreamer::prelude::*;
 
-    let mut factories: Vec<gstreamer::ElementFactory> = gstreamer::Registry::get()
-        .features_by_plugin("qsv")
+    let mut features: Vec<gstreamer::PluginFeature> = gstreamer::Registry::get()
+        .features_by_plugin(QSV_PLUGIN)
         .into_iter()
-        .filter_map(|feature| feature.downcast::<gstreamer::ElementFactory>().ok())
-        .filter(|factory| is_encoder_klass(factory.klass()))
         .collect();
     for name in QSV_ENCODERS {
         if let Some(factory) = gstreamer::ElementFactory::find(name) {
-            if !factories.contains(&factory) {
-                factories.push(factory);
+            let feature = factory.upcast::<gstreamer::PluginFeature>();
+            if !features.contains(&feature) {
+                features.push(feature);
             }
         }
     }
-    factories
+    features
+}
+
+/// Set once by [`demote_qsv_plugin`]: whether the plugin is blocked.
+static QSV_BLOCKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// True when [`demote_qsv_plugin`] blocked the `qsv` plugin in this process.
+pub fn qsv_blocked() -> bool {
+    QSV_BLOCKED.get().copied().unwrap_or(false)
+}
+
+/// The refusal for creating element `factory_name` by name, when it belongs to
+/// the `qsv` plugin and the plugin is blocked. `None` means it may be created.
+/// Reads registry metadata only, so it never loads the plugin.
+pub fn qsv_refusal(factory_name: &str) -> Option<String> {
+    use gstreamer::prelude::*;
+
+    if !qsv_blocked() {
+        return None;
+    }
+    let factory = gstreamer::ElementFactory::find(factory_name)?;
+    let in_qsv = factory.plugin_name().is_some_and(|p| p == QSV_PLUGIN)
+        || QSV_ENCODERS.contains(&factory_name);
+    in_qsv.then(|| qsv_refusal_message(factory_name))
+}
+
+fn qsv_refusal_message(factory_name: &str) -> String {
+    format!(
+        "{factory_name} is disabled: the Intel graphics driver on this host corrupts the heap \
+         when the qsv plugin loads (#1163). Install Intel graphics driver {} or later, or set \
+         {QSV_ENV}=on to load it anyway",
+        show_version(Some(QSV_FIXED_INTEL_DRIVER))
+    )
 }
 
 fn show_version(version: Option<[u16; 4]>) -> String {
@@ -199,46 +276,61 @@ fn show_version(version: Option<[u16; 4]>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Drop the rank of every Intel Quick Sync Video encoder to NONE when an Intel
-/// GPU that has the #1163 driver bug runs a driver older than
-/// [`QSV_FIXED_INTEL_DRIVER`] (or one whose version cannot be read), so nothing
-/// picks them: neither the Video Encoder block, which skips an encoder of rank
-/// NONE, nor `webrtcsink`'s encoder discovery in WHEP Output.
+fn list_or_none(names: &[String]) -> String {
+    if names.is_empty() {
+        "not installed".to_string()
+    } else {
+        names.join(", ")
+    }
+}
+
+/// Block the Intel Quick Sync Video plugin when an Intel GPU that has the
+/// #1163 driver bug runs a driver older than [`QSV_FIXED_INTEL_DRIVER`] (or one
+/// whose version cannot be read): every `qsv` feature drops to rank NONE, so
+/// nothing picks one (the Video Encoder block, `webrtcsink`'s encoder
+/// discovery in WHEP Output, `decodebin`), and [`qsv_blocked`] is set, so
+/// creating one by name is refused.
 ///
 /// The `qsv` plugin does not say which adapter a per-device feature belongs to
-/// without loading it, so when any affected adapter is at risk, all QSV encoder
-/// features are demoted.
+/// without loading it, so when any affected adapter is at risk, the whole
+/// plugin is blocked.
 ///
 /// Detection runs on Windows only. [`QSV_ENV`] overrides it: `on` never
-/// demotes, `off` always demotes, on any platform. Call after `gst::init()`
-/// and before `register_static_plugins()`: `webrtcsink` reads encoder ranks
-/// when it registers.
-pub fn demote_qsv_encoders() {
-    let mode = qsv_mode_from_env();
-    if mode == QsvMode::Off {
-        let demoted = demote_all();
-        tracing::info!(
-            "{}=off: QSV encoders disabled ({})",
-            QSV_ENV,
-            if demoted.is_empty() {
-                "none installed".to_string()
-            } else {
-                demoted.join(", ")
-            }
-        );
-        return;
-    }
-    if !cfg!(windows) {
-        return;
+/// blocks, `off` always blocks, on any platform. Runs once per process; later
+/// calls are free. Call after `gst::init()` and before
+/// `register_static_plugins()`: `webrtcsink` reads encoder ranks when it
+/// registers.
+pub fn demote_qsv_plugin() {
+    QSV_BLOCKED.get_or_init(|| run_plan(qsv_plan(qsv_mode_from_env(), cfg!(windows))));
+}
+
+/// Carry out `plan`. Returns whether the plugin is blocked.
+fn run_plan(plan: QsvPlan) -> bool {
+    match plan {
+        QsvPlan::Keep => return false,
+        QsvPlan::Block => {
+            let demoted = demote_all();
+            tracing::info!(
+                "{}=off: Intel QSV plugin disabled ({})",
+                QSV_ENV,
+                list_or_none(&demoted)
+            );
+            return true;
+        }
+        QsvPlan::Detect | QsvPlan::Override => {}
     }
     let scan = intel_adapters();
     for issue in &scan.issues {
-        tracing::warn!(
-            "Intel QSV check: {}. QSV encoders keep their rank. If QSV crashes Strom \
-             (#1163), set {}=off",
-            issue,
-            QSV_ENV
-        );
+        if plan == QsvPlan::Override {
+            tracing::debug!("Intel QSV check: {}", issue);
+        } else {
+            tracing::warn!(
+                "Intel QSV check: {}. QSV keeps its rank. If QSV crashes Strom (#1163), \
+                 set {}=off",
+                issue,
+                QSV_ENV
+            );
+        }
     }
     for adapter in &scan.intel {
         tracing::debug!(
@@ -249,22 +341,23 @@ pub fn demote_qsv_encoders() {
         );
     }
     let risk = qsv_at_risk(&scan.intel);
-    if mode == QsvMode::On {
-        tracing::info!("{}=on: QSV encoders keep their rank", QSV_ENV);
-        if let Some(risk) = risk {
-            tracing::warn!(
-                "{}=on overrides the #1163 check: Intel graphics driver {} on {} graphics \
-                 (0x{:04X}) can corrupt the heap when QSV loads. Install {} or later",
-                QSV_ENV,
-                show_version(risk.driver),
-                qsv_affected_family(risk.device_id).unwrap_or("Intel"),
-                risk.device_id,
-                show_version(Some(QSV_FIXED_INTEL_DRIVER))
-            );
+    if !plan.blocks(risk.is_some()) {
+        if plan == QsvPlan::Override {
+            tracing::info!("{}=on: Intel QSV plugin keeps its rank", QSV_ENV);
+            if let Some(risk) = risk {
+                tracing::warn!(
+                    "{}=on overrides the #1163 check: Intel graphics driver {} on {} graphics \
+                     (0x{:04X}) can corrupt the heap when the qsv plugin loads. Install {} or \
+                     later",
+                    QSV_ENV,
+                    show_version(risk.driver),
+                    qsv_affected_family(risk.device_id).unwrap_or("Intel"),
+                    risk.device_id,
+                    show_version(Some(QSV_FIXED_INTEL_DRIVER))
+                );
+            }
+            return false;
         }
-        return;
-    }
-    let Some(risk) = risk else {
         let affected: Vec<String> = scan
             .intel
             .iter()
@@ -273,25 +366,23 @@ pub fn demote_qsv_encoders() {
             .collect();
         if !affected.is_empty() {
             tracing::info!(
-                "Intel graphics driver has the fix for #1163: QSV encoders enabled ({})",
+                "Intel graphics driver has the fix for #1163: QSV enabled ({})",
                 affected.join(", ")
             );
         } else if !scan.intel.is_empty() {
-            tracing::info!(
-                "Intel graphics adapter not affected by #1163: QSV encoders keep their rank"
-            );
+            tracing::info!("Intel graphics adapter not affected by #1163: QSV keeps its rank");
         } else if scan.issues.is_empty() {
-            tracing::info!("No Intel graphics adapter: QSV encoders keep their rank");
+            tracing::info!("No Intel graphics adapter: QSV keeps its rank");
         }
-        return;
-    };
+        return false;
+    }
     let demoted = demote_all();
-    if !demoted.is_empty() {
+    if let Some(risk) = risk {
         tracing::warn!(
-            "Intel QSV encoders disabled ({}): Intel graphics driver {} on {} graphics \
-             (0x{:04X}) corrupts the heap when QSV probes its encoders (#1163). \
-             Install {} or later to use them: {}. To keep them anyway, set {}=on",
-            demoted.join(", "),
+            "Intel QSV plugin disabled ({}): Intel graphics driver {} on {} graphics \
+             (0x{:04X}) corrupts the heap when the qsv plugin loads (#1163). Install {} or \
+             later to use it: {}. To keep it anyway, set {}=on",
+            list_or_none(&demoted),
             show_version(risk.driver),
             qsv_affected_family(risk.device_id).unwrap_or("Intel"),
             risk.device_id,
@@ -300,19 +391,20 @@ pub fn demote_qsv_encoders() {
             QSV_ENV
         );
     }
+    true
 }
 
-/// Set every QSV encoder feature's rank to NONE. Returns the names of the ones
-/// that had a rank.
+/// Set every `qsv` feature's rank to NONE. Returns the names of the ones that
+/// had a rank.
 fn demote_all() -> Vec<String> {
     use gstreamer::prelude::*;
 
-    qsv_encoder_features()
+    qsv_plugin_features()
         .into_iter()
-        .filter_map(|factory| {
-            let ranked = factory.rank() != gstreamer::Rank::NONE;
-            factory.set_rank(gstreamer::Rank::NONE);
-            ranked.then(|| factory.name().to_string())
+        .filter_map(|feature| {
+            let ranked = feature.rank() != gstreamer::Rank::NONE;
+            feature.set_rank(gstreamer::Rank::NONE);
+            ranked.then(|| feature.name().to_string())
         })
         .collect()
 }
@@ -446,7 +538,7 @@ mod tests {
     #[test]
     fn other_intel_gpus_are_not_affected() {
         // Raptor Lake-P/-S, Alder Lake-P, Arc A770, Arc B580, Panther Lake,
-        // and an id that does not fit in 16 bits.
+        // and an id above 16 bits whose low half is Meteor Lake.
         for id in [0xA7A0, 0xA780, 0x46A6, 0x56A0, 0xE20B, 0xB080, 0x1_7D55] {
             assert_eq!(
                 qsv_affected_family(id),
@@ -508,10 +600,37 @@ mod tests {
     }
 
     #[test]
-    fn encoder_klass_matches_encoders_only() {
-        assert!(is_encoder_klass("Codec/Encoder/Video/Hardware"));
-        assert!(!is_encoder_klass("Codec/Decoder/Video/Hardware"));
-        assert!(!is_encoder_klass("Filter/Converter/Video"));
+    fn off_blocks_on_every_platform() {
+        // Fails if the non-Windows early return moves above `off`.
+        assert_eq!(qsv_plan(QsvMode::Off, false), QsvPlan::Block);
+        assert_eq!(qsv_plan(QsvMode::Off, true), QsvPlan::Block);
+        assert!(QsvPlan::Block.blocks(false));
+    }
+
+    #[test]
+    fn on_never_blocks() {
+        // Fails if `on` is inverted.
+        assert_eq!(qsv_plan(QsvMode::On, true), QsvPlan::Override);
+        assert_eq!(qsv_plan(QsvMode::On, false), QsvPlan::Keep);
+        assert!(!QsvPlan::Override.blocks(true));
+        assert!(!QsvPlan::Keep.blocks(true));
+    }
+
+    #[test]
+    fn auto_detects_on_windows_only() {
+        assert_eq!(qsv_plan(QsvMode::Auto, true), QsvPlan::Detect);
+        assert!(QsvPlan::Detect.blocks(true));
+        assert!(!QsvPlan::Detect.blocks(false));
+        assert_eq!(qsv_plan(QsvMode::Auto, false), QsvPlan::Keep);
+    }
+
+    #[test]
+    fn refusal_names_the_issue_and_the_override() {
+        let message = qsv_refusal_message("qsvh264dec");
+        assert!(message.starts_with("qsvh264dec is disabled"), "{message}");
+        assert!(message.contains("#1163"), "{message}");
+        assert!(message.contains("STROM_QSV=on"), "{message}");
+        assert!(message.contains("32.0.101.9150"), "{message}");
     }
 
     #[test]

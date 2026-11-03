@@ -538,7 +538,7 @@ fn run_with_gui(
 
         // Intel QSV encoders corrupt the heap on Windows (#1163). Before the
         // static plugins: webrtcsink reads encoder ranks when it registers.
-        strom::gst::demote_qsv_encoders();
+        strom::gst::demote_qsv_plugin();
 
         // Register GStreamer plugins statically
         strom::gst::register_static_plugins();
@@ -812,7 +812,7 @@ async fn run_headless(
 
     // Intel QSV encoders corrupt the heap on Windows (#1163). Before the
     // static plugins: webrtcsink reads encoder ranks when it registers.
-    strom::gst::demote_qsv_encoders();
+    strom::gst::demote_qsv_plugin();
 
     // Register GStreamer plugins statically
     strom::gst::register_static_plugins();

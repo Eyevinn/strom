@@ -711,28 +711,29 @@ fn test_block_encoder_preference() {
 
 /// #1163: on Windows with a Core Ultra GPU and an Intel driver older than
 /// 32.0.101.9150, the QSV encoders corrupt the process heap, so once
-/// `demote_qsv_encoders` has run the block never selects one. With 9150 or
+/// `demote_qsv_plugin` has run the block never selects one. With 9150 or
 /// later, or on other GPUs, they keep their rank. Elsewhere QSV keeps its rank
 /// and this checks nothing.
 ///
-/// The independent check: when the `qsv` plugin registered encoders, DXGI
+/// The independent check: when the `qsv` plugin registered features, DXGI
 /// must have found the Intel adapter behind them, with a real device id. The
 /// rank checks reuse `qsv_at_risk`, so they show the demotion was applied to
-/// every QSV encoder feature (per-device ones included), not that the
-/// decision is right; the unit tests in `gst::intel_qsv` cover that.
+/// every feature of the qsv plugin (decoders and per-device ones included)
+/// and set the refusal, not that the decision is right; the unit tests in
+/// `gst::intel_qsv` cover that.
 #[test]
 fn qsv_encoders_follow_the_intel_driver_on_windows() {
     use crate::gst::intel_qsv::{self, QsvMode};
 
     init_gst();
-    crate::gst::demote_qsv_encoders();
+    crate::gst::demote_qsv_plugin();
     if !cfg!(windows) {
         return;
     }
-    let features = intel_qsv::qsv_encoder_features();
+    let features = intel_qsv::qsv_plugin_features();
     let scan = intel_qsv::intel_adapters();
     let names: Vec<String> = features.iter().map(|f| f.name().to_string()).collect();
-    eprintln!("QSV encoder features {names:?}, adapter scan {scan:?}");
+    eprintln!("QSV plugin features {names:?}, adapter scan {scan:?}");
     if features.is_empty() {
         return;
     }
@@ -751,8 +752,18 @@ fn qsv_encoders_follow_the_intel_driver_on_windows() {
         QsvMode::On => false,
         QsvMode::Auto => intel_qsv::qsv_at_risk(&scan.intel).is_some(),
     };
+    assert_eq!(
+        intel_qsv::qsv_blocked(),
+        demote,
+        "qsv_blocked() on {scan:?}"
+    );
     for factory in &features {
         let name = factory.name();
+        assert_eq!(
+            crate::gst::qsv_refusal(&name).is_some(),
+            demote,
+            "{name} refusal on {scan:?}"
+        );
         if demote {
             assert_eq!(
                 factory.rank(),

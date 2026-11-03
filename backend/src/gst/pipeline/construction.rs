@@ -320,6 +320,15 @@ impl PipelineManager {
             element_def.id, element_def.element_type
         );
 
+        // Loading the qsv plugin crashes on some Intel drivers (#1163).
+        if let Some(refusal) = crate::gst::qsv_refusal(&element_def.element_type) {
+            error!("Refusing element {}: {}", element_def.id, refusal);
+            return Err(PipelineError::ElementCreation(format!(
+                "{}: {}",
+                element_def.id, refusal
+            )));
+        }
+
         // Create the element
         let element = gst::ElementFactory::make(&element_def.element_type)
             .name(&element_def.id)

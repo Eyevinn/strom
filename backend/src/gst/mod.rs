@@ -85,7 +85,7 @@ pub fn start_glib_main_loop() {
 }
 
 pub use discovery::ElementDiscovery;
-pub use intel_qsv::{demote_qsv_encoders, QSV_ENCODERS};
+pub use intel_qsv::{demote_qsv_plugin, qsv_refusal, QSV_ENCODERS};
 pub use pipeline::{PipelineError, PipelineManager};
 pub use thread_priority::{
     setup_thread_priority_handler, SessionThreadConfig, ThreadPriorityState,

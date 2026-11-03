@@ -92,6 +92,22 @@ fn parse_pipeline(
     let cleaned_pipeline = preprocess_pipeline_string(input);
     debug!("Cleaned pipeline: {}", cleaned_pipeline);
 
+    // Parsing creates every named element. Loading the qsv plugin crashes on
+    // some Intel drivers (#1163), so refuse a qsv element before parsing.
+    if let Some(refusal) = cleaned_pipeline
+        .split(|c: char| c.is_whitespace() || c == '!')
+        .find_map(crate::gst::qsv_refusal)
+    {
+        warn!("Refusing pipeline: {}", refusal);
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_details(
+                "Element disabled on this host",
+                refusal,
+            )),
+        ));
+    }
+
     // Parse the pipeline using GStreamer's native parser
     let pipeline = match gst::parse::launch(&cleaned_pipeline) {
         Ok(p) => p,
