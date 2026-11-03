@@ -709,25 +709,11 @@ fn test_block_encoder_preference() {
     }
 }
 
-/// #1163: QSV is only safe from Intel driver 32.0.101.9150 on. An unknown
-/// version (no Intel adapter, or unreadable) is not.
-#[test]
-fn qsv_needs_intel_driver_9150_or_later() {
-    use crate::gst::intel_driver_has_qsv_fix as fixed;
-    assert!(!fixed(None));
-    assert!(!fixed(Some([32, 0, 101, 8991])));
-    assert!(!fixed(Some([32, 0, 101, 8247])));
-    assert!(!fixed(Some([31, 0, 101, 9999])));
-    assert!(fixed(Some([32, 0, 101, 9150])));
-    assert!(fixed(Some([32, 0, 101, 9151])));
-    assert!(fixed(Some([32, 0, 102, 1])));
-    assert!(fixed(Some([33, 0, 0, 0])));
-}
-
-/// #1163: on Windows with an Intel driver older than 32.0.101.9150, the QSV
-/// encoders corrupt the process heap, so once `demote_qsv_encoders` has run
-/// the block never selects one. With 9150 or later they keep their rank.
-/// Elsewhere QSV keeps its rank and this checks nothing.
+/// #1163: on Windows with a Core Ultra GPU and an Intel driver older than
+/// 32.0.101.9150, the QSV encoders corrupt the process heap, so once
+/// `demote_qsv_encoders` has run the block never selects one. With 9150 or
+/// later, or on other GPUs, they keep their rank. Elsewhere QSV keeps its rank
+/// and this checks nothing.
 #[test]
 fn qsv_encoders_follow_the_intel_driver_on_windows() {
     init_gst();
@@ -735,17 +721,17 @@ fn qsv_encoders_follow_the_intel_driver_on_windows() {
     if !cfg!(windows) {
         return;
     }
-    let version = crate::gst::intel_driver_version();
-    let safe = crate::gst::intel_driver_has_qsv_fix(version);
-    eprintln!("Intel driver {version:?}: QSV safe = {safe}");
+    let adapters = crate::gst::intel_qsv::intel_adapters();
+    let safe = crate::gst::intel_qsv::qsv_at_risk(&adapters).is_none();
+    eprintln!("Intel adapters {adapters:?}: QSV safe = {safe}");
     for name in crate::gst::QSV_ENCODERS {
         if let Some(factory) = gst::ElementFactory::find(name) {
             assert_eq!(
                 factory.rank() == gst::Rank::NONE,
                 !safe,
-                "{name} has rank {:?} with the Intel driver {} the fix",
+                "{name} has rank {:?} with QSV {} on {adapters:?}",
                 factory.rank(),
-                if safe { "with" } else { "without" }
+                if safe { "safe" } else { "at risk" }
             );
         }
     }
