@@ -15,12 +15,14 @@
 //! - AV1
 //! - VP9
 //!
-//! The block creates a chain: input -> videoconvert -> encoder -> parser -> capsfilter
+//! The block creates a chain: input -> videoconvert -> [rawcaps] -> encoder -> parser -> capsfilter
 //! - input: `identity` whose sink pad adapts the memory that arrives to what the
 //!   encoder takes, from the negotiated caps (see `gst::download_front`)
 //! - videoconvert: Ensures compatible pixel format for the encoder. Plain
 //!   `videoconvert`, never `autovideoconvert`: it passes GPU memory the encoder
 //!   takes straight through, and converts system memory on the CPU
+//! - rawcaps (VP9/AV1 unless profile is "none"): limits system-memory input to
+//!   8-bit 4:2:0, so the encoder produces its base profile
 //! - encoder: Selected hardware or software encoder
 //! - parser: Codec-specific parser (h264parse, h265parse, etc.) for proper stream formatting
 //! - capsfilter: Sets output caps for proper codec negotiation
@@ -135,6 +137,7 @@ impl BlockBuilder for VideoEncBuilder {
         // a download in front of it for GPU memory the encoder does not take.
         let input_id = format!("{}:input", instance_id);
         let convert_id = format!("{}:videoconvert", instance_id);
+        let rawcaps_id = format!("{}:rawcaps", instance_id);
         let encoder_id = format!("{}:encoder", instance_id);
         let capsfilter_id = format!("{}:capsfilter", instance_id);
 
@@ -161,6 +164,24 @@ impl BlockBuilder for VideoEncBuilder {
             rate_control,
             keyframe_interval,
         )?;
+
+        // VP9 and AV1 encoders do not pick their input format from a profile
+        // pinned downstream, so the 4:2:0 constraint goes in front of them.
+        let rawcaps = match base_profile_input_caps(codec, profile, &encoder) {
+            Some(caps) => {
+                info!("Constraining {} input to {}", encoder_name, caps);
+                Some(
+                    gst::ElementFactory::make("capsfilter")
+                        .name(&rawcaps_id)
+                        .property("caps", &caps)
+                        .build()
+                        .map_err(|e| {
+                            BlockBuildError::ElementCreation(format!("capsfilter: {}", e))
+                        })?,
+                )
+            }
+            None => None,
+        };
 
         // Create parser for the codec (critical for proper MPEG-TS muxing and playback)
         let parser_name = get_parser_name(codec);
@@ -192,13 +213,24 @@ impl BlockBuilder for VideoEncBuilder {
             VIDEO_CONVERT_FACTORY, encoder_name, parser_name, caps_str
         );
 
-        // Chain: input -> videoconvert -> encoder -> parser -> capsfilter
-        let internal_links = vec![
-            front.link(),
-            (
+        // Chain: input -> videoconvert -> [rawcaps] -> encoder -> parser -> capsfilter
+        let mut internal_links = vec![front.link()];
+        if rawcaps.is_some() {
+            internal_links.push((
+                ElementPadRef::pad(&convert_id, "src"),
+                ElementPadRef::pad(&rawcaps_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&rawcaps_id, "src"),
+                ElementPadRef::pad(&encoder_id, "sink"),
+            ));
+        } else {
+            internal_links.push((
                 ElementPadRef::pad(&convert_id, "src"),
                 ElementPadRef::pad(&encoder_id, "sink"),
-            ),
+            ));
+        }
+        internal_links.extend([
             (
                 ElementPadRef::pad(&encoder_id, "src"),
                 ElementPadRef::pad(&parser_id, "sink"),
@@ -207,16 +239,20 @@ impl BlockBuilder for VideoEncBuilder {
                 ElementPadRef::pad(&parser_id, "src"),
                 ElementPadRef::pad(&capsfilter_id, "sink"),
             ),
-        ];
+        ]);
+
+        let mut elements = vec![(input_id, front.front), (convert_id, front.convert)];
+        if let Some(rawcaps) = rawcaps {
+            elements.push((rawcaps_id, rawcaps));
+        }
+        elements.extend([
+            (encoder_id, encoder),
+            (parser_id, parser),
+            (capsfilter_id, capsfilter),
+        ]);
 
         Ok(BlockBuildResult {
-            elements: vec![
-                (input_id, front.front),
-                (convert_id, front.convert),
-                (encoder_id, encoder),
-                (parser_id, parser),
-                (capsfilter_id, capsfilter),
-            ],
+            elements,
             internal_links,
             bus_message_handler: None,
             pad_properties: HashMap::new(),
@@ -982,7 +1018,8 @@ fn map_quality_preset_vp9enc(quality_preset: &str) -> i32 {
 /// For H.264/H.265: pins `profile=<name>` on the capsfilter. [`Profile::Auto`]
 /// resolves to the codec's 8-bit 4:2:0 profile; [`Profile::None`] adds no
 /// profile field and lets the encoder negotiate freely with downstream.
-/// For AV1/VP9: profile is ignored — caps only contain the codec media type.
+/// For AV1/VP9: caps only contain the codec media type; the profile is kept
+/// by constraining the encoder's input instead (see [`base_profile_input_caps`]).
 ///
 /// The pinned field is what keeps the output 4:2:0. It propagates back up
 /// through the parser to the encoder, which picks an input format that can
@@ -1016,6 +1053,79 @@ fn pinned_profile(codec: Codec, profile: Profile) -> Option<&'static str> {
         profile
     };
     effective.as_caps_str()
+}
+
+/// 8-bit 4:2:0 raw formats: the input that gives VP9 profile 0 and AV1 Main.
+const BASE_PROFILE_FORMATS: [&str; 3] = ["I420", "YV12", "NV12"];
+
+/// Input caps that keep a VP9 or AV1 encoder on its 8-bit 4:2:0 base profile
+/// (VP9 profile 0, AV1 Main), or `None` when no constraint applies.
+///
+/// H.264/H.265 get this from the profile pinned after the encoder (see
+/// [`get_codec_caps_string`]); `vp9enc` instead fails with "Invalid vpx
+/// profile" on a pinned profile, and follows whatever format arrives, so a
+/// 4:4:4 input gives VP9 profile 1 or AV1 High (#1176).
+///
+/// The caps come from the encoder's sink template. System-memory structures
+/// keep only [`BASE_PROFILE_FORMATS`], since the 4:2:0 formats each encoder
+/// takes differ (`vp9enc` takes `I420`, not `NV12`). GPU-memory structures are
+/// kept as they are, so `videoconvert` still passes GPU memory through (#1104).
+/// [`Profile::None`] keeps free negotiation.
+fn base_profile_input_caps(
+    codec: Codec,
+    profile: Profile,
+    encoder: &gst::Element,
+) -> Option<gst::Caps> {
+    if !matches!(codec, Codec::VP9 | Codec::AV1) || profile == Profile::None {
+        return None;
+    }
+    let template = encoder.pad_template("sink")?.caps().clone();
+    let caps = constrain_to_base_profile(&template);
+    if caps.is_none() {
+        warn!(
+            "{} takes no 8-bit 4:2:0 format in system memory; its output profile follows the input",
+            encoder
+                .factory()
+                .map(|f| f.name().to_string())
+                .unwrap_or_default()
+        );
+    }
+    caps
+}
+
+/// `template` with its system-memory raw video limited to
+/// [`BASE_PROFILE_FORMATS`] and everything else kept, or `None` when no
+/// system-memory structure takes one of them.
+fn constrain_to_base_profile(template: &gst::CapsRef) -> Option<gst::Caps> {
+    let mut caps = gst::Caps::new_empty();
+    let mut constrained = false;
+    for (structure, features) in template.iter_with_features() {
+        let system_memory =
+            features.is_any() || features.contains(gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY);
+        if structure.name() != "video/x-raw" || !system_memory {
+            caps.get_mut()
+                .unwrap()
+                .append_structure_full(structure.to_owned(), Some(features.to_owned()));
+            continue;
+        }
+        let accepted: Vec<&str> = BASE_PROFILE_FORMATS
+            .into_iter()
+            .filter(|format| match structure.value("format") {
+                Ok(value) => format.to_value().intersect(value).is_some(),
+                Err(_) => true,
+            })
+            .collect();
+        if accepted.is_empty() {
+            continue;
+        }
+        let mut structure = structure.to_owned();
+        structure.set("format", gst::List::new(accepted));
+        caps.get_mut()
+            .unwrap()
+            .append_structure_full(structure, Some(features.to_owned()));
+        constrained = true;
+    }
+    constrained.then_some(caps)
 }
 
 /// Parse the `profile` property. Unknown / missing values fall back to the
@@ -1076,7 +1186,7 @@ fn videoenc_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "profile".to_string(),
                 label: "Profile".to_string(),
-                description: "Codec profile pinned on the encoder's output capsfilter. \"auto\" (default) pins the codec's 8-bit 4:2:0 profile — high for H.264, main for H.265 — which every common delivery target decodes; without it the encoder follows the incoming pixel format and a 4:2:2, 4:4:4 or 10-bit input produces a profile many targets refuse. \"none\" omits the profile field and lets the encoder negotiate freely with downstream. Pick an explicit profile when the downstream needs a particular one. H.264 profiles begin with baseline/main/high; H.265 profiles begin with main. Ignored for AV1 and VP9.".to_string(),
+                description: "Codec profile pinned on the encoder's output capsfilter. \"auto\" (default) pins the codec's 8-bit 4:2:0 profile — high for H.264, main for H.265 — which every common delivery target decodes; without it the encoder follows the incoming pixel format and a 4:2:2, 4:4:4 or 10-bit input produces a profile many targets refuse. \"none\" omits the profile field and lets the encoder negotiate freely with downstream. Pick an explicit profile when the downstream needs a particular one. H.264 profiles begin with baseline/main/high; H.265 profiles begin with main. For VP9 and AV1 any value but \"none\" limits the encoder's input to 8-bit 4:2:0, which gives VP9 profile 0 and AV1 Main.".to_string(),
                 property_type: PropertyType::Enum {
                     values: Profile::block_enum_values(),
                 },
