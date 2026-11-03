@@ -792,3 +792,261 @@ fn qsv_encoders_follow_the_intel_driver_on_windows() {
         }
     }
 }
+
+// --- Windows Media Foundation encoders ---------------------------------------
+//
+// These run on every platform: they exercise the pure selection and mapping
+// functions, not a real `mf*enc` element.
+
+use super::mediafoundation::{
+    map_quality_preset_mf, mf_encoder_settings, mf_rc_mode_nick, MfSetting,
+};
+
+/// The Media Foundation encoder for each codec that has one sits after every
+/// vendor-native hardware encoder (NVENC, QSV, AMF) and is not a software
+/// fallback. AV1 has none: the plugin registers no AV1 encoder.
+#[test]
+fn media_foundation_encoders_follow_the_vendor_native_ones() {
+    for (codec, mf) in [
+        (Codec::H264, Some("mfh264enc")),
+        (Codec::H265, Some("mfh265enc")),
+        (Codec::VP9, Some("mfvp9enc")),
+        (Codec::AV1, None),
+    ] {
+        let hw = get_hardware_encoder_list(codec);
+        let mf_entries: Vec<&str> = hw
+            .iter()
+            .copied()
+            .filter(|e| is_media_foundation(e))
+            .collect();
+        assert_eq!(mf_entries, mf.into_iter().collect::<Vec<_>>(), "{codec:?}");
+        let Some(mf) = mf else { continue };
+        let mf_pos = hw.iter().position(|&e| e == mf).unwrap();
+        for (pos, name) in hw.iter().enumerate() {
+            if ["nv", "qsv", "amf"].iter().any(|p| name.starts_with(p)) {
+                assert!(pos < mf_pos, "{codec:?}: {name} must come before {mf}");
+            }
+        }
+        assert!(
+            !get_software_encoder_list(codec).contains(&mf),
+            "{codec:?}: {mf} is not a software fallback"
+        );
+    }
+}
+
+/// The plugin names the first device `mf{codec}enc` and further ones
+/// `mf{codec}device{N}enc`; all of them are tried, default first.
+#[test]
+fn media_foundation_candidates_include_device_variants() {
+    let names = candidate_feature_names("mfh264enc");
+    assert_eq!(names[0], "mfh264enc");
+    assert_eq!(names[1], "mfh264device1enc");
+    assert_eq!(names.last().unwrap(), "mfh264device12enc");
+    assert_eq!(names.len(), 13);
+    assert!(candidate_feature_names("mfvp9enc").contains(&"mfvp9device3enc".to_string()));
+
+    assert_eq!(candidate_feature_names("nvh264enc"), vec!["nvh264enc"]);
+    assert_eq!(candidate_feature_names("amfh265enc"), vec!["amfh265enc"]);
+}
+
+/// A software MFT, registered under the same names, is never selected from
+/// the hardware list; other candidates do not depend on the klass.
+#[test]
+fn software_media_foundation_transform_is_not_selected() {
+    assert!(hardware_candidate_accepted("mfh264enc", true));
+    assert!(hardware_candidate_accepted("mfh265device1enc", true));
+    assert!(!hardware_candidate_accepted("mfh264enc", false));
+    assert!(!hardware_candidate_accepted("mfh264device2enc", false));
+    assert!(!hardware_candidate_accepted("mfvp9enc", false));
+    // vtenc_h264 has no Hardware klass and stays selectable as before
+    assert!(hardware_candidate_accepted("vtenc_h264", false));
+    assert!(hardware_candidate_accepted("nvh264enc", false));
+}
+
+/// `rc-mode` nicks per codec, from GStreamer's `sys/mediafoundation`.
+const MF_H264_RC: [&str; 4] = ["cbr", "pcvbr", "uvbr", "qvbr"];
+const MF_H265_RC: [&str; 2] = ["cbr", "qvbr"];
+
+#[test]
+fn media_foundation_rate_control_mapping() {
+    assert_eq!(mf_rc_mode_nick(RateControl::CBR, &MF_H264_RC), Some("cbr"));
+    assert_eq!(
+        mf_rc_mode_nick(RateControl::VBR, &MF_H264_RC),
+        Some("pcvbr")
+    );
+    assert_eq!(mf_rc_mode_nick(RateControl::CQP, &MF_H264_RC), Some("qvbr"));
+    // H.265 / VP9 have no peak-constrained VBR
+    assert_eq!(mf_rc_mode_nick(RateControl::VBR, &MF_H265_RC), Some("cbr"));
+    assert_eq!(mf_rc_mode_nick(RateControl::CQP, &MF_H265_RC), Some("qvbr"));
+    assert_eq!(mf_rc_mode_nick(RateControl::CBR, &[]), None);
+}
+
+#[test]
+fn media_foundation_quality_preset_mapping() {
+    assert_eq!(map_quality_preset_mf("ultrafast"), 0);
+    assert_eq!(map_quality_preset_mf("fast"), 33);
+    assert_eq!(map_quality_preset_mf("medium"), 50);
+    assert_eq!(map_quality_preset_mf("slow"), 67);
+    assert_eq!(map_quality_preset_mf("veryslow"), 100);
+    assert_eq!(map_quality_preset_mf("unknown"), 50);
+}
+
+fn settings_map(settings: &[MfSetting]) -> HashMap<&str, &str> {
+    settings
+        .iter()
+        .map(|s| (s.name, s.value.as_str()))
+        .collect()
+}
+
+/// An `mfh264enc` with every optional property: what each block property
+/// becomes, in the element's units.
+#[test]
+fn media_foundation_h264_property_mapping() {
+    let all = |_: &str| true;
+    let settings = mf_encoder_settings(
+        all,
+        &MF_H264_RC,
+        4000,
+        "slow",
+        "zerolatency",
+        RateControl::VBR,
+    );
+    let map = settings_map(&settings);
+    assert_eq!(map.get("bitrate"), Some(&"4000"), "kbit/s, as the block");
+    assert_eq!(map.get("rc-mode"), Some(&"pcvbr"));
+    assert_eq!(map.get("max-bitrate"), Some(&"4800"), "1.2x, kbit/s");
+    assert_eq!(
+        map.get("vbv-buffer-size"),
+        Some(&"250000"),
+        "0.5 s in bytes"
+    );
+    assert_eq!(map.get("quality-vs-speed"), Some(&"67"));
+    assert_eq!(map.get("low-latency"), Some(&"true"));
+    assert_eq!(map.get("bframes"), Some(&"0"));
+    let derived: Vec<&str> = settings
+        .iter()
+        .filter(|s| s.derived)
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(derived, vec!["max-bitrate", "vbv-buffer-size"]);
+
+    // CBR: no peak cap; another tune turns low latency off
+    let settings = mf_encoder_settings(all, &MF_H264_RC, 4000, "medium", "film", RateControl::CBR);
+    let map = settings_map(&settings);
+    assert_eq!(map.get("rc-mode"), Some(&"cbr"));
+    assert!(!map.contains_key("max-bitrate"));
+    assert!(map.contains_key("vbv-buffer-size"));
+    assert_eq!(map.get("low-latency"), Some(&"false"));
+
+    // CQP: quality-based, no bitrate bounds
+    let settings = mf_encoder_settings(
+        all,
+        &MF_H264_RC,
+        4000,
+        "medium",
+        "zerolatency",
+        RateControl::CQP,
+    );
+    let map = settings_map(&settings);
+    assert_eq!(map.get("rc-mode"), Some(&"qvbr"));
+    assert!(!map.contains_key("max-bitrate"));
+    assert!(!map.contains_key("vbv-buffer-size"));
+}
+
+/// The plugin installs most properties only when the MFT supports them. An
+/// MFT with only `bitrate` gets only `bitrate`, and nothing it lacks.
+#[test]
+fn media_foundation_settings_skip_properties_the_mft_lacks() {
+    let only_bitrate = |name: &str| name == "bitrate";
+    let settings = mf_encoder_settings(
+        only_bitrate,
+        &[],
+        4000,
+        "slow",
+        "zerolatency",
+        RateControl::VBR,
+    );
+    assert_eq!(
+        settings_map(&settings),
+        HashMap::from([("bitrate", "4000")])
+    );
+
+    // VP9: no vbv-buffer-size, no bframes
+    let vp9 = |name: &str| {
+        [
+            "bitrate",
+            "rc-mode",
+            "max-bitrate",
+            "quality-vs-speed",
+            "gop-size",
+            "low-latency",
+        ]
+        .contains(&name)
+    };
+    let settings = mf_encoder_settings(
+        vp9,
+        &MF_H265_RC,
+        4000,
+        "medium",
+        "zerolatency",
+        RateControl::VBR,
+    );
+    let map = settings_map(&settings);
+    assert_eq!(map.get("rc-mode"), Some(&"cbr"));
+    assert!(
+        !map.contains_key("max-bitrate"),
+        "max-bitrate is pcvbr-only"
+    );
+    assert!(!map.contains_key("vbv-buffer-size"));
+    assert!(!map.contains_key("bframes"));
+    assert_eq!(map.get("quality-vs-speed"), Some(&"50"));
+}
+
+/// Media Foundation takes the keyframe interval as `gop-size`.
+#[test]
+fn keyframe_interval_goes_to_gop_size_on_media_foundation() {
+    let mf = |name: &str| ["bitrate", "gop-size", "low-latency"].contains(&name);
+    assert_eq!(keyframe_interval_property(mf), Some("gop-size"));
+    let x264 = |name: &str| ["bitrate", "key-int-max"].contains(&name);
+    assert_eq!(keyframe_interval_property(x264), Some("key-int-max"));
+    assert_eq!(keyframe_interval_property(|_: &str| false), None);
+}
+
+/// The Media Foundation branch sets properties on a real element without
+/// failing on the ones it lacks. `x264enc` stands in: it has `bitrate`
+/// (kbit/s) and none of `rc-mode`, `quality-vs-speed`, `low-latency` or
+/// `vbv-buffer-size`.
+#[test]
+fn media_foundation_branch_skips_properties_the_element_lacks() {
+    init_gst();
+    if !require_element("x264enc") {
+        return;
+    }
+    let encoder = gst::ElementFactory::make("x264enc")
+        .build()
+        .expect("Should create x264enc");
+    for name in [
+        "rc-mode",
+        "quality-vs-speed",
+        "low-latency",
+        "vbv-buffer-size",
+    ] {
+        assert!(
+            !encoder.has_property(name),
+            "the stand-in must lack {} for this test to mean anything",
+            name
+        );
+    }
+    set_encoder_properties(
+        &encoder,
+        "mfh264enc",
+        3000,
+        "medium",
+        "zerolatency",
+        RateControl::VBR,
+        60,
+    )
+    .expect("a property the element lacks must be skipped, not fail the build");
+    let bitrate: u32 = encoder.property("bitrate");
+    assert_eq!(bitrate, 3000);
+}

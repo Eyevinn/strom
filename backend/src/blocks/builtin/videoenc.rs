@@ -1,8 +1,13 @@
 //! Video encoder block with automatic hardware encoder selection.
 //!
 //! This block automatically selects the best available video encoder for the chosen codec,
-//! with priority given to hardware-accelerated encoders (NVIDIA NVENC, Intel QSV, VA-API, AMD AMF)
-//! and fallback to software encoders when hardware is not available.
+//! with priority given to hardware-accelerated encoders (NVIDIA NVENC, Intel QSV, VA-API,
+//! Apple VideoToolbox, AMD AMF, Windows Media Foundation, V4L2) and fallback to software
+//! encoders when hardware is not available.
+//!
+//! Media Foundation (`mfh264enc`, `mfh265enc`, `mfvp9enc`) comes after the vendor-native
+//! encoders, which expose more control. Older Windows systems expose their hardware encoder
+//! only as a Media Foundation transform; only hardware ones are selected (see `mediafoundation`).
 //!
 //! Supported codecs:
 //! - H.264 / AVC
@@ -23,6 +28,7 @@
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gst::download_front;
 use crate::gst::pipeline::properties::set_property_checked;
+use crate::gst::software_decoder::is_hardware;
 use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -319,21 +325,36 @@ fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String,
     let encoder_list = get_encoder_priority_list(codec, preference);
 
     // Try each encoder in priority order
-    for encoder_name in &encoder_list {
-        if let Some(factory) = gst::ElementFactory::find(encoder_name) {
+    for candidate in &encoder_list {
+        let mut found = false;
+        for feature_name in candidate_feature_names(candidate) {
+            // Device-numbered features are registered in sequence, so the
+            // first missing one ends the list.
+            let Some(factory) = gst::ElementFactory::find(&feature_name) else {
+                break;
+            };
+            found = true;
             // Check if element is disabled via GST_PLUGIN_FEATURE_RANK (rank = 0/NONE)
             if factory.rank() == gst::Rank::NONE {
-                info!("Encoder disabled (rank=0): {}", encoder_name);
+                info!("Encoder disabled (rank=0): {}", feature_name);
+                continue;
+            }
+            if !hardware_candidate_accepted(&feature_name, is_hardware(&factory)) {
+                info!(
+                    "Skipping {}: a software Media Foundation transform, not a hardware encoder",
+                    feature_name
+                );
                 continue;
             }
             info!(
                 "Found available encoder: {} (rank={:?})",
-                encoder_name,
+                feature_name,
                 factory.rank()
             );
-            return Ok(encoder_name.to_string());
-        } else {
-            info!("Encoder not available: {}", encoder_name);
+            return Ok(feature_name);
+        }
+        if !found {
+            info!("Encoder not available: {}", candidate);
         }
     }
 
@@ -404,6 +425,9 @@ fn get_hardware_encoder_list(codec: Codec) -> Vec<&'static str> {
             "vtenc_h264",    // May use software fallback
             // AMD AMF (Windows)
             "amfh264enc",
+            // Windows Media Foundation hardware MFT (any vendor; older Windows
+            // systems with no NVENC/QSV/AMF element)
+            "mfh264enc",
             // V4L2 (Raspberry Pi, embedded Linux)
             "v4l2h264enc",
         ],
@@ -422,6 +446,8 @@ fn get_hardware_encoder_list(codec: Codec) -> Vec<&'static str> {
             "vtenc_h265",    // May use software fallback
             // AMD AMF
             "amfh265enc",
+            // Windows Media Foundation hardware MFT
+            "mfh265enc",
             // V4L2 (Raspberry Pi 4+, embedded Linux)
             "v4l2h265enc",
         ],
@@ -436,12 +462,16 @@ fn get_hardware_encoder_list(codec: Codec) -> Vec<&'static str> {
             "vaav1enc",
             // AMD AMF
             "amfav1enc",
+            // No Media Foundation entry: GStreamer's `mediafoundation` plugin
+            // has no AV1 encoder (H.264, H.265 and VP9 only, through 1.28).
         ],
         Codec::VP9 => vec![
             // Intel QSV
             "qsvvp9enc",
             // VA-API
             "vavp9enc",
+            // Windows Media Foundation hardware MFT
+            "mfvp9enc",
         ],
     }
 }
@@ -622,6 +652,15 @@ fn set_encoder_properties(
         if encoder.has_property("usage") {
             set_encoder_property(encoder, "usage", usage)?;
         }
+    } else if is_media_foundation(encoder_name) {
+        set_mf_encoder_properties(
+            encoder,
+            encoder_name,
+            bitrate,
+            quality_preset,
+            tune,
+            rate_control,
+        )?;
     } else if encoder_name.starts_with("vtenc") {
         // Apple VideoToolbox (macOS): bitrate property is in kbps
         set_encoder_property(encoder, "bitrate", &bitrate_str)?;
@@ -757,15 +796,8 @@ fn set_encoder_properties(
 
     // Keyframe interval (GOP size) - try different property names
     if keyframe_interval > 0 {
-        if encoder.has_property("key-int-max") {
-            set_encoder_property(encoder, "key-int-max", &keyframe_str)?;
-        } else if encoder.has_property("gop-size") {
-            set_encoder_property(encoder, "gop-size", &keyframe_str)?;
-        } else if encoder.has_property("keyint-max") {
-            set_encoder_property(encoder, "keyint-max", &keyframe_str)?;
-        } else if encoder.has_property("max-keyframe-interval") {
-            // Apple VideoToolbox
-            set_encoder_property(encoder, "max-keyframe-interval", &keyframe_str)?;
+        if let Some(property) = keyframe_interval_property(|name| encoder.has_property(name)) {
+            set_encoder_property(encoder, property, &keyframe_str)?;
         }
     }
 
@@ -789,6 +821,21 @@ fn set_encoder_properties(
     );
 
     Ok(())
+}
+
+/// The property that takes the keyframe interval in frames, by the names
+/// encoders use for it: `key-int-max` (x264/x265, VA-API), `gop-size` (NVENC,
+/// QSV, AMF, Media Foundation), `keyint-max`, and `max-keyframe-interval`
+/// (Apple VideoToolbox).
+fn keyframe_interval_property(has_property: impl Fn(&str) -> bool) -> Option<&'static str> {
+    [
+        "key-int-max",
+        "gop-size",
+        "keyint-max",
+        "max-keyframe-interval",
+    ]
+    .into_iter()
+    .find(|name| has_property(name))
 }
 
 /// Map quality preset to x264/x265 speed-preset enum nick (string value for enum lookup).
@@ -968,7 +1015,7 @@ fn videoenc_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.videoenc".to_string(),
         name: "Video Encoder".to_string(),
-        description: "Video encoder with automatic hardware acceleration selection. Supports H.264, H.265, AV1, and VP9 with automatic selection of NVIDIA NVENC, Intel QSV, VA-API, AMD AMF, or software encoders.".to_string(),
+        description: "Video encoder with automatic hardware acceleration selection. Supports H.264, H.265, AV1, and VP9 with automatic selection of NVIDIA NVENC, Intel QSV, VA-API, Apple VideoToolbox, AMD AMF, Windows Media Foundation, V4L2, or software encoders.".to_string(),
         category: "Video".to_string(),
         exposed_properties: vec![
             ExposedProperty {
@@ -1149,6 +1196,12 @@ fn videoenc_definition() -> BlockDefinition {
         }),
     }
 }
+
+mod mediafoundation;
+use mediafoundation::{
+    candidate_feature_names, hardware_candidate_accepted, is_media_foundation,
+    set_mf_encoder_properties,
+};
 
 #[cfg(test)]
 mod tests;
