@@ -2568,7 +2568,7 @@ pub struct BlockThumbnailQuery {
     responses(
         (status = 200, description = "JPEG thumbnail image", content_type = "image/jpeg"),
         (status = 404, description = "Flow not running or block not found", body = ErrorResponse),
-        (status = 504, description = "Frame capture timed out (retry shortly)", body = ErrorResponse)
+        (status = 504, description = "No recent frame: capture not ready yet, or the source sends no frames (retry shortly)", body = ErrorResponse)
     )
 )]
 pub async fn get_block_thumbnail(
