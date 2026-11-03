@@ -258,10 +258,13 @@ pub fn qsv_refusal(factory_name: &str) -> Option<String> {
     let factory = gstreamer::ElementFactory::find(factory_name)?;
     let in_qsv = factory.plugin_name().is_some_and(|p| p == QSV_PLUGIN)
         || QSV_ENCODERS.contains(&factory_name);
-    in_qsv.then(|| qsv_refusal_message(factory_name))
+    in_qsv.then(|| qsv_refusal_message(factory_name, qsv_mode_from_env()))
 }
 
-fn qsv_refusal_message(factory_name: &str) -> String {
+fn qsv_refusal_message(factory_name: &str, mode: QsvMode) -> String {
+    if mode == QsvMode::Off {
+        return format!("{factory_name} is disabled by {QSV_ENV}=off (#1163)");
+    }
     format!(
         "{factory_name} is disabled: the Intel graphics driver on this host corrupts the heap \
          when the qsv plugin loads (#1163). Install Intel graphics driver {} or later, or set \
@@ -626,11 +629,18 @@ mod tests {
 
     #[test]
     fn refusal_names_the_issue_and_the_override() {
-        let message = qsv_refusal_message("qsvh264dec");
+        let message = qsv_refusal_message("qsvh264dec", QsvMode::Auto);
         assert!(message.starts_with("qsvh264dec is disabled"), "{message}");
         assert!(message.contains("#1163"), "{message}");
         assert!(message.contains("STROM_QSV=on"), "{message}");
         assert!(message.contains("32.0.101.9150"), "{message}");
+    }
+
+    #[test]
+    fn refusal_under_off_names_the_override_not_the_driver() {
+        let message = qsv_refusal_message("qsvh264enc", QsvMode::Off);
+        assert!(message.contains("STROM_QSV=off"), "{message}");
+        assert!(!message.contains("driver"), "{message}");
     }
 
     #[test]
