@@ -589,8 +589,9 @@ fn audioprocessor_definition() -> BlockDefinition {
         description: "Experimental. Broadcast/streaming final processor: loudness AGC, \
                       multiband compressor and true-peak limiter, with presets for EBU R 128, \
                       ATSC A/85, streaming and speech. Put it on the programme output, before \
-                      the encoder. Known limitation: very peaky programme can land below the \
-                      target, by up to about 2.7 LU on the streaming preset."
+                      the encoder. Typical programme lands within about 0.3 LU of the \
+                      target; extreme material (very frequent clicks with the limiter holding \
+                      every peak) can still miss it by more than 1 LU."
             .to_string(),
         category: "Audio".to_string(),
         exposed_properties,

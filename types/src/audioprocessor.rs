@@ -65,8 +65,10 @@ pub const DEFAULT_TARGET_LOUDNESS_LUFS: f32 = -23.0;
 pub const DEFAULT_TRUE_PEAK_CEILING_DBTP: f32 = -1.0;
 
 pub const DEFAULT_AGC_ENABLED: bool = true;
-pub const DEFAULT_AGC_MAX_GAIN_DB: f32 = 12.0;
-pub const DEFAULT_AGC_MAX_CUT_DB: f32 = 12.0;
+/// AGC range (dB). Every element preset uses +/-24 dB since strom-dsp
+/// v0.1.1, so custom does too.
+pub const DEFAULT_AGC_MAX_GAIN_DB: f32 = 24.0;
+pub const DEFAULT_AGC_MAX_CUT_DB: f32 = 24.0;
 /// How fast the AGC raises gain (dB/s).
 pub const DEFAULT_AGC_RATE_UP_DB_S: f32 = 1.0;
 /// How fast the AGC lowers gain (dB/s).
