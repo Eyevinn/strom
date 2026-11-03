@@ -5,10 +5,72 @@
 //! keeps the decision testable on every platform, with descriptors standing in
 //! for factories the host does not have.
 
-use super::mediafoundation::{is_media_foundation_plugin, MEDIA_FOUNDATION_CANDIDATE};
+use super::mediafoundation::is_media_foundation_plugin;
+use crate::gst::software_decoder::klass_is_hardware;
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use std::fmt;
 use tracing::info;
+
+/// One entry of an encoder priority list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Candidate {
+    /// The element factory of that name.
+    Named(&'static str),
+    /// Every video encoder of that plugin for the codec, highest rank first.
+    /// For plugins that register one feature per device under names that are
+    /// not known in advance (`mediafoundation`).
+    Plugin(&'static str),
+}
+
+impl fmt::Display for Candidate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Named(name) => write!(f, "{}", name),
+            Self::Plugin(plugin) => write!(f, "{} encoders", plugin),
+        }
+    }
+}
+
+/// `names` as [`Candidate::Named`] entries.
+pub(super) fn named(names: &[&'static str]) -> Vec<Candidate> {
+    names.iter().copied().map(Candidate::Named).collect()
+}
+
+/// What the encoder must produce: the codec's media type and the profile the
+/// block pins on its capsfilter, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct EncoderOutput {
+    pub(super) media_type: &'static str,
+    pub(super) profile: Option<&'static str>,
+}
+
+/// One structure of a factory's source pad template.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct SrcFormat {
+    pub(super) media_type: String,
+    /// The `profile` values the template lists; `None` when it has no
+    /// profile field (any profile may come out).
+    pub(super) profiles: Option<Vec<String>>,
+}
+
+impl SrcFormat {
+    fn from_structure(s: &gst::StructureRef) -> Self {
+        let profiles = s.value("profile").ok().and_then(|v| {
+            if let Ok(p) = v.get::<String>() {
+                Some(vec![p])
+            } else if let Ok(list) = v.get::<gst::List>() {
+                Some(list.iter().filter_map(|v| v.get::<String>().ok()).collect())
+            } else {
+                None
+            }
+        });
+        Self {
+            media_type: s.name().to_string(),
+            profiles,
+        }
+    }
+}
 
 /// What selection needs to know about one element factory.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,22 +80,22 @@ pub(super) struct FactoryInfo {
     pub(super) plugin: Option<String>,
     pub(super) klass: String,
     pub(super) rank: gst::Rank,
-    /// Media types of the source pad templates (`video/x-h264`, ...).
-    pub(super) src_media_types: Vec<String>,
+    /// The source pad templates' structures.
+    pub(super) src_formats: Vec<SrcFormat>,
 }
 
 impl FactoryInfo {
     /// Read a factory's registry metadata. Pad templates come from the
     /// registry cache; the element is not created.
     pub(super) fn from_factory(factory: &gst::ElementFactory) -> Self {
-        let src_media_types = factory
+        let src_formats = factory
             .static_pad_templates()
             .iter()
             .filter(|t| t.direction() == gst::PadDirection::Src)
             .flat_map(|t| {
                 t.caps()
                     .iter()
-                    .map(|s| s.name().to_string())
+                    .map(SrcFormat::from_structure)
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -45,13 +107,12 @@ impl FactoryInfo {
                 .unwrap_or_default()
                 .to_string(),
             rank: factory.rank(),
-            src_media_types,
+            src_formats,
         }
     }
 
-    /// GStreamer marks dedicated-hardware elements with `Hardware` in the klass.
     pub(super) fn is_hardware(&self) -> bool {
-        self.klass.split('/').any(|part| part == "Hardware")
+        klass_is_hardware(&self.klass)
     }
 
     fn is_media_foundation(&self) -> bool {
@@ -62,72 +123,89 @@ impl FactoryInfo {
         let parts: Vec<&str> = self.klass.split('/').collect();
         parts.contains(&"Encoder")
             && parts.contains(&"Video")
-            && self.src_media_types.iter().any(|m| m == media_type)
+            && self.src_formats.iter().any(|f| f.media_type == media_type)
+    }
+
+    /// Whether the source template can produce `wanted`. A template with no
+    /// structures (ANY) or no profile field counts as able to.
+    pub(super) fn can_produce(&self, wanted: &EncoderOutput) -> bool {
+        self.src_formats.is_empty()
+            || self.src_formats.iter().any(|f| {
+                f.media_type == wanted.media_type
+                    && match (wanted.profile, &f.profiles) {
+                        (None, _) | (_, None) => true,
+                        (Some(profile), Some(listed)) => listed.iter().any(|p| p == profile),
+                    }
+            })
     }
 }
 
 /// Read the registry entries a priority list can resolve to: each named
-/// candidate, and for [`MEDIA_FOUNDATION_CANDIDATE`] every feature of the
-/// `mediafoundation` plugin.
-pub(super) fn registry_snapshot(candidates: &[&str]) -> Vec<FactoryInfo> {
-    let mut factories: Vec<FactoryInfo> = candidates
-        .iter()
-        .filter(|c| **c != MEDIA_FOUNDATION_CANDIDATE)
-        .filter_map(|c| gst::ElementFactory::find(c))
-        .map(|f| FactoryInfo::from_factory(&f))
-        .collect();
-    if candidates.contains(&MEDIA_FOUNDATION_CANDIDATE) {
-        let registry = gst::Registry::get();
-        factories.extend(
-            registry
-                .features_by_plugin(super::mediafoundation::MEDIA_FOUNDATION_PLUGIN)
-                .into_iter()
-                .filter_map(|f| f.downcast::<gst::ElementFactory>().ok())
-                .map(|f| FactoryInfo::from_factory(&f)),
-        );
+/// candidate, and every feature of each [`Candidate::Plugin`].
+pub(super) fn registry_snapshot(candidates: &[Candidate]) -> Vec<FactoryInfo> {
+    let registry = gst::Registry::get();
+    let mut factories = Vec::new();
+    for candidate in candidates {
+        match candidate {
+            Candidate::Named(name) => factories
+                .extend(gst::ElementFactory::find(name).map(|f| FactoryInfo::from_factory(&f))),
+            Candidate::Plugin(plugin) => factories.extend(
+                registry
+                    .features_by_plugin(plugin)
+                    .into_iter()
+                    .filter_map(|f| f.downcast::<gst::ElementFactory>().ok())
+                    .map(|f| FactoryInfo::from_factory(&f)),
+            ),
+        }
     }
     factories
 }
 
 /// The factories one candidate stands for, in the order to try them.
 ///
-/// A named candidate is that factory. [`MEDIA_FOUNDATION_CANDIDATE`] is every
-/// video encoder of the `mediafoundation` plugin that produces `media_type`,
-/// highest rank first. The plugin registers one feature per device (the first
-/// as `mf{codec}enc` at the given rank, later ones one rank lower), so the
-/// names are not known in advance.
+/// [`Candidate::Plugin`] is every video encoder of that plugin whose source
+/// template has `media_type`, highest rank first. The `mediafoundation`
+/// plugin registers one feature per device (the first as `mf{codec}enc` at
+/// the plugin's rank, later ones one rank lower), so the names are not known
+/// in advance.
 fn expand_candidate<'a>(
-    candidate: &str,
+    candidate: &Candidate,
     media_type: &str,
     factories: &'a [FactoryInfo],
 ) -> Vec<&'a FactoryInfo> {
-    if candidate == MEDIA_FOUNDATION_CANDIDATE {
-        let mut found: Vec<&FactoryInfo> = factories
-            .iter()
-            .filter(|f| f.is_media_foundation() && f.is_video_encoder_for(media_type))
-            .collect();
-        // Stable: equal ranks keep registry order.
-        found.sort_by_key(|f| std::cmp::Reverse(f.rank));
-        found
-    } else {
-        factories.iter().filter(|f| f.name == candidate).collect()
+    match candidate {
+        Candidate::Named(name) => factories.iter().filter(|f| f.name == *name).collect(),
+        Candidate::Plugin(plugin) => {
+            let mut found: Vec<&FactoryInfo> = factories
+                .iter()
+                .filter(|f| {
+                    f.plugin.as_deref() == Some(plugin) && f.is_video_encoder_for(media_type)
+                })
+                .collect();
+            // Stable: equal ranks keep registry order.
+            found.sort_by_key(|f| std::cmp::Reverse(f.rank));
+            found
+        }
     }
 }
 
 /// The first usable factory for the priority list `candidates`.
 ///
-/// Skips a factory whose rank is NONE (disabled, e.g. via
-/// `GST_PLUGIN_FEATURE_RANK`), and a Media Foundation factory without the
-/// Hardware klass: the plugin registers Microsoft's software MFT under the
-/// same naming and rank as the hardware ones, and x264/x265/libvpx are the
-/// better software encoders.
+/// Skips a factory:
+/// - whose rank is NONE (disabled, e.g. via `GST_PLUGIN_FEATURE_RANK`);
+/// - from `mediafoundation` without the Hardware klass: the plugin registers
+///   Microsoft's software MFT under the same naming and rank as the hardware
+///   ones, and x264/x265/libvpx are the better software encoders;
+/// - whose source template cannot produce the pinned profile: the capsfilter
+///   would refuse its output (not-negotiated) instead of a later candidate
+///   encoding it. An MFT, for one, lists only the profiles its device has.
 pub(super) fn choose_encoder(
-    candidates: &[&str],
-    media_type: &str,
+    candidates: &[Candidate],
+    wanted: &EncoderOutput,
     factories: &[FactoryInfo],
 ) -> Option<String> {
     for candidate in candidates {
-        let options = expand_candidate(candidate, media_type, factories);
+        let options = expand_candidate(candidate, wanted.media_type, factories);
         if options.is_empty() {
             info!("Encoder not available: {}", candidate);
             continue;
@@ -141,6 +219,15 @@ pub(super) fn choose_encoder(
                 info!(
                     "Skipping {}: a software Media Foundation transform, not a hardware encoder",
                     factory.name
+                );
+                continue;
+            }
+            if !factory.can_produce(wanted) {
+                info!(
+                    "Skipping {}: its source template cannot produce {} profile={}",
+                    factory.name,
+                    wanted.media_type,
+                    wanted.profile.unwrap_or("")
                 );
                 continue;
             }

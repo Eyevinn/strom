@@ -78,8 +78,11 @@ impl BlockBuilder for VideoEncBuilder {
         // Parse encoder preference (optional, default: auto)
         let preference = parse_encoder_preference(properties);
 
+        // The profile the capsfilter pins; the encoder must be able to produce it
+        let profile = parse_profile(properties);
+
         // Select best available encoder
-        let encoder_name = select_encoder(codec, preference)?;
+        let encoder_name = select_encoder(codec, preference, profile)?;
         info!(
             "Selected encoder '{}' for codec {:?} with preference {:?}",
             encoder_name, codec, preference
@@ -121,8 +124,6 @@ impl BlockBuilder for VideoEncBuilder {
                 _ => None,
             })
             .unwrap_or(60);
-
-        let profile = parse_profile(properties);
 
         // Create elements.
         //
@@ -318,13 +319,22 @@ fn parse_rate_control(properties: &HashMap<String, PropertyValue>) -> RateContro
         .unwrap_or(RateControl::VBR)
 }
 
-/// Select the best available encoder for the given codec and preference.
-fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String, BlockBuildError> {
-    let media_type = codec_media_type(codec);
+/// Select the best available encoder for the given codec, preference and
+/// profile. An encoder whose source template cannot produce the profile the
+/// block pins on its capsfilter is skipped (see `selection::choose_encoder`).
+fn select_encoder(
+    codec: Codec,
+    preference: EncoderPreference,
+    profile: Profile,
+) -> Result<String, BlockBuildError> {
+    let wanted = EncoderOutput {
+        media_type: codec_media_type(codec),
+        profile: pinned_profile(codec, profile),
+    };
     // Get priority list of encoders to try
     let encoder_list = get_encoder_priority_list(codec, preference);
     let factories = registry_snapshot(&encoder_list);
-    if let Some(encoder_name) = choose_encoder(&encoder_list, media_type, &factories) {
+    if let Some(encoder_name) = choose_encoder(&encoder_list, &wanted, &factories) {
         return Ok(encoder_name);
     }
 
@@ -346,9 +356,9 @@ fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String,
         }
         EncoderPreference::Auto => {
             // Try software encoders as fallback
-            let software_list = get_software_encoder_list(codec);
+            let software_list = named(&get_software_encoder_list(codec));
             let factories = registry_snapshot(&software_list);
-            if let Some(encoder_name) = choose_encoder(&software_list, media_type, &factories) {
+            if let Some(encoder_name) = choose_encoder(&software_list, &wanted, &factories) {
                 warn!("Using software fallback encoder: {}", encoder_name);
                 return Ok(encoder_name);
             }
@@ -361,9 +371,9 @@ fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String,
 }
 
 /// Get priority-ordered list of encoders to try for the given codec and preference.
-fn get_encoder_priority_list(codec: Codec, preference: EncoderPreference) -> Vec<&'static str> {
+fn get_encoder_priority_list(codec: Codec, preference: EncoderPreference) -> Vec<Candidate> {
     match preference {
-        EncoderPreference::SoftwareOnly => get_software_encoder_list(codec),
+        EncoderPreference::SoftwareOnly => named(&get_software_encoder_list(codec)),
         EncoderPreference::HardwareOnly | EncoderPreference::Auto => {
             get_hardware_encoder_list(codec)
         }
@@ -371,72 +381,73 @@ fn get_encoder_priority_list(codec: Codec, preference: EncoderPreference) -> Vec
 }
 
 /// Get priority-ordered list of hardware encoders for the given codec.
-fn get_hardware_encoder_list(codec: Codec) -> Vec<&'static str> {
+fn get_hardware_encoder_list(codec: Codec) -> Vec<Candidate> {
+    use Candidate::{Named, Plugin};
     match codec {
         Codec::H264 => vec![
             // NVIDIA (best for NVIDIA GPUs)
             // NOTE: nvh264enc is prioritized over nvautogpuh264enc due to keyframe bug in nvautogpu*
             // nvautogpuh264enc has a bug where it doesn't generate keyframes regardless of gop-size settings
-            "nvh264enc",        // CUDA mode - WORKS correctly for keyframes
-            "nvautogpuh264enc", // Auto GPU select mode - HAS KEYFRAME BUG (doesn't respect gop-size)
-            "nvd3d11h264enc",   // Direct3D11 mode (Windows)
+            Named("nvh264enc"),        // CUDA mode - WORKS correctly for keyframes
+            Named("nvautogpuh264enc"), // Auto GPU select mode - HAS KEYFRAME BUG (doesn't respect gop-size)
+            Named("nvd3d11h264enc"),   // Direct3D11 mode (Windows)
             // Intel QSV
-            "qsvh264enc",
+            Named("qsvh264enc"),
             // VA-API (Intel/AMD on Linux)
-            "vah264enc",
-            "vah264lpenc", // Low power variant
+            Named("vah264enc"),
+            Named("vah264lpenc"), // Low power variant
             // Apple VideoToolbox (macOS)
-            "vtenc_h264_hw", // Hardware-only variant
-            "vtenc_h264",    // May use software fallback
+            Named("vtenc_h264_hw"), // Hardware-only variant
+            Named("vtenc_h264"),    // May use software fallback
             // AMD AMF (Windows)
-            "amfh264enc",
+            Named("amfh264enc"),
             // Windows Media Foundation hardware MFTs (any vendor; older Windows
             // systems with no NVENC/QSV/AMF element)
-            MEDIA_FOUNDATION_CANDIDATE,
+            Plugin(MEDIA_FOUNDATION_PLUGIN),
             // V4L2 (Raspberry Pi, embedded Linux)
-            "v4l2h264enc",
+            Named("v4l2h264enc"),
         ],
         Codec::H265 => vec![
             // NVIDIA
-            "nvautogpuh265enc",
-            "nvh265enc",
-            "nvd3d11h265enc",
+            Named("nvautogpuh265enc"),
+            Named("nvh265enc"),
+            Named("nvd3d11h265enc"),
             // Intel QSV
-            "qsvh265enc",
+            Named("qsvh265enc"),
             // VA-API
-            "vah265enc",
-            "vah265lpenc",
+            Named("vah265enc"),
+            Named("vah265lpenc"),
             // Apple VideoToolbox (macOS)
-            "vtenc_h265_hw", // Hardware-only variant
-            "vtenc_h265",    // May use software fallback
+            Named("vtenc_h265_hw"), // Hardware-only variant
+            Named("vtenc_h265"),    // May use software fallback
             // AMD AMF
-            "amfh265enc",
+            Named("amfh265enc"),
             // Windows Media Foundation hardware MFTs
-            MEDIA_FOUNDATION_CANDIDATE,
+            Plugin(MEDIA_FOUNDATION_PLUGIN),
             // V4L2 (Raspberry Pi 4+, embedded Linux)
-            "v4l2h265enc",
+            Named("v4l2h265enc"),
         ],
         Codec::AV1 => vec![
             // NVIDIA
-            "nvautogpuav1enc",
-            "nvav1enc",
-            "nvd3d11av1enc",
+            Named("nvautogpuav1enc"),
+            Named("nvav1enc"),
+            Named("nvd3d11av1enc"),
             // Intel QSV
-            "qsvav1enc",
+            Named("qsvav1enc"),
             // VA-API
-            "vaav1enc",
+            Named("vaav1enc"),
             // AMD AMF
-            "amfav1enc",
+            Named("amfav1enc"),
             // No Media Foundation entry: GStreamer's `mediafoundation` plugin
             // has no AV1 encoder (H.264, H.265 and VP9 only, through 1.28).
         ],
         Codec::VP9 => vec![
             // Intel QSV
-            "qsvvp9enc",
+            Named("qsvvp9enc"),
             // VA-API
-            "vavp9enc",
+            Named("vavp9enc"),
             // Windows Media Foundation hardware MFTs
-            MEDIA_FOUNDATION_CANDIDATE,
+            Plugin(MEDIA_FOUNDATION_PLUGIN),
         ],
     }
 }
@@ -978,23 +989,33 @@ fn map_quality_preset_vp9enc(quality_preset: &str) -> i32 {
 /// produce the profile; without it the encoder follows whatever pixel format
 /// arrives and a 4:2:2, 4:4:4 or 10-bit input escalates the output profile.
 fn get_codec_caps_string(codec: Codec, profile: Profile) -> String {
-    let (media_type, auto) = match codec {
+    let media_type = codec_media_type(codec);
+    if matches!(codec, Codec::AV1 | Codec::VP9) {
+        return media_type.to_string();
+    }
+    match pinned_profile(codec, profile) {
+        None => format!("{},alignment=au", media_type),
+        Some(p) => format!("{},alignment=au,profile={}", media_type, p),
+    }
+}
+
+/// The `profile` caps value the capsfilter pins for `codec`, if any.
+/// [`Profile::Auto`] resolves to the codec's 8-bit 4:2:0 profile; AV1 and
+/// VP9 pin none.
+fn pinned_profile(codec: Codec, profile: Profile) -> Option<&'static str> {
+    let auto = match codec {
         // High rather than Main: same 8-bit 4:2:0, better compression, and
         // every H.264 target that takes Main takes High.
-        Codec::H264 => ("video/x-h264", Profile::High),
-        Codec::H265 => ("video/x-h265", Profile::Main),
-        Codec::AV1 => return "video/x-av1".to_string(),
-        Codec::VP9 => return "video/x-vp9".to_string(),
+        Codec::H264 => Profile::High,
+        Codec::H265 => Profile::Main,
+        Codec::AV1 | Codec::VP9 => return None,
     };
     let effective = if profile == Profile::Auto {
         auto
     } else {
         profile
     };
-    match effective.as_caps_str() {
-        None => format!("{},alignment=au", media_type),
-        Some(p) => format!("{},alignment=au,profile={}", media_type, p),
-    }
+    effective.as_caps_str()
 }
 
 /// Parse the `profile` property. Unknown / missing values fall back to the
@@ -1213,9 +1234,9 @@ fn videoenc_definition() -> BlockDefinition {
 mod mediafoundation;
 mod selection;
 use mediafoundation::{
-    is_media_foundation_plugin, set_mf_encoder_properties, MEDIA_FOUNDATION_CANDIDATE,
+    is_media_foundation_plugin, set_mf_encoder_properties, MEDIA_FOUNDATION_PLUGIN,
 };
-use selection::{choose_encoder, registry_snapshot};
+use selection::{choose_encoder, named, registry_snapshot, Candidate, EncoderOutput};
 
 #[cfg(test)]
 mod tests;
