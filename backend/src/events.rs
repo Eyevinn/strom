@@ -49,15 +49,18 @@ impl EventBroadcaster {
 
         // Emitted inline (not from a subscribe() task) so a lagging/dropped broadcast
         // receiver can never silently drop a structured log record.
-        if self.structured_events
-            && (self.include_high_frequency_events || !event.is_high_frequency())
-        {
+        if self.logs_structured(&event) {
             log_strom_event(&event);
         }
 
         // broadcast::send returns the number of receivers
         // We don't care about the result since clients may or may not be connected
         let _ = self.sender.send(event);
+    }
+
+    /// Whether `broadcast` emits `event` as a structured log record.
+    fn logs_structured(&self, event: &StromEvent) -> bool {
+        self.structured_events && (self.include_high_frequency_events || !event.is_high_frequency())
     }
 
     /// Get the number of active subscribers.
@@ -85,9 +88,10 @@ mod tests {
     use tracing_subscriber::layer::{Context, SubscriberExt};
     use tracing_subscriber::Layer;
 
-    /// Counts tracing events emitted from `event_logging`, so tests can assert on the
-    /// `structured_events` / `include_high_frequency_events` gate in `broadcast()` without
-    /// depending on the unrelated "Broadcasting event" trace/debug line.
+    /// Counts tracing events emitted from `event_logging`, without the unrelated
+    /// "Broadcasting event" trace/debug line. Only a smoke test of `broadcast()`'s
+    /// path uses it: a count above 0 is not reliable (see below), the gate itself
+    /// is tested through `logs_structured`.
     struct StructuredLogCounter {
         count: Arc<AtomicUsize>,
     }
@@ -116,42 +120,38 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 0);
     }
 
+    // The gate is checked directly, not through a counting subscriber. tracing
+    // stores per callsite, globally, whether anyone listens; with a single
+    // scoped dispatcher alive it asks the dispatcher of the thread that hits
+    // the callsite first. The smoke tests in `event_logging` hit the same
+    // `info!` callsites on threads without a subscriber, and when one comes
+    // first the callsite reads "never": the counted record went missing
+    // (1 run in 48 under load).
     #[test]
     fn high_frequency_events_dropped_unless_included() {
-        let count = Arc::new(AtomicUsize::new(0));
-        let layer = StructuredLogCounter {
-            count: count.clone(),
+        let meter = StromEvent::MeterData {
+            flow_id: FlowId::nil(),
+            element_id: "level0".to_string(),
+            rms: vec![],
+            peak: vec![],
+            decay: vec![],
         };
-        let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
+        let created = StromEvent::FlowCreated {
+            flow_id: FlowId::nil(),
+        };
 
+        // High-frequency: dropped even though structured_events is on; others
+        // are still logged.
         let broadcaster = EventBroadcaster::new(10, true, false);
+        assert!(!broadcaster.logs_structured(&meter));
+        assert!(broadcaster.logs_structured(&created));
 
-        // High-frequency: dropped even though structured_events is on.
-        broadcaster.broadcast(StromEvent::MeterData {
-            flow_id: FlowId::nil(),
-            element_id: "level0".to_string(),
-            rms: vec![],
-            peak: vec![],
-            decay: vec![],
-        });
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-
-        // Not high-frequency: still logged.
-        broadcaster.broadcast(StromEvent::FlowCreated {
-            flow_id: FlowId::nil(),
-        });
-        assert_eq!(count.load(Ordering::SeqCst), 1);
-
-        // Enabled path: with include_high_frequency_events = true, the same
-        // high-frequency event is no longer dropped.
+        // With include_high_frequency_events the same event is logged.
         let broadcaster = EventBroadcaster::new(10, true, true);
-        broadcaster.broadcast(StromEvent::MeterData {
-            flow_id: FlowId::nil(),
-            element_id: "level0".to_string(),
-            rms: vec![],
-            peak: vec![],
-            decay: vec![],
-        });
-        assert_eq!(count.load(Ordering::SeqCst), 2);
+        assert!(broadcaster.logs_structured(&meter));
+
+        // Without structured_events nothing is.
+        let broadcaster = EventBroadcaster::new(10, false, true);
+        assert!(!broadcaster.logs_structured(&created));
     }
 }
