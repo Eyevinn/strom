@@ -70,7 +70,8 @@ pub fn register_dsp_plugins() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         gst_plugins_lsp::plugin_register_static().expect("Could not register lsp-dsp-rs plugins");
-        gststromdsp::plugin_register_static().expect("Could not register strom-dsp plugins");
+        gst_plugin_stromdsp::plugin_register_static()
+            .expect("Could not register strom-dsp plugins");
     });
 }
 
