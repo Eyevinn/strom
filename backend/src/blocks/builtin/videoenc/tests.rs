@@ -144,12 +144,15 @@ fn test_hardware_encoder_list_h264() {
         "Should have H.264 hardware encoders in list"
     );
     assert!(
-        encoders.contains(&"nvautogpuh264enc"),
+        encoders.contains(&Candidate::Named("nvautogpuh264enc")),
         "Should include nvautogpuh264enc"
     );
-    assert!(encoders.contains(&"nvh264enc"), "Should include nvh264enc");
     assert!(
-        encoders.contains(&"qsvh264enc"),
+        encoders.contains(&Candidate::Named("nvh264enc")),
+        "Should include nvh264enc"
+    );
+    assert!(
+        encoders.contains(&Candidate::Named("qsvh264enc")),
         "Should include qsvh264enc"
     );
 }
@@ -176,8 +179,12 @@ fn test_encoder_priority_order() {
 
     // H.264 hardware priority: NVIDIA should come before Intel/VA-API
     let h264_hw = get_hardware_encoder_list(Codec::H264);
-    let nv_pos = h264_hw.iter().position(|&e| e == "nvautogpuh264enc");
-    let qsv_pos = h264_hw.iter().position(|&e| e == "qsvh264enc");
+    let nv_pos = h264_hw
+        .iter()
+        .position(|&e| e == Candidate::Named("nvautogpuh264enc"));
+    let qsv_pos = h264_hw
+        .iter()
+        .position(|&e| e == Candidate::Named("qsvh264enc"));
 
     if let (Some(nv), Some(qsv)) = (nv_pos, qsv_pos) {
         assert!(
@@ -192,7 +199,7 @@ fn test_encoder_selection_software_only() {
     init_gst();
 
     // Software-only should only try software encoders
-    let result = select_encoder(Codec::H264, EncoderPreference::SoftwareOnly);
+    let result = select_encoder(Codec::H264, EncoderPreference::SoftwareOnly, Profile::Auto);
 
     match result {
         Ok(encoder) => {
@@ -783,7 +790,7 @@ fn qsv_encoders_follow_the_intel_driver_on_windows() {
     }
     for codec in [Codec::H264, Codec::H265, Codec::AV1, Codec::VP9] {
         for preference in [EncoderPreference::Auto, EncoderPreference::HardwareOnly] {
-            if let Ok(encoder) = select_encoder(codec, preference) {
+            if let Ok(encoder) = select_encoder(codec, preference, Profile::Auto) {
                 assert!(
                     !encoder.starts_with("qsv"),
                     "{codec:?} {preference:?} selected {encoder}"
@@ -791,4 +798,655 @@ fn qsv_encoders_follow_the_intel_driver_on_windows() {
             }
         }
     }
+}
+
+// --- Encoder selection over factory descriptors -------------------------------
+//
+// These run on every platform: `choose_encoder` decides over descriptors, so
+// factories the host lacks (Media Foundation, NVENC) are stood in for.
+
+use super::mediafoundation::{
+    map_quality_preset_mf, mf_encoder_settings, mf_encoder_settings_with, mf_kbit_from_kbps,
+    mf_max_bitrate, mf_rc_mode_nick, mf_rc_mode_nick_with, MfSetting, MfValue, MF_CQP_QP,
+    MF_CQP_QUALITY, MF_VBR_RC_MODE,
+};
+use super::selection::{FactoryInfo, SrcFormat};
+
+const HW_KLASS: &str = "Codec/Encoder/Video/Hardware";
+const SW_KLASS: &str = "Codec/Encoder/Video";
+
+/// A descriptor whose source template has `media` with no profile field.
+fn factory(name: &str, plugin: &str, klass: &str, rank: gst::Rank, media: &str) -> FactoryInfo {
+    FactoryInfo {
+        name: name.to_string(),
+        plugin: Some(plugin.to_string()),
+        klass: klass.to_string(),
+        rank,
+        src_formats: vec![SrcFormat {
+            media_type: media.to_string(),
+            profiles: None,
+        }],
+    }
+}
+
+fn mf(name: &str, klass: &str, rank: gst::Rank, media: &str) -> FactoryInfo {
+    factory(name, MEDIA_FOUNDATION_PLUGIN, klass, rank, media)
+}
+
+/// `info` with its source template listing only `profiles`.
+fn with_profiles(mut info: FactoryInfo, profiles: &[&str]) -> FactoryInfo {
+    for format in &mut info.src_formats {
+        format.profiles = Some(profiles.iter().map(|p| p.to_string()).collect());
+    }
+    info
+}
+
+const H264: &str = "video/x-h264";
+/// The rank the plugin gives a non-default device: one below the default.
+fn lower() -> gst::Rank {
+    gst::Rank::SECONDARY - 1
+}
+
+/// H.264 with the block's default profile pin (`high`).
+fn h264_output(profile: Profile) -> EncoderOutput {
+    EncoderOutput {
+        media_type: H264,
+        profile: pinned_profile(Codec::H264, profile),
+    }
+}
+
+fn choose_h264(factories: &[FactoryInfo]) -> Option<String> {
+    choose_encoder(
+        &get_hardware_encoder_list(Codec::H264),
+        &h264_output(Profile::Auto),
+        factories,
+    )
+}
+
+/// Hardware list, then the software fallback, as `select_encoder` in Auto.
+fn choose_h264_auto(factories: &[FactoryInfo], profile: Profile) -> Option<String> {
+    let wanted = h264_output(profile);
+    choose_encoder(&get_hardware_encoder_list(Codec::H264), &wanted, factories).or_else(|| {
+        choose_encoder(
+            &named(&get_software_encoder_list(Codec::H264)),
+            &wanted,
+            factories,
+        )
+    })
+}
+
+/// The profiles GStreamer 1.28's `mediafoundation` plugin can list for an
+/// H.264 MFT (`gstmfvideoencoder.cpp`: high, main, baseline, plus
+/// constrained-baseline next to baseline), and x264enc's template.
+const MF_H264_ALL_PROFILES: [&str; 4] = ["high", "main", "constrained-baseline", "baseline"];
+const X264_PROFILES: [&str; 10] = [
+    "high-4:4:4",
+    "high-4:2:2",
+    "high-10",
+    "high",
+    "main",
+    "baseline",
+    "constrained-baseline",
+    "high-4:4:4-intra",
+    "high-4:2:2-intra",
+    "high-10-intra",
+];
+
+/// An MFT whose device lists only some profiles is skipped for a pinned
+/// profile it lacks, and selection falls through to x264. Fails if the
+/// profile filter is removed from `choose_encoder`.
+#[test]
+fn encoder_that_cannot_produce_the_pinned_profile_is_skipped() {
+    let factories = [
+        with_profiles(
+            mf("mfh264enc", HW_KLASS, gst::Rank::SECONDARY, H264),
+            &["high", "main"],
+        ),
+        with_profiles(
+            factory("x264enc", "x264", SW_KLASS, gst::Rank::PRIMARY, H264),
+            &X264_PROFILES,
+        ),
+    ];
+    // WebRTC pins constrained-baseline
+    assert_eq!(
+        choose_h264_auto(&factories, Profile::ConstrainedBaseline).as_deref(),
+        Some("x264enc")
+    );
+    // High is listed: the MFT is used
+    assert_eq!(
+        choose_h264_auto(&factories, Profile::Auto).as_deref(),
+        Some("mfh264enc")
+    );
+    // No pin: any profile will do
+    assert_eq!(
+        choose_h264_auto(&factories, Profile::None).as_deref(),
+        Some("mfh264enc")
+    );
+}
+
+/// Profiles no MFT lists (4:2:2, 4:4:4, 10-bit H.264) go to x264, even with a
+/// full MF profile list; the filter is generic, so a vendor encoder that
+/// lacks the profile is skipped the same way.
+#[test]
+fn profiles_the_mft_cannot_make_fall_through_to_x264() {
+    let factories = [
+        with_profiles(
+            factory("nvh264enc", "nvcodec", HW_KLASS, gst::Rank::PRIMARY, H264),
+            &["main", "high", "constrained-baseline", "baseline"],
+        ),
+        with_profiles(
+            mf("mfh264enc", HW_KLASS, gst::Rank::SECONDARY, H264),
+            &MF_H264_ALL_PROFILES,
+        ),
+        with_profiles(
+            factory("x264enc", "x264", SW_KLASS, gst::Rank::PRIMARY, H264),
+            &X264_PROFILES,
+        ),
+    ];
+    for profile in [Profile::High444, Profile::High422, Profile::High10] {
+        assert_eq!(
+            choose_h264_auto(&factories, profile).as_deref(),
+            Some("x264enc"),
+            "{profile:?}"
+        );
+    }
+    assert_eq!(
+        choose_h264_auto(&factories, Profile::ConstrainedBaseline).as_deref(),
+        Some("nvh264enc")
+    );
+}
+
+/// A template without a profile field, or with no structures (ANY), counts
+/// as able to produce any profile.
+#[test]
+fn template_without_profiles_is_compatible() {
+    let wanted = h264_output(Profile::ConstrainedBaseline);
+    assert!(mf("mfh264enc", HW_KLASS, gst::Rank::SECONDARY, H264).can_produce(&wanted));
+    let mut any = mf("mfh264enc", HW_KLASS, gst::Rank::SECONDARY, H264);
+    any.src_formats.clear();
+    assert!(any.can_produce(&wanted));
+    let other_codec = with_profiles(
+        mf("mfh265enc", HW_KLASS, gst::Rank::SECONDARY, "video/x-h265"),
+        &["main"],
+    );
+    assert!(!other_codec.can_produce(&wanted));
+}
+
+/// The Media Foundation entry for each codec that has one sits after every
+/// vendor-native hardware encoder (NVENC, QSV, AMF) and is not a software
+/// fallback. AV1 has none: the plugin registers no AV1 encoder.
+#[test]
+fn media_foundation_follows_the_vendor_native_encoders() {
+    for (codec, has_mf) in [
+        (Codec::H264, true),
+        (Codec::H265, true),
+        (Codec::VP9, true),
+        (Codec::AV1, false),
+    ] {
+        let hw = get_hardware_encoder_list(codec);
+        let mf_pos = hw
+            .iter()
+            .position(|&e| e == Candidate::Plugin(MEDIA_FOUNDATION_PLUGIN));
+        assert_eq!(mf_pos.is_some(), has_mf, "{codec:?}");
+        let Some(mf_pos) = mf_pos else { continue };
+        for (pos, candidate) in hw.iter().enumerate() {
+            let Candidate::Named(name) = candidate else {
+                continue;
+            };
+            if ["nv", "qsv", "amf"].iter().any(|p| name.starts_with(p)) {
+                assert!(
+                    pos < mf_pos,
+                    "{codec:?}: {name} must come before Media Foundation"
+                );
+            }
+        }
+        assert!(!get_software_encoder_list(codec).contains(&MEDIA_FOUNDATION_PLUGIN));
+    }
+}
+
+/// A host with only a Media Foundation hardware MFT encodes in hardware.
+#[test]
+fn hardware_mft_is_selected_without_a_vendor_encoder() {
+    let factories = [mf("mfh264enc", HW_KLASS, gst::Rank::SECONDARY, H264)];
+    assert_eq!(choose_h264(&factories).as_deref(), Some("mfh264enc"));
+}
+
+/// A vendor-native encoder wins over the MFT for the same GPU.
+#[test]
+fn vendor_native_encoder_is_preferred_over_the_mft() {
+    let factories = [
+        mf("mfh264enc", HW_KLASS, gst::Rank::SECONDARY, H264),
+        factory("nvh264enc", "nvcodec", HW_KLASS, gst::Rank::PRIMARY, H264),
+    ];
+    assert_eq!(choose_h264(&factories).as_deref(), Some("nvh264enc"));
+}
+
+/// Microsoft's software MFT is registered under the same names and rank as a
+/// hardware one; only the klass tells them apart. It is never selected, even
+/// when it ranks first. Fails if the Hardware-klass check is removed.
+#[test]
+fn software_mft_is_never_selected() {
+    // No hardware MFT: the software one takes the default name.
+    let only_software = [mf("mfh264enc", SW_KLASS, gst::Rank::SECONDARY, H264)];
+    assert_eq!(choose_h264(&only_software), None);
+
+    let both = [
+        mf("mfh264enc", SW_KLASS, gst::Rank::SECONDARY, H264),
+        mf("mfh264device1enc", HW_KLASS, lower(), H264),
+    ];
+    assert_eq!(choose_h264(&both).as_deref(), Some("mfh264device1enc"));
+}
+
+/// A factory of rank NONE (disabled through `GST_PLUGIN_FEATURE_RANK`) is
+/// skipped, named or Media Foundation. Fails if the rank-NONE skip is removed.
+#[test]
+fn disabled_encoders_are_skipped() {
+    let factories = [
+        factory("nvh264enc", "nvcodec", HW_KLASS, gst::Rank::NONE, H264),
+        mf("mfh264enc", HW_KLASS, gst::Rank::NONE, H264),
+        mf("mfh264device1enc", HW_KLASS, lower(), H264),
+    ];
+    assert_eq!(choose_h264(&factories).as_deref(), Some("mfh264device1enc"));
+}
+
+/// Media Foundation devices are tried by rank (the default device ranks one
+/// above the rest), whatever order the registry lists them in.
+#[test]
+fn media_foundation_devices_are_tried_by_rank() {
+    let factories = [
+        mf("mfh264device1enc", HW_KLASS, lower(), H264),
+        mf("mfh264enc", HW_KLASS, gst::Rank::SECONDARY, H264),
+    ];
+    assert_eq!(choose_h264(&factories).as_deref(), Some("mfh264enc"));
+}
+
+/// Media Foundation encoders are found by plugin and output caps, not name: a
+/// feature of another plugin named like one is ignored, an MFT for another
+/// codec is ignored, and an MFT with any name is found.
+#[test]
+fn media_foundation_encoders_are_found_by_plugin_and_caps() {
+    let factories = [
+        factory("mfh264enc", "other", HW_KLASS, gst::Rank::SECONDARY, H264),
+        mf("mfh265enc", HW_KLASS, gst::Rank::SECONDARY, "video/x-h265"),
+    ];
+    assert_eq!(choose_h264(&factories), None);
+
+    let factories = [mf("somemftenc", HW_KLASS, gst::Rank::SECONDARY, H264)];
+    assert_eq!(choose_h264(&factories).as_deref(), Some("somemftenc"));
+}
+
+/// The real registry: a named candidate resolves through `registry_snapshot`.
+#[test]
+fn registry_snapshot_reads_factory_metadata() {
+    init_gst();
+    if !require_element("x264enc") {
+        return;
+    }
+    let snapshot = registry_snapshot(&[
+        Candidate::Named("x264enc"),
+        Candidate::Plugin(MEDIA_FOUNDATION_PLUGIN),
+    ]);
+    let x264 = snapshot
+        .iter()
+        .find(|f| f.name == "x264enc")
+        .expect("x264enc in the snapshot");
+    assert_eq!(x264.plugin.as_deref(), Some("x264"));
+    assert!(!x264.is_hardware());
+    // The profile list is read from the registry's template caps
+    let h264 = x264
+        .src_formats
+        .iter()
+        .find(|f| f.media_type == H264)
+        .expect("x264enc produces H.264");
+    let profiles = h264.profiles.as_ref().expect("x264enc lists its profiles");
+    assert!(profiles.iter().any(|p| p == "high"), "{profiles:?}");
+    assert!(
+        profiles.iter().any(|p| p == "constrained-baseline"),
+        "{profiles:?}"
+    );
+    assert_eq!(
+        choose_encoder(
+            &[Candidate::Named("x264enc")],
+            &h264_output(Profile::Auto),
+            &snapshot
+        )
+        .as_deref(),
+        Some("x264enc")
+    );
+}
+
+#[test]
+fn media_foundation_is_identified_by_plugin() {
+    assert!(is_media_foundation_plugin(Some("mediafoundation")));
+    assert!(!is_media_foundation_plugin(Some("x264")));
+    assert!(!is_media_foundation_plugin(None));
+}
+
+// --- Media Foundation property mapping ----------------------------------------
+
+/// `rc-mode` nicks per codec, from GStreamer's `sys/mediafoundation`.
+const MF_H264_RC: [&str; 4] = ["cbr", "pcvbr", "uvbr", "qvbr"];
+const MF_H265_RC: [&str; 2] = ["cbr", "qvbr"];
+
+#[test]
+fn media_foundation_rate_control_mapping() {
+    for nicks in [&MF_H264_RC[..], &MF_H265_RC[..]] {
+        assert_eq!(mf_rc_mode_nick(RateControl::CBR, nicks), Some("cbr"));
+        assert_eq!(mf_rc_mode_nick(RateControl::CQP, nicks), Some("qvbr"));
+    }
+    // VBR: peak-constrained on H.264; H.265/VP9 have no pcvbr and use cbr
+    assert_eq!(
+        mf_rc_mode_nick(RateControl::VBR, &MF_H264_RC),
+        Some("pcvbr")
+    );
+    assert_eq!(mf_rc_mode_nick(RateControl::VBR, &MF_H265_RC), Some("cbr"));
+    assert_eq!(mf_rc_mode_nick(RateControl::CBR, &[]), None);
+    assert_eq!(mf_rc_mode_nick(RateControl::CQP, &["cbr"]), None);
+}
+
+#[test]
+fn media_foundation_quality_preset_mapping() {
+    assert_eq!(map_quality_preset_mf("ultrafast"), 0);
+    assert_eq!(map_quality_preset_mf("fast"), 33);
+    assert_eq!(map_quality_preset_mf("medium"), 50);
+    assert_eq!(map_quality_preset_mf("slow"), 67);
+    assert_eq!(map_quality_preset_mf("veryslow"), 100);
+    assert_eq!(map_quality_preset_mf("unknown"), 50);
+}
+
+/// The plugin multiplies `bitrate` by 1024; the block's kbps is 1000 bits.
+#[test]
+fn media_foundation_bitrate_is_converted_to_1024_bit_kbit() {
+    assert_eq!(mf_kbit_from_kbps(4000), 3906); // 3906.25
+    assert_eq!(mf_kbit_from_kbps(1024), 1000);
+    assert_eq!(mf_kbit_from_kbps(100), 98); // 97.66
+    assert_eq!(mf_kbit_from_kbps(0), 0); // clamped to the range (min 1) when set
+}
+
+/// The shared burst policy, in explicit units, and what NVENC gets from it:
+/// the same values as before it was factored out.
+#[test]
+fn burst_limits_units() {
+    let limits = BurstLimits::for_bitrate_kbps(4000);
+    assert_eq!(limits.peak_bits_per_sec, 4_800_000);
+    assert_eq!(limits.vbv_bits, 2_000_000);
+    // NVENC: max-bitrate kbit/s, vbv-buffer-size kbits
+    assert_eq!(limits.peak_bits_per_sec / 1000, 4000 * 12 / 10);
+    assert_eq!(limits.vbv_bits / 1000, 4000 / 2);
+    // Media Foundation: vbv-buffer-size bytes
+    assert_eq!(limits.vbv_bits / 8, 250_000);
+}
+
+fn settings_map(settings: &[MfSetting]) -> HashMap<&'static str, MfValue> {
+    settings.iter().map(|s| (s.name, s.value)).collect()
+}
+
+fn derived(value: u64) -> MfValue {
+    MfValue::Number { value, clamp: true }
+}
+
+fn fixed(value: u64) -> MfValue {
+    MfValue::Number {
+        value,
+        clamp: false,
+    }
+}
+
+/// An `mfh264enc` with every optional property: what each block property
+/// becomes, in the element's units.
+#[test]
+fn media_foundation_h264_property_mapping() {
+    let all = |_: &str| true;
+    let map = settings_map(&mf_encoder_settings(
+        all,
+        &MF_H264_RC,
+        4000,
+        "slow",
+        "zerolatency",
+        RateControl::VBR,
+    ));
+    assert_eq!(map.get("bitrate"), Some(&derived(3906)), "1024-bit kbit/s");
+    assert_eq!(map.get("rc-mode"), Some(&MfValue::Nick("pcvbr")));
+    // 1.2 x 4000 kbps = 4_800_000 bits/s = 4687.5 1024-bit kbit/s
+    assert_eq!(map.get("max-bitrate"), Some(&derived(4688)));
+    assert_eq!(map.get("vbv-buffer-size"), Some(&derived(250_000)), "bytes");
+    assert_eq!(map.get("quality-vs-speed"), Some(&fixed(67)));
+    assert_eq!(map.get("low-latency"), Some(&MfValue::Bool(true)));
+    assert_eq!(map.get("bframes"), Some(&fixed(0)));
+
+    let map = settings_map(&mf_encoder_settings(
+        all,
+        &MF_H264_RC,
+        4000,
+        "medium",
+        "film",
+        RateControl::CBR,
+    ));
+    assert_eq!(map.get("rc-mode"), Some(&MfValue::Nick("cbr")));
+    assert!(map.contains_key("vbv-buffer-size"));
+    assert_eq!(map.get("low-latency"), Some(&MfValue::Bool(false)));
+}
+
+/// CQP never gets a VBV bound, whatever rc-mode the element resolves to:
+/// `qvbr`, no `rc-mode` property, or no matching nick.
+#[test]
+fn media_foundation_cqp_never_sets_vbv() {
+    let all = |_: &str| true;
+    let no_rc = |name: &str| name != "rc-mode";
+    for (has, nicks) in [
+        (&all as &dyn Fn(&str) -> bool, &MF_H264_RC[..]),
+        (&no_rc, &[][..]),
+        (&all, &["cbr"][..]),
+    ] {
+        let map = settings_map(&mf_encoder_settings(
+            has,
+            nicks,
+            4000,
+            "medium",
+            "zerolatency",
+            RateControl::CQP,
+        ));
+        assert!(!map.contains_key("vbv-buffer-size"), "{nicks:?}");
+    }
+}
+
+/// The plugin installs most properties only when the MFT supports them. An
+/// MFT with only `bitrate` gets only `bitrate`, and nothing it lacks.
+#[test]
+fn media_foundation_settings_skip_properties_the_mft_lacks() {
+    let only_bitrate = |name: &str| name == "bitrate";
+    let map = settings_map(&mf_encoder_settings(
+        only_bitrate,
+        &[],
+        4000,
+        "slow",
+        "zerolatency",
+        RateControl::VBR,
+    ));
+    assert_eq!(map, HashMap::from([("bitrate", derived(3906))]));
+
+    // VP9: no vbv-buffer-size, no bframes
+    let vp9 = |name: &str| {
+        [
+            "bitrate",
+            "rc-mode",
+            "max-bitrate",
+            "quality-vs-speed",
+            "gop-size",
+            "low-latency",
+        ]
+        .contains(&name)
+    };
+    let map = settings_map(&mf_encoder_settings(
+        vp9,
+        &MF_H265_RC,
+        4000,
+        "medium",
+        "zerolatency",
+        RateControl::VBR,
+    ));
+    assert_eq!(map.get("rc-mode"), Some(&MfValue::Nick("cbr")));
+    assert!(!map.contains_key("vbv-buffer-size"));
+    assert!(!map.contains_key("bframes"));
+    assert_eq!(map.get("quality-vs-speed"), Some(&fixed(50)));
+}
+
+/// Media Foundation takes the keyframe interval as `gop-size`.
+#[test]
+fn keyframe_interval_goes_to_gop_size_on_media_foundation() {
+    let mf = |name: &str| ["bitrate", "gop-size", "low-latency"].contains(&name);
+    assert_eq!(keyframe_interval_property(mf), Some("gop-size"));
+    let x264 = |name: &str| ["bitrate", "key-int-max"].contains(&name);
+    assert_eq!(keyframe_interval_property(x264), Some("key-int-max"));
+    assert_eq!(keyframe_interval_property(|_: &str| false), None);
+}
+
+/// The Media Foundation settings apply to a real element without failing on
+/// the properties it lacks. `x264enc` stands in: it has `bitrate` and
+/// `bframes`, and none of `rc-mode`, `quality-vs-speed`, `low-latency` or
+/// `vbv-buffer-size`.
+#[test]
+fn media_foundation_settings_skip_properties_the_element_lacks() {
+    init_gst();
+    if !require_element("x264enc") {
+        return;
+    }
+    let encoder = gst::ElementFactory::make("x264enc")
+        .build()
+        .expect("Should create x264enc");
+    for name in [
+        "rc-mode",
+        "quality-vs-speed",
+        "low-latency",
+        "vbv-buffer-size",
+    ] {
+        assert!(
+            !encoder.has_property(name),
+            "the stand-in must lack {} for this test to mean anything",
+            name
+        );
+    }
+    set_mf_encoder_properties(
+        &encoder,
+        "mfh264enc",
+        4000,
+        "medium",
+        "zerolatency",
+        RateControl::VBR,
+    )
+    .expect("a property the element lacks must be skipped, not fail the build");
+    let bitrate: u32 = encoder.property("bitrate");
+    assert_eq!(bitrate, 3906, "converted to 1024-bit kbit/s");
+}
+
+/// The Media Foundation branch is chosen by plugin, not name: an `x264enc`
+/// handed in under a Media Foundation name does not get the MF settings
+/// (which would set its bitrate to the 1024-bit conversion).
+#[test]
+fn media_foundation_branch_is_chosen_by_plugin_not_name() {
+    init_gst();
+    if !require_element("x264enc") {
+        return;
+    }
+    let encoder = gst::ElementFactory::make("x264enc")
+        .build()
+        .expect("Should create x264enc");
+    set_encoder_properties(
+        &encoder,
+        "mfh264enc",
+        4000,
+        "medium",
+        "zerolatency",
+        RateControl::VBR,
+        60,
+    )
+    .expect("settings apply");
+    let bitrate: u32 = encoder.property("bitrate");
+    assert_ne!(bitrate, 3906, "the MF branch ran for a non-MF element");
+}
+
+/// CQP (`qvbr`) sets the quality target: `qp` where the MFT has it, else
+/// `quality` (the plugin installs only one). Other modes set neither.
+#[test]
+fn media_foundation_cqp_sets_the_quality_target() {
+    let with_qp = |name: &str| ["bitrate", "rc-mode", "qp"].contains(&name);
+    let map = settings_map(&mf_encoder_settings(
+        with_qp,
+        &MF_H264_RC,
+        4000,
+        "medium",
+        "zerolatency",
+        RateControl::CQP,
+    ));
+    assert_eq!(map.get("rc-mode"), Some(&MfValue::Nick("qvbr")));
+    assert_eq!(map.get("qp"), Some(&fixed(MF_CQP_QP)));
+    assert!(!map.contains_key("quality"));
+    assert!(
+        map.contains_key("bitrate"),
+        "kept: written to the media type"
+    );
+
+    let with_quality = |name: &str| ["bitrate", "rc-mode", "quality"].contains(&name);
+    let map = settings_map(&mf_encoder_settings(
+        with_quality,
+        &MF_H264_RC,
+        4000,
+        "medium",
+        "zerolatency",
+        RateControl::CQP,
+    ));
+    assert_eq!(map.get("quality"), Some(&fixed(MF_CQP_QUALITY)));
+    assert!(!map.contains_key("qp"));
+
+    let all = |_: &str| true;
+    for rc in [RateControl::CBR, RateControl::VBR] {
+        let map = settings_map(&mf_encoder_settings(
+            all,
+            &MF_H264_RC,
+            4000,
+            "medium",
+            "zerolatency",
+            rc,
+        ));
+        assert!(
+            !map.contains_key("qp") && !map.contains_key("quality"),
+            "{rc:?}"
+        );
+    }
+}
+
+/// VBR on H.265/VP9 (no `pcvbr`) is `cbr` with no peak cap; with the VBR
+/// mode set to `cbr`, H.264 gets `cbr` and no cap either. `max-bitrate`
+/// follows `pcvbr` only.
+#[test]
+fn media_foundation_max_bitrate_follows_pcvbr_only() {
+    assert_eq!(MF_VBR_RC_MODE, "pcvbr");
+    assert_eq!(mf_max_bitrate(1000), 1172); // 1_200_000 / 1024
+    let all = |_: &str| true;
+    let hevc = settings_map(&mf_encoder_settings(
+        all,
+        &MF_H265_RC,
+        4000,
+        "medium",
+        "zerolatency",
+        RateControl::VBR,
+    ));
+    assert_eq!(hevc.get("rc-mode"), Some(&MfValue::Nick("cbr")));
+    assert!(!hevc.contains_key("max-bitrate"));
+
+    let h264_cbr = settings_map(&mf_encoder_settings_with(
+        all,
+        &MF_H264_RC,
+        4000,
+        "medium",
+        "zerolatency",
+        RateControl::VBR,
+        "cbr",
+    ));
+    assert_eq!(h264_cbr.get("rc-mode"), Some(&MfValue::Nick("cbr")));
+    assert!(!h264_cbr.contains_key("max-bitrate"));
+    assert_eq!(
+        mf_rc_mode_nick_with(RateControl::VBR, &MF_H264_RC, "cbr"),
+        Some("cbr")
+    );
 }
