@@ -66,6 +66,9 @@ impl PipelineManager {
         let events = self.events.clone();
         let cached_state = self.cached_state.clone();
         let qos_aggregator = self.qos_aggregator.clone();
+        // Weak: the bus handler is owned by the pipeline it redistributes
+        // latency for.
+        let pipeline_weak = self.pipeline.downgrade();
         let warning_gate = Mutex::new(WarningGate::default());
         let block_names: HashMap<String, String> = self
             .blocks
@@ -263,6 +266,23 @@ impl PipelineManager {
                         );
                     }
                 }
+                MessageView::Latency(_) => {
+                    // An element's latency changed after the pipeline went to
+                    // PLAYING: an encoder configured itself, a sink connected.
+                    // Sinks keep the latency they were given until the
+                    // application redistributes it. Without this, every buffer
+                    // reaches a syncing sink late by the difference, and QoS
+                    // drops it upstream.
+                    let Some(pipeline) = pipeline_weak.upgrade() else {
+                        return;
+                    };
+                    if let Err(e) = pipeline.recalculate_latency() {
+                        debug!(
+                            "Pipeline '{}' could not recalculate latency: {}",
+                            flow_name, e
+                        );
+                    }
+                }
                 _ => {
                     // Ignore other message types
                 }
@@ -350,24 +370,19 @@ impl PipelineManager {
                             (None, element_name.clone(), None)
                         };
 
-                    // Log aggregated stats
-                    if is_falling_behind {
-                        let drop_percentage = (1.0 - avg_proportion) * 100.0;
-                        warn!(
-                            "QoS: '{}' in flow '{}' falling behind {:.1}% ({} events, avg proportion {:.3}, jitter {} ns)",
-                            element_name,
-                            flow_name,
-                            drop_percentage,
-                            element_stats.event_count,
-                            avg_proportion,
-                            element_stats.avg_jitter()
-                        );
-                    } else {
-                        debug!(
-                            "QoS: '{}' in flow '{}' OK ({} events, avg proportion {:.3})",
-                            element_name, flow_name, element_stats.event_count, avg_proportion
-                        );
-                    }
+                    // Log aggregated stats. An element posts a QoS message
+                    // when it drops a late buffer, so the count is the number
+                    // of drops, whatever the proportion. A proportion below
+                    // 1.0 means the element keeps up with time to spare, so
+                    // it is no drop rate.
+                    warn!(
+                        "QoS: '{}' in flow '{}' dropped {} late buffer(s) in the last second (avg jitter {:.1} ms, avg proportion {:.3})",
+                        element_name,
+                        flow_name,
+                        element_stats.event_count,
+                        element_stats.avg_jitter() as f64 / 1_000_000.0,
+                        avg_proportion
+                    );
 
                     // Broadcast QoS event to frontend
                     events.broadcast(StromEvent::QoSStats {
