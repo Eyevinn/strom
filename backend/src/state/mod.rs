@@ -1846,6 +1846,16 @@ impl AppState {
                 crate::blocks::builtin::liveaudiorouter::fade_ms(&props)
             });
 
+        // Audio Processor: its settings apply only with the custom preset, so
+        // resolve the preset and the values switching to custom would apply —
+        // values sent in this same batch take precedence over stored ones.
+        let audioprocessor_props =
+            (definition_id == strom_types::audioprocessor::BLOCK_ID).then(|| {
+                let mut props = stored_properties.clone();
+                props.extend(properties.iter().map(|(k, v)| (k.clone(), v.clone())));
+                props
+            });
+
         let mut rejected: HashMap<String, String> = HashMap::new();
         let mut to_persist: Vec<(String, PropertyValue)> = Vec::new();
         // True iff this batch successfully applied at least one solo write
@@ -1944,6 +1954,61 @@ impl AppState {
                     }
                 }
                 continue;
+            }
+
+            // Audio Processor: a setting that only the custom preset uses is
+            // refused under a named preset (the element would apply it and the
+            // preset would win again on restart), and switching to custom
+            // writes every custom setting, since writing `custom` to the
+            // element itself changes nothing.
+            if let Some(props) = &audioprocessor_props {
+                use crate::blocks::builtin::audioprocessor;
+                let preset = match audioprocessor::preset(props) {
+                    Ok(p) => p,
+                    Err(reason) => {
+                        rejected.insert(name, reason);
+                        continue;
+                    }
+                };
+                let custom = preset == strom_types::audioprocessor::PRESET_CUSTOM;
+                if audioprocessor::is_custom_only(&name) && !custom {
+                    rejected.insert(
+                        name,
+                        format!("applies only with the custom preset (preset is {preset})"),
+                    );
+                    continue;
+                }
+                if name == strom_types::audioprocessor::PRESET_PROPERTY && custom {
+                    let element_id = format!(
+                        "{}:{}",
+                        block_instance_id,
+                        audioprocessor::PROCESSOR_ELEMENT
+                    );
+                    let writes = match audioprocessor::custom_writes(props, true) {
+                        Ok(w) => w,
+                        Err(reason) => {
+                            rejected.insert(name, reason);
+                            continue;
+                        }
+                    };
+                    let mut failed = None;
+                    for (prop, v) in &writes {
+                        if let Err(e) = self
+                            .update_element_property(flow_id, &element_id, prop, v.clone(), None)
+                            .await
+                        {
+                            failed = Some(format!("pipeline write of {prop} failed: {e}"));
+                            break;
+                        }
+                    }
+                    match failed {
+                        Some(reason) => {
+                            rejected.insert(name, reason);
+                        }
+                        None => to_persist.push((name, value)),
+                    }
+                    continue;
+                }
             }
 
             // The `_block` element_id marker is a virtual element for properties that
@@ -2679,7 +2744,8 @@ impl AppState {
             .unwrap_or(false)
     }
 
-    /// Reset accumulated loudness measurements on an EBU R128 meter block.
+    /// Reset accumulated loudness measurements on a Loudness Meter block, or the
+    /// integrated loudness of an Audio Processor block.
     pub async fn reset_loudness(
         &self,
         flow_id: &FlowId,

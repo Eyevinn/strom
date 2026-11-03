@@ -635,6 +635,8 @@ pub struct StromApp {
     spectrum_data: SpectrumDataStore,
     /// Loudness data storage for all EBU R128 loudness meters
     loudness_data: LoudnessDataStore,
+    /// Meter data storage for all Audio Processor blocks
+    audioprocessor_data: crate::audioprocessor::AudioProcessorDataStore,
     /// Latency data storage for all audio latency measurements
     latency_data: LatencyDataStore,
     /// Media player data storage for all media player blocks

@@ -56,9 +56,23 @@ pub fn register_static_plugins() {
             err
         );
     }
-    gst_plugins_lsp::plugin_register_static().expect("Could not register lsp-dsp-rs plugins");
+    register_dsp_plugins();
     #[cfg(feature = "efp")]
     gst_plugin_efp::plugin_register_static().expect("Could not register efp mux/demux plugins");
+}
+
+/// Register the audio mixer's built-in DSP plugins (lsp-plugins-rs and
+/// strom-dsp), once per process. Call after `gst::init()`. Registering a
+/// static plugin from two threads at once can crash, so tests that run in
+/// parallel call this instead of `plugin_register_static()`. Panics when a
+/// plugin fails to register.
+pub fn register_dsp_plugins() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        gst_plugins_lsp::plugin_register_static().expect("Could not register lsp-dsp-rs plugins");
+        gst_plugin_stromdsp::plugin_register_static()
+            .expect("Could not register strom-dsp plugins");
+    });
 }
 
 /// Start GLib main loop in a background thread.

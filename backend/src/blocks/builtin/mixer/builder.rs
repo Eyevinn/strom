@@ -11,7 +11,8 @@ use super::metering::connect_mixer_meter_handler;
 use super::properties::*;
 use super::{METER_INTERVAL_NS, MIN_KNEE_LINEAR};
 use strom_types::mixer::{
-    DEFAULT_INTERNAL_BUS_LATENCY_MS, DEFAULT_LATENCY_MS, DEFAULT_MIN_UPSTREAM_LATENCY_MS,
+    DEFAULT_DSP_BACKEND, DEFAULT_INTERNAL_BUS_LATENCY_MS, DEFAULT_LATENCY_MS,
+    DEFAULT_MIN_UPSTREAM_LATENCY_MS, DSP_BACKENDS,
 };
 
 /// Follow a bus mixer with its rate pin at `rate`. Returns the pin's id: the
@@ -112,17 +113,15 @@ impl BlockBuilder for MixerBuilder {
         let num_aux_buses = parse_num_aux_buses(properties);
         let num_groups = parse_num_groups(properties);
         let sample_rate = parse_sample_rate(properties);
-        let dsp_backend = get_string_prop(properties, "dsp_backend", "rust");
-        if dsp_backend != "rust" && dsp_backend != "lv2" {
-            warn!(
-                "Unrecognized dsp_backend '{}', falling back to 'rust'",
-                dsp_backend
-            );
-        }
-        let dsp_backend = if dsp_backend == "rust" || dsp_backend == "lv2" {
-            dsp_backend
+        let requested_backend = get_string_prop(properties, "dsp_backend", DEFAULT_DSP_BACKEND);
+        let dsp_backend = if DSP_BACKENDS.contains(&requested_backend) {
+            requested_backend
         } else {
-            "rust"
+            warn!(
+                "Unrecognized dsp_backend '{}', falling back to '{}'",
+                requested_backend, DEFAULT_DSP_BACKEND
+            );
+            DEFAULT_DSP_BACKEND
         };
         info!(
             "Mixer config: {} channels, {} aux buses, {} groups, dsp={}, rate={}",

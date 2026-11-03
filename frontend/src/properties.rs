@@ -513,6 +513,7 @@ impl PropertyInspector {
         meter_data_store: &crate::meter::MeterDataStore,
         spectrum_data_store: &crate::spectrum::SpectrumDataStore,
         loudness_data_store: &crate::loudness::LoudnessDataStore,
+        audioprocessor_data_store: &crate::audioprocessor::AudioProcessorDataStore,
         latency_data_store: &crate::latency::LatencyDataStore,
         mediaplayer_data_store: &crate::mediaplayer::MediaPlayerDataStore,
         webrtc_stats_store: &crate::webrtc_stats::WebRtcStatsStore,
@@ -961,6 +962,8 @@ impl PropertyInspector {
                             // slots beyond the configured count.
                             let skip_set = if definition.id == "builtin.vision_mixer" {
                                 Some(Self::vision_mixer_skip_set(block))
+                            } else if definition.id == strom_types::audioprocessor::BLOCK_ID {
+                                Self::audioprocessor_skip_set(block)
                             } else {
                                 None
                             };
@@ -1094,6 +1097,28 @@ impl PropertyInspector {
                                 Color32::from_rgb(200, 200, 100),
                                 "No flow selected",
                             );
+                        }
+                    }
+
+                    // Show meters for Audio Processor blocks
+                    if definition.id == strom_types::audioprocessor::BLOCK_ID {
+                        ui.separator();
+                        if let Some(flow_id) = flow_id {
+                            if ui.button("Reset Integrated Loudness").clicked() {
+                                result.loudness_reset_requested =
+                                    Some((flow_id, block.id.clone()));
+                            }
+                        }
+                        match flow_id.and_then(|fid| audioprocessor_data_store.get(&fid, &block.id)) {
+                            Some(data) => crate::audioprocessor::show_full(ui, data),
+                            None => {
+                                ui.colored_label(
+                                    Color32::from_rgb(200, 200, 100),
+                                    "No meter data available",
+                                );
+                                ui.add_space(4.0);
+                                ui.small("Meters appear when audio is flowing through this block.");
+                            }
                         }
                     }
 
@@ -1465,6 +1490,25 @@ impl PropertyInspector {
 
     /// Skip per-input labels for slots beyond the configured `num_inputs`
     /// so the property panel shows just the inputs in use.
+    /// Audio Processor: with a named preset the preset owns the settings
+    /// that only Custom uses, so they are hidden rather than shown as if
+    /// they applied.
+    fn audioprocessor_skip_set(block: &BlockInstance) -> Option<std::collections::HashSet<String>> {
+        use strom_types::audioprocessor::{
+            CUSTOM_ONLY_PROPERTIES, DEFAULT_PRESET, PRESET_CUSTOM, PRESET_PROPERTY,
+        };
+        let preset = match block.properties.get(PRESET_PROPERTY) {
+            Some(PropertyValue::String(s)) => s.as_str(),
+            _ => DEFAULT_PRESET,
+        };
+        (preset != PRESET_CUSTOM).then(|| {
+            CUSTOM_ONLY_PROPERTIES
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        })
+    }
+
     fn vision_mixer_skip_set(block: &BlockInstance) -> std::collections::HashSet<String> {
         use strom_types::vision_mixer::{DEFAULT_NUM_INPUTS, MAX_NUM_INPUTS};
 
@@ -2468,7 +2512,11 @@ impl PropertyInspector {
         // Show description
         if !exposed_prop.description.is_empty() {
             ui.indent(prop_name, |ui| {
-                ui.small(&exposed_prop.description);
+                // Wrap explicitly: inside the inspector's two-way scroll area
+                // a label extends sideways and runs off the panel instead.
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&exposed_prop.description).small()).wrap(),
+                );
             });
         }
 
@@ -2614,7 +2662,11 @@ impl PropertyInspector {
         // Show description
         if !prop_info.description.is_empty() {
             ui.indent(prop_name, |ui| {
-                ui.small(&prop_info.description);
+                // Wrap explicitly: inside the inspector's two-way scroll area
+                // a label extends sideways and runs off the panel instead.
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&prop_info.description).small()).wrap(),
+                );
             });
         }
 
@@ -2718,7 +2770,11 @@ impl PropertyInspector {
         // Show description
         if !prop_info.description.is_empty() {
             ui.indent(prop_name, |ui| {
-                ui.small(&prop_info.description);
+                // Wrap explicitly: inside the inspector's two-way scroll area
+                // a label extends sideways and runs off the panel instead.
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&prop_info.description).small()).wrap(),
+                );
             });
         }
 

@@ -126,7 +126,7 @@ fn link(flow: &mut Flow, from: &str, to: &str) {
     });
 }
 
-/// Two live tones through the audio mixer block (lsp-dsp-rs backend).
+/// Two live tones through the audio mixer block (default DSP backend, strom-dsp).
 fn audio_mixer_flow() -> Flow {
     let mut flow = Flow::new("floor-audio-mixer");
     flow.elements.push(live_audio("tone1"));

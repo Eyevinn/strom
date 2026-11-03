@@ -7,12 +7,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strom_types::block::ExposedProperty;
-use strom_types::mixer::DEFAULT_INTERNAL_BUS_LATENCY_MS;
+use strom_types::mixer::{
+    DEFAULT_GATE_HOLD, DEFAULT_GATE_REDUCTION, DEFAULT_INTERNAL_BUS_LATENCY_MS,
+    DEFAULT_LIMITER_ATTACK, DEFAULT_LIMITER_LOOKAHEAD, DEFAULT_LIMITER_RELEASE,
+};
 use strom_types::PropertyValue;
 
 fn init_gst() {
-    let _ = gst::init();
-    let _ = gst_plugins_lsp::plugin_register_static();
+    gst::init().expect("GStreamer initialises");
+    crate::gst::register_dsp_plugins();
 }
 
 /// GObject type name. `factory()` can SIGSEGV when static and LV2 plugins
@@ -1646,4 +1649,188 @@ fn test_a_bridge_input_next_to_a_two_second_input_configures_latency() {
         "a live appsrc at its defaults no longer fails the mixer's latency; \
          this test no longer shows what it guards"
     );
+}
+
+// ---- strom-dsp backend ----
+
+#[test]
+fn test_stromdsp_backend_builds_stromdsp_elements() {
+    let m = assemble(&small_mixer_props(&[
+        ("dsp_backend", PropertyValue::String("stromdsp".to_string())),
+        ("main_limiter_enabled", PropertyValue::Bool(true)),
+    ]));
+    assert_eq!(type_name(m.element("gate_0")), "StromDspGate");
+    assert_eq!(type_name(m.element("comp_0")), "StromDspCompressor");
+    assert_eq!(type_name(m.element("eq_0")), "StromDspEqualizer");
+    assert_eq!(type_name(m.element("main_limiter")), "StromDspLimiter");
+}
+
+fn assert_stromdsp_elements(m: &Assembled, what: &str) {
+    assert_eq!(type_name(m.element("gate_0")), "StromDspGate", "{what}");
+    assert_eq!(
+        type_name(m.element("comp_0")),
+        "StromDspCompressor",
+        "{what}"
+    );
+    assert_eq!(type_name(m.element("eq_0")), "StromDspEqualizer", "{what}");
+    assert_eq!(
+        type_name(m.element("main_comp")),
+        "StromDspCompressor",
+        "{what}"
+    );
+    assert_eq!(
+        type_name(m.element("main_eq")),
+        "StromDspEqualizer",
+        "{what}"
+    );
+    assert_eq!(
+        type_name(m.element("main_limiter")),
+        "StromDspLimiter",
+        "{what}"
+    );
+}
+
+#[test]
+fn test_mixer_without_dsp_backend_builds_stromdsp_elements() {
+    // strom-dsp is the default: a mixer saved without dsp_backend, or with a
+    // value this version does not know, gets strom-dsp elements.
+    let mut missing = small_mixer_props(&[("main_limiter_enabled", PropertyValue::Bool(true))]);
+    missing.remove("dsp_backend");
+    assert_stromdsp_elements(&assemble(&missing), "dsp_backend missing");
+
+    let unknown = small_mixer_props(&[
+        (
+            "dsp_backend",
+            PropertyValue::String("no-such-backend".to_string()),
+        ),
+        ("main_limiter_enabled", PropertyValue::Bool(true)),
+    ]);
+    assert_stromdsp_elements(&assemble(&unknown), "dsp_backend unknown");
+}
+
+#[test]
+fn test_mixer_definition_defaults_to_stromdsp() {
+    let def = mixer_definition();
+    let prop = exposed(&def, "dsp_backend");
+    assert!(
+        matches!(&prop.default_value, Some(PropertyValue::String(v)) if v == "stromdsp"),
+        "dsp_backend should default to stromdsp, got {:?}",
+        prop.default_value
+    );
+    let strom_types::block::PropertyType::Enum { values } = &prop.property_type else {
+        panic!("dsp_backend should be an enum");
+    };
+    let values: Vec<&str> = values.iter().map(|v| v.value.as_str()).collect();
+    assert_eq!(values, ["stromdsp", "rust", "lv2"]);
+}
+
+#[test]
+fn test_rust_backends_set_gate_and_limiter_timing_explicitly() {
+    // The mixer sets hold/reduction and attack/release/lookahead itself, so its
+    // sound does not follow whatever defaults a DSP element ships with.
+    for backend in ["rust", "stromdsp"] {
+        let m = assemble(&small_mixer_props(&[
+            ("dsp_backend", PropertyValue::String(backend.to_string())),
+            ("main_limiter_enabled", PropertyValue::Bool(true)),
+        ]));
+        let gate = m.element("gate_0");
+        assert_eq!(gate.property::<f32>("hold"), DEFAULT_GATE_HOLD, "{backend}");
+        assert_eq!(
+            gate.property::<f32>("reduction"),
+            DEFAULT_GATE_REDUCTION,
+            "{backend}"
+        );
+        let lim = m.element("main_limiter");
+        assert_eq!(
+            lim.property::<f32>("attack"),
+            DEFAULT_LIMITER_ATTACK,
+            "{backend}"
+        );
+        assert_eq!(
+            lim.property::<f32>("release"),
+            DEFAULT_LIMITER_RELEASE,
+            "{backend}"
+        );
+        assert_eq!(
+            lim.property::<f32>("lookahead"),
+            DEFAULT_LIMITER_LOOKAHEAD,
+            "{backend}"
+        );
+    }
+}
+
+#[test]
+fn test_stromdsp_compressor_gets_detector_and_auto_makeup() {
+    let m = assemble(&small_mixer_props(&[(
+        "dsp_backend",
+        PropertyValue::String("stromdsp".to_string()),
+    )]));
+    for id in ["comp_0", "main_comp"] {
+        let comp = m.element(id);
+        let detector = comp.property_value("detector");
+        let nick = gst::glib::EnumValue::from_value(&detector)
+            .map(|(_, v)| v.nick().to_string())
+            .unwrap();
+        assert_eq!(nick, strom_types::mixer::DEFAULT_COMP_DETECTOR, "{id}");
+        assert_eq!(
+            comp.property::<bool>("auto-makeup"),
+            strom_types::mixer::DEFAULT_COMP_AUTO_MAKEUP,
+            "{id}"
+        );
+    }
+}
+
+#[test]
+fn test_stromdsp_compressor_threshold_offset() {
+    use strom_types::mixer::STROMDSP_COMP_THRESHOLD_OFFSET_DB;
+    // Build path: -20 dB reaches a strom-dsp compressor as -14 dB, lsp-rs as -20 dB.
+    let threshold = |backend: &str| {
+        let m = assemble(&small_mixer_props(&[
+            ("dsp_backend", PropertyValue::String(backend.to_string())),
+            ("ch1_comp_threshold", PropertyValue::Float(-20.0)),
+        ]));
+        m.element("comp_0").property::<f32>("threshold") as f64
+    };
+    let expected = db_to_linear(-20.0 + STROMDSP_COMP_THRESHOLD_OFFSET_DB);
+    assert!((threshold("stromdsp") - expected).abs() < 1e-5);
+    assert!((threshold("rust") - db_to_linear(-20.0)).abs() < 1e-5);
+
+    // Live path: the same offset, and 0 dB clamps to the element's maximum.
+    init_gst();
+    let comp = gst::ElementFactory::make("stromdsp-compressor")
+        .build()
+        .unwrap();
+    let live = |db: f64| {
+        let r =
+            translate_property_for_element(&comp, "al", &PropertyValue::Float(db_to_linear(db)));
+        float(&r[0].1)
+    };
+    assert!((live(-20.0) - expected).abs() < 1e-9);
+    assert_eq!(live(0.0), 1.0);
+    let lsp = lsp_rs("lsp-rs-compressor");
+    let r = translate_property_for_element(&lsp, "al", &PropertyValue::Float(0.1));
+    assert_eq!(float(&r[0].1), 0.1);
+}
+
+#[test]
+fn test_translate_stromdsp_properties() {
+    init_gst();
+    let make = |f: &str| gst::ElementFactory::make(f).build().unwrap();
+    let gate = make("stromdsp-gate");
+    let names: Vec<String> =
+        translate_property_for_element(&gate, "gt", &PropertyValue::Float(0.1))
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+    assert_eq!(names, ["open-threshold", "close-threshold"]);
+    let comp = make("stromdsp-compressor");
+    let r = translate_property_for_element(&comp, "cr", &PropertyValue::Float(4.0));
+    assert_eq!(r[0].0, "ratio");
+    let eq = make("stromdsp-equalizer");
+    let r = translate_property_for_element(&eq, "f-1", &PropertyValue::Float(400.0));
+    assert_eq!(r[0].0, "band1-frequency");
+    let lim = make("stromdsp-limiter");
+    let r = translate_property_for_element(&lim, "th", &PropertyValue::Float(0.1));
+    assert_eq!(r[0].0, "threshold");
+    assert!((float(&r[0].1) + 20.0).abs() < 1e-6);
 }

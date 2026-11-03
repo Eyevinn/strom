@@ -254,7 +254,8 @@ impl ApiClient {
         Ok(response.pads)
     }
 
-    /// Reset accumulated loudness measurements on an EBU R128 meter block.
+    /// Reset accumulated loudness measurements on a Loudness Meter block, or the
+    /// integrated loudness of an Audio Processor block.
     pub async fn reset_loudness(&self, flow_id: &FlowId, block_id: &str) -> ApiResult<()> {
         let url = format!(
             "{}/flows/{}/blocks/{}/loudness/reset",

@@ -27,14 +27,18 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             persist: None,
         },
         // DSP Backend selection — construction-time only; switches which set of
-        // LV2/Rust DSP elements the builder instantiates.
+        // DSP elements the builder instantiates.
         ExposedProperty {
             name: "dsp_backend".to_string(),
             label: "DSP Backend".to_string(),
-            description: "LV2 uses external C++ LSP plugins, Rust uses built-in lsp-plugins-rs"
+            description: "strom-dsp (default) uses the built-in strom-dsp elements, Rust uses the built-in lsp-plugins-rs, LV2 uses the external C++ LSP plugins"
                 .to_string(),
             property_type: PropertyType::Enum {
                 values: vec![
+                    EnumValue {
+                        value: "stromdsp".to_string(),
+                        label: Some("strom-dsp".to_string()),
+                    },
                     EnumValue {
                         value: "rust".to_string(),
                         label: Some("Rust".to_string()),
@@ -45,7 +49,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                     },
                 ],
             },
-            default_value: Some(PropertyValue::String("rust".to_string())),
+            default_value: Some(PropertyValue::String(DEFAULT_DSP_BACKEND.to_string())),
             mapping: PropertyMapping {
                 element_id: "_block".to_string(),
                 property_name: "dsp_backend".to_string(),
