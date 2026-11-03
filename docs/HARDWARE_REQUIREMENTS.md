@@ -189,6 +189,15 @@ render sizes rather than a bigger GPU.
   [GPU support matrix](https://developer.nvidia.com/video-encode-and-decode-gpu-support-matrix-new)
   for the current per-card figures. Rarely reached with per-output encoding, but relevant if you
   build many separately encoded outputs.
+- **Intel QSV on Windows needs driver 32.0.101.9150 or later on Core Ultra.** Older Intel
+  drivers for Meteor Lake, Arrow Lake and Lunar Lake graphics corrupt the heap when GStreamer's
+  `qsv` plugin loads, which can crash Strom
+  ([issue #1163](https://github.com/Eyevinn/strom/issues/1163)). On those GPUs with an older
+  driver, Strom disables the QSV encoders at startup and logs a warning with the driver
+  download link. Other GPUs keep QSV: only GPUs the bug has been reported on are checked, so
+  report another affected GPU in an issue. Override the check with `STROM_QSV`:
+  `auto` (default) detects, `on` or `enable` always keeps QSV, `off` or `disable` always
+  disables the QSV encoders, on any platform.
 - **Platforms**: on WSL2 NVENC works but CUDA-GL interop does not (the D3D layer blocks it); on
   macOS there is no NVENC/NVDEC at all, only VideoToolbox.
 - **Encoder/decoder engine utilisation is not reported** by Strom's system monitor, which covers

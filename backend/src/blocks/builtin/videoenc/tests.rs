@@ -714,28 +714,60 @@ fn test_block_encoder_preference() {
 /// `demote_qsv_encoders` has run the block never selects one. With 9150 or
 /// later, or on other GPUs, they keep their rank. Elsewhere QSV keeps its rank
 /// and this checks nothing.
+///
+/// The independent check: when the `qsv` plugin registered encoders, DXGI
+/// must have found the Intel adapter behind them, with a real device id. The
+/// rank checks reuse `qsv_at_risk`, so they show the demotion was applied to
+/// every QSV encoder feature (per-device ones included), not that the
+/// decision is right; the unit tests in `gst::intel_qsv` cover that.
 #[test]
 fn qsv_encoders_follow_the_intel_driver_on_windows() {
+    use crate::gst::intel_qsv::{self, QsvMode};
+
     init_gst();
     crate::gst::demote_qsv_encoders();
     if !cfg!(windows) {
         return;
     }
-    let adapters = crate::gst::intel_qsv::intel_adapters();
-    let safe = crate::gst::intel_qsv::qsv_at_risk(&adapters).is_none();
-    eprintln!("Intel adapters {adapters:?}: QSV safe = {safe}");
-    for name in crate::gst::QSV_ENCODERS {
-        if let Some(factory) = gst::ElementFactory::find(name) {
+    let features = intel_qsv::qsv_encoder_features();
+    let scan = intel_qsv::intel_adapters();
+    let names: Vec<String> = features.iter().map(|f| f.name().to_string()).collect();
+    eprintln!("QSV encoder features {names:?}, adapter scan {scan:?}");
+    if features.is_empty() {
+        return;
+    }
+    assert!(
+        !scan.intel.is_empty(),
+        "qsv registered {names:?} but DXGI found no Intel adapter: {scan:?}"
+    );
+    for adapter in &scan.intel {
+        assert_ne!(
+            adapter.device_id, 0,
+            "Intel adapter without a device id: {scan:?}"
+        );
+    }
+    let demote = match intel_qsv::qsv_mode_from_env() {
+        QsvMode::Off => true,
+        QsvMode::On => false,
+        QsvMode::Auto => intel_qsv::qsv_at_risk(&scan.intel).is_some(),
+    };
+    for factory in &features {
+        let name = factory.name();
+        if demote {
             assert_eq!(
-                factory.rank() == gst::Rank::NONE,
-                !safe,
-                "{name} has rank {:?} with QSV {} on {adapters:?}",
                 factory.rank(),
-                if safe { "safe" } else { "at risk" }
+                gst::Rank::NONE,
+                "{name} kept its rank on {scan:?}"
+            );
+        } else if crate::gst::QSV_ENCODERS.contains(&name.as_str()) {
+            assert_ne!(
+                factory.rank(),
+                gst::Rank::NONE,
+                "{name} was demoted on {scan:?}"
             );
         }
     }
-    if safe {
+    if !demote {
         return;
     }
     for codec in [Codec::H264, Codec::H265, Codec::AV1, Codec::VP9] {
