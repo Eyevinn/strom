@@ -61,6 +61,11 @@ pub struct ThumbnailTapConfig {
     /// stand still but keep sending (a paused player repeats its frame) stay
     /// fresh. Raised to at least two `update_interval`s, the tap's own gap
     /// between pictures.
+    ///
+    /// A source that sends frames less often than `max_age` (a slideshow, a
+    /// timelapse, a screen share or NDI source that only sends on change)
+    /// alternates between a picture and Timeout, although it runs. The tap
+    /// cannot tell it from a source that stopped.
     pub max_age: Duration,
 }
 

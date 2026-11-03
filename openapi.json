@@ -3403,7 +3403,7 @@
             }
           },
           "504": {
-            "description": "Frame capture timed out (retry shortly)",
+            "description": "No recent frame: capture not ready yet, or the source sends no frames (retry shortly)",
             "content": {
               "application/json": {
                 "schema": {
