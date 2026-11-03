@@ -1723,6 +1723,38 @@ fn test_stromdsp_compressor_gets_detector_and_auto_makeup() {
 }
 
 #[test]
+fn test_stromdsp_compressor_threshold_offset() {
+    use strom_types::mixer::STROMDSP_COMP_THRESHOLD_OFFSET_DB;
+    // Build path: -20 dB reaches a strom-dsp compressor as -14 dB, lsp-rs as -20 dB.
+    let threshold = |backend: &str| {
+        let m = assemble(&small_mixer_props(&[
+            ("dsp_backend", PropertyValue::String(backend.to_string())),
+            ("ch1_comp_threshold", PropertyValue::Float(-20.0)),
+        ]));
+        m.element("comp_0").property::<f32>("threshold") as f64
+    };
+    let expected = db_to_linear(-20.0 + STROMDSP_COMP_THRESHOLD_OFFSET_DB);
+    assert!((threshold("stromdsp") - expected).abs() < 1e-5);
+    assert!((threshold("rust") - db_to_linear(-20.0)).abs() < 1e-5);
+
+    // Live path: the same offset, and 0 dB clamps to the element's maximum.
+    init_gst();
+    let comp = gst::ElementFactory::make("stromdsp-compressor")
+        .build()
+        .unwrap();
+    let live = |db: f64| {
+        let r =
+            translate_property_for_element(&comp, "al", &PropertyValue::Float(db_to_linear(db)));
+        float(&r[0].1)
+    };
+    assert!((live(-20.0) - expected).abs() < 1e-9);
+    assert_eq!(live(0.0), 1.0);
+    let lsp = lsp_rs("lsp-rs-compressor");
+    let r = translate_property_for_element(&lsp, "al", &PropertyValue::Float(0.1));
+    assert_eq!(float(&r[0].1), 0.1);
+}
+
+#[test]
 fn test_translate_stromdsp_properties() {
     init_gst();
     let make = |f: &str| gst::ElementFactory::make(f).build().unwrap();

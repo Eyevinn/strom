@@ -6,6 +6,7 @@ use strom_types::{parse_common_audio_sample_rate, PropertyValue, DEFAULT_AUDIO_S
 use tracing::warn;
 
 use super::{DEFAULT_CHANNELS, MAX_AUX_BUSES, MAX_CHANNELS, MAX_GROUPS, MIN_KNEE_LINEAR};
+use strom_types::mixer::STROMDSP_COMP_THRESHOLD_OFFSET_DB;
 
 /// Read a count property. A negative integer counts as zero so the caller's
 /// clamp lands on its minimum; `as usize` would wrap it to `usize::MAX`.
@@ -180,6 +181,16 @@ pub fn translate_property_for_element(
 
     if type_name == "LspRsCompressor" || type_name == "StromDspCompressor" {
         let pair = match prop_name {
+            "al" if type_name == "StromDspCompressor" => {
+                // Same offset as the build path (see STROMDSP_COMP_THRESHOLD_OFFSET_DB).
+                let linear = match value {
+                    PropertyValue::Float(v) => {
+                        (v * db_to_linear(STROMDSP_COMP_THRESHOLD_OFFSET_DB)).min(1.0)
+                    }
+                    _ => return vec![],
+                };
+                ("threshold".to_string(), PropertyValue::Float(linear))
+            }
             "al" => ("threshold".to_string(), value.clone()),
             "cr" => ("ratio".to_string(), value.clone()),
             "at" => ("attack".to_string(), value.clone()),

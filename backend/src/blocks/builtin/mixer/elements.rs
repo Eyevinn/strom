@@ -9,6 +9,7 @@ use super::EQ_BAND_TYPE_BELL;
 use strom_types::mixer::{
     DEFAULT_COMP_AUTO_MAKEUP, DEFAULT_COMP_DETECTOR, DEFAULT_GATE_HOLD, DEFAULT_GATE_REDUCTION,
     DEFAULT_LIMITER_ATTACK, DEFAULT_LIMITER_LOOKAHEAD, DEFAULT_LIMITER_RELEASE,
+    STROMDSP_COMP_THRESHOLD_OFFSET_DB,
 };
 
 /// Cached result of checking whether audiomixer supports the force-live property.
@@ -218,7 +219,13 @@ pub(super) fn make_compressor_element(
             .build()
         {
             comp.set_property("enabled", enabled);
-            comp.set_property("threshold", db_to_linear(threshold_db) as f32);
+            let threshold_db = if backend == "stromdsp" {
+                threshold_db + STROMDSP_COMP_THRESHOLD_OFFSET_DB
+            } else {
+                threshold_db
+            };
+            // The element takes 0..=1 linear; the offset can push 0 dB past it.
+            comp.set_property("threshold", db_to_linear(threshold_db).min(1.0) as f32);
             comp.set_property("ratio", ratio as f32);
             comp.set_property("attack", attack_ms as f32);
             comp.set_property("release", release_ms as f32);

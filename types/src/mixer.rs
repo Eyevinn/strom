@@ -33,6 +33,12 @@ pub const DEFAULT_COMP_KNEE: f32 = -6.0;
 pub const DEFAULT_COMP_DETECTOR: &str = "rms";
 /// Automatic makeup gain, for DSP elements that offer it.
 pub const DEFAULT_COMP_AUTO_MAKEUP: bool = false;
+/// Added to the compressor threshold (dB) before it reaches a strom-dsp
+/// compressor. strom-dsp follows the textbook static curve; measured on a
+/// black box, the earlier backends compress as if their threshold sat about
+/// 6 dB higher. The offset keeps Strom's threshold scale, and existing
+/// flows, sounding the same across backends.
+pub const STROMDSP_COMP_THRESHOLD_OFFSET_DB: f64 = 6.0;
 
 // EQ bands: (freq Hz, gain dB, Q)
 pub const DEFAULT_EQ_BANDS: [(f32, f32, f32); 4] = [
@@ -47,7 +53,7 @@ pub const DEFAULT_LIMITER_THRESHOLD: f32 = -3.0;
 /// Limiter attack, release and lookahead (ms). Set explicitly so the limiter
 /// does not depend on the DSP element's own defaults.
 pub const DEFAULT_LIMITER_ATTACK: f32 = 1.0;
-pub const DEFAULT_LIMITER_RELEASE: f32 = 100.0;
+pub const DEFAULT_LIMITER_RELEASE: f32 = 20.0;
 pub const DEFAULT_LIMITER_LOOKAHEAD: f32 = 5.0;
 
 // ── Structural defaults ─────────────────────────────────────────────
