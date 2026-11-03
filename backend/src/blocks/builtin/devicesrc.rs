@@ -15,10 +15,10 @@
 //!
 //! Video leaves the block as the source delivers it, in system memory or GL
 //! memory (an AVFoundation camera prefers GL), at the configured resolution
-//! and framerate: each consumer adapts its own input (BLOCK_GUIDELINES).
-//! Audio goes through a queue that holds what the source captures (see
-//! `audio_source_queue`), then `audioconvert` + `audioresample` + an
-//! `audio/x-raw` capsfilter.
+//! and framerate: each consumer adapts its own input (BLOCK_GUIDELINES). It
+//! goes through a queue that holds what the source captures (see
+//! `source_queue`). Audio goes through the same kind of queue, then
+//! `audioconvert` + `audioresample` + an `audio/x-raw` capsfilter.
 //!
 //! `stream_mode` chooses which pads are exposed (`audio_video`, `video`,
 //! `audio`) the same way the DeckLink and WHEP blocks do.
@@ -121,7 +121,7 @@ impl BlockBuilder for LocalInputBuilder {
                 },
                 name: "video_out".to_string(),
                 media_type: MediaType::Video,
-                internal_element_id: "videosrc_caps".to_string(),
+                internal_element_id: VIDEO_SOURCE_QUEUE.to_string(),
                 internal_pad_name: "src".to_string(),
             });
         }
@@ -167,6 +167,7 @@ impl BlockBuilder for LocalInputBuilder {
 
             let videosrc_id = format!("{}:videosrc", instance_id);
             let videosrc_caps_id = format!("{}:videosrc_caps", instance_id);
+            let videosrc_queue_id = format!("{}:{}", instance_id, VIDEO_SOURCE_QUEUE);
 
             let videosrc = make_source(
                 ctx,
@@ -176,12 +177,13 @@ impl BlockBuilder for LocalInputBuilder {
                 "autovideosrc",
             )?;
 
-            // The capture front, which is also the block's video output: the
-            // source must deliver the configured resolution / framerate at
-            // capture time (AVFoundation, v4l2 and Media Foundation pick the
-            // device mode that matches) rather than running at the device's
-            // default mode. Nothing in the block scales; a consumer that needs
-            // another size scales on its own input.
+            // The capture front, followed only by the source queue, which is
+            // the block's video output: the source must deliver the
+            // configured resolution / framerate at capture time
+            // (AVFoundation, v4l2 and Media Foundation pick the device mode
+            // that matches) rather than running at the device's default mode.
+            // Nothing in the block scales; a consumer that needs another size
+            // scales on its own input.
             // Both memory types are offered, system memory first so a device
             // that can deliver either keeps producing what it does today. A
             // capsfilter naming only `video/x-raw` means SystemMemory, not
@@ -217,13 +219,20 @@ impl BlockBuilder for LocalInputBuilder {
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("videosrc_caps: {}", e)))?;
 
+            let videosrc_queue = source_queue(&videosrc_queue_id)?;
+
             internal_links.push((
                 ElementPadRef::pad(&videosrc_id, "src"),
                 ElementPadRef::pad(&videosrc_caps_id, "sink"),
             ));
+            internal_links.push((
+                ElementPadRef::pad(&videosrc_caps_id, "src"),
+                ElementPadRef::pad(&videosrc_queue_id, "sink"),
+            ));
 
             elements.push((videosrc_id, videosrc));
             elements.push((videosrc_caps_id, videosrc_caps));
+            elements.push((videosrc_queue_id, videosrc_queue));
         }
 
         if stream_mode.has_audio() {
@@ -341,7 +350,7 @@ impl BlockBuilder for LocalInputBuilder {
                 ElementPadRef::pad(&audiosrc_id, "src"),
                 ElementPadRef::pad(&audiosrc_caps_id, "sink"),
             ));
-            let audiosrc_queue = audio_source_queue(&audiosrc_queue_id)?;
+            let audiosrc_queue = source_queue(&audiosrc_queue_id)?;
 
             internal_links.push((
                 ElementPadRef::pad(&audiosrc_caps_id, "src"),
@@ -491,7 +500,11 @@ const ASIO_SOURCE_FACTORY: &str = "asiosrc";
 /// The queue right behind the audio source, inside the block (#1068).
 pub const AUDIO_SOURCE_QUEUE: &str = "audiosrc_queue";
 
-/// The queue that holds the audio source's data while the flow waits on it.
+/// The queue right behind the video capture front, inside the block, and the
+/// block's video output (#1183).
+pub const VIDEO_SOURCE_QUEUE: &str = "videosrc_queue";
+
+/// The queue that holds a capture source's data while the flow waits on it.
 ///
 /// An audio capture source reports as its maximum latency the ring buffer it
 /// captures into, and loses data past that. For `asiosrc` that is two ASIO
@@ -502,14 +515,22 @@ pub const AUDIO_SOURCE_QUEUE: &str = "audiosrc_queue";
 /// add queues") until the ASIO buffer was 1024 samples (min 21.3 ms, max
 /// 42.7 ms). The same holds for any input a mixer lines up with others.
 ///
+/// Video has the same problem. `avfvideosrc` reports one frame as both its
+/// minimum and its maximum latency (33.3 ms at 30 fps), so with nothing after
+/// it that buffers, a syncing sink downstream had no room for its processing
+/// deadline. srtsink shortened the deadline to 0, and every millisecond the
+/// encoder took made a frame late: a Mac camera into Video Encoder and
+/// MPEG-TS/SRT Output lost about 10 frames a second to QoS.
+///
 /// This queue is the buffering the block itself has, and it reports it: a
 /// non-leaky queue adds its `max-size-time` (1 s, the default) to the
 /// maximum, and leaves the minimum alone, so no latency is added. Its buffer
 /// and byte limits are off: with small ASIO buffers (32 samples = 0.67 ms
-/// each) the default 200 buffers would fill in 133 ms, well short of the 1 s
-/// the queue reports, and the source would then lose data inside the latency
-/// it reported (BLOCK_GUIDELINES, Reported Latency).
-fn audio_source_queue(id: &str) -> Result<gst::Element, BlockBuildError> {
+/// each) the default 200 buffers would fill in 133 ms, and the default 10 MB
+/// holds about five 720p video frames, well short of the 1 s the queue
+/// reports. The source would then lose data inside the latency it reported
+/// (BLOCK_GUIDELINES, Reported Latency).
+fn source_queue(id: &str) -> Result<gst::Element, BlockBuildError> {
     gst::ElementFactory::make("queue")
         .name(id)
         .property("max-size-buffers", 0u32)
@@ -890,7 +911,7 @@ fn local_input_definition() -> BlockDefinition {
                     label: Some("V".to_string()),
                     name: "video_out".to_string(),
                     media_type: MediaType::Video,
-                    internal_element_id: "videosrc_caps".to_string(),
+                    internal_element_id: VIDEO_SOURCE_QUEUE.to_string(),
                     internal_pad_name: "src".to_string(),
                 },
                 ExternalPad {

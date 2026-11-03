@@ -16,10 +16,11 @@
 
 pub mod common;
 
+use common::latency;
+
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 use strom::blocks::builtin::devicesrc::LocalInputBuilder;
 use strom::blocks::BlockBuilder;
 use strom_types::PropertyValue;
@@ -48,59 +49,8 @@ fn asio_like_source() -> gst::Element {
         .build()
         .expect("audiotestsrc");
     let min = gst::ClockTime::from_nseconds(ASIO_BUFFER * 1_000_000_000 / RATE);
-    src.static_pad("src").unwrap().add_probe(
-        gst::PadProbeType::QUERY_UPSTREAM,
-        move |_pad, info| {
-            let Some(gst::PadProbeData::Query(query)) = info.data.as_mut() else {
-                return gst::PadProbeReturn::Ok;
-            };
-            let gst::QueryViewMut::Latency(q) = query.view_mut() else {
-                return gst::PadProbeReturn::Ok;
-            };
-            q.set(true, min, min * 2);
-            gst::PadProbeReturn::Handled
-        },
-    );
+    latency::report_latency(&src, min, min * 2);
     src
-}
-
-/// A sink that syncs, with the default 20 ms processing deadline, as
-/// `ndisink` has.
-fn syncing_sink() -> gst::Element {
-    gst::ElementFactory::make("fakesink")
-        .property("sync", true)
-        .build()
-        .expect("fakesink")
-}
-
-/// Play `pipeline` for a second and return the warnings it posted.
-fn warnings(pipeline: &gst::Pipeline) -> Vec<String> {
-    let bus = pipeline.bus().unwrap();
-    pipeline.set_state(gst::State::Playing).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(1);
-    let mut warnings = Vec::new();
-    while Instant::now() < deadline {
-        let Some(msg) = bus.timed_pop_filtered(
-            gst::ClockTime::from_mseconds(50),
-            &[gst::MessageType::Warning, gst::MessageType::Error],
-        ) else {
-            continue;
-        };
-        match msg.view() {
-            gst::MessageView::Warning(w) => warnings.push(w.error().to_string()),
-            gst::MessageView::Error(e) => panic!("the pipeline failed: {}", e.error()),
-            _ => {}
-        }
-    }
-    pipeline.set_state(gst::State::Null).unwrap();
-    warnings
-}
-
-fn add_queues_warnings(warnings: &[String]) -> usize {
-    warnings
-        .iter()
-        .filter(|w| w.contains("please add queues"))
-        .count()
 }
 
 #[test]
@@ -111,12 +61,12 @@ fn the_stand_in_alone_trips_a_syncing_sink() {
     // The setup shows the failure the block test guards against.
     let pipeline = gst::Pipeline::new();
     let src = asio_like_source();
-    let sink = syncing_sink();
+    let sink = latency::syncing_sink();
     pipeline.add_many([&src, &sink]).unwrap();
     src.link(&sink).unwrap();
-    let warnings = warnings(&pipeline);
+    let warnings = latency::warnings(&pipeline);
     assert!(
-        add_queues_warnings(&warnings) > 0,
+        latency::add_queues_warnings(&warnings) > 0,
         "an ASIO-like source straight into a syncing sink should warn: {warnings:?}"
     );
 }
@@ -154,16 +104,16 @@ fn an_asio_like_source_through_local_input_does_not_trip_a_syncing_sink() {
         .expect("capture front sink pad");
 
     let src = asio_like_source();
-    let sink = syncing_sink();
+    let sink = latency::syncing_sink();
     pipeline.add_many([&src, &sink]).unwrap();
     src.static_pad("src").unwrap().link(&capture_front).unwrap();
     block_out
         .link(&sink.static_pad("sink").unwrap())
         .expect("the block's audio output links to the sink");
 
-    let warnings = warnings(&pipeline);
+    let warnings = latency::warnings(&pipeline);
     assert_eq!(
-        add_queues_warnings(&warnings),
+        latency::add_queues_warnings(&warnings),
         0,
         "Local Input must report the latency it can hold: {warnings:?}"
     );
