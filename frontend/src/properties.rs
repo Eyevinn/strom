@@ -2512,7 +2512,11 @@ impl PropertyInspector {
         // Show description
         if !exposed_prop.description.is_empty() {
             ui.indent(prop_name, |ui| {
-                ui.small(&exposed_prop.description);
+                // Wrap explicitly: inside the inspector's two-way scroll area
+                // a label extends sideways and runs off the panel instead.
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&exposed_prop.description).small()).wrap(),
+                );
             });
         }
 
@@ -2658,7 +2662,11 @@ impl PropertyInspector {
         // Show description
         if !prop_info.description.is_empty() {
             ui.indent(prop_name, |ui| {
-                ui.small(&prop_info.description);
+                // Wrap explicitly: inside the inspector's two-way scroll area
+                // a label extends sideways and runs off the panel instead.
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&prop_info.description).small()).wrap(),
+                );
             });
         }
 
@@ -2762,7 +2770,11 @@ impl PropertyInspector {
         // Show description
         if !prop_info.description.is_empty() {
             ui.indent(prop_name, |ui| {
-                ui.small(&prop_info.description);
+                // Wrap explicitly: inside the inspector's two-way scroll area
+                // a label extends sideways and runs off the panel instead.
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&prop_info.description).small()).wrap(),
+                );
             });
         }
 

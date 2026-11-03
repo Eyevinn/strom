@@ -36,14 +36,15 @@ pub const CUSTOM_ONLY_PROPERTIES: &[&str] = &[
 /// Preset that applies the block's own (Strom's) values for every setting.
 pub const PRESET_CUSTOM: &str = "custom";
 
-/// Presets the block offers, as the element's enum nicks, with a label.
+/// Presets the block offers, as the element's enum nicks, with a short label
+/// for the dropdown. The targets are in the preset property's description.
 /// `custom` is last: it is the only one that uses the block's own settings.
 pub const PRESETS: &[(&str, &str)] = &[
-    ("ebu-r128", "EBU R 128 (-23 LUFS / -1 dBTP)"),
-    ("atsc-a85", "ATSC A/85 (-24 LKFS / -2 dBTP)"),
-    ("streaming", "Streaming (-16 LUFS / -1 dBTP)"),
-    ("speech", "Speech (-18 LUFS / -1 dBTP)"),
-    (PRESET_CUSTOM, "Custom (settings below)"),
+    ("ebu-r128", "EBU R 128"),
+    ("atsc-a85", "ATSC A/85"),
+    ("streaming", "Streaming"),
+    ("speech", "Speech"),
+    (PRESET_CUSTOM, "Custom"),
 ];
 
 /// Preset a new block starts with.

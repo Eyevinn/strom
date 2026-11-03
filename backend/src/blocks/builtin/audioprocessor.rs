@@ -537,8 +537,10 @@ fn audioprocessor_definition() -> BlockDefinition {
     let mut exposed_properties = vec![ExposedProperty {
         name: PRESET_PROPERTY.to_string(),
         label: "Preset".to_string(),
-        description: "Processing preset. A named preset sets loudness, AGC, multiband and limiter \
-                      from its own tuning; choose Custom to set them yourself."
+        description: "Processing preset. EBU R 128: -23 LUFS / -1 dBTP. ATSC A/85: -24 LKFS / \
+                      -2 dBTP. Streaming: -16 LUFS / -1 dBTP. Speech: -18 LUFS / -1 dBTP. A named \
+                      preset sets loudness, AGC, multiband and limiter from its own tuning; choose \
+                      Custom to set them yourself."
             .to_string(),
         property_type: PropertyType::Enum {
             values: PRESETS
@@ -609,7 +611,7 @@ fn audioprocessor_definition() -> BlockDefinition {
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
             icon: Some("\u{E228}".to_string()),
-            width: Some(2.0),
+            width: Some(2.6),
             height: Some(2.5),
             ..Default::default()
         }),
