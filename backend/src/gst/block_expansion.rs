@@ -355,12 +355,24 @@ fn visible_properties(block: &BlockInstance) -> HashMap<String, PropertyValue> {
     let (properties, ignored) =
         strom_types::block::effective_properties(&definition.exposed_properties, &block.properties);
     for value in ignored {
-        warn!(
-            "Block {} ({}): {}",
-            block.id,
-            definition.name,
-            value.describe()
-        );
+        // A ruled-out option is a setting that no longer fits (e.g. a profile
+        // of another codec): worth a warning. A hidden property's stored value
+        // is normal (custom settings kept while a named preset is selected).
+        if value.option {
+            warn!(
+                "Block {} ({}): {}",
+                block.id,
+                definition.name,
+                value.describe()
+            );
+        } else {
+            debug!(
+                "Block {} ({}): {}",
+                block.id,
+                definition.name,
+                value.describe()
+            );
+        }
     }
     properties
 }
