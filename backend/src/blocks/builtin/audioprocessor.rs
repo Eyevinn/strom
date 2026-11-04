@@ -88,6 +88,7 @@ impl Setting {
                     .map(|(nick, label)| EnumValue {
                         value: nick.to_string(),
                         label: Some(label.to_string()),
+                        visible_when: None,
                     })
                     .collect(),
             },
