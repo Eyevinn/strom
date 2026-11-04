@@ -166,6 +166,7 @@ fn audiogain_definition() -> BlockDefinition {
                 },
                 live: true,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "mute".to_string(),
@@ -180,6 +181,7 @@ fn audiogain_definition() -> BlockDefinition {
                 },
                 live: true,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "invert".to_string(),
@@ -194,6 +196,7 @@ fn audiogain_definition() -> BlockDefinition {
                 },
                 live: true,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {

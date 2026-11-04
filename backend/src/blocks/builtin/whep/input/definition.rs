@@ -23,6 +23,7 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "video_assignment".to_string(),
@@ -33,10 +34,12 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
                         EnumValue {
                             value: WHEP_VIDEO_ASSIGNMENT_FILL.to_string(),
                             label: Some("Fill (keep outputs)".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: WHEP_VIDEO_ASSIGNMENT_NEWEST.to_string(),
                             label: Some("Newest (follow the latest source)".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -48,6 +51,7 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "video_stream_timeout_ms".to_string(),
@@ -67,6 +71,7 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "implementation".to_string(),
@@ -77,10 +82,12 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
                         EnumValue {
                             value: "whepsrc".to_string(),
                             label: Some("whepsrc (stable)".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "whepclientsrc".to_string(),
                             label: Some("whepclientsrc (new)".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -92,6 +99,7 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "whep_endpoint".to_string(),
@@ -107,6 +115,7 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "auth_token".to_string(),
@@ -121,6 +130,7 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "mixer_latency_ms".to_string(),
@@ -135,6 +145,7 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "jitterbuffer_latency_ms".to_string(),
@@ -149,6 +160,7 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "drop_on_latency".to_string(),
@@ -163,6 +175,7 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "ice_transport_policy".to_string(),
@@ -173,14 +186,17 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
                         EnumValue {
                             value: "".to_string(),
                             label: Some("Server default".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "all".to_string(),
                             label: Some("All (host, srflx, relay)".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "relay".to_string(),
                             label: Some("Relay only (force TURN)".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -192,6 +208,7 @@ pub(crate) fn whep_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         // Static default (audio only). WHEPInputBuilder::get_external_pads adds

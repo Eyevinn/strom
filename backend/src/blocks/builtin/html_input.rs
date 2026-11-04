@@ -757,6 +757,7 @@ fn html_input_definition() -> BlockDefinition {
                 },
                 live: true,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "width".to_string(),
@@ -772,6 +773,7 @@ fn html_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "height".to_string(),
@@ -787,6 +789,7 @@ fn html_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "framerate".to_string(),
@@ -802,6 +805,7 @@ fn html_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "stream_mode".to_string(),
@@ -814,14 +818,17 @@ fn html_input_definition() -> BlockDefinition {
                         EnumValue {
                             value: "video".to_string(),
                             label: Some("Video".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "audio_video".to_string(),
                             label: Some("Audio + Video".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "audio".to_string(),
                             label: Some("Audio".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -833,6 +840,7 @@ fn html_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: BROWSER_PROFILE_PROPERTY.to_string(),
@@ -850,6 +858,7 @@ fn html_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: REMOTE_CONTROL_PROPERTY.to_string(),
@@ -872,6 +881,7 @@ fn html_input_definition() -> BlockDefinition {
                 },
                 live: true,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: STRICT_NETWORK_PROPERTY.to_string(),
@@ -894,6 +904,7 @@ fn html_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {

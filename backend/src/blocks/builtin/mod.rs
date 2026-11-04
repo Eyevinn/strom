@@ -282,4 +282,59 @@ mod tests {
             }
         }
     }
+
+    /// Every `visible_when` points at a property of the same block that has
+    /// no condition of its own (conditions are flat), and names only values
+    /// that property can hold. A typo would hide a property for good.
+    #[test]
+    fn visible_when_conditions_point_at_real_unconditioned_properties() {
+        gst::init().expect("gst init");
+        for block in get_all_builtin_blocks() {
+            let exposed = &block.exposed_properties;
+            let mut conditions = Vec::new();
+            for p in exposed {
+                if let Some(c) = &p.visible_when {
+                    conditions.push((p.name.clone(), c));
+                }
+                if let PropertyType::Enum { values } = &p.property_type {
+                    for v in values {
+                        if let Some(c) = &v.visible_when {
+                            conditions.push((format!("{}={}", p.name, v.value), c));
+                        }
+                    }
+                }
+            }
+            for (owner, c) in conditions {
+                let target = exposed
+                    .iter()
+                    .find(|p| p.name == c.property)
+                    .unwrap_or_else(|| {
+                        panic!("{}: {} depends on unknown {}", block.id, owner, c.property)
+                    });
+                assert!(
+                    target.visible_when.is_none(),
+                    "{}: {} depends on {}, which has a condition itself",
+                    block.id,
+                    owner,
+                    c.property
+                );
+                assert!(!c.one_of.is_empty(), "{}: {}", block.id, owner);
+                if let PropertyType::Enum { values } = &target.property_type {
+                    for want in &c.one_of {
+                        let PropertyValue::String(want) = want else {
+                            panic!("{}: {} compares an enum to {:?}", block.id, owner, want);
+                        };
+                        assert!(
+                            values.iter().any(|v| &v.value == want),
+                            "{}: {} names {}={}, which is not an option",
+                            block.id,
+                            owner,
+                            c.property,
+                            want
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

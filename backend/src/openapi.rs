@@ -23,7 +23,8 @@ use strom_types::audioprocessor::AudioProcessorGovernorState;
 use strom_types::auth::{LoginRequest, LoginResponse};
 use strom_types::block::{
     BlockCategoriesResponse, BlockDefinition, BlockInstance, BlockListResponse, BlockResponse,
-    CreateBlockRequest, ExposedProperty, ExternalPad, ExternalPads, PropertyMapping, PropertyType,
+    CreateBlockRequest, ExposedProperty, ExternalPad, ExternalPads, PropertyCondition,
+    PropertyMapping, PropertyType,
 };
 use strom_types::devtools::{
     DevToolsLink, DevToolsLinkSummary, DevToolsLinks, DevToolsRevokedLinks, DevToolsTarget,
@@ -240,6 +241,7 @@ use utoipa::OpenApi;
             CreateBlockRequest,
             BlockCategoriesResponse,
             ExposedProperty,
+            PropertyCondition,
             PropertyMapping,
             PropertyType,
             ExternalPads,

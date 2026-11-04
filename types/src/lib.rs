@@ -27,6 +27,7 @@ pub mod mediaplayer;
 pub mod mixer;
 pub mod network;
 pub mod ports;
+pub mod property_condition;
 pub mod routing;
 pub mod state;
 pub mod stats;
@@ -46,12 +47,12 @@ pub use block::{
     decklink_video_format_enum_values, parse_audio_channel_config, parse_common_audio_sample_rate,
     parse_resolution_string, AudioChannelConfig, BlockDefinition, BlockInstance, BlockListResponse,
     BlockResponse, CreateBlockRequest, EnumValue, ExposedProperty, ExternalPad, ExternalPads,
-    PropertyMapping, PropertyType, COMMON_AUDIO_SAMPLE_RATES, COMMON_VIDEO_RESOLUTIONS,
-    DECKLINK_VIDEO_FORMATS, DEFAULT_AES67_INPUT_BUFFER_DURATION_MS, DEFAULT_AUDIO_SAMPLE_RATE,
-    DEFAULT_EFP_BUCKET_TIMEOUT, DEFAULT_EFP_HOL_TIMEOUT, DEFAULT_EFP_MTU, DEFAULT_OPUS_BITRATE,
-    DEFAULT_OPUS_COMPLEXITY, DEFAULT_RTMP_LOCATION, DEFAULT_SRT_AUTO_RECONNECT,
-    DEFAULT_SRT_INPUT_URI, DEFAULT_SRT_KEEP_LISTENING, DEFAULT_SRT_LATENCY_MS,
-    DEFAULT_SRT_OUTPUT_URI, DEFAULT_SRT_WAIT_FOR_CONNECTION,
+    PropertyCondition, PropertyMapping, PropertyType, COMMON_AUDIO_SAMPLE_RATES,
+    COMMON_VIDEO_RESOLUTIONS, DECKLINK_VIDEO_FORMATS, DEFAULT_AES67_INPUT_BUFFER_DURATION_MS,
+    DEFAULT_AUDIO_SAMPLE_RATE, DEFAULT_EFP_BUCKET_TIMEOUT, DEFAULT_EFP_HOL_TIMEOUT,
+    DEFAULT_EFP_MTU, DEFAULT_OPUS_BITRATE, DEFAULT_OPUS_COMPLEXITY, DEFAULT_RTMP_LOCATION,
+    DEFAULT_SRT_AUTO_RECONNECT, DEFAULT_SRT_INPUT_URI, DEFAULT_SRT_KEEP_LISTENING,
+    DEFAULT_SRT_LATENCY_MS, DEFAULT_SRT_OUTPUT_URI, DEFAULT_SRT_WAIT_FOR_CONNECTION,
 };
 pub use element::{Element, ElementId, Link, MediaType, PropertyValue};
 pub use events::StromEvent;

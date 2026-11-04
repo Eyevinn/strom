@@ -379,10 +379,12 @@ fn audioanalyzer_definition() -> BlockDefinition {
                         EnumValue {
                             value: "20".to_string(),
                             label: Some("20 Hz".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "30".to_string(),
                             label: Some("30 Hz".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -394,6 +396,7 @@ fn audioanalyzer_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "waveform_columns".to_string(),
@@ -404,14 +407,17 @@ fn audioanalyzer_definition() -> BlockDefinition {
                         EnumValue {
                             value: "200".to_string(),
                             label: Some("200".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "400".to_string(),
                             label: Some("400".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "800".to_string(),
                             label: Some("800".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -423,6 +429,7 @@ fn audioanalyzer_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "vector_pairs".to_string(),
@@ -433,14 +440,17 @@ fn audioanalyzer_definition() -> BlockDefinition {
                         EnumValue {
                             value: "256".to_string(),
                             label: Some("256".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "512".to_string(),
                             label: Some("512".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "1024".to_string(),
                             label: Some("1024".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -452,6 +462,7 @@ fn audioanalyzer_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {

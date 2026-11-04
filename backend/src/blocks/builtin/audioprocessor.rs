@@ -748,6 +748,7 @@ fn audioprocessor_definition() -> BlockDefinition {
                 .map(|(nick, label)| EnumValue {
                     value: nick.to_string(),
                     label: Some(label.to_string()),
+                    visible_when: None,
                 })
                 .collect(),
         },
@@ -759,6 +760,7 @@ fn audioprocessor_definition() -> BlockDefinition {
         },
         live: true,
         persist: None,
+        visible_when: None,
     }];
 
     for s in SETTINGS {
@@ -780,6 +782,9 @@ fn audioprocessor_definition() -> BlockDefinition {
             },
             live: s.live,
             persist: None,
+            visible_when: s
+                .custom_only()
+                .then(|| PropertyCondition::one_of_strings(PRESET_PROPERTY, &[PRESET_CUSTOM])),
         });
     }
 
@@ -911,6 +916,20 @@ mod tests {
                 exposed.contains(name),
                 "{name} is custom-only but not exposed"
             );
+        }
+        // Custom-only settings show only with the Custom preset; the rest
+        // always show.
+        for p in &def.exposed_properties {
+            let custom_only = CUSTOM_ONLY_PROPERTIES.contains(&p.name.as_str());
+            match &p.visible_when {
+                Some(c) => {
+                    assert!(custom_only, "{} has a condition", p.name);
+                    assert_eq!(c.property, PRESET_PROPERTY);
+                    assert_eq!(c.one_of.len(), 1);
+                    assert_pv!(c.one_of[0], PropertyValue::String(PRESET_CUSTOM.into()));
+                }
+                None => assert!(!custom_only, "{} lacks the custom condition", p.name),
+            }
         }
     }
 

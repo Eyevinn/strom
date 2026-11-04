@@ -1168,10 +1168,10 @@ fn videoenc_definition() -> BlockDefinition {
                 description: "Video codec to encode to".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "h264".to_string(), label: Some("H.264 / AVC".to_string()) },
-                        EnumValue { value: "h265".to_string(), label: Some("H.265 / HEVC".to_string()) },
-                        EnumValue { value: "av1".to_string(), label: Some("AV1".to_string()) },
-                        EnumValue { value: "vp9".to_string(), label: Some("VP9".to_string()) },
+                        EnumValue { value: "h264".to_string(), label: Some("H.264 / AVC".to_string()), visible_when: None },
+                        EnumValue { value: "h265".to_string(), label: Some("H.265 / HEVC".to_string()), visible_when: None },
+                        EnumValue { value: "av1".to_string(), label: Some("AV1".to_string()), visible_when: None },
+                        EnumValue { value: "vp9".to_string(), label: Some("VP9".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String("h264".to_string())),
@@ -1182,11 +1182,12 @@ fn videoenc_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "profile".to_string(),
                 label: "Profile".to_string(),
-                description: "Codec profile pinned on the encoder's output capsfilter. \"auto\" (default) pins the codec's 8-bit 4:2:0 profile — high for H.264, main for H.265 — which every common delivery target decodes; without it the encoder follows the incoming pixel format and a 4:2:2, 4:4:4 or 10-bit input produces a profile many targets refuse. \"none\" omits the profile field and lets the encoder negotiate freely with downstream. Pick an explicit profile when the downstream needs a particular one. H.264 profiles begin with baseline/main/high; H.265 profiles begin with main. For VP9 and AV1 any value but \"none\" limits the encoder's input to 8-bit 4:2:0, which gives VP9 profile 0 and AV1 Main.".to_string(),
+                description: "Codec profile pinned on the encoder's output capsfilter. \"auto\" (default) pins the codec's 8-bit 4:2:0 profile — high for H.264, main for H.265 — which every common delivery target decodes; without it the encoder follows the incoming pixel format and a 4:2:2, 4:4:4 or 10-bit input produces a profile many targets refuse. \"none\" omits the profile field and lets the encoder negotiate freely with downstream. Pick an explicit profile when the downstream needs a particular one; the list offers the profiles of the selected codec (H.264 and H.265 only). For VP9 and AV1 any value but \"none\" limits the encoder's input to 8-bit 4:2:0, which gives VP9 profile 0 and AV1 Main.".to_string(),
                 property_type: PropertyType::Enum {
                     values: Profile::block_enum_values(),
                 },
@@ -1200,6 +1201,7 @@ fn videoenc_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "encoder_preference".to_string(),
@@ -1207,9 +1209,9 @@ fn videoenc_definition() -> BlockDefinition {
                 description: "Prefer hardware or software encoding".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "auto".to_string(), label: Some("Auto (Hardware first, then software)".to_string()) },
-                        EnumValue { value: "hardware".to_string(), label: Some("Hardware Only".to_string()) },
-                        EnumValue { value: "software".to_string(), label: Some("Software Only".to_string()) },
+                        EnumValue { value: "auto".to_string(), label: Some("Auto (Hardware first, then software)".to_string()), visible_when: None },
+                        EnumValue { value: "hardware".to_string(), label: Some("Hardware Only".to_string()), visible_when: None },
+                        EnumValue { value: "software".to_string(), label: Some("Software Only".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String("auto".to_string())),
@@ -1220,6 +1222,7 @@ fn videoenc_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "bitrate".to_string(),
@@ -1234,6 +1237,7 @@ fn videoenc_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "quality_preset".to_string(),
@@ -1241,11 +1245,11 @@ fn videoenc_definition() -> BlockDefinition {
                 description: "Encoding quality/speed tradeoff. Slower presets provide better quality at same bitrate.".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "ultrafast".to_string(), label: Some("Ultra Fast".to_string()) },
-                        EnumValue { value: "fast".to_string(), label: Some("Fast".to_string()) },
-                        EnumValue { value: "medium".to_string(), label: Some("Medium".to_string()) },
-                        EnumValue { value: "slow".to_string(), label: Some("Slow".to_string()) },
-                        EnumValue { value: "veryslow".to_string(), label: Some("Very Slow".to_string()) },
+                        EnumValue { value: "ultrafast".to_string(), label: Some("Ultra Fast".to_string()), visible_when: None },
+                        EnumValue { value: "fast".to_string(), label: Some("Fast".to_string()), visible_when: None },
+                        EnumValue { value: "medium".to_string(), label: Some("Medium".to_string()), visible_when: None },
+                        EnumValue { value: "slow".to_string(), label: Some("Slow".to_string()), visible_when: None },
+                        EnumValue { value: "veryslow".to_string(), label: Some("Very Slow".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String("ultrafast".to_string())),
@@ -1256,6 +1260,7 @@ fn videoenc_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "tune".to_string(),
@@ -1263,12 +1268,12 @@ fn videoenc_definition() -> BlockDefinition {
                 description: "Optimize encoder for specific use case (x264/x265 only). Zero latency disables look-ahead for minimal delay.".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "zerolatency".to_string(), label: Some("Zero Latency (streaming/real-time)".to_string()) },
-                        EnumValue { value: "film".to_string(), label: Some("Film (high quality)".to_string()) },
-                        EnumValue { value: "animation".to_string(), label: Some("Animation".to_string()) },
-                        EnumValue { value: "grain".to_string(), label: Some("Grain (preserve film grain)".to_string()) },
-                        EnumValue { value: "stillimage".to_string(), label: Some("Still Image".to_string()) },
-                        EnumValue { value: "fastdecode".to_string(), label: Some("Fast Decode".to_string()) },
+                        EnumValue { value: "zerolatency".to_string(), label: Some("Zero Latency (streaming/real-time)".to_string()), visible_when: None },
+                        EnumValue { value: "film".to_string(), label: Some("Film (high quality)".to_string()), visible_when: None },
+                        EnumValue { value: "animation".to_string(), label: Some("Animation".to_string()), visible_when: None },
+                        EnumValue { value: "grain".to_string(), label: Some("Grain (preserve film grain)".to_string()), visible_when: None },
+                        EnumValue { value: "stillimage".to_string(), label: Some("Still Image".to_string()), visible_when: None },
+                        EnumValue { value: "fastdecode".to_string(), label: Some("Fast Decode".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String("zerolatency".to_string())),
@@ -1279,6 +1284,7 @@ fn videoenc_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "rate_control".to_string(),
@@ -1286,9 +1292,9 @@ fn videoenc_definition() -> BlockDefinition {
                 description: "Rate control mode for encoding".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "vbr".to_string(), label: Some("VBR (Variable Bitrate)".to_string()) },
-                        EnumValue { value: "cbr".to_string(), label: Some("CBR (Constant Bitrate)".to_string()) },
-                        EnumValue { value: "cqp".to_string(), label: Some("CQP (Constant Quality)".to_string()) },
+                        EnumValue { value: "vbr".to_string(), label: Some("VBR (Variable Bitrate)".to_string()), visible_when: None },
+                        EnumValue { value: "cbr".to_string(), label: Some("CBR (Constant Bitrate)".to_string()), visible_when: None },
+                        EnumValue { value: "cqp".to_string(), label: Some("CQP (Constant Quality)".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String("vbr".to_string())),
@@ -1299,6 +1305,7 @@ fn videoenc_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "keyframe_interval".to_string(),
@@ -1313,6 +1320,7 @@ fn videoenc_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {

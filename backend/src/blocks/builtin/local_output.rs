@@ -590,6 +590,7 @@ fn local_output_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         ExposedProperty {
             name: "audio_channels".to_string(),
@@ -606,6 +607,7 @@ fn local_output_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         }],
         external_pads: ExternalPads {
             inputs: vec![ExternalPad {

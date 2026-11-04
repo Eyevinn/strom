@@ -7449,6 +7449,17 @@
           "value": {
             "type": "string",
             "description": "The actual value stored/used"
+          },
+          "visible_when": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PropertyCondition",
+                "description": "Offer this value only while the condition holds. A stored value whose\ncondition is false fails the block build. See [`PropertyCondition`]."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -7559,6 +7570,17 @@
           "property_type": {
             "$ref": "#/components/schemas/PropertyType",
             "description": "Type of property"
+          },
+          "visible_when": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PropertyCondition",
+                "description": "Show and apply this property only while the condition holds. While it\nis false the UI hides the property and the block is built as if it\nwere unset; the stored value is kept. See [`PropertyCondition`]."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -9409,6 +9431,27 @@
           "probe_id": {
             "type": "string",
             "description": "Unique probe ID"
+          }
+        }
+      },
+      "PropertyCondition": {
+        "type": "object",
+        "description": "True while the property named `property` has one of the values in `one_of`.\n\nThe property's current value is its stored value, or its default when the\nblock does not store one. A property with neither never matches.",
+        "required": [
+          "property",
+          "one_of"
+        ],
+        "properties": {
+          "one_of": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PropertyValue"
+            },
+            "description": "Values of that property that make the condition true."
+          },
+          "property": {
+            "type": "string",
+            "description": "Name of another exposed property of the same block."
           }
         }
       },

@@ -912,6 +912,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "num_audio_tracks".to_string(),
@@ -926,6 +927,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "num_data_tracks".to_string(),
@@ -940,6 +942,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "data_stream_ids".to_string(),
@@ -954,6 +957,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "srt_uri".to_string(),
@@ -970,6 +974,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "latency".to_string(),
@@ -984,6 +989,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "wait_for_connection".to_string(),
@@ -998,6 +1004,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "auto_reconnect".to_string(),
@@ -1012,6 +1019,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "keep_listening".to_string(),
@@ -1026,6 +1034,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "decode".to_string(),
@@ -1040,6 +1049,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "bucket_timeout".to_string(),
@@ -1054,6 +1064,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "hol_timeout".to_string(),
@@ -1068,6 +1079,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "normalize_segment".to_string(),
@@ -1082,14 +1094,17 @@ fn efpsrt_input_definition() -> BlockDefinition {
                         EnumValue {
                             value: "auto".to_string(),
                             label: Some("Auto (based on pipeline clock)".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "always".to_string(),
                             label: Some("Always normalize".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "never".to_string(),
                             label: Some("Never (preserve absolute PTS)".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -1101,6 +1116,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {

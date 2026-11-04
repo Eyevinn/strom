@@ -26,14 +26,17 @@ fn vision_mixer_definition() -> BlockDefinition {
                     EnumValue {
                         value: "auto".to_string(),
                         label: Some("Auto (GPU first)".to_string()),
+                        visible_when: None,
                     },
                     EnumValue {
                         value: "gpu".to_string(),
                         label: Some("GPU Only (OpenGL)".to_string()),
+                        visible_when: None,
                     },
                     EnumValue {
                         value: "cpu".to_string(),
                         label: Some("CPU Only (Software)".to_string()),
+                        visible_when: None,
                     },
                 ],
             },
@@ -45,6 +48,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Number of inputs
         ExposedProperty {
@@ -63,6 +67,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // PGM output resolution
         ExposedProperty {
@@ -80,6 +85,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Multiview output resolution
         ExposedProperty {
@@ -99,6 +105,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // PGM output framerate
         ExposedProperty {
@@ -118,6 +125,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Multiview output framerate
         ExposedProperty {
@@ -137,6 +145,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Latency
         ExposedProperty {
@@ -154,6 +163,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Min upstream latency
         ExposedProperty {
@@ -171,6 +181,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Initial PGM input
         ExposedProperty {
@@ -186,6 +197,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Initial PVW input
         ExposedProperty {
@@ -201,6 +213,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Initial PGM source — overrides initial_pgm_input when non-empty.
         // Format: "input:N" or "pip:N".
@@ -219,6 +232,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Initial PVW source — overrides initial_pvw_input when non-empty.
         ExposedProperty {
@@ -236,6 +250,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Swap PVW/PGM positions in the multiview layout
         ExposedProperty {
@@ -255,6 +270,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Output pixel format
         ExposedProperty {
@@ -266,6 +282,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                     let mut v = vec![EnumValue {
                         value: String::new(),
                         label: Some("Auto".to_string()),
+                        visible_when: None,
                     }];
                     v.extend(common_video_pixel_format_enum_values(false));
                     v
@@ -279,6 +296,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Shader FX engine (GPU path only)
         ExposedProperty {
@@ -294,6 +312,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Stinger input
         ExposedProperty {
@@ -309,6 +328,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         ExposedProperty {
             name: strom_types::stinger::STINGER_PREROLL_PROPERTY.to_string(),
@@ -323,6 +343,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Show VU meters in multiview overlay
         ExposedProperty {
@@ -339,6 +360,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Number of DSK inputs
         ExposedProperty {
@@ -350,22 +372,27 @@ fn vision_mixer_definition() -> BlockDefinition {
                     EnumValue {
                         value: "0".to_string(),
                         label: Some("None".to_string()),
+                        visible_when: None,
                     },
                     EnumValue {
                         value: "1".to_string(),
                         label: Some("1 DSK".to_string()),
+                        visible_when: None,
                     },
                     EnumValue {
                         value: "2".to_string(),
                         label: Some("2 DSK".to_string()),
+                        visible_when: None,
                     },
                     EnumValue {
                         value: "3".to_string(),
                         label: Some("3 DSK".to_string()),
+                        visible_when: None,
                     },
                     EnumValue {
                         value: "4".to_string(),
                         label: Some("4 DSK".to_string()),
+                        visible_when: None,
                     },
                 ],
             },
@@ -377,6 +404,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
     ];
 
@@ -400,6 +428,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
     }
 
@@ -408,11 +437,13 @@ fn vision_mixer_definition() -> BlockDefinition {
         let mut pip_values = vec![EnumValue {
             value: "0".to_string(),
             label: Some("None".to_string()),
+            visible_when: None,
         }];
         for i in 1..=MAX_NUM_PIPS {
             pip_values.push(EnumValue {
                 value: i.to_string(),
                 label: Some(format!("{} PiP", i)),
+                visible_when: None,
             });
         }
         exposed_properties.push(ExposedProperty {
@@ -430,6 +461,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         });
     }
 

@@ -1562,6 +1562,7 @@ fn recorder_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "num_audio_tracks".to_string(),
@@ -1576,6 +1577,7 @@ fn recorder_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "container".to_string(),
@@ -1583,10 +1585,10 @@ fn recorder_definition() -> BlockDefinition {
                 description: "Output container format".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "mp4".to_string(), label: Some("MP4".to_string()) },
-                        EnumValue { value: "mkv".to_string(), label: Some("MKV (Matroska)".to_string()) },
-                        EnumValue { value: "mpegts".to_string(), label: Some("MPEG-TS (remux)".to_string()) },
-                        EnumValue { value: "ts_passthrough".to_string(), label: Some("MPEG-TS (passthrough)".to_string()) },
+                        EnumValue { value: "mp4".to_string(), label: Some("MP4".to_string()), visible_when: None },
+                        EnumValue { value: "mkv".to_string(), label: Some("MKV (Matroska)".to_string()), visible_when: None },
+                        EnumValue { value: "mpegts".to_string(), label: Some("MPEG-TS (remux)".to_string()), visible_when: None },
+                        EnumValue { value: "ts_passthrough".to_string(), label: Some("MPEG-TS (passthrough)".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String("mp4".to_string())),
@@ -1597,6 +1599,7 @@ fn recorder_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "output_dir".to_string(),
@@ -1611,6 +1614,7 @@ fn recorder_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "filename_prefix".to_string(),
@@ -1625,6 +1629,7 @@ fn recorder_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "max_size_time_secs".to_string(),
@@ -1639,6 +1644,7 @@ fn recorder_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "max_size_mb".to_string(),
@@ -1653,6 +1659,7 @@ fn recorder_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "max_duration_mins".to_string(),
@@ -1667,6 +1674,7 @@ fn recorder_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {

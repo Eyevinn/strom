@@ -960,10 +960,11 @@ impl PropertyInspector {
                             // Build skip-set for blocks whose property panel
                             // grows with a count property: hide entries for
                             // slots beyond the configured count.
+                            // (Properties that depend on another property's
+                            // value use `visible_when` instead, which
+                            // `show_exposed_property` evaluates for every block.)
                             let skip_set = if definition.id == "builtin.vision_mixer" {
                                 Some(Self::vision_mixer_skip_set(block))
-                            } else if definition.id == strom_types::audioprocessor::BLOCK_ID {
-                                Self::audioprocessor_skip_set(block)
                             } else {
                                 None
                             };
@@ -1489,26 +1490,9 @@ impl PropertyInspector {
     }
 
     /// Skip per-input labels for slots beyond the configured `num_inputs`
-    /// so the property panel shows just the inputs in use.
-    /// Audio Processor: with a named preset the preset owns the settings
-    /// that only Custom uses, so they are hidden rather than shown as if
-    /// they applied.
-    fn audioprocessor_skip_set(block: &BlockInstance) -> Option<std::collections::HashSet<String>> {
-        use strom_types::audioprocessor::{
-            CUSTOM_ONLY_PROPERTIES, DEFAULT_PRESET, PRESET_CUSTOM, PRESET_PROPERTY,
-        };
-        let preset = match block.properties.get(PRESET_PROPERTY) {
-            Some(PropertyValue::String(s)) => s.as_str(),
-            _ => DEFAULT_PRESET,
-        };
-        (preset != PRESET_CUSTOM).then(|| {
-            CUSTOM_ONLY_PROPERTIES
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
-        })
-    }
-
+    /// so the property panel shows just the inputs in use. This stays
+    /// hand-written: "slot index below a count" is a range, not the flat
+    /// value list a `visible_when` condition holds.
     fn vision_mixer_skip_set(block: &BlockInstance) -> std::collections::HashSet<String> {
         use strom_types::vision_mixer::{DEFAULT_NUM_INPUTS, MAX_NUM_INPUTS};
 
@@ -2298,6 +2282,11 @@ impl PropertyInspector {
         taken_endpoint_ids: &std::collections::HashSet<String>,
         device_picker_actions: &mut DevicePickerActions,
     ) -> bool {
+        // A property whose `visible_when` is false does not apply with the
+        // block's current settings; its stored value is kept for later.
+        if !exposed_prop.is_visible(&block.properties, &definition.exposed_properties) {
+            return false;
+        }
         let prop_name = &exposed_prop.name;
         let display_label = &exposed_prop.label;
         let default_value = exposed_prop.default_value.as_ref();
@@ -2423,7 +2412,12 @@ impl PropertyInspector {
                         // Check property type for special handling
                         match &exposed_prop.property_type {
                             strom_types::block::PropertyType::Enum { values } => {
-                                Self::show_block_enum_editor(ui, &mut value, values)
+                                let offered = offered_enum_values(
+                                    values,
+                                    &block.properties,
+                                    &definition.exposed_properties,
+                                );
+                                Self::show_block_enum_editor(ui, &mut value, values, &offered)
                             }
                             strom_types::block::PropertyType::NetworkInterface => {
                                 Self::show_network_interface_editor(
@@ -2806,11 +2800,15 @@ impl PropertyInspector {
         }
     }
 
-    /// Show enum editor for block properties with labels.
+    /// Show enum editor for block properties with labels. The dropdown lists
+    /// `offered`, the options that apply with the block's current settings.
+    /// A current value that the settings rule out is still shown, marked
+    /// invalid, rather than changed behind the operator's back.
     fn show_block_enum_editor(
         ui: &mut Ui,
         value: &mut PropertyValue,
         enum_values: &[EnumValue],
+        offered: &[&EnumValue],
     ) -> bool {
         // Normalize numeric values to strings so they match enum variant values.
         // This handles values deserialized from JSON as Int/UInt (e.g. `4` instead of `"4"`).
@@ -2823,17 +2821,26 @@ impl PropertyInspector {
             let mut changed = false;
 
             // Find the label for the current value
-            let current_label = enum_values
-                .iter()
-                .find(|ev| ev.value == *s)
+            let current = enum_values.iter().find(|ev| ev.value == *s);
+            let current_label = current
                 .and_then(|ev| ev.label.as_ref())
                 .cloned()
                 .unwrap_or_else(|| s.clone());
+            let ruled_out = current.and_then(|ev| {
+                ev.visible_when
+                    .as_ref()
+                    .filter(|_| !offered.iter().any(|o| o.value == ev.value))
+            });
+            let selected_text = match ruled_out {
+                Some(_) => egui::RichText::new(format!("{} (invalid)", current_label))
+                    .color(Color32::from_rgb(230, 80, 80)),
+                None => egui::RichText::new(current_label),
+            };
 
-            egui::ComboBox::from_id_salt(ui.next_auto_id())
-                .selected_text(&current_label)
+            let response = egui::ComboBox::from_id_salt(ui.next_auto_id())
+                .selected_text(selected_text)
                 .show_ui(ui, |ui| {
-                    for enum_val in enum_values {
+                    for enum_val in offered {
                         // Display label if available, otherwise just the value
                         let display_text = enum_val.label.as_deref().unwrap_or(&enum_val.value);
 
@@ -2846,6 +2853,12 @@ impl PropertyInspector {
                         }
                     }
                 });
+            if let Some(condition) = ruled_out {
+                response.response.on_hover_text(format!(
+                    "This value applies only when {}. Pick another value, or the flow will not start.",
+                    condition.describe()
+                ));
+            }
             changed
         } else {
             false
@@ -3156,6 +3169,19 @@ impl PropertyInspector {
     }
 }
 
+/// The options of an enum property that apply with the block's current
+/// `properties` (each option's `visible_when`).
+fn offered_enum_values<'a>(
+    values: &'a [EnumValue],
+    properties: &std::collections::HashMap<String, PropertyValue>,
+    exposed: &[ExposedProperty],
+) -> Vec<&'a EnumValue> {
+    values
+        .iter()
+        .filter(|v| v.is_visible(properties, exposed))
+        .collect()
+}
+
 /// The devices in `list` of `category`, by reference: the property panel
 /// draws every frame, so it does not copy the lists it filters.
 fn devices_of(
@@ -3228,6 +3254,54 @@ mod tests {
             .collect();
         sent.sort();
         assert_eq!(sent, ["https://a.example", "https://b.example"]);
+    }
+
+    /// The panel offers each option only while its condition holds, and
+    /// hides a property whose condition is false.
+    #[test]
+    fn options_and_properties_follow_their_visible_when() {
+        use strom_types::block::{PropertyCondition, PropertyType};
+        let h264_only = Some(PropertyCondition::one_of_strings("codec", &["h264"]));
+        let profile_values = vec![
+            EnumValue {
+                value: "auto".to_string(),
+                ..Default::default()
+            },
+            EnumValue {
+                value: "high".to_string(),
+                visible_when: h264_only.clone(),
+                ..Default::default()
+            },
+        ];
+        let exposed = vec![
+            ExposedProperty {
+                name: "codec".to_string(),
+                default_value: Some(PropertyValue::String("h264".to_string())),
+                ..Default::default()
+            },
+            ExposedProperty {
+                name: "level".to_string(),
+                property_type: PropertyType::String,
+                visible_when: h264_only,
+                ..Default::default()
+            },
+        ];
+        let offered = |props: &HashMap<String, PropertyValue>| -> Vec<String> {
+            offered_enum_values(&profile_values, props, &exposed)
+                .iter()
+                .map(|v| v.value.clone())
+                .collect()
+        };
+        let h265 = HashMap::from([(
+            "codec".to_string(),
+            PropertyValue::String("h265".to_string()),
+        )]);
+        // Default codec (h264): both offered, level shown.
+        assert_eq!(offered(&HashMap::new()), ["auto", "high"]);
+        assert!(exposed[1].is_visible(&HashMap::new(), &exposed));
+        // h265: high is not offered, level is hidden.
+        assert_eq!(offered(&h265), ["auto"]);
+        assert!(!exposed[1].is_visible(&h265, &exposed));
     }
 
     #[test]

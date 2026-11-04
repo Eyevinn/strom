@@ -770,96 +770,119 @@ fn video_mode_enum_values() -> Vec<EnumValue> {
         EnumValue {
             value: "auto".to_string(),
             label: Some("Auto".to_string()),
+            visible_when: None,
         },
         // HD modes
         EnumValue {
             value: "1080p2398".to_string(),
             label: Some("1080p 23.98".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "1080p24".to_string(),
             label: Some("1080p 24".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "1080p25".to_string(),
             label: Some("1080p 25".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "1080p2997".to_string(),
             label: Some("1080p 29.97".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "1080p30".to_string(),
             label: Some("1080p 30".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "1080p50".to_string(),
             label: Some("1080p 50".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "1080p5994".to_string(),
             label: Some("1080p 59.94".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "1080p60".to_string(),
             label: Some("1080p 60".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "1080i50".to_string(),
             label: Some("1080i 50".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "1080i5994".to_string(),
             label: Some("1080i 59.94".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "1080i60".to_string(),
             label: Some("1080i 60".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "720p50".to_string(),
             label: Some("720p 50".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "720p5994".to_string(),
             label: Some("720p 59.94".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "720p60".to_string(),
             label: Some("720p 60".to_string()),
+            visible_when: None,
         },
         // UHD modes
         EnumValue {
             value: "2160p2398".to_string(),
             label: Some("4K 23.98".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "2160p24".to_string(),
             label: Some("4K 24".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "2160p25".to_string(),
             label: Some("4K 25".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "2160p2997".to_string(),
             label: Some("4K 29.97".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "2160p30".to_string(),
             label: Some("4K 30".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "2160p50".to_string(),
             label: Some("4K 50".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "2160p5994".to_string(),
             label: Some("4K 59.94".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "2160p60".to_string(),
             label: Some("4K 60".to_string()),
+            visible_when: None,
         },
     ]
 }
@@ -881,14 +904,17 @@ fn decklink_input_definition() -> BlockDefinition {
                         EnumValue {
                             value: "audio_video".to_string(),
                             label: Some("Audio + Video".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "video".to_string(),
                             label: Some("Video only".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "audio".to_string(),
                             label: Some("Audio only".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -900,6 +926,7 @@ fn decklink_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "device_number".to_string(),
@@ -915,6 +942,7 @@ fn decklink_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "mode".to_string(),
@@ -931,6 +959,7 @@ fn decklink_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "connection".to_string(),
@@ -941,30 +970,37 @@ fn decklink_input_definition() -> BlockDefinition {
                         EnumValue {
                             value: "auto".to_string(),
                             label: Some("Auto".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "sdi".to_string(),
                             label: Some("SDI".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "hdmi".to_string(),
                             label: Some("HDMI".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "optical-sdi".to_string(),
                             label: Some("Optical SDI".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "component".to_string(),
                             label: Some("Component".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "composite".to_string(),
                             label: Some("Composite".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "svideo".to_string(),
                             label: Some("S-Video".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -976,6 +1012,7 @@ fn decklink_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "video_format".to_string(),
@@ -992,6 +1029,7 @@ fn decklink_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "drop_no_signal_frames".to_string(),
@@ -1006,6 +1044,7 @@ fn decklink_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "synchronized_capture".to_string(),
@@ -1020,6 +1059,7 @@ fn decklink_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "audio_connection".to_string(),
@@ -1030,26 +1070,32 @@ fn decklink_input_definition() -> BlockDefinition {
                         EnumValue {
                             value: "auto".to_string(),
                             label: Some("Auto".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "embedded".to_string(),
                             label: Some("Embedded (SDI/HDMI)".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "aes".to_string(),
                             label: Some("AES/EBU".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "analog".to_string(),
                             label: Some("Analog".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "analog-xlr".to_string(),
                             label: Some("Analog (XLR)".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "analog-rca".to_string(),
                             label: Some("Analog (RCA)".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -1061,6 +1107,7 @@ fn decklink_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "audio_channels".to_string(),
@@ -1071,18 +1118,22 @@ fn decklink_input_definition() -> BlockDefinition {
                         EnumValue {
                             value: "2".to_string(),
                             label: Some("2 (Stereo)".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "8".to_string(),
                             label: Some("8".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "16".to_string(),
                             label: Some("16".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "max".to_string(),
                             label: Some("Max (auto-detect)".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -1094,6 +1145,7 @@ fn decklink_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         // Static fallback — matches the default `audio_video` mode. The actual
@@ -1145,14 +1197,17 @@ fn decklink_output_definition() -> BlockDefinition {
                         EnumValue {
                             value: "audio_video".to_string(),
                             label: Some("Audio + Video".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "video".to_string(),
                             label: Some("Video only".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "audio".to_string(),
                             label: Some("Audio only".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -1164,6 +1219,7 @@ fn decklink_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "device_number".to_string(),
@@ -1179,6 +1235,7 @@ fn decklink_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "mode".to_string(),
@@ -1195,6 +1252,7 @@ fn decklink_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "video_format".to_string(),
@@ -1211,6 +1269,7 @@ fn decklink_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         // Static fallback — matches the default `audio_video` mode. Actual pads

@@ -899,14 +899,17 @@ fn compositor_definition() -> BlockDefinition {
                     EnumValue {
                         value: "auto".to_string(),
                         label: Some("Auto (GPU first, then CPU)".to_string()),
+                        visible_when: None,
                     },
                     EnumValue {
                         value: "gpu".to_string(),
                         label: Some("GPU Only (OpenGL)".to_string()),
+                        visible_when: None,
                     },
                     EnumValue {
                         value: "cpu".to_string(),
                         label: Some("CPU Only (Software)".to_string()),
+                        visible_when: None,
                     },
                 ],
             },
@@ -918,6 +921,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Number of inputs
         ExposedProperty {
@@ -933,6 +937,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Output resolution
         ExposedProperty {
@@ -950,6 +955,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Background
         ExposedProperty {
@@ -961,14 +967,17 @@ fn compositor_definition() -> BlockDefinition {
                     EnumValue {
                         value: "black".to_string(),
                         label: Some("Black".to_string()),
+                        visible_when: None,
                     },
                     EnumValue {
                         value: "white".to_string(),
                         label: Some("White".to_string()),
+                        visible_when: None,
                     },
                     EnumValue {
                         value: "transparent".to_string(),
                         label: Some("Transparent".to_string()),
+                        visible_when: None,
                     },
                 ],
             },
@@ -980,6 +989,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Latency
         ExposedProperty {
@@ -995,6 +1005,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Min upstream latency
         ExposedProperty {
@@ -1010,6 +1021,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Force live mode
         ExposedProperty {
@@ -1025,6 +1037,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Use queues
         ExposedProperty {
@@ -1040,6 +1053,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // GL output (GPU only)
         ExposedProperty {
@@ -1055,6 +1069,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
     ];
 
@@ -1077,6 +1092,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         });
 
         // YPos
@@ -1093,6 +1109,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         });
 
         // Width
@@ -1109,6 +1126,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         });
 
         // Height
@@ -1125,6 +1143,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         });
 
         // Alpha
@@ -1141,6 +1160,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         });
 
         // Z-Order
@@ -1157,6 +1177,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         });
 
         // Sizing Policy (GPU only)
@@ -1172,10 +1193,12 @@ fn compositor_definition() -> BlockDefinition {
                     EnumValue {
                         value: "none".to_string(),
                         label: Some("None (Stretch to Fill)".to_string()),
+                        visible_when: None,
                     },
                     EnumValue {
                         value: "keep-aspect-ratio".to_string(),
                         label: Some("Keep Aspect Ratio".to_string()),
+                        visible_when: None,
                     },
                 ],
             },
@@ -1187,6 +1210,7 @@ fn compositor_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         });
     }
 

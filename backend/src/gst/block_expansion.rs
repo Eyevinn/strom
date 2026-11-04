@@ -88,6 +88,12 @@ pub async fn expand_blocks(
         dunce::canonicalize(media_path).unwrap_or_else(|_| media_path.to_path_buf());
     let canonical_media_str = canonical_media.to_string_lossy().to_string();
 
+    let definitions = if blocks.is_empty() {
+        Vec::new()
+    } else {
+        builtin::get_all_builtin_blocks()
+    };
+
     for block_instance in blocks {
         // Get builder for this block type
         let builder =
@@ -103,8 +109,11 @@ pub async fn expand_blocks(
             block_instance.id, block_instance.block_definition_id
         );
 
+        // Drop properties whose `visible_when` is false; refuse enum values
+        // that do not apply to the current settings.
+        let mut properties = visible_properties(block_instance, &definitions)?;
+
         // Inject _flow_id, _block_id, and _media_path into properties for blocks that need them
-        let mut properties = block_instance.properties.clone();
         properties.insert(
             "_flow_id".to_string(),
             PropertyValue::String(flow_id.to_string()),
@@ -340,6 +349,26 @@ async fn resolve_pad(pad_ref: &str, blocks: &[BlockInstance]) -> Result<String, 
     Ok(pad_ref.to_string())
 }
 
+/// The block's stored properties without the ones its definition hides for
+/// the current settings (see `strom_types::property_condition`). The stored
+/// values stay in the flow; the block is only built as if they were unset.
+/// An enum value that does not apply to the current settings is an error.
+fn visible_properties(
+    block: &BlockInstance,
+    definitions: &[strom_types::BlockDefinition],
+) -> Result<HashMap<String, PropertyValue>, PipelineError> {
+    let Some(definition) = definitions
+        .iter()
+        .find(|d| d.id == block.block_definition_id)
+    else {
+        return Ok(block.properties.clone());
+    };
+    strom_types::block::effective_properties(&definition.exposed_properties, &block.properties)
+        .map_err(|e| {
+            PipelineError::InvalidFlow(format!("Block {} ({}): {}", block.id, definition.name, e))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +398,74 @@ mod tests {
         let expanded = result.unwrap();
         assert_eq!(expanded.gst_elements.len(), 0);
         assert_eq!(expanded.links.len(), 0);
+    }
+
+    fn block(definition: &str, props: &[(&str, PropertyValue)]) -> BlockInstance {
+        BlockInstance {
+            id: "b1".to_string(),
+            block_definition_id: definition.to_string(),
+            name: None,
+            properties: props
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+            position: strom_types::block::Position { x: 0.0, y: 0.0 },
+            runtime_data: None,
+            computed_external_pads: None,
+        }
+    }
+
+    fn s(v: &str) -> PropertyValue {
+        PropertyValue::String(v.to_string())
+    }
+
+    /// A custom-only Audio Processor setting is hidden under a named preset:
+    /// the block is built without it, and it comes back with Custom.
+    #[test]
+    fn hidden_property_is_not_passed_to_the_builder() {
+        use strom_types::audioprocessor::BLOCK_ID;
+        gst::init().expect("gst init");
+        let definitions = builtin::get_all_builtin_blocks();
+        let loudness = ("target_loudness", PropertyValue::Float(-16.0));
+
+        let named = block(BLOCK_ID, &[("preset", s("ebu-r128")), loudness.clone()]);
+        let props = visible_properties(&named, &definitions).unwrap();
+        assert!(!props.contains_key("target_loudness"));
+        assert!(named.properties.contains_key("target_loudness"));
+
+        let custom = block(BLOCK_ID, &[("preset", s("custom")), loudness]);
+        let props = visible_properties(&custom, &definitions).unwrap();
+        assert!(props.contains_key("target_loudness"));
+    }
+
+    /// An H.264 profile on an H.265 encoder fails the flow with a message
+    /// naming the property, the value and the condition, before any element
+    /// is made.
+    #[tokio::test]
+    async fn enum_value_hidden_for_the_current_settings_fails_the_build() {
+        gst::init().expect("gst init");
+        let blocks = [block(
+            "builtin.videoenc",
+            &[("codec", s("h265")), ("profile", s("high"))],
+        )];
+        let result = expand_blocks(
+            &blocks,
+            &[],
+            &FlowId::new_v4(),
+            std::path::Path::new("./media"),
+            Vec::new(),
+            "all".to_string(),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            None,
+            crate::gst::SessionThreadConfig::new(),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        )
+        .await;
+        let Err(PipelineError::InvalidFlow(msg)) = result else {
+            panic!("expected InvalidFlow");
+        };
+        assert!(msg.contains("'profile'"), "{msg}");
+        assert!(msg.contains("'high'"), "{msg}");
+        assert!(msg.contains("codec is one of h264"), "{msg}");
     }
 }
