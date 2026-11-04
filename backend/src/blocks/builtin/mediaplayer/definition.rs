@@ -107,7 +107,9 @@ pub fn media_player_definition() -> BlockDefinition {
                 description: "For http(s) files, HLS and DASH: how many seconds of media \
                               to fetch ahead of playback, held in memory. Rides out dips in \
                               download speed; raise it for high-bitrate files on a slow or \
-                              uneven network. 0 turns read-ahead off. Local files are not \
+                              uneven network. Memory use grows with the bitrate: 10 s of a \
+                              32 Mbit/s file is about 40 MB. 0 turns read-ahead off; at most \
+                              120. Local files and live sources (rtsp, srt, udp) are not \
                               affected."
                     .to_string(),
                 property_type: PropertyType::UInt,
@@ -128,9 +130,11 @@ pub fn media_player_definition() -> BlockDefinition {
                 label: "Download to Disk".to_string(),
                 description: "For http(s) files that allow it (mp4, mov, ...): download \
                               the whole file to a temporary file as fast as the network \
-                              allows, while it plays. Takes as much disk space as the file \
-                              itself, removed when the file stops playing. Read-ahead is \
-                              not used then."
+                              allows, while it plays. The file goes in the server's user \
+                              cache directory ($HOME/.cache on Linux), takes as much disk \
+                              space as the file itself, and is removed when the file stops \
+                              playing. HLS, DASH and other streams that cannot be \
+                              downloaded use Read-ahead instead."
                     .to_string(),
                 property_type: PropertyType::Bool,
                 default_value: Some(PropertyValue::Bool(false)),

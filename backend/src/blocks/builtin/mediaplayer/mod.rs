@@ -219,7 +219,6 @@ mod tests {
             audio_slots: MediaPlayerState::free_slots(0),
             decode: false,
             sync: true,
-            network_buffer: Default::default(),
             media_path: std::path::PathBuf::from("/media"),
             timing: Arc::new(super::timing::Timing::new(0)),
             main_pipeline: gst::glib::WeakRef::new(),

@@ -133,20 +133,7 @@ impl BlockBuilder for MediaPlayerBuilder {
             })
             .unwrap_or(timing::DEFAULT_PLAYOUT_DELAY_MS);
 
-        let network_buffer = bridge::NetworkBuffer {
-            read_ahead_s: properties
-                .get("read_ahead_s")
-                .and_then(|v| match v {
-                    PropertyValue::UInt(u) => Some(*u),
-                    PropertyValue::Int(i) => u64::try_from(*i).ok(),
-                    _ => None,
-                })
-                .unwrap_or(bridge::NetworkBuffer::DEFAULT_READ_AHEAD_S),
-            download: matches!(
-                properties.get("download_to_disk"),
-                Some(PropertyValue::Bool(true))
-            ),
-        };
+        let network_buffer = bridge::NetworkBuffer::from_properties(properties);
 
         let position_update_interval_ms = properties
             .get("position_update_interval")
@@ -334,7 +321,6 @@ fn build_media_player(
         audio_slots: MediaPlayerState::free_slots(num_audio_slots),
         decode,
         sync,
-        network_buffer,
         media_path: media_path.clone(),
         timing: Arc::new(if stinger_mode {
             Timing::for_stinger(timing::STINGER_RELEASE_AHEAD_MS)
@@ -367,9 +353,20 @@ fn build_media_player(
 
     // --- Create internal pipeline ---
     let internal_pipeline = if decode {
-        bridge::create_decode_pipeline(instance_id, &state, initial_uri.as_deref(), decoder)?
+        bridge::create_decode_pipeline(
+            instance_id,
+            &state,
+            initial_uri.as_deref(),
+            decoder,
+            network_buffer,
+        )?
     } else {
-        bridge::create_passthrough_pipeline(instance_id, &state, initial_uri.as_deref())?
+        bridge::create_passthrough_pipeline(
+            instance_id,
+            &state,
+            initial_uri.as_deref(),
+            network_buffer,
+        )?
     };
 
     // Store internal pipeline in state
@@ -733,6 +730,28 @@ mod tests {
             true,
             bridge::Decoder::DECODEBIN3,
             &[("read_ahead_s", PropertyValue::UInt(0))],
+        );
+        assert!(!source.property::<bool>("use-buffering"));
+    }
+
+    /// Read-ahead is held in memory, so it has a ceiling, and a value no
+    /// clock can hold (u64::MAX seconds) builds instead of panicking.
+    #[test]
+    fn read_ahead_is_capped_and_a_negative_one_turns_it_off() {
+        let max_ns = bridge::NetworkBuffer::MAX_READ_AHEAD_S as i64 * 1_000_000_000;
+        for huge in [3600, u64::MAX] {
+            let source = built_source(
+                true,
+                bridge::Decoder::DECODEBIN3,
+                &[("read_ahead_s", PropertyValue::UInt(huge))],
+            );
+            assert_eq!(source.property::<i64>("buffer-duration"), max_ns, "{huge}");
+        }
+
+        let source = built_source(
+            true,
+            bridge::Decoder::DECODEBIN3,
+            &[("read_ahead_s", PropertyValue::Int(-1))],
         );
         assert!(!source.property::<bool>("use-buffering"));
     }
