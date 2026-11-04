@@ -88,6 +88,7 @@ impl Setting {
                     .map(|(nick, label)| EnumValue {
                         value: nick.to_string(),
                         label: Some(label.to_string()),
+                        visible_when: None,
                     })
                     .collect(),
             },
@@ -377,11 +378,6 @@ pub fn preset(properties: &HashMap<String, PropertyValue>) -> Result<String, Str
                 .join(", ")
         )),
     }
-}
-
-/// Whether `name` is a block property that applies only with the custom preset.
-pub fn is_custom_only(name: &str) -> bool {
-    CUSTOM_ONLY_PROPERTIES.contains(&name)
 }
 
 /// Custom settings that follow the target loudness while the flow has not
@@ -748,6 +744,7 @@ fn audioprocessor_definition() -> BlockDefinition {
                 .map(|(nick, label)| EnumValue {
                     value: nick.to_string(),
                     label: Some(label.to_string()),
+                    visible_when: None,
                 })
                 .collect(),
         },
@@ -759,6 +756,7 @@ fn audioprocessor_definition() -> BlockDefinition {
         },
         live: true,
         persist: None,
+        visible_when: None,
     }];
 
     for s in SETTINGS {
@@ -780,6 +778,9 @@ fn audioprocessor_definition() -> BlockDefinition {
             },
             live: s.live,
             persist: None,
+            visible_when: s
+                .custom_only()
+                .then(|| PropertyCondition::one_of_strings(PRESET_PROPERTY, &[PRESET_CUSTOM])),
         });
     }
 
@@ -912,6 +913,20 @@ mod tests {
                 "{name} is custom-only but not exposed"
             );
         }
+        // Custom-only settings show only with the Custom preset; the rest
+        // always show.
+        for p in &def.exposed_properties {
+            let custom_only = CUSTOM_ONLY_PROPERTIES.contains(&p.name.as_str());
+            match &p.visible_when {
+                Some(c) => {
+                    assert!(custom_only, "{} has a condition", p.name);
+                    assert_eq!(c.property, PRESET_PROPERTY);
+                    assert_eq!(c.one_of.len(), 1);
+                    assert_pv!(c.one_of[0], PropertyValue::String(PRESET_CUSTOM.into()));
+                }
+                None => assert!(!custom_only, "{} lacks the custom condition", p.name),
+            }
+        }
     }
 
     #[test]
@@ -991,7 +1006,7 @@ mod tests {
             .iter()
             .find(|p| p.name == "latency_mode")
             .unwrap();
-        assert!(!is_custom_only("latency_mode"));
+        assert!(!CUSTOM_ONLY_PROPERTIES.contains(&"latency_mode"));
         assert!(!p.live);
         assert_eq!(p.mapping.property_name, "latency-mode");
         match &p.property_type {
@@ -1019,7 +1034,7 @@ mod tests {
             "governor_enabled",
             "clip_budget",
         ] {
-            assert!(is_custom_only(name), "{name}");
+            assert!(CUSTOM_ONLY_PROPERTIES.contains(&name), "{name}");
             assert!(setting(name).unwrap().live, "{name}");
         }
     }

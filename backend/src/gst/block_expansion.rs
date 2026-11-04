@@ -10,7 +10,7 @@ use crate::whip_registry::WhipRegistry;
 use crate::whip_session_manager::WhipEndpointConfig;
 use gstreamer as gst;
 use strom_types::{BlockInstance, Link};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::PipelineError;
 
@@ -103,8 +103,11 @@ pub async fn expand_blocks(
             block_instance.id, block_instance.block_definition_id
         );
 
+        // Drop stored values that a false `visible_when` rules out, so the
+        // block uses its default for them.
+        let mut properties = visible_properties(block_instance);
+
         // Inject _flow_id, _block_id, and _media_path into properties for blocks that need them
-        let mut properties = block_instance.properties.clone();
         properties.insert(
             "_flow_id".to_string(),
             PropertyValue::String(flow_id.to_string()),
@@ -295,15 +298,13 @@ async fn resolve_pad(pad_ref: &str, blocks: &[BlockInstance]) -> Result<String, 
                     "Using static external pads for block {} ({})",
                     block_instance.id, block_instance.block_definition_id
                 );
-                let definition = crate::blocks::builtin::get_all_builtin_blocks()
-                    .into_iter()
-                    .find(|b| b.id == block_instance.block_definition_id)
+                let definition = builtin::builtin_definition(&block_instance.block_definition_id)
                     .ok_or_else(|| {
-                        PipelineError::InvalidFlow(format!(
-                            "Block definition not found: {}",
-                            block_instance.block_definition_id
-                        ))
-                    })?;
+                    PipelineError::InvalidFlow(format!(
+                        "Block definition not found: {}",
+                        block_instance.block_definition_id
+                    ))
+                })?;
 
                 if let Some(external_pad) = definition
                     .external_pads
@@ -340,6 +341,42 @@ async fn resolve_pad(pad_ref: &str, blocks: &[BlockInstance]) -> Result<String, 
     Ok(pad_ref.to_string())
 }
 
+/// The block's stored properties without the values its definition rules
+/// out for the current settings (see `strom_types::property_condition`): a
+/// property whose `visible_when` is false, or an enum value whose option's
+/// `visible_when` is false. The block is built as if they were unset, so it
+/// uses its default; each one is logged. The stored values stay in the flow,
+/// so switching back restores them, and a flow saved before a condition
+/// existed keeps starting.
+fn visible_properties(block: &BlockInstance) -> HashMap<String, PropertyValue> {
+    let Some(definition) = builtin::builtin_definition(&block.block_definition_id) else {
+        return block.properties.clone();
+    };
+    let (properties, ignored) =
+        strom_types::block::effective_properties(&definition.exposed_properties, &block.properties);
+    for value in ignored {
+        // A ruled-out option is a setting that no longer fits (e.g. a profile
+        // of another codec): worth a warning. A hidden property's stored value
+        // is normal (custom settings kept while a named preset is selected).
+        if value.option {
+            warn!(
+                "Block {} ({}): {}",
+                block.id,
+                definition.name,
+                value.describe()
+            );
+        } else {
+            debug!(
+                "Block {} ({}): {}",
+                block.id,
+                definition.name,
+                value.describe()
+            );
+        }
+    }
+    properties
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +406,87 @@ mod tests {
         let expanded = result.unwrap();
         assert_eq!(expanded.gst_elements.len(), 0);
         assert_eq!(expanded.links.len(), 0);
+    }
+
+    fn block(definition: &str, props: &[(&str, PropertyValue)]) -> BlockInstance {
+        BlockInstance {
+            id: "b1".to_string(),
+            block_definition_id: definition.to_string(),
+            name: None,
+            properties: props
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+            position: strom_types::block::Position { x: 0.0, y: 0.0 },
+            runtime_data: None,
+            computed_external_pads: None,
+        }
+    }
+
+    fn s(v: &str) -> PropertyValue {
+        PropertyValue::String(v.to_string())
+    }
+
+    /// A custom-only Audio Processor setting is hidden under a named preset:
+    /// the block is built without it, and it comes back with Custom.
+    #[test]
+    fn hidden_property_is_not_passed_to_the_builder() {
+        use strom_types::audioprocessor::BLOCK_ID;
+        gst::init().expect("gst init");
+        let loudness = ("target_loudness", PropertyValue::Float(-16.0));
+
+        let named = block(BLOCK_ID, &[("preset", s("ebu-r128")), loudness.clone()]);
+        let props = visible_properties(&named);
+        assert!(!props.contains_key("target_loudness"));
+        assert!(named.properties.contains_key("target_loudness"));
+
+        let custom = block(BLOCK_ID, &[("preset", s("custom")), loudness]);
+        let props = visible_properties(&custom);
+        assert!(props.contains_key("target_loudness"));
+    }
+
+    /// A stored profile its codec rules out (an H.264 profile on H.265, or
+    /// `main` on a VP9 flow saved before the condition existed) is ignored:
+    /// the block is built with the default profile, and the flow still
+    /// expands.
+    #[tokio::test]
+    async fn ruled_out_enum_value_uses_the_default_and_the_flow_builds() {
+        gst::init().expect("gst init");
+        for (codec, profile) in [("h265", "high"), ("vp9", "main")] {
+            let enc = block(
+                "builtin.videoenc",
+                &[("codec", s(codec)), ("profile", s(profile))],
+            );
+            let props = visible_properties(&enc);
+            assert!(!props.contains_key("profile"), "{codec} + {profile}");
+            assert!(matches!(props.get("codec"), Some(PropertyValue::String(c)) if c == codec));
+            // The stored value stays in the flow.
+            assert!(
+                matches!(enc.properties.get("profile"), Some(PropertyValue::String(p)) if p == profile)
+            );
+
+            let result = expand_blocks(
+                &[enc],
+                &[],
+                &FlowId::new_v4(),
+                std::path::Path::new("./media"),
+                Vec::new(),
+                "all".to_string(),
+                std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+                None,
+                crate::gst::SessionThreadConfig::new(),
+                std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await;
+            if let Err(e) = result {
+                let msg = e.to_string();
+                // Without an encoder for the codec on this machine the build
+                // may still fail, but never because of the profile.
+                assert!(
+                    !msg.contains("profile") && !msg.contains("applies only"),
+                    "{codec} + {profile}: {msg}"
+                );
+            }
+        }
     }
 }

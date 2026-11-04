@@ -420,8 +420,11 @@ async fn custom_only_setting_is_refused_under_a_named_preset() {
         )
         .await
         .expect("update_block_properties");
+    // Refused by the property's `visible_when`, which names the condition
+    // and the current preset.
     let reason = rejected.get("target_loudness").expect("refused");
-    assert!(reason.contains("custom preset"), "{reason}");
+    assert!(reason.contains("preset is one of custom"), "{reason}");
+    assert!(reason.contains("(preset is ebu-r128)"), "{reason}");
 
     let (_, rejected) = state
         .update_block_properties(
@@ -439,7 +442,7 @@ async fn custom_only_setting_is_refused_under_a_named_preset() {
     // The flow is not running, so the write itself fails, but not because of
     // the preset.
     if let Some(reason) = rejected.get("target_loudness") {
-        assert!(!reason.contains("custom preset"), "{reason}");
+        assert!(!reason.contains("applies only"), "{reason}");
     }
 }
 

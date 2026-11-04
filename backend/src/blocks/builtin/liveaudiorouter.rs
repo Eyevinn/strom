@@ -982,6 +982,7 @@ fn liveaudiorouter_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         ExposedProperty {
             name: "num_outputs".to_string(),
@@ -996,6 +997,7 @@ fn liveaudiorouter_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
     ];
 
@@ -1013,6 +1015,7 @@ fn liveaudiorouter_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         });
     }
 
@@ -1030,6 +1033,7 @@ fn liveaudiorouter_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         });
     }
 
@@ -1051,6 +1055,7 @@ fn liveaudiorouter_definition() -> BlockDefinition {
         },
         live: false,
         persist: None,
+        visible_when: None,
     });
     exposed_properties.push(ExposedProperty {
         name: "latency".to_string(),
@@ -1065,6 +1070,7 @@ fn liveaudiorouter_definition() -> BlockDefinition {
         },
         live: false,
         persist: None,
+        visible_when: None,
     });
     exposed_properties.push(ExposedProperty {
         name: "min_upstream_latency".to_string(),
@@ -1081,6 +1087,7 @@ fn liveaudiorouter_definition() -> BlockDefinition {
         },
         live: false,
         persist: None,
+        visible_when: None,
     });
     exposed_properties.push(ExposedProperty {
         name: "output_buffer_duration".to_string(),
@@ -1095,6 +1102,7 @@ fn liveaudiorouter_definition() -> BlockDefinition {
         },
         live: false,
         persist: None,
+        visible_when: None,
     });
 
     exposed_properties.push(ExposedProperty {
@@ -1112,6 +1120,7 @@ fn liveaudiorouter_definition() -> BlockDefinition {
         },
         live: false,
         persist: None,
+        visible_when: None,
     });
 
     exposed_properties.push(ExposedProperty {
@@ -1136,6 +1145,7 @@ fn liveaudiorouter_definition() -> BlockDefinition {
         },
         live: false,
         persist: None,
+        visible_when: None,
     });
     exposed_properties.push(ExposedProperty {
         name: OUTPUT_SOFT_CLIP_PROPERTY.to_string(),
@@ -1160,6 +1170,7 @@ fn liveaudiorouter_definition() -> BlockDefinition {
         },
         live: false,
         persist: None,
+        visible_when: None,
     });
 
     exposed_properties.push(ExposedProperty {
@@ -1176,6 +1187,7 @@ fn liveaudiorouter_definition() -> BlockDefinition {
         },
         live: true,
         persist: None,
+        visible_when: None,
     });
 
     exposed_properties.push(ExposedProperty {
@@ -1193,6 +1205,7 @@ fn liveaudiorouter_definition() -> BlockDefinition {
         },
         live: true,
         persist: None,
+        visible_when: None,
     });
 
     BlockDefinition {

@@ -191,11 +191,11 @@ fn meter_definition() -> BlockDefinition {
                 .to_string(),
             property_type: PropertyType::Enum {
                 values: vec![
-                    EnumValue { value: "10".to_string(), label: Some("10 ms".to_string()) },
-                    EnumValue { value: "20".to_string(), label: Some("20 ms".to_string()) },
-                    EnumValue { value: "50".to_string(), label: Some("50 ms".to_string()) },
-                    EnumValue { value: "100".to_string(), label: Some("100 ms".to_string()) },
-                    EnumValue { value: "200".to_string(), label: Some("200 ms".to_string()) },
+                    EnumValue { value: "10".to_string(), label: Some("10 ms".to_string()), visible_when: None },
+                    EnumValue { value: "20".to_string(), label: Some("20 ms".to_string()), visible_when: None },
+                    EnumValue { value: "50".to_string(), label: Some("50 ms".to_string()), visible_when: None },
+                    EnumValue { value: "100".to_string(), label: Some("100 ms".to_string()), visible_when: None },
+                    EnumValue { value: "200".to_string(), label: Some("200 ms".to_string()), visible_when: None },
                 ],
             },
             default_value: Some(PropertyValue::String("100".to_string())),
@@ -206,6 +206,7 @@ fn meter_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         }],
         external_pads: ExternalPads {
             inputs: vec![ExternalPad {

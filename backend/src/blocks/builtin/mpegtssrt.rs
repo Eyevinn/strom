@@ -969,6 +969,7 @@ fn mpegtssrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "num_audio_tracks".to_string(),
@@ -983,6 +984,7 @@ fn mpegtssrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "srt_uri".to_string(),
@@ -997,6 +999,7 @@ fn mpegtssrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "latency".to_string(),
@@ -1011,6 +1014,7 @@ fn mpegtssrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "wait_for_connection".to_string(),
@@ -1025,6 +1029,7 @@ fn mpegtssrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "auto_reconnect".to_string(),
@@ -1039,6 +1044,7 @@ fn mpegtssrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "sync".to_string(),
@@ -1053,6 +1059,7 @@ fn mpegtssrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         // External pads are now computed dynamically based on num_video_tracks and num_audio_tracks properties

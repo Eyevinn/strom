@@ -25,6 +25,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // DSP Backend selection — construction-time only; switches which set of
         // DSP elements the builder instantiates.
@@ -38,14 +39,17 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                     EnumValue {
                         value: "stromdsp".to_string(),
                         label: Some("strom-dsp".to_string()),
+                        visible_when: None,
                     },
                     EnumValue {
                         value: "rust".to_string(),
                         label: Some("Rust".to_string()),
+                        visible_when: None,
                     },
                     EnumValue {
                         value: "lv2".to_string(),
                         label: Some("LV2".to_string()),
+                        visible_when: None,
                     },
                 ],
             },
@@ -57,6 +61,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Main fader
         ExposedProperty {
@@ -72,6 +77,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         },
         // Main mute — independent Bool on the same GstVolume element. Built-in
         // anti-click on the `mute` property handles the on/off fade.
@@ -88,6 +94,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         },
         // Number of aux buses — construction-time only.
         ExposedProperty {
@@ -103,6 +110,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Number of groups — construction-time only.
         ExposedProperty {
@@ -118,6 +126,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         },
         // Monitor master level — drives the Monitor bus output. The Monitor
         // bus follows Main when no channel has PFL or AFL active, and
@@ -135,6 +144,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         },
     ];
 
@@ -154,6 +164,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         },
         live: false,
         persist: None,
+        visible_when: None,
     });
     exposed_properties.push(ExposedProperty {
         name: "latency".to_string(),
@@ -168,6 +179,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         },
         live: false,
         persist: None,
+        visible_when: None,
     });
     exposed_properties.push(ExposedProperty {
         name: "internal_bus_latency".to_string(),
@@ -182,6 +194,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         },
         live: false,
         persist: None,
+        visible_when: None,
     });
     exposed_properties.push(ExposedProperty {
         name: "min_upstream_latency".to_string(),
@@ -196,6 +209,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         },
         live: false,
         persist: None,
+        visible_when: None,
     });
     exposed_properties.push(ExposedProperty {
         name: "sample_rate".to_string(),
@@ -212,6 +226,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         },
         live: false,
         persist: None,
+        visible_when: None,
     });
 
     // ========================================================================
@@ -230,6 +245,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         },
         live: true,
         persist: None,
+        visible_when: None,
     });
     for (prop_suffix, label, gst_prop, default, desc, transform) in [
         (
@@ -294,6 +310,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
     }
 
@@ -311,6 +328,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         },
         live: true,
         persist: None,
+        visible_when: None,
     });
     let eq_band_names = ["Low", "Low-Mid", "Hi-Mid", "High"];
     for (band, band_name) in eq_band_names.iter().enumerate() {
@@ -332,6 +350,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
         exposed_properties.push(ExposedProperty {
             name: format!("main_eq{}_gain", band_num),
@@ -346,6 +365,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
         exposed_properties.push(ExposedProperty {
             name: format!("main_eq{}_q", band_num),
@@ -360,6 +380,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
     }
 
@@ -377,6 +398,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         },
         live: true,
         persist: None,
+        visible_when: None,
     });
     exposed_properties.push(ExposedProperty {
         name: "main_limiter_threshold".to_string(),
@@ -391,6 +413,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         },
         live: true,
         persist: None,
+        visible_when: None,
     });
 
     // Add aux bus master properties
@@ -408,6 +431,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
         exposed_properties.push(ExposedProperty {
             name: format!("aux{}_mute", aux),
@@ -422,6 +446,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         // AFL on the aux master — taps post-master, post-mute and sums into
@@ -440,6 +465,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: Some(false),
+            visible_when: None,
         });
     }
 
@@ -458,6 +484,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
         exposed_properties.push(ExposedProperty {
             name: format!("group{}_mute", sg),
@@ -472,6 +499,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         // AFL on the group master — taps post-master, post-mute and sums
@@ -490,6 +518,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: Some(false),
+            visible_when: None,
         });
     }
 
@@ -509,6 +538,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         });
 
         // Input gain
@@ -525,6 +555,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         exposed_properties.push(ExposedProperty {
@@ -540,6 +571,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         exposed_properties.push(ExposedProperty {
@@ -555,6 +587,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         exposed_properties.push(ExposedProperty {
@@ -570,6 +603,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         // PFL (Pre-Fader Listen) — transient solo state, not persisted.
@@ -586,6 +620,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: Some(false),
+            visible_when: None,
         });
 
         // AFL (After-Fader Listen) — transient solo state, not persisted.
@@ -602,6 +637,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: Some(false),
+            visible_when: None,
         });
 
         // Routing to main
@@ -618,6 +654,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         // Routing to groups
@@ -635,6 +672,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                 },
                 live: true,
                 persist: None,
+                visible_when: None,
             });
         }
 
@@ -653,6 +691,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                 },
                 live: true,
                 persist: None,
+                visible_when: None,
             });
             exposed_properties.push(ExposedProperty {
                 name: format!("ch{}_aux{}_pre", ch, aux),
@@ -670,6 +709,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             });
         }
 
@@ -689,6 +729,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         });
 
         exposed_properties.push(ExposedProperty {
@@ -707,6 +748,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         // ============================================================
@@ -725,6 +767,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         exposed_properties.push(ExposedProperty {
@@ -740,6 +783,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         exposed_properties.push(ExposedProperty {
@@ -755,6 +799,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         exposed_properties.push(ExposedProperty {
@@ -770,6 +815,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         // Note: LSP gate has no settable range property
@@ -791,6 +837,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         exposed_properties.push(ExposedProperty {
@@ -806,6 +853,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         exposed_properties.push(ExposedProperty {
@@ -821,6 +869,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         exposed_properties.push(ExposedProperty {
@@ -836,6 +885,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         exposed_properties.push(ExposedProperty {
@@ -851,6 +901,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         exposed_properties.push(ExposedProperty {
@@ -866,6 +917,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         exposed_properties.push(ExposedProperty {
@@ -881,6 +933,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         // ============================================================
@@ -899,6 +952,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         // 4 EQ bands with default frequencies from shared constants
@@ -923,6 +977,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                 },
                 live: true,
                 persist: None,
+                visible_when: None,
             });
 
             exposed_properties.push(ExposedProperty {
@@ -941,6 +996,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                 },
                 live: true,
                 persist: None,
+                visible_when: None,
             });
 
             exposed_properties.push(ExposedProperty {
@@ -956,6 +1012,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                 },
                 live: true,
                 persist: None,
+                visible_when: None,
             });
         }
     }

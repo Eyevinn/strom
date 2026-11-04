@@ -19,10 +19,12 @@ pub(crate) fn whip_output_definition() -> BlockDefinition {
                         EnumValue {
                             value: "whipsink".to_string(),
                             label: Some("whipsink (stable)".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "whipclientsink".to_string(),
                             label: Some("whipclientsink (new)".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -34,6 +36,7 @@ pub(crate) fn whip_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "num_audio_tracks".to_string(),
@@ -48,6 +51,7 @@ pub(crate) fn whip_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "num_video_tracks".to_string(),
@@ -62,6 +66,7 @@ pub(crate) fn whip_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "whip_endpoint".to_string(),
@@ -77,6 +82,7 @@ pub(crate) fn whip_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "auth_token".to_string(),
@@ -91,6 +97,7 @@ pub(crate) fn whip_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "opus_complexity".to_string(),
@@ -105,6 +112,7 @@ pub(crate) fn whip_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "opus_bitrate".to_string(),
@@ -119,6 +127,7 @@ pub(crate) fn whip_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "ice_transport_policy".to_string(),
@@ -129,14 +138,17 @@ pub(crate) fn whip_output_definition() -> BlockDefinition {
                         EnumValue {
                             value: "".to_string(),
                             label: Some("Server default".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "all".to_string(),
                             label: Some("All (host, srflx, relay)".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "relay".to_string(),
                             label: Some("Relay only (force TURN)".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -148,6 +160,7 @@ pub(crate) fn whip_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         // Defaults only: the pads are computed from num_audio_tracks and

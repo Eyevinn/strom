@@ -31,6 +31,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "decoder".to_string(),
@@ -45,10 +46,12 @@ pub fn media_player_definition() -> BlockDefinition {
                         EnumValue {
                             value: Decoder::CLASSIC.to_string(),
                             label: Some("Classic (uridecodebin, fallback)".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: Decoder::DECODEBIN3.to_string(),
                             label: Some("decodebin3 (uridecodebin3)".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -60,6 +63,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "sync".to_string(),
@@ -75,6 +79,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "playout_delay_ms".to_string(),
@@ -94,6 +99,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "loop_playlist".to_string(),
@@ -109,6 +115,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "num_video_tracks".to_string(),
@@ -126,6 +133,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "num_audio_tracks".to_string(),
@@ -144,6 +152,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "position_update_interval".to_string(),
@@ -159,6 +168,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: strom_types::stinger::STINGER_MODE_PROPERTY.to_string(),
@@ -174,6 +184,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {

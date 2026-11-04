@@ -1846,15 +1846,20 @@ impl AppState {
                 crate::blocks::builtin::liveaudiorouter::fade_ms(&props)
             });
 
-        // Audio Processor: its settings apply only with the custom preset, so
-        // resolve the preset and the values switching to custom would apply —
-        // values sent in this same batch take precedence over stored ones.
+        // The block's values as they will be after this batch: stored values
+        // with the batch applied. `visible_when` conditions are checked
+        // against these, so a batch that switches the Audio Processor to
+        // custom and sets a custom setting is accepted as a whole.
+        let after_batch = {
+            let mut props = stored_properties.clone();
+            props.extend(properties.iter().map(|(k, v)| (k.clone(), v.clone())));
+            props
+        };
+
+        // Audio Processor: switching to custom writes the values the custom
+        // preset applies.
         let audioprocessor_props =
-            (definition_id == strom_types::audioprocessor::BLOCK_ID).then(|| {
-                let mut props = stored_properties.clone();
-                props.extend(properties.iter().map(|(k, v)| (k.clone(), v.clone())));
-                props
-            });
+            (definition_id == strom_types::audioprocessor::BLOCK_ID).then_some(&after_batch);
 
         let mut rejected: HashMap<String, String> = HashMap::new();
         let mut to_persist: Vec<(String, PropertyValue)> = Vec::new();
@@ -1879,6 +1884,20 @@ impl AppState {
                     name,
                     "property is not live (requires flow restart)".to_string(),
                 );
+                continue;
+            }
+
+            // A property (or enum value) whose `visible_when` is false does
+            // not apply with the block's settings: the block would be built
+            // without it on the next restart, so writing it live would put the
+            // running pipeline out of step with the flow.
+            if let Some(reason) = strom_types::block::write_refusal(
+                &definition.exposed_properties,
+                &name,
+                &value,
+                &after_batch,
+            ) {
+                rejected.insert(name, reason);
                 continue;
             }
 
@@ -1956,12 +1975,11 @@ impl AppState {
                 continue;
             }
 
-            // Audio Processor: a setting that only the custom preset uses is
-            // refused under a named preset (the element would apply it and the
-            // preset would win again on restart), and switching to custom
-            // writes every custom setting, since writing `custom` to the
-            // element itself changes nothing.
-            if let Some(props) = &audioprocessor_props {
+            // Audio Processor: switching to custom writes every custom
+            // setting, since writing `custom` to the element itself changes
+            // nothing. A custom-only setting under a named preset was refused
+            // above by its `visible_when`.
+            if let Some(props) = audioprocessor_props {
                 use crate::blocks::builtin::audioprocessor;
                 let preset = match audioprocessor::preset(props) {
                     Ok(p) => p,
@@ -1971,13 +1989,6 @@ impl AppState {
                     }
                 };
                 let custom = preset == strom_types::audioprocessor::PRESET_CUSTOM;
-                if audioprocessor::is_custom_only(&name) && !custom {
-                    rejected.insert(
-                        name,
-                        format!("applies only with the custom preset (preset is {preset})"),
-                    );
-                    continue;
-                }
                 if name == strom_types::audioprocessor::PRESET_PROPERTY && custom {
                     let element_id = format!(
                         "{}:{}",

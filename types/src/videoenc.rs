@@ -1,6 +1,6 @@
 //! Shared types for the Video Encoder block.
 
-use crate::block::EnumValue;
+use crate::block::{EnumValue, PropertyCondition};
 
 /// Codec profile constraint on the video encoder's output.
 ///
@@ -101,23 +101,23 @@ impl Profile {
     /// Human-readable UI label for property dropdowns.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Auto => "Auto (8-bit 4:2:0, widely decodable)",
-            Self::None => "None (no constraint)",
-            Self::ConstrainedBaseline => "Constrained Baseline (H.264)",
-            Self::Baseline => "Baseline (H.264)",
-            Self::Main => "Main (H.264 / H.265)",
-            Self::High => "High (H.264)",
-            Self::High10 => "High 10-bit (H.264)",
-            Self::High422 => "High 4:2:2 (H.264, 8/10-bit)",
-            Self::High444 => "High 4:4:4 (H.264)",
-            Self::Main10 => "Main 10 (H.265, 10-bit 4:2:0)",
-            Self::Main12 => "Main 12 (H.265, 12-bit 4:2:0)",
-            Self::Main422_10 => "Main 4:2:2 10 (H.265)",
-            Self::Main422_12 => "Main 4:2:2 12 (H.265)",
-            Self::Main444 => "Main 4:4:4 (H.265)",
-            Self::Main444_10 => "Main 4:4:4 10 (H.265)",
-            Self::Main444_12 => "Main 4:4:4 12 (H.265)",
-            Self::MainStillPicture => "Main Still Picture (H.265)",
+            Self::Auto => "Auto",
+            Self::None => "None",
+            Self::ConstrainedBaseline => "Constrained Baseline",
+            Self::Baseline => "Baseline",
+            Self::Main => "Main",
+            Self::High => "High",
+            Self::High10 => "High 10",
+            Self::High422 => "High 4:2:2",
+            Self::High444 => "High 4:4:4",
+            Self::Main10 => "Main 10",
+            Self::Main12 => "Main 12",
+            Self::Main422_10 => "Main 4:2:2 10",
+            Self::Main422_12 => "Main 4:2:2 12",
+            Self::Main444 => "Main 4:4:4",
+            Self::Main444_10 => "Main 4:4:4 10",
+            Self::Main444_12 => "Main 4:4:4 12",
+            Self::MainStillPicture => "Main Still Picture",
         }
     }
 
@@ -127,15 +127,68 @@ impl Profile {
         Self::ALL.iter().copied().find(|p| p.as_property_str() == s)
     }
 
+    /// The `codec` property values this profile applies to, or `None` for
+    /// the two policies (`auto`, `none`) that apply to every codec.
+    pub fn codecs(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Auto | Self::None => None,
+            Self::Main => Some(&[CODEC_H264, CODEC_H265]),
+            Self::ConstrainedBaseline
+            | Self::Baseline
+            | Self::High
+            | Self::High10
+            | Self::High422
+            | Self::High444 => Some(&[CODEC_H264]),
+            Self::Main10
+            | Self::Main12
+            | Self::Main422_10
+            | Self::Main422_12
+            | Self::Main444
+            | Self::Main444_10
+            | Self::Main444_12
+            | Self::MainStillPicture => Some(&[CODEC_H265]),
+        }
+    }
+
     /// `EnumValue` list for `BlockDefinition` — keeps the API enum surface and
-    /// the Rust enum in lock-step.
+    /// the Rust enum in lock-step. Each named profile is offered only for the
+    /// codecs it belongs to (see [`Profile::codecs`]).
     pub fn block_enum_values() -> Vec<EnumValue> {
         Self::ALL
             .iter()
             .map(|p| EnumValue {
                 value: p.as_property_str().to_string(),
                 label: Some(p.label().to_string()),
+                visible_when: p
+                    .codecs()
+                    .map(|codecs| PropertyCondition::one_of_strings(CODEC_PROPERTY, codecs)),
             })
             .collect()
+    }
+}
+
+/// Block property that picks the codec.
+pub const CODEC_PROPERTY: &str = "codec";
+/// `codec` property value for H.264.
+pub const CODEC_H264: &str = "h264";
+/// `codec` property value for H.265.
+pub const CODEC_H265: &str = "h265";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_named_profile_names_its_codec_and_policies_apply_to_all() {
+        for p in Profile::ALL {
+            let codecs = p.codecs();
+            match p {
+                Profile::Auto | Profile::None => assert!(codecs.is_none(), "{p:?}"),
+                _ => assert!(!codecs.unwrap().is_empty(), "{p:?}"),
+            }
+        }
+        assert_eq!(Profile::High.codecs(), Some(&[CODEC_H264][..]));
+        assert_eq!(Profile::Main10.codecs(), Some(&[CODEC_H265][..]));
+        assert_eq!(Profile::Main.codecs(), Some(&[CODEC_H264, CODEC_H265][..]));
     }
 }

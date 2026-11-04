@@ -19,14 +19,17 @@ pub(crate) fn whip_input_definition() -> BlockDefinition {
                         EnumValue {
                             value: "audio_video".to_string(),
                             label: Some("Audio + Video".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "audio".to_string(),
                             label: Some("Audio Only".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "video".to_string(),
                             label: Some("Video Only".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -38,6 +41,7 @@ pub(crate) fn whip_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "endpoint_id".to_string(),
@@ -52,6 +56,7 @@ pub(crate) fn whip_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "decode".to_string(),
@@ -66,6 +71,7 @@ pub(crate) fn whip_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "jitterbuffer_latency_ms".to_string(),
@@ -80,6 +86,7 @@ pub(crate) fn whip_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "do_retransmission".to_string(),
@@ -94,6 +101,7 @@ pub(crate) fn whip_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "drop_on_latency".to_string(),
@@ -108,6 +116,7 @@ pub(crate) fn whip_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "max_video_bitrate".to_string(),
@@ -124,6 +133,7 @@ pub(crate) fn whip_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "max_sessions".to_string(),
@@ -138,6 +148,7 @@ pub(crate) fn whip_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "ice_transport_policy".to_string(),
@@ -148,14 +159,17 @@ pub(crate) fn whip_input_definition() -> BlockDefinition {
                         EnumValue {
                             value: "".to_string(),
                             label: Some("Server default".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "all".to_string(),
                             label: Some("All (host, srflx, relay)".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "relay".to_string(),
                             label: Some("Relay only (force TURN)".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -167,6 +181,7 @@ pub(crate) fn whip_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         // Note: external_pads here are the static defaults for audio_video mode with max_sessions=1.

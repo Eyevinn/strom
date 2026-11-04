@@ -596,6 +596,7 @@ fn int_property(name: &str, label: &str, description: &str, default: i64) -> Exp
         },
         live: false,
         persist: None,
+        visible_when: None,
     }
 }
 
@@ -613,6 +614,7 @@ fn string_prop(name: &str, label: &str, description: &str, default: &str) -> Exp
         },
         live: false,
         persist: None,
+        visible_when: None,
     }
 }
 
@@ -631,10 +633,10 @@ fn definition() -> BlockDefinition {
                 description: "Output container format".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "mp4".to_string(), label: Some("MP4 (fragmented)".to_string()) },
-                        EnumValue { value: "mkv".to_string(), label: Some("MKV (Matroska)".to_string()) },
-                        EnumValue { value: "mpegts".to_string(), label: Some("MPEG-TS (remux)".to_string()) },
-                        EnumValue { value: "ts_passthrough".to_string(), label: Some("MPEG-TS (passthrough)".to_string()) },
+                        EnumValue { value: "mp4".to_string(), label: Some("MP4 (fragmented)".to_string()), visible_when: None },
+                        EnumValue { value: "mkv".to_string(), label: Some("MKV (Matroska)".to_string()), visible_when: None },
+                        EnumValue { value: "mpegts".to_string(), label: Some("MPEG-TS (remux)".to_string()), visible_when: None },
+                        EnumValue { value: "ts_passthrough".to_string(), label: Some("MPEG-TS (passthrough)".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String("mp4".to_string())),
@@ -645,6 +647,7 @@ fn definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             string_prop("output_dir", "Output Directory", "Subdirectory within the media folder where recordings are saved", DEFAULT_OUTPUT_DIR),
             string_prop("filename_prefix", "Filename Prefix", "Prefix for output filenames", DEFAULT_FILENAME_PREFIX),

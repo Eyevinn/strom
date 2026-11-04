@@ -22,14 +22,17 @@ fn bandwidth_enum_values() -> Vec<EnumValue> {
         EnumValue {
             value: "100".to_string(),
             label: Some("Highest".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "10".to_string(),
             label: Some("Audio Only".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "-10".to_string(),
             label: Some("Metadata Only".to_string()),
+            visible_when: None,
         },
     ]
 }
@@ -40,14 +43,17 @@ fn mode_enum_values() -> Vec<EnumValue> {
         EnumValue {
             value: "combined".to_string(),
             label: Some("Audio + Video".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "video".to_string(),
             label: Some("Video Only".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "audio".to_string(),
             label: Some("Audio Only".to_string()),
+            visible_when: None,
         },
     ]
 }
@@ -709,6 +715,7 @@ fn ndi_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "url_address".to_string(),
@@ -723,6 +730,7 @@ fn ndi_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "mode".to_string(),
@@ -739,6 +747,7 @@ fn ndi_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "bandwidth".to_string(),
@@ -755,6 +764,7 @@ fn ndi_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "timeout_ms".to_string(),
@@ -769,6 +779,7 @@ fn ndi_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "connect_timeout_ms".to_string(),
@@ -785,6 +796,7 @@ fn ndi_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {
@@ -841,6 +853,7 @@ fn ndi_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "mode".to_string(),
@@ -857,6 +870,7 @@ fn ndi_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {

@@ -309,9 +309,9 @@ fn spectrum_definition() -> BlockDefinition {
                     .to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "50".to_string(), label: Some("50 ms".to_string()) },
-                        EnumValue { value: "100".to_string(), label: Some("100 ms".to_string()) },
-                        EnumValue { value: "200".to_string(), label: Some("200 ms".to_string()) },
+                        EnumValue { value: "50".to_string(), label: Some("50 ms".to_string()), visible_when: None },
+                        EnumValue { value: "100".to_string(), label: Some("100 ms".to_string()), visible_when: None },
+                        EnumValue { value: "200".to_string(), label: Some("200 ms".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String("100".to_string())),
@@ -322,6 +322,7 @@ fn spectrum_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "bands".to_string(),
@@ -330,10 +331,10 @@ fn spectrum_definition() -> BlockDefinition {
                     .to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "16".to_string(), label: Some("16 bands".to_string()) },
-                        EnumValue { value: "32".to_string(), label: Some("32 bands".to_string()) },
-                        EnumValue { value: "64".to_string(), label: Some("64 bands".to_string()) },
-                        EnumValue { value: "128".to_string(), label: Some("128 bands".to_string()) },
+                        EnumValue { value: "16".to_string(), label: Some("16 bands".to_string()), visible_when: None },
+                        EnumValue { value: "32".to_string(), label: Some("32 bands".to_string()), visible_when: None },
+                        EnumValue { value: "64".to_string(), label: Some("64 bands".to_string()), visible_when: None },
+                        EnumValue { value: "128".to_string(), label: Some("128 bands".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String("32".to_string())),
@@ -344,6 +345,7 @@ fn spectrum_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "threshold".to_string(),
@@ -351,9 +353,9 @@ fn spectrum_definition() -> BlockDefinition {
                 description: "Minimum magnitude threshold for reported values".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "-80".to_string(), label: Some("-80 dB".to_string()) },
-                        EnumValue { value: "-60".to_string(), label: Some("-60 dB".to_string()) },
-                        EnumValue { value: "-40".to_string(), label: Some("-40 dB".to_string()) },
+                        EnumValue { value: "-80".to_string(), label: Some("-80 dB".to_string()), visible_when: None },
+                        EnumValue { value: "-60".to_string(), label: Some("-60 dB".to_string()), visible_when: None },
+                        EnumValue { value: "-40".to_string(), label: Some("-40 dB".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String("-80".to_string())),
@@ -364,6 +366,7 @@ fn spectrum_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "multi_channel".to_string(),
@@ -379,6 +382,7 @@ fn spectrum_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {

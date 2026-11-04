@@ -1,11 +1,14 @@
 //! Block definitions and instances for reusable element groupings.
 
+pub use crate::property_condition::{
+    effective_properties, write_refusal, IgnoredValue, PropertyCondition,
+};
 use crate::{discovery::DeviceCategory, MediaType, PropertyValue};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap};
 
 /// Enum value with optional label for display
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct EnumValue {
     /// The actual value stored/used
@@ -14,6 +17,11 @@ pub struct EnumValue {
     /// Optional human-readable label for UI display
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+
+    /// Offer this value only while the condition holds. A stored value whose
+    /// condition is false fails the block build. See [`PropertyCondition`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_when: Option<PropertyCondition>,
 }
 
 /// Stream content selector for blocks that handle both audio and video.
@@ -161,6 +169,12 @@ pub struct ExposedProperty {
     /// default behaviour without an added field. Read via `persist()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persist: Option<bool>,
+
+    /// Show and apply this property only while the condition holds. While it
+    /// is false the UI hides the property and the block is built as if it
+    /// were unset; the stored value is kept. See [`PropertyCondition`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_when: Option<PropertyCondition>,
 }
 
 impl ExposedProperty {
@@ -473,6 +487,7 @@ pub fn common_video_resolution_enum_values(include_empty: bool) -> Vec<EnumValue
         values.push(EnumValue {
             value: String::new(),
             label: Some("-".to_string()),
+            visible_when: None,
         });
     }
 
@@ -480,6 +495,7 @@ pub fn common_video_resolution_enum_values(include_empty: bool) -> Vec<EnumValue
         values.push(EnumValue {
             value: (*value).to_string(),
             label: Some((*label).to_string()),
+            visible_when: None,
         });
     }
 
@@ -528,6 +544,7 @@ pub fn common_video_pixel_format_enum_values(include_empty: bool) -> Vec<EnumVal
         values.push(EnumValue {
             value: String::new(),
             label: Some("-".to_string()),
+            visible_when: None,
         });
     }
 
@@ -535,6 +552,7 @@ pub fn common_video_pixel_format_enum_values(include_empty: bool) -> Vec<EnumVal
         values.push(EnumValue {
             value: (*value).to_string(),
             label: Some((*label).to_string()),
+            visible_when: None,
         });
     }
 
@@ -566,6 +584,7 @@ pub fn common_video_framerate_enum_values(include_empty: bool) -> Vec<EnumValue>
         values.push(EnumValue {
             value: String::new(),
             label: Some("-".to_string()),
+            visible_when: None,
         });
     }
 
@@ -573,6 +592,7 @@ pub fn common_video_framerate_enum_values(include_empty: bool) -> Vec<EnumValue>
         values.push(EnumValue {
             value: (*value).to_string(),
             label: Some((*label).to_string()),
+            visible_when: None,
         });
     }
 
@@ -609,6 +629,7 @@ pub fn common_audio_sample_rate_enum_values(include_empty: bool) -> Vec<EnumValu
         values.push(EnumValue {
             value: String::new(),
             label: Some("-".to_string()),
+            visible_when: None,
         });
     }
 
@@ -616,6 +637,7 @@ pub fn common_audio_sample_rate_enum_values(include_empty: bool) -> Vec<EnumValu
         values.push(EnumValue {
             value: rate.to_string(),
             label: Some((*label).to_string()),
+            visible_when: None,
         });
     }
 
@@ -686,6 +708,7 @@ pub fn audio_channel_enum_values(device_default: bool) -> Vec<EnumValue> {
     let default = device_default.then(|| EnumValue {
         value: String::new(),
         label: Some("Default (device)".to_string()),
+        visible_when: None,
     });
     default
         .into_iter()
@@ -695,6 +718,7 @@ pub fn audio_channel_enum_values(device_default: bool) -> Vec<EnumValue> {
                 .map(|(value, label)| EnumValue {
                     value: (*value).to_string(),
                     label: Some((*label).to_string()),
+                    visible_when: None,
                 }),
         )
         .collect()
@@ -722,6 +746,7 @@ pub fn decklink_video_format_enum_values() -> Vec<EnumValue> {
         .map(|(value, label)| EnumValue {
             value: (*value).to_string(),
             label: Some((*label).to_string()),
+            visible_when: None,
         })
         .collect()
 }

@@ -40,22 +40,27 @@ fn dscp_enum_values() -> Vec<EnumValue> {
         EnumValue {
             value: "0x2E".to_string(),
             label: Some("EF (0x2E) - Expedited Forwarding".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "0x22".to_string(),
             label: Some("AF41 (0x22) - Multimedia Streaming".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "0x1A".to_string(),
             label: Some("AF31 (0x1A) - Multimedia Conferencing".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "0x00".to_string(),
             label: Some("Best Effort (0x00)".to_string()),
+            visible_when: None,
         },
         EnumValue {
             value: "disabled".to_string(),
             label: Some("Disabled".to_string()),
+            visible_when: None,
         },
     ]
 }
@@ -903,6 +908,7 @@ fn aes67_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "decode".to_string(),
@@ -918,6 +924,7 @@ fn aes67_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "latency_ms".to_string(),
@@ -932,6 +939,7 @@ fn aes67_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "timeout_ms".to_string(),
@@ -946,6 +954,7 @@ fn aes67_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "interface".to_string(),
@@ -960,6 +969,7 @@ fn aes67_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "buffer_duration_ms".to_string(),
@@ -974,6 +984,7 @@ fn aes67_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {
@@ -1020,6 +1031,7 @@ fn aes67_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "bit_depth".to_string(),
@@ -1027,8 +1039,8 @@ fn aes67_output_definition() -> BlockDefinition {
                 description: "Audio sample bit depth (16 or 24 bit PCM)".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "16".to_string(), label: Some("16-bit".to_string()) },
-                        EnumValue { value: "24".to_string(), label: Some("24-bit".to_string()) },
+                        EnumValue { value: "16".to_string(), label: Some("16-bit".to_string()), visible_when: None },
+                        EnumValue { value: "24".to_string(), label: Some("24-bit".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String("24".to_string())),
@@ -1039,6 +1051,7 @@ fn aes67_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "sample_rate".to_string(),
@@ -1046,13 +1059,13 @@ fn aes67_output_definition() -> BlockDefinition {
                 description: "Audio sample rate in Hz".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "32000".to_string(), label: Some("32 kHz".to_string()) },
-                        EnumValue { value: "44100".to_string(), label: Some("44.1 kHz".to_string()) },
-                        EnumValue { value: "48000".to_string(), label: Some("48 kHz".to_string()) },
-                        EnumValue { value: "88200".to_string(), label: Some("88.2 kHz".to_string()) },
-                        EnumValue { value: "96000".to_string(), label: Some("96 kHz".to_string()) },
-                        EnumValue { value: "176400".to_string(), label: Some("176.4 kHz".to_string()) },
-                        EnumValue { value: "192000".to_string(), label: Some("192 kHz".to_string()) },
+                        EnumValue { value: "32000".to_string(), label: Some("32 kHz".to_string()), visible_when: None },
+                        EnumValue { value: "44100".to_string(), label: Some("44.1 kHz".to_string()), visible_when: None },
+                        EnumValue { value: "48000".to_string(), label: Some("48 kHz".to_string()), visible_when: None },
+                        EnumValue { value: "88200".to_string(), label: Some("88.2 kHz".to_string()), visible_when: None },
+                        EnumValue { value: "96000".to_string(), label: Some("96 kHz".to_string()), visible_when: None },
+                        EnumValue { value: "176400".to_string(), label: Some("176.4 kHz".to_string()), visible_when: None },
+                        EnumValue { value: "192000".to_string(), label: Some("192 kHz".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String("48000".to_string())),
@@ -1063,6 +1076,7 @@ fn aes67_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "channels".to_string(),
@@ -1077,6 +1091,7 @@ fn aes67_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "ptime".to_string(),
@@ -1084,10 +1099,10 @@ fn aes67_output_definition() -> BlockDefinition {
                 description: "RTP packet duration in milliseconds".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "0.125".to_string(), label: Some("0.125 ms".to_string()) },
-                        EnumValue { value: "0.25".to_string(), label: Some("0.25 ms".to_string()) },
-                        EnumValue { value: "1.0".to_string(), label: Some("1.0 ms".to_string()) },
-                        EnumValue { value: "4.0".to_string(), label: Some("4.0 ms".to_string()) },
+                        EnumValue { value: "0.125".to_string(), label: Some("0.125 ms".to_string()), visible_when: None },
+                        EnumValue { value: "0.25".to_string(), label: Some("0.25 ms".to_string()), visible_when: None },
+                        EnumValue { value: "1.0".to_string(), label: Some("1.0 ms".to_string()), visible_when: None },
+                        EnumValue { value: "4.0".to_string(), label: Some("4.0 ms".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String("1.0".to_string())),
@@ -1098,6 +1113,7 @@ fn aes67_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "payload_type".to_string(),
@@ -1112,6 +1128,7 @@ fn aes67_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "host".to_string(),
@@ -1126,6 +1143,7 @@ fn aes67_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "port".to_string(),
@@ -1140,6 +1158,7 @@ fn aes67_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "source_port".to_string(),
@@ -1154,6 +1173,7 @@ fn aes67_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "interface".to_string(),
@@ -1168,6 +1188,7 @@ fn aes67_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "ttl".to_string(),
@@ -1182,6 +1203,7 @@ fn aes67_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "qos_dscp".to_string(),
@@ -1198,6 +1220,7 @@ fn aes67_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "ravenna_extensions".to_string(),
@@ -1212,6 +1235,7 @@ fn aes67_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {

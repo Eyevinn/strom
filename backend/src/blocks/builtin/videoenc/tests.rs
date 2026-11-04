@@ -1612,3 +1612,75 @@ fn av1enc_input_is_limited_to_420() {
     assert!(!caps.to_string().contains("Y444"), "{caps}");
     assert!(base_profile_input_caps(Codec::AV1, Profile::None, &encoder).is_none());
 }
+
+/// The profile list offers each named profile only for its own codec, and
+/// the two policies (auto, none) for every codec. The property itself stays
+/// visible for every codec: on VP9 and AV1 "none" lifts the 8-bit 4:2:0
+/// input limit that "auto" applies.
+#[test]
+fn profile_options_carry_their_codec_condition() {
+    let def = videoenc_definition();
+    let profile = def
+        .exposed_properties
+        .iter()
+        .find(|p| p.name == "profile")
+        .expect("profile property");
+    assert!(profile.visible_when.is_none());
+    let PropertyType::Enum { values } = &profile.property_type else {
+        panic!("profile is not an enum");
+    };
+    let codec_of = |value: &str| -> Option<Vec<String>> {
+        let ev = values.iter().find(|v| v.value == value).unwrap();
+        ev.visible_when.as_ref().map(|c| {
+            assert_eq!(c.property, "codec");
+            c.one_of
+                .iter()
+                .map(|v| match v {
+                    PropertyValue::String(s) => s.clone(),
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        })
+    };
+    assert_eq!(codec_of("auto"), None);
+    assert_eq!(codec_of("none"), None);
+    assert_eq!(codec_of("high"), Some(vec!["h264".to_string()]));
+    assert_eq!(codec_of("high-4:4:4"), Some(vec!["h264".to_string()]));
+    assert_eq!(
+        codec_of("main"),
+        Some(vec!["h264".to_string(), "h265".to_string()])
+    );
+    assert_eq!(codec_of("main-422-10"), Some(vec!["h265".to_string()]));
+    // Every condition names a codec the codec property offers.
+    let codec = def
+        .exposed_properties
+        .iter()
+        .find(|p| p.name == "codec")
+        .unwrap();
+    let PropertyType::Enum { values: codecs } = &codec.property_type else {
+        panic!("codec is not an enum");
+    };
+    for v in values {
+        for c in codec_of(&v.value).unwrap_or_default() {
+            assert!(codecs.iter().any(|ev| ev.value == c), "{c}");
+        }
+    }
+
+    // Offered per codec, as the UI filters them.
+    let offered = |codec: &str| -> Vec<String> {
+        let props = HashMap::from([(
+            "codec".to_string(),
+            PropertyValue::String(codec.to_string()),
+        )]);
+        values
+            .iter()
+            .filter(|v| v.is_visible(&props, &def.exposed_properties))
+            .map(|v| v.value.clone())
+            .collect()
+    };
+    assert_eq!(offered("vp9"), ["auto", "none"]);
+    assert!(offered("h264").contains(&"high".to_string()));
+    assert!(!offered("h264").contains(&"main-10".to_string()));
+    assert!(offered("h265").contains(&"main-10".to_string()));
+    assert!(!offered("h265").contains(&"high".to_string()));
+}

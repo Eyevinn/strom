@@ -740,14 +740,17 @@ fn local_input_definition() -> BlockDefinition {
                         EnumValue {
                             value: "audio_video".to_string(),
                             label: Some("Audio + Video".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "video".to_string(),
                             label: Some("Video only".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "audio".to_string(),
                             label: Some("Audio only".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -759,6 +762,7 @@ fn local_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "video_device".to_string(),
@@ -775,6 +779,7 @@ fn local_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "video_resolution".to_string(),
@@ -791,6 +796,7 @@ fn local_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "video_framerate".to_string(),
@@ -807,6 +813,7 @@ fn local_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "audio_device".to_string(),
@@ -823,6 +830,7 @@ fn local_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "audio_rate".to_string(),
@@ -833,34 +841,42 @@ fn local_input_definition() -> BlockDefinition {
                         EnumValue {
                             value: String::new(),
                             label: Some("Default (device)".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "192000".to_string(),
                             label: Some("192 kHz".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "96000".to_string(),
                             label: Some("96 kHz".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "88200".to_string(),
                             label: Some("88.2 kHz".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "48000".to_string(),
                             label: Some("48 kHz".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "44100".to_string(),
                             label: Some("44.1 kHz".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "32000".to_string(),
                             label: Some("32 kHz".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "16000".to_string(),
                             label: Some("16 kHz".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -872,6 +888,7 @@ fn local_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "audio_channels".to_string(),
@@ -888,6 +905,7 @@ fn local_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "wasapi_exclusive_mode".to_string(),
@@ -902,6 +920,7 @@ fn local_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {

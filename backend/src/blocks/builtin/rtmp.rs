@@ -1093,6 +1093,7 @@ fn rtmp_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "sync".to_string(),
@@ -1110,6 +1111,7 @@ fn rtmp_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {

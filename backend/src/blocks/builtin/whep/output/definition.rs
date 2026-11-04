@@ -23,6 +23,7 @@ pub(crate) fn whep_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "num_audio_tracks".to_string(),
@@ -37,6 +38,7 @@ pub(crate) fn whep_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "endpoint_id".to_string(),
@@ -51,6 +53,7 @@ pub(crate) fn whep_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "ts_offset_ms".to_string(),
@@ -65,6 +68,7 @@ pub(crate) fn whep_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "do_retransmission".to_string(),
@@ -79,6 +83,7 @@ pub(crate) fn whep_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "ice_transport_policy".to_string(),
@@ -89,14 +94,17 @@ pub(crate) fn whep_output_definition() -> BlockDefinition {
                         EnumValue {
                             value: "".to_string(),
                             label: Some("Server default".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "all".to_string(),
                             label: Some("All (host, srflx, relay)".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "relay".to_string(),
                             label: Some("Relay only (force TURN)".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -108,6 +116,7 @@ pub(crate) fn whep_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         // Note: external_pads here are the static defaults (1 video + 1 audio).

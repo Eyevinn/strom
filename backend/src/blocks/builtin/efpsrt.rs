@@ -851,6 +851,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "num_audio_tracks".to_string(),
@@ -865,6 +866,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "num_data_tracks".to_string(),
@@ -879,6 +881,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "srt_uri".to_string(),
@@ -893,6 +896,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "latency".to_string(),
@@ -907,6 +911,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "wait_for_connection".to_string(),
@@ -921,6 +926,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "auto_reconnect".to_string(),
@@ -935,6 +941,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "sync".to_string(),
@@ -949,6 +956,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "mtu".to_string(),
@@ -963,6 +971,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {

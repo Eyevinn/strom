@@ -1024,10 +1024,12 @@ fn tams_output_definition() -> BlockDefinition {
                         EnumValue {
                             value: "mpegts".to_string(),
                             label: Some("MPEG-TS (muxed)".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "mp4".to_string(),
                             label: Some("MP4 (separate flows)".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -1035,6 +1037,7 @@ fn tams_output_definition() -> BlockDefinition {
                 mapping: block_mapping("container"),
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "auth_mode".to_string(),
@@ -1045,10 +1048,12 @@ fn tams_output_definition() -> BlockDefinition {
                         EnumValue {
                             value: "static".to_string(),
                             label: Some("Static API Token".to_string()),
+                            visible_when: None,
                         },
                         EnumValue {
                             value: "osc".to_string(),
                             label: Some("OSC PAT/SAT".to_string()),
+                            visible_when: None,
                         },
                     ],
                 },
@@ -1056,6 +1061,7 @@ fn tams_output_definition() -> BlockDefinition {
                 mapping: block_mapping("auth_mode"),
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             simple_prop(
                 "api_token",
@@ -1174,5 +1180,6 @@ fn simple_prop(
         mapping: block_mapping(name),
         live: false,
         persist: None,
+        visible_when: None,
     }
 }

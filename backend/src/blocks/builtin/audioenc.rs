@@ -377,10 +377,10 @@ fn audioenc_definition() -> BlockDefinition {
                 description: "Audio codec to encode to. AAC is the safe choice for MP4 recordings.".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "aac".to_string(), label: Some("AAC".to_string()) },
-                        EnumValue { value: "opus".to_string(), label: Some("Opus".to_string()) },
-                        EnumValue { value: "mp3".to_string(), label: Some("MP3".to_string()) },
-                        EnumValue { value: "ac3".to_string(), label: Some("AC-3".to_string()) },
+                        EnumValue { value: "aac".to_string(), label: Some("AAC".to_string()), visible_when: None },
+                        EnumValue { value: "opus".to_string(), label: Some("Opus".to_string()), visible_when: None },
+                        EnumValue { value: "mp3".to_string(), label: Some("MP3".to_string()), visible_when: None },
+                        EnumValue { value: "ac3".to_string(), label: Some("AC-3".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String("aac".to_string())),
@@ -391,6 +391,7 @@ fn audioenc_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "bitrate".to_string(),
@@ -405,6 +406,7 @@ fn audioenc_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "sample_rate".to_string(),
@@ -412,10 +414,10 @@ fn audioenc_definition() -> BlockDefinition {
                 description: "Output sample rate. \"Match source\" pins no rate, letting the resampler settle on one the encoder accepts. Opus encodes only at 8/12/16/24/48 kHz, so pinning 44.1 or 32 kHz with Opus is rejected at build time.".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "48000".to_string(), label: Some("48 kHz".to_string()) },
-                        EnumValue { value: "44100".to_string(), label: Some("44.1 kHz".to_string()) },
-                        EnumValue { value: "32000".to_string(), label: Some("32 kHz".to_string()) },
-                        EnumValue { value: "source".to_string(), label: Some("Match source".to_string()) },
+                        EnumValue { value: "48000".to_string(), label: Some("48 kHz".to_string()), visible_when: None },
+                        EnumValue { value: "44100".to_string(), label: Some("44.1 kHz".to_string()), visible_when: None },
+                        EnumValue { value: "32000".to_string(), label: Some("32 kHz".to_string()), visible_when: None },
+                        EnumValue { value: "source".to_string(), label: Some("Match source".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String(DEFAULT_SAMPLE_RATE.to_string())),
@@ -426,6 +428,7 @@ fn audioenc_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "channels".to_string(),
@@ -433,9 +436,9 @@ fn audioenc_definition() -> BlockDefinition {
                 description: "Output channel count. \"Match source\" passes upstream's layout through.".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "source".to_string(), label: Some("Match source".to_string()) },
-                        EnumValue { value: "1".to_string(), label: Some("Mono".to_string()) },
-                        EnumValue { value: "2".to_string(), label: Some("Stereo".to_string()) },
+                        EnumValue { value: "source".to_string(), label: Some("Match source".to_string()), visible_when: None },
+                        EnumValue { value: "1".to_string(), label: Some("Mono".to_string()), visible_when: None },
+                        EnumValue { value: "2".to_string(), label: Some("Stereo".to_string()), visible_when: None },
                     ],
                 },
                 default_value: Some(PropertyValue::String("source".to_string())),
@@ -446,6 +449,7 @@ fn audioenc_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {

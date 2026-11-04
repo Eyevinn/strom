@@ -871,6 +871,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "num_audio_tracks".to_string(),
@@ -885,6 +886,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },            ExposedProperty {
                 name: "map_audio_by_pid".to_string(),
                 label: "Map Audio by PID".to_string(),
@@ -898,6 +900,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "srt_uri".to_string(),
@@ -914,6 +917,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "latency".to_string(),
@@ -928,6 +932,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "wait_for_connection".to_string(),
@@ -942,6 +947,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "auto_reconnect".to_string(),
@@ -956,6 +962,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "keep_listening".to_string(),
@@ -970,6 +977,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "decode".to_string(),
@@ -984,6 +992,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },            ExposedProperty {
                 name: "tsdemux_latency".to_string(),
                 label: "TS Demux Latency (ms)".to_string(),
@@ -997,6 +1006,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "ignore_pcr".to_string(),
@@ -1011,6 +1021,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {
