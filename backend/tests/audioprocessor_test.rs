@@ -159,9 +159,10 @@ fn custom_preset_writes_the_block_settings() {
     assert_eq!(p.property::<f32>("clip-budget"), 4.0);
     assert!(!p.property::<bool>("bass-clipper-enabled"));
     assert!(p.property::<bool>("governor-enabled"));
+    // Not stored, so it follows the -14 LUFS target: target + 9 dB.
     assert_eq!(
         p.property::<f32>("bass-clip-threshold"),
-        DEFAULT_BASS_CLIP_THRESHOLD_DB
+        bass_clip_threshold_for_target(-14.0)
     );
     assert_eq!(
         p.property::<f32>("clipper-bandwidth"),
@@ -175,10 +176,8 @@ fn custom_preset_writes_the_block_settings() {
         p.property::<f32>("true-peak-ceiling"),
         DEFAULT_TRUE_PEAK_CEILING_DBTP
     );
-    assert_eq!(
-        p.property::<f32>("limiter-lookahead"),
-        DEFAULT_LIMITER_LOOKAHEAD_MS
-    );
+    // Not stored: the standard latency mode's lookahead.
+    assert_eq!(p.property::<f32>("limiter-lookahead"), 1.5);
     for n in 0..5 {
         assert_eq!(
             p.property::<f32>(&format!("band{n}-ratio")),
@@ -186,11 +185,11 @@ fn custom_preset_writes_the_block_settings() {
         );
         assert_eq!(
             p.property::<f32>(&format!("band{n}-threshold")),
-            DEFAULT_BAND_THRESHOLD_DB[n]
+            band_threshold_for_target(-14.0, n)
         );
         assert_eq!(
             p.property::<f32>(&format!("band{n}-expander-threshold")),
-            DEFAULT_BAND_EXPANDER_THRESHOLD_DB[n]
+            band_expander_threshold_for_target(-14.0, n)
         );
         assert_eq!(
             p.property::<f32>(&format!("band{n}-expander-ratio")),
@@ -260,10 +259,33 @@ fn standard_latency_mode_is_the_default() {
     let a = assemble("audiotestsrc num-buffers=1", &HashMap::new());
     let p = &a.processor;
     assert_eq!(enum_nick(p, "latency-mode"), DEFAULT_LATENCY_MODE);
-    assert_eq!(
-        p.property::<f32>("limiter-lookahead"),
-        DEFAULT_LIMITER_LOOKAHEAD_MS
+    // The standard mode's lookahead (strom-dsp broadcastprocessor docs).
+    assert_eq!(p.property::<f32>("limiter-lookahead"), 1.5);
+}
+
+/// A lookahead of 0 follows the latency mode; an explicit one overrides it,
+/// even in the low mode.
+#[test]
+fn an_explicit_limiter_lookahead_overrides_the_latency_mode() {
+    init();
+    let a = assemble(
+        "audiotestsrc num-buffers=1",
+        &props(&[
+            ("latency_mode", s("low")),
+            ("limiter_lookahead", PropertyValue::Float(0.0)),
+        ]),
     );
+    assert_eq!(a.processor.property::<f32>("limiter-lookahead"), 0.6);
+
+    let a = assemble(
+        "audiotestsrc num-buffers=1",
+        &props(&[
+            ("latency_mode", s("low")),
+            ("limiter_lookahead", PropertyValue::Float(1.5)),
+        ]),
+    );
+    assert_eq!(enum_nick(&a.processor, "latency-mode"), "low");
+    assert_eq!(a.processor.property::<f32>("limiter-lookahead"), 1.5);
 }
 
 /// The element's meter message reaches clients as `AudioProcessorData`, keyed
@@ -474,6 +496,40 @@ async fn switching_to_custom_live_applies_the_stored_settings() {
         .reset_loudness(&flow_id, "proc")
         .await
         .expect("reset integrated loudness");
+
+    state.stop_flow(&flow_id).await.expect("stop_flow");
+}
+
+/// Changing the target of a running custom block moves the values that
+/// follow it (an unstored bass clip threshold, the band and expander
+/// thresholds) with it, as the next start would.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_custom_target_change_moves_the_target_relative_values() {
+    init();
+    let state = common::state::new();
+    let flow = flow(PRESET_CUSTOM, &[]);
+    let flow_id = flow.id;
+    state.upsert_flow(flow).await.expect("upsert_flow");
+    state.start_flow(&flow_id).await.expect("start_flow");
+
+    let (_, rejected) = state
+        .update_block_properties(
+            &flow_id,
+            "proc",
+            props(&[("target_loudness", PropertyValue::Float(-16.0))]),
+            None,
+            None,
+        )
+        .await
+        .expect("update_block_properties");
+    assert!(rejected.is_empty(), "{rejected:?}");
+
+    let after = state
+        .get_block_properties(&flow_id, "proc")
+        .await
+        .expect("block properties");
+    assert_eq!(float(after.get("target_loudness")), Some(-16.0));
+    assert_eq!(float(after.get("bass_clip_threshold")), Some(-7.0));
 
     state.stop_flow(&flow_id).await.expect("stop_flow");
 }

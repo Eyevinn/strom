@@ -45,29 +45,11 @@ pub struct AudioProcessorData {
     pub governor_state: AudioProcessorGovernorState,
 }
 
-#[derive(Debug, Clone)]
-struct Timestamped<T> {
-    data: T,
-    updated_at: Instant,
-}
-
-impl<T> Timestamped<T> {
-    fn new(data: T) -> Self {
-        Self {
-            data,
-            updated_at: Instant::now(),
-        }
-    }
-
-    fn fresh(&self) -> Option<&T> {
-        (self.updated_at.elapsed() < DATA_TTL).then_some(&self.data)
-    }
-}
-
-/// Storage for the meter data of every Audio Processor block.
+/// Storage for the meter data of every Audio Processor block, with the time
+/// each block's data arrived.
 #[derive(Debug, Clone, Default)]
 pub struct AudioProcessorDataStore {
-    data: HashMap<BlockDataKey, Timestamped<AudioProcessorData>>,
+    data: HashMap<BlockDataKey, (AudioProcessorData, Instant)>,
 }
 
 impl AudioProcessorDataStore {
@@ -81,22 +63,20 @@ impl AudioProcessorDataStore {
                 flow_id,
                 element_id,
             },
-            Timestamped::new(data),
+            (data, Instant::now()),
         );
-    }
-
-    fn key(flow_id: &FlowId, element_id: &str) -> BlockDataKey {
-        BlockDataKey {
-            flow_id: *flow_id,
-            element_id: element_id.to_string(),
-        }
     }
 
     /// Meter data for a block, or `None` when it is stale.
     pub fn get(&self, flow_id: &FlowId, element_id: &str) -> Option<&AudioProcessorData> {
+        let key = BlockDataKey {
+            flow_id: *flow_id,
+            element_id: element_id.to_string(),
+        };
         self.data
-            .get(&Self::key(flow_id, element_id))
-            .and_then(Timestamped::fresh)
+            .get(&key)
+            .filter(|(_, updated_at)| updated_at.elapsed() < DATA_TTL)
+            .map(|(data, _)| data)
     }
 }
 
@@ -272,12 +252,15 @@ fn show_stages(ui: &mut Ui, stages: &AudioProcessorData, width: f32) {
 
     if !stages.band_expander_gain_reduction.is_empty() {
         ui.add_space(4.0);
-        ui.label("Expander:");
+        // The values on the label's line, the bars on their own line, so
+        // five bands fit the bar width.
+        ui.label(format!(
+            "Expander: {}",
+            fmt_band_list(&stages.band_expander_gain_reduction)
+        ));
         ui.horizontal(|ui| {
-            // One short bar per band, side by side.
-            let n = stages.band_expander_gain_reduction.len() as f32;
-            let band_width = ((width - 4.0 * (n - 1.0)) / n).max(10.0);
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.spacing_mut().item_spacing.x = EXPANDER_BAR_GAP;
+            let band_width = expander_bar_width(width, stages.band_expander_gain_reduction.len());
             for gr in &stages.band_expander_gain_reduction {
                 bar(
                     ui,
@@ -286,7 +269,6 @@ fn show_stages(ui: &mut Ui, stages: &AudioProcessorData, width: f32) {
                     REDUCTION_COLOR,
                 );
             }
-            ui.label(fmt_band_list(&stages.band_expander_gain_reduction));
         });
     }
 
@@ -305,6 +287,16 @@ fn show_stages(ui: &mut Ui, stages: &AudioProcessorData, width: f32) {
             stages.loudness_deficit
         ),
     );
+}
+
+/// Gap between the per-band expander bars.
+const EXPANDER_BAR_GAP: f32 = 4.0;
+
+/// Width of each of `bands` expander bars so that, with the gaps, they fill
+/// `width` exactly and never overflow it.
+fn expander_bar_width(width: f32, bands: usize) -> f32 {
+    let n = bands.max(1) as f32;
+    ((width - EXPANDER_BAR_GAP * (n - 1.0)) / n).max(1.0)
 }
 
 /// Per-band values as "a / b / c dB".
@@ -350,6 +342,19 @@ mod tests {
         assert_eq!(governor_color(&stages), REDUCTION_COLOR);
         // Nothing clipped reads as no value, not as -200 dB.
         assert_eq!(fmt_level(stages.clip_depth, "dB"), "---");
+    }
+
+    /// Five bands fit the narrowest bar width the inspector uses (40) and
+    /// the widest (120), gaps included.
+    #[test]
+    fn expander_bars_fit_the_width() {
+        for width in [40.0f32, 120.0] {
+            for bands in 1..=5 {
+                let total = expander_bar_width(width, bands) * bands as f32
+                    + EXPANDER_BAR_GAP * (bands as f32 - 1.0);
+                assert!(total <= width + 0.01, "{bands} bands at {width}: {total}");
+            }
+        }
     }
 
     #[test]

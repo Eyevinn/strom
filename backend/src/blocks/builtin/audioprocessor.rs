@@ -25,9 +25,10 @@ use crate::gst::pipeline::properties::set_property_checked;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use strom_types::audioprocessor::*;
 use strom_types::{block::*, element::ElementPadRef, EnumValue, PropertyValue, StromEvent, *};
-use tracing::{debug, info, trace};
+use tracing::{debug, info, warn};
 
 /// The GStreamer element the block wraps.
 pub const ELEMENT_FACTORY: &str = "stromdsp-broadcastprocessor";
@@ -268,7 +269,7 @@ const SETTINGS: &[Setting] = &[
         name: "bass_clip_threshold",
         element_property: "bass-clip-threshold",
         label: "Bass Clip Threshold (dB)",
-        description: "Level of the lowest band the bass clipper holds (-40 to 0 dB).",
+        description: "Level of the lowest band the bass clipper holds (-40 to 0 dB). Unset, it follows the target loudness: target + 9 dB, as in the presets.",
         default: Kind::Float(DEFAULT_BASS_CLIP_THRESHOLD_DB),
         live: true,
     },
@@ -332,7 +333,7 @@ const SETTINGS: &[Setting] = &[
         name: "limiter_lookahead",
         element_property: "limiter-lookahead",
         label: "Limiter Lookahead (ms)",
-        description: "Overrides the latency mode's limiter lookahead (1.5 ms standard, 0.6 ms low; 0.5 to 20 ms). Adds to the block's latency. Leave it unset to follow the latency mode. Applies with every preset. Construction-time only.",
+        description: "0 follows the latency mode (1.5 ms standard, 0.6 ms low). Otherwise 0.5 to 20 ms, overriding the mode's; more adds latency. Applies with every preset. Construction-time only.",
         default: Kind::Float(DEFAULT_LIMITER_LOOKAHEAD_MS),
         live: false,
     },
@@ -383,9 +384,55 @@ pub fn is_custom_only(name: &str) -> bool {
     CUSTOM_ONLY_PROPERTIES.contains(&name)
 }
 
+/// Custom settings that follow the target loudness while the flow has not
+/// stored them, as the element's presets set them relative to the target.
+const TARGET_RELATIVE_SETTINGS: &[&str] = &["bass_clip_threshold"];
+
+/// The target loudness the custom preset runs with (stored, or the default).
+fn target_loudness(properties: &HashMap<String, PropertyValue>) -> Result<f32, String> {
+    match setting("target_loudness")
+        .expect("target_loudness setting exists")
+        .value(properties)?
+    {
+        PropertyValue::Float(v) => Ok(v as f32),
+        other => Err(format!(
+            "Audio Processor: target_loudness must be a number, got {other:?}"
+        )),
+    }
+}
+
+/// The custom element writes that follow the target loudness: the band and
+/// expander thresholds (never exposed) and every target-relative setting the
+/// flow has not stored. A stored value wins. Applied with the custom preset,
+/// and again when the target changes on a running custom block.
+pub fn target_relative_writes(
+    properties: &HashMap<String, PropertyValue>,
+) -> Result<Vec<(String, PropertyValue)>, String> {
+    let target = target_loudness(properties)?;
+    let mut writes = Vec::new();
+    if !properties.contains_key("bass_clip_threshold") {
+        writes.push((
+            "bass-clip-threshold".to_string(),
+            PropertyValue::Float(bass_clip_threshold_for_target(target) as f64),
+        ));
+    }
+    for n in 0..MAX_NUM_BANDS as usize {
+        writes.push((
+            format!("band{n}-threshold"),
+            PropertyValue::Float(band_threshold_for_target(target, n) as f64),
+        ));
+        writes.push((
+            format!("band{n}-expander-threshold"),
+            PropertyValue::Float(band_expander_threshold_for_target(target, n) as f64),
+        ));
+    }
+    Ok(writes)
+}
+
 /// The element property writes that make the custom preset, in order: every
 /// custom-only setting (stored value or Strom default), then the band and
-/// crossover settings the block does not expose.
+/// crossover settings the block does not expose, then the values that follow
+/// the target loudness.
 ///
 /// `running` leaves out the properties the element only takes in NULL/READY,
 /// for switching a running block to custom.
@@ -398,6 +445,9 @@ pub fn custom_writes(
         if running && !s.live {
             continue;
         }
+        if TARGET_RELATIVE_SETTINGS.contains(&s.name) && !properties.contains_key(s.name) {
+            continue;
+        }
         writes.push((s.element_property.to_string(), s.value(properties)?));
     }
     // All crossovers in one write: one at a time, a write can land on the
@@ -408,12 +458,10 @@ pub fn custom_writes(
     ));
     for n in 0..MAX_NUM_BANDS as usize {
         for (suffix, value) in [
-            ("threshold", DEFAULT_BAND_THRESHOLD_DB[n]),
             ("ratio", DEFAULT_BAND_RATIO[n]),
             ("attack", DEFAULT_BAND_ATTACK_MS[n]),
             ("release", DEFAULT_BAND_RELEASE_MS[n]),
             ("makeup", DEFAULT_BAND_MAKEUP_DB[n]),
-            ("expander-threshold", DEFAULT_BAND_EXPANDER_THRESHOLD_DB[n]),
             ("expander-ratio", DEFAULT_BAND_EXPANDER_RATIO[n]),
             ("expander-floor", DEFAULT_BAND_EXPANDER_FLOOR_DB[n]),
         ] {
@@ -423,6 +471,7 @@ pub fn custom_writes(
             ));
         }
     }
+    writes.extend(target_relative_writes(properties)?);
     Ok(writes)
 }
 
@@ -447,8 +496,9 @@ pub fn build_writes(
     // The settings no preset touches come first, `num-bands` before anything
     // that addresses a band. The preset comes after them, so they do not
     // turn it into custom. `latency-mode` sets the limiter lookahead along
-    // with the other lookaheads, so a stored `limiter_lookahead` is written
-    // after it, as an override, and only when the flow has one.
+    // with the other lookaheads, so `limiter_lookahead` is written after it,
+    // as an override, and only when the flow stores a non-zero value (0
+    // follows the mode).
     for name in [
         "num_bands",
         "latency_mode",
@@ -457,10 +507,11 @@ pub fn build_writes(
         "meter_interval",
     ] {
         let s = setting(name).expect("always-applied setting exists");
-        if name == "limiter_lookahead" && !properties.contains_key(name) {
+        let value = s.value(properties)?;
+        if name == "limiter_lookahead" && matches!(value, PropertyValue::Float(v) if v == 0.0) {
             continue;
         }
-        writes.push((s.element_property.to_string(), s.value(properties)?));
+        writes.push((s.element_property.to_string(), value));
     }
 
     if preset == PRESET_CUSTOM {
@@ -557,60 +608,74 @@ pub fn missing_element_message() -> String {
     )
 }
 
-/// Read an element meter message into an event. `None` when the structure is
-/// not the processor's meter message or a field is missing.
-pub fn meter_event(s: &gst::StructureRef, flow_id: FlowId, element_id: &str) -> Option<StromEvent> {
+/// Read an element meter message into an event. `Ok(None)` when the
+/// structure is not the processor's meter message, `Err(field)` when it is
+/// but lacks `field` (the event is dropped then).
+pub fn meter_event(
+    s: &gst::StructureRef,
+    flow_id: FlowId,
+    element_id: &str,
+) -> Result<Option<StromEvent>, &'static str> {
     if s.name() != METER_MESSAGE {
-        return None;
+        return Ok(None);
     }
-    let f = |name: &str| s.get::<f64>(name).ok().map(finite_or_silence);
-    let band_gain_reduction = s
-        .get::<gst::Array>("band-gain-reduction")
-        .ok()?
-        .iter()
-        .filter_map(|v| v.get::<f64>().ok())
-        .map(finite_or_silence)
-        .collect();
-    let band_expander_gain_reduction = s
-        .get::<gst::Array>("band-expander-gain-reduction")
-        .ok()?
-        .iter()
-        .filter_map(|v| v.get::<f64>().ok())
-        .map(finite_or_silence)
-        .collect();
-    Some(StromEvent::AudioProcessorData {
+    let get = |name: &'static str| s.get::<f64>(name).map_err(|_| name);
+    // Loudness, peaks and clip depth: a level, -200 for silence.
+    let level = |name: &'static str| get(name).map(finite_or_silence);
+    // Gains and reductions: 0 means nothing done.
+    let amount = |name: &'static str| get(name).map(finite_or_zero);
+    let bands = |name: &'static str| {
+        s.get::<gst::Array>(name).map_err(|_| name).map(|a| {
+            a.iter()
+                .filter_map(|v| v.get::<f64>().ok())
+                .map(finite_or_zero)
+                .collect::<Vec<_>>()
+        })
+    };
+    Ok(Some(StromEvent::AudioProcessorData {
         flow_id,
         element_id: element_id.to_string(),
-        input_momentary: f("input-momentary")?,
-        input_short_term: f("input-short-term")?,
-        output_momentary: f("output-momentary")?,
-        output_short_term: f("output-short-term")?,
-        output_integrated: f("output-integrated")?,
-        input_true_peak: f("input-true-peak")?,
-        output_true_peak: f("output-true-peak")?,
-        agc_gain: f("agc-gain")?,
-        band_gain_reduction,
-        limiter_gain_reduction: f("limiter-gain-reduction")?,
-        spike_events: s.get::<u64>("spike-events").ok()?,
-        band_expander_gain_reduction,
-        bass_clip_gain_reduction: f("bass-clip-gr")?,
-        clip_depth: f("clip-depth")?,
-        loudness_deficit: f("loudness-deficit")?,
-        budget_excess: f("budget-excess")?,
+        input_momentary: level("input-momentary")?,
+        input_short_term: level("input-short-term")?,
+        output_momentary: level("output-momentary")?,
+        output_short_term: level("output-short-term")?,
+        output_integrated: level("output-integrated")?,
+        input_true_peak: level("input-true-peak")?,
+        output_true_peak: level("output-true-peak")?,
+        agc_gain: amount("agc-gain")?,
+        band_gain_reduction: bands("band-gain-reduction")?,
+        limiter_gain_reduction: amount("limiter-gain-reduction")?,
+        spike_events: s.get::<u64>("spike-events").map_err(|_| "spike-events")?,
+        band_expander_gain_reduction: bands("band-expander-gain-reduction")?,
+        bass_clip_gain_reduction: amount("bass-clip-gr")?,
+        clip_depth: level("clip-depth")?,
+        loudness_deficit: amount("loudness-deficit")?,
+        budget_excess: amount("budget-excess")?,
         governor_state: AudioProcessorGovernorState::from_nick(
-            s.get::<&str>("governor-state").ok()?,
+            s.get::<&str>("governor-state")
+                .map_err(|_| "governor-state")?,
         ),
-    })
+    }))
 }
 
 /// The element reports silence as -200, never NaN or infinity. JSON has no
-/// NaN, so anything that is not finite is mapped to silence rather than
+/// NaN, so a level that is not finite is mapped to silence rather than
 /// breaking the WebSocket message.
 fn finite_or_silence(v: f64) -> f64 {
     if v.is_finite() {
         v
     } else {
         METER_SILENCE
+    }
+}
+
+/// A gain or reduction that is not finite reads as none (0 dB), not as
+/// -200: a reduction of -200 dB would be nonsense on the meters.
+fn finite_or_zero(v: f64) -> f64 {
+    if v.is_finite() {
+        v
+    } else {
+        0.0
     }
 }
 
@@ -625,6 +690,10 @@ fn connect_meter_handler(
         "Connecting Audio Processor meter handler for flow {} element {}",
         flow_id, expected_source
     );
+
+    // A meter message without a field is dropped. That means a strom-dsp
+    // this block was not written for, so say it once, not on every message.
+    let warned_missing = AtomicBool::new(false);
 
     // No add_signal_watch() here: setup_bus_watch takes the single watch this
     // bus needs, and matches it with exactly one remove on teardown.
@@ -642,12 +711,17 @@ fn connect_meter_handler(
             return;
         }
         match meter_event(s, flow_id, &block_id) {
-            Some(event) => events.broadcast(event),
-            None => trace!(
-                "Audio Processor {}: meter message missing fields: {}",
-                block_id,
-                s
-            ),
+            Ok(Some(event)) => events.broadcast(event),
+            Ok(None) => {}
+            Err(field) => {
+                if !warned_missing.swap(true, Ordering::Relaxed) {
+                    warn!(
+                        "Audio Processor {} (flow {}): meter message has no {} field, \
+                         meters are not sent. Is strom-dsp older than v0.2.0?",
+                        block_id, flow_id, field
+                    );
+                }
+            }
         }
     })
 }
@@ -1031,6 +1105,97 @@ mod tests {
         );
     }
 
+    /// 0 follows the latency mode, so it is never written; an explicit value
+    /// is, even one equal to the standard mode's, so an operator can run the
+    /// low mode with a 1.5 ms lookahead.
+    #[test]
+    fn a_zero_limiter_lookahead_follows_the_latency_mode() {
+        let writes = build_writes(&props(&[
+            ("latency_mode", PropertyValue::String("low".to_string())),
+            ("limiter_lookahead", PropertyValue::Float(0.0)),
+        ]))
+        .unwrap();
+        assert!(!names(&writes).contains(&"limiter-lookahead"));
+        assert_pv!(default_of("limiter_lookahead"), PropertyValue::Float(0.0));
+
+        let writes = build_writes(&props(&[
+            ("latency_mode", PropertyValue::String("low".to_string())),
+            ("limiter_lookahead", PropertyValue::Float(1.5)),
+        ]))
+        .unwrap();
+        let written = names(&writes);
+        let mode = written.iter().position(|n| *n == "latency-mode").unwrap();
+        let lookahead = written
+            .iter()
+            .position(|n| *n == "limiter-lookahead")
+            .expect("an explicit lookahead is written");
+        assert!(mode < lookahead, "{written:?}");
+        assert_pv!(
+            value(&writes, "limiter-lookahead"),
+            &PropertyValue::Float(1.5)
+        );
+    }
+
+    fn default_of(name: &str) -> PropertyValue {
+        audioprocessor_definition()
+            .exposed_properties
+            .into_iter()
+            .find(|p| p.name == name)
+            .and_then(|p| p.default_value)
+            .unwrap()
+    }
+
+    /// With Custom, settings the presets set relative to the target follow
+    /// the stored target while the flow has not stored them: a -16 LUFS
+    /// target must not clip steady bass at the -23 LUFS target's -14 dB.
+    #[test]
+    fn custom_target_relative_settings_follow_the_target() {
+        let writes = build_writes(&props(&[
+            ("preset", PropertyValue::String("custom".to_string())),
+            ("target_loudness", PropertyValue::Float(-16.0)),
+        ]))
+        .unwrap();
+        assert_pv!(
+            value(&writes, "bass-clip-threshold"),
+            &PropertyValue::Float(-7.0)
+        );
+        assert_pv!(
+            value(&writes, "band0-expander-threshold"),
+            &PropertyValue::Float(-40.0)
+        );
+        assert_pv!(
+            value(&writes, "band0-threshold"),
+            &PropertyValue::Float(-17.0)
+        );
+        assert_eq!(
+            names(&writes)
+                .iter()
+                .filter(|n| **n == "bass-clip-threshold")
+                .count(),
+            1
+        );
+
+        // A stored value wins.
+        let writes = build_writes(&props(&[
+            ("preset", PropertyValue::String("custom".to_string())),
+            ("target_loudness", PropertyValue::Float(-16.0)),
+            ("bass_clip_threshold", PropertyValue::Float(-20.0)),
+        ]))
+        .unwrap();
+        assert_pv!(
+            value(&writes, "bass-clip-threshold"),
+            &PropertyValue::Float(-20.0)
+        );
+        assert!(!names(
+            &target_relative_writes(&props(&[(
+                "bass_clip_threshold",
+                PropertyValue::Float(-20.0)
+            )]))
+            .unwrap()
+        )
+        .contains(&"bass-clip-threshold"));
+    }
+
     #[test]
     fn an_unknown_latency_mode_is_an_error() {
         let err = build_writes(&props(&[(
@@ -1103,7 +1268,7 @@ mod tests {
         );
         assert_pv!(
             value(&writes, "bass-clip-threshold"),
-            &PropertyValue::Float(DEFAULT_BASS_CLIP_THRESHOLD_DB as f64)
+            &PropertyValue::Float(bass_clip_threshold_for_target(-14.0) as f64)
         );
         assert_pv!(
             value(&writes, "band3-expander-floor"),
@@ -1192,7 +1357,7 @@ mod tests {
         let s = meter_message();
         let flow_id = FlowId::new_v4();
         match meter_event(&s, flow_id, "proc") {
-            Some(StromEvent::AudioProcessorData {
+            Ok(Some(StromEvent::AudioProcessorData {
                 flow_id: f,
                 element_id,
                 input_momentary,
@@ -1212,7 +1377,7 @@ mod tests {
                 loudness_deficit,
                 budget_excess,
                 governor_state,
-            }) => {
+            })) => {
                 assert_eq!(f, flow_id);
                 assert_eq!(element_id, "proc");
                 assert_eq!(input_momentary, -30.0);
@@ -1238,10 +1403,11 @@ mod tests {
     }
 
     /// strom-dsp v0.2.0 always sends every field: any one missing, stage
-    /// fields included, drops the event. An unknown governor state reads as
+    /// fields included, drops the event and names the field. Another message
+    /// is not a meter message at all. An unknown governor state reads as
     /// `Unknown`, not as a dropped message.
     #[test]
-    fn meter_message_with_any_field_missing_is_ignored() {
+    fn meter_message_with_a_missing_field_or_other_name_is_ignored() {
         gst::init().unwrap();
         let flow_id = FlowId::new_v4();
         for field in [
@@ -1265,32 +1431,25 @@ mod tests {
         ] {
             let mut s = meter_message();
             s.remove_field(field);
-            assert!(
-                meter_event(&s, flow_id, "proc").is_none(),
+            assert_eq!(
+                meter_event(&s, flow_id, "proc").err(),
+                Some(field),
                 "{field} missing"
             );
         }
+
+        let s = gst::Structure::builder("ebur128-level").build();
+        assert!(matches!(meter_event(&s, flow_id, "proc"), Ok(None)));
 
         let mut s = meter_message();
         s.set("governor-state", "sideways");
         assert!(matches!(
             meter_event(&s, flow_id, "proc"),
-            Some(StromEvent::AudioProcessorData {
+            Ok(Some(StromEvent::AudioProcessorData {
                 governor_state: AudioProcessorGovernorState::Unknown,
                 ..
-            })
+            }))
         ));
-    }
-
-    #[test]
-    fn meter_message_with_a_missing_field_or_other_name_is_ignored() {
-        gst::init().unwrap();
-        let s = gst::Structure::builder(METER_MESSAGE)
-            .field("input-momentary", -30.0f64)
-            .build();
-        assert!(meter_event(&s, FlowId::new_v4(), "proc").is_none());
-        let s = gst::Structure::builder("ebur128-level").build();
-        assert!(meter_event(&s, FlowId::new_v4(), "proc").is_none());
     }
 
     /// Without the element the flow must fail with a message naming it, never
@@ -1316,10 +1475,59 @@ mod tests {
         );
     }
 
+    /// A non-finite level reads as silence (-200); a non-finite gain or
+    /// reduction reads as none (0), never as 200 dB of reduction.
     #[test]
-    fn non_finite_meter_values_read_as_silence() {
+    fn non_finite_meter_values_read_as_silence_or_no_reduction() {
         assert_eq!(finite_or_silence(f64::NEG_INFINITY), METER_SILENCE);
         assert_eq!(finite_or_silence(f64::NAN), METER_SILENCE);
         assert_eq!(finite_or_silence(-12.0), -12.0);
+        assert_eq!(finite_or_zero(f64::NAN), 0.0);
+        assert_eq!(finite_or_zero(1.5), 1.5);
+
+        gst::init().unwrap();
+        let mut s = meter_message();
+        for field in [
+            "bass-clip-gr",
+            "loudness-deficit",
+            "budget-excess",
+            "limiter-gain-reduction",
+            "agc-gain",
+            "clip-depth",
+            "output-true-peak",
+        ] {
+            s.set(field, f64::NAN);
+        }
+        s.set(
+            "band-expander-gain-reduction",
+            gst::Array::new([f64::INFINITY, 1.0]),
+        );
+        s.set("band-gain-reduction", gst::Array::new([f64::NAN]));
+        match meter_event(&s, FlowId::new_v4(), "proc") {
+            Ok(Some(StromEvent::AudioProcessorData {
+                bass_clip_gain_reduction,
+                loudness_deficit,
+                budget_excess,
+                limiter_gain_reduction,
+                agc_gain,
+                band_expander_gain_reduction,
+                band_gain_reduction,
+                clip_depth,
+                output_true_peak,
+                ..
+            })) => {
+                assert_eq!(bass_clip_gain_reduction, 0.0);
+                assert_eq!(loudness_deficit, 0.0);
+                assert_eq!(budget_excess, 0.0);
+                assert_eq!(limiter_gain_reduction, 0.0);
+                assert_eq!(agc_gain, 0.0);
+                assert_eq!(band_expander_gain_reduction, vec![0.0, 1.0]);
+                assert_eq!(band_gain_reduction, vec![0.0]);
+                // Levels keep the silence value.
+                assert_eq!(clip_depth, METER_SILENCE);
+                assert_eq!(output_true_peak, METER_SILENCE);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

@@ -114,9 +114,15 @@ pub const DEFAULT_EXPANDER_HOLD_MS: f32 = 100.0;
 
 /// Bass clipper on the lowest band.
 pub const DEFAULT_BASS_CLIPPER_ENABLED: bool = true;
-/// Bass clipper threshold (dB, band 0 envelope): the target + 9 dB, as the
-/// element's presets set it.
-pub const DEFAULT_BASS_CLIP_THRESHOLD_DB: f32 = -14.0;
+/// Bass clipper threshold over the target loudness (dB), as the element's
+/// presets set it: 4 dB above the band threshold, so the clipper catches
+/// only the bass peaks the band compressor lets through.
+pub const BASS_CLIP_THRESHOLD_OVER_TARGET_DB: f32 = 9.0;
+/// Bass clipper threshold (dB, band 0 envelope) at the default target. With
+/// Custom an unset threshold follows the target; see
+/// [`bass_clip_threshold_for_target`].
+pub const DEFAULT_BASS_CLIP_THRESHOLD_DB: f32 =
+    DEFAULT_TARGET_LOUDNESS_LUFS + BASS_CLIP_THRESHOLD_OVER_TARGET_DB;
 
 /// Final clipper ahead of the limiter.
 pub const DEFAULT_CLIPPER_ENABLED: bool = true;
@@ -130,11 +136,14 @@ pub const DEFAULT_CLIP_BUDGET_DB: f32 = 2.0;
 
 pub const DEFAULT_LIMITER_ENABLED: bool = true;
 pub const DEFAULT_LIMITER_RELEASE_MS: f32 = 80.0;
-/// Limiter lookahead (ms) of the standard latency mode. Construction-time
-/// only. `latency-mode` sets the lookahead itself (1.5 ms standard, 0.6 ms
-/// low), so the block writes `limiter_lookahead` only when the flow stores
-/// a value, as an override after the latency mode.
-pub const DEFAULT_LIMITER_LOOKAHEAD_MS: f32 = 1.5;
+/// Limiter lookahead (ms). Construction-time only. 0 means "follow the
+/// latency mode", which sets the lookahead itself (1.5 ms standard, 0.6 ms
+/// low); the block writes a non-zero value after the latency mode, as an
+/// override.
+pub const DEFAULT_LIMITER_LOOKAHEAD_MS: f32 = 0.0;
+/// Range of an explicit limiter lookahead (ms), the element's.
+pub const MIN_LIMITER_LOOKAHEAD_MS: f32 = 0.5;
+pub const MAX_LIMITER_LOOKAHEAD_MS: f32 = 20.0;
 
 // ── Custom preset: band settings the block sets but does not expose ──
 // Gentle starting points: low ratios, no makeup, slower time constants in
@@ -143,16 +152,38 @@ pub const DEFAULT_LIMITER_LOOKAHEAD_MS: f32 = 1.5;
 
 /// Crossover frequencies (Hz), strictly ascending.
 pub const DEFAULT_CROSSOVER_FREQUENCIES_HZ: [f32; 4] = [120.0, 800.0, 4000.0, 10000.0];
-pub const DEFAULT_BAND_THRESHOLD_DB: [f32; 5] = [-24.0, -22.0, -20.0, -20.0, -20.0];
+/// Band compressor thresholds over the target loudness (dB). They follow the
+/// target, as in the element's presets, because the multiband comes after
+/// the AGC: at the default -23 LUFS they are -24, -22, -20, -20, -20 dB.
+pub const BAND_THRESHOLD_OVER_TARGET_DB: [f32; 5] = [-1.0, 1.0, 3.0, 3.0, 3.0];
 pub const DEFAULT_BAND_RATIO: [f32; 5] = [2.0, 2.0, 2.0, 1.8, 1.5];
 pub const DEFAULT_BAND_ATTACK_MS: [f32; 5] = [40.0, 20.0, 10.0, 5.0, 3.0];
 pub const DEFAULT_BAND_RELEASE_MS: [f32; 5] = [400.0, 250.0, 150.0, 100.0, 80.0];
 pub const DEFAULT_BAND_MAKEUP_DB: [f32; 5] = [0.0; 5];
-/// Per-band downward expander: threshold (dB, band level), ratio (1 = off)
-/// and floor (largest attenuation, dB). The element's `ebu-r128` values.
-pub const DEFAULT_BAND_EXPANDER_THRESHOLD_DB: [f32; 5] = [-47.0; 5];
+/// Per-band downward expander: threshold over the target loudness (dB, band
+/// level), ratio (1 = off) and floor (largest attenuation, dB). The element's
+/// programme presets: target - 24 dB, 1:1.5, at most 4 dB.
+pub const BAND_EXPANDER_THRESHOLD_OVER_TARGET_DB: [f32; 5] = [-24.0; 5];
 pub const DEFAULT_BAND_EXPANDER_RATIO: [f32; 5] = [1.5; 5];
 pub const DEFAULT_BAND_EXPANDER_FLOOR_DB: [f32; 5] = [4.0; 5];
+
+/// Bass clip threshold (dB) for a target loudness (LUFS), inside the
+/// element's range.
+pub fn bass_clip_threshold_for_target(target: f32) -> f32 {
+    (target + BASS_CLIP_THRESHOLD_OVER_TARGET_DB).clamp(-40.0, 0.0)
+}
+
+/// Band `n`'s compressor threshold (dB) for a target loudness (LUFS), inside
+/// the element's range.
+pub fn band_threshold_for_target(target: f32, n: usize) -> f32 {
+    (target + BAND_THRESHOLD_OVER_TARGET_DB[n]).clamp(-60.0, 0.0)
+}
+
+/// Band `n`'s expander threshold (dB) for a target loudness (LUFS), inside
+/// the element's range.
+pub fn band_expander_threshold_for_target(target: f32, n: usize) -> f32 {
+    (target + BAND_EXPANDER_THRESHOLD_OVER_TARGET_DB[n]).clamp(-80.0, 0.0)
+}
 
 /// Meter value the element reports for silence (LUFS, dBTP, dB).
 pub const METER_SILENCE: f64 = -200.0;
@@ -273,7 +304,10 @@ mod tests {
         assert!(within(DEFAULT_AGC_GATE_LUFS, -80.0, -20.0));
         assert!(within(DEFAULT_MULTIBAND_DRIVE_DB, -12.0, 12.0));
         assert!(within(DEFAULT_LIMITER_RELEASE_MS, 1.0, 2000.0));
-        assert!(within(DEFAULT_LIMITER_LOOKAHEAD_MS, 0.5, 20.0));
+        // 0 follows the latency mode; the block never writes it.
+        assert_eq!(DEFAULT_LIMITER_LOOKAHEAD_MS, 0.0);
+        assert_eq!(MIN_LIMITER_LOOKAHEAD_MS, 0.5);
+        assert_eq!(MAX_LIMITER_LOOKAHEAD_MS, 20.0);
         assert!(within(DEFAULT_SPIKE_THRESHOLD_DB, 6.0, 30.0));
         assert!(within(DEFAULT_EXPANDER_HOLD_MS, 0.0, 1000.0));
         assert!(within(DEFAULT_BASS_CLIP_THRESHOLD_DB, -40.0, 0.0));
@@ -286,14 +320,36 @@ mod tests {
             assert!(within(f, 20.0, 20000.0));
         }
         for n in 0..5 {
-            assert!(within(DEFAULT_BAND_THRESHOLD_DB[n], -60.0, 0.0));
             assert!(within(DEFAULT_BAND_RATIO[n], 1.0, 20.0));
             assert!(within(DEFAULT_BAND_ATTACK_MS[n], 0.1, 500.0));
             assert!(within(DEFAULT_BAND_RELEASE_MS[n], 5.0, 5000.0));
             assert!(within(DEFAULT_BAND_MAKEUP_DB[n], -12.0, 24.0));
-            assert!(within(DEFAULT_BAND_EXPANDER_THRESHOLD_DB[n], -80.0, 0.0));
             assert!(within(DEFAULT_BAND_EXPANDER_RATIO[n], 1.0, 10.0));
             assert!(within(DEFAULT_BAND_EXPANDER_FLOOR_DB[n], 0.0, 40.0));
+        }
+    }
+
+    /// The target-relative values match the element's presets: bass clip
+    /// target + 9 dB, expander target - 24 dB, and at the default target the
+    /// custom band thresholds Strom has always used.
+    #[test]
+    fn target_relative_values_follow_the_presets() {
+        assert_eq!(DEFAULT_BASS_CLIP_THRESHOLD_DB, -14.0);
+        assert_eq!(bass_clip_threshold_for_target(-16.0), -7.0);
+        assert_eq!(bass_clip_threshold_for_target(-24.0), -15.0);
+        assert_eq!(band_expander_threshold_for_target(-23.0, 0), -47.0);
+        assert_eq!(band_expander_threshold_for_target(-16.0, 4), -40.0);
+        let at_default: Vec<f32> = (0..5)
+            .map(|n| band_threshold_for_target(DEFAULT_TARGET_LOUDNESS_LUFS, n))
+            .collect();
+        assert_eq!(at_default, [-24.0, -22.0, -20.0, -20.0, -20.0]);
+        // Inside the element's ranges over the whole target range.
+        for target in [-40.0f32, -23.0, -5.0] {
+            assert!((-40.0..=0.0).contains(&bass_clip_threshold_for_target(target)));
+            for n in 0..5 {
+                assert!((-60.0..=0.0).contains(&band_threshold_for_target(target, n)));
+                assert!((-80.0..=0.0).contains(&band_expander_threshold_for_target(target, n)));
+            }
         }
     }
 }
