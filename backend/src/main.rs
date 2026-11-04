@@ -310,6 +310,18 @@ fn main() -> anyhow::Result<()> {
     blank_env_vars.sort();
     blank_env_vars.dedup();
 
+    // Make libsoup (souphttpsrc, and the HLS/DASH demuxers' segment downloads)
+    // speak HTTP/1.1. Its HTTP/2 client returns flow-control credit as data
+    // arrives rather than as it is read, and queues the body in memory without
+    // a limit: a paused Media Player on an http(s) file from an HTTP/2 server
+    // (most CDNs) downloads the whole file into RAM. Over HTTP/1.1, TCP flow
+    // control holds the server back. libsoup reads the variable once, at its
+    // first connection, so it is set here, before any thread exists. A value
+    // the operator set is left alone.
+    if std::env::var_os("SOUP_FORCE_HTTP1").is_none() {
+        std::env::set_var("SOUP_FORCE_HTTP1", "1");
+    }
+
     // Initialize process startup time before anything else
     strom::version::init_process_startup_time();
 
