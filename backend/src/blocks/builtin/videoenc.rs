@@ -1187,7 +1187,7 @@ fn videoenc_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "profile".to_string(),
                 label: "Profile".to_string(),
-                description: "Codec profile pinned on the encoder's output capsfilter. \"auto\" (default) pins the codec's 8-bit 4:2:0 profile — high for H.264, main for H.265 — which every common delivery target decodes; without it the encoder follows the incoming pixel format and a 4:2:2, 4:4:4 or 10-bit input produces a profile many targets refuse. \"none\" omits the profile field and lets the encoder negotiate freely with downstream. Pick an explicit profile when the downstream needs a particular one; the list offers the profiles of the selected codec (H.264 and H.265 only). For VP9 and AV1 any value but \"none\" limits the encoder's input to 8-bit 4:2:0, which gives VP9 profile 0 and AV1 Main.".to_string(),
+                description: "Codec profile of the encoded output. Auto: High for H.264, Main for H.265, 8-bit 4:2:0 for VP9 and AV1, which every common player decodes. None: the encoder follows the input format.".to_string(),
                 property_type: PropertyType::Enum {
                     values: Profile::block_enum_values(),
                 },
