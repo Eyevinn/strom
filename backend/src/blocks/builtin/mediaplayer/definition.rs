@@ -104,13 +104,9 @@ pub fn media_player_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "read_ahead_s".to_string(),
                 label: "Read-ahead (s)".to_string(),
-                description: "For http(s) files, HLS and DASH: how many seconds of media \
-                              to fetch ahead of playback, held in memory. Rides out dips in \
-                              download speed; raise it for high-bitrate files on a slow or \
-                              uneven network. Memory use grows with the bitrate: 10 s of a \
-                              32 Mbit/s file is about 40 MB. 0 turns read-ahead off; at most \
-                              120. Local files and live sources (rtsp, srt, udp) are not \
-                              affected."
+                description: "Seconds of http(s)/HLS/DASH media fetched ahead of playback, \
+                              in memory. Raise for high-bitrate files on an uneven network. \
+                              0 = off, max 120."
                     .to_string(),
                 property_type: PropertyType::UInt,
                 default_value: Some(PropertyValue::UInt(
@@ -128,13 +124,9 @@ pub fn media_player_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "download_to_disk".to_string(),
                 label: "Download to Disk".to_string(),
-                description: "For http(s) files that allow it (mp4, mov, ...): download \
-                              the whole file to a temporary file as fast as the network \
-                              allows, while it plays. The file goes in the server's user \
-                              cache directory ($HOME/.cache on Linux), takes as much disk \
-                              space as the file itself, and is removed when the file stops \
-                              playing. HLS, DASH and other streams that cannot be \
-                              downloaded use Read-ahead instead."
+                description: "Download http(s) files (mp4, mov, ...) to a temp file at full \
+                              network speed while playing. Uses disk equal to the file size; \
+                              removed after."
                     .to_string(),
                 property_type: PropertyType::Bool,
                 default_value: Some(PropertyValue::Bool(false)),
