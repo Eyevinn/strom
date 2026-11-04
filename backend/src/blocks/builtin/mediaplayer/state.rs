@@ -90,6 +90,8 @@ pub struct MediaPlayerState {
     pub decode: bool,
     /// Whether clocksync pacing is enabled
     pub sync: bool,
+    /// Read-ahead and download settings for network sources.
+    pub network_buffer: super::bridge::NetworkBuffer,
     /// Configured media files directory (for resolving relative playlist paths)
     pub media_path: std::path::PathBuf,
     /// When the bridge lets buffers go and what it stamps them with, shared

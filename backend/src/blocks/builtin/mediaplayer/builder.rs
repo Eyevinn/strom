@@ -133,6 +133,21 @@ impl BlockBuilder for MediaPlayerBuilder {
             })
             .unwrap_or(timing::DEFAULT_PLAYOUT_DELAY_MS);
 
+        let network_buffer = bridge::NetworkBuffer {
+            read_ahead_s: properties
+                .get("read_ahead_s")
+                .and_then(|v| match v {
+                    PropertyValue::UInt(u) => Some(*u),
+                    PropertyValue::Int(i) => u64::try_from(*i).ok(),
+                    _ => None,
+                })
+                .unwrap_or(bridge::NetworkBuffer::DEFAULT_READ_AHEAD_S),
+            download: matches!(
+                properties.get("download_to_disk"),
+                Some(PropertyValue::Bool(true))
+            ),
+        };
+
         let position_update_interval_ms = properties
             .get("position_update_interval")
             .and_then(|v| match v {
@@ -152,12 +167,13 @@ impl BlockBuilder for MediaPlayerBuilder {
         let block_id = instance_id.to_string();
 
         info!(
-            "Media Player {}: decode={} ({:?}), sync={}, playout_delay={} ms ({})",
+            "Media Player {}: decode={} ({:?}), sync={}, playout_delay={} ms, {:?} ({})",
             instance_id,
             decode,
             decoder,
             sync,
             playout_delay_ms,
+            network_buffer,
             if decode {
                 "decoding to raw"
             } else {
@@ -207,6 +223,7 @@ impl BlockBuilder for MediaPlayerBuilder {
             decode,
             decoder,
             sync,
+            network_buffer,
             playout_delay_ms,
             position_update_interval_ms,
             initial_playlist,
@@ -231,6 +248,7 @@ fn build_media_player(
     decode: bool,
     decoder: bridge::Decoder,
     sync: bool,
+    network_buffer: bridge::NetworkBuffer,
     playout_delay_ms: u64,
     position_update_interval_ms: u64,
     initial_playlist: Vec<String>,
@@ -316,6 +334,7 @@ fn build_media_player(
         audio_slots: MediaPlayerState::free_slots(num_audio_slots),
         decode,
         sync,
+        network_buffer,
         media_path: media_path.clone(),
         timing: Arc::new(if stinger_mode {
             Timing::for_stinger(timing::STINGER_RELEASE_AHEAD_MS)
@@ -639,6 +658,83 @@ mod tests {
                 appsrc.name()
             );
         }
+    }
+
+    /// The source element the builder gave a player built with `props`, in
+    /// decode mode with `decoder` or in passthrough.
+    fn built_source(decode: bool, decoder: &str, props: &[(&str, PropertyValue)]) -> gst::Element {
+        let _ = gst::init();
+        let flow_id = Uuid::new_v4();
+        let mut all: HashMap<String, PropertyValue> = props
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        all.insert("decode".to_string(), PropertyValue::Bool(decode));
+        all.insert(
+            "decoder".to_string(),
+            PropertyValue::String(decoder.to_string()),
+        );
+        all.insert(
+            "_flow_id".to_string(),
+            PropertyValue::String(flow_id.to_string()),
+        );
+        let _built = MediaPlayerBuilder
+            .build(
+                "mp",
+                &all,
+                &crate::blocks::BlockBuildContext::new(Vec::new(), "all".to_string()),
+            )
+            .unwrap();
+        let key = MediaPlayerKey {
+            flow_id,
+            block_id: "mp".to_string(),
+        };
+        let player = MEDIA_PLAYER_REGISTRY.get(&key).unwrap();
+        MEDIA_PLAYER_REGISTRY.unregister(&key);
+        player.source_element.upgrade().unwrap()
+    }
+
+    /// Without `use-buffering`, the URI bins link `souphttpsrc` straight to
+    /// the demuxer: a high-bitrate http file stutters on any dip in download
+    /// speed. Every source element, in every mode, reads ahead by default.
+    #[test]
+    fn network_sources_read_ahead_by_default() {
+        for (decode, decoder) in [
+            (true, bridge::Decoder::DECODEBIN3),
+            (true, bridge::Decoder::CLASSIC),
+            (false, bridge::Decoder::DECODEBIN3),
+        ] {
+            let source = built_source(decode, decoder, &[]);
+            let name = source.factory().unwrap().name();
+            assert!(source.property::<bool>("use-buffering"), "{name}");
+            assert_eq!(
+                source.property::<i64>("buffer-duration"),
+                10_000_000_000,
+                "{name}"
+            );
+            assert!(!source.property::<bool>("download"), "{name}");
+        }
+    }
+
+    #[test]
+    fn read_ahead_and_download_follow_the_block_properties() {
+        let source = built_source(
+            true,
+            bridge::Decoder::DECODEBIN3,
+            &[
+                ("read_ahead_s", PropertyValue::UInt(30)),
+                ("download_to_disk", PropertyValue::Bool(true)),
+            ],
+        );
+        assert_eq!(source.property::<i64>("buffer-duration"), 30_000_000_000);
+        assert!(source.property::<bool>("download"));
+
+        let source = built_source(
+            true,
+            bridge::Decoder::DECODEBIN3,
+            &[("read_ahead_s", PropertyValue::UInt(0))],
+        );
+        assert!(!source.property::<bool>("use-buffering"));
     }
 
     /// A Media Player built by the real builder, its elements in a flow of

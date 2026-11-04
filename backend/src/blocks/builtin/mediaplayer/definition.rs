@@ -102,6 +102,48 @@ pub fn media_player_definition() -> BlockDefinition {
                 visible_when: None,
             },
             ExposedProperty {
+                name: "read_ahead_s".to_string(),
+                label: "Read-ahead (s)".to_string(),
+                description: "For http(s) files, HLS and DASH: how many seconds of media \
+                              to fetch ahead of playback, held in memory. Rides out dips in \
+                              download speed; raise it for high-bitrate files on a slow or \
+                              uneven network. 0 turns read-ahead off. Local files are not \
+                              affected."
+                    .to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(
+                    super::bridge::NetworkBuffer::DEFAULT_READ_AHEAD_S,
+                )),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "read_ahead_s".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
+            ExposedProperty {
+                name: "download_to_disk".to_string(),
+                label: "Download to Disk".to_string(),
+                description: "For http(s) files that allow it (mp4, mov, ...): download \
+                              the whole file to a temporary file as fast as the network \
+                              allows, while it plays. Takes as much disk space as the file \
+                              itself, removed when the file stops playing. Read-ahead is \
+                              not used then."
+                    .to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "download_to_disk".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
+            ExposedProperty {
                 name: "loop_playlist".to_string(),
                 label: "Loop Playlist".to_string(),
                 description: "Loop back to the first file when reaching the end of the playlist"

@@ -52,6 +52,45 @@ impl Decoder {
     }
 }
 
+/// How far the source element reads ahead of playback on a network stream
+/// (http(s) files, HLS, DASH). GStreamer's URI bins put no queue between
+/// `souphttpsrc` and the demuxer unless `use-buffering` is on, so any dip in
+/// download speed stalls playback at once. Local files are not affected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetworkBuffer {
+    /// Encoded media to hold ahead of playback, in memory. 0 turns
+    /// read-ahead off.
+    pub read_ahead_s: u64,
+    /// Download the whole file to a temporary file on disk as fast as the
+    /// network allows (`downloadbuffer`), for formats that allow it (mp4,
+    /// mov, ...). No size cap: the file takes as much disk as its size.
+    pub download: bool,
+}
+
+impl NetworkBuffer {
+    pub const DEFAULT_READ_AHEAD_S: u64 = 10;
+
+    /// Set on a `uridecodebin`, `uridecodebin3` or `urisourcebin`; all three
+    /// share these properties.
+    fn apply(self, source: &gst::Element) {
+        source.set_property("use-buffering", self.read_ahead_s > 0);
+        if self.read_ahead_s > 0 {
+            let ns = gst::ClockTime::from_seconds(self.read_ahead_s).nseconds();
+            source.set_property("buffer-duration", i64::try_from(ns).unwrap_or(i64::MAX));
+        }
+        source.set_property("download", self.download);
+    }
+}
+
+impl Default for NetworkBuffer {
+    fn default() -> Self {
+        Self {
+            read_ahead_s: Self::DEFAULT_READ_AHEAD_S,
+            download: false,
+        }
+    }
+}
+
 /// Set while any [`hold_bridge_for_tests`] hold waits, so the bridge looks
 /// up holds only then. Only a stinger source's bridge reads it: one relaxed
 /// load per sample there, nothing for an ordinary player.
@@ -147,6 +186,7 @@ pub fn create_decode_pipeline(
             Some(select_stream(&collection, &stream, videos, audios).to_value())
         });
     }
+    state.network_buffer.apply(&source);
 
     if let Some(uri) = initial_uri {
         if state.stinger.enabled {
@@ -239,6 +279,7 @@ pub fn create_passthrough_pipeline(
         .property("parse-streams", true)
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("urisourcebin: {}", e)))?;
+    state.network_buffer.apply(&source);
 
     if let Some(uri) = initial_uri {
         source.set_property("uri", uri);
@@ -1205,6 +1246,7 @@ mod tests {
             audio_slots: MediaPlayerState::free_slots(0),
             decode: true,
             sync: true,
+            network_buffer: Default::default(),
             media_path: std::env::temp_dir(),
             timing: Arc::new(super::super::timing::Timing::new(0)),
             main_pipeline: gst::glib::WeakRef::new(),
