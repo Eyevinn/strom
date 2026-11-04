@@ -35,7 +35,10 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom_types::{
-    block::*, element::ElementPadRef, videoenc::Profile, EnumValue, PropertyValue, *,
+    block::*,
+    element::ElementPadRef,
+    videoenc::{Profile, CODEC_H264, CODEC_H265, CODEC_PROPERTY},
+    EnumValue, PropertyValue, *,
 };
 use tracing::{info, warn};
 
@@ -306,16 +309,16 @@ fn configure_parser(parser: &gst::Element, codec: Codec, _keyframe_interval: u32
 /// Parse codec from properties.
 fn parse_codec(properties: &HashMap<String, PropertyValue>) -> Result<Codec, BlockBuildError> {
     let codec_str = properties
-        .get("codec")
+        .get(CODEC_PROPERTY)
         .and_then(|v| match v {
             PropertyValue::String(s) => Some(s.as_str()),
             _ => None,
         })
-        .unwrap_or("h264"); // Default to H.264 if not specified
+        .unwrap_or(CODEC_H264); // Default to H.264 if not specified
 
     match codec_str {
-        "h264" => Ok(Codec::H264),
-        "h265" => Ok(Codec::H265),
+        CODEC_H264 => Ok(Codec::H264),
+        CODEC_H265 => Ok(Codec::H265),
         "av1" => Ok(Codec::AV1),
         "vp9" => Ok(Codec::VP9),
         _ => Err(BlockBuildError::InvalidConfiguration(format!(
@@ -1163,21 +1166,21 @@ fn videoenc_definition() -> BlockDefinition {
         category: "Video".to_string(),
         exposed_properties: vec![
             ExposedProperty {
-                name: "codec".to_string(),
+                name: CODEC_PROPERTY.to_string(),
                 label: "Codec".to_string(),
                 description: "Video codec to encode to".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
-                        EnumValue { value: "h264".to_string(), label: Some("H.264 / AVC".to_string()), visible_when: None },
-                        EnumValue { value: "h265".to_string(), label: Some("H.265 / HEVC".to_string()), visible_when: None },
+                        EnumValue { value: CODEC_H264.to_string(), label: Some("H.264 / AVC".to_string()), visible_when: None },
+                        EnumValue { value: CODEC_H265.to_string(), label: Some("H.265 / HEVC".to_string()), visible_when: None },
                         EnumValue { value: "av1".to_string(), label: Some("AV1".to_string()), visible_when: None },
                         EnumValue { value: "vp9".to_string(), label: Some("VP9".to_string()), visible_when: None },
                     ],
                 },
-                default_value: Some(PropertyValue::String("h264".to_string())),
+                default_value: Some(PropertyValue::String(CODEC_H264.to_string())),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
-                    property_name: "codec".to_string(),
+                    property_name: CODEC_PROPERTY.to_string(),
                     transform: None,
                 },
                 live: false,

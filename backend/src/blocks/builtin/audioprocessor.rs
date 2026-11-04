@@ -379,11 +379,6 @@ pub fn preset(properties: &HashMap<String, PropertyValue>) -> Result<String, Str
     }
 }
 
-/// Whether `name` is a block property that applies only with the custom preset.
-pub fn is_custom_only(name: &str) -> bool {
-    CUSTOM_ONLY_PROPERTIES.contains(&name)
-}
-
 /// Custom settings that follow the target loudness while the flow has not
 /// stored them, as the element's presets set them relative to the target.
 const TARGET_RELATIVE_SETTINGS: &[&str] = &["bass_clip_threshold"];
@@ -1010,7 +1005,7 @@ mod tests {
             .iter()
             .find(|p| p.name == "latency_mode")
             .unwrap();
-        assert!(!is_custom_only("latency_mode"));
+        assert!(!CUSTOM_ONLY_PROPERTIES.contains(&"latency_mode"));
         assert!(!p.live);
         assert_eq!(p.mapping.property_name, "latency-mode");
         match &p.property_type {
@@ -1038,7 +1033,7 @@ mod tests {
             "governor_enabled",
             "clip_budget",
         ] {
-            assert!(is_custom_only(name), "{name}");
+            assert!(CUSTOM_ONLY_PROPERTIES.contains(&name), "{name}");
             assert!(setting(name).unwrap().live, "{name}");
         }
     }

@@ -2855,7 +2855,7 @@ impl PropertyInspector {
                 });
             if let Some(condition) = ruled_out {
                 response.response.on_hover_text(format!(
-                    "This value applies only when {}. Pick another value, or the flow will not start.",
+                    "This value applies only when {}. The flow uses the default instead; pick another value.",
                     condition.describe()
                 ));
             }

@@ -45,8 +45,21 @@ pub mod whep;
 pub mod whip;
 
 use crate::blocks::BlockBuilder;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
 use strom_types::BlockDefinition;
+
+/// A built-in block definition by id. The catalog is built once per process,
+/// so this is cheap enough for every flow start and every link.
+pub fn builtin_definition(id: &str) -> Option<&'static BlockDefinition> {
+    static CATALOG: LazyLock<HashMap<String, BlockDefinition>> = LazyLock::new(|| {
+        get_all_builtin_blocks()
+            .into_iter()
+            .map(|d| (d.id.clone(), d))
+            .collect()
+    });
+    CATALOG.get(id)
+}
 
 /// Get all built-in block definitions.
 pub fn get_all_builtin_blocks() -> Vec<BlockDefinition> {

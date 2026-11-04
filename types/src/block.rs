@@ -1,6 +1,8 @@
 //! Block definitions and instances for reusable element groupings.
 
-pub use crate::property_condition::{effective_properties, PropertyCondition};
+pub use crate::property_condition::{
+    effective_properties, write_refusal, IgnoredValue, PropertyCondition,
+};
 use crate::{discovery::DeviceCategory, MediaType, PropertyValue};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap};

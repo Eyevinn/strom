@@ -12,7 +12,14 @@
 //!   default). The stored value stays in the flow, so switching back
 //!   restores it.
 //! - Enum option: the UI leaves it out of the dropdown. A stored value whose
-//!   option is false is an error when the block is built.
+//!   option is false is ignored when the block is built: the block sees the
+//!   property as unset and uses its default. A flow saved before the
+//!   condition existed (or a codec switched after a profile was picked) keeps
+//!   starting.
+//!
+//! In both cases [`effective_properties`] reports what it ignored, so the
+//! backend can log it. A live write that a false condition rules out is
+//! refused ([`write_refusal`]).
 //!
 //! Keep conditions flat: point a condition at a property that has no
 //! condition of its own. Conditions are evaluated against the stored values,
@@ -57,15 +64,42 @@ impl PropertyCondition {
         properties: &HashMap<String, PropertyValue>,
         exposed: &[ExposedProperty],
     ) -> bool {
-        let current = properties.get(&self.property).or_else(|| {
+        match self.current(properties, exposed) {
+            Some(value) => self.one_of.iter().any(|v| values_match(v, value)),
+            None => false,
+        }
+    }
+
+    /// The value the condition is evaluated against: the stored value of
+    /// `property`, or its default.
+    pub fn current<'a>(
+        &self,
+        properties: &'a HashMap<String, PropertyValue>,
+        exposed: &'a [ExposedProperty],
+    ) -> Option<&'a PropertyValue> {
+        properties.get(&self.property).or_else(|| {
             exposed
                 .iter()
                 .find(|p| p.name == self.property)
                 .and_then(|p| p.default_value.as_ref())
-        });
-        match current {
-            Some(value) => self.one_of.iter().any(|v| values_match(v, value)),
-            None => false,
+        })
+    }
+
+    /// [`Self::describe`] plus the current value, e.g.
+    /// `codec is one of h264 (codec is vp9)`.
+    fn describe_with_current(
+        &self,
+        properties: &HashMap<String, PropertyValue>,
+        exposed: &[ExposedProperty],
+    ) -> String {
+        match self.current(properties, exposed) {
+            Some(v) => format!(
+                "{} ({} is {})",
+                self.describe(),
+                self.property,
+                value_text(v)
+            ),
+            None => format!("{} ({} is unset)", self.describe(), self.property),
         }
     }
 
@@ -102,52 +136,154 @@ impl EnumValue {
     }
 }
 
+/// A stored value that [`effective_properties`] left out, and why.
+#[derive(Debug, Clone)]
+pub struct IgnoredValue {
+    /// Name of the property whose stored value was left out.
+    pub property: String,
+    /// The stored value.
+    pub value: PropertyValue,
+    /// The condition that is false: the property's own `visible_when`, or the
+    /// `visible_when` of the enum option the value names.
+    pub condition: PropertyCondition,
+    /// True when the condition is the enum option's, false when it is the
+    /// property's.
+    pub option: bool,
+}
+
+impl IgnoredValue {
+    /// Human-readable form for a log line.
+    pub fn describe(&self) -> String {
+        let subject = if self.option {
+            format!(
+                "property '{}' has value '{}', which applies",
+                self.property,
+                value_text(&self.value)
+            )
+        } else {
+            format!(
+                "property '{}' (value '{}') applies",
+                self.property,
+                value_text(&self.value)
+            )
+        };
+        format!(
+            "{} only when {}; ignored, the default applies",
+            subject,
+            self.condition.describe()
+        )
+    }
+}
+
 /// The properties a block is built with: the stored `properties` without the
-/// ones whose `visible_when` is false. Keys that are not exposed properties
+/// values a false `visible_when` rules out. That is a property whose own
+/// condition is false, and an enum property whose stored value names an
+/// option whose condition is false. Either way the block sees the property as
+/// unset and uses its default. Keys that are not exposed properties
 /// (internal `_`-prefixed values, for example) pass through.
 ///
-/// Errors when a visible enum property holds a value whose own `visible_when`
-/// is false, naming the property, the value and the condition.
+/// Returns the left-out values too, so the caller can log them.
 pub fn effective_properties(
     exposed: &[ExposedProperty],
     properties: &HashMap<String, PropertyValue>,
-) -> Result<HashMap<String, PropertyValue>, String> {
+) -> (HashMap<String, PropertyValue>, Vec<IgnoredValue>) {
     let mut effective = properties.clone();
+    let mut ignored = Vec::new();
     for prop in exposed {
-        if !prop.is_visible(properties, exposed) {
+        let Some(value) = properties.get(&prop.name) else {
+            continue;
+        };
+        if let Some(condition) = prop
+            .visible_when
+            .as_ref()
+            .filter(|c| !c.is_met(properties, exposed))
+        {
             effective.remove(&prop.name);
+            ignored.push(IgnoredValue {
+                property: prop.name.clone(),
+                value: value.clone(),
+                condition: condition.clone(),
+                option: false,
+            });
             continue;
         }
-        let PropertyType::Enum { values } = &prop.property_type else {
-            continue;
-        };
-        let Some(PropertyValue::String(current)) = properties.get(&prop.name) else {
-            continue;
-        };
-        let Some(option) = values.iter().find(|v| &v.value == current) else {
-            continue;
-        };
-        if let Some(condition) = &option.visible_when {
-            if !condition.is_met(properties, exposed) {
-                return Err(format!(
-                    "property '{}' has value '{}', which applies only when {}",
-                    prop.name,
-                    current,
-                    condition.describe()
-                ));
-            }
+        if let Some(condition) = ruled_out_option(prop, value, properties, exposed) {
+            effective.remove(&prop.name);
+            ignored.push(IgnoredValue {
+                property: prop.name.clone(),
+                value: value.clone(),
+                condition: condition.clone(),
+                option: true,
+            });
         }
     }
-    Ok(effective)
+    (effective, ignored)
+}
+
+/// Why a live write of `value` to the property `name` does not apply, or
+/// `None` when it does. `properties` are the block's values as they would be
+/// after the write (stored values with the rest of the batch applied).
+///
+/// Refused: a write to a property whose `visible_when` is false, and a write
+/// of an enum value whose option's `visible_when` is false.
+pub fn write_refusal(
+    exposed: &[ExposedProperty],
+    name: &str,
+    value: &PropertyValue,
+    properties: &HashMap<String, PropertyValue>,
+) -> Option<String> {
+    let prop = exposed.iter().find(|p| p.name == name)?;
+    if let Some(condition) = prop
+        .visible_when
+        .as_ref()
+        .filter(|c| !c.is_met(properties, exposed))
+    {
+        return Some(format!(
+            "applies only when {}",
+            condition.describe_with_current(properties, exposed)
+        ));
+    }
+    ruled_out_option(prop, value, properties, exposed).map(|condition| {
+        format!(
+            "value '{}' applies only when {}",
+            value_text(value),
+            condition.describe_with_current(properties, exposed)
+        )
+    })
+}
+
+/// The condition of the enum option that `value` names, when it is false.
+/// Enum values may be stored as numbers (`4` for `"4"`), so the option is
+/// found by loose comparison.
+fn ruled_out_option<'a>(
+    prop: &'a ExposedProperty,
+    value: &PropertyValue,
+    properties: &HashMap<String, PropertyValue>,
+    exposed: &[ExposedProperty],
+) -> Option<&'a PropertyCondition> {
+    let PropertyType::Enum { values } = &prop.property_type else {
+        return None;
+    };
+    values
+        .iter()
+        .find(|v| values_match(&PropertyValue::String(v.value.clone()), value))?
+        .visible_when
+        .as_ref()
+        .filter(|c| !c.is_met(properties, exposed))
 }
 
 /// Loose equality between a condition value and a stored value. Stored values
-/// may arrive with a different numeric variant (`4` vs `"4"`, `UInt` vs `Int`)
-/// depending on where they came from, so numbers compare by value.
+/// may arrive with a different variant (`4` vs `"4"`, `UInt` vs `Int`, `true`
+/// vs `"true"`) depending on where they came from, so numbers compare by
+/// value and bools match their string form.
 fn values_match(want: &PropertyValue, have: &PropertyValue) -> bool {
     match (want, have) {
         (PropertyValue::String(a), PropertyValue::String(b)) => a == b,
         (PropertyValue::Bool(a), PropertyValue::Bool(b)) => a == b,
+        (PropertyValue::Bool(b), PropertyValue::String(s))
+        | (PropertyValue::String(s), PropertyValue::Bool(b)) => {
+            s.trim().parse::<bool>().is_ok_and(|parsed| parsed == *b)
+        }
         (PropertyValue::Bool(_), _) | (_, PropertyValue::Bool(_)) => false,
         _ => match (as_number(want), as_number(have)) {
             (Some(a), Some(b)) => a == b,
@@ -314,34 +450,121 @@ mod tests {
             ("bitrate", PropertyValue::UInt(2000)),
             ("_flow_id", s("f")),
         ]);
-        let effective = effective_properties(&exposed, &stored).unwrap();
+        let (effective, ignored) = effective_properties(&exposed, &stored);
         assert!(!effective.contains_key("profile"));
         assert!(effective.contains_key("codec"));
         assert!(effective.contains_key("bitrate"));
         assert!(effective.contains_key("_flow_id"));
         // The stored map is untouched: switching back restores the value.
         assert!(stored.contains_key("profile"));
+        assert_eq!(ignored.len(), 1);
+        assert_eq!(ignored[0].property, "profile");
+        assert!(!ignored[0].option);
+        let msg = ignored[0].describe();
+        assert!(msg.contains("'high'"), "{msg}");
+        assert!(msg.contains("codec is one of h264, h265"), "{msg}");
     }
 
     #[test]
-    fn effective_properties_errors_on_a_hidden_enum_value() {
+    fn effective_properties_drops_a_ruled_out_enum_value() {
         let exposed = exposed();
-        let err = effective_properties(
+        let (effective, ignored) = effective_properties(
             &exposed,
             &props(&[("codec", s("h265")), ("profile", s("high"))]),
-        )
-        .unwrap_err();
-        assert!(err.contains("'profile'"), "{err}");
-        assert!(err.contains("'high'"), "{err}");
-        assert!(err.contains("codec is one of h264"), "{err}");
+        );
+        assert!(!effective.contains_key("profile"));
+        assert_eq!(ignored.len(), 1);
+        assert!(ignored[0].option);
+        let msg = ignored[0].describe();
+        assert!(msg.contains("'profile'"), "{msg}");
+        assert!(msg.contains("'high'"), "{msg}");
+        assert!(msg.contains("codec is one of h264"), "{msg}");
     }
 
     #[test]
     fn effective_properties_accepts_a_visible_enum_value() {
         let exposed = exposed();
         let stored = props(&[("codec", s("h265")), ("profile", s("main-10"))]);
-        let effective = effective_properties(&exposed, &stored).unwrap();
+        let (effective, ignored) = effective_properties(&exposed, &stored);
         assert!(effective.contains_key("profile"));
+        assert!(ignored.is_empty());
+    }
+
+    /// Enum values that look numeric may be stored as numbers; the option
+    /// is still found and its condition still applies.
+    #[test]
+    fn effective_properties_checks_numeric_enum_values() {
+        let channels = enum_prop(
+            "channels",
+            vec![
+                option("2", None),
+                option(
+                    "8",
+                    Some(PropertyCondition::one_of_strings("codec", &["h265"])),
+                ),
+            ],
+            "2",
+        );
+        let exposed = vec![exposed().remove(0), channels];
+        for stored in [PropertyValue::UInt(8), PropertyValue::Int(8), s("8")] {
+            let (effective, ignored) =
+                effective_properties(&exposed, &props(&[("channels", stored.clone())]));
+            assert!(!effective.contains_key("channels"), "{stored:?}");
+            assert_eq!(ignored.len(), 1, "{stored:?}");
+            let refusal = write_refusal(&exposed, "channels", &stored, &HashMap::new());
+            assert!(refusal.is_some(), "{stored:?}");
+        }
+        let (effective, _) =
+            effective_properties(&exposed, &props(&[("channels", PropertyValue::UInt(2))]));
+        assert!(effective.contains_key("channels"));
+    }
+
+    #[test]
+    fn bools_match_their_string_form() {
+        let cond = PropertyCondition {
+            property: "on".to_string(),
+            one_of: vec![PropertyValue::Bool(true)],
+        };
+        assert!(cond.is_met(&props(&[("on", s("true"))]), &[]));
+        assert!(cond.is_met(&props(&[("on", PropertyValue::Bool(true))]), &[]));
+        assert!(!cond.is_met(&props(&[("on", s("false"))]), &[]));
+        assert!(!cond.is_met(&props(&[("on", s("yes"))]), &[]));
+        let cond = PropertyCondition {
+            property: "on".to_string(),
+            one_of: vec![s("false")],
+        };
+        assert!(cond.is_met(&props(&[("on", PropertyValue::Bool(false))]), &[]));
+        assert!(!cond.is_met(&props(&[("on", PropertyValue::Bool(true))]), &[]));
+    }
+
+    #[test]
+    fn write_refusal_names_the_condition_and_current_value() {
+        let exposed = exposed();
+        // Hidden property.
+        let reason = write_refusal(
+            &exposed,
+            "profile",
+            &s("auto"),
+            &props(&[("codec", s("vp9"))]),
+        )
+        .expect("refused");
+        assert!(reason.contains("codec is one of h264, h265"), "{reason}");
+        assert!(reason.contains("(codec is vp9)"), "{reason}");
+        // Ruled-out option.
+        let reason = write_refusal(
+            &exposed,
+            "profile",
+            &s("high"),
+            &props(&[("codec", s("h265"))]),
+        )
+        .expect("refused");
+        assert!(reason.contains("'high'"), "{reason}");
+        assert!(reason.contains("codec is one of h264"), "{reason}");
+        // Allowed writes.
+        let h265 = props(&[("codec", s("h265"))]);
+        assert!(write_refusal(&exposed, "profile", &s("main-10"), &h265).is_none());
+        assert!(write_refusal(&exposed, "bitrate", &PropertyValue::UInt(1), &h265).is_none());
+        assert!(write_refusal(&exposed, "unknown", &s("x"), &h265).is_none());
     }
 
     #[test]
