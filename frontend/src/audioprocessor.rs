@@ -1,10 +1,13 @@
-//! Audio Processor meters: input/output loudness, AGC gain and gain reduction.
+//! Audio Processor meters: input/output loudness, AGC gain and gain reduction,
+//! and the stage meters (spike guard, expander, bass clipper, final clipper,
+//! clip budget governor).
 
 use crate::meter::BlockDataKey;
 use egui::{Color32, Rect, Stroke, Ui, Vec2};
 use instant::Instant;
 use std::collections::HashMap;
 use std::time::Duration;
+use strom_types::audioprocessor::AudioProcessorGovernorState;
 use strom_types::FlowId;
 
 /// Time-to-live for meter data before it's considered stale.
@@ -20,7 +23,7 @@ const MAX_REDUCTION_DB: f64 = 12.0;
 /// Below this the element is reporting silence (it sends -200).
 const SILENCE_FLOOR: f64 = -100.0;
 
-/// Meter values from one Audio Processor block.
+/// Meter values from one Audio Processor block, stage meters included.
 #[derive(Debug, Clone)]
 pub struct AudioProcessorData {
     pub input_momentary: f64,
@@ -33,18 +36,20 @@ pub struct AudioProcessorData {
     pub agc_gain: f64,
     pub band_gain_reduction: Vec<f64>,
     pub limiter_gain_reduction: f64,
+    pub spike_events: u64,
+    pub band_expander_gain_reduction: Vec<f64>,
+    pub bass_clip_gain_reduction: f64,
+    pub clip_depth: f64,
+    pub loudness_deficit: f64,
+    pub budget_excess: f64,
+    pub governor_state: AudioProcessorGovernorState,
 }
 
-#[derive(Debug, Clone)]
-struct Timestamped {
-    data: AudioProcessorData,
-    updated_at: Instant,
-}
-
-/// Storage for the meter data of every Audio Processor block.
+/// Storage for the meter data of every Audio Processor block, with the time
+/// each block's data arrived.
 #[derive(Debug, Clone, Default)]
 pub struct AudioProcessorDataStore {
-    data: HashMap<BlockDataKey, Timestamped>,
+    data: HashMap<BlockDataKey, (AudioProcessorData, Instant)>,
 }
 
 impl AudioProcessorDataStore {
@@ -58,10 +63,7 @@ impl AudioProcessorDataStore {
                 flow_id,
                 element_id,
             },
-            Timestamped {
-                data,
-                updated_at: Instant::now(),
-            },
+            (data, Instant::now()),
         );
     }
 
@@ -73,8 +75,8 @@ impl AudioProcessorDataStore {
         };
         self.data
             .get(&key)
-            .filter(|t| t.updated_at.elapsed() < DATA_TTL)
-            .map(|t| &t.data)
+            .filter(|(_, updated_at)| updated_at.elapsed() < DATA_TTL)
+            .map(|(data, _)| data)
     }
 }
 
@@ -147,6 +149,18 @@ pub fn show_compact(ui: &mut Ui, data: &AudioProcessorData) {
     );
 }
 
+/// Governor state colour: amber when over budget or short of the target.
+fn governor_color(stages: &AudioProcessorData) -> Color32 {
+    if stages.budget_excess > 0.0
+        || stages.loudness_deficit > 0.0
+        || stages.governor_state == AudioProcessorGovernorState::OverBudget
+    {
+        REDUCTION_COLOR
+    } else {
+        Color32::from_gray(180)
+    }
+}
+
 /// Full view for the property inspector.
 pub fn show_full(ui: &mut Ui, data: &AudioProcessorData) {
     ui.heading("Audio Processor");
@@ -217,6 +231,78 @@ pub fn show_full(ui: &mut Ui, data: &AudioProcessorData) {
         );
         ui.label(format!("{:.1} dB", data.limiter_gain_reduction));
     });
+
+    show_stages(ui, data, width);
+}
+
+/// The stage meters, compactly: one line per stage, with bars only for
+/// the per-band expander and the bass clipper.
+fn show_stages(ui: &mut Ui, stages: &AudioProcessorData, width: f32) {
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Bass clip");
+        bar(
+            ui,
+            Vec2::new(width, 8.0),
+            reduction_fraction(stages.bass_clip_gain_reduction),
+            REDUCTION_COLOR,
+        );
+        ui.label(format!("{:.1} dB", stages.bass_clip_gain_reduction));
+    });
+
+    if !stages.band_expander_gain_reduction.is_empty() {
+        ui.add_space(4.0);
+        // The values on the label's line, the bars on their own line, so
+        // five bands fit the bar width.
+        ui.label(format!(
+            "Expander: {}",
+            fmt_band_list(&stages.band_expander_gain_reduction)
+        ));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = EXPANDER_BAR_GAP;
+            let band_width = expander_bar_width(width, stages.band_expander_gain_reduction.len());
+            for gr in &stages.band_expander_gain_reduction {
+                bar(
+                    ui,
+                    Vec2::new(band_width, 8.0),
+                    reduction_fraction(*gr),
+                    REDUCTION_COLOR,
+                );
+            }
+        });
+    }
+
+    ui.add_space(4.0);
+    ui.label(format!(
+        "Spikes removed: {}   Clip depth: {}",
+        stages.spike_events,
+        fmt_level(stages.clip_depth, "dB")
+    ));
+    ui.colored_label(
+        governor_color(stages),
+        format!(
+            "Governor: {}   Budget excess: {:.1} dB   Deficit: {:.1} LU",
+            stages.governor_state.label(),
+            stages.budget_excess,
+            stages.loudness_deficit
+        ),
+    );
+}
+
+/// Gap between the per-band expander bars.
+const EXPANDER_BAR_GAP: f32 = 4.0;
+
+/// Width of each of `bands` expander bars so that, with the gaps, they fill
+/// `width` exactly and never overflow it.
+fn expander_bar_width(width: f32, bands: usize) -> f32 {
+    let n = bands.max(1) as f32;
+    ((width - EXPANDER_BAR_GAP * (n - 1.0)) / n).max(1.0)
+}
+
+/// Per-band values as "a / b / c dB".
+fn fmt_band_list(values: &[f64]) -> String {
+    let parts: Vec<String> = values.iter().map(|v| format!("{v:.1}")).collect();
+    format!("{} dB", parts.join(" / "))
 }
 
 #[cfg(test)]
@@ -227,6 +313,48 @@ mod tests {
     fn silence_reads_as_no_value() {
         assert_eq!(fmt_level(-200.0, "LUFS"), "---");
         assert_eq!(fmt_level(-23.04, "LUFS"), "-23.0 LUFS");
+    }
+
+    #[test]
+    fn band_lists_and_governor_colour() {
+        assert_eq!(fmt_band_list(&[2.0, 0.0, 4.25]), "2.0 / 0.0 / 4.2 dB");
+        let mut stages = AudioProcessorData {
+            input_momentary: -23.0,
+            input_short_term: -23.0,
+            output_momentary: -23.0,
+            output_short_term: -23.0,
+            output_integrated: -23.0,
+            input_true_peak: -2.0,
+            output_true_peak: -3.0,
+            agc_gain: 0.0,
+            band_gain_reduction: vec![],
+            limiter_gain_reduction: 0.0,
+            spike_events: 0,
+            band_expander_gain_reduction: vec![],
+            bass_clip_gain_reduction: 0.0,
+            clip_depth: -200.0,
+            loudness_deficit: 0.0,
+            budget_excess: 0.0,
+            governor_state: AudioProcessorGovernorState::Free,
+        };
+        assert_eq!(governor_color(&stages), Color32::from_gray(180));
+        stages.budget_excess = 0.5;
+        assert_eq!(governor_color(&stages), REDUCTION_COLOR);
+        // Nothing clipped reads as no value, not as -200 dB.
+        assert_eq!(fmt_level(stages.clip_depth, "dB"), "---");
+    }
+
+    /// Five bands fit the narrowest bar width the inspector uses (40) and
+    /// the widest (120), gaps included.
+    #[test]
+    fn expander_bars_fit_the_width() {
+        for width in [40.0f32, 120.0] {
+            for bands in 1..=5 {
+                let total = expander_bar_width(width, bands) * bands as f32
+                    + EXPANDER_BAR_GAP * (bands as f32 - 1.0);
+                assert!(total <= width + 0.01, "{bands} bands at {width}: {total}");
+            }
+        }
     }
 
     #[test]

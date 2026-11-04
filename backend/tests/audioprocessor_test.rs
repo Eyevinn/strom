@@ -148,10 +148,27 @@ fn custom_preset_writes_the_block_settings() {
             ("target_loudness", PropertyValue::Float(-14.0)),
             ("agc_enabled", PropertyValue::Bool(false)),
             ("num_bands", PropertyValue::UInt(3)),
+            ("spike_threshold", PropertyValue::Float(12.0)),
+            ("clip_budget", PropertyValue::Float(4.0)),
+            ("bass_clipper_enabled", PropertyValue::Bool(false)),
         ]),
     );
     let p = &a.processor;
     assert_eq!(preset_nick(p), PRESET_CUSTOM);
+    assert_eq!(p.property::<f32>("spike-threshold"), 12.0);
+    assert_eq!(p.property::<f32>("clip-budget"), 4.0);
+    assert!(!p.property::<bool>("bass-clipper-enabled"));
+    assert!(p.property::<bool>("governor-enabled"));
+    // Not stored, so it follows the -14 LUFS target: target + 9 dB.
+    assert_eq!(
+        p.property::<f32>("bass-clip-threshold"),
+        bass_clip_threshold_for_target(-14.0)
+    );
+    assert_eq!(
+        p.property::<f32>("clipper-bandwidth"),
+        DEFAULT_CLIPPER_BANDWIDTH_HZ
+    );
+    assert_eq!(p.property::<f32>("expander-hold"), DEFAULT_EXPANDER_HOLD_MS);
     assert_eq!(p.property::<f32>("target-loudness"), -14.0);
     assert!(!p.property::<bool>("agc-enabled"));
     assert_eq!(p.property::<u32>("num-bands"), 3);
@@ -159,10 +176,8 @@ fn custom_preset_writes_the_block_settings() {
         p.property::<f32>("true-peak-ceiling"),
         DEFAULT_TRUE_PEAK_CEILING_DBTP
     );
-    assert_eq!(
-        p.property::<f32>("limiter-lookahead"),
-        DEFAULT_LIMITER_LOOKAHEAD_MS
-    );
+    // Not stored: the standard latency mode's lookahead.
+    assert_eq!(p.property::<f32>("limiter-lookahead"), 1.5);
     for n in 0..5 {
         assert_eq!(
             p.property::<f32>(&format!("band{n}-ratio")),
@@ -170,7 +185,19 @@ fn custom_preset_writes_the_block_settings() {
         );
         assert_eq!(
             p.property::<f32>(&format!("band{n}-threshold")),
-            DEFAULT_BAND_THRESHOLD_DB[n]
+            band_threshold_for_target(-14.0, n)
+        );
+        assert_eq!(
+            p.property::<f32>(&format!("band{n}-expander-threshold")),
+            band_expander_threshold_for_target(-14.0, n)
+        );
+        assert_eq!(
+            p.property::<f32>(&format!("band{n}-expander-ratio")),
+            DEFAULT_BAND_EXPANDER_RATIO[n]
+        );
+        assert_eq!(
+            p.property::<f32>(&format!("band{n}-expander-floor")),
+            DEFAULT_BAND_EXPANDER_FLOOR_DB[n]
         );
     }
     for (n, f) in DEFAULT_CROSSOVER_FREQUENCIES_HZ.iter().enumerate() {
@@ -202,8 +229,68 @@ fn named_preset_is_applied_by_the_element() {
     assert_eq!(p.property::<u32>("meter-interval"), 250);
 }
 
+fn enum_nick(element: &gst::Element, property: &str) -> String {
+    let v = element.property_value(property);
+    gst::glib::EnumValue::from_value(&v)
+        .map(|(_, e)| e.nick().to_string())
+        .expect("an enum property")
+}
+
+/// The latency mode applies with a named preset and sets the limiter
+/// lookahead, and the preset does not undo it.
+#[test]
+fn low_latency_mode_applies_with_a_named_preset() {
+    init();
+    let a = assemble(
+        "audiotestsrc num-buffers=1",
+        &props(&[("preset", s("speech")), ("latency_mode", s("low"))]),
+    );
+    let p = &a.processor;
+    assert_eq!(preset_nick(p), "speech");
+    assert_eq!(enum_nick(p, "latency-mode"), "low");
+    // The low mode's limiter lookahead (strom-dsp broadcastprocessor docs).
+    assert_eq!(p.property::<f32>("limiter-lookahead"), 0.6);
+}
+
+/// The default is the standard mode, with its own limiter lookahead.
+#[test]
+fn standard_latency_mode_is_the_default() {
+    init();
+    let a = assemble("audiotestsrc num-buffers=1", &HashMap::new());
+    let p = &a.processor;
+    assert_eq!(enum_nick(p, "latency-mode"), DEFAULT_LATENCY_MODE);
+    // The standard mode's lookahead (strom-dsp broadcastprocessor docs).
+    assert_eq!(p.property::<f32>("limiter-lookahead"), 1.5);
+}
+
+/// A lookahead of 0 follows the latency mode; an explicit one overrides it,
+/// even in the low mode.
+#[test]
+fn an_explicit_limiter_lookahead_overrides_the_latency_mode() {
+    init();
+    let a = assemble(
+        "audiotestsrc num-buffers=1",
+        &props(&[
+            ("latency_mode", s("low")),
+            ("limiter_lookahead", PropertyValue::Float(0.0)),
+        ]),
+    );
+    assert_eq!(a.processor.property::<f32>("limiter-lookahead"), 0.6);
+
+    let a = assemble(
+        "audiotestsrc num-buffers=1",
+        &props(&[
+            ("latency_mode", s("low")),
+            ("limiter_lookahead", PropertyValue::Float(1.5)),
+        ]),
+    );
+    assert_eq!(enum_nick(&a.processor, "latency-mode"), "low");
+    assert_eq!(a.processor.property::<f32>("limiter-lookahead"), 1.5);
+}
+
 /// The element's meter message reaches clients as `AudioProcessorData`, keyed
-/// by the block id, with one gain reduction per band.
+/// by the block id, with one gain reduction and one expander reduction per
+/// band.
 #[test]
 fn meter_messages_become_events() {
     init();
@@ -229,30 +316,45 @@ fn meter_messages_become_events() {
 
     a.pipeline.set_state(gst::State::Playing).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
-    let got = loop {
+    let mut got = None;
+    while got.is_none() {
         match rx.try_recv() {
             Ok(StromEvent::AudioProcessorData {
                 flow_id: f,
                 element_id,
                 band_gain_reduction,
                 output_true_peak,
+                band_expander_gain_reduction,
+                clip_depth,
                 ..
-            }) => break Some((f, element_id, band_gain_reduction, output_true_peak)),
+            }) => {
+                got = Some((
+                    f,
+                    element_id,
+                    band_gain_reduction,
+                    output_true_peak,
+                    band_expander_gain_reduction,
+                    clip_depth,
+                ))
+            }
             Ok(_) => {}
             Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => break None,
+            Err(_) => break,
         }
-    };
+    }
     a.pipeline.set_state(gst::State::Null).unwrap();
     bus.disconnect(handler);
     bus.remove_signal_watch();
     main_loop.quit();
 
-    let (f, element_id, bands, tp) = got.expect("an AudioProcessorData event within 10 s");
+    let (f, element_id, bands, tp, expander, clip_depth) =
+        got.expect("an AudioProcessorData event within 10 s");
     assert_eq!(f, flow_id);
     assert_eq!(element_id, "proc");
     assert_eq!(bands.len(), 3);
     assert!(tp.is_finite());
+    assert_eq!(expander.len(), 3);
+    assert!(clip_depth.is_finite());
 }
 
 // ---- Live writes through AppState ----
@@ -394,6 +496,40 @@ async fn switching_to_custom_live_applies_the_stored_settings() {
         .reset_loudness(&flow_id, "proc")
         .await
         .expect("reset integrated loudness");
+
+    state.stop_flow(&flow_id).await.expect("stop_flow");
+}
+
+/// Changing the target of a running custom block moves the values that
+/// follow it (an unstored bass clip threshold, the band and expander
+/// thresholds) with it, as the next start would.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_custom_target_change_moves_the_target_relative_values() {
+    init();
+    let state = common::state::new();
+    let flow = flow(PRESET_CUSTOM, &[]);
+    let flow_id = flow.id;
+    state.upsert_flow(flow).await.expect("upsert_flow");
+    state.start_flow(&flow_id).await.expect("start_flow");
+
+    let (_, rejected) = state
+        .update_block_properties(
+            &flow_id,
+            "proc",
+            props(&[("target_loudness", PropertyValue::Float(-16.0))]),
+            None,
+            None,
+        )
+        .await
+        .expect("update_block_properties");
+    assert!(rejected.is_empty(), "{rejected:?}");
+
+    let after = state
+        .get_block_properties(&flow_id, "proc")
+        .await
+        .expect("block properties");
+    assert_eq!(float(after.get("target_loudness")), Some(-16.0));
+    assert_eq!(float(after.get("bass_clip_threshold")), Some(-7.0));
 
     state.stop_flow(&flow_id).await.expect("stop_flow");
 }

@@ -6226,6 +6226,20 @@
           }
         }
       },
+      "AudioProcessorGovernorState": {
+        "type": "string",
+        "description": "What the clip budget governor is doing, from the element's\n`governor-state` meter field.",
+        "enum": [
+          "off",
+          "frozen",
+          "free",
+          "hold",
+          "density",
+          "over-budget",
+          "release",
+          "unknown"
+        ]
+      },
       "AuthStatusResponse": {
         "type": "object",
         "description": "Authentication status response.",
@@ -11834,13 +11848,28 @@
                   "output_true_peak",
                   "agc_gain",
                   "band_gain_reduction",
-                  "limiter_gain_reduction"
+                  "limiter_gain_reduction",
+                  "spike_events",
+                  "band_expander_gain_reduction",
+                  "bass_clip_gain_reduction",
+                  "clip_depth",
+                  "loudness_deficit",
+                  "budget_excess",
+                  "governor_state"
                 ],
                 "properties": {
                   "agc_gain": {
                     "type": "number",
                     "format": "double",
                     "description": "Gain the loudness AGC applies, in dB (positive = boost)"
+                  },
+                  "band_expander_gain_reduction": {
+                    "type": "array",
+                    "items": {
+                      "type": "number",
+                      "format": "double"
+                    },
+                    "description": "Downward expander attenuation per active band, in dB (positive =\nattenuation)"
                   },
                   "band_gain_reduction": {
                     "type": "array",
@@ -11850,6 +11879,21 @@
                     },
                     "description": "Gain reduction per active multiband band, in dB (positive = reduction)"
                   },
+                  "bass_clip_gain_reduction": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Bass clipper reduction on the lowest band, in dB (positive =\nreduction), the largest since the previous message"
+                  },
+                  "budget_excess": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "How far the clipper's and limiter's work is over the clip budget at\nthe target loudness, in dB of budget (>= 0)"
+                  },
+                  "clip_depth": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "Energy the final clipper removed relative to its input since the\nprevious message, in dB (-200.0 when nothing)"
+                  },
                   "element_id": {
                     "type": "string",
                     "description": "The block instance id."
@@ -11857,6 +11901,10 @@
                   "flow_id": {
                     "type": "string",
                     "format": "uuid"
+                  },
+                  "governor_state": {
+                    "$ref": "#/components/schemas/AudioProcessorGovernorState",
+                    "description": "What the clip budget governor is doing"
                   },
                   "input_momentary": {
                     "type": "number",
@@ -11878,6 +11926,11 @@
                     "format": "double",
                     "description": "Gain reduction of the true-peak limiter, in dB (positive = reduction)"
                   },
+                  "loudness_deficit": {
+                    "type": "number",
+                    "format": "double",
+                    "description": "How far the output stays under the target with all of the\ngovernor's density used, in LU (>= 0)"
+                  },
                   "output_integrated": {
                     "type": "number",
                     "format": "double",
@@ -11897,6 +11950,12 @@
                     "type": "number",
                     "format": "double",
                     "description": "Output true peak in dBTP, the maximum since the previous message"
+                  },
+                  "spike_events": {
+                    "type": "integer",
+                    "format": "int64",
+                    "description": "Spikes the spike guard removed since the previous message (0 while\nit is off)",
+                    "minimum": 0
                   }
                 }
               },

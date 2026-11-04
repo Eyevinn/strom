@@ -19,6 +19,7 @@ use strom_types::api::{
     UpdatePipConfigRequest, UpdatePipConfigResponse, UpdatePropertyRequest, VisionMixerState,
     WebRtcConnectionStats, WebRtcStats, WebRtcStatsResponse,
 };
+use strom_types::audioprocessor::AudioProcessorGovernorState;
 use strom_types::auth::{LoginRequest, LoginResponse};
 use strom_types::block::{
     BlockCategoriesResponse, BlockDefinition, BlockInstance, BlockListResponse, BlockResponse,
@@ -365,6 +366,7 @@ use utoipa::OpenApi;
             JsonRpcRequest,
             // WebSocket event types
             StromEvent,
+            AudioProcessorGovernorState,
             ServerMessage,
             ClientMessage,
         )

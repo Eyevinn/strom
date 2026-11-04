@@ -1991,16 +1991,10 @@ impl AppState {
                             continue;
                         }
                     };
-                    let mut failed = None;
-                    for (prop, v) in &writes {
-                        if let Err(e) = self
-                            .update_element_property(flow_id, &element_id, prop, v.clone(), None)
-                            .await
-                        {
-                            failed = Some(format!("pipeline write of {prop} failed: {e}"));
-                            break;
-                        }
-                    }
+                    let failed = self
+                        .write_element_properties(flow_id, &element_id, &writes)
+                        .await
+                        .err();
                     match failed {
                         Some(reason) => {
                             rejected.insert(name, reason);
@@ -2008,6 +2002,32 @@ impl AppState {
                         None => to_persist.push((name, value)),
                     }
                     continue;
+                }
+                // With custom, the values that follow the target (the band and
+                // expander thresholds, and an unstored bass clip threshold)
+                // move with it, as they would on the next start. The target
+                // itself is written below.
+                if name == "target_loudness" && custom {
+                    let element_id = format!(
+                        "{}:{}",
+                        block_instance_id,
+                        audioprocessor::PROCESSOR_ELEMENT
+                    );
+                    let writes = match audioprocessor::target_relative_writes(props) {
+                        Ok(w) => w,
+                        Err(reason) => {
+                            rejected.insert(name, reason);
+                            continue;
+                        }
+                    };
+                    let failed = self
+                        .write_element_properties(flow_id, &element_id, &writes)
+                        .await
+                        .err();
+                    if let Some(reason) = failed {
+                        rejected.insert(name, reason);
+                        continue;
+                    }
                 }
             }
 
@@ -2116,6 +2136,25 @@ impl AppState {
     /// Read the current block-level (user-facing) values of all live exposed properties
     /// from the running pipeline. Non-live properties and those without a transform
     /// match are silently skipped.
+    /// Write `writes` to one element of a running flow, in order. The first
+    /// failure stops the writes and is returned, naming the property.
+    async fn write_element_properties(
+        &self,
+        flow_id: &FlowId,
+        element_id: &str,
+        writes: &[(String, PropertyValue)],
+    ) -> Result<(), String> {
+        for (prop, v) in writes {
+            if let Err(e) = self
+                .update_element_property(flow_id, element_id, prop, v.clone(), None)
+                .await
+            {
+                return Err(format!("pipeline write of {prop} failed: {e}"));
+            }
+        }
+        Ok(())
+    }
+
     pub async fn get_block_properties(
         &self,
         flow_id: &FlowId,

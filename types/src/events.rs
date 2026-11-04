@@ -154,6 +154,26 @@ pub enum StromEvent {
         band_gain_reduction: Vec<f64>,
         /// Gain reduction of the true-peak limiter, in dB (positive = reduction)
         limiter_gain_reduction: f64,
+        /// Spikes the spike guard removed since the previous message (0 while
+        /// it is off)
+        spike_events: u64,
+        /// Downward expander attenuation per active band, in dB (positive =
+        /// attenuation)
+        band_expander_gain_reduction: Vec<f64>,
+        /// Bass clipper reduction on the lowest band, in dB (positive =
+        /// reduction), the largest since the previous message
+        bass_clip_gain_reduction: f64,
+        /// Energy the final clipper removed relative to its input since the
+        /// previous message, in dB (-200.0 when nothing)
+        clip_depth: f64,
+        /// How far the output stays under the target with all of the
+        /// governor's density used, in LU (>= 0)
+        loudness_deficit: f64,
+        /// How far the clipper's and limiter's work is over the clip budget at
+        /// the target loudness, in dB of budget (>= 0)
+        budget_excess: f64,
+        /// What the clip budget governor is doing
+        governor_state: crate::audioprocessor::AudioProcessorGovernorState,
     },
     /// Audio latency measurement data from GStreamer audiolatency element
     LatencyData {
@@ -1398,6 +1418,13 @@ mod event_accessor_tests {
                 agc_gain: 0.0,
                 band_gain_reduction: vec![0.0; 4],
                 limiter_gain_reduction: 0.0,
+                spike_events: 0,
+                band_expander_gain_reduction: vec![0.0; 4],
+                bass_clip_gain_reduction: 0.0,
+                clip_depth: -200.0,
+                loudness_deficit: 0.0,
+                budget_excess: 0.0,
+                governor_state: crate::audioprocessor::AudioProcessorGovernorState::Free,
             },
             StromEvent::LatencyData {
                 flow_id: id,
