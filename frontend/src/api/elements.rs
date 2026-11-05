@@ -172,6 +172,39 @@ impl ApiClient {
             .await
     }
 
+    /// Read the current values of a block's live exposed properties from the
+    /// running pipeline, in block-level units. Empty when the flow is not running.
+    pub async fn get_block_properties(
+        &self,
+        flow_id: &FlowId,
+        block_id: &str,
+    ) -> ApiResult<std::collections::HashMap<String, strom_types::PropertyValue>> {
+        use strom_types::api::BlockPropertiesResponse;
+
+        let url = format!(
+            "{}/flows/{}/blocks/{}/properties",
+            self.base_url, flow_id, block_id
+        );
+
+        let response = self
+            .with_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http(status, text));
+        }
+
+        let body: BlockPropertiesResponse = response
+            .json()
+            .await
+            .map_err(|e| ApiError::Decode(e.to_string()))?;
+        Ok(body.properties)
+    }
+
     /// Batched variant of [`Self::update_block_property`]. All writes in `properties`
     /// arrive at the backend in a single PATCH and are applied atomically relative to
     /// any block-level derived state (e.g. the mixer monitor-gate refresh fires once
