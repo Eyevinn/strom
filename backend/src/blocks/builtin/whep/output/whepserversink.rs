@@ -9,7 +9,7 @@ use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use strom_types::{element::ElementPadRef, PropertyValue};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -686,41 +686,17 @@ pub(super) fn build_whepserversink(
                 gst::PadProbeReturn::Pass
             });
 
-            // Normalize encoded video caps before they reach webrtcsink, and
-            // fail the flow with a usable message on a change webrtcsink
-            // refuses.
+            // Give webrtcsink complete encoded video caps, keep them to what
+            // it can follow mid-stream, and fail the flow with a usable
+            // message on a change it cannot follow.
             //
-            // The parsers add fields (chroma-format, the bit depths, ...) once
-            // they have parsed the first frame, and an encoder fed a larger
-            // input (an HLS variant switch) raises the level. webrtcsink
-            // refuses both as "renegotiation", so they are kept away from it
-            // here; see `caps_change`. Applied per slot.
+            // The parsers complete their caps (chroma-format, the bit depths,
+            // ...) once they have parsed the first frame, and an encoder fed a
+            // larger input (an HLS variant switch) raises the level.
+            // webrtcsink refuses both as "renegotiation"; see `caps_change`.
+            // Applied per slot, before the input bridge's probes.
             let queue_src_pad = video_queue.static_pad("src").expect("queue has src pad");
-            let follower = Mutex::new(caps_change::CapsFollower::default());
-            queue_src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
-                let Some(gst::PadProbeData::Event(ref event)) = info.data else {
-                    return gst::PadProbeReturn::Ok;
-                };
-                let gst::EventView::Caps(caps_event) = event.view() else {
-                    return gst::PadProbeReturn::Ok;
-                };
-                let next = follower
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .next(caps_event.caps());
-                match next {
-                    Ok(caps) if caps.as_ref() != caps_event.caps() => {
-                        info.data = Some(gst::PadProbeData::Event(gst::event::Caps::new(&caps)));
-                    }
-                    Ok(_) => {}
-                    Err(reason) => {
-                        if let Some(queue) = pad.parent_element() {
-                            gst::element_error!(queue, gst::StreamError::Format, ("{}", reason));
-                        }
-                    }
-                }
-                gst::PadProbeReturn::Ok
-            });
+            caps_change::install(&queue_src_pad);
 
             // Consumer-side input adaptation: download GL memory, and convert
             // to a format the encoders take natively.

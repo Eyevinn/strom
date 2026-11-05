@@ -50,6 +50,21 @@ fn whep_output_follows_an_h265_level_rise_from_a_size_change() {
     size_change("h265", "software", Some("x265enc"), "h265parse", true);
 }
 
+/// H.265 Main 10 from 10-bit input: the session starts from the caps
+/// h265parse completes (profile, 4:2:0, 10-bit) and follows the switch.
+#[test]
+fn whep_output_follows_a_size_change_h265_main_10() {
+    size_change_in(
+        "h265",
+        "software",
+        Some("x265enc"),
+        "h265parse",
+        true,
+        Some("main-10"),
+        "I420_10LE",
+    );
+}
+
 // The encoder the block picks on its default preference: a hardware one where
 // the host has it (VideoToolbox on macOS, NVENC, ...), else the software one.
 
@@ -94,6 +109,28 @@ fn size_change(
     parser: &str,
     level_must_change: bool,
 ) {
+    size_change_in(
+        codec,
+        preference,
+        encoder,
+        parser,
+        level_must_change,
+        None,
+        "I420",
+    );
+}
+
+/// [`size_change`] with the Video Encoder's `profile` and the raw input
+/// `format`.
+fn size_change_in(
+    codec: &str,
+    preference: &str,
+    encoder: Option<&str>,
+    parser: &str,
+    level_must_change: bool,
+    profile: Option<&str>,
+    format: &'static str,
+) {
     common::init_webrtc_plugins();
     let mut required = REQUIRED.to_vec();
     required.push(parser);
@@ -110,6 +147,9 @@ fn size_change(
         PropertyValue::String(preference.into()),
     );
     enc_props.insert("keyframe_interval".to_string(), PropertyValue::UInt(10));
+    if let Some(profile) = profile {
+        enc_props.insert("profile".to_string(), PropertyValue::String(profile.into()));
+    }
     let enc = get_builder("builtin.videoenc")
         .expect("Video Encoder builder")
         .build("enc", &enc_props, &ctx)
@@ -197,12 +237,14 @@ fn size_change(
             let mut pts = gst::ClockTime::ZERO;
             for (width, height, fps, frames) in [(640, 360, 25, 50), (1920, 1080, 50, 100)] {
                 let caps = gst::Caps::builder("video/x-raw")
-                    .field("format", "I420")
+                    .field("format", format)
                     .field("width", width)
                     .field("height", height)
                     .field("framerate", gst::Fraction::new(fps, 1))
                     .build();
-                let size = (width * height * 3 / 2) as usize;
+                // 4:2:0: 1.5 samples per pixel, of 2 bytes above 8 bits.
+                let bytes_per_sample = if format.ends_with("LE") { 2 } else { 1 };
+                let size = (width * height * 3 / 2 * bytes_per_sample) as usize;
                 let duration = gst::ClockTime::SECOND / fps as u64;
                 for i in 0..frames {
                     let mut buffer = gst::Buffer::from_mut_slice(vec![(i * 7 % 255) as u8; size]);
@@ -274,6 +316,12 @@ fn size_change(
         sink_caps.contains("width=(int)1920"),
         "WHEP Output's sink did not take the 1080p caps: {sink_caps}"
     );
+    if let Some(profile) = profile {
+        assert!(
+            sink_caps.contains(&format!("profile=(string){profile}")),
+            "WHEP Output's sink lost the {profile} profile: {sink_caps}"
+        );
+    }
     let hd_frames = hd_frames.load(Ordering::Relaxed);
     assert!(
         hd_frames > 50,
