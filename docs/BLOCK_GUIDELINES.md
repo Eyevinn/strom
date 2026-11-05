@@ -34,3 +34,8 @@ These are rules, not a description of the code. The code is the source of truth 
 - **Audio may arrive either way.** Pass encoded audio through as it is. Encode raw audio inside the block, with defaults that suit the target.
 - Check what the target actually accepts from the negotiated caps, not only the caps name. That means the codec, and also `profile` where the target restricts it.
 - **A refusal fails the flow, with a message the operator can act on.** Post an element error from the block (`gst::element_error!`) saying what arrived, what the target needs, and which block property fixes it. Do not only log the refusal and leave the pad unlinked: the flow then shows only `Internal data stream error`, or a track goes missing without a word.
+
+## Property Descriptions
+- A property's `description` is UI text: it says what the property does, plus the unit, range or special values (`0 = off`) the operator needs to set it. Aim for under 150 characters, and never go over 200.
+- Why the property exists, its trade-offs, and how it works go in the code and the PR, not in the description.
+- When you find a description over 200 characters, in code you change or review, propose a shorter replacement with the new text: fix it in the PR you are working on, or report it as a review finding.
