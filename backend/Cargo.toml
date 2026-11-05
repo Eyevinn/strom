@@ -70,7 +70,7 @@ gst-plugin-webrtchttp.workspace = true
 gst-plugin-inter.workspace = true
 gst-plugin-rtp.workspace = true
 gst-plugin-isobmff.workspace = true
-gst-plugin-stromdsp = { git = "https://github.com/Eyevinn/strom-dsp", tag = "v0.2.2", package = "gst-plugin-stromdsp" }
+gst-plugin-stromdsp = { git = "https://github.com/Eyevinn/strom-dsp", tag = "v0.2.3", package = "gst-plugin-stromdsp" }
 gst-plugin-efp = { git = "https://github.com/Eyevinn/efp", tag = "v0.4.1", package = "gst-plugin-efp", optional = true }
 
 # Encoding
