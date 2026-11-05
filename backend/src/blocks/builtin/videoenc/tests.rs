@@ -1844,6 +1844,7 @@ struct VpxSettings {
     threads: i32,
     keyframe_max_dist: i32,
     end_usage: String,
+    cq_level: i32,
     row_mt: Option<bool>,
 }
 
@@ -1866,6 +1867,7 @@ fn configure_vpx(name: &str, preset: &str, tune: &str, rc: RateControl) -> VpxSe
             .serialize()
             .map(|s| s.to_string())
             .unwrap_or_default(),
+        cq_level: encoder.property("cq-level"),
         row_mt: encoder
             .has_property("row-mt")
             .then(|| encoder.property("row-mt")),
@@ -1887,9 +1889,12 @@ fn vpx_encoders_get_live_settings() {
         let expected_cpu = if name == "vp8enc" { -8 } else { 8 };
         assert_eq!(s.cpu_used, expected_cpu, "{name}");
         assert_eq!(s.lag_in_frames, 0, "{name}");
-        assert_eq!(s.error_resilient, "default", "{name}");
+        // Error resilience for VP8 only (WebRTC practice); it costs VP9
+        // compression for nothing.
+        let expected_er = if name == "vp8enc" { "default" } else { "" };
+        assert_eq!(s.error_resilient, expected_er, "{name}");
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-        assert_eq!(s.threads as usize, cores.min(VPX_MAX_THREADS), "{name}");
+        assert_eq!(s.threads, vpx_threads(cores), "{name}");
         assert_eq!(s.keyframe_max_dist, 45, "{name}");
         assert_eq!(s.end_usage, "cbr", "{name}");
         if name == "vp9enc" {
@@ -1900,6 +1905,17 @@ fn vpx_encoders_get_live_settings() {
         let s = configure_vpx(name, "medium", "zerolatency", RateControl::CQP);
         assert_eq!(s.deadline, VPX_DEADLINE_REALTIME, "{name}");
         assert_eq!(s.end_usage, "cq", "{name}");
+        assert_eq!(s.cq_level, VPX_CQ_LEVEL, "{name}");
+
+        // ultrafast and fast never look ahead, whatever the tune.
+        for preset in ["ultrafast", "fast"] {
+            let s = configure_vpx(name, preset, "film", RateControl::VBR);
+            assert_eq!(s.lag_in_frames, 0, "{name} {preset}");
+            assert_eq!(s.error_resilient, "", "{name} {preset}");
+        }
+        // zerolatency turns look-ahead off on the slowest preset too.
+        let s = configure_vpx(name, "veryslow", "zerolatency", RateControl::VBR);
+        assert_eq!(s.lag_in_frames, 0, "{name}");
 
         // slow keeps libvpx's "good" deadline, and a non-live tune the
         // encoder's own look-ahead (25 frames on vp9enc, none on vp8enc).
@@ -1909,5 +1925,143 @@ fn vpx_encoders_get_live_settings() {
             assert_ne!(s.lag_in_frames, 0, "{name}");
         }
         assert_eq!(s.end_usage, "vbr", "{name}");
+    }
+}
+
+#[test]
+fn vpx_lookahead_off_for_fast_presets_and_zerolatency() {
+    for preset in ["ultrafast", "fast"] {
+        for tune in ["zerolatency", "film", "animation"] {
+            assert!(vpx_no_lookahead(preset, tune), "{preset} {tune}");
+        }
+    }
+    for preset in ["medium", "slow", "veryslow"] {
+        assert!(vpx_no_lookahead(preset, "zerolatency"), "{preset}");
+        assert!(!vpx_no_lookahead(preset, "film"), "{preset}");
+    }
+}
+
+#[test]
+fn vpx_error_resilience_for_vp8_under_zerolatency_only() {
+    assert!(vpx_error_resilient(true, "zerolatency"));
+    assert!(!vpx_error_resilient(true, "film"));
+    assert!(!vpx_error_resilient(false, "zerolatency"));
+    assert!(!vpx_error_resilient(false, "film"));
+}
+
+#[test]
+fn vpx_threads_take_half_the_cores_up_to_four() {
+    assert_eq!(vpx_threads(1), 1);
+    assert_eq!(vpx_threads(2), 1);
+    assert_eq!(vpx_threads(4), 2);
+    assert_eq!(vpx_threads(8), 4);
+    assert_eq!(vpx_threads(18), 4);
+    assert_eq!(vpx_threads(128), VPX_MAX_THREADS as i32);
+}
+
+#[test]
+fn vpx_cqp_is_constrained_quality() {
+    assert_eq!(vpx_end_usage(RateControl::CQP), "cq");
+    assert_eq!(vpx_end_usage(RateControl::CBR), "cbr");
+    assert_eq!(vpx_end_usage(RateControl::VBR), "vbr");
+    assert!((0..=63).contains(&VPX_CQ_LEVEL));
+}
+
+#[test]
+fn va_rate_control_follows_the_block() {
+    assert_eq!(va_rate_control_nick(RateControl::CBR), "cbr");
+    assert_eq!(va_rate_control_nick(RateControl::VBR), "vbr");
+    assert_eq!(va_rate_control_nick(RateControl::CQP), "cqp");
+}
+
+/// The va encoders take the keyframe interval as `key-int-max`, which the
+/// shared keyframe step sets.
+#[test]
+fn va_keyframe_interval_goes_to_key_int_max() {
+    let va_props = ["bitrate", "key-int-max", "rate-control", "qp"];
+    assert_eq!(
+        keyframe_interval_property(|name| va_props.contains(&name)),
+        Some("key-int-max")
+    );
+}
+
+#[test]
+fn enum_nick_lookup_checks_the_element() {
+    init_gst();
+    if !require_element("vp8enc") {
+        return;
+    }
+    let encoder = gst::ElementFactory::make("vp8enc").build().unwrap();
+    assert!(enum_property_has_nick(&encoder, "end-usage", "cq"));
+    assert!(!enum_property_has_nick(&encoder, "end-usage", "cqp"));
+    assert!(!enum_property_has_nick(&encoder, "no-such-property", "cq"));
+    // An int property is not an enum.
+    assert!(!enum_property_has_nick(&encoder, "threads", "1"));
+}
+
+#[test]
+fn v4l2_controls_carry_bitrate_rate_control_and_gop() {
+    init_gst();
+    let c = v4l2_extra_controls(2500, RateControl::CBR, 60);
+    assert_eq!(c.get::<i32>("video_bitrate").unwrap(), 2_500_000);
+    assert_eq!(
+        c.get::<i32>("video_bitrate_mode").unwrap(),
+        V4L2_BITRATE_MODE_CBR
+    );
+    assert_eq!(c.get::<i32>("video_gop_size").unwrap(), 60);
+
+    let c = v4l2_extra_controls(1000, RateControl::VBR, 0);
+    assert_eq!(
+        c.get::<i32>("video_bitrate_mode").unwrap(),
+        V4L2_BITRATE_MODE_VBR
+    );
+    assert!(!c.has_field("video_gop_size"), "0 leaves the driver's GOP");
+
+    let c = v4l2_extra_controls(u32::MAX, RateControl::CQP, 30);
+    assert_eq!(c.get::<i32>("video_bitrate").unwrap(), i32::MAX);
+    assert_eq!(
+        c.get::<i32>("video_bitrate_mode").unwrap(),
+        V4L2_BITRATE_MODE_CQ
+    );
+}
+
+/// Every codec the block offers is either in `CODECS_WITH_PROFILE` or listed
+/// as profile-less, never both, and the profile property is shown exactly for
+/// the first. A new codec cannot silently hide its profile.
+#[test]
+fn every_offered_codec_states_whether_it_has_a_profile() {
+    use strom_types::videoenc::CODECS_WITHOUT_PROFILE;
+    let def = videoenc_definition();
+    let codec = def
+        .exposed_properties
+        .iter()
+        .find(|p| p.name == CODEC_PROPERTY)
+        .expect("codec property");
+    let PropertyType::Enum { values } = &codec.property_type else {
+        panic!("codec is not an enum");
+    };
+    let profile = def
+        .exposed_properties
+        .iter()
+        .find(|p| p.name == "profile")
+        .expect("profile property");
+    assert!(!values.is_empty());
+    for value in values {
+        let c = value.value.as_str();
+        let with = CODECS_WITH_PROFILE.contains(&c);
+        let without = CODECS_WITHOUT_PROFILE.contains(&c);
+        assert!(
+            with != without,
+            "codec {c} must be in exactly one of CODECS_WITH_PROFILE and CODECS_WITHOUT_PROFILE"
+        );
+        let props = HashMap::from([(
+            CODEC_PROPERTY.to_string(),
+            PropertyValue::String(c.to_string()),
+        )]);
+        let visible = profile
+            .visible_when
+            .as_ref()
+            .is_none_or(|cond| cond.is_met(&props, &def.exposed_properties));
+        assert_eq!(visible, with, "profile visibility for {c}");
     }
 }

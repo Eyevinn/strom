@@ -195,7 +195,8 @@ impl BlockBuilder for VideoEncBuilder {
 
         // Create parser for the codec (critical for proper MPEG-TS muxing and playback)
         let parser_id = format!("{}:parser", instance_id);
-        let parser = match get_parser_name(codec) {
+        let parser_name = get_parser_name(codec);
+        let parser = match parser_name {
             Some(parser_name) => {
                 let parser = gst::ElementFactory::make(parser_name)
                     .name(&parser_id)
@@ -210,7 +211,6 @@ impl BlockBuilder for VideoEncBuilder {
             }
             None => None,
         };
-        let parser_name = get_parser_name(codec).unwrap_or("no parser");
 
         // Create capsfilter with codec-specific caps
         let caps_str = get_codec_caps_string(codec, profile);
@@ -226,7 +226,10 @@ impl BlockBuilder for VideoEncBuilder {
 
         info!(
             "VideoEncoder block created (chain: input -> {} -> {} -> {} -> capsfilter [{}])",
-            VIDEO_CONVERT_FACTORY, encoder_name, parser_name, caps_str
+            VIDEO_CONVERT_FACTORY,
+            encoder_name,
+            parser_name.unwrap_or("no parser"),
+            caps_str
         );
 
         // Chain: input -> videoconvert -> [rawcaps] -> encoder -> parser -> capsfilter
@@ -246,23 +249,13 @@ impl BlockBuilder for VideoEncBuilder {
                 ElementPadRef::pad(&encoder_id, "sink"),
             ));
         }
+        // encoder -> [parser] -> capsfilter
+        let mut tail = ElementPadRef::pad(&encoder_id, "src");
         if parser.is_some() {
-            internal_links.extend([
-                (
-                    ElementPadRef::pad(&encoder_id, "src"),
-                    ElementPadRef::pad(&parser_id, "sink"),
-                ),
-                (
-                    ElementPadRef::pad(&parser_id, "src"),
-                    ElementPadRef::pad(&capsfilter_id, "sink"),
-                ),
-            ]);
-        } else {
-            internal_links.push((
-                ElementPadRef::pad(&encoder_id, "src"),
-                ElementPadRef::pad(&capsfilter_id, "sink"),
-            ));
+            internal_links.push((tail, ElementPadRef::pad(&parser_id, "sink")));
+            tail = ElementPadRef::pad(&parser_id, "src");
         }
+        internal_links.push((tail, ElementPadRef::pad(&capsfilter_id, "sink")));
 
         let mut elements = vec![(input_id, front.front), (convert_id, front.convert)];
         if let Some(rawcaps) = rawcaps {
@@ -299,33 +292,29 @@ fn get_parser_name(codec: Codec) -> Option<&'static str> {
 /// Configure parser for streaming (insert codec headers periodically).
 fn configure_parser(parser: &gst::Element, codec: Codec, _keyframe_interval: u32) {
     match codec {
-        Codec::H264 | Codec::H265 => {
-            // For H.264/H.265: Insert SPS/PPS headers frequently for best streaming
-            // config-interval: -1 = only at start, 0 = disabled, >0 = every N seconds
-            //
-            // Best practice for live streaming: Insert at EVERY keyframe (IDR)
-            // - Minimal overhead (SPS/PPS are tiny: ~20-50 bytes)
-            // - Instant stream join at any keyframe
-            // - Better resilience to packet loss
-            // - Proper sync with keyframes
-            //
-            // We set config-interval=1 to insert headers every second, which ensures
-            // headers are present at every keyframe for typical GOP sizes (30-120 frames)
-
-            if parser.has_property("config-interval") {
-                // Set to 1 second for frequent SPS/PPS insertion
-                // This is better than time-based on GOP because:
-                // 1. Viewers can join stream instantly at any keyframe
-                // 2. No waiting for next config interval
-                // 3. Overhead is negligible (~50 bytes per second)
-                parser.set_property("config-interval", 1i32);
-                info!("Parser configured: config-interval=1s (SPS/PPS at every keyframe for instant stream join)");
-            }
+        // For H.264/H.265: Insert SPS/PPS headers frequently for best streaming
+        // config-interval: -1 = only at start, 0 = disabled, >0 = every N seconds
+        //
+        // Best practice for live streaming: Insert at EVERY keyframe (IDR)
+        // - Minimal overhead (SPS/PPS are tiny: ~20-50 bytes)
+        // - Instant stream join at any keyframe
+        // - Better resilience to packet loss
+        // - Proper sync with keyframes
+        //
+        // We set config-interval=1 to insert headers every second, which ensures
+        // headers are present at every keyframe for typical GOP sizes (30-120 frames)
+        Codec::H264 | Codec::H265 if parser.has_property("config-interval") => {
+            // Set to 1 second for frequent SPS/PPS insertion
+            // This is better than time-based on GOP because:
+            // 1. Viewers can join stream instantly at any keyframe
+            // 2. No waiting for next config interval
+            // 3. Overhead is negligible (~50 bytes per second)
+            parser.set_property("config-interval", 1i32);
+            info!("Parser configured: config-interval=1s (SPS/PPS at every keyframe for instant stream join)");
         }
-        Codec::AV1 | Codec::VP9 | Codec::VP8 => {
-            // AV1 and VP9 parsers don't need special configuration for headers
-            // They handle sequence headers automatically
-        }
+        // av1parse and vp9parse need no configuration: they handle sequence
+        // headers themselves. VP8 has no parser, so this is not called for it.
+        _ => {}
     }
 }
 
@@ -714,8 +703,20 @@ fn set_encoder_properties(
         let target_usage = map_quality_preset_qsv(quality_preset);
         set_encoder_property(encoder, "target-usage", &target_usage.to_string())?;
     } else if encoder_name.starts_with("va") {
-        // VA-API: bitrate in kbps
+        // VA-API: bitrate in kbps. The keyframe interval goes to `key-int-max`
+        // below, as for every encoder that names it so.
         set_encoder_property(encoder, "bitrate", &bitrate_str)?;
+        // `rate-control` lists only the modes the driver supports, so its
+        // values differ between GPUs.
+        let rc_nick = va_rate_control_nick(rate_control);
+        if enum_property_has_nick(encoder, "rate-control", rc_nick) {
+            set_encoder_property(encoder, "rate-control", rc_nick)?;
+        } else {
+            warn!(
+                "{} does not offer rate-control={}; the driver's default is used",
+                encoder_name, rc_nick
+            );
+        }
     } else if encoder_name.starts_with("amf") {
         // AMD AMF: bitrate in kbps
         set_encoder_property(encoder, "bitrate", &bitrate_str)?;
@@ -800,18 +801,13 @@ fn set_encoder_properties(
             encoder.set_property("allow-frame-reordering", false);
         }
     } else if encoder_name.starts_with("v4l2") {
-        // V4L2 encoders (Raspberry Pi, embedded Linux)
-        // V4L2 encoders use extra-controls structure for bitrate (bits per second)
-        let bitrate_bps = bitrate.saturating_mul(1000);
+        // V4L2 encoders (Raspberry Pi, embedded Linux) take bitrate, rate
+        // control and GOP size as V4L2 controls through `extra-controls`. A
+        // control the driver lacks is skipped by the element with a warning.
         if encoder.has_property("extra-controls") {
-            let controls = gst::Structure::builder("extra-controls")
-                .field("video_bitrate", bitrate_bps)
-                .build();
+            let controls = v4l2_extra_controls(bitrate, rate_control, keyframe_interval);
+            info!("V4L2 encoder: extra-controls {}", controls);
             encoder.set_property("extra-controls", &controls);
-            info!(
-                "V4L2 encoder: set video_bitrate={} bps via extra-controls",
-                bitrate_bps
-            );
         }
     } else if encoder_name == "svtav1enc" {
         // SVT-AV1: target-bitrate in kbps
@@ -870,10 +866,18 @@ fn set_encoder_properties(
 /// frame duration, using the `cpu-used` speed.
 const VPX_DEADLINE_REALTIME: i64 = 1;
 
-/// Upper bound on libvpx encoder threads. Measured with `vp9enc` at 1080p30
-/// on 18 cores: 4 threads 134 fps, 8 threads 158 fps, 16 threads 153 fps.
-/// Several encoders often run in one Strom, so one does not take every core.
-const VPX_MAX_THREADS: usize = 8;
+/// Upper bound on libvpx threads per encoder. Measured with `vp9enc` at
+/// 1080p30 on 18 cores: 4 threads 134 fps, 8 threads 158 fps. Several encoders
+/// often run in one Strom (one per rendition, one per flow), and libvpx
+/// threads busy-wait for each other, so one encoder must not take every core.
+const VPX_MAX_THREADS: usize = 4;
+
+/// libvpx `cq-level` (0-63, lower is better) when `rate_control` is CQP. The
+/// block has no quality setting, so this is a fixed default: 31 is Google's
+/// recommended VP9 constant-quality level for 1080p. GStreamer's `end-usage`
+/// offers libvpx's constrained quality (`cq`), not pure constant quality
+/// (`q`), so `target-bitrate` stays the ceiling.
+const VPX_CQ_LEVEL: i32 = 31;
 
 /// Settings for libvpx (`vp8enc`, `vp9enc`) in a live flow.
 ///
@@ -901,11 +905,13 @@ fn set_vpx_properties(
     let bitrate_bps = clamp_to_property_range(encoder, "target-bitrate", u64::from(bitrate) * 1000);
     set_encoder_property(encoder, "target-bitrate", &bitrate_bps.to_string())?;
     set_encoder_property(encoder, "end-usage", vpx_end_usage(rate_control))?;
+    if rate_control == RateControl::CQP {
+        set_encoder_property(encoder, "cq-level", &VPX_CQ_LEVEL.to_string())?;
+    }
 
     // Real time for every preset a live flow can sustain; slow and veryslow
     // keep libvpx's "good" deadline for an operator who chose quality.
-    let realtime = vpx_realtime(quality_preset);
-    if realtime {
+    if vpx_realtime(quality_preset) {
         encoder.set_property("deadline", VPX_DEADLINE_REALTIME);
     }
     let cpu_used = if vp8 {
@@ -915,24 +921,20 @@ fn set_vpx_properties(
     };
     set_encoder_property(encoder, "cpu-used", &cpu_used.to_string())?;
 
-    // Latency follows the tune, as for x264 and VideoToolbox: no look-ahead,
-    // and error resilience so a receiver recovers from a lost packet without
-    // waiting for the next keyframe (WebRTC, SRT).
-    if tune == "zerolatency" {
+    if vpx_no_lookahead(quality_preset, tune) {
         encoder.set_property("lag-in-frames", 0i32);
+    }
+    if vpx_error_resilient(vp8, tune) {
         set_encoder_property(encoder, "error-resilient", "default")?;
     }
 
     // vp8enc defaults to threads=0 (one thread): 84 fps against 136 fps with
     // 8 at 1080p. vp9enc's default differs between versions.
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(VPX_MAX_THREADS);
-    encoder.set_property("threads", threads as i32);
-    // VP9: rows within a tile in parallel, 95 -> 158 fps at 1080p30.
-    // tile-columns stays at its default (6, log2), which libvpx caps to what
-    // the width allows (4 columns at 1080p).
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    encoder.set_property("threads", vpx_threads(cores));
+    // VP9: rows within a tile in parallel, 95 -> 158 fps at 1080p30. This is
+    // what lets VP9 use its threads; tile-columns stays at its default (6,
+    // log2), which libvpx caps to what the width allows (4 columns at 1080p).
     if encoder.has_property("row-mt") {
         encoder.set_property("row-mt", true);
     }
@@ -944,13 +946,91 @@ fn vpx_realtime(quality_preset: &str) -> bool {
     !matches!(quality_preset, "slow" | "veryslow")
 }
 
-/// libvpx `end-usage` for the block's rate control.
+/// Whether libvpx runs without look-ahead (`lag-in-frames=0`). ultrafast and
+/// fast always do, as they did before VP8 was added: look-ahead costs the CPU
+/// they are chosen to save. `tune=zerolatency` does for every preset, as it
+/// turns off look-ahead on x264 and VideoToolbox.
+fn vpx_no_lookahead(quality_preset: &str, tune: &str) -> bool {
+    matches!(quality_preset, "ultrafast" | "fast") || tune == "zerolatency"
+}
+
+/// Whether libvpx gets `error-resilient=default`: VP8 under
+/// `tune=zerolatency`, so a receiver recovers from a lost packet without
+/// waiting for the next keyframe, as libwebrtc runs VP8. Not VP9: libwebrtc
+/// does not enable it for non-SVC VP9, and it costs compression that a
+/// recorder or HLS output pays for nothing.
+fn vpx_error_resilient(vp8: bool, tune: &str) -> bool {
+    vp8 && tune == "zerolatency"
+}
+
+/// libvpx threads for one encoder on a machine with `cores` cores: half the
+/// cores, at most [`VPX_MAX_THREADS`], at least one.
+fn vpx_threads(cores: usize) -> i32 {
+    (cores / 2).clamp(1, VPX_MAX_THREADS) as i32
+}
+
+/// libvpx `end-usage` for the block's rate control. CQP maps to constrained
+/// quality at [`VPX_CQ_LEVEL`].
 fn vpx_end_usage(rate_control: RateControl) -> &'static str {
     match rate_control {
         RateControl::CBR => "cbr",
         RateControl::VBR => "vbr",
         RateControl::CQP => "cq",
     }
+}
+
+/// VA-API `rate-control` value for the block's rate control.
+fn va_rate_control_nick(rate_control: RateControl) -> &'static str {
+    match rate_control {
+        RateControl::CBR => "cbr",
+        RateControl::VBR => "vbr",
+        RateControl::CQP => "cqp",
+    }
+}
+
+/// Whether `property` is an enum on `element` that offers `nick`.
+fn enum_property_has_nick(element: &gst::Element, property: &str, nick: &str) -> bool {
+    element
+        .find_property(property)
+        .and_then(|pspec| {
+            pspec
+                .downcast_ref::<gst::glib::ParamSpecEnum>()
+                .map(|p| p.enum_class().value_by_nick(nick).is_some())
+        })
+        .unwrap_or(false)
+}
+
+/// V4L2 `video_bitrate_mode` menu values (V4L2_MPEG_VIDEO_BITRATE_MODE_*).
+const V4L2_BITRATE_MODE_VBR: i32 = 0;
+const V4L2_BITRATE_MODE_CBR: i32 = 1;
+const V4L2_BITRATE_MODE_CQ: i32 = 2;
+
+/// `extra-controls` for a V4L2 encoder: bitrate in bits/s, rate control, and
+/// the keyframe interval as the GOP size. Control names are the kernel's
+/// control names as GStreamer spells them. Values are `int`: the element
+/// skips a control whose value is of any other type.
+fn v4l2_extra_controls(
+    bitrate_kbps: u32,
+    rate_control: RateControl,
+    keyframe_interval: u32,
+) -> gst::Structure {
+    let bitrate_bps = i32::try_from(u64::from(bitrate_kbps) * 1000).unwrap_or(i32::MAX);
+    let mode = match rate_control {
+        RateControl::VBR => V4L2_BITRATE_MODE_VBR,
+        RateControl::CBR => V4L2_BITRATE_MODE_CBR,
+        RateControl::CQP => V4L2_BITRATE_MODE_CQ,
+    };
+    let mut controls = gst::Structure::builder("extra-controls")
+        .field("video_bitrate", bitrate_bps)
+        .field("video_bitrate_mode", mode)
+        .build();
+    if keyframe_interval > 0 {
+        controls.set(
+            "video_gop_size",
+            i32::try_from(keyframe_interval).unwrap_or(i32::MAX),
+        );
+    }
+    controls
 }
 
 /// Peak bitrate allowed in VBR, as a percentage of the target.
@@ -1398,7 +1478,7 @@ fn videoenc_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "tune".to_string(),
                 label: "Tune".to_string(),
-                description: "Optimize encoder for specific use case (x264/x265). Zero latency disables look-ahead for minimal delay; on VP8/VP9 it also turns on error resilience, and on VideoToolbox real-time mode.".to_string(),
+                description: "Optimize encoder for specific use case (x264/x265). Zero latency disables look-ahead for minimal delay; on VP8 it also turns on error resilience, and on VideoToolbox real-time mode.".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
                         EnumValue { value: "zerolatency".to_string(), label: Some("Zero Latency (streaming/real-time)".to_string()), visible_when: None },
@@ -1422,7 +1502,7 @@ fn videoenc_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "rate_control".to_string(),
                 label: "Rate Control".to_string(),
-                description: "Rate control mode for encoding".to_string(),
+                description: "Rate control mode for encoding. CQP on VP8/VP9 is a fixed quality (cq-level 31), capped at the bitrate.".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
                         EnumValue { value: "vbr".to_string(), label: Some("VBR (Variable Bitrate)".to_string()), visible_when: None },

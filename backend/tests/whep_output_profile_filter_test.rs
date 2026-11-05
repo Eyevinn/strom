@@ -148,6 +148,41 @@ a=rtcp-fb:96 ccm fir\r\n\
 a=rtcp-fb:96 nack\r\n\
 a=rtcp-fb:96 nack pli\r\n";
 
+/// A video-only offer shaped like a browser's: H.264, VP9, AV1 and VP8, in
+/// that order of preference.
+const BROWSER_OFFER: &str = "v=0\r\n\
+o=- 4611731400430051338 2 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0\r\n\
+a=msid-semantic: WMS\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 102 98 45 96\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=rtcp:9 IN IP4 0.0.0.0\r\n\
+a=ice-ufrag:abcd\r\n\
+a=ice-pwd:abcdefghijklmnopqrstuvwx\r\n\
+a=ice-options:trickle\r\n\
+a=fingerprint:sha-256 7B:8B:F0:65:5F:78:E2:51:3B:AC:6F:F3:3F:46:1B:35:DC:B8:5F:64:1A:24:C2:43:F0:A1:58:D0:A1:2C:19:08\r\n\
+a=setup:actpass\r\n\
+a=mid:0\r\n\
+a=recvonly\r\n\
+a=rtcp-mux\r\n\
+a=rtcp-rsize\r\n\
+a=rtpmap:102 H264/90000\r\n\
+a=rtcp-fb:102 nack\r\n\
+a=rtcp-fb:102 nack pli\r\n\
+a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n\
+a=rtpmap:98 VP9/90000\r\n\
+a=rtcp-fb:98 nack\r\n\
+a=rtcp-fb:98 nack pli\r\n\
+a=fmtp:98 profile-id=0\r\n\
+a=rtpmap:45 AV1/90000\r\n\
+a=rtcp-fb:45 nack\r\n\
+a=rtcp-fb:45 nack pli\r\n\
+a=rtpmap:96 VP8/90000\r\n\
+a=rtcp-fb:96 nack\r\n\
+a=rtcp-fb:96 nack pli\r\n";
+
 /// POST `offer` to the block's internal WHEP endpoint and return the status
 /// line. Retries until the sink's HTTP server is listening.
 fn post_offer(port: u16, offer: &str) -> String {
@@ -181,6 +216,11 @@ struct Viewer {
     payloaded: usize,
     /// The level the viewer's payloader was given.
     level: Option<String>,
+    /// The media type the viewer's payloader was given.
+    media_type: Option<String>,
+    /// The sink's `video-caps` once the input's caps arrived: what it may
+    /// offer viewers.
+    video_caps: String,
     /// Anything that went wrong along the way.
     problems: Vec<String>,
 }
@@ -366,22 +406,24 @@ fn viewer_payloaded(input: Input, offer: &str, width: i32, height: i32, fps: i32
         }
     }
 
-    let level = payloaders
+    let payloader_caps = payloaders
         .lock()
         .unwrap()
         .first()
         .and_then(|payloader| payloader.upgrade())
         .and_then(|payloader| payloader.static_pad("sink"))
-        .and_then(|pad| pad.current_caps())
-        .and_then(|caps| {
-            caps.structure(0)
-                .and_then(|s| s.get::<String>("level").ok())
-        });
+        .and_then(|pad| pad.current_caps());
+    let structure = payloader_caps.as_ref().and_then(|caps| caps.structure(0));
+    let level = structure.and_then(|s| s.get::<String>("level").ok());
+    let media_type = structure.map(|s| s.name().to_string());
+    let video_caps = sink.property::<gst::Caps>("video-caps").to_string();
     let _ = pipeline.set_state(gst::State::Null);
     let problems = problems.lock().unwrap().clone();
     Viewer {
         payloaded: payloaded.load(Ordering::Relaxed),
         level,
+        media_type,
+        video_caps,
         problems,
     }
 }
@@ -467,6 +509,36 @@ fn vp8_offer_gets_vp8_from_the_video_encoder_block() {
     assert!(
         viewer.payloaded > 0,
         "a viewer offering VP8 got no VP8 from the Video Encoder block \
+         (payloaded {} buffers; {:?})",
+        viewer.payloaded,
+        viewer.problems
+    );
+}
+
+/// A browser offers H.264, VP9 and AV1 ahead of VP8. With VP8 from the Video
+/// Encoder block, the viewer gets VP8 and the sink offers only VP8. Fails if
+/// WHEP Output stops limiting `video-caps` to encoded VP8 input (it then logs
+/// "Unknown video codec" and keeps every codec in `video-caps`).
+#[test]
+fn browser_offer_gets_vp8_from_the_video_encoder_block() {
+    if !plugins_available() || !common::plugins_available(&["vp8enc", "rtpvp8pay"]) {
+        return;
+    }
+    let viewer = viewer_payloaded(Input::Vp8Block, BROWSER_OFFER, 320, 240, 30);
+    assert_eq!(
+        viewer.video_caps, "video/x-vp8",
+        "WHEP Output did not limit video-caps to the VP8 that arrived ({:?})",
+        viewer.problems
+    );
+    assert_eq!(
+        viewer.media_type.as_deref(),
+        Some("video/x-vp8"),
+        "a browser offering VP8 among others did not get VP8 ({:?})",
+        viewer.problems
+    );
+    assert!(
+        viewer.payloaded > 0,
+        "a browser offering VP8 among others got no VP8 \
          (payloaded {} buffers; {:?})",
         viewer.payloaded,
         viewer.problems

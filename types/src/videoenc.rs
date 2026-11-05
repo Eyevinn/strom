@@ -185,6 +185,12 @@ pub const CODEC_VP8: &str = "vp8";
 /// property is hidden for it.
 pub const CODECS_WITH_PROFILE: &[&str] = &[CODEC_H264, CODEC_H265, CODEC_AV1, CODEC_VP9];
 
+/// The codecs the `profile` property does not apply to. Every codec the
+/// Video Encoder block offers is in exactly one of this list and
+/// [`CODECS_WITH_PROFILE`]; the block's tests check it, so a new codec has to
+/// choose.
+pub const CODECS_WITHOUT_PROFILE: &[&str] = &[CODEC_VP8];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +212,12 @@ mod tests {
     #[test]
     fn every_named_profile_belongs_to_a_codec_with_a_profile() {
         assert!(!CODECS_WITH_PROFILE.contains(&CODEC_VP8));
+        for codec in CODECS_WITHOUT_PROFILE {
+            assert!(
+                !CODECS_WITH_PROFILE.contains(codec),
+                "{codec} is in both lists"
+            );
+        }
         for p in Profile::ALL {
             for codec in p.codecs().unwrap_or_default() {
                 assert!(CODECS_WITH_PROFILE.contains(codec), "{p:?} names {codec}");
