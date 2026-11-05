@@ -310,25 +310,12 @@ fn main() -> anyhow::Result<()> {
     blank_env_vars.sort();
     blank_env_vars.dedup();
 
-    // Make libsoup (souphttpsrc, and the HLS/DASH demuxers' segment downloads)
-    // speak HTTP/1.1. Its HTTP/2 client returns flow-control credit as data
-    // arrives rather than as it is read, and queues the body in memory without
-    // a limit: a paused Media Player on an http(s) file from an HTTP/2 server
-    // (most CDNs) downloads the whole file into RAM. Over HTTP/1.1, TCP flow
-    // control holds the server back. libsoup reads the variable once, at its
-    // first connection, so it is set here, before any thread exists.
-    // STROM_SOUP_HTTP2 alone decides: libsoup only checks that SOUP_FORCE_HTTP1
-    // is set, not its value, so `on` removes it to get HTTP/2 back.
-    let soup_http2 = std::env::var("STROM_SOUP_HTTP2").is_ok_and(|v| {
-        ["on", "true", "1"]
-            .iter()
-            .any(|on| v.trim().eq_ignore_ascii_case(on))
-    });
-    if soup_http2 {
-        std::env::remove_var("SOUP_FORCE_HTTP1");
-    } else {
-        std::env::set_var("SOUP_FORCE_HTTP1", "1");
-    }
+    // Make libsoup speak HTTP/1.1 unless STROM_SOUP_HTTP2 is on: its HTTP/2
+    // client buffers a paused player's whole file in memory (see
+    // strom::gst::soup_http). libsoup reads SOUP_FORCE_HTTP1 once, at its first
+    // connection, so it is set here, before any thread exists. Logged below,
+    // once logging is up.
+    let soup_http = strom::gst::soup_http::configure().map_err(anyhow::Error::msg)?;
 
     // Initialize process startup time before anything else
     strom::version::init_process_startup_time();
@@ -420,6 +407,20 @@ fn main() -> anyhow::Result<()> {
         eprintln!("Failed to initialize logging: {}", e);
         std::process::exit(1);
     });
+
+    match soup_http {
+        strom::gst::soup_http::SoupHttp::Http1 => {
+            info!("libsoup HTTP sources use HTTP/1.1 (STROM_SOUP_HTTP2=on allows HTTP/2)")
+        }
+        strom::gst::soup_http::SoupHttp::Http2 {
+            removed_force_http1,
+        } => {
+            info!("libsoup HTTP sources may use HTTP/2 (STROM_SOUP_HTTP2 is on)");
+            if removed_force_http1 {
+                warn!("SOUP_FORCE_HTTP1 was set, and removed because STROM_SOUP_HTTP2 is on");
+            }
+        }
+    }
 
     let (blank_credentials, blank_settings): (Vec<String>, Vec<String>) = blank_env_vars
         .into_iter()

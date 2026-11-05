@@ -22,6 +22,7 @@ pub mod rtp_hdrext;
 pub mod scale_front;
 pub mod shaders;
 pub mod software_decoder;
+pub mod soup_http;
 pub mod thread_priority;
 pub mod thumbnail;
 pub mod thumbnail_tap;

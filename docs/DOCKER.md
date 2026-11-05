@@ -55,7 +55,7 @@ The common ones:
 | `STROM_TLS_CERT` / `STROM_TLS_KEY` | Built-in TLS (PEM) |
 | `STROM_MEDIA_PATH` | Media library directory (default `media/` under the data directory) |
 | `STROM_LOGGING_STDOUT_LOG_FORMAT` | `json` for container log collectors |
-| `STROM_SOUP_HTTP2` | `on` lets libsoup (HTTP sources, HLS/DASH segments) use HTTP/2. Off by default: libsoup's HTTP/2 buffers whole files in memory while a player is paused |
+| `STROM_SOUP_HTTP2` | `true` lets libsoup (HTTP sources, HLS/DASH segments) use HTTP/2; it also overrides a `SOUP_FORCE_HTTP1` you set. Default `false`: HTTP/1.1, because libsoup's HTTP/2 buffers whole files in memory while a player is paused |
 | `RUST_LOG` | Logging level (default `info`) |
 
 Volumes: mount `./data:/data` for persistent storage. The `/data` volume holds all of
