@@ -42,20 +42,62 @@ fn level(caps: &gst::CapsRef) -> String {
 
 #[test]
 fn whep_output_follows_an_h264_level_rise_from_a_size_change() {
-    level_rise_from_a_size_change("h264", "x264enc", "h264parse");
+    size_change("h264", "software", Some("x264enc"), "h264parse", true);
 }
 
 #[test]
 fn whep_output_follows_an_h265_level_rise_from_a_size_change() {
-    level_rise_from_a_size_change("h265", "x265enc", "h265parse");
+    size_change("h265", "software", Some("x265enc"), "h265parse", true);
 }
 
-/// Encode 640x360p25 then 1080p50 with the software encoder for `codec`
-/// into WHEP Output, and check that the flow follows the switch.
-fn level_rise_from_a_size_change(codec: &str, encoder: &str, parser: &str) {
+// The encoder the block picks on its default preference: a hardware one where
+// the host has it (VideoToolbox on macOS, NVENC, ...), else the software one.
+
+#[test]
+fn whep_output_starts_and_follows_a_size_change_h264_default_encoder() {
+    size_change("h264", "auto", None, "h264parse", false);
+}
+
+#[test]
+fn whep_output_starts_and_follows_a_size_change_h265_default_encoder() {
+    size_change("h265", "auto", None, "h265parse", false);
+}
+
+/// vp9parse sends caps without `chroma-format` and the bit depths, then adds
+/// them once it has parsed the first frame. That is a refinement, not a
+/// change: the flow has to start.
+#[test]
+fn whep_output_starts_and_follows_a_size_change_vp9() {
+    size_change("vp9", "auto", None, "vp9parse", false);
+}
+
+/// av1parse refines its caps the same way as vp9parse.
+#[test]
+fn whep_output_starts_and_follows_a_size_change_av1() {
+    // The Video Encoder's software AV1 encoders, either will do.
+    if common::missing_elements(&["svtav1enc", "av1enc"]).len() == 2
+        && !common::require_or_skip(&["svtav1enc or av1enc"])
+    {
+        return;
+    }
+    size_change("av1", "auto", None, "av1parse", false);
+}
+
+/// Encode 640x360p25 then 1080p50 with the Video Encoder for `codec` on
+/// `preference` into WHEP Output, and check that the flow starts and follows
+/// the switch. `encoder` pins the encoder the block must pick;
+/// `level_must_change` asserts the switch raised the H.264/H.265 level.
+fn size_change(
+    codec: &str,
+    preference: &str,
+    encoder: Option<&str>,
+    parser: &str,
+    level_must_change: bool,
+) {
     common::init_webrtc_plugins();
     let mut required = REQUIRED.to_vec();
-    required.extend([encoder, parser]);
+    required.push(parser);
+    required.extend(encoder);
     if !common::plugins_available(&required) {
         return;
     }
@@ -65,7 +107,7 @@ fn level_rise_from_a_size_change(codec: &str, encoder: &str, parser: &str) {
     enc_props.insert("codec".to_string(), PropertyValue::String(codec.into()));
     enc_props.insert(
         "encoder_preference".to_string(),
-        PropertyValue::String("software".into()),
+        PropertyValue::String(preference.into()),
     );
     enc_props.insert("keyframe_interval".to_string(), PropertyValue::UInt(10));
     let enc = get_builder("builtin.videoenc")
@@ -78,7 +120,7 @@ fn level_rise_from_a_size_change(codec: &str, encoder: &str, parser: &str) {
     whep_props.insert("num_video_tracks".to_string(), PropertyValue::Int(1));
     whep_props.insert(
         "endpoint_id".to_string(),
-        PropertyValue::String(format!("level-change-test-{codec}")),
+        PropertyValue::String(format!("level-change-test-{codec}-{preference}")),
     );
     let whep = get_builder("builtin.whep_output")
         .expect("WHEP Output builder")
@@ -88,11 +130,11 @@ fn level_rise_from_a_size_change(codec: &str, encoder: &str, parser: &str) {
     let pipeline = gst::Pipeline::new();
     let enc_els = common::block::install(&pipeline, &enc);
     let whep_els = common::block::install(&pipeline, &whep);
-    assert_eq!(
-        enc_els["enc:encoder"].factory().unwrap().name(),
-        encoder,
-        "software {codec} encoder"
-    );
+    let picked = enc_els["enc:encoder"].factory().unwrap().name().to_string();
+    eprintln!("{codec} ({preference}): Video Encoder picked {picked}");
+    if let Some(encoder) = encoder {
+        assert_eq!(picked, encoder, "{preference} {codec} encoder");
+    }
 
     let appsrc = gst_app::AppSrc::builder()
         .format(gst::Format::Time)
@@ -176,17 +218,21 @@ fn level_rise_from_a_size_change(codec: &str, encoder: &str, parser: &str) {
                     }
                 }
             }
+            // Drain the encoder: a software AV1 encoder holds back over a
+            // second of frames for its lookahead.
+            let _ = appsrc.end_of_stream();
         })
     };
 
     let mut errors: Vec<String> = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(45);
     let mut settle: Option<Instant> = None;
     while errors.is_empty() && Instant::now() < deadline {
         if pusher.is_finished() {
-            // Let the last frames through the encoder.
-            let until = *settle.get_or_insert_with(|| Instant::now() + Duration::from_secs(1));
-            if Instant::now() >= until {
+            // Let the last frames through the encoder: a software AV1 encoder
+            // holds back many frames and runs slower than real time at 1080p.
+            let until = *settle.get_or_insert_with(|| Instant::now() + Duration::from_secs(15));
+            if Instant::now() >= until || hd_frames.load(Ordering::Relaxed) > 50 {
                 break;
             }
         }
@@ -213,10 +259,12 @@ fn level_rise_from_a_size_change(codec: &str, encoder: &str, parser: &str) {
     pusher.join().unwrap();
 
     let levels = levels.lock().unwrap().clone();
-    assert!(
-        levels.first().is_some_and(|l| !l.is_empty()) && levels.first() != levels.last(),
-        "the encoder has to change the level for this test to mean anything: {levels:?}"
-    );
+    if level_must_change {
+        assert!(
+            levels.first().is_some_and(|l| !l.is_empty()) && levels.first() != levels.last(),
+            "the encoder has to change the level for this test to mean anything: {levels:?}"
+        );
+    }
     eprintln!("{codec} levels at the encoder output: {levels:?}");
     assert!(
         errors.is_empty(),

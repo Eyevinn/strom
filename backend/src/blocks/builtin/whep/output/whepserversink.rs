@@ -671,16 +671,17 @@ pub(super) fn build_whepserversink(
                 gst::PadProbeReturn::Pass
             });
 
-            // Normalize H.264/H.265 caps before they reach webrtcsink, and fail
-            // the flow with a usable message on a change webrtcsink refuses.
+            // Normalize encoded video caps before they reach webrtcsink, and
+            // fail the flow with a usable message on a change webrtcsink
+            // refuses.
             //
-            // h264parse progressively adds fields (coded-picture-structure,
-            // chroma-format, bit-depth-luma, bit-depth-chroma) as it parses the
-            // stream, and an encoder fed a larger input (an HLS variant switch)
-            // raises the level. webrtcsink refuses both as "renegotiation", so
-            // they are removed here; see `caps_change`. Applied per slot.
+            // The parsers add fields (chroma-format, the bit depths, ...) once
+            // they have parsed the first frame, and an encoder fed a larger
+            // input (an HLS variant switch) raises the level. webrtcsink
+            // refuses both as "renegotiation", so they are kept away from it
+            // here; see `caps_change`. Applied per slot.
             let queue_src_pad = video_queue.static_pad("src").expect("queue has src pad");
-            let previous_caps: Mutex<Option<gst::Caps>> = Mutex::new(None);
+            let follower = Mutex::new(caps_change::CapsFollower::default());
             queue_src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
                 let Some(gst::PadProbeData::Event(ref event)) = info.data else {
                     return gst::PadProbeReturn::Ok;
@@ -688,22 +689,20 @@ pub(super) fn build_whepserversink(
                 let gst::EventView::Caps(caps_event) = event.view() else {
                     return gst::PadProbeReturn::Ok;
                 };
-                let normalized = caps_change::normalize(caps_event.caps());
-                let caps = normalized
-                    .clone()
-                    .unwrap_or_else(|| caps_event.caps_owned());
-                let mut previous = previous_caps.lock().unwrap_or_else(|p| p.into_inner());
-                if let Some(old) = previous.as_ref() {
-                    if let Some(reason) = caps_change::refused_change(old, &caps) {
+                let next = follower
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .next(caps_event.caps());
+                match next {
+                    Ok(caps) if caps.as_ref() != caps_event.caps() => {
+                        info.data = Some(gst::PadProbeData::Event(gst::event::Caps::new(&caps)));
+                    }
+                    Ok(_) => {}
+                    Err(reason) => {
                         if let Some(queue) = pad.parent_element() {
                             gst::element_error!(queue, gst::StreamError::Format, ("{}", reason));
                         }
                     }
-                }
-                *previous = Some(caps);
-                drop(previous);
-                if let Some(new_caps) = normalized {
-                    info.data = Some(gst::PadProbeData::Event(gst::event::Caps::new(&new_caps)));
                 }
                 gst::PadProbeReturn::Ok
             });
