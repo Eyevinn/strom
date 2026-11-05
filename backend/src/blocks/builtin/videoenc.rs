@@ -25,7 +25,8 @@
 //!   8-bit 4:2:0, so the encoder produces its base profile
 //! - encoder: Selected hardware or software encoder
 //! - parser: Codec-specific parser (h264parse, h265parse, etc.) for proper stream formatting
-//! - capsfilter: Sets output caps for proper codec negotiation
+//! - capsfilter: Sets output caps for proper codec negotiation, including the
+//!   H.264 level (see `level`)
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gst::download_front;
@@ -37,7 +38,7 @@ use std::collections::HashMap;
 use strom_types::{
     block::*,
     element::ElementPadRef,
-    videoenc::{Profile, CODEC_H264, CODEC_H265, CODEC_PROPERTY},
+    videoenc::{H264Level, Profile, CODEC_H264, CODEC_H265, CODEC_PROPERTY},
     EnumValue, PropertyValue, *,
 };
 use tracing::{info, warn};
@@ -85,6 +86,9 @@ impl BlockBuilder for VideoEncBuilder {
 
         // The profile the capsfilter pins; the encoder must be able to produce it
         let profile = parse_profile(properties);
+
+        // The H.264 level the capsfilter pins (see `level`)
+        let h264_level = parse_h264_level(properties);
 
         // Select best available encoder
         let encoder_name = select_encoder(codec, preference, profile)?;
@@ -200,7 +204,14 @@ impl BlockBuilder for VideoEncBuilder {
         info!("Added {} parser for proper stream formatting", parser_name);
 
         // Create capsfilter with codec-specific caps
-        let caps_str = get_codec_caps_string(codec, profile);
+        let mut caps_str = get_codec_caps_string(codec, profile);
+        let base_caps = caps_str.parse::<gst::Caps>().map_err(|_| {
+            BlockBuildError::InvalidConfiguration(format!("Invalid caps: {}", caps_str))
+        })?;
+        let level = applied_h264_level(codec, h264_level, &encoder_name);
+        if let Some(pinned) = level.as_caps_str() {
+            caps_str.push_str(&format!(",level=(string){}", pinned));
+        }
         let caps = caps_str.parse::<gst::Caps>().map_err(|_| {
             BlockBuildError::InvalidConfiguration(format!("Invalid caps: {}", caps_str))
         })?;
@@ -210,6 +221,10 @@ impl BlockBuilder for VideoEncBuilder {
             .property("caps", &caps)
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
+
+        if level != H264Level::None {
+            level::install_probe(&encoder, &capsfilter, base_caps, level);
+        }
 
         info!(
             "VideoEncoder block created (chain: input -> {} -> {} -> {} -> capsfilter [{}])",
@@ -1152,6 +1167,41 @@ fn parse_profile(properties: &HashMap<String, PropertyValue>) -> Profile {
         .unwrap_or_default()
 }
 
+/// Parse the `level` property. Unknown / missing values fall back to
+/// [`H264Level::None`].
+fn parse_h264_level(properties: &HashMap<String, PropertyValue>) -> H264Level {
+    properties
+        .get("level")
+        .and_then(|v| match v {
+            PropertyValue::String(s) => {
+                let parsed = H264Level::from_property_str(s);
+                if parsed.is_none() {
+                    warn!(
+                        "videoenc: invalid level value '{}', falling back to default",
+                        s
+                    );
+                }
+                parsed
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// The level setting that applies to `encoder_name`: the setting itself for
+/// H.264 on an encoder that takes the level from downstream caps, otherwise
+/// [`H264Level::None`] (no level field, as before the setting existed).
+fn applied_h264_level(codec: Codec, setting: H264Level, encoder_name: &str) -> H264Level {
+    if codec != Codec::H264 || setting == H264Level::None {
+        return H264Level::None;
+    }
+    if !level::takes_level_from_downstream(encoder_name) {
+        level::log_not_applied(encoder_name, setting);
+        return H264Level::None;
+    }
+    setting
+}
+
 /// Get metadata for VideoEncoder block (for UI/API).
 pub fn get_blocks() -> Vec<BlockDefinition> {
     vec![videoenc_definition()]
@@ -1205,6 +1255,25 @@ fn videoenc_definition() -> BlockDefinition {
                 live: false,
                 persist: None,
                 visible_when: None,
+            },
+            ExposedProperty {
+                name: "level".to_string(),
+                label: "Level".to_string(),
+                description: "H.264 level of the encoded output. None (default): the encoder picks the level and changes it with the input. A fixed level, or Auto (the lowest of 4.2, 5.1 and 5.2 that fits the first input), keeps it the same when the input changes size mid-stream, for players that cannot follow a level change. Applies to VideoToolbox and x264 only.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: H264Level::block_enum_values(),
+                },
+                default_value: Some(PropertyValue::String(
+                    H264Level::default().as_property_str().to_string(),
+                )),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "level".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: Some(PropertyCondition::one_of_strings(CODEC_PROPERTY, &[CODEC_H264])),
             },
             ExposedProperty {
                 name: "encoder_preference".to_string(),
@@ -1352,6 +1421,7 @@ fn videoenc_definition() -> BlockDefinition {
     }
 }
 
+mod level;
 mod mediafoundation;
 mod selection;
 use mediafoundation::{
