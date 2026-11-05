@@ -316,9 +316,17 @@ fn main() -> anyhow::Result<()> {
     // a limit: a paused Media Player on an http(s) file from an HTTP/2 server
     // (most CDNs) downloads the whole file into RAM. Over HTTP/1.1, TCP flow
     // control holds the server back. libsoup reads the variable once, at its
-    // first connection, so it is set here, before any thread exists. A value
-    // the operator set is left alone.
-    if std::env::var_os("SOUP_FORCE_HTTP1").is_none() {
+    // first connection, so it is set here, before any thread exists.
+    // STROM_SOUP_HTTP2 alone decides: libsoup only checks that SOUP_FORCE_HTTP1
+    // is set, not its value, so `on` removes it to get HTTP/2 back.
+    let soup_http2 = std::env::var("STROM_SOUP_HTTP2").is_ok_and(|v| {
+        ["on", "true", "1"]
+            .iter()
+            .any(|on| v.trim().eq_ignore_ascii_case(on))
+    });
+    if soup_http2 {
+        std::env::remove_var("SOUP_FORCE_HTTP1");
+    } else {
         std::env::set_var("SOUP_FORCE_HTTP1", "1");
     }
 
