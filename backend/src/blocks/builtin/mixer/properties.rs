@@ -6,7 +6,7 @@ use strom_types::{parse_common_audio_sample_rate, PropertyValue, DEFAULT_AUDIO_S
 use tracing::warn;
 
 use super::{DEFAULT_CHANNELS, MAX_AUX_BUSES, MAX_CHANNELS, MAX_GROUPS, MIN_KNEE_LINEAR};
-use strom_types::mixer::STROMDSP_COMP_THRESHOLD_OFFSET_DB;
+use strom_types::mixer::{DSP_BACKEND_ALIASES, STROMDSP_COMP_THRESHOLD_OFFSET_DB};
 
 /// Read a count property. A negative integer counts as zero so the caller's
 /// clamp lands on its minimum; `as usize` would wrap it to `usize::MAX`.
@@ -140,14 +140,38 @@ pub(super) fn linear_to_db(linear: f64) -> f64 {
     }
 }
 
-/// Translate a property name and value from LV2 conventions to lsp-rs conventions.
+/// The current `dsp_backend` value for one saved under an earlier name, or
+/// `None` when `value` is not an alias.
+pub(super) fn dsp_backend_alias(value: &str) -> Option<&'static str> {
+    DSP_BACKEND_ALIASES
+        .iter()
+        .find(|(old, _)| *old == value)
+        .map(|(_, new)| *new)
+}
+
+/// Rewrite a `dsp_backend` saved under an earlier name (`lv2`, `rust`) to the
+/// value it means now, so the flow is saved with the new value. Idempotent.
+///
+/// Returns `true` when something changed.
+pub fn migrate_dsp_backend(properties: &mut HashMap<String, PropertyValue>) -> bool {
+    let Some(PropertyValue::String(value)) = properties.get_mut("dsp_backend") else {
+        return false;
+    };
+    let Some(new) = dsp_backend_alias(value) else {
+        return false;
+    };
+    *value = new.to_string();
+    true
+}
+
+/// Translate a property name and value from LV2 conventions to strom-dsp conventions.
 ///
 /// The ExposedProperty mappings use LV2 property names (gt, at, rt, al, cr, mk, kn, th, f-N, g-N, q-N).
-/// When the target element is from lsp-plugins-rs, this function translates the property name
-/// and adjusts the value format where needed (e.g., LV2 uses linear gain, Rust uses dB).
+/// When the target element is from strom-dsp, this function translates the property name
+/// and adjusts the value format where needed (e.g., LV2 uses linear gain, strom-dsp uses dB).
 ///
 /// Returns a list of (translated_prop_name, translated_value) pairs, or empty if no translation needed.
-/// May return multiple pairs when one LV2 property maps to multiple Rust properties.
+/// May return multiple pairs when one LV2 property maps to multiple strom-dsp properties.
 pub fn translate_property_for_element(
     element: &gst::Element,
     prop_name: &str,
@@ -157,11 +181,11 @@ pub fn translate_property_for_element(
     // when static plugins and LV2 plugins coexist.
     let type_name = element.type_().name();
 
-    if type_name == "LspRsGate" || type_name == "StromDspGate" {
+    if type_name == "StromDspGate" {
         let pairs = match prop_name {
             "gt" => {
                 // LV2: gt is linear (already transformed by db_to_linear).
-                // Rust: open-threshold/close-threshold are dB. Reverse the transform.
+                // strom-dsp: open-threshold/close-threshold are dB. Reverse the transform.
                 let db_val = match value {
                     PropertyValue::Float(v) => linear_to_db(*v),
                     _ => return vec![],
@@ -179,9 +203,9 @@ pub fn translate_property_for_element(
         return pairs;
     }
 
-    if type_name == "LspRsCompressor" || type_name == "StromDspCompressor" {
+    if type_name == "StromDspCompressor" {
         let pair = match prop_name {
-            "al" if type_name == "StromDspCompressor" => {
+            "al" => {
                 // Same offset as the build path (see STROMDSP_COMP_THRESHOLD_OFFSET_DB).
                 let linear = match value {
                     PropertyValue::Float(v) => {
@@ -191,7 +215,6 @@ pub fn translate_property_for_element(
                 };
                 ("threshold".to_string(), PropertyValue::Float(linear))
             }
-            "al" => ("threshold".to_string(), value.clone()),
             "cr" => ("ratio".to_string(), value.clone()),
             "at" => ("attack".to_string(), value.clone()),
             "rt" => ("release".to_string(), value.clone()),
@@ -211,14 +234,14 @@ pub fn translate_property_for_element(
         return vec![pair];
     }
 
-    if type_name == "LspRsEqualizer" || type_name == "StromDspEqualizer" {
+    if type_name == "StromDspEqualizer" {
         // EQ band properties: f-N -> bandN-frequency, g-N -> bandN-gain, q-N -> bandN-q
         if let Some(band) = prop_name.strip_prefix("f-") {
             return vec![(format!("band{}-frequency", band), value.clone())];
         }
         if let Some(band) = prop_name.strip_prefix("g-") {
             // LV2: g-N is linear (already transformed by db_to_linear).
-            // Rust: bandN-gain is dB. Reverse the transform.
+            // strom-dsp: bandN-gain is dB. Reverse the transform.
             let db_val = match value {
                 PropertyValue::Float(v) => linear_to_db(*v),
                 _ => return vec![],
@@ -231,11 +254,11 @@ pub fn translate_property_for_element(
         return vec![];
     }
 
-    if type_name == "LspRsLimiter" || type_name == "StromDspLimiter" {
+    if type_name == "StromDspLimiter" {
         let pair = match prop_name {
             "th" => {
                 // LV2: th is linear (already transformed by db_to_linear).
-                // Rust: threshold is dB. Reverse the transform.
+                // strom-dsp: threshold is dB. Reverse the transform.
                 let db_val = match value {
                     PropertyValue::Float(v) => linear_to_db(*v),
                     _ => return vec![],
@@ -284,9 +307,9 @@ mod clamping_tests {
     fn live_knee(linear: f64) -> f64 {
         gst::init().expect("GStreamer initialises");
         crate::gst::register_dsp_plugins();
-        let comp = gst::ElementFactory::make("lsp-rs-compressor")
+        let comp = gst::ElementFactory::make("stromdsp-compressor")
             .build()
-            .expect("lsp-rs-compressor is statically registered");
+            .expect("stromdsp-compressor is statically registered");
         let out = translate_property_for_element(&comp, "kn", &PropertyValue::Float(linear));
         match out.as_slice() {
             [(name, PropertyValue::Float(v))] if name == "knee" => *v,

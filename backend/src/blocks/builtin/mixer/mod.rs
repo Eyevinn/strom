@@ -61,8 +61,9 @@
 //! output pads don't cause NOT_LINKED flow errors. Audiomixer elements use
 //! force-live=true so unconnected input pads don't stall the pipeline.
 //!
-//! Processing uses LSP LV2 plugins when available. Falls back to identity passthrough
-//! when LV2 plugins are not installed.
+//! Processing uses the built-in strom-dsp elements, or the external LSP LV2
+//! plugins with `dsp_backend = lv2`. Falls back to identity passthrough when
+//! the LV2 plugins are not installed.
 
 mod builder;
 mod definition;
@@ -78,13 +79,13 @@ use strom_types::mixer::{
 };
 /// Level meter interval in nanoseconds (100ms)
 const METER_INTERVAL_NS: u64 = 100_000_000;
-/// EQ band type for Peaking/Bell filter (lsp-rs-equalizer enum value)
+/// EQ band type for Peaking/Bell filter (stromdsp-equalizer enum value)
 const EQ_BAND_TYPE_BELL: i32 = 7;
 
 // Public API
 pub use builder::MixerBuilder;
 pub use definition::get_blocks;
-pub use properties::translate_property_for_element;
+pub use properties::{migrate_dsp_backend, translate_property_for_element};
 
 /// Block definition ID for the audio mixer. Used by state-layer hooks that
 /// need to recognize mixer instances (e.g. the PFL/AFL → monitor-gate derivation).

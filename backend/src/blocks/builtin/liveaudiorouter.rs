@@ -152,8 +152,8 @@ pub const OUTPUT_SOFT_CLIP_PROPERTY: &str = "output_soft_clip_enabled";
 /// above it, and an asymptote at full scale — which is a soft clipper. Nothing
 /// it emits can reach 0 dBFS whatever goes in.
 ///
-/// Not `lsp-rs-limiter`, the true limiter `builtin.mixer` uses through
-/// `make_limiter_element`. That one rides gain on an envelope, and on speech
+/// Not a true limiter like the one `builtin.mixer` builds through
+/// `make_limiter_element`. That kind rides gain on an envelope, and on speech
 /// its attack loses the transient it was pointed at: measured on a four-seat
 /// return 5 dB over, it still let 0.05% of samples past full scale at a -3 dB
 /// threshold and 0.0007% at -10 dB, where it also costs 7.5 dB of level. A

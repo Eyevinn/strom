@@ -114,6 +114,7 @@ impl BlockBuilder for MixerBuilder {
         let num_groups = parse_num_groups(properties);
         let sample_rate = parse_sample_rate(properties);
         let requested_backend = get_string_prop(properties, "dsp_backend", DEFAULT_DSP_BACKEND);
+        let requested_backend = dsp_backend_alias(requested_backend).unwrap_or(requested_backend);
         let dsp_backend = if DSP_BACKENDS.contains(&requested_backend) {
             requested_backend
         } else {

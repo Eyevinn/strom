@@ -239,7 +239,7 @@ impl PipelineManager {
         }
 
         // Translate property name/value for elements that need conversion.
-        // Mixer lsp-rs elements use different property names than LV2 conventions.
+        // Mixer strom-dsp elements use different property names than LV2 conventions.
         // AudioGain stores gain in dB but GStreamer volume element expects linear.
         let mut translations = crate::blocks::builtin::mixer::translate_property_for_element(
             element,
@@ -261,7 +261,7 @@ impl PipelineManager {
         } else {
             for (translated_name, translated_value) in &translations {
                 debug!(
-                    "Translated property {}.{} -> {}.{} for lsp-rs element",
+                    "Translated property {}.{} -> {}.{}",
                     element_id, property_name, element_id, translated_name
                 );
                 self.validate_property_mutability(element, element_id, translated_name, state)?;

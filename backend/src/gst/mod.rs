@@ -35,7 +35,7 @@ pub mod volume_ramp;
 pub mod whep_probe;
 
 /// Register the GStreamer plugins Strom links in statically (gst-plugins-rs
-/// WebRTC, inter, RTP, audiofx, isobmff, lsp-dsp-rs, and EFP with the `efp`
+/// WebRTC, inter, RTP, audiofx, isobmff, strom-dsp, and EFP with the `efp`
 /// feature). Call once, after `gst::init()`, before any flow is built. Panics
 /// when a plugin fails to register: the blocks that use it could not work.
 ///
@@ -62,15 +62,13 @@ pub fn register_static_plugins() {
     gst_plugin_efp::plugin_register_static().expect("Could not register efp mux/demux plugins");
 }
 
-/// Register the audio mixer's built-in DSP plugins (lsp-plugins-rs and
-/// strom-dsp), once per process. Call after `gst::init()`. Registering a
+/// Register the built-in strom-dsp plugins, once per process. Call after `gst::init()`. Registering a
 /// static plugin from two threads at once can crash, so tests that run in
 /// parallel call this instead of `plugin_register_static()`. Panics when a
 /// plugin fails to register.
 pub fn register_dsp_plugins() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        gst_plugins_lsp::plugin_register_static().expect("Could not register lsp-dsp-rs plugins");
         gst_plugin_stromdsp::plugin_register_static()
             .expect("Could not register strom-dsp plugins");
     });

@@ -35,7 +35,7 @@ impl MixerEditor {
     ///
     /// Values are sent in user-facing units (Hz, dB, ms) — the backend's
     /// `db_to_linear` transform handles the conversion to the underlying
-    /// LV2/LSP element. HPF enabled remains on the element path because the
+    /// DSP element. HPF enabled remains on the element path because the
     /// "off" state is the cutoff=0 passthrough trick, not a real bool.
     pub(super) fn update_processing_param(
         &mut self,
@@ -105,7 +105,7 @@ impl MixerEditor {
                 format!("ch{}_gate_release", ch1),
                 PropertyValue::Float(channel.gate_release as f64),
             ),
-            // LSP gate has no settable range property
+            // The gate has no settable range property
             ("gate", "range") => return,
             ("comp", "threshold") => (
                 format!("ch{}_comp_threshold", ch1),
