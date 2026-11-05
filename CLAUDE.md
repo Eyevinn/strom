@@ -35,6 +35,11 @@
 - Moving the target or the floor needs a stated reason in its own issue: a fix or feature we need, a supported distro going end of life. "A newer version exists" is not a reason. A change of either touches CI, the Docker images, `install.sh`, the Windows installer scripts, the `v1_*` Cargo features, the startup version warning, and the docs that name the versions. Move them together.
 - A test that fails only on an old GStreamer because of an upstream bug fixed in the target is not a reason to raise the floor. Keep it out of the floor smoke set, and name the upstream fix.
 
+## Upstream Findings
+- When you find a bug or odd behaviour in GStreamer, a plugin, or another dependency (libsoup, nvcodec, ...), add an entry to `docs/UPSTREAM_NOTES.md` in the same PR that finds or works around it. It is data collection for whoever reports or fixes it upstream, not a commitment to do so.
+- Fill in the fields the file lists: versions and platform, symptom, a simple repro, a hint at the cause, tests, upstream status, and links to the Strom issue or PR. Mark what is measured and what is a guess.
+- Do not keep a Strom issue open only to remember an upstream problem. Move it to the file and close the issue.
+
 ## GStreamer Queues
 - Leave `queue`, `queue2`, and `multiqueue` elements with default property values unless there is a documented latency requirement that justifies overriding them.
 
