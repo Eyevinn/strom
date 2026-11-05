@@ -233,6 +233,13 @@ fn vp9_source() -> Vec<gst::Element> {
     vpx_source("vp9enc")
 }
 
+/// videotestsrc -> the real Video Encoder block set to VP8.
+fn videoenc_vp8_source() -> Vec<gst::Element> {
+    let mut chain = sized_raw_video(320, 240);
+    chain.push(common::block::videoenc_bin("vp8"));
+    chain
+}
+
 // --- Connectivity ---------------------------------------------------------
 
 #[test]
@@ -576,6 +583,24 @@ fn whipclientsink_publishes_vp8_to_a_whip_server() {
         return;
     }
     assert_publishes("whipclientsink", vp8_source);
+}
+
+/// The Video Encoder block's VP8 output, as configured by the block, is what
+/// WHIP Output publishes.
+#[test]
+fn whipsink_publishes_vp8_from_the_video_encoder_block() {
+    if !available(VPX_LOOPBACK_ELEMENTS) {
+        return;
+    }
+    assert_publishes("whipsink", videoenc_vp8_source);
+}
+
+#[test]
+fn whipclientsink_publishes_vp8_from_the_video_encoder_block() {
+    if !available(VPX_LOOPBACK_ELEMENTS) {
+        return;
+    }
+    assert_publishes("whipclientsink", videoenc_vp8_source);
 }
 
 #[test]

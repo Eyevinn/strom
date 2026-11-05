@@ -12,19 +12,20 @@ pub fn context() -> BlockBuildContext {
     BlockBuildContext::new(Vec::new(), "all".to_string())
 }
 
-/// Add every element of `built` to `pipeline` and make the internal links it
-/// declares, as the pipeline manager does. Returns the elements by ID.
+/// Add every element of `built` to `bin` (a pipeline, or a bin of its own) and
+/// make the internal links it declares, as the pipeline manager does. Returns
+/// the elements by ID.
 pub fn install(
-    pipeline: &gst::Pipeline,
+    bin: &impl IsA<gst::Bin>,
     built: &BlockBuildResult,
 ) -> HashMap<String, gst::Element> {
-    install_except(pipeline, built, &[])
+    install_except(bin, built, &[])
 }
 
 /// [`install`], leaving out the elements in `skip` and every link that touches
 /// one.
 pub fn install_except(
-    pipeline: &gst::Pipeline,
+    bin: &impl IsA<gst::Bin>,
     built: &BlockBuildResult,
     skip: &[&str],
 ) -> HashMap<String, gst::Element> {
@@ -33,7 +34,7 @@ pub fn install_except(
         if skip.contains(&id.as_str()) {
             continue;
         }
-        pipeline.add(element).expect("add block element");
+        bin.add(element).expect("add block element");
         by_id.insert(id.clone(), element.clone());
     }
     for (from, to) in &built.internal_links {
@@ -69,4 +70,37 @@ pub fn run_setups(ctx: &BlockBuildContext) {
     for setup in ctx.take_element_setups() {
         setup(flow_id, events.clone());
     }
+}
+
+/// The real Video Encoder block (`builtin.videoenc`) for `codec`, software
+/// encoder, in a bin with ghost pads `sink` (the block's `video_in`) and `src`
+/// (its `encoded_out`), so a test can link it like one element.
+pub fn videoenc_bin(codec: &str) -> gst::Element {
+    let properties = HashMap::from([
+        (
+            "codec".to_string(),
+            strom_types::PropertyValue::String(codec.to_string()),
+        ),
+        (
+            "encoder_preference".to_string(),
+            strom_types::PropertyValue::String("software".to_string()),
+        ),
+    ]);
+    let built = strom::blocks::builtin::get_builder("builtin.videoenc")
+        .expect("Video Encoder builder")
+        .build("videoenc", &properties, &context())
+        .expect("Video Encoder builds");
+    let bin = gst::Bin::new();
+    let by_id = install(&bin, &built);
+    let ghost = |element: &str, pad: &str, name: &str| {
+        let target = by_id[element].static_pad(pad).expect("block pad");
+        let ghost = gst::GhostPad::builder_with_target(&target)
+            .expect("ghost pad")
+            .name(name)
+            .build();
+        bin.add_pad(&ghost).expect("add ghost pad");
+    };
+    ghost("videoenc:input", "sink", "sink");
+    ghost("videoenc:capsfilter", "src", "src");
+    bin.upcast()
 }
