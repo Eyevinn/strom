@@ -102,6 +102,26 @@ pub fn media_player_definition() -> BlockDefinition {
                 visible_when: None,
             },
             ExposedProperty {
+                name: "read_ahead_s".to_string(),
+                label: "Read-ahead (s)".to_string(),
+                description: "Seconds of http(s)/HLS/DASH media fetched ahead of playback, \
+                              in memory. Raise for high-bitrate files on an uneven network. \
+                              0 = GStreamer default, max 120."
+                    .to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(
+                    super::bridge::NetworkBuffer::DEFAULT_READ_AHEAD_S,
+                )),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "read_ahead_s".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
+            ExposedProperty {
                 name: "loop_playlist".to_string(),
                 label: "Loop Playlist".to_string(),
                 description: "Loop back to the first file when reaching the end of the playlist"

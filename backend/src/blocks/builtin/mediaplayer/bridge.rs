@@ -15,7 +15,7 @@ use gstreamer_app as gst_app;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use strom_types::{FlowId, StromEvent};
+use strom_types::{FlowId, PropertyValue, StromEvent};
 use tracing::{debug, error, info, warn};
 
 /// Which element decodes in decode mode.
@@ -48,6 +48,65 @@ impl Decoder {
         match self {
             Decoder::Classic => "uridecodebin",
             Decoder::Decodebin3 => "uridecodebin3",
+        }
+    }
+}
+
+/// How far the source element reads ahead of playback on a network stream
+/// (http(s) files, HLS, DASH). GStreamer's URI bins put no queue between
+/// `souphttpsrc` and the demuxer unless `use-buffering` is on, so any dip in
+/// download speed stalls playback at once. Local files are not affected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetworkBuffer {
+    /// Encoded media to hold ahead of playback, in memory. 0 leaves the
+    /// element's own default: off for `uridecodebin(3)`, 5 s for
+    /// `urisourcebin` in passthrough.
+    pub read_ahead_s: u64,
+}
+
+impl NetworkBuffer {
+    pub const DEFAULT_READ_AHEAD_S: u64 = 10;
+    /// Read-ahead sits in memory and grows with the bitrate: 120 s of a
+    /// 32 Mbit/s file is about 480 MB. More than this is capped.
+    pub const MAX_READ_AHEAD_S: u64 = 120;
+
+    /// From the block's `read_ahead_s` property. A negative value means 0,
+    /// the element's default.
+    pub fn from_properties(properties: &HashMap<String, PropertyValue>) -> Self {
+        let read_ahead_s = match properties.get("read_ahead_s") {
+            Some(PropertyValue::UInt(u)) => *u,
+            Some(PropertyValue::Int(i)) => u64::try_from(*i).unwrap_or(0),
+            _ => Self::DEFAULT_READ_AHEAD_S,
+        };
+        if read_ahead_s > Self::MAX_READ_AHEAD_S {
+            warn!(
+                "Media Player: read-ahead of {} s capped at {} s",
+                read_ahead_s,
+                Self::MAX_READ_AHEAD_S
+            );
+        }
+        Self {
+            read_ahead_s: read_ahead_s.min(Self::MAX_READ_AHEAD_S),
+        }
+    }
+
+    /// Set on a `uridecodebin`, `uridecodebin3` or `urisourcebin`; all three
+    /// share these properties. 0 leaves the element as it is.
+    fn apply(self, source: &gst::Element) {
+        if self.read_ahead_s == 0 {
+            return;
+        }
+        // At most MAX_READ_AHEAD_S, far inside i64 nanoseconds.
+        let ns = gst::ClockTime::from_seconds(self.read_ahead_s).nseconds();
+        source.set_property("use-buffering", true);
+        source.set_property("buffer-duration", ns as i64);
+    }
+}
+
+impl Default for NetworkBuffer {
+    fn default() -> Self {
+        Self {
+            read_ahead_s: Self::DEFAULT_READ_AHEAD_S,
         }
     }
 }
@@ -124,6 +183,7 @@ pub fn create_decode_pipeline(
     state: &Arc<MediaPlayerState>,
     initial_uri: Option<&str>,
     decoder: Decoder,
+    network_buffer: NetworkBuffer,
 ) -> Result<gst::Pipeline, BlockBuildError> {
     let pipeline_name = format!("mediaplayer-internal-{}", instance_id);
     let pipeline = gst::Pipeline::builder().name(&pipeline_name).build();
@@ -147,6 +207,7 @@ pub fn create_decode_pipeline(
             Some(select_stream(&collection, &stream, videos, audios).to_value())
         });
     }
+    network_buffer.apply(&source);
 
     if let Some(uri) = initial_uri {
         if state.stinger.enabled {
@@ -229,6 +290,7 @@ pub fn create_passthrough_pipeline(
     instance_id: &str,
     state: &Arc<MediaPlayerState>,
     initial_uri: Option<&str>,
+    network_buffer: NetworkBuffer,
 ) -> Result<gst::Pipeline, BlockBuildError> {
     let pipeline_name = format!("mediaplayer-internal-{}", instance_id);
     let pipeline = gst::Pipeline::builder().name(&pipeline_name).build();
@@ -239,6 +301,7 @@ pub fn create_passthrough_pipeline(
         .property("parse-streams", true)
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("urisourcebin: {}", e)))?;
+    network_buffer.apply(&source);
 
     if let Some(uri) = initial_uri {
         source.set_property("uri", uri);
@@ -1556,7 +1619,14 @@ mod tests {
 
         for decoder in [Decoder::Classic, Decoder::Decodebin3] {
             let state = state_with_slots(1, 2);
-            let pipeline = create_decode_pipeline("test", &state, Some(&uri), decoder).unwrap();
+            let pipeline = create_decode_pipeline(
+                "test",
+                &state,
+                Some(&uri),
+                decoder,
+                NetworkBuffer::default(),
+            )
+            .unwrap();
             let msg = play_to_end(&pipeline);
             assert!(
                 matches!(msg.view(), gst::MessageView::Eos(_)),
@@ -1607,9 +1677,15 @@ mod tests {
         for passthrough in [false, true] {
             let state = state_with_slots(1, 2);
             let pipeline = if passthrough {
-                create_passthrough_pipeline("test", &state, Some(&uri))
+                create_passthrough_pipeline("test", &state, Some(&uri), NetworkBuffer::default())
             } else {
-                create_decode_pipeline("test", &state, Some(&uri), Decoder::Decodebin3)
+                create_decode_pipeline(
+                    "test",
+                    &state,
+                    Some(&uri),
+                    Decoder::Decodebin3,
+                    NetworkBuffer::default(),
+                )
             }
             .unwrap();
             let other = std::thread::spawn(|| std::thread::current().id())
@@ -1667,7 +1743,14 @@ mod tests {
         let flow = gst::Pipeline::new();
         flow.add(&state.video_appsrcs[0]).unwrap();
         flow.set_context(&context("flow"));
-        let internal = create_decode_pipeline("mp", &state, None, Decoder::Decodebin3).unwrap();
+        let internal = create_decode_pipeline(
+            "mp",
+            &state,
+            None,
+            Decoder::Decodebin3,
+            NetworkBuffer::default(),
+        )
+        .unwrap();
         let source = internal.by_name("mp_uridecodebin3").unwrap();
 
         source
@@ -1718,8 +1801,14 @@ mod tests {
         let uri = write_two_audio_track_file(dir.path());
 
         let state = state_with_slots(1, 1);
-        let pipeline =
-            create_decode_pipeline("test", &state, Some(&uri), Decoder::Decodebin3).unwrap();
+        let pipeline = create_decode_pipeline(
+            "test",
+            &state,
+            Some(&uri),
+            Decoder::Decodebin3,
+            NetworkBuffer::default(),
+        )
+        .unwrap();
         let msg = play_to_end(&pipeline);
         assert!(matches!(msg.view(), gst::MessageView::Eos(_)), "{:?}", msg);
         assert!(pipeline.by_name("test_appsink_audio").is_some());
@@ -2056,7 +2145,14 @@ mod tests {
         state.timing = Arc::new(timing::Timing::new(200));
         state.main_pipeline.set(Some(&main));
         let state = Arc::new(state);
-        let internal = create_decode_pipeline("test", &state, Some(&uri), decoder).unwrap();
+        let internal = create_decode_pipeline(
+            "test",
+            &state,
+            Some(&uri),
+            decoder,
+            NetworkBuffer::default(),
+        )
+        .unwrap();
         *state.internal_pipeline.write().unwrap() = Some(internal.clone());
         state.set_playlist(vec![uri.clone(), uri]);
         assert!(state.follow_main_clock(&internal));
@@ -2110,7 +2206,9 @@ mod tests {
         }
         for decoder in [Decoder::Classic, Decoder::Decodebin3] {
             let state = test_state();
-            let pipeline = create_decode_pipeline("test", &state, None, decoder).unwrap();
+            let pipeline =
+                create_decode_pipeline("test", &state, None, decoder, NetworkBuffer::default())
+                    .unwrap();
             assert_hdrext_disabled_on_late_depayloader(&pipeline);
         }
     }
@@ -2122,7 +2220,8 @@ mod tests {
             return;
         }
         let state = test_state();
-        let pipeline = create_passthrough_pipeline("test", &state, None).unwrap();
+        let pipeline =
+            create_passthrough_pipeline("test", &state, None, NetworkBuffer::default()).unwrap();
         assert_hdrext_disabled_on_late_depayloader(&pipeline);
     }
 

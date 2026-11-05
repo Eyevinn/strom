@@ -1213,6 +1213,19 @@ impl eframe::App for StromApp {
                     // Store the flow ID to navigate to after the next refresh
                     self.pending_flow_navigation = Some(flow_id);
                 }
+                AppMessage::MixerPropertiesLoaded {
+                    flow_id,
+                    block_id,
+                    properties,
+                } => {
+                    if let Some(editor) = self
+                        .mixer_editor
+                        .as_mut()
+                        .filter(|e| e.flow_id() == flow_id && e.block_id() == block_id)
+                    {
+                        editor.load_from_properties(&properties);
+                    }
+                }
                 AppMessage::LatencyLoaded { flow_id, latency } => {
                     tracing::debug!(
                         "Latency loaded for flow {}: {}",
@@ -1586,6 +1599,42 @@ impl eframe::App for StromApp {
                 );
                 editor.load_from_properties(&properties);
                 self.mixer_editor = Some(editor);
+
+                // The cached flow misses live changes: the backend stores them
+                // without telling clients. Fetch the stored flow and the running
+                // pipeline's values (solo state is never stored) and reload.
+                let api = self.api.clone();
+                let tx = self.channels.sender();
+                let ctx = ui.ctx().clone();
+                let mixer_block_id = block_id.clone();
+                spawn_task(async move {
+                    let flow = match api.get_flow(flow_id).await {
+                        Ok(flow) => flow,
+                        Err(e) => {
+                            tracing::warn!("Failed to fetch flow for mixer editor: {}", e);
+                            return;
+                        }
+                    };
+                    let Some(mut properties) = flow
+                        .blocks
+                        .iter()
+                        .find(|b| b.id == mixer_block_id)
+                        .map(|b| b.properties.clone())
+                    else {
+                        return;
+                    };
+                    match api.get_block_properties(&flow_id, &mixer_block_id).await {
+                        Ok(live) => properties.extend(live),
+                        Err(e) => tracing::warn!("Failed to fetch live mixer values: {}", e),
+                    }
+                    let _ = tx.send(AppMessage::FlowFetched(Box::new(flow)));
+                    let _ = tx.send(AppMessage::MixerPropertiesLoaded {
+                        flow_id,
+                        block_id: mixer_block_id,
+                        properties,
+                    });
+                    ctx.request_repaint();
+                });
 
                 // Enter Live Audio mode
                 self.app_mode = AppMode::Live { flow_id, block_id };

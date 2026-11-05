@@ -41,6 +41,14 @@ pub enum AppMessage {
     /// Single flow fetched (for updating after WebSocket events)
     FlowFetched(Box<Flow>),
 
+    /// Current audio mixer values fetched when the mixer editor opens: the stored
+    /// block properties with the running pipeline's live values on top.
+    MixerPropertiesLoaded {
+        flow_id: strom_types::FlowId,
+        block_id: String,
+        properties: std::collections::HashMap<String, strom_types::PropertyValue>,
+    },
+
     /// Request full refresh of flows
     RefreshNeeded,
 
