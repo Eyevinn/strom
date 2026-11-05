@@ -106,7 +106,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 label: "Read-ahead (s)".to_string(),
                 description: "Seconds of http(s)/HLS/DASH media fetched ahead of playback, \
                               in memory. Raise for high-bitrate files on an uneven network. \
-                              0 = off, max 120."
+                              0 = GStreamer default, max 120."
                     .to_string(),
                 property_type: PropertyType::UInt,
                 default_value: Some(PropertyValue::UInt(
@@ -115,24 +115,6 @@ pub fn media_player_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "read_ahead_s".to_string(),
-                    transform: None,
-                },
-                live: false,
-                persist: None,
-                visible_when: None,
-            },
-            ExposedProperty {
-                name: "download_to_disk".to_string(),
-                label: "Download to Disk".to_string(),
-                description: "Download http(s) files (mp4, mov, ...) to a temp file at full \
-                              network speed while playing. Uses disk equal to the file size; \
-                              removed after."
-                    .to_string(),
-                property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(false)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "download_to_disk".to_string(),
                     transform: None,
                 },
                 live: false,

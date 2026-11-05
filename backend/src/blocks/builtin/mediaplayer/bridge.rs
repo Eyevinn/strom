@@ -58,13 +58,10 @@ impl Decoder {
 /// download speed stalls playback at once. Local files are not affected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NetworkBuffer {
-    /// Encoded media to hold ahead of playback, in memory. 0 turns
-    /// read-ahead off.
+    /// Encoded media to hold ahead of playback, in memory. 0 leaves the
+    /// element's own default: off for `uridecodebin(3)`, 5 s for
+    /// `urisourcebin` in passthrough.
     pub read_ahead_s: u64,
-    /// Download the whole file to a temporary file on disk as fast as the
-    /// network allows (`downloadbuffer`), for formats that allow it (mp4,
-    /// mov, ...). No size cap: the file takes as much disk as its size.
-    pub download: bool,
 }
 
 impl NetworkBuffer {
@@ -73,8 +70,8 @@ impl NetworkBuffer {
     /// 32 Mbit/s file is about 480 MB. More than this is capped.
     pub const MAX_READ_AHEAD_S: u64 = 120;
 
-    /// From the block's `read_ahead_s` and `download_to_disk` properties.
-    /// A negative read-ahead turns it off, as -1 does in GStreamer.
+    /// From the block's `read_ahead_s` property. A negative value means 0,
+    /// the element's default.
     pub fn from_properties(properties: &HashMap<String, PropertyValue>) -> Self {
         let read_ahead_s = match properties.get("read_ahead_s") {
             Some(PropertyValue::UInt(u)) => *u,
@@ -90,23 +87,19 @@ impl NetworkBuffer {
         }
         Self {
             read_ahead_s: read_ahead_s.min(Self::MAX_READ_AHEAD_S),
-            download: matches!(
-                properties.get("download_to_disk"),
-                Some(PropertyValue::Bool(true))
-            ),
         }
     }
 
     /// Set on a `uridecodebin`, `uridecodebin3` or `urisourcebin`; all three
-    /// share these properties.
+    /// share these properties. 0 leaves the element as it is.
     fn apply(self, source: &gst::Element) {
-        source.set_property("use-buffering", self.read_ahead_s > 0);
-        if self.read_ahead_s > 0 {
-            // At most MAX_READ_AHEAD_S, far inside i64 nanoseconds.
-            let ns = gst::ClockTime::from_seconds(self.read_ahead_s).nseconds();
-            source.set_property("buffer-duration", ns as i64);
+        if self.read_ahead_s == 0 {
+            return;
         }
-        source.set_property("download", self.download);
+        // At most MAX_READ_AHEAD_S, far inside i64 nanoseconds.
+        let ns = gst::ClockTime::from_seconds(self.read_ahead_s).nseconds();
+        source.set_property("use-buffering", true);
+        source.set_property("buffer-duration", ns as i64);
     }
 }
 
@@ -114,7 +107,6 @@ impl Default for NetworkBuffer {
     fn default() -> Self {
         Self {
             read_ahead_s: Self::DEFAULT_READ_AHEAD_S,
-            download: false,
         }
     }
 }

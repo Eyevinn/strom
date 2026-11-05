@@ -709,35 +709,45 @@ mod tests {
                 10_000_000_000,
                 "{name}"
             );
-            assert!(!source.property::<bool>("download"), "{name}");
         }
     }
 
     #[test]
-    fn read_ahead_and_download_follow_the_block_properties() {
+    fn read_ahead_follows_the_block_property() {
         let source = built_source(
             true,
             bridge::Decoder::DECODEBIN3,
-            &[
-                ("read_ahead_s", PropertyValue::UInt(30)),
-                ("download_to_disk", PropertyValue::Bool(true)),
-            ],
+            &[("read_ahead_s", PropertyValue::UInt(30))],
         );
         assert_eq!(source.property::<i64>("buffer-duration"), 30_000_000_000);
-        assert!(source.property::<bool>("download"));
+    }
 
-        let source = built_source(
-            true,
-            bridge::Decoder::DECODEBIN3,
-            &[("read_ahead_s", PropertyValue::UInt(0))],
-        );
-        assert!(!source.property::<bool>("use-buffering"));
+    /// 0 leaves each element at its own default. Passthrough's
+    /// `urisourcebin` buffers by itself, and keeps doing so.
+    #[test]
+    fn zero_read_ahead_keeps_each_elements_default() {
+        for (decode, decoder) in [
+            (true, bridge::Decoder::DECODEBIN3),
+            (true, bridge::Decoder::CLASSIC),
+            (false, bridge::Decoder::DECODEBIN3),
+        ] {
+            let source = built_source(decode, decoder, &[("read_ahead_s", PropertyValue::UInt(0))]);
+            let name = source.factory().unwrap().name();
+            let pristine = gst::ElementFactory::make(&name).build().unwrap();
+            for prop in ["use-buffering", "buffer-duration"] {
+                assert_eq!(
+                    source.property_value(prop).serialize().unwrap(),
+                    pristine.property_value(prop).serialize().unwrap(),
+                    "{name} {prop}"
+                );
+            }
+        }
     }
 
     /// Read-ahead is held in memory, so it has a ceiling, and a value no
     /// clock can hold (u64::MAX seconds) builds instead of panicking.
     #[test]
-    fn read_ahead_is_capped_and_a_negative_one_turns_it_off() {
+    fn read_ahead_is_capped_and_a_negative_one_means_zero() {
         let max_ns = bridge::NetworkBuffer::MAX_READ_AHEAD_S as i64 * 1_000_000_000;
         for huge in [3600, u64::MAX] {
             let source = built_source(
@@ -748,12 +758,15 @@ mod tests {
             assert_eq!(source.property::<i64>("buffer-duration"), max_ns, "{huge}");
         }
 
+        // Negative means 0: the element's default, which for passthrough's
+        // urisourcebin is to buffer.
         let source = built_source(
-            true,
+            false,
             bridge::Decoder::DECODEBIN3,
             &[("read_ahead_s", PropertyValue::Int(-1))],
         );
-        assert!(!source.property::<bool>("use-buffering"));
+        assert!(source.property::<bool>("use-buffering"));
+        assert_eq!(source.property::<i64>("buffer-duration"), -1);
     }
 
     /// A Media Player built by the real builder, its elements in a flow of
