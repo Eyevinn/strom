@@ -52,6 +52,7 @@ fn test_codec_parsing_valid() {
         ("h265", Codec::H265),
         ("av1", Codec::AV1),
         ("vp9", Codec::VP9),
+        ("vp8", Codec::VP8),
     ];
 
     for (codec_str, expected) in test_cases {
@@ -171,6 +172,9 @@ fn test_software_encoder_list() {
 
     let vp9 = get_software_encoder_list(Codec::VP9);
     assert_eq!(vp9, vec!["vp9enc"], "VP9 software encoder");
+
+    let vp8 = get_software_encoder_list(Codec::VP8);
+    assert_eq!(vp8, vec!["vp8enc"], "VP8 software encoder");
 }
 
 #[test]
@@ -1614,9 +1618,10 @@ fn av1enc_input_is_limited_to_420() {
 }
 
 /// The profile list offers each named profile only for its own codec, and
-/// the two policies (auto, none) for every codec. The property itself stays
-/// visible for every codec: on VP9 and AV1 "none" lifts the 8-bit 4:2:0
-/// input limit that "auto" applies.
+/// the two policies (auto, none) for every codec that has a profile. The
+/// property stays visible for VP9 and AV1, where "none" lifts the 8-bit 4:2:0
+/// input limit that "auto" applies, and is hidden for VP8, which has no
+/// other input format.
 #[test]
 fn profile_options_carry_their_codec_condition() {
     let def = videoenc_definition();
@@ -1625,7 +1630,22 @@ fn profile_options_carry_their_codec_condition() {
         .iter()
         .find(|p| p.name == "profile")
         .expect("profile property");
-    assert!(profile.visible_when.is_none());
+    let props_for = |codec: &str| {
+        HashMap::from([(
+            "codec".to_string(),
+            PropertyValue::String(codec.to_string()),
+        )])
+    };
+    let property_visible = |codec: &str| {
+        profile
+            .visible_when
+            .as_ref()
+            .is_none_or(|c| c.is_met(&props_for(codec), &def.exposed_properties))
+    };
+    for codec in ["h264", "h265", "av1", "vp9"] {
+        assert!(property_visible(codec), "profile hidden for {codec}");
+    }
+    assert!(!property_visible("vp8"), "profile shown for vp8");
     let PropertyType::Enum { values } = &profile.property_type else {
         panic!("profile is not an enum");
     };
@@ -1683,4 +1703,365 @@ fn profile_options_carry_their_codec_condition() {
     assert!(!offered("h264").contains(&"main-10".to_string()));
     assert!(offered("h265").contains(&"main-10".to_string()));
     assert!(!offered("h265").contains(&"high".to_string()));
+}
+
+// --- VP8, and the hardware list entries by factory name --------------------
+
+const AV1: &str = "video/x-av1";
+const VP9: &str = "video/x-vp9";
+const VP8: &str = "video/x-vp8";
+
+/// The hardware list for `codec`, then its software list, as `select_encoder`
+/// runs them in Auto, over descriptors standing in for the registry.
+fn choose_auto(codec: Codec, factories: &[FactoryInfo]) -> Option<String> {
+    let wanted = EncoderOutput {
+        media_type: codec_media_type(codec),
+        profile: pinned_profile(codec, Profile::Auto),
+    };
+    choose_encoder(&get_hardware_encoder_list(codec), &wanted, factories).or_else(|| {
+        choose_encoder(
+            &named(&get_software_encoder_list(codec)),
+            &wanted,
+            factories,
+        )
+    })
+}
+
+fn va(name: &str, media: &str) -> FactoryInfo {
+    factory(name, "va", HW_KLASS, gst::Rank::NONE + 1, media)
+}
+
+fn vpx(name: &str, media: &str) -> FactoryInfo {
+    factory(name, "vpx", SW_KLASS, gst::Rank::PRIMARY, media)
+}
+
+/// Intel encodes AV1 only on the low-power entrypoint, so its driver
+/// registers `vaav1lpenc` and no `vaav1enc`. Without the lp entry the block
+/// fell back to software on hardware that encodes AV1.
+#[test]
+fn av1_uses_the_low_power_va_encoder() {
+    let factories = [
+        va("vaav1lpenc", AV1),
+        factory("svtav1enc", "svtav1", SW_KLASS, gst::Rank::PRIMARY, AV1),
+    ];
+    assert_eq!(
+        choose_auto(Codec::AV1, &factories).as_deref(),
+        Some("vaav1lpenc")
+    );
+    // Both entrypoints: the full one first, as for H.264 and H.265.
+    let factories = [va("vaav1lpenc", AV1), va("vaav1enc", AV1)];
+    assert_eq!(
+        choose_auto(Codec::AV1, &factories).as_deref(),
+        Some("vaav1enc")
+    );
+}
+
+/// Same for VP9 on Intel Gen11 and later.
+#[test]
+fn vp9_uses_the_low_power_va_encoder() {
+    let factories = [va("vavp9lpenc", VP9), vpx("vp9enc", VP9)];
+    assert_eq!(
+        choose_auto(Codec::VP9, &factories).as_deref(),
+        Some("vavp9lpenc")
+    );
+    let factories = [
+        factory(
+            "v4l2vp9enc",
+            "video4linux2",
+            HW_KLASS,
+            gst::Rank::PRIMARY + 1,
+            VP9,
+        ),
+        vpx("vp9enc", VP9),
+    ];
+    assert_eq!(
+        choose_auto(Codec::VP9, &factories).as_deref(),
+        Some("v4l2vp9enc")
+    );
+}
+
+/// VP8: VA-API (full, then low-power), then V4L2, then libvpx.
+#[test]
+fn vp8_hardware_encoders_by_name() {
+    let all = [
+        factory(
+            "v4l2vp8enc",
+            "video4linux2",
+            HW_KLASS,
+            gst::Rank::PRIMARY + 1,
+            VP8,
+        ),
+        va("vavp8lpenc", VP8),
+        va("vavp8enc", VP8),
+        vpx("vp8enc", VP8),
+    ];
+    assert_eq!(choose_auto(Codec::VP8, &all).as_deref(), Some("vavp8enc"));
+    assert_eq!(
+        choose_auto(Codec::VP8, &all[..2]).as_deref(),
+        Some("vavp8lpenc")
+    );
+    assert_eq!(
+        choose_auto(Codec::VP8, &all[..1]).as_deref(),
+        Some("v4l2vp8enc")
+    );
+    assert_eq!(
+        choose_auto(Codec::VP8, &[vpx("vp8enc", VP8)]).as_deref(),
+        Some("vp8enc")
+    );
+    // A VP9 encoder is never picked for VP8.
+    assert_eq!(choose_auto(Codec::VP8, &[va("vavp9enc", VP9)]), None);
+}
+
+/// VP8 has no parser and no profile: the capsfilter takes the bare media type.
+#[test]
+fn vp8_caps_and_parser() {
+    assert_eq!(get_parser_name(Codec::VP8), None);
+    assert_eq!(
+        get_codec_caps_string(Codec::VP8, Profile::Auto),
+        "video/x-vp8"
+    );
+    assert_eq!(pinned_profile(Codec::VP8, Profile::High), None);
+}
+
+/// The real block encodes VP8: the chain links without a parser and the
+/// output is `video/x-vp8`.
+#[test]
+fn vp8_block_encodes_a_test_pattern() {
+    init_gst();
+    if !require_element("vp8enc") {
+        return;
+    }
+    let caps = encode_test_pattern("vp8", "auto");
+    assert_eq!(caps.structure(0).unwrap().name(), "video/x-vp8", "{caps}");
+}
+
+/// What a libvpx encoder is left with after the block configures it.
+struct VpxSettings {
+    deadline: i64,
+    cpu_used: i32,
+    lag_in_frames: i32,
+    error_resilient: String,
+    threads: i32,
+    keyframe_max_dist: i32,
+    end_usage: String,
+    cq_level: i32,
+    row_mt: Option<bool>,
+}
+
+fn configure_vpx(name: &str, preset: &str, tune: &str, rc: RateControl) -> VpxSettings {
+    let encoder = gst::ElementFactory::make(name).build().unwrap();
+    set_encoder_properties(&encoder, name, 2500, preset, tune, rc, 45)
+        .expect("configure the encoder");
+    let flags = encoder.property_value("error-resilient");
+    VpxSettings {
+        deadline: encoder.property("deadline"),
+        cpu_used: encoder.property("cpu-used"),
+        lag_in_frames: encoder.property("lag-in-frames"),
+        error_resilient: gst::glib::FlagsValue::from_value(&flags)
+            .map(|(_, v)| v.iter().map(|f| f.nick()).collect::<Vec<_>>().join("+"))
+            .unwrap_or_default(),
+        threads: encoder.property("threads"),
+        keyframe_max_dist: encoder.property("keyframe-max-dist"),
+        end_usage: encoder
+            .property_value("end-usage")
+            .serialize()
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
+        cq_level: encoder.property("cq-level"),
+        row_mt: encoder
+            .has_property("row-mt")
+            .then(|| encoder.property("row-mt")),
+    }
+}
+
+/// The live settings for libvpx: real time, no look-ahead, error resilience,
+/// several threads, the block's keyframe interval and rate control. Fails if
+/// any of them is dropped from `set_vpx_properties`.
+#[test]
+fn vpx_encoders_get_live_settings() {
+    init_gst();
+    for name in ["vp8enc", "vp9enc"] {
+        if !require_element(name) {
+            continue;
+        }
+        let s = configure_vpx(name, "ultrafast", "zerolatency", RateControl::CBR);
+        assert_eq!(s.deadline, VPX_DEADLINE_REALTIME, "{name}");
+        let expected_cpu = if name == "vp8enc" { -8 } else { 8 };
+        assert_eq!(s.cpu_used, expected_cpu, "{name}");
+        assert_eq!(s.lag_in_frames, 0, "{name}");
+        // Error resilience for VP8 only (WebRTC practice); it costs VP9
+        // compression for nothing.
+        let expected_er = if name == "vp8enc" { "default" } else { "" };
+        assert_eq!(s.error_resilient, expected_er, "{name}");
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        assert_eq!(s.threads, vpx_threads(cores), "{name}");
+        assert_eq!(s.keyframe_max_dist, 45, "{name}");
+        assert_eq!(s.end_usage, "cbr", "{name}");
+        if name == "vp9enc" {
+            assert_eq!(s.row_mt, Some(true));
+        }
+
+        // medium is still a live preset.
+        let s = configure_vpx(name, "medium", "zerolatency", RateControl::CQP);
+        assert_eq!(s.deadline, VPX_DEADLINE_REALTIME, "{name}");
+        assert_eq!(s.end_usage, "cq", "{name}");
+        assert_eq!(s.cq_level, VPX_CQ_LEVEL, "{name}");
+
+        // ultrafast and fast never look ahead, whatever the tune.
+        for preset in ["ultrafast", "fast"] {
+            let s = configure_vpx(name, preset, "film", RateControl::VBR);
+            assert_eq!(s.lag_in_frames, 0, "{name} {preset}");
+            assert_eq!(s.error_resilient, "", "{name} {preset}");
+        }
+        // zerolatency turns look-ahead off on the slowest preset too.
+        let s = configure_vpx(name, "veryslow", "zerolatency", RateControl::VBR);
+        assert_eq!(s.lag_in_frames, 0, "{name}");
+
+        // slow keeps libvpx's "good" deadline, and a non-live tune the
+        // encoder's own look-ahead (25 frames on vp9enc, none on vp8enc).
+        let s = configure_vpx(name, "slow", "film", RateControl::VBR);
+        assert_ne!(s.deadline, VPX_DEADLINE_REALTIME, "{name}");
+        if name == "vp9enc" {
+            assert_ne!(s.lag_in_frames, 0, "{name}");
+        }
+        assert_eq!(s.end_usage, "vbr", "{name}");
+    }
+}
+
+#[test]
+fn vpx_lookahead_off_for_fast_presets_and_zerolatency() {
+    for preset in ["ultrafast", "fast"] {
+        for tune in ["zerolatency", "film", "animation"] {
+            assert!(vpx_no_lookahead(preset, tune), "{preset} {tune}");
+        }
+    }
+    for preset in ["medium", "slow", "veryslow"] {
+        assert!(vpx_no_lookahead(preset, "zerolatency"), "{preset}");
+        assert!(!vpx_no_lookahead(preset, "film"), "{preset}");
+    }
+}
+
+#[test]
+fn vpx_error_resilience_for_vp8_under_zerolatency_only() {
+    assert!(vpx_error_resilient(true, "zerolatency"));
+    assert!(!vpx_error_resilient(true, "film"));
+    assert!(!vpx_error_resilient(false, "zerolatency"));
+    assert!(!vpx_error_resilient(false, "film"));
+}
+
+#[test]
+fn vpx_threads_take_half_the_cores_up_to_four() {
+    assert_eq!(vpx_threads(1), 1);
+    assert_eq!(vpx_threads(2), 1);
+    assert_eq!(vpx_threads(4), 2);
+    assert_eq!(vpx_threads(8), 4);
+    assert_eq!(vpx_threads(18), 4);
+    assert_eq!(vpx_threads(128), VPX_MAX_THREADS as i32);
+}
+
+#[test]
+fn vpx_cqp_is_constrained_quality() {
+    assert_eq!(vpx_end_usage(RateControl::CQP), "cq");
+    assert_eq!(vpx_end_usage(RateControl::CBR), "cbr");
+    assert_eq!(vpx_end_usage(RateControl::VBR), "vbr");
+    assert!((0..=63).contains(&VPX_CQ_LEVEL));
+}
+
+#[test]
+fn va_rate_control_follows_the_block() {
+    assert_eq!(va_rate_control_nick(RateControl::CBR), "cbr");
+    assert_eq!(va_rate_control_nick(RateControl::VBR), "vbr");
+    assert_eq!(va_rate_control_nick(RateControl::CQP), "cqp");
+}
+
+/// The va encoders take the keyframe interval as `key-int-max`, which the
+/// shared keyframe step sets.
+#[test]
+fn va_keyframe_interval_goes_to_key_int_max() {
+    let va_props = ["bitrate", "key-int-max", "rate-control", "qp"];
+    assert_eq!(
+        keyframe_interval_property(|name| va_props.contains(&name)),
+        Some("key-int-max")
+    );
+}
+
+#[test]
+fn enum_nick_lookup_checks_the_element() {
+    init_gst();
+    if !require_element("vp8enc") {
+        return;
+    }
+    let encoder = gst::ElementFactory::make("vp8enc").build().unwrap();
+    assert!(enum_property_has_nick(&encoder, "end-usage", "cq"));
+    assert!(!enum_property_has_nick(&encoder, "end-usage", "cqp"));
+    assert!(!enum_property_has_nick(&encoder, "no-such-property", "cq"));
+    // An int property is not an enum.
+    assert!(!enum_property_has_nick(&encoder, "threads", "1"));
+}
+
+#[test]
+fn v4l2_controls_carry_bitrate_rate_control_and_gop() {
+    init_gst();
+    let c = v4l2_extra_controls(2500, RateControl::CBR, 60);
+    assert_eq!(c.get::<i32>("video_bitrate").unwrap(), 2_500_000);
+    assert_eq!(
+        c.get::<i32>("video_bitrate_mode").unwrap(),
+        V4L2_BITRATE_MODE_CBR
+    );
+    assert_eq!(c.get::<i32>("video_gop_size").unwrap(), 60);
+
+    let c = v4l2_extra_controls(1000, RateControl::VBR, 0);
+    assert_eq!(
+        c.get::<i32>("video_bitrate_mode").unwrap(),
+        V4L2_BITRATE_MODE_VBR
+    );
+    assert!(!c.has_field("video_gop_size"), "0 leaves the driver's GOP");
+
+    let c = v4l2_extra_controls(u32::MAX, RateControl::CQP, 30);
+    assert_eq!(c.get::<i32>("video_bitrate").unwrap(), i32::MAX);
+    assert_eq!(
+        c.get::<i32>("video_bitrate_mode").unwrap(),
+        V4L2_BITRATE_MODE_CQ
+    );
+}
+
+/// Every codec the block offers is either in `CODECS_WITH_PROFILE` or listed
+/// as profile-less, never both, and the profile property is shown exactly for
+/// the first. A new codec cannot silently hide its profile.
+#[test]
+fn every_offered_codec_states_whether_it_has_a_profile() {
+    use strom_types::videoenc::CODECS_WITHOUT_PROFILE;
+    let def = videoenc_definition();
+    let codec = def
+        .exposed_properties
+        .iter()
+        .find(|p| p.name == CODEC_PROPERTY)
+        .expect("codec property");
+    let PropertyType::Enum { values } = &codec.property_type else {
+        panic!("codec is not an enum");
+    };
+    let profile = def
+        .exposed_properties
+        .iter()
+        .find(|p| p.name == "profile")
+        .expect("profile property");
+    assert!(!values.is_empty());
+    for value in values {
+        let c = value.value.as_str();
+        let with = CODECS_WITH_PROFILE.contains(&c);
+        let without = CODECS_WITHOUT_PROFILE.contains(&c);
+        assert!(
+            with != without,
+            "codec {c} must be in exactly one of CODECS_WITH_PROFILE and CODECS_WITHOUT_PROFILE"
+        );
+        let props = HashMap::from([(
+            CODEC_PROPERTY.to_string(),
+            PropertyValue::String(c.to_string()),
+        )]);
+        let visible = profile
+            .visible_when
+            .as_ref()
+            .is_none_or(|cond| cond.is_met(&props, &def.exposed_properties));
+        assert_eq!(visible, with, "profile visibility for {c}");
+    }
 }

@@ -635,6 +635,13 @@ pub(super) fn build_whepserversink(
                                         );
                                         Some(gst::Caps::builder("video/x-av1").build())
                                     }
+                                    "video/x-vp8" => {
+                                        info!(
+                                            "WHEP Output {} (slot {}): Detected VP8 input, setting video-caps",
+                                            instance_id_owned, slot
+                                        );
+                                        Some(gst::Caps::builder("video/x-vp8").build())
+                                    }
                                     "video/x-raw" => {
                                         info!(
                                             "WHEP Output {} (slot {}): Detected raw video input, setting video-caps to H.264/H.265/VP9/AV1",
