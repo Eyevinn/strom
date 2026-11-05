@@ -16,6 +16,10 @@
 //! Chrome-shaped video-only offer to the block's internal WHEP endpoint and
 //! waits for the viewer's payloader to emit a buffer. No ICE or DTLS is needed:
 //! the chain negotiates as soon as the first keyframe reaches the session.
+//!
+//! The same harness checks that VP8 from the Video Encoder block reaches a
+//! viewer that offers only VP8. The block leaves VP8 out of what it offers
+//! for raw input, so this guards that encoded VP8 still gets through.
 
 pub mod common;
 
@@ -117,9 +121,36 @@ a=rtcp-fb:102 nack\r\n\
 a=rtcp-fb:102 nack pli\r\n\
 a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\n";
 
-/// POST `OFFER` to the block's internal WHEP endpoint and return the status
+/// A video-only offer with VP8 as the only payload type, as a receiver that
+/// decodes nothing newer sends.
+const VP8_OFFER: &str = "v=0\r\n\
+o=- 4611731400430051337 2 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0\r\n\
+a=msid-semantic: WMS\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=rtcp:9 IN IP4 0.0.0.0\r\n\
+a=ice-ufrag:abcd\r\n\
+a=ice-pwd:abcdefghijklmnopqrstuvwx\r\n\
+a=ice-options:trickle\r\n\
+a=fingerprint:sha-256 7B:8B:F0:65:5F:78:E2:51:3B:AC:6F:F3:3F:46:1B:35:DC:B8:5F:64:1A:24:C2:43:F0:A1:58:D0:A1:2C:19:08\r\n\
+a=setup:actpass\r\n\
+a=mid:0\r\n\
+a=recvonly\r\n\
+a=rtcp-mux\r\n\
+a=rtcp-rsize\r\n\
+a=rtpmap:96 VP8/90000\r\n\
+a=rtcp-fb:96 goog-remb\r\n\
+a=rtcp-fb:96 transport-cc\r\n\
+a=rtcp-fb:96 ccm fir\r\n\
+a=rtcp-fb:96 nack\r\n\
+a=rtcp-fb:96 nack pli\r\n";
+
+/// POST `offer` to the block's internal WHEP endpoint and return the status
 /// line. Retries until the sink's HTTP server is listening.
-fn post_offer(port: u16) -> String {
+fn post_offer(port: u16, offer: &str) -> String {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut stream = loop {
         match TcpStream::connect(("127.0.0.1", port)) {
@@ -135,8 +166,8 @@ fn post_offer(port: u16) -> String {
         "POST /whep/endpoint HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/sdp\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         port,
-        OFFER.len(),
-        OFFER
+        offer.len(),
+        offer
     );
     stream.write_all(request.as_bytes()).expect("send offer");
     let mut response = String::new();
@@ -154,11 +185,27 @@ struct Viewer {
     problems: Vec<String>,
 }
 
+/// What reaches the WHEP Output block's video input.
+enum Input<'a> {
+    /// Raw video; the block encodes it.
+    Raw,
+    /// H.264 of that profile from `x264enc`.
+    H264(&'a str),
+    /// VP8 from the real Video Encoder block.
+    Vp8Block,
+}
+
 /// Build the WHEP Output block with one video track, feed it `width`x`height`
 /// video at `fps`, and connect one video-only viewer. With `profile`, the
 /// video arrives as H.264 of that profile; without, it arrives raw and the
 /// block encodes it.
 fn viewer_payloaded_buffers(profile: Option<&str>, width: i32, height: i32, fps: i32) -> Viewer {
+    let input = profile.map_or(Input::Raw, Input::H264);
+    viewer_payloaded(input, OFFER, width, height, fps)
+}
+
+/// [`viewer_payloaded_buffers`] with any input and offer.
+fn viewer_payloaded(input: Input, offer: &str, width: i32, height: i32, fps: i32) -> Viewer {
     let mut props: HashMap<String, PropertyValue> = HashMap::new();
     props.insert("num_audio_tracks".to_string(), PropertyValue::Int(0));
     props.insert("num_video_tracks".to_string(), PropertyValue::Int(1));
@@ -206,7 +253,10 @@ fn viewer_payloaded_buffers(profile: Option<&str>, width: i32, height: i32, fps:
         .build()
         .expect("capsfilter");
     let mut chain = vec![src, raw];
-    if let Some(profile) = profile {
+    if let Input::Vp8Block = input {
+        chain.push(common::block::videoenc_bin("vp8"));
+    }
+    if let Input::H264(profile) = input {
         let enc = gst::ElementFactory::make("x264enc")
             // No speed preset: `ultrafast` turns off the High profile tools and
             // x264 then labels the stream Constrained Baseline.
@@ -261,10 +311,14 @@ fn viewer_payloaded_buffers(profile: Option<&str>, width: i32, height: i32, fps:
                 payloader
                     .static_pad("src")
                     .expect("payloader src pad")
-                    .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
-                        payloaded.fetch_add(1, Ordering::Relaxed);
-                        gst::PadProbeReturn::Ok
-                    });
+                    // rtpvp8pay pushes buffer lists, rtph264pay buffers.
+                    .add_probe(
+                        gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+                        move |_, _| {
+                            payloaded.fetch_add(1, Ordering::Relaxed);
+                            gst::PadProbeReturn::Ok
+                        },
+                    );
             }
             Some(false.to_value())
         });
@@ -285,7 +339,7 @@ fn viewer_payloaded_buffers(profile: Option<&str>, width: i32, height: i32, fps:
         .set_state(gst::State::Playing)
         .expect("pipeline goes to PLAYING");
 
-    let status = post_offer(port);
+    let status = post_offer(port, offer);
     if !status.contains(" 201 ") {
         problems
             .lock()
@@ -397,6 +451,24 @@ fn level_3_1_offer_gets_1080p_video_encoded_by_the_block() {
         viewer.level.as_deref(),
         Some("4"),
         "the block's encoder should produce level 4 for 1080p30 ({:?})",
+        viewer.problems
+    );
+}
+
+/// VP8 from the Video Encoder block reaches a viewer that offers only VP8.
+/// Fails if the block's VP8 output cannot be payloaded, or if WHEP Output
+/// stops passing encoded VP8 through to a viewer.
+#[test]
+fn vp8_offer_gets_vp8_from_the_video_encoder_block() {
+    if !plugins_available() || !common::plugins_available(&["vp8enc", "rtpvp8pay"]) {
+        return;
+    }
+    let viewer = viewer_payloaded(Input::Vp8Block, VP8_OFFER, 320, 240, 30);
+    assert!(
+        viewer.payloaded > 0,
+        "a viewer offering VP8 got no VP8 from the Video Encoder block \
+         (payloaded {} buffers; {:?})",
+        viewer.payloaded,
         viewer.problems
     );
 }
