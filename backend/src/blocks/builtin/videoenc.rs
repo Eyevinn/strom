@@ -28,7 +28,8 @@
 //! - parser: Codec-specific parser (h264parse, h265parse, etc.) for proper stream
 //!   formatting. VP8 has none: GStreamer ships no `vp8parse`, and the encoder
 //!   already emits whole frames
-//! - capsfilter: Sets output caps for proper codec negotiation
+//! - capsfilter: Sets output caps for proper codec negotiation, including the
+//!   H.264 level (see `level`)
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gst::download_front;
@@ -41,8 +42,8 @@ use strom_types::{
     block::*,
     element::ElementPadRef,
     videoenc::{
-        Profile, CODECS_WITH_PROFILE, CODEC_AV1, CODEC_H264, CODEC_H265, CODEC_PROPERTY, CODEC_VP8,
-        CODEC_VP9,
+        H264Level, Profile, CODECS_WITH_PROFILE, CODEC_AV1, CODEC_H264, CODEC_H265, CODEC_PROPERTY,
+        CODEC_VP8, CODEC_VP9,
     },
     EnumValue, PropertyValue, *,
 };
@@ -92,6 +93,9 @@ impl BlockBuilder for VideoEncBuilder {
 
         // The profile the capsfilter pins; the encoder must be able to produce it
         let profile = parse_profile(properties);
+
+        // The H.264 level the capsfilter pins (see `level`)
+        let h264_level = parse_h264_level(properties);
 
         // Select best available encoder
         let encoder_name = select_encoder(codec, preference, profile)?;
@@ -213,7 +217,14 @@ impl BlockBuilder for VideoEncBuilder {
         };
 
         // Create capsfilter with codec-specific caps
-        let caps_str = get_codec_caps_string(codec, profile);
+        let mut caps_str = get_codec_caps_string(codec, profile);
+        let base_caps = caps_str.parse::<gst::Caps>().map_err(|_| {
+            BlockBuildError::InvalidConfiguration(format!("Invalid caps: {}", caps_str))
+        })?;
+        let level = applied_h264_level(codec, h264_level, &encoder_name);
+        if let Some(pinned) = level.as_caps_str() {
+            caps_str.push_str(&format!(",level=(string){}", pinned));
+        }
         let caps = caps_str.parse::<gst::Caps>().map_err(|_| {
             BlockBuildError::InvalidConfiguration(format!("Invalid caps: {}", caps_str))
         })?;
@@ -223,6 +234,10 @@ impl BlockBuilder for VideoEncBuilder {
             .property("caps", &caps)
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
+
+        if level != H264Level::None {
+            level::install_probe(&encoder, &capsfilter, base_caps, level);
+        }
 
         info!(
             "VideoEncoder block created (chain: input -> {} -> {} -> {} -> capsfilter [{}])",
@@ -809,18 +824,15 @@ fn set_encoder_properties(
             info!("V4L2 encoder: extra-controls {}", controls);
             encoder.set_property("extra-controls", &controls);
         }
-    } else if encoder_name == "svtav1enc" {
-        // SVT-AV1: target-bitrate in kbps
-        set_encoder_property(encoder, "target-bitrate", &bitrate_str)?;
-        // SVT-AV1: preset (0=slowest/best, 13=fastest)
-        let preset = map_quality_preset_svtav1(quality_preset);
-        set_encoder_property(encoder, "preset", &preset.to_string())?;
-    } else if encoder_name == "av1enc" {
-        // libaom AV1: target-bitrate in kbps
-        set_encoder_property(encoder, "target-bitrate", &bitrate_str)?;
-        // libaom: cpu-used (0=slowest, 8=fastest)
-        let cpu_used = map_quality_preset_av1enc(quality_preset);
-        set_encoder_property(encoder, "cpu-used", &cpu_used.to_string())?;
+    } else if encoder_name == "svtav1enc" || encoder_name == "av1enc" {
+        av1::set_av1_properties(
+            encoder,
+            encoder_name,
+            bitrate,
+            quality_preset,
+            tune,
+            keyframe_interval,
+        )?;
     } else if encoder_name == "vp9enc" || encoder_name == "vp8enc" {
         set_vpx_properties(
             encoder,
@@ -1172,28 +1184,6 @@ fn map_quality_preset_amf(quality_preset: &str) -> &str {
     }
 }
 
-/// Map quality preset to SVT-AV1 preset (0=best, 13=fastest).
-fn map_quality_preset_svtav1(quality_preset: &str) -> u32 {
-    match quality_preset {
-        "ultrafast" => 12,
-        "fast" => 10,
-        "slow" => 4,
-        "veryslow" => 0,
-        _ => 8, // medium
-    }
-}
-
-/// Map quality preset to libaom AV1 cpu-used (0=slowest, 8=fastest).
-fn map_quality_preset_av1enc(quality_preset: &str) -> i32 {
-    match quality_preset {
-        "ultrafast" => 8,
-        "fast" => 6,
-        "slow" => 2,
-        "veryslow" => 0,
-        _ => 4, // medium
-    }
-}
-
 /// Map quality preset to VP9 cpu-used. Real-time speeds run 5-9 in libvpx;
 /// measured at 1080p30 (18-core Mac): 5 158 fps, 6 207, 7 228, 8 251. On noise
 /// content 5 reaches only 32 fps, 7 64, so the live presets start at 6.
@@ -1417,6 +1407,25 @@ fn videoenc_definition() -> BlockDefinition {
                 )),
             },
             ExposedProperty {
+                name: "level".to_string(),
+                label: "Level".to_string(),
+                description: "H.264 level of the encoded output. None (default): the encoder picks the level and changes it with the input. A fixed level, or Auto (the lowest of 4.2, 5.1 and 5.2 that fits the first input), keeps it the same when the input changes size mid-stream, for players that cannot follow a level change. Applies to VideoToolbox and x264 only.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: H264Level::block_enum_values(),
+                },
+                default_value: Some(PropertyValue::String(
+                    H264Level::default().as_property_str().to_string(),
+                )),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "level".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: Some(PropertyCondition::one_of_strings(CODEC_PROPERTY, &[CODEC_H264])),
+            },
+            ExposedProperty {
                 name: "encoder_preference".to_string(),
                 label: "Encoder Preference".to_string(),
                 description: "Prefer hardware or software encoding".to_string(),
@@ -1478,7 +1487,7 @@ fn videoenc_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "tune".to_string(),
                 label: "Tune".to_string(),
-                description: "Optimize encoder for specific use case (x264/x265). Zero latency disables look-ahead for minimal delay; on VP8 it also turns on error resilience, and on VideoToolbox real-time mode.".to_string(),
+                description: "Optimize encoder for specific use case (x264/x265). Zero latency disables look-ahead for minimal delay; on VP8 it also turns on error resilience, on VideoToolbox real-time mode, and on the software AV1 encoders live settings.".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
                         EnumValue { value: "zerolatency".to_string(), label: Some("Zero Latency (streaming/real-time)".to_string()), visible_when: None },
@@ -1562,8 +1571,13 @@ fn videoenc_definition() -> BlockDefinition {
     }
 }
 
+mod av1;
+mod level;
 mod mediafoundation;
 mod selection;
+#[cfg(test)]
+use av1::{svtav1_intra_period, SVTAV1_LIVE_PARAMETERS};
+use level::{applied_h264_level, parse_h264_level};
 use mediafoundation::{
     is_media_foundation_plugin, set_mf_encoder_properties, MEDIA_FOUNDATION_PLUGIN,
 };

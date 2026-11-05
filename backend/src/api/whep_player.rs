@@ -61,192 +61,6 @@ pub async fn whep_streams_page() -> impl IntoResponse {
 // WHEP Proxy (endpoint_id-based routing via WhepRegistry)
 // ============================================================================
 
-/// Renumber any H.265 payload types that fall outside the dynamic RTP PT
-/// range [96, 127] so that GStreamer's `rtph265pay` element accepts them.
-///
-/// Chrome offers H.265 on low PTs (49, 51 in current builds) which fall
-/// outside `rtph265pay`'s src-pad template `payload=[96,127]`. webrtcsink's
-/// discovery pipeline then fails to link `rtph265pay → payload-chain-output-caps`
-/// (caps subset rejected on PT), `payloader-setup` never fires, the codec is
-/// dropped from negotiation, and the m=video line ends up `a=inactive`.
-///
-/// Walk the SDP, build a map `old_pt -> new_pt` for H.265 payloads and their
-/// RTX companions, and rewrite every reference (`m=video` PT list,
-/// `a=rtpmap`, `a=fmtp` including `apt=` back-references, `a=rtcp-fb`).
-fn renumber_low_h265_payload_types(sdp: &str, endpoint_id: &str) -> String {
-    use std::collections::{HashMap, HashSet};
-
-    // First pass: collect rtpmap entries and fmtp `apt=` mappings.
-    let mut used_pts: HashSet<u8> = HashSet::new();
-    let mut h265_pts: Vec<u8> = Vec::new(); // PTs whose rtpmap is H265
-    let mut rtx_for: HashMap<u8, u8> = HashMap::new(); // rtx_pt -> source_pt
-    for line in sdp.lines() {
-        if let Some(rest) = line.strip_prefix("a=rtpmap:") {
-            if let Some(sp) = rest.find(' ') {
-                if let Ok(pt) = rest[..sp].parse::<u8>() {
-                    used_pts.insert(pt);
-                    let codec = rest[sp + 1..].split('/').next().unwrap_or("");
-                    if codec.eq_ignore_ascii_case("H265") {
-                        h265_pts.push(pt);
-                    }
-                }
-            }
-        } else if let Some(rest) = line.strip_prefix("a=fmtp:") {
-            if let Some(sp) = rest.find(' ') {
-                if let Ok(pt) = rest[..sp].parse::<u8>() {
-                    if let Some(apt_idx) = rest[sp + 1..].find("apt=") {
-                        let after = &rest[sp + 1 + apt_idx + "apt=".len()..];
-                        let end = after
-                            .find(|c: char| c == ';' || c.is_whitespace())
-                            .unwrap_or(after.len());
-                        if let Ok(source) = after[..end].parse::<u8>() {
-                            rtx_for.insert(pt, source);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Identify the H.265 PTs that need renumbering (those below 96), plus
-    // their RTX partners (which inherit the move).
-    let mut to_renumber: Vec<u8> = Vec::new();
-    for &pt in &h265_pts {
-        if pt < 96 {
-            to_renumber.push(pt);
-        }
-    }
-    if to_renumber.is_empty() {
-        return sdp.to_string();
-    }
-    let mut rtx_to_renumber: Vec<u8> = Vec::new();
-    for (&rtx_pt, &source_pt) in &rtx_for {
-        if to_renumber.contains(&source_pt) && rtx_pt < 96 {
-            rtx_to_renumber.push(rtx_pt);
-        }
-    }
-
-    // Allocate fresh PTs in [96, 127] avoiding all currently-used PTs.
-    let mut pt_map: HashMap<u8, u8> = HashMap::new();
-    let mut next_free = || -> Option<u8> {
-        for candidate in 96..=127u8 {
-            if !used_pts.contains(&candidate) {
-                used_pts.insert(candidate);
-                return Some(candidate);
-            }
-        }
-        None
-    };
-    for &old in to_renumber.iter().chain(rtx_to_renumber.iter()) {
-        if let Some(new_pt) = next_free() {
-            pt_map.insert(old, new_pt);
-        }
-    }
-    if pt_map.is_empty() {
-        tracing::warn!(
-            "WHEP offer for endpoint '{}': H.265 PTs {:?} need renumbering but no free slots in [96,127]",
-            endpoint_id,
-            to_renumber
-        );
-        return sdp.to_string();
-    }
-
-    // Second pass: rewrite every reference. Lines we touch:
-    //   m=video <port> <proto> <pt1> <pt2> ...     → replace each pt
-    //   a=rtpmap:<pt> ...                          → replace prefix pt
-    //   a=fmtp:<pt> ... apt=<pt> ...               → replace prefix pt + apt= value
-    //   a=rtcp-fb:<pt> ...                         → replace prefix pt
-    let rewrite_pt = |s: &str| -> String {
-        // Helper: parse leading u8 and remainder.
-        if let Some(end) = s.find(|c: char| !c.is_ascii_digit()) {
-            if let Ok(pt) = s[..end].parse::<u8>() {
-                if let Some(&new_pt) = pt_map.get(&pt) {
-                    return format!("{}{}", new_pt, &s[end..]);
-                }
-            }
-        }
-        s.to_string()
-    };
-
-    let mut out = String::with_capacity(sdp.len() + 32);
-    for line in sdp.split_inclusive('\n') {
-        if let Some(rest) = line.strip_prefix("m=video ") {
-            // Rewrite each PT token in the m= line PT list (skip first 2
-            // tokens which are <port> and <proto>).
-            let trailing = if rest.ends_with("\r\n") {
-                "\r\n"
-            } else if rest.ends_with('\n') {
-                "\n"
-            } else {
-                ""
-            };
-            let core = rest.trim_end_matches(['\r', '\n']);
-            let parts: Vec<&str> = core.split(' ').collect();
-            let mut rewritten: Vec<String> = Vec::with_capacity(parts.len());
-            for (idx, p) in parts.iter().enumerate() {
-                if idx < 2 {
-                    rewritten.push((*p).to_string());
-                    continue;
-                }
-                if let Ok(pt) = p.parse::<u8>() {
-                    if let Some(&new_pt) = pt_map.get(&pt) {
-                        rewritten.push(new_pt.to_string());
-                        continue;
-                    }
-                }
-                rewritten.push((*p).to_string());
-            }
-            out.push_str("m=video ");
-            out.push_str(&rewritten.join(" "));
-            out.push_str(trailing);
-        } else if let Some(rest) = line.strip_prefix("a=rtpmap:") {
-            out.push_str("a=rtpmap:");
-            out.push_str(&rewrite_pt(rest));
-        } else if let Some(rest) = line.strip_prefix("a=rtcp-fb:") {
-            out.push_str("a=rtcp-fb:");
-            out.push_str(&rewrite_pt(rest));
-        } else if let Some(rest) = line.strip_prefix("a=fmtp:") {
-            // Rewrite prefix PT, and also any `apt=N` reference inside.
-            let prefix_rewritten = rewrite_pt(rest);
-            // Replace `apt=<n>` if <n> is in the map.
-            let final_line = if let Some(idx) = prefix_rewritten.find("apt=") {
-                let head = &prefix_rewritten[..idx + "apt=".len()];
-                let tail = &prefix_rewritten[idx + "apt=".len()..];
-                let end = tail
-                    .find(|c: char| c == ';' || c.is_whitespace())
-                    .unwrap_or(tail.len());
-                let apt_str = &tail[..end];
-                let apt_rewritten = if let Ok(apt) = apt_str.parse::<u8>() {
-                    if let Some(&new_pt) = pt_map.get(&apt) {
-                        new_pt.to_string()
-                    } else {
-                        apt_str.to_string()
-                    }
-                } else {
-                    apt_str.to_string()
-                };
-                format!("{}{}{}", head, apt_rewritten, &tail[end..])
-            } else {
-                prefix_rewritten
-            };
-            out.push_str("a=fmtp:");
-            out.push_str(&final_line);
-        } else {
-            out.push_str(line);
-        }
-    }
-
-    let mut mapping: Vec<(u8, u8)> = pt_map.iter().map(|(a, b)| (*a, *b)).collect();
-    mapping.sort();
-    tracing::info!(
-        "WHEP offer for endpoint '{}': renumbered low H.265 PTs (old->new): {:?}",
-        endpoint_id,
-        mapping
-    );
-
-    out
-}
-
 /// Remove `level-id=<n>;` (or `level-id=<n>` if trailing) from any H.265
 /// `a=fmtp` line in an SDP. webrtcsink advertises level-id=180 (level 6.0)
 /// regardless of the actual stream level; Chrome desktop's HW HEVC decoder
@@ -459,8 +273,9 @@ pub async fn whep_endpoint_proxy(
 
     // Renumber low H.265 PTs (Chrome offers H265 on PT < 96, which
     // rtph265pay's src-pad template rejects → discovery link fails → codec
-    // dropped → m=video goes inactive). Move them into [96, 127].
-    let body = renumber_low_h265_payload_types(&body, &endpoint_id);
+    // dropped → m=video goes inactive). Move them into [96, 127]; the answer
+    // is mapped back below and WHEP Output sends the offered PT on the wire.
+    let (body, pt_mapping) = super::whep_h265_pt::renumber_offer(&body, &endpoint_id);
 
     // Filter out H264 fmtp lines with profile-level-ids that webrtcsink's
     // compat_profiles() panics on (constrained-high, progressive-high,
@@ -554,6 +369,8 @@ pub async fn whep_endpoint_proxy(
             let body_bytes = if body_bytes.windows(5).any(|w| w == b"H265/") {
                 let answer = String::from_utf8_lossy(&body_bytes).into_owned();
                 let rewritten = strip_h265_fmtp_level_id(&answer);
+                // Back to the payload types the browser offered.
+                let rewritten = super::whep_h265_pt::restore_answer(&rewritten, &pt_mapping);
                 if rewritten != answer {
                     tracing::debug!(
                         "WHEP SDP ANSWER (final) for '{}' [{} bytes]:\n{}",

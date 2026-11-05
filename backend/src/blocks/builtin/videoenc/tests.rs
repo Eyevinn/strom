@@ -25,7 +25,8 @@ fn is_encoder_available(encoder_name: &str) -> bool {
 
 /// Like `is_encoder_available`, but a skip is a failure when CI sets
 /// `STROM_REQUIRE_GST_PLUGINS`: a test that skips passes green and guards nothing.
-fn require_element(element_name: &str) -> bool {
+pub(super) fn require_element(element_name: &str) -> bool {
+    init_gst();
     if is_encoder_available(element_name) {
         return true;
     }
@@ -1703,6 +1704,87 @@ fn profile_options_carry_their_codec_condition() {
     assert!(!offered("h264").contains(&"main-10".to_string()));
     assert!(offered("h265").contains(&"main-10".to_string()));
     assert!(!offered("h265").contains(&"high".to_string()));
+}
+
+/// svtav1enc takes the keyframe interval as `intra-period-length`, the frames
+/// between two keyframes. The generic keyframe property names miss it.
+#[test]
+fn test_svtav1_intra_period_from_keyframe_interval() {
+    assert_eq!(svtav1_intra_period(60), Some(59));
+    assert_eq!(svtav1_intra_period(1), Some(0));
+    assert_eq!(svtav1_intra_period(0), None);
+}
+
+/// The software AV1 encoders get the block's keyframe interval and, on
+/// `tune=zerolatency`, live settings: svtav1enc's defaults hold frames back
+/// 1.7 s on average for look-ahead, and libaom's good-quality usage looks 19
+/// frames ahead. Either encoder will do; CI has at least one.
+#[test]
+fn test_av1_software_encoders_get_keyframe_interval_and_live_settings() {
+    init_gst();
+    let have_svt = is_encoder_available("svtav1enc");
+    let have_aom = is_encoder_available("av1enc");
+    if !have_svt && !have_aom && !require_element("svtav1enc or av1enc") {
+        return;
+    }
+
+    if have_svt {
+        let encoder = gst::ElementFactory::make("svtav1enc").build().unwrap();
+        set_encoder_properties(
+            &encoder,
+            "svtav1enc",
+            4000,
+            "fast",
+            "zerolatency",
+            RateControl::VBR,
+            60,
+        )
+        .expect("svtav1enc properties");
+        assert_eq!(encoder.property::<i32>("intra-period-length"), 59);
+        assert_eq!(
+            encoder
+                .property::<Option<String>>("parameters-string")
+                .as_deref(),
+            Some(SVTAV1_LIVE_PARAMETERS)
+        );
+
+        // Not live: the encoder keeps its own structure.
+        let encoder = gst::ElementFactory::make("svtav1enc").build().unwrap();
+        set_encoder_properties(
+            &encoder,
+            "svtav1enc",
+            4000,
+            "fast",
+            "film",
+            RateControl::VBR,
+            60,
+        )
+        .unwrap();
+        assert_eq!(
+            encoder.property::<Option<String>>("parameters-string"),
+            None
+        );
+    }
+
+    if have_aom {
+        let encoder = gst::ElementFactory::make("av1enc").build().unwrap();
+        set_encoder_properties(
+            &encoder,
+            "av1enc",
+            4000,
+            "fast",
+            "zerolatency",
+            RateControl::VBR,
+            60,
+        )
+        .expect("av1enc properties");
+        assert_eq!(encoder.property::<i32>("keyframe-max-dist"), 60);
+        assert_eq!(encoder.property::<u32>("lag-in-frames"), 0);
+        assert!(encoder.property::<bool>("row-mt"));
+        let usage = encoder.property_value("usage-profile");
+        let usage = gst::glib::EnumValue::from_value(&usage).unwrap().1.nick();
+        assert_eq!(usage, "realtime");
+    }
 }
 
 // --- VP8, and the hardware list entries by factory name --------------------

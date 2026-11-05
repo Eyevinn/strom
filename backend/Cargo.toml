@@ -63,6 +63,7 @@ gstreamer-net.workspace = true
 gstreamer-rtp.workspace = true
 gstreamer-gl.workspace = true
 gstreamer-video.workspace = true
+gstreamer-webrtc.workspace = true
 gst-plugin-audiofx.workspace = true
 gst-plugin-webrtc.workspace = true
 gst-plugin-webrtchttp.workspace = true

@@ -14,7 +14,7 @@ use strom_types::{element::ElementPadRef, PropertyValue};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use super::resolve_track_counts;
+use super::{caps_change, resolve_track_counts};
 use crate::blocks::builtin::webrtc_props::parse_do_retransmission;
 
 /// Build WHEP Output using whepserversink (hosts HTTP server for WHEP clients).
@@ -409,6 +409,14 @@ pub(super) fn build_whepserversink(
     // WORKAROUND #2: a viewer's offered profile must not block the stream.
     crate::blocks::builtin::webrtcsink_profile_filter::install(&whepserversink);
 
+    // WORKAROUND #3: send the H.265 payload type the viewer offered when the
+    // WHEP proxy had to renumber it (rtph265pay only produces 96-127).
+    crate::blocks::builtin::webrtcsink_pt_restore::install(&whepserversink);
+
+    // WORKAROUND #4: a viewer must not get frames whose references webrtcsink
+    // dropped while its ICE/DTLS came up.
+    crate::blocks::builtin::webrtcsink_keyframe_gate::install(&whepserversink);
+
     // Handle consumer-removed to clean up webrtcbin from stats storage
     let dynamic_webrtcbin_store_remove = ctx.dynamic_webrtcbin_store();
     let block_id_for_remove = instance_id.to_string();
@@ -678,40 +686,17 @@ pub(super) fn build_whepserversink(
                 gst::PadProbeReturn::Pass
             });
 
-            // Normalize H.264/H.265 caps before they reach webrtcsink.
-            // h264parse progressively adds fields (coded-picture-structure, chroma-format,
-            // bit-depth-luma, bit-depth-chroma) as it parses the stream. webrtcsink's
-            // input_caps_change_allowed() doesn't account for these and rejects them as
-            // "renegotiation". This probe removes those fields from CAPS events to
-            // prevent false renegotiation errors. Applied per-slot.
+            // Give webrtcsink complete encoded video caps, keep them to what
+            // it can follow mid-stream, and fail the flow with a usable
+            // message on a change it cannot follow.
+            //
+            // The parsers complete their caps (chroma-format, the bit depths,
+            // ...) once they have parsed the first frame, and an encoder fed a
+            // larger input (an HLS variant switch) raises the level.
+            // webrtcsink refuses both as "renegotiation"; see `caps_change`.
+            // Applied per slot, before the input bridge's probes.
             let queue_src_pad = video_queue.static_pad("src").expect("queue has src pad");
-            queue_src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
-                if let Some(gst::PadProbeData::Event(ref event)) = info.data {
-                    if event.type_() == gst::EventType::Caps {
-                        if let gst::EventView::Caps(caps_event) = event.view() {
-                            let caps = caps_event.caps();
-                            if let Some(structure) = caps.structure(0) {
-                                if structure.name() == "video/x-h264"
-                                    || structure.name() == "video/x-h265"
-                                {
-                                    let mut new_caps = caps.copy();
-                                    if let Some(s) = new_caps.make_mut().structure_mut(0) {
-                                        s.remove_fields([
-                                            "coded-picture-structure",
-                                            "chroma-format",
-                                            "bit-depth-luma",
-                                            "bit-depth-chroma",
-                                        ]);
-                                    }
-                                    let new_event = gst::event::Caps::new(&new_caps);
-                                    info.data = Some(gst::PadProbeData::Event(new_event));
-                                }
-                            }
-                        }
-                    }
-                }
-                gst::PadProbeReturn::Ok
-            });
+            caps_change::install(&queue_src_pad);
 
             // Consumer-side input adaptation: download GL memory, and convert
             // to a format the encoders take natively.

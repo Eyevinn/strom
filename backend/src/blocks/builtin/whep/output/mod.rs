@@ -2,6 +2,7 @@
 //!
 //! `whepserversink` hosts the HTTP endpoint; clients connect via WHEP to receive.
 
+mod caps_change;
 pub(crate) mod definition;
 mod whepserversink;
 
