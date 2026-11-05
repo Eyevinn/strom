@@ -133,6 +133,8 @@ impl BlockBuilder for MediaPlayerBuilder {
             })
             .unwrap_or(timing::DEFAULT_PLAYOUT_DELAY_MS);
 
+        let network_buffer = bridge::NetworkBuffer::from_properties(properties);
+
         let position_update_interval_ms = properties
             .get("position_update_interval")
             .and_then(|v| match v {
@@ -152,12 +154,13 @@ impl BlockBuilder for MediaPlayerBuilder {
         let block_id = instance_id.to_string();
 
         info!(
-            "Media Player {}: decode={} ({:?}), sync={}, playout_delay={} ms ({})",
+            "Media Player {}: decode={} ({:?}), sync={}, playout_delay={} ms, {:?} ({})",
             instance_id,
             decode,
             decoder,
             sync,
             playout_delay_ms,
+            network_buffer,
             if decode {
                 "decoding to raw"
             } else {
@@ -207,6 +210,7 @@ impl BlockBuilder for MediaPlayerBuilder {
             decode,
             decoder,
             sync,
+            network_buffer,
             playout_delay_ms,
             position_update_interval_ms,
             initial_playlist,
@@ -231,6 +235,7 @@ fn build_media_player(
     decode: bool,
     decoder: bridge::Decoder,
     sync: bool,
+    network_buffer: bridge::NetworkBuffer,
     playout_delay_ms: u64,
     position_update_interval_ms: u64,
     initial_playlist: Vec<String>,
@@ -348,9 +353,20 @@ fn build_media_player(
 
     // --- Create internal pipeline ---
     let internal_pipeline = if decode {
-        bridge::create_decode_pipeline(instance_id, &state, initial_uri.as_deref(), decoder)?
+        bridge::create_decode_pipeline(
+            instance_id,
+            &state,
+            initial_uri.as_deref(),
+            decoder,
+            network_buffer,
+        )?
     } else {
-        bridge::create_passthrough_pipeline(instance_id, &state, initial_uri.as_deref())?
+        bridge::create_passthrough_pipeline(
+            instance_id,
+            &state,
+            initial_uri.as_deref(),
+            network_buffer,
+        )?
     };
 
     // Store internal pipeline in state
@@ -639,6 +655,118 @@ mod tests {
                 appsrc.name()
             );
         }
+    }
+
+    /// The source element the builder gave a player built with `props`, in
+    /// decode mode with `decoder` or in passthrough.
+    fn built_source(decode: bool, decoder: &str, props: &[(&str, PropertyValue)]) -> gst::Element {
+        let _ = gst::init();
+        let flow_id = Uuid::new_v4();
+        let mut all: HashMap<String, PropertyValue> = props
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        all.insert("decode".to_string(), PropertyValue::Bool(decode));
+        all.insert(
+            "decoder".to_string(),
+            PropertyValue::String(decoder.to_string()),
+        );
+        all.insert(
+            "_flow_id".to_string(),
+            PropertyValue::String(flow_id.to_string()),
+        );
+        let _built = MediaPlayerBuilder
+            .build(
+                "mp",
+                &all,
+                &crate::blocks::BlockBuildContext::new(Vec::new(), "all".to_string()),
+            )
+            .unwrap();
+        let key = MediaPlayerKey {
+            flow_id,
+            block_id: "mp".to_string(),
+        };
+        let player = MEDIA_PLAYER_REGISTRY.get(&key).unwrap();
+        MEDIA_PLAYER_REGISTRY.unregister(&key);
+        player.source_element.upgrade().unwrap()
+    }
+
+    /// Without `use-buffering`, the URI bins link `souphttpsrc` straight to
+    /// the demuxer: a high-bitrate http file stutters on any dip in download
+    /// speed. Every source element, in every mode, reads ahead by default.
+    #[test]
+    fn network_sources_read_ahead_by_default() {
+        for (decode, decoder) in [
+            (true, bridge::Decoder::DECODEBIN3),
+            (true, bridge::Decoder::CLASSIC),
+            (false, bridge::Decoder::DECODEBIN3),
+        ] {
+            let source = built_source(decode, decoder, &[]);
+            let name = source.factory().unwrap().name();
+            assert!(source.property::<bool>("use-buffering"), "{name}");
+            assert_eq!(
+                source.property::<i64>("buffer-duration"),
+                10_000_000_000,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_ahead_follows_the_block_property() {
+        let source = built_source(
+            true,
+            bridge::Decoder::DECODEBIN3,
+            &[("read_ahead_s", PropertyValue::UInt(30))],
+        );
+        assert_eq!(source.property::<i64>("buffer-duration"), 30_000_000_000);
+    }
+
+    /// 0 leaves each element at its own default. Passthrough's
+    /// `urisourcebin` buffers by itself, and keeps doing so.
+    #[test]
+    fn zero_read_ahead_keeps_each_elements_default() {
+        for (decode, decoder) in [
+            (true, bridge::Decoder::DECODEBIN3),
+            (true, bridge::Decoder::CLASSIC),
+            (false, bridge::Decoder::DECODEBIN3),
+        ] {
+            let source = built_source(decode, decoder, &[("read_ahead_s", PropertyValue::UInt(0))]);
+            let name = source.factory().unwrap().name();
+            let pristine = gst::ElementFactory::make(&name).build().unwrap();
+            for prop in ["use-buffering", "buffer-duration"] {
+                assert_eq!(
+                    source.property_value(prop).serialize().unwrap(),
+                    pristine.property_value(prop).serialize().unwrap(),
+                    "{name} {prop}"
+                );
+            }
+        }
+    }
+
+    /// Read-ahead is held in memory, so it has a ceiling, and a value no
+    /// clock can hold (u64::MAX seconds) builds instead of panicking.
+    #[test]
+    fn read_ahead_is_capped_and_a_negative_one_means_zero() {
+        let max_ns = bridge::NetworkBuffer::MAX_READ_AHEAD_S as i64 * 1_000_000_000;
+        for huge in [3600, u64::MAX] {
+            let source = built_source(
+                true,
+                bridge::Decoder::DECODEBIN3,
+                &[("read_ahead_s", PropertyValue::UInt(huge))],
+            );
+            assert_eq!(source.property::<i64>("buffer-duration"), max_ns, "{huge}");
+        }
+
+        // Negative means 0: the element's default, which for passthrough's
+        // urisourcebin is to buffer.
+        let source = built_source(
+            false,
+            bridge::Decoder::DECODEBIN3,
+            &[("read_ahead_s", PropertyValue::Int(-1))],
+        );
+        assert!(source.property::<bool>("use-buffering"));
+        assert_eq!(source.property::<i64>("buffer-duration"), -1);
     }
 
     /// A Media Player built by the real builder, its elements in a flow of
