@@ -29,24 +29,25 @@ pub fn renumber_offer(sdp: &str, endpoint_id: &str) -> (String, PtMapping) {
     let mut used_pts: HashSet<u8> = HashSet::new();
     let mut h265_pts: Vec<u8> = Vec::new();
     let mut rtx_for: Vec<(u8, u8)> = Vec::new(); // (rtx_pt, source_pt)
-    for line in video_lines(sdp) {
+                                                 // One pass over the offer. Payload types in use by any m= section count
+                                                 // as taken: the session is bundled, so two sections must not share one.
+    let mut in_video = false;
+    for line in sdp.lines() {
+        if line.starts_with("m=") {
+            in_video = line.starts_with("m=video ");
+        }
         if let Some((pt, rest)) = pt_prefix(line, "a=rtpmap:") {
             used_pts.insert(pt);
             let codec = rest.trim_start().split('/').next().unwrap_or("");
-            if codec.eq_ignore_ascii_case("H265") {
+            if in_video && codec.eq_ignore_ascii_case("H265") {
                 h265_pts.push(pt);
             }
+        } else if !in_video {
+            continue;
         } else if let Some((pt, rest)) = pt_prefix(line, "a=fmtp:") {
             if let Some(source) = apt_value(rest) {
                 rtx_for.push((pt, source));
             }
-        }
-    }
-    // Payload types in use by any m= section count as taken: the session is
-    // bundled, so two sections must not share one.
-    for line in sdp.lines() {
-        if let Some((pt, _)) = pt_prefix(line, "a=rtpmap:") {
-            used_pts.insert(pt);
         }
     }
 
@@ -147,17 +148,6 @@ fn insert_session_attribute(sdp: &str, attribute: &str) -> String {
         out.push_str(eol);
     }
     out
-}
-
-/// Lines of the `m=video` sections, without line endings.
-fn video_lines(sdp: &str) -> impl Iterator<Item = &str> {
-    let mut in_video = false;
-    sdp.lines().filter(move |line| {
-        if line.starts_with("m=") {
-            in_video = line.starts_with("m=video ");
-        }
-        in_video
-    })
 }
 
 /// `Some((pt, rest))` for a line `<prefix><pt><rest>`.

@@ -17,11 +17,16 @@
 //!   still finds its history for the packets and sends RTX on the offered RTX
 //!   payload type.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
 use gstreamer_webrtc as gst_webrtc;
 use tracing::{debug, info};
+
+use super::webrtcsink_keyframe_gate::{is_video_payloader, DISCOVERY_CONSUMER};
 
 /// Session-level SDP attribute the WHEP proxy adds to an offer whose payload
 /// types it renumbered.
@@ -34,41 +39,100 @@ const KEEP: u8 = 0xff;
 /// payload type. Copied into each closure: no locks or lookups per packet.
 type PtTable = [u8; 128];
 
+/// A viewer's session, as `consumer-added` announced it.
+struct Session {
+    /// Weak: the map lives in a handler of the sink, and the session's
+    /// webrtcbin must be free to go when the viewer leaves.
+    webrtcbin: glib::WeakRef<gst::Element>,
+    /// The `rtprtxsend` watch is installed on this session's webrtcbin.
+    rtx_watched: bool,
+}
+
 /// Restore the offered payload types for every viewer of `whepserversink`.
 pub(crate) fn install(whepserversink: &gst::Element) {
-    whepserversink.connect("payloader-setup", false, |values| {
+    // consumer id -> session. The signal handlers below share it; it only
+    // holds weak references.
+    let sessions: Arc<Mutex<HashMap<String, Session>>> = Arc::default();
+
+    let added = sessions.clone();
+    whepserversink.connect("consumer-added", false, move |values| {
+        if let (Ok(id), Ok(webrtcbin)) =
+            (values[1].get::<String>(), values[2].get::<gst::Element>())
+        {
+            added.lock().unwrap_or_else(|p| p.into_inner()).insert(
+                id,
+                Session {
+                    webrtcbin: webrtcbin.downgrade(),
+                    rtx_watched: false,
+                },
+            );
+        }
+        None
+    });
+
+    let removed = sessions.clone();
+    whepserversink.connect("consumer-removed", false, move |values| {
+        if let Ok(id) = values[1].get::<String>() {
+            removed
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&id);
+        }
+        None
+    });
+
+    whepserversink.connect("payloader-setup", false, move |values| {
         let consumer_id = values[1].get::<String>().unwrap_or_default();
-        let payloader = values[3].get::<gst::Element>().unwrap();
-        if let Some(webrtcbin) = session_webrtcbin(&payloader) {
-            if let Some(table) = remote_pt_table(&webrtcbin) {
-                info!(
-                    "WHEP Output: viewer {} offered payload types the proxy renumbered ({}), \
-                     sending the offered ones from {}",
-                    consumer_id,
-                    describe(&table),
-                    payloader.name()
-                );
-                restore_on_payloader(&payloader, table);
-                restore_on_rtxsend(&webrtcbin, table);
-            }
+        if let Ok(payloader) = values[3].get::<gst::Element>() {
+            on_payloader_setup(&sessions, &consumer_id, &payloader);
         }
         // Let the other handlers and webrtcsink's defaults run.
         Some(false.to_value())
     });
 }
 
-/// The webrtcbin of the session pipeline `payloader` is in. `None` in a
-/// discovery pipeline, which has none.
-pub(crate) fn session_webrtcbin(payloader: &gst::Element) -> Option<gst::Element> {
-    let mut top: gst::Object = payloader.clone().upcast();
-    while let Some(parent) = top.parent() {
-        top = parent;
+/// Rewrite `payloader`'s payload type when the viewer's offer was renumbered,
+/// and watch the session's `rtprtxsend` once per session.
+fn on_payloader_setup(
+    sessions: &Mutex<HashMap<String, Session>>,
+    consumer_id: &str,
+    payloader: &gst::Element,
+) {
+    // Discovery pipelines have no viewer; the proxy renumbers video only.
+    if consumer_id == DISCOVERY_CONSUMER || !is_video_payloader(payloader) {
+        return;
     }
-    let bin = top.downcast::<gst::Bin>().ok()?;
-    // webrtcsink is still adding elements to the session pipeline from other
-    // threads; `find` resyncs and restarts when the bin changes under it.
-    bin.iterate_elements()
-        .find(|e| factory_name(&e).as_deref() == Some("webrtcbin"))
+    // Claimed under the lock, so two video payloaders of one session do not
+    // both install the rtprtxsend watch. Every payloader of a session sees
+    // the same remote description, so a session without a table never needs
+    // the watch.
+    let (webrtcbin, watch_rtx) = {
+        let mut sessions = sessions.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(session) = sessions.get_mut(consumer_id) else {
+            return;
+        };
+        let Some(webrtcbin) = session.webrtcbin.upgrade() else {
+            return;
+        };
+        (
+            webrtcbin,
+            !std::mem::replace(&mut session.rtx_watched, true),
+        )
+    };
+    let Some(table) = remote_pt_table(&webrtcbin) else {
+        return;
+    };
+    info!(
+        "WHEP Output: viewer {} offered payload types the proxy renumbered ({}), \
+         sending the offered ones from {}",
+        consumer_id,
+        describe(&table),
+        payloader.name()
+    );
+    restore_on_payloader(payloader, table);
+    if watch_rtx {
+        restore_on_rtxsend(&webrtcbin, table);
+    }
 }
 
 fn factory_name(element: &gst::Element) -> Option<glib::GString> {
@@ -161,16 +225,21 @@ fn restore_on_rtxsend(webrtcbin: &gst::Element, table: PtTable) {
     let Some(bin) = webrtcbin.downcast_ref::<gst::Bin>() else {
         return;
     };
-    for_each_element(bin, |element| watch_rtxsend(element, table));
+    for_each_element(bin, |element| {
+        watch_rtxsend(element, table);
+    });
     // webrtcbin creates its RTX senders when rtpbin asks for them. The
-    // handler only holds the table: the element arrives as an argument.
+    // handler only holds the table (the element arrives as an argument), and
+    // webrtcbin owns it, so it goes with the session.
     bin.connect("deep-element-added", false, move |values| {
         if let Ok(element) = values[2].get::<gst::Element>() {
             watch_rtxsend(&element, table);
             // A bin added whole (webrtcbin's aux sender bin) announces only
             // itself.
             if let Some(added) = element.downcast_ref::<gst::Bin>() {
-                for_each_element(added, |child| watch_rtxsend(child, table));
+                for_each_element(added, |child| {
+                    watch_rtxsend(child, table);
+                });
             }
         }
         None
@@ -179,7 +248,7 @@ fn restore_on_rtxsend(webrtcbin: &gst::Element, table: PtTable) {
 
 /// Call `f` on every element in `bin`, recursively. Restarts when the bin
 /// changes while it is walked; an element may then be seen twice, which
-/// [`watch_rtxsend`]'s patching tolerates.
+/// [`watch_rtxsend`] skips.
 fn for_each_element(bin: &gst::Bin, mut f: impl FnMut(&gst::Element)) {
     let mut iter = bin.iterate_recurse();
     while let Err(gst::IteratorError::Resync) = iter.foreach(|element| f(&element)) {
@@ -187,15 +256,34 @@ fn for_each_element(bin: &gst::Bin, mut f: impl FnMut(&gst::Element)) {
     }
 }
 
-/// Patch `element`'s maps now and whenever webrtcbin sets them again.
-fn watch_rtxsend(element: &gst::Element, table: PtTable) {
+/// Qdata flag on an `rtprtxsend` this module already watches.
+fn watched_quark() -> glib::Quark {
+    glib::Quark::from_str("strom-pt-restore-watched")
+}
+
+/// Patch `element`'s maps now and whenever webrtcbin sets them again. An
+/// element is watched once: the walk and `deep-element-added` can both
+/// report it, and a second notify handler would only patch twice.
+/// `true` when it starts watching `element`.
+fn watch_rtxsend(element: &gst::Element, table: PtTable) -> bool {
     if factory_name(element).as_deref() != Some("rtprtxsend") {
-        return;
+        return false;
+    }
+    let quark = watched_quark();
+    // SAFETY: this module is the only user of the quark and always stores a
+    // `bool` under it.
+    unsafe {
+        if element.qdata::<bool>(quark).is_some() {
+            return false;
+        }
+        element.set_qdata(quark, true);
     }
     patch_rtxsend(element, &table);
+    // The handler holds only the table, and goes with the element.
     element.connect_notify(Some("payload-type-map"), move |element, _| {
         patch_rtxsend(element, &table)
     });
+    true
 }
 
 /// Add an entry for the offered payload type next to each renumbered one in
@@ -359,7 +447,10 @@ mod tests {
                 .build(),
         );
         restore_on_payloader(&pay, table);
-        watch_rtxsend(&rtx, table);
+        assert!(watch_rtxsend(&rtx, table));
+        // Seen again (the walk and deep-element-added both report it): no
+        // second handler.
+        assert!(!watch_rtxsend(&rtx, table));
 
         // Count the RTX packets rtprtxsend sends on the offered RTX type.
         let rtx_seen = Arc::new(AtomicU32::new(0));
@@ -415,5 +506,44 @@ mod tests {
             rtx_seen.load(Ordering::SeqCst) > 0,
             "rtprtxsend sent no RTX on payload type 50"
         );
+    }
+
+    /// The rtprtxsend watch is claimed once per session, by the first video
+    /// payloader of a viewer: not by an audio payloader, not by a discovery
+    /// pipeline, not again by a second video payloader.
+    #[test]
+    fn rtx_watch_is_claimed_once_per_session_by_video_only() {
+        gst::init().unwrap();
+        for factory in ["webrtcbin", "rtpopuspay", "rtph264pay"] {
+            assert!(
+                gst::ElementFactory::find(factory).is_some(),
+                "{factory} is missing"
+            );
+        }
+        let webrtcbin = gst::ElementFactory::make("webrtcbin").build().unwrap();
+        let sessions = Mutex::new(HashMap::from([(
+            "viewer".to_string(),
+            Session {
+                webrtcbin: webrtcbin.downgrade(),
+                rtx_watched: false,
+            },
+        )]));
+        let watched = || sessions.lock().unwrap()["viewer"].rtx_watched;
+        let audio = gst::ElementFactory::make("rtpopuspay").build().unwrap();
+        let video = gst::ElementFactory::make("rtph264pay").build().unwrap();
+
+        on_payloader_setup(&sessions, "viewer", &audio);
+        assert!(!watched(), "an audio payloader claimed the watch");
+        on_payloader_setup(&sessions, DISCOVERY_CONSUMER, &video);
+        assert!(!watched(), "a discovery pipeline claimed the watch");
+        on_payloader_setup(&sessions, "viewer", &video);
+        assert!(watched());
+        // Gone with the session: nothing to look up, nothing kept alive.
+        drop(webrtcbin);
+        assert!(sessions.lock().unwrap()["viewer"]
+            .webrtcbin
+            .upgrade()
+            .is_none());
+        on_payloader_setup(&sessions, "viewer", &video);
     }
 }
