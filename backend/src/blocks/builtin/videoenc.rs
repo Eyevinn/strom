@@ -794,12 +794,39 @@ fn set_encoder_properties(
         // SVT-AV1: preset (0=slowest/best, 13=fastest)
         let preset = map_quality_preset_svtav1(quality_preset);
         set_encoder_property(encoder, "preset", &preset.to_string())?;
+        // The keyframe interval is `intra-period-length`, the frames between
+        // two keyframes: 59 gives one every 60 frames. Left at auto, a viewer
+        // that joins or loses a frame waits seconds for a picture.
+        if let Some(period) = svtav1_intra_period(keyframe_interval) {
+            set_encoder_property(encoder, "intra-period-length", &period.to_string())?;
+        }
+        // SVT-AV1's random-access defaults hold frames back for look-ahead,
+        // temporal filtering and a 5-level hierarchy: 1.7 s on average at
+        // 720p25 (2.3 s worst). The live settings bring that to ~0.2 s.
+        // Low-delay prediction (`pred-struct=1`, `rtc=1`) would go lower, but
+        // svtav1enc stalls after its first frames in that mode.
+        if tune == "zerolatency" {
+            set_encoder_property(encoder, "parameters-string", SVTAV1_LIVE_PARAMETERS)?;
+        }
     } else if encoder_name == "av1enc" {
         // libaom AV1: target-bitrate in kbps
         set_encoder_property(encoder, "target-bitrate", &bitrate_str)?;
         // libaom: cpu-used (0=slowest, 8=fastest)
         let cpu_used = map_quality_preset_av1enc(quality_preset);
         set_encoder_property(encoder, "cpu-used", &cpu_used.to_string())?;
+        // libaom's keyframe interval is `keyframe-max-dist`.
+        if keyframe_interval > 0 && encoder.has_property("keyframe-max-dist") {
+            set_encoder_property(encoder, "keyframe-max-dist", &keyframe_str)?;
+        }
+        // libaom defaults to the good-quality usage with 19 frames of
+        // look-ahead. Live: the realtime usage, no lag, row threading.
+        if tune == "zerolatency" {
+            for (property, value) in AV1ENC_LIVE_PROPERTIES {
+                if encoder.has_property(property) {
+                    set_encoder_property(encoder, property, value)?;
+                }
+            }
+        }
     } else if encoder_name == "vp9enc" {
         // libvpx VP9: target-bitrate is in BITS/SEC, not kbps —
         // verified via `gst-inspect-1.0 vp9enc` on GStreamer 1.28:
@@ -996,6 +1023,24 @@ fn map_quality_preset_amf(quality_preset: &str) -> &str {
         "veryslow" => "quality",
         _ => "transcoding", // balanced
     }
+}
+
+/// svtav1enc `parameters-string` for live output (`tune=zerolatency`): no
+/// look-ahead beyond what the encoder needs, no temporal filtering, the
+/// shallowest prediction hierarchy.
+const SVTAV1_LIVE_PARAMETERS: &str = "lookahead=0:enable-tf=0:hierarchical-levels=1";
+
+/// libaom `av1enc` properties for live output (`tune=zerolatency`).
+const AV1ENC_LIVE_PROPERTIES: &[(&str, &str)] = &[
+    ("usage-profile", "realtime"),
+    ("lag-in-frames", "0"),
+    ("row-mt", "true"),
+];
+
+/// svtav1enc `intra-period-length` for a keyframe every `keyframe_interval`
+/// frames, or `None` for the encoder's choice (0).
+fn svtav1_intra_period(keyframe_interval: u32) -> Option<u32> {
+    (keyframe_interval > 0).then(|| keyframe_interval - 1)
 }
 
 /// Map quality preset to SVT-AV1 preset (0=best, 13=fastest).
@@ -1337,7 +1382,7 @@ fn videoenc_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "tune".to_string(),
                 label: "Tune".to_string(),
-                description: "Optimize encoder for specific use case (x264/x265 only). Zero latency disables look-ahead for minimal delay.".to_string(),
+                description: "Optimize encoder for specific use case (x264/x265; Zero Latency also sets the software AV1 encoders to live settings). Zero latency disables look-ahead for minimal delay.".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
                         EnumValue { value: "zerolatency".to_string(), label: Some("Zero Latency (streaming/real-time)".to_string()), visible_when: None },
