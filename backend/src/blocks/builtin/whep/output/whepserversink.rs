@@ -409,6 +409,10 @@ pub(super) fn build_whepserversink(
     // WORKAROUND #2: a viewer's offered profile must not block the stream.
     crate::blocks::builtin::webrtcsink_profile_filter::install(&whepserversink);
 
+    // WORKAROUND #3: send the H.265 payload type the viewer offered when the
+    // WHEP proxy had to renumber it (rtph265pay only produces 96-127).
+    crate::blocks::builtin::webrtcsink_pt_restore::install(&whepserversink);
+
     // Handle consumer-removed to clean up webrtcbin from stats storage
     let dynamic_webrtcbin_store_remove = ctx.dynamic_webrtcbin_store();
     let block_id_for_remove = instance_id.to_string();
