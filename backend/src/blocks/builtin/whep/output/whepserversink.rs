@@ -9,12 +9,12 @@ use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use strom_types::{element::ElementPadRef, PropertyValue};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use super::resolve_track_counts;
+use super::{caps_change, resolve_track_counts};
 use crate::blocks::builtin::webrtc_props::parse_do_retransmission;
 
 /// Build WHEP Output using whepserversink (hosts HTTP server for WHEP clients).
@@ -671,37 +671,39 @@ pub(super) fn build_whepserversink(
                 gst::PadProbeReturn::Pass
             });
 
-            // Normalize H.264/H.265 caps before they reach webrtcsink.
-            // h264parse progressively adds fields (coded-picture-structure, chroma-format,
-            // bit-depth-luma, bit-depth-chroma) as it parses the stream. webrtcsink's
-            // input_caps_change_allowed() doesn't account for these and rejects them as
-            // "renegotiation". This probe removes those fields from CAPS events to
-            // prevent false renegotiation errors. Applied per-slot.
+            // Normalize H.264/H.265 caps before they reach webrtcsink, and fail
+            // the flow with a usable message on a change webrtcsink refuses.
+            //
+            // h264parse progressively adds fields (coded-picture-structure,
+            // chroma-format, bit-depth-luma, bit-depth-chroma) as it parses the
+            // stream, and an encoder fed a larger input (an HLS variant switch)
+            // raises the level. webrtcsink refuses both as "renegotiation", so
+            // they are removed here; see `caps_change`. Applied per slot.
             let queue_src_pad = video_queue.static_pad("src").expect("queue has src pad");
-            queue_src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
-                if let Some(gst::PadProbeData::Event(ref event)) = info.data {
-                    if event.type_() == gst::EventType::Caps {
-                        if let gst::EventView::Caps(caps_event) = event.view() {
-                            let caps = caps_event.caps();
-                            if let Some(structure) = caps.structure(0) {
-                                if structure.name() == "video/x-h264"
-                                    || structure.name() == "video/x-h265"
-                                {
-                                    let mut new_caps = caps.copy();
-                                    if let Some(s) = new_caps.make_mut().structure_mut(0) {
-                                        s.remove_fields([
-                                            "coded-picture-structure",
-                                            "chroma-format",
-                                            "bit-depth-luma",
-                                            "bit-depth-chroma",
-                                        ]);
-                                    }
-                                    let new_event = gst::event::Caps::new(&new_caps);
-                                    info.data = Some(gst::PadProbeData::Event(new_event));
-                                }
-                            }
+            let previous_caps: Mutex<Option<gst::Caps>> = Mutex::new(None);
+            queue_src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+                let Some(gst::PadProbeData::Event(ref event)) = info.data else {
+                    return gst::PadProbeReturn::Ok;
+                };
+                let gst::EventView::Caps(caps_event) = event.view() else {
+                    return gst::PadProbeReturn::Ok;
+                };
+                let normalized = caps_change::normalize(caps_event.caps());
+                let caps = normalized
+                    .clone()
+                    .unwrap_or_else(|| caps_event.caps_owned());
+                let mut previous = previous_caps.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(old) = previous.as_ref() {
+                    if let Some(reason) = caps_change::refused_change(old, &caps) {
+                        if let Some(queue) = pad.parent_element() {
+                            gst::element_error!(queue, gst::StreamError::Format, ("{}", reason));
                         }
                     }
+                }
+                *previous = Some(caps);
+                drop(previous);
+                if let Some(new_caps) = normalized {
+                    info.data = Some(gst::PadProbeData::Event(gst::event::Caps::new(&new_caps)));
                 }
                 gst::PadProbeReturn::Ok
             });
