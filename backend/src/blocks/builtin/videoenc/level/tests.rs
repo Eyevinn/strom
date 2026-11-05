@@ -1,6 +1,5 @@
-use super::super::{
-    applied_h264_level, parse_h264_level, videoenc_definition, Codec, VideoEncBuilder,
-};
+use super::super::tests::require_element;
+use super::super::{videoenc_definition, Codec, VideoEncBuilder};
 use super::*;
 use crate::blocks::{BlockBuildContext, BlockBuilder};
 use gstreamer_app as gst_app;
@@ -272,27 +271,12 @@ fn encode_size_change(level: &str, formats: &[(i32, i32, i32)]) -> Result<Vec<St
     outcome
 }
 
-fn x264_available() -> bool {
-    let _ = gst::init();
-    for element in ["x264enc", "h264parse"] {
-        if gst::ElementFactory::find(element).is_none() {
-            assert!(
-                strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
-                "STROM_REQUIRE_GST_PLUGINS is set but {element} is missing"
-            );
-            println!("{element} not available, skipping test");
-            return false;
-        }
-    }
-    true
-}
-
 /// An HLS variant switch, 640x360@25 to 1920x1080@50, keeps level 4.2 on the
 /// output with level auto. Fails if the pin is removed: x264enc then signals
 /// a lower level for 360p and 4.2 for 1080p50.
 #[test]
 fn auto_level_survives_a_size_change_through_x264enc() {
-    if !x264_available() {
+    if !(require_element("x264enc") && require_element("h264parse")) {
         return;
     }
     let caps =
@@ -307,7 +291,7 @@ fn auto_level_survives_a_size_change_through_x264enc() {
 /// which is what the test above guards against.
 #[test]
 fn level_none_follows_the_size_through_x264enc() {
-    if !x264_available() {
+    if !(require_element("x264enc") && require_element("h264parse")) {
         return;
     }
     let caps =
@@ -325,7 +309,7 @@ fn level_none_follows_the_size_through_x264enc() {
 /// names the level it needs, not a bare not-negotiated.
 #[test]
 fn fixed_level_too_low_fails_the_flow_with_the_level_it_needs() {
-    if !x264_available() {
+    if !(require_element("x264enc") && require_element("h264parse")) {
         return;
     }
     let err = encode_size_change("3.1", &[(1920, 1080, 50)]).unwrap_err();

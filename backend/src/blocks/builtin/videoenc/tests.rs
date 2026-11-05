@@ -25,7 +25,8 @@ fn is_encoder_available(encoder_name: &str) -> bool {
 
 /// Like `is_encoder_available`, but a skip is a failure when CI sets
 /// `STROM_REQUIRE_GST_PLUGINS`: a test that skips passes green and guards nothing.
-fn require_element(element_name: &str) -> bool {
+pub(super) fn require_element(element_name: &str) -> bool {
+    init_gst();
     if is_encoder_available(element_name) {
         return true;
     }

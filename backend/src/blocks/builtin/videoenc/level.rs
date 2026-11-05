@@ -16,14 +16,57 @@
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
+
+use super::Codec;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use strom_types::videoenc::H264Level;
+use strom_types::PropertyValue;
 use tracing::{info, warn};
+
+/// Parse the `level` property. Unknown / missing values fall back to
+/// [`H264Level::None`].
+pub(super) fn parse_h264_level(properties: &HashMap<String, PropertyValue>) -> H264Level {
+    properties
+        .get("level")
+        .and_then(|v| match v {
+            PropertyValue::String(s) => {
+                let parsed = H264Level::from_property_str(s);
+                if parsed.is_none() {
+                    warn!(
+                        "videoenc: invalid level value '{}', falling back to default",
+                        s
+                    );
+                }
+                parsed
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// The level setting that applies to `encoder_name`: the setting itself for
+/// H.264 on an encoder that takes the level from downstream caps, otherwise
+/// [`H264Level::None`] (no level field, as before the setting existed).
+pub(super) fn applied_h264_level(
+    codec: Codec,
+    setting: H264Level,
+    encoder_name: &str,
+) -> H264Level {
+    if codec != Codec::H264 || setting == H264Level::None {
+        return H264Level::None;
+    }
+    if !takes_level_from_downstream(encoder_name) {
+        log_not_applied(encoder_name, setting);
+        return H264Level::None;
+    }
+    setting
+}
 
 /// Encoders verified to take the level from the downstream caps. Others pick
 /// their own level, and a pinned one could fail to link, so they are left
 /// alone.
-pub(super) fn takes_level_from_downstream(encoder_name: &str) -> bool {
+fn takes_level_from_downstream(encoder_name: &str) -> bool {
     matches!(encoder_name, "vtenc_h264" | "vtenc_h264_hw" | "x264enc")
 }
 
@@ -210,7 +253,7 @@ pub(super) fn install_probe(
 
 /// Log, once per block build, that the level setting is not applied to an
 /// encoder that picks its own level.
-pub(super) fn log_not_applied(encoder_name: &str, setting: H264Level) {
+fn log_not_applied(encoder_name: &str, setting: H264Level) {
     info!(
         "videoenc: H.264 level setting '{}' is not applied to {}: only vtenc_h264, vtenc_h264_hw and x264enc are known to take the level from downstream caps",
         setting.as_property_str(),

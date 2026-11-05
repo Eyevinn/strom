@@ -824,45 +824,15 @@ fn set_encoder_properties(
             info!("V4L2 encoder: extra-controls {}", controls);
             encoder.set_property("extra-controls", &controls);
         }
-    } else if encoder_name == "svtav1enc" {
-        // SVT-AV1: target-bitrate in kbps
-        set_encoder_property(encoder, "target-bitrate", &bitrate_str)?;
-        // SVT-AV1: preset (0=slowest/best, 13=fastest)
-        let preset = map_quality_preset_svtav1(quality_preset);
-        set_encoder_property(encoder, "preset", &preset.to_string())?;
-        // The keyframe interval is `intra-period-length`, the frames between
-        // two keyframes: 59 gives one every 60 frames. Left at auto, a viewer
-        // that joins or loses a frame waits seconds for a picture.
-        if let Some(period) = svtav1_intra_period(keyframe_interval) {
-            set_encoder_property(encoder, "intra-period-length", &period.to_string())?;
-        }
-        // SVT-AV1's random-access defaults hold frames back for look-ahead,
-        // temporal filtering and a 5-level hierarchy: 1.7 s on average at
-        // 720p25 (2.3 s worst). The live settings bring that to ~0.2 s.
-        // Low-delay prediction (`pred-struct=1`, `rtc=1`) would go lower, but
-        // svtav1enc stalls after its first frames in that mode.
-        if tune == "zerolatency" {
-            set_encoder_property(encoder, "parameters-string", SVTAV1_LIVE_PARAMETERS)?;
-        }
-    } else if encoder_name == "av1enc" {
-        // libaom AV1: target-bitrate in kbps
-        set_encoder_property(encoder, "target-bitrate", &bitrate_str)?;
-        // libaom: cpu-used (0=slowest, 8=fastest)
-        let cpu_used = map_quality_preset_av1enc(quality_preset);
-        set_encoder_property(encoder, "cpu-used", &cpu_used.to_string())?;
-        // libaom's keyframe interval is `keyframe-max-dist`.
-        if keyframe_interval > 0 && encoder.has_property("keyframe-max-dist") {
-            set_encoder_property(encoder, "keyframe-max-dist", &keyframe_str)?;
-        }
-        // libaom defaults to the good-quality usage with 19 frames of
-        // look-ahead. Live: the realtime usage, no lag, row threading.
-        if tune == "zerolatency" {
-            for (property, value) in AV1ENC_LIVE_PROPERTIES {
-                if encoder.has_property(property) {
-                    set_encoder_property(encoder, property, value)?;
-                }
-            }
-        }
+    } else if encoder_name == "svtav1enc" || encoder_name == "av1enc" {
+        av1::set_av1_properties(
+            encoder,
+            encoder_name,
+            bitrate,
+            quality_preset,
+            tune,
+            keyframe_interval,
+        )?;
     } else if encoder_name == "vp9enc" || encoder_name == "vp8enc" {
         set_vpx_properties(
             encoder,
@@ -1214,46 +1184,6 @@ fn map_quality_preset_amf(quality_preset: &str) -> &str {
     }
 }
 
-/// svtav1enc `parameters-string` for live output (`tune=zerolatency`): no
-/// look-ahead beyond what the encoder needs, no temporal filtering, the
-/// shallowest prediction hierarchy.
-const SVTAV1_LIVE_PARAMETERS: &str = "lookahead=0:enable-tf=0:hierarchical-levels=1";
-
-/// libaom `av1enc` properties for live output (`tune=zerolatency`).
-const AV1ENC_LIVE_PROPERTIES: &[(&str, &str)] = &[
-    ("usage-profile", "realtime"),
-    ("lag-in-frames", "0"),
-    ("row-mt", "true"),
-];
-
-/// svtav1enc `intra-period-length` for a keyframe every `keyframe_interval`
-/// frames, or `None` for the encoder's choice (0).
-fn svtav1_intra_period(keyframe_interval: u32) -> Option<u32> {
-    (keyframe_interval > 0).then(|| keyframe_interval - 1)
-}
-
-/// Map quality preset to SVT-AV1 preset (0=best, 13=fastest).
-fn map_quality_preset_svtav1(quality_preset: &str) -> u32 {
-    match quality_preset {
-        "ultrafast" => 12,
-        "fast" => 10,
-        "slow" => 4,
-        "veryslow" => 0,
-        _ => 8, // medium
-    }
-}
-
-/// Map quality preset to libaom AV1 cpu-used (0=slowest, 8=fastest).
-fn map_quality_preset_av1enc(quality_preset: &str) -> i32 {
-    match quality_preset {
-        "ultrafast" => 8,
-        "fast" => 6,
-        "slow" => 2,
-        "veryslow" => 0,
-        _ => 4, // medium
-    }
-}
-
 /// Map quality preset to VP9 cpu-used. Real-time speeds run 5-9 in libvpx;
 /// measured at 1080p30 (18-core Mac): 5 158 fps, 6 207, 7 228, 8 251. On noise
 /// content 5 reaches only 32 fps, 7 64, so the live presets start at 6.
@@ -1416,41 +1346,6 @@ fn parse_profile(properties: &HashMap<String, PropertyValue>) -> Profile {
             _ => None,
         })
         .unwrap_or_default()
-}
-
-/// Parse the `level` property. Unknown / missing values fall back to
-/// [`H264Level::None`].
-fn parse_h264_level(properties: &HashMap<String, PropertyValue>) -> H264Level {
-    properties
-        .get("level")
-        .and_then(|v| match v {
-            PropertyValue::String(s) => {
-                let parsed = H264Level::from_property_str(s);
-                if parsed.is_none() {
-                    warn!(
-                        "videoenc: invalid level value '{}', falling back to default",
-                        s
-                    );
-                }
-                parsed
-            }
-            _ => None,
-        })
-        .unwrap_or_default()
-}
-
-/// The level setting that applies to `encoder_name`: the setting itself for
-/// H.264 on an encoder that takes the level from downstream caps, otherwise
-/// [`H264Level::None`] (no level field, as before the setting existed).
-fn applied_h264_level(codec: Codec, setting: H264Level, encoder_name: &str) -> H264Level {
-    if codec != Codec::H264 || setting == H264Level::None {
-        return H264Level::None;
-    }
-    if !level::takes_level_from_downstream(encoder_name) {
-        level::log_not_applied(encoder_name, setting);
-        return H264Level::None;
-    }
-    setting
 }
 
 /// Get metadata for VideoEncoder block (for UI/API).
@@ -1676,9 +1571,13 @@ fn videoenc_definition() -> BlockDefinition {
     }
 }
 
+mod av1;
 mod level;
 mod mediafoundation;
 mod selection;
+#[cfg(test)]
+use av1::{svtav1_intra_period, SVTAV1_LIVE_PARAMETERS};
+use level::{applied_h264_level, parse_h264_level};
 use mediafoundation::{
     is_media_foundation_plugin, set_mf_encoder_properties, MEDIA_FOUNDATION_PLUGIN,
 };
