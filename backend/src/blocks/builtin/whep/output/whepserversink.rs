@@ -413,6 +413,10 @@ pub(super) fn build_whepserversink(
     // WHEP proxy had to renumber it (rtph265pay only produces 96-127).
     crate::blocks::builtin::webrtcsink_pt_restore::install(&whepserversink);
 
+    // WORKAROUND #4: a viewer must not get frames whose references webrtcsink
+    // dropped while its ICE/DTLS came up.
+    crate::blocks::builtin::webrtcsink_keyframe_gate::install(&whepserversink);
+
     // Handle consumer-removed to clean up webrtcbin from stats storage
     let dynamic_webrtcbin_store_remove = ctx.dynamic_webrtcbin_store();
     let block_id_for_remove = instance_id.to_string();

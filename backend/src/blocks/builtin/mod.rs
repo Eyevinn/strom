@@ -40,6 +40,7 @@ pub mod videoenc;
 pub mod videoformat;
 pub mod vision_mixer;
 pub(crate) mod webrtc_props;
+pub(crate) mod webrtcsink_keyframe_gate;
 pub(crate) mod webrtcsink_profile_filter;
 pub(crate) mod webrtcsink_pt_restore;
 pub mod whep;
