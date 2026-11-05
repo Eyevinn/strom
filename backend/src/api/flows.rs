@@ -328,6 +328,10 @@ fn prepare_flow(flow: &mut Flow) -> Result<(), String> {
         if block.block_definition_id == "builtin.whep_output" {
             crate::blocks::builtin::whep::migrate_legacy_mode(&mut block.properties);
         }
+        // Mixers saved with a renamed (`lv2`) or removed (`rust`) DSP backend.
+        if block.block_definition_id == crate::blocks::builtin::mixer::MIXER_BLOCK_ID {
+            crate::blocks::builtin::mixer::migrate_dsp_backend(&mut block.properties);
+        }
     }
 
     // Compute external pads for all block instances based on their properties
@@ -2635,6 +2639,29 @@ pub async fn get_block_thumbnail(
 mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn prepare_flow_rewrites_an_old_mixer_dsp_backend() {
+        // A flow sent with `dsp_backend: lv2` is stored as `lsp-lv2`.
+        let mut flow = Flow::new("mixer");
+        flow.blocks.push(strom_types::block::BlockInstance {
+            id: "mx".to_string(),
+            block_definition_id: crate::blocks::builtin::mixer::MIXER_BLOCK_ID.to_string(),
+            name: None,
+            properties: HashMap::from([(
+                "dsp_backend".to_string(),
+                strom_types::PropertyValue::String("lv2".to_string()),
+            )]),
+            position: strom_types::block::Position { x: 0.0, y: 0.0 },
+            runtime_data: None,
+            computed_external_pads: None,
+        });
+        prepare_flow(&mut flow).expect("flow is valid");
+        assert!(matches!(
+            flow.blocks[0].properties.get("dsp_backend"),
+            Some(strom_types::PropertyValue::String(v)) if v == "lsp-lv2"
+        ));
+    }
 
     // ========================================================================
     // resolve_link_endpoint() tests - these cover the gst-launch import bug

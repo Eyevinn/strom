@@ -475,6 +475,14 @@ impl AppState {
                                 &mut block.properties,
                             );
                         }
+                        // Mixers saved with a renamed or removed DSP backend.
+                        if block.block_definition_id
+                            == crate::blocks::builtin::mixer::MIXER_BLOCK_ID
+                        {
+                            crate::blocks::builtin::mixer::migrate_dsp_backend(
+                                &mut block.properties,
+                            );
+                        }
                     }
                 }
 

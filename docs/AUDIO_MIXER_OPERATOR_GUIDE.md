@@ -365,7 +365,7 @@ built and require restarting the flow to change:
 - channel, aux-bus and group counts
 - aux send pre/post-fader
 - sample rate
-- DSP backend (strom-dsp, Rust or LV2, see below)
+- DSP backend (strom-dsp or LSP LV2, see below)
 - Force Live, Latency, Internal Bus Latency and Min Upstream Latency
 
 Everything else (faders, mutes, send levels, processing parameters,
@@ -373,25 +373,53 @@ routing switches, PFL/AFL) is live-editable.
 
 ### DSP backend
 
-The gate, compressor, EQ and limiter come from one of three DSP backends,
+The gate, compressor, EQ and limiter come from one of two DSP backends,
 chosen with the mixer's **DSP Backend** property:
 
 | Backend | What it is |
 |---|---|
-| **strom-dsp** (default) | Built into Strom. |
-| **Rust** | Built into Strom: lsp-plugins-rs. |
-| **LV2** | The external LSP plugins. They must be installed on the host. |
+| **strom-dsp** (default) | Built into Strom. Nothing to install. |
+| **LSP LV2** | The external LSP plugin suite, as LV2 plugins. Not shipped with Strom: install it yourself, see below. |
 
 A mixer with no DSP Backend set, or with a value Strom does not know, uses
-strom-dsp. A flow that names Rust or LV2 keeps it.
+strom-dsp. A flow that names LSP LV2 keeps it. Strom no longer ships the Rust
+backend (lsp-plugins-rs); a flow saved with it uses strom-dsp.
 
-On strom-dsp, compared with the other backends:
+LSP LV2 was called `lv2` in earlier versions; its value is now `lsp-lv2`.
+Strom still reads `lv2` (and `rust`), and rewrites them to `lsp-lv2` (and
+`stromdsp`) when it loads a flow or receives one through the API, so the
+flow is saved with the new value.
+
+#### Using the LSP plugins (LSP LV2)
+
+Strom does not ship the LSP plugins, in any package or Docker image. To use
+them, install them on the host next to Strom:
+
+1. Install the LSP LV2 plugins. On Debian and Ubuntu: `apt install lsp-plugins-lv2`.
+   On other systems, get them from the LSP project.
+2. Make sure GStreamer has its LV2 wrapper (the `lv2` plugin in
+   gst-plugins-bad), and that it finds the plugins. Check with
+   `gst-inspect-1.0 lsp-plug-in-plugins-lv2-compressor-stereo`. If the
+   plugins are installed outside the standard LV2 paths, point `LV2_PATH`
+   at them.
+3. Restart Strom, then set **DSP Backend** to **LSP LV2** on the mixer and
+   restart the flow.
+
+The mixer uses the stereo gate, compressor, parametric equalizer x8 and
+limiter. If one of them is missing, that stage passes audio through
+unprocessed and Strom logs an error naming it. The flow still runs, so check
+the log after switching.
+
+In Docker, build your own image on top of Strom's and install the plugins
+there; the base image is Ubuntu.
+
+On strom-dsp, compared with LSP LV2 and the removed Rust backend:
 
 - **Compressor threshold**: the same scale. A threshold sounds the same as
-  it did on Rust or LV2.
+  it did on Rust or LSP LV2.
 - **Limiter**: holds its threshold as a ceiling, with a 20 ms release.
 - **Latency**: the main limiter looks ahead 5 ms, also while it is disabled,
-  so the main output is 5 ms later than on the other backends.
+  so the main output is 5 ms later than on LSP LV2.
 - **Enable / disable**: switching gate, compressor, EQ or limiter on or off
   fades instead of switching hard.
 

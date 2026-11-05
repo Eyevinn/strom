@@ -130,19 +130,13 @@ pub(super) fn make_rate_pin(name: &str, rate: u32) -> Result<gst::Element, Block
         .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter {}: {}", name, e)))
 }
 
-/// Element factory for one of the built-in Rust DSP elements: `stromdsp-*`
-/// for the `stromdsp` backend, `lsp-rs-*` for `rust`. Both sets have the same
-/// property interface.
-fn rust_factory(backend: &str, kind: &str) -> &'static str {
-    match (backend, kind) {
-        ("stromdsp", "gate") => "stromdsp-gate",
-        ("stromdsp", "compressor") => "stromdsp-compressor",
-        ("stromdsp", "equalizer") => "stromdsp-equalizer",
-        ("stromdsp", "limiter") => "stromdsp-limiter",
-        (_, "gate") => "lsp-rs-gate",
-        (_, "compressor") => "lsp-rs-compressor",
-        (_, "equalizer") => "lsp-rs-equalizer",
-        _ => "lsp-rs-limiter",
+/// Element factory for one of the built-in strom-dsp elements.
+fn stromdsp_factory(kind: &str) -> &'static str {
+    match kind {
+        "gate" => "stromdsp-gate",
+        "compressor" => "stromdsp-compressor",
+        "equalizer" => "stromdsp-equalizer",
+        _ => "stromdsp-limiter",
     }
 }
 
@@ -155,8 +149,8 @@ pub(super) fn make_gate_element(
     release_ms: f64,
     backend: &str,
 ) -> Result<gst::Element, BlockBuildError> {
-    if backend == "rust" || backend == "stromdsp" {
-        if let Ok(gate) = gst::ElementFactory::make(rust_factory(backend, "gate"))
+    if backend == "stromdsp" {
+        if let Ok(gate) = gst::ElementFactory::make(stromdsp_factory("gate"))
             .name(name)
             .build()
         {
@@ -171,7 +165,7 @@ pub(super) fn make_gate_element(
         }
         error!(
             "{} not available for {}, using passthrough",
-            rust_factory(backend, "gate"),
+            stromdsp_factory("gate"),
             name
         );
     } else if let Ok(gate) = gst::ElementFactory::make("lsp-plug-in-plugins-lv2-gate-stereo")
@@ -192,7 +186,10 @@ pub(super) fn make_gate_element(
         }
         return Ok(gate);
     } else {
-        error!("LV2 gate not available for {}, using passthrough", name);
+        error!(
+            "LSP LV2 gate (lsp-plug-in-plugins-lv2-gate-stereo) not available for {}, using passthrough",
+            name
+        );
     }
     gst::ElementFactory::make("identity")
         .name(name)
@@ -213,35 +210,26 @@ pub(super) fn make_compressor_element(
     makeup_db: f64,
     backend: &str,
 ) -> Result<gst::Element, BlockBuildError> {
-    if backend == "rust" || backend == "stromdsp" {
-        if let Ok(comp) = gst::ElementFactory::make(rust_factory(backend, "compressor"))
+    if backend == "stromdsp" {
+        if let Ok(comp) = gst::ElementFactory::make(stromdsp_factory("compressor"))
             .name(name)
             .build()
         {
             comp.set_property("enabled", enabled);
-            let threshold_db = if backend == "stromdsp" {
-                threshold_db + STROMDSP_COMP_THRESHOLD_OFFSET_DB
-            } else {
-                threshold_db
-            };
+            let threshold_db = threshold_db + STROMDSP_COMP_THRESHOLD_OFFSET_DB;
             // The element takes 0..=1 linear; the offset can push 0 dB past it.
             comp.set_property("threshold", db_to_linear(threshold_db).min(1.0) as f32);
             comp.set_property("ratio", ratio as f32);
             comp.set_property("attack", attack_ms as f32);
             comp.set_property("release", release_ms as f32);
             comp.set_property("makeup-gain", db_to_linear(makeup_db) as f32);
-            // Only strom-dsp offers a detector choice and auto makeup.
-            if comp.find_property("detector").is_some() {
-                comp.set_property_from_str("detector", DEFAULT_COMP_DETECTOR);
-            }
-            if comp.find_property("auto-makeup").is_some() {
-                comp.set_property("auto-makeup", DEFAULT_COMP_AUTO_MAKEUP);
-            }
+            comp.set_property_from_str("detector", DEFAULT_COMP_DETECTOR);
+            comp.set_property("auto-makeup", DEFAULT_COMP_AUTO_MAKEUP);
             return Ok(comp);
         }
         error!(
             "{} not available for {}, using passthrough",
-            rust_factory(backend, "compressor"),
+            stromdsp_factory("compressor"),
             name
         );
     } else if let Ok(comp) = gst::ElementFactory::make("lsp-plug-in-plugins-lv2-compressor-stereo")
@@ -269,7 +257,7 @@ pub(super) fn make_compressor_element(
         return Ok(comp);
     } else {
         error!(
-            "LV2 compressor not available for {}, using passthrough",
+            "LSP LV2 compressor (lsp-plug-in-plugins-lv2-compressor-stereo) not available for {}, using passthrough",
             name
         );
     }
@@ -289,8 +277,8 @@ pub(super) fn make_eq_element(
     bands: &[(f64, f64, f64); 4],
     backend: &str,
 ) -> Result<gst::Element, BlockBuildError> {
-    if backend == "rust" || backend == "stromdsp" {
-        if let Ok(eq) = gst::ElementFactory::make(rust_factory(backend, "equalizer"))
+    if backend == "stromdsp" {
+        if let Ok(eq) = gst::ElementFactory::make(stromdsp_factory("equalizer"))
             .name(name)
             .build()
         {
@@ -307,7 +295,7 @@ pub(super) fn make_eq_element(
         }
         error!(
             "{} not available for {}, using passthrough",
-            rust_factory(backend, "equalizer"),
+            stromdsp_factory("equalizer"),
             name
         );
     } else if let Ok(eq) =
@@ -338,7 +326,10 @@ pub(super) fn make_eq_element(
         }
         return Ok(eq);
     } else {
-        error!("LV2 EQ not available for {}, using passthrough", name);
+        error!(
+            "LSP LV2 EQ (lsp-plug-in-plugins-lv2-para-equalizer-x8-stereo) not available for {}, using passthrough",
+            name
+        );
     }
     gst::ElementFactory::make("identity")
         .name(name)
@@ -354,8 +345,8 @@ pub(super) fn make_limiter_element(
     threshold_db: f64,
     backend: &str,
 ) -> Result<gst::Element, BlockBuildError> {
-    if backend == "rust" || backend == "stromdsp" {
-        if let Ok(lim) = gst::ElementFactory::make(rust_factory(backend, "limiter"))
+    if backend == "stromdsp" {
+        if let Ok(lim) = gst::ElementFactory::make(stromdsp_factory("limiter"))
             .name(name)
             .build()
         {
@@ -368,7 +359,7 @@ pub(super) fn make_limiter_element(
         }
         error!(
             "{} not available for {}, using passthrough",
-            rust_factory(backend, "limiter"),
+            stromdsp_factory("limiter"),
             name
         );
     } else if let Ok(lim) = gst::ElementFactory::make("lsp-plug-in-plugins-lv2-limiter-stereo")
@@ -383,7 +374,10 @@ pub(super) fn make_limiter_element(
         }
         return Ok(lim);
     } else {
-        error!("LV2 limiter not available for {}, using passthrough", name);
+        error!(
+            "LSP LV2 limiter (lsp-plug-in-plugins-lv2-limiter-stereo) not available for {}, using passthrough",
+            name
+        );
     }
     gst::ElementFactory::make("identity")
         .name(name)

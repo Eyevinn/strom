@@ -32,7 +32,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         ExposedProperty {
             name: "dsp_backend".to_string(),
             label: "DSP Backend".to_string(),
-            description: "strom-dsp (default) uses the built-in strom-dsp elements, Rust uses the built-in lsp-plugins-rs, LV2 uses the external C++ LSP plugins"
+            description: "strom-dsp (default) uses the built-in strom-dsp elements, LSP LV2 uses the external LSP plugin suite (LV2), which must be installed on the host separately"
                 .to_string(),
             property_type: PropertyType::Enum {
                 values: vec![
@@ -42,13 +42,8 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                         visible_when: None,
                     },
                     EnumValue {
-                        value: "rust".to_string(),
-                        label: Some("Rust".to_string()),
-                        visible_when: None,
-                    },
-                    EnumValue {
-                        value: "lv2".to_string(),
-                        label: Some("LV2".to_string()),
+                        value: "lsp-lv2".to_string(),
+                        label: Some("LSP LV2".to_string()),
                         visible_when: None,
                     },
                 ],
@@ -818,7 +813,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             visible_when: None,
         });
 
-        // Note: LSP gate has no settable range property
+        // Note: the gate has no settable range property
         // ("rr" doesn't exist, "gr" is a read-only reduction meter)
 
         // ============================================================

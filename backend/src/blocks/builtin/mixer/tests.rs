@@ -299,24 +299,25 @@ fn test_mixer_config_properties_not_live() {
 // ---- Element factories ----
 
 #[test]
-fn test_rust_backend_elements_take_their_settings() {
+fn test_stromdsp_backend_elements_take_their_settings() {
     init_gst();
-    // lsp-rs is statically registered, so the rust backend never falls back
-    // to identity. These asserts are unconditional on purpose.
-    let gate = make_gate_element("t_gate_rs", true, -40.0, 5.0, 100.0, "rust").unwrap();
-    assert_eq!(type_name(&gate), "LspRsGate");
+    // strom-dsp is statically registered, so the stromdsp backend never falls
+    // back to identity. These asserts are unconditional on purpose.
+    let gate = make_gate_element("t_gate_sd", true, -40.0, 5.0, 100.0, "stromdsp").unwrap();
+    assert_eq!(type_name(&gate), "StromDspGate");
     assert!(gate.property::<bool>("enabled"));
     assert_eq!(gate.property::<f32>("open-threshold"), -40.0);
     assert_eq!(gate.property::<f32>("close-threshold"), -40.0);
     assert_eq!(gate.property::<f32>("attack"), 5.0);
     assert_eq!(gate.property::<f32>("release"), 100.0);
 
-    let gate_off = make_gate_element("t_gate_rs_off", false, -40.0, 5.0, 100.0, "rust").unwrap();
+    let gate_off =
+        make_gate_element("t_gate_sd_off", false, -40.0, 5.0, 100.0, "stromdsp").unwrap();
     assert!(!gate_off.property::<bool>("enabled"));
 
-    let comp =
-        make_compressor_element("t_comp_rs", true, -20.0, 4.0, 10.0, 100.0, 6.0, "rust").unwrap();
-    assert_eq!(type_name(&comp), "LspRsCompressor");
+    let comp = make_compressor_element("t_comp_sd", true, -20.0, 4.0, 10.0, 100.0, 6.0, "stromdsp")
+        .unwrap();
+    assert_eq!(type_name(&comp), "StromDspCompressor");
     assert!(comp.property::<bool>("enabled"));
     assert_eq!(comp.property::<f32>("ratio"), 4.0);
     assert_eq!(comp.property::<f32>("attack"), 10.0);
@@ -328,15 +329,15 @@ fn test_rust_backend_elements_take_their_settings() {
         (4000.0, 0.0, 1.0),
         (8000.0, 6.0, 0.7),
     ];
-    let eq = make_eq_element("t_eq_rs", true, &bands, "rust").unwrap();
-    assert_eq!(type_name(&eq), "LspRsEqualizer");
+    let eq = make_eq_element("t_eq_sd", true, &bands, "stromdsp").unwrap();
+    assert_eq!(type_name(&eq), "StromDspEqualizer");
     assert!(eq.property::<bool>("enabled"));
     for (i, (freq, gain_db, q)) in bands.iter().enumerate() {
         assert_eq!(
             eq.property::<f32>(&format!("band{i}-frequency")),
             *freq as f32
         );
-        // The Rust EQ takes dB directly.
+        // The strom-dsp EQ takes dB directly.
         assert_eq!(
             eq.property::<f32>(&format!("band{i}-gain")),
             *gain_db as f32
@@ -344,8 +345,8 @@ fn test_rust_backend_elements_take_their_settings() {
         assert_eq!(eq.property::<f32>(&format!("band{i}-q")), *q as f32);
     }
 
-    let lim = make_limiter_element("t_lim_rs", true, -3.0, "rust").unwrap();
-    assert_eq!(type_name(&lim), "LspRsLimiter");
+    let lim = make_limiter_element("t_lim_sd", true, -3.0, "stromdsp").unwrap();
+    assert_eq!(type_name(&lim), "StromDspLimiter");
     assert!(lim.property::<bool>("enabled"));
     assert_eq!(lim.property::<f32>("threshold"), -3.0);
 }
@@ -365,10 +366,11 @@ fn lv2_elements() -> [gst::Element; 4] {
         (8000.0, 0.0, 1.0),
     ];
     [
-        make_gate_element("t_gate_lv2", true, -40.0, 5.0, 100.0, "lv2").unwrap(),
-        make_compressor_element("t_comp_lv2", true, -20.0, 4.0, 10.0, 100.0, 0.0, "lv2").unwrap(),
-        make_eq_element("t_eq_lv2", true, &bands, "lv2").unwrap(),
-        make_limiter_element("t_lim_lv2", true, -3.0, "lv2").unwrap(),
+        make_gate_element("t_gate_lv2", true, -40.0, 5.0, 100.0, "lsp-lv2").unwrap(),
+        make_compressor_element("t_comp_lv2", true, -20.0, 4.0, 10.0, 100.0, 0.0, "lsp-lv2")
+            .unwrap(),
+        make_eq_element("t_eq_lv2", true, &bands, "lsp-lv2").unwrap(),
+        make_limiter_element("t_lim_lv2", true, -3.0, "lsp-lv2").unwrap(),
     ]
 }
 
@@ -416,9 +418,9 @@ fn test_make_hpf_element() {
     assert_eq!(off.property::<f32>("cutoff"), 0.0);
 }
 
-// ---- Property translation (lsp-rs is statically registered) ----
+// ---- Property translation (strom-dsp is statically registered) ----
 
-fn lsp_rs(factory: &str) -> gst::Element {
+fn stromdsp(factory: &str) -> gst::Element {
     init_gst();
     gst::ElementFactory::make(factory)
         .build()
@@ -434,7 +436,7 @@ fn float(value: &PropertyValue) -> f64 {
 
 #[test]
 fn test_translate_gate_property() {
-    let gate = lsp_rs("lsp-rs-gate");
+    let gate = stromdsp("stromdsp-gate");
     // gt (linear) -> open-threshold + close-threshold (dB): 0.1 linear = -20 dB
     let result = translate_property_for_element(&gate, "gt", &PropertyValue::Float(0.1));
     let names: Vec<&str> = result.iter().map(|(n, _)| n.as_str()).collect();
@@ -446,9 +448,8 @@ fn test_translate_gate_property() {
 
 #[test]
 fn test_translate_compressor_property() {
-    let comp = lsp_rs("lsp-rs-compressor");
-    for (lv2, rust) in [
-        ("al", "threshold"),
+    let comp = stromdsp("stromdsp-compressor");
+    for (lv2, name) in [
         ("cr", "ratio"),
         ("at", "attack"),
         ("rt", "release"),
@@ -456,7 +457,7 @@ fn test_translate_compressor_property() {
     ] {
         let result = translate_property_for_element(&comp, lv2, &PropertyValue::Float(0.5));
         assert_eq!(result.len(), 1, "{lv2}");
-        assert_eq!(result[0].0, rust, "{lv2}");
+        assert_eq!(result[0].0, name, "{lv2}");
         assert_eq!(float(&result[0].1), 0.5, "{lv2} passes the value through");
     }
     let result = translate_property_for_element(&comp, "enabled", &PropertyValue::Bool(true));
@@ -465,7 +466,7 @@ fn test_translate_compressor_property() {
 
 #[test]
 fn test_translate_eq_property() {
-    let eq = lsp_rs("lsp-rs-equalizer");
+    let eq = stromdsp("stromdsp-equalizer");
 
     let result = translate_property_for_element(&eq, "f-2", &PropertyValue::Float(1000.0));
     assert_eq!(result.len(), 1);
@@ -485,7 +486,7 @@ fn test_translate_eq_property() {
 
 #[test]
 fn test_translate_limiter_property() {
-    let lim = lsp_rs("lsp-rs-limiter");
+    let lim = stromdsp("stromdsp-limiter");
     // th (linear) -> threshold (dB)
     let result = translate_property_for_element(&lim, "th", &PropertyValue::Float(0.1));
     assert_eq!(result.len(), 1);
@@ -500,7 +501,7 @@ fn test_translate_no_translation_for_other_elements() {
     let result = translate_property_for_element(&elem, "gt", &PropertyValue::Float(0.1));
     assert!(
         result.is_empty(),
-        "Should not translate properties for non-lsp-rs elements"
+        "Should not translate properties for non-strom-dsp elements"
     );
 }
 
@@ -515,7 +516,7 @@ fn small_mixer_props(extra: &[(&str, PropertyValue)]) -> HashMap<String, Propert
         ("num_channels", PropertyValue::UInt(2)),
         ("num_aux_buses", PropertyValue::UInt(1)),
         ("num_groups", PropertyValue::UInt(1)),
-        ("dsp_backend", PropertyValue::String("rust".to_string())),
+        ("dsp_backend", PropertyValue::String("stromdsp".to_string())),
     ]);
     p.extend(props(extra));
     p
@@ -869,7 +870,7 @@ fn assert_late_input_is_heard(input_rate: i32, mixer_rate: Option<u32>) {
         ("num_channels", PropertyValue::UInt(2)),
         ("num_aux_buses", PropertyValue::UInt(2)),
         ("num_groups", PropertyValue::UInt(1)),
-        ("dsp_backend", PropertyValue::String("rust".to_string())),
+        ("dsp_backend", PropertyValue::String("stromdsp".to_string())),
         // Aux sends default to 0: open channel 1's send to aux 2.
         ("ch1_aux2_level", PropertyValue::Float(1.0)),
     ]);
@@ -1138,7 +1139,7 @@ fn test_solo_keeps_block_latency_without_aux_or_group() {
         ("num_channels", PropertyValue::UInt(2)),
         ("num_aux_buses", PropertyValue::UInt(0)),
         ("num_groups", PropertyValue::UInt(0)),
-        ("dsp_backend", PropertyValue::String("rust".to_string())),
+        ("dsp_backend", PropertyValue::String("stromdsp".to_string())),
         ("latency", PropertyValue::UInt(latency)),
     ]);
     let m = assemble(&props);
@@ -1706,6 +1707,51 @@ fn test_mixer_without_dsp_backend_builds_stromdsp_elements() {
         ("main_limiter_enabled", PropertyValue::Bool(true)),
     ]);
     assert_stromdsp_elements(&assemble(&unknown), "dsp_backend unknown");
+
+    // `rust` (lsp-plugins-rs) was removed; flows saved with it get strom-dsp.
+    let removed = small_mixer_props(&[
+        ("dsp_backend", PropertyValue::String("rust".to_string())),
+        ("main_limiter_enabled", PropertyValue::Bool(true)),
+    ]);
+    assert_stromdsp_elements(&assemble(&removed), "dsp_backend rust");
+}
+
+#[test]
+fn test_mixer_builds_lsp_lv2_for_the_old_lv2_value() {
+    // `lv2` is the old name of `lsp-lv2`. Without the alias it would be an
+    // unknown value and build strom-dsp.
+    let m = assemble(&small_mixer_props(&[(
+        "dsp_backend",
+        PropertyValue::String("lv2".to_string()),
+    )]));
+    for id in ["gate_0", "comp_0", "eq_0", "main_limiter"] {
+        assert!(
+            !type_name(m.element(id)).starts_with("StromDsp"),
+            "{id}: built {} for dsp_backend lv2",
+            type_name(m.element(id))
+        );
+    }
+}
+
+#[test]
+fn test_migrate_dsp_backend_rewrites_old_values() {
+    use super::migrate_dsp_backend;
+    for (old, new) in [("lv2", "lsp-lv2"), ("rust", "stromdsp")] {
+        let mut p = props(&[("dsp_backend", PropertyValue::String(old.to_string()))]);
+        assert!(migrate_dsp_backend(&mut p), "{old}");
+        assert!(
+            matches!(p.get("dsp_backend"), Some(PropertyValue::String(v)) if v == new),
+            "{old} should become {new}, got {:?}",
+            p.get("dsp_backend")
+        );
+        // Idempotent: a second pass changes nothing.
+        assert!(!migrate_dsp_backend(&mut p), "{old}");
+    }
+    for current in ["stromdsp", "lsp-lv2", "no-such-backend"] {
+        let mut p = props(&[("dsp_backend", PropertyValue::String(current.to_string()))]);
+        assert!(!migrate_dsp_backend(&mut p), "{current}");
+    }
+    assert!(!migrate_dsp_backend(&mut HashMap::new()));
 }
 
 #[test]
@@ -1721,42 +1767,24 @@ fn test_mixer_definition_defaults_to_stromdsp() {
         panic!("dsp_backend should be an enum");
     };
     let values: Vec<&str> = values.iter().map(|v| v.value.as_str()).collect();
-    assert_eq!(values, ["stromdsp", "rust", "lv2"]);
+    assert_eq!(values, ["stromdsp", "lsp-lv2"]);
 }
 
 #[test]
-fn test_rust_backends_set_gate_and_limiter_timing_explicitly() {
+fn test_stromdsp_backend_sets_gate_and_limiter_timing_explicitly() {
     // The mixer sets hold/reduction and attack/release/lookahead itself, so its
     // sound does not follow whatever defaults a DSP element ships with.
-    for backend in ["rust", "stromdsp"] {
-        let m = assemble(&small_mixer_props(&[
-            ("dsp_backend", PropertyValue::String(backend.to_string())),
-            ("main_limiter_enabled", PropertyValue::Bool(true)),
-        ]));
-        let gate = m.element("gate_0");
-        assert_eq!(gate.property::<f32>("hold"), DEFAULT_GATE_HOLD, "{backend}");
-        assert_eq!(
-            gate.property::<f32>("reduction"),
-            DEFAULT_GATE_REDUCTION,
-            "{backend}"
-        );
-        let lim = m.element("main_limiter");
-        assert_eq!(
-            lim.property::<f32>("attack"),
-            DEFAULT_LIMITER_ATTACK,
-            "{backend}"
-        );
-        assert_eq!(
-            lim.property::<f32>("release"),
-            DEFAULT_LIMITER_RELEASE,
-            "{backend}"
-        );
-        assert_eq!(
-            lim.property::<f32>("lookahead"),
-            DEFAULT_LIMITER_LOOKAHEAD,
-            "{backend}"
-        );
-    }
+    let m = assemble(&small_mixer_props(&[(
+        "main_limiter_enabled",
+        PropertyValue::Bool(true),
+    )]));
+    let gate = m.element("gate_0");
+    assert_eq!(gate.property::<f32>("hold"), DEFAULT_GATE_HOLD);
+    assert_eq!(gate.property::<f32>("reduction"), DEFAULT_GATE_REDUCTION);
+    let lim = m.element("main_limiter");
+    assert_eq!(lim.property::<f32>("attack"), DEFAULT_LIMITER_ATTACK);
+    assert_eq!(lim.property::<f32>("release"), DEFAULT_LIMITER_RELEASE);
+    assert_eq!(lim.property::<f32>("lookahead"), DEFAULT_LIMITER_LOOKAHEAD);
 }
 
 #[test]
@@ -1783,17 +1811,14 @@ fn test_stromdsp_compressor_gets_detector_and_auto_makeup() {
 #[test]
 fn test_stromdsp_compressor_threshold_offset() {
     use strom_types::mixer::STROMDSP_COMP_THRESHOLD_OFFSET_DB;
-    // Build path: -20 dB reaches a strom-dsp compressor as -14 dB, lsp-rs as -20 dB.
-    let threshold = |backend: &str| {
-        let m = assemble(&small_mixer_props(&[
-            ("dsp_backend", PropertyValue::String(backend.to_string())),
-            ("ch1_comp_threshold", PropertyValue::Float(-20.0)),
-        ]));
-        m.element("comp_0").property::<f32>("threshold") as f64
-    };
+    // Build path: -20 dB reaches a strom-dsp compressor as -14 dB.
+    let m = assemble(&small_mixer_props(&[(
+        "ch1_comp_threshold",
+        PropertyValue::Float(-20.0),
+    )]));
+    let threshold = m.element("comp_0").property::<f32>("threshold") as f64;
     let expected = db_to_linear(-20.0 + STROMDSP_COMP_THRESHOLD_OFFSET_DB);
-    assert!((threshold("stromdsp") - expected).abs() < 1e-5);
-    assert!((threshold("rust") - db_to_linear(-20.0)).abs() < 1e-5);
+    assert!((threshold - expected).abs() < 1e-5);
 
     // Live path: the same offset, and 0 dB clamps to the element's maximum.
     init_gst();
@@ -1807,9 +1832,6 @@ fn test_stromdsp_compressor_threshold_offset() {
     };
     assert!((live(-20.0) - expected).abs() < 1e-9);
     assert_eq!(live(0.0), 1.0);
-    let lsp = lsp_rs("lsp-rs-compressor");
-    let r = translate_property_for_element(&lsp, "al", &PropertyValue::Float(0.1));
-    assert_eq!(float(&r[0].1), 0.1);
 }
 
 #[test]
