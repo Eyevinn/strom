@@ -2,59 +2,77 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
-## [0.8.0-alpha.2] - 2026-10-28
+## [0.8.0] - 2026-11-06
 
-A prerelease. WHIP Output now sends video, and WHEP Input can decode video. Test it before you rely on it: `latest` stays on 0.7.2.
+The Docker images move to Ubuntu 26.04 and GStreamer 1.28, and most blocks now emit video in the memory they produce it in (GL, CUDA, D3D) and adapt their own inputs. WHIP Output sends video and WHEP Input decodes it. strom-dsp is the audio mixer's default DSP backend, and a new Audio Processor block (experimental) takes a programme to a loudness target. The Video Encoder uses Media Foundation hardware encoders on Windows and gains VP8. This entry covers everything since 0.7.2, including the 0.8.0-alpha.1 to alpha.5 prereleases.
+
+### Upgrade notes
+- **GStreamer:** 1.28 is the target and 1.22 the floor; `install.sh` warns below the floor (#1122). The Docker images move from Ubuntu 25.10 to 26.04 LTS (#1124).
+- **Audio Mixer DSP backend:** a mixer without an explicit `dsp_backend` now uses strom-dsp (#1214). The built-in `rust` backend (lsp-plugins-rs) is removed, and `lv2` is renamed `lsp-lv2`; saved flows with `rust` or `lv2` are rewritten to `stromdsp` and `lsp-lv2` on load (#1226). Strom does not ship the LSP LV2 plugins: install them on the host, or build your own image on top of Strom's. On strom-dsp the main limiter holds its threshold as a ceiling, its 5 ms lookahead adds 5 ms latency to the main bus also while disabled, and turning a stage on or off fades. Compressor thresholds sound as before.
+- **Vision Mixer:** the GPU backend emits GL memory, and the `gl_download` property is removed. Downstream blocks download it themselves (#1119).
+- **Video Encoder:** with profile `auto`, VP9 stays at profile 0 and AV1 at Main, whatever the input's pixel format. Set `profile=none` for the old free negotiation (#1215).
+- **Block properties:** at flow start, a stored property value that its condition rules out (a setting that does not apply to the chosen codec or preset) is left out, and the block uses its default (#1220).
+- **Media Player:** network sources read 10 s ahead by default (`read_ahead_s`, at most 120 s), held in memory. Set 0 for the old behaviour (#1222).
+- **HTTP:** libsoup is forced to HTTP/1.1, for `souphttpsrc` and the HLS/DASH segment downloads. Set `STROM_SOUP_HTTP2=1` to use HTTP/2 again (#1225).
+- **Windows, Intel QSV:** on Core Ultra GPUs (Meteor Lake, Arrow Lake, Lunar Lake) with an Intel driver older than 32.0.101.9150, the `qsv` plugin is disabled, because it corrupts the heap. `STROM_QSV=on` or `off` overrides the check (#1178, #1184, #1209).
 
 ### Added
 - WHIP Output: send H.264, VP8 and VP9 video alongside audio (#1086)
-- WHEP Input: decode video to `video_out` outputs (#1085)
-
-### Fixed
-- Video Format: offer the output size and format to a producer that can choose (#1159)
-- MPEG-TS/SRT Output: build one video input per track (#1150, #1169)
-- Audio outputs: adapt DeckLink Output's audio, and hold Local Input's audio in a queue (#1068, #1168)
-- Windows: ship GIO's TLS backend and license texts, and report Media Player errors (#1079, #1170)
-- Windows installer: build the MSI as a 64-bit package (#1155)
-- API: the element and pad property endpoints answer 404 for a missing flow, element or pad, as documented, instead of 400 (#1162)
-- Frontend: text fields look editable in every theme (#1167)
-
-### Changed
-- Dependencies: monthly round 2026-10 (#1002)
-
----
-
-## [0.8.0-alpha.1] - 2026-10-27
-
-A prerelease. The Docker images move to Ubuntu 26.04 and GStreamer 1.28, and most blocks now emit video in the memory they produce it in (GL, CUDA, D3D) and adapt their own inputs. Test it before you rely on it: `latest` stays on 0.7.2.
-
-### Added
+- WHEP Input: decode video to `video_out` outputs (#1085), and give the outputs to the streams that are sending: a silent stream frees its output after `video_stream_timeout_ms` (#1161)
+- Audio Processor (experimental): a broadcast processor from strom-dsp, with loudness AGC, multiband compressor and true-peak limiter, presets for EBU R 128, ATSC A/85, streaming and speech, and meters (#1216); spike guard, expander, clippers, clip budget governor and a low-latency mode (#1218)
+- Audio Mixer: strom-dsp as the default DSP backend (#1214), updated to strom-dsp v0.2.2 and v0.2.3 (#1224, #1230)
+- Video Encoder: Media Foundation hardware encoders on Windows (#1210)
+- Video Encoder: VP8, live libvpx settings for VP8 and VP9, and the VA low-power and V4L2 VP9 encoders (#1227)
+- Video Encoder: a `level` property for H.264 (default `none`) (#1219)
 - Video Format: scale video where it is, with GPU memory scaled on the GPU (#1117)
+- Media Player: read ahead on network sources (#1222)
 - MPEG-TS/SRT Input: map audio outputs to streams in PID order (#1120)
+- Blocks: properties and enum options show only when they apply to the other settings (#1220)
 - EFP: enabled on Windows, with gst-plugin-efp v0.4.1 (#1094)
 
 ### Fixed
-- Vision Mixer: emit GL memory, and retire `gl_download` (#1119)
-- Vision Mixer: download GPU memory on the CPU mixer's own inputs (#1121)
+- Vision Mixer: emit GL memory (#1119), download GPU memory on the CPU mixer's own inputs (#1121), and the GL PGM mixer no longer waits on the multiview to allocate (#1171)
 - Compositor: download GPU memory on the CPU backend's own inputs (#1138)
 - Inter Input: download GL memory that arrives from another flow (#1118)
 - WHIP Input: emit the decoder's video without a converter (#1128)
-- Local Input: emit video as the source delivers it (#1129)
+- WHEP Output: follow H.264 and H.265 level changes mid-stream, and fail the flow with a clear error on a change the sink cannot follow (#1219)
+- Local Input: emit video as the source delivers it (#1129), and hold audio and video in a queue so the block reports the latency it can wait (#1168, #1213)
 - NDI: adapt NDI Output's video input, and emit NDI Input's video as it arrives (#1134)
-- DeckLink Output: adapt the video input to the configured mode (#1131)
-- Thumbnail tap: scale GL memory in any format or texture target (#1140)
+- DeckLink Output: adapt the video input to the configured mode (#1131), and adapt its audio (#1168)
+- MPEG-TS/SRT Output: build one video input per track (#1150, #1169)
+- Video Format: offer the output size and format to a producer that can choose (#1159)
+- Pipeline: recalculate latency when an element posts a LATENCY message, so a live source into Video Encoder and SRT Output no longer drops frames to QoS (#1208)
+- Buffer age: count samples for buffers ahead of the clock (#1198)
+- Thumbnail tap: scale GL memory in any format or texture target (#1140); detach the branch without the state lock, drop the picture when it detaches, start it before the tee feeds it, and never serve a picture older than `max_age` (#1187, #1189, #1201, #1194); log a thumbnail's 504 at DEBUG (#1193)
+- Audio Mixer: load current values when the mixer editor opens (#1221)
+- Media Player: a parked stinger clip no longer locks its file on Windows (#1174)
+- Storage: one lock for the JSON storage's cache and file (#1207)
+- GPU: find the GL renderer on GStreamer 1.28 (#1199)
+- Frontend: the standalone native frontend gets a Tokio runtime (#1190), and text fields look editable in every theme (#1167)
+- API: the element and pad property endpoints answer 404 for a missing flow, element or pad, as documented, instead of 400 (#1162)
+- Windows: ship GIO's TLS backend and license texts, and report Media Player errors (#1079, #1170)
+- Windows installer: build the MSI as a 64-bit package (#1155), and take the license texts from GStreamer's devel components (#1180)
+- Build: `build.rs` watches the real git dir (#1191)
 
 ### Changed
 - Docker: the images move from Ubuntu 25.10 to 26.04 LTS (#1124), and carry the tsdemux PTS rollover fix (#1132)
-- GStreamer: 1.28 is the target and 1.22 the floor; `install.sh` warns below it (#1122)
-- Video adapt: one planner decides scaling, downloads and pins (#1137), split into decide, adapters and tests (#1141)
+- GStreamer: 1.28 is the target and 1.22 the floor (#1122)
+- Audio Mixer: lsp-plugins-rs is removed, and the `lv2` backend is renamed `lsp-lv2` (#1226)
+- Video Encoder: VP9 stays at profile 0 and AV1 at Main by default (#1215)
+- HTTP: libsoup uses HTTP/1.1 (#1225)
+- Windows: Intel QSV is disabled only on Core Ultra GPUs with an old driver (#1178, #1184, #1209)
+- Video adapt: one planner decides scaling, downloads and pins (#1137, #1141, #1146)
 - GPU: retire the global `VideoConvertMode` (#1142)
 - Release: a suffixed tag (`v0.8.0-alpha.1`) is published as a prerelease, not as latest (#1148)
+- Dependencies: monthly round 2026-10 (#1002), utoipa 6 and utoipa-swagger-ui 10 (#1154)
 
 ### CI
-- Check that Strom builds and runs on GStreamer 1.22, the floor (#1125)
+- Check that Strom builds and runs on GStreamer 1.22, the floor, and test Linux and macOS on 1.28 (#1123, #1125)
 - Windows: install GStreamer 1.28.8 from the Inno Setup installer (#1126)
-- Tests: Vision Mixer and Stinger test fixes (#1133, #1143)
+
+### Documentation
+- Collect upstream bugs and odd behaviour in `UPSTREAM_NOTES.md` (#1229)
+- Keep block property descriptions short (#1223)
 
 ---
 
