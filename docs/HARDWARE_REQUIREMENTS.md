@@ -150,7 +150,7 @@ Every generation below handles H.264, which is what we run live; the rest is inf
 `gst-inspect-1.0 nvcodec` on the target machine beats this table.
 
 **Non-NVIDIA:** Intel (QSV, VA-API) and AMD (VA-API, AMF) encoders are supported and selected
-automatically when present, and GL compositing works on any hardware GL driver including Intel
+automatically when present, as are hardware Media Foundation encoders on Windows (any vendor), and GL compositing works on any hardware GL driver including Intel
 iGPUs. NVIDIA-only is the zero-copy CUDA-GL interop path. These combinations get far less
 testing — field reports especially welcome.
 

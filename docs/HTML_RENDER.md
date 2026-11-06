@@ -247,7 +247,7 @@ docker build --platform linux/amd64 -t gstcefsrc-builder:amd64 .
 docker run --rm -v $(pwd)/output:/export gstcefsrc-builder:amd64
 ```
 
-The build uses Ubuntu Questing to match the strom base image's glibc version.
+The build uses Ubuntu 26.04 (Resolute) to match the strom base image's glibc version.
 
 ## HTML Input block
 
