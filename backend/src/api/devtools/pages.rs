@@ -15,6 +15,8 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, warn};
 
+use crate::cef_pages::browser_endpoint;
+
 /// One Chromium target, as the browser endpoint describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetInfo {
@@ -180,22 +182,6 @@ impl PageFamily {
         })
         .to_string()
     }
-}
-
-/// The browser-wide DevTools endpoint, which is where targets are announced.
-async fn browser_endpoint(port: u16) -> Option<String> {
-    let version: Value = super::devtools_client()
-        .get(format!("http://127.0.0.1:{}/json/version", port))
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    version
-        .get("webSocketDebuggerUrl")?
-        .as_str()
-        .map(str::to_string)
 }
 
 /// Every target in the browser, with its opener.
