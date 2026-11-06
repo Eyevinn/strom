@@ -612,7 +612,7 @@ impl MediaPlayerState {
             .ok_or("Source element no longer exists")?;
 
         let uri = normalize_uri(&file_path, &self.media_path);
-        info!("Loading file: {}", uri);
+        info!("Loading file: {}", crate::redact::text(&uri));
 
         let pipeline_guard = self
             .internal_pipeline

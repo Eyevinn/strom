@@ -188,7 +188,10 @@ pub(super) fn build_whipclientsink(
 
     debug!(
         "WHIP Output (whipclientsink) configured: endpoint={}, stun={:?}, turn={:?}, ice_transport_policy={}",
-        whip_endpoint, stun_server, turn_server, ice_transport_policy
+        crate::redact::origin(&whip_endpoint),
+        stun_server,
+        turn_server.as_deref().map(crate::redact::url),
+        ice_transport_policy
     );
 
     let mut elements: Vec<(String, gst::Element)> = Vec::new();

@@ -272,7 +272,7 @@ impl BlockBuilder for EfpSrtInputBuilder {
 
         debug!(
             "SRT source configured: uri={}, latency={}ms, keep-listening={}, auto-reconnect={}, wait-for-connection={}",
-            srt_uri, latency, keep_listening, auto_reconnect, wait_for_connection
+            crate::redact::url(&srt_uri), latency, keep_listening, auto_reconnect, wait_for_connection
         );
 
         // Always use efpdemux directly. In decode mode, explicit decoder elements
