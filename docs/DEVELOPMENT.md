@@ -14,7 +14,7 @@ Make sure you have the following installed:
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
 
-2. **GStreamer development libraries and runtime plugins**
+2. **GStreamer development libraries and runtime plugins** (GStreamer 1.22 or newer; CI tests against 1.28)
    ```bash
    # Ubuntu/Debian (full set, matches what the binaries are built against)
    sudo apt-get install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \

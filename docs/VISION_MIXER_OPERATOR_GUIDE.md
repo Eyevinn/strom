@@ -605,8 +605,7 @@ Stinger takes also emit `StingerCued`, `StingerStarted`,
 | PGM framerate | 30/1 |
 | Multiview resolution | 1280×720 |
 | Multiview framerate | 30/1 |
-| Output pixel format | Auto (negotiated by GStreamer) |
-| GL download | Off (GPU memory passes downstream) |
+| Output pixel format | Auto (negotiated by GStreamer). CPU backend only: the GPU backend emits RGBA in GL memory, and each consumer converts it |
 | Show VU meters on multiview | **On** |
 | Initial PGM input | Input 0 |
 | Initial PVW input | Input 1 |

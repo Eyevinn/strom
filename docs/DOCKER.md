@@ -16,7 +16,7 @@ docker pull eyevinntechnology/strom:latest        # base image
 docker pull eyevinntechnology/strom-full:latest   # + CEF/Chromium for HTML rendering
 ```
 
-Pin a specific version with a tag, e.g. `eyevinntechnology/strom:0.7.2` (tags `X.Y.Z`, `X.Y`, `X` and `latest` are published).
+Pin a specific version with a tag, e.g. `eyevinntechnology/strom:0.8.0` (tags `X.Y.Z`, `X.Y`, `X` and `latest` are published).
 
 ## Quick start
 

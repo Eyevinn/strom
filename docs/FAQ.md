@@ -82,8 +82,8 @@ WASAPI or ASIO). Pick the device from the live list in the inspector.
 Yes, via CEF in the `strom-full` image. See [HTML_RENDER.md](HTML_RENDER.md).
 
 ### Which video encoders are supported?
-H.264/H.265/AV1/VP9 with automatic hardware acceleration (NVENC, QSV, VA-API, AMF, VideoToolbox on macOS, software
-fallback). The Video Encoder block picks the best available encoder; its properties in the
+H.264/H.265/AV1/VP9/VP8 with automatic hardware acceleration (NVENC, QSV, VA-API, AMF, VideoToolbox on macOS,
+Media Foundation on Windows, V4L2 on embedded Linux, software fallback). The Video Encoder block picks the best available encoder; its properties in the
 in-app inspector are the authoritative list.
 
 ### How do I integrate with an AI assistant (Claude, etc.)?

@@ -25,6 +25,10 @@ video only. A saved flow whose Media Player never set `decode` now decodes; if i
 output, that output refuses the raw video and the flow fails to start until you set
 `decode=false`.
 
+**Read-ahead (s)** (default 10, at most 120) holds that many seconds of an `http(s)`, HLS or
+DASH source in memory ahead of playback. Raise it for high-bitrate files on an uneven network;
+0 leaves GStreamer's default. Local files and live sources are not affected.
+
 ## Download from a URL
 
 Clips that live on a web server, such as stingers, can be copied into the library once instead
