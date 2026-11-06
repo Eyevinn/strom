@@ -379,6 +379,92 @@ mod tests {
         assert_eq!(state.unwrap(), PipelineState::Null);
     }
 
+    /// A flow's AAC encoder runs one encoder delay early and reports it as
+    /// latency: 1024 samples at 44.1 kHz, the rate audiotestsrc picks.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn aac_encoder_in_a_flow_runs_one_delay_early() {
+        gst::init().unwrap();
+        let mut flow = Flow::new("AAC delay");
+        let element = |id: &str, kind: &str, properties: Vec<(&str, PropertyValue)>| Element {
+            id: id.to_string(),
+            element_type: kind.to_string(),
+            properties: properties
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+            pad_properties: HashMap::new(),
+            position: (0.0, 0.0),
+        };
+        flow.elements = vec![
+            element(
+                "src",
+                "audiotestsrc",
+                vec![
+                    ("num-buffers", PropertyValue::Int(50)),
+                    ("samplesperbuffer", PropertyValue::Int(1024)),
+                ],
+            ),
+            element("enc", "avenc_aac", vec![]),
+            element("out", "appsink", vec![("sync", PropertyValue::Bool(false))]),
+        ];
+        flow.links = vec![
+            Link {
+                from: "src".to_string(),
+                to: "enc".to_string(),
+            },
+            Link {
+                from: "enc".to_string(),
+                to: "out".to_string(),
+            },
+        ];
+        let mut manager = PipelineManager::new(
+            &flow,
+            EventBroadcaster::default(),
+            &BlockRegistry::new("test_blocks.json"),
+            default_test_ice_servers(),
+            "all".to_string(),
+            None,
+            std::path::PathBuf::from("./media"),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        )
+        .unwrap();
+        manager.start().unwrap();
+        let out = manager.elements["out"]
+            .clone()
+            .downcast::<gstreamer_app::AppSink>()
+            .unwrap();
+        let sample = out
+            .try_pull_sample(gst::ClockTime::from_seconds(10))
+            .expect("no sample from the encoder");
+        let pts = sample.buffer().unwrap().pts().unwrap();
+        let segment = sample
+            .segment()
+            .unwrap()
+            .downcast_ref::<gst::ClockTime>()
+            .unwrap();
+        // Signed: the first packets run before the start of the stream.
+        let running = segment.to_running_time_full(pts).unwrap();
+        let early = gst::Signed::Positive(pts) - running;
+
+        let min_latency = |pad: gst::Pad| {
+            let mut query = gst::query::Latency::new();
+            assert!(pad.peer_query(&mut query));
+            query.result().1
+        };
+        let enc = &manager.elements["enc"];
+        let added = min_latency(out.static_pad("sink").unwrap())
+            - min_latency(enc.static_pad("sink").unwrap());
+        manager.stop().unwrap();
+
+        let delay = gst::ClockTime::from_nseconds(1_000_000_000 * 1024 / 44_100);
+        assert_eq!(
+            early,
+            gst::Signed::Positive(delay),
+            "output not moved earlier"
+        );
+        assert_eq!(added, delay, "shift not reported as latency");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_invalid_element() {
         gst::init().unwrap();
