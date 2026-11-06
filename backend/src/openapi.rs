@@ -320,6 +320,7 @@ use utoipa::OpenApi;
             strom_types::stinger::StingerVariant,
             strom_types::stinger::StingerBeneath,
             strom_types::stinger::StingerClipSettings,
+            strom_types::stinger::StingerSourceKind,
             strom_types::stinger::StingerClipInfo,
             strom_types::stinger::StingerClip,
             strom_types::stinger::StingerTakeReport,
