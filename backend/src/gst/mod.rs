@@ -1,5 +1,6 @@
 //! GStreamer integration.
 
+pub(crate) mod aggregator_catch_up;
 pub(crate) mod aggregator_start;
 mod block_expansion;
 pub mod buffer_age_probe;
