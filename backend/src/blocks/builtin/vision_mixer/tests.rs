@@ -1212,3 +1212,33 @@ fn activity_probes_stamp_buffers_from_a_running_compositor() {
     // Input 1 was never linked, so it stays unstamped.
     assert_eq!(state.input_media_age_ms(1), None);
 }
+
+/// Inputs and DSK layers nobody feeds must not hold program back: both
+/// compositors ignore pads that have not had a buffer yet (after waiting for
+/// each new pad once), on every backend.
+#[test]
+fn test_compositors_ignore_inactive_pads() {
+    use super::elements::{make_dist_compositor, make_mv_compositor, CompositorBackend};
+    use gstreamer as gst;
+    use gstreamer_base::prelude::*;
+    use gstreamer_base::Aggregator;
+
+    gst::init().unwrap();
+    // GL only where its plugin exists; glvideomixerelement has no
+    // ignore-inactive-pads property, the aggregator API still applies.
+    let backends = [
+        (CompositorBackend::Software, "compositor"),
+        (CompositorBackend::OpenGL, "glvideomixerelement"),
+    ];
+    for (backend, factory) in backends {
+        if gst::ElementFactory::find(factory).is_none() {
+            continue;
+        }
+        let dist = make_dist_compositor(backend, 20, 20).unwrap();
+        let mv = make_mv_compositor(backend, 20, 20).unwrap();
+        for mixer in [dist, mv] {
+            let aggregator = mixer.downcast_ref::<Aggregator>().unwrap();
+            assert!(aggregator.ignores_inactive_pads(), "{}", factory);
+        }
+    }
+}
