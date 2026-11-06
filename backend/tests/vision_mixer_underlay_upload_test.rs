@@ -476,7 +476,7 @@ fn run(block_id: &str, backend: &str, mixer_frame_delay: Option<Duration>) {
     // frame and the configuration gave it the zone's color.
     std::thread::sleep(Duration::from_millis(1000));
     manager
-        .trigger_transition(block_id, 0, 0, "cut", 0)
+        .trigger_transition(block_id, Some(0), Some(0), "cut", 0)
         .expect("take the PiP");
     // The first PGM frame showing the PiP (blue background) already shows
     // the border. Had the border's frame only been pushed on the cut, it
@@ -580,11 +580,11 @@ fn run(block_id: &str, backend: &str, mixer_frame_delay: Option<Duration>) {
     // Take away from the PiP (the border goes) and fade back to it (the
     // border returns in its new colour).
     manager
-        .trigger_transition(block_id, 0, 0, "cut", 0)
+        .trigger_transition(block_id, Some(0), Some(0), "cut", 0)
         .expect("take the input");
     wait_for_border(&appsink, "the zone border gone", is_black);
     manager
-        .trigger_transition(block_id, 0, 0, "fade", 300)
+        .trigger_transition(block_id, Some(0), Some(0), "fade", 300)
         .expect("take the PiP back");
     let frames_until_back = wait_for_border(&appsink, "the green zone border back", is_green);
     eprintln!("{backend}: border back after a 300 ms fade: {frames_until_back} PGM frame(s)");
