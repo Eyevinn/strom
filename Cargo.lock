@@ -3008,8 +3008,8 @@ dependencies = [
 
 [[package]]
 name = "gst-plugin-stromdsp"
-version = "0.2.3"
-source = "git+https://github.com/Eyevinn/strom-dsp?tag=v0.2.3#d4b4abc69f3aae41385d13d3ed02903194071cf0"
+version = "0.2.4"
+source = "git+https://github.com/Eyevinn/strom-dsp?tag=v0.2.4#310529a9e3617c0d0d49adbbc999a1dd368e9790"
 dependencies = [
  "gst-plugin-version-helper",
  "gstreamer",
@@ -7024,8 +7024,8 @@ dependencies = [
 
 [[package]]
 name = "strom-dsp"
-version = "0.2.3"
-source = "git+https://github.com/Eyevinn/strom-dsp?tag=v0.2.3#d4b4abc69f3aae41385d13d3ed02903194071cf0"
+version = "0.2.4"
+source = "git+https://github.com/Eyevinn/strom-dsp?tag=v0.2.4#310529a9e3617c0d0d49adbbc999a1dd368e9790"
 dependencies = [
  "ebur128",
  "fearless_simd 1.2.0",
