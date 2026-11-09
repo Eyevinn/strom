@@ -1,7 +1,7 @@
 //! [`SessionThreadConfig`]: a flow's thread settings, for the pipelines its
 //! blocks run of their own.
 
-use super::{set_thread_cpu_affinity, ThreadPriorityState, ThreadSetup};
+use super::{ThreadPriorityState, ThreadSetup};
 use crate::thread_handle::ThreadHandle;
 use crate::thread_registry::ThreadRegistry;
 use gstreamer as gst;
@@ -28,7 +28,8 @@ use tracing::{debug, info, warn};
 /// Created empty at block-build time (`BlockBuildContext::session_thread_config`)
 /// and populated in `PipelineManager::start()`, after the blocks are built.
 /// Both install paths read it when a thread enters, not when they install, so
-/// a pipeline built with the block picks up the flow's settings.
+/// a pipeline built with the block, or a session created before a later
+/// `populate`, uses the flow's current settings.
 #[derive(Clone, Default)]
 pub struct SessionThreadConfig(Arc<std::sync::Mutex<ConfigSlot>>);
 
@@ -70,8 +71,8 @@ impl SessionThreadConfig {
     /// settings for every thread that enters after it.
     ///
     /// Threads of an internal pipeline that entered before this call are
-    /// registered and pinned here. Their priority cannot be set from another
-    /// thread, so they keep their own scheduling, with a warning.
+    /// registered here. Their priority and CPUs can only be set on the thread
+    /// itself, so they keep their own, with a warning.
     pub fn populate(
         &self,
         state: &ThreadPriorityState,
@@ -86,24 +87,24 @@ impl SessionThreadConfig {
             thread_registry,
             state: state.clone(),
         });
-        let early = {
-            let mut slot = self.slot();
-            if slot.setup.is_some() {
-                info!(
-                    "Thread settings of flow {} replaced; threads that enter from now on use the new ones",
-                    flow_id
-                );
-            }
-            slot.setup = Some(Arc::clone(&setup));
-            std::mem::take(&mut slot.early)
-        };
+        let mut slot = self.slot();
+        if slot.setup.is_some() {
+            info!(
+                "Thread settings of flow {} replaced; threads that enter from now on use the new ones",
+                flow_id
+            );
+        }
+        slot.setup = Some(Arc::clone(&setup));
+        // Under the lock: a thread that leaves meanwhile is no longer early,
+        // and must not be registered after it has gone back to the pool.
+        let early = std::mem::take(&mut slot.early);
         if early.is_empty() || !setup.is_active() {
             return;
         }
-        if !matches!(setup.priority, ThreadPriority::Normal) {
+        if !matches!(setup.priority, ThreadPriority::Normal) || setup.assigned_cpus.is_some() {
             warn!(
-                "{} streaming thread(s) of an internal pipeline started before flow {} did and keep normal priority \
-                 (first: element '{}' in pipeline '{}')",
+                "{} streaming thread(s) of an internal pipeline started before flow {} did and keep \
+                 their own priority and CPUs (first: element '{}' in pipeline '{}')",
                 early.len(),
                 flow_id,
                 early[0].owner,
@@ -248,8 +249,8 @@ impl SessionThreadConfig {
         block_id: &str,
     ) {
         let Some(setup) = self.setup() else {
-            warn!(
-                "SessionThreadConfig not yet populated when session {} was created",
+            debug!(
+                "No flow thread settings when session {} was created; its threads keep their own",
                 session_id
             );
             return;
@@ -267,6 +268,7 @@ impl SessionThreadConfig {
             setup.assigned_cpus
         );
 
+        let config = self.clone();
         let block_id: Arc<str> = block_id.into();
         let pipeline_name: Arc<str> = pipeline.name().as_str().into();
 
@@ -278,7 +280,7 @@ impl SessionThreadConfig {
             let added: gst::Element = args[2].get().ok()?;
             let sink_pad = added.static_pad("sink")?;
 
-            let setup = Arc::clone(&setup);
+            let config = config.clone();
             let block_id = Arc::clone(&block_id);
             let pipeline_name = Arc::clone(&pipeline_name);
             let configured = Arc::clone(&configured_threads);
@@ -303,11 +305,16 @@ impl SessionThreadConfig {
                     return gst::PadProbeReturn::Remove;
                 }
 
-                // These threads never send a Leave, so an elevation here goes
-                // back to the pool with the thread; the next flow's Enter, or
-                // Normal session, restores it. The registry entry lives until
-                // the flow's entries are dropped by unregister_flow.
-                setup.enter(&element_name, Some(&block_id), &pipeline_name);
+                // The flow's settings as they are now, not as they were when
+                // the session was created.
+                if let Some(setup) = config.setup().filter(|s| s.is_active()) {
+                    // These threads never send a Leave, so an elevation here
+                    // goes back to the pool with the thread; the next
+                    // pipeline that picks it up restores it (see
+                    // `reset_streaming_threads`). The registry entry lives
+                    // until the flow's entries are dropped by unregister_flow.
+                    setup.enter(&element_name, Some(&block_id), &pipeline_name);
+                }
 
                 gst::PadProbeReturn::Remove
             });
@@ -318,30 +325,10 @@ impl SessionThreadConfig {
 }
 
 impl ThreadSetup {
-    /// Register and pin a thread that entered before the flow had settings,
-    /// from another thread. Its priority stays as it is: that can only be set
-    /// on the thread itself.
+    /// Register a thread that entered before the flow had settings, from
+    /// another thread. Its priority and CPUs stay as they are: a change made
+    /// from outside could not be undone on the thread when it leaves.
     fn adopt(&self, thread: EarlyThread) {
-        let thread_id = thread.handle.id();
-        let pinned_cpus = self.assigned_cpus.as_ref().and_then(|cpus| {
-            set_thread_cpu_affinity(thread_id, cpus)
-                .map_err(|e| {
-                    warn!(
-                        "Failed to set CPU affinity for thread {} (element: {}, pipeline: {}): {}",
-                        thread_id, thread.owner, thread.pipeline, e
-                    )
-                })
-                .ok()
-                .map(|()| cpus.clone())
-        });
-        if let Some(ref registry) = self.thread_registry {
-            registry.register(
-                thread.handle,
-                thread.owner,
-                self.flow_id,
-                Some(thread.block_id.to_string()),
-                pinned_cpus,
-            );
-        }
+        self.register(thread.handle, &thread.owner, Some(&thread.block_id), None);
     }
 }

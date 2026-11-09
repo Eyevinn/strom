@@ -12,11 +12,18 @@
 //! 0, with a thread registry. It asserts that the registry holds threads of the
 //! block's own pipeline (filed under the block, for an element that is not one
 //! of the block's elements in the flow, which are named `block_id:...`), and
-//! that every one of them carries the flow's settings: pinned to CPU 0, and
-//! elevated where this platform lets an unprivileged process elevate (macOS
-//! and Windows; Linux needs CAP_SYS_NICE, so there only the pinning is
-//! checked). Revert the install in a block, or drop the elevation or the
-//! pinning from the shared path, and the test fails.
+//! that every one of them carries the flow's settings. Which settings a
+//! platform can show differs:
+//!
+//! - Linux pins threads, so there the test checks the pinning. Elevation
+//!   needs CAP_SYS_NICE, which CI does not have, so it is checked only when
+//!   it succeeded.
+//! - macOS and Windows elevate without privileges but do not pin, so there
+//!   the test checks the elevation, and that no thread claims to be pinned.
+//!
+//! Revert the install in a block and the test fails everywhere. Drop the
+//! pinning from the shared path and it fails on Linux; drop the elevation
+//! and it fails on macOS and Windows.
 
 pub mod common;
 
@@ -72,50 +79,64 @@ fn describe(registry: &ThreadRegistry) -> Vec<(String, Option<String>)> {
 /// The CPUs every test flow is pinned to.
 const CPUS: [usize; 1] = [0];
 
-/// Assert that `threads`, the threads of a block's own pipeline, carry the
-/// flow's settings and not only a registry entry.
-fn assert_flow_settings(
+/// Check that `threads`, the threads of a block's own pipeline, carry the
+/// flow's settings and not only a registry entry. Runs while the pipeline
+/// runs: a thread that has left since `threads` was read has dropped out of
+/// the registry and the count, and is skipped.
+fn check_flow_settings(
     threads: &[ThreadInfo],
     state: &ThreadPriorityState,
-    all: &[(String, Option<String>)],
-) {
-    assert!(
-        !threads.is_empty(),
-        "no thread of the block's own pipeline is registered under the block; registry: {:?}",
-        all
-    );
+    registry: &ThreadRegistry,
+) -> Result<(), String> {
+    if threads.is_empty() {
+        return Err("no thread of the block's own pipeline is registered under the block".into());
+    }
+    // Only Linux pins threads; elsewhere the registry must not claim it did.
+    let pinned = cfg!(target_os = "linux").then_some(&CPUS[..]);
     for thread in threads {
-        assert_eq!(
-            thread.pinned_cpus.as_deref(),
-            Some(&CPUS[..]),
-            "thread {} ({}) is not pinned to the flow's CPUs",
-            thread.thread_id(),
-            thread.element_name
-        );
+        if thread.pinned_cpus.as_deref() != pinned {
+            return Err(format!(
+                "thread {} ({}) is pinned to {:?}, not {:?}",
+                thread.thread_id(),
+                thread.element_name,
+                thread.pinned_cpus,
+                pinned
+            ));
+        }
     }
     // Linux refuses `High` without CAP_SYS_NICE, and records why.
     let can_elevate =
         cfg!(any(target_os = "macos", target_os = "windows")) || state.get_status().error.is_none();
     if can_elevate {
         for thread in threads {
-            assert!(
-                state.is_configured(thread.thread_id()),
-                "thread {} ({}) did not get the flow's priority",
-                thread.thread_id(),
-                thread.element_name
-            );
+            let id = thread.thread_id();
+            // Count first, registry second: a thread leaves the registry
+            // before it leaves the count.
+            if !state.is_configured(id) && registry.get_all().iter().any(|t| t.thread_id() == id) {
+                return Err(format!(
+                    "thread {} ({}) did not get the flow's priority",
+                    id, thread.element_name
+                ));
+            }
         }
     }
+    Ok(())
 }
 
 /// What [`run_through_manager`] saw.
 struct Run {
-    /// The threads of the block's own pipeline.
-    threads: Vec<ThreadInfo>,
-    /// The flow's priority state.
-    state: ThreadPriorityState,
+    /// [`check_flow_settings`] on the threads of the block's own pipeline.
+    verdict: Result<(), String>,
     /// The whole registry, for the failure message.
     all: Vec<(String, Option<String>)>,
+}
+
+impl Run {
+    fn assert(&self) {
+        if let Err(e) = &self.verdict {
+            panic!("{}; registry: {:?}", e, self.all);
+        }
+    }
 }
 
 /// Start `flow` through the pipeline manager at `High` priority, pinned to
@@ -136,13 +157,10 @@ fn run_through_manager(mut flow: Flow, block_id: &str) -> Run {
         .thread_priority_state()
         .cloned()
         .expect("a started flow has a priority state");
+    let verdict = check_flow_settings(&threads, &state, &registry);
     manager.stop().expect("flow stops");
     drop(manager);
-    Run {
-        threads,
-        state,
-        all,
-    }
+    Run { verdict, all }
 }
 
 fn element(id: &str, kind: &str, props: &[(&str, PropertyValue)]) -> Element {
@@ -241,8 +259,7 @@ fn media_player_registers_its_internal_threads() {
         to: "sink:sink".to_string(),
     });
 
-    let run = run_through_manager(flow, PLAYER);
-    assert_flow_settings(&run.threads, &run.state, &run.all);
+    run_through_manager(flow, PLAYER).assert();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -348,12 +365,17 @@ fn whip_input_registers_its_session_threads() {
 
     let threads = wait_for_internal_threads(&registry, WHIP_INPUT);
     let all = describe(&registry);
+    let verdict = check_flow_settings(&threads, &state, &registry);
 
     let _ = publisher.set_state(gst::State::Null);
     WhipSessionManager::teardown_session_pipeline(&session.session_pipeline);
     let _ = flow.set_state(gst::State::Null);
 
-    assert_flow_settings(&threads, &state, &all);
+    Run {
+        verdict,
+        all: all.clone(),
+    }
+    .assert();
     assert!(
         threads.iter().all(|t| t.flow_id == flow_id),
         "session threads registered under another flow: {:?}",
@@ -485,7 +507,7 @@ fn whip_output_registers_its_session_threads() {
 
     let run = run_through_manager(flow, WHIP_OUTPUT);
     let _ = server.set_state(gst::State::Null);
-    assert_flow_settings(&run.threads, &run.state, &run.all);
+    run.assert();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
