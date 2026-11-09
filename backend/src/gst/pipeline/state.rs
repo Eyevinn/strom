@@ -35,6 +35,12 @@ impl PipelineManager {
             .map(|state| state.get_status())
     }
 
+    /// The flow's thread priority state, with which threads it configured.
+    /// None until the pipeline has started.
+    pub fn thread_priority_state(&self) -> Option<&crate::gst::ThreadPriorityState> {
+        self.thread_priority_state.as_ref()
+    }
+
     /// Get the clock synchronization status for this pipeline.
     pub fn get_clock_sync_status(&self) -> strom_types::flow::ClockSyncStatus {
         use strom_types::flow::{ClockSyncStatus, GStreamerClockType};

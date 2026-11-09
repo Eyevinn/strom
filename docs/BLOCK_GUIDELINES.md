@@ -22,7 +22,7 @@ These are rules, not a description of the code. The code is the source of truth 
 - When a mixer fails its latency configuration, fix the input that reports the wrong latency. Do not raise queue sizes in front of the mixer to hide it.
 
 ## Thread Priority
-- **A block that runs a pipeline of its own gives its streaming threads the flow's priority.** The flow's thread priority, CPU affinity and thread registry follow the flow's bus. An internal pipeline has its own bus, and gets none of them unless the block hands them over. Hand them over through `SessionThreadConfig` on every pipeline the block creates: `install_on_internal_pipeline` where the block owns the bus, `install_on_webrtcsink` where webrtcsink owns it.
+- **A block that runs a pipeline of its own gives its streaming threads the flow's priority.** The flow's thread priority, CPU affinity and thread registry follow the flow's bus. An internal pipeline has its own bus, and gets none of them unless the block hands them over. Hand them over through `SessionThreadConfig` on every pipeline the block creates: `install_on_internal_pipeline` where the block owns the bus, `install_on_webrtcsink` where webrtcsink owns it. A pipeline Strom runs outside any flow calls `thread_priority::reset_streaming_threads`, so a pooled thread a WebRTC session left elevated gets its own scheduling back.
 - A guard test builds the real block with a thread registry, and fails if no streaming thread of the internal pipeline is registered under the block.
 
 ## GStreamer Memory Formats

@@ -14,11 +14,16 @@ use crate::thread_handle::ThreadHandle;
 use crate::thread_registry::ThreadRegistry;
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use strom_types::flow::{ThreadPriority, ThreadPriorityStatus};
 use strom_types::FlowId;
 use tracing::{debug, error, info, warn};
+
+mod session;
+
+pub use session::SessionThreadConfig;
 
 /// Shared state for tracking thread priority configuration across threads.
 #[derive(Debug, Clone)]
@@ -29,8 +34,9 @@ pub struct ThreadPriorityState {
     achieved: Arc<AtomicBool>,
     /// First error encountered (if any)
     error: Arc<std::sync::Mutex<Option<String>>>,
-    /// Number of threads configured
-    threads_configured: Arc<AtomicU32>,
+    /// The distinct OS threads configured. A pooled thread that enters again,
+    /// for another session or another file, counts once.
+    threads_configured: Arc<std::sync::Mutex<HashSet<u64>>>,
 }
 
 impl ThreadPriorityState {
@@ -40,14 +46,26 @@ impl ThreadPriorityState {
             requested,
             achieved: Arc::new(AtomicBool::new(false)),
             error: Arc::new(std::sync::Mutex::new(None)),
-            threads_configured: Arc::new(AtomicU32::new(0)),
+            threads_configured: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }
 
-    /// Record a successful priority configuration.
-    fn record_success(&self) {
+    /// Record a successful priority configuration of `thread_id`.
+    fn record_success(&self, thread_id: u64) {
         self.achieved.store(true, Ordering::SeqCst);
-        self.threads_configured.fetch_add(1, Ordering::SeqCst);
+        self.threads_configured
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(thread_id);
+    }
+
+    /// Whether the thread `thread_id` was configured with the requested
+    /// priority (for `Normal`, left at or restored to its own scheduling).
+    pub fn is_configured(&self, thread_id: u64) -> bool {
+        self.threads_configured
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&thread_id)
     }
 
     /// Record a failed priority configuration. Returns `true` if this was the
@@ -69,7 +87,11 @@ impl ThreadPriorityState {
             requested: self.requested,
             achieved: self.achieved.load(Ordering::SeqCst),
             error: self.error.lock().unwrap().clone(),
-            threads_configured: self.threads_configured.load(Ordering::SeqCst),
+            threads_configured: self
+                .threads_configured
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .len() as u32,
         }
     }
 }
@@ -578,7 +600,6 @@ const ELEVATION_HINT: &str = "";
 /// threads: the sync handler on the flow's own bus, the `sync-message` handler
 /// on a block's internal pipeline, and the pad probes on a WebRTC session
 /// pipeline. Each calls [`ThreadSetup::enter`] on the streaming thread itself.
-#[derive(Clone)]
 struct ThreadSetup {
     priority: ThreadPriority,
     assigned_cpus: Option<Vec<usize>>,
@@ -598,10 +619,11 @@ impl ThreadSetup {
     /// Configure the calling thread, which has just entered its streaming
     /// loop for `owner` in `pipeline`, and register it.
     ///
-    /// The registry files the thread under the block named by the owner's
-    /// `block_id:` prefix, the way the flow's own elements are named, or under
-    /// `block_id` for an element a block built without that prefix (anything
-    /// inside an internal or session pipeline).
+    /// The registry files the thread under `block_id` when the caller knows
+    /// the block (every thread of an internal or session pipeline belongs to
+    /// the block that runs it, whatever its elements are called), and
+    /// otherwise under the owner's `block_id:` prefix, the way the flow's own
+    /// elements are named.
     fn enter(&self, owner: &str, block_id: Option<&str>, pipeline: &str) {
         // Captured here, on the streaming thread itself, so the handle owns
         // whatever reference makes it safe to sample after this thread exits.
@@ -615,14 +637,14 @@ impl ThreadSetup {
 
         if matches!(self.priority, ThreadPriority::Normal) {
             // A pooled thread can arrive still elevated by a WebRTC session,
-            // whose threads never send a Leave.
+            // whose threads never send a Leave. See reset_streaming_threads.
             if let Err(e) = restore_current_thread_priority() {
                 warn!(
                     "Failed to restore scheduling of streaming thread {} (element: {}, pipeline: {}): {}",
                     thread_id, owner, pipeline, e
                 );
             }
-            self.state.record_success();
+            self.state.record_success(thread_id);
         } else {
             match set_current_thread_priority(self.priority) {
                 Ok(()) => {
@@ -630,7 +652,7 @@ impl ThreadSetup {
                         "Set {:?} priority for streaming thread {} (element: {}, pipeline: {})",
                         self.priority, thread_id, owner, pipeline
                     );
-                    self.state.record_success();
+                    self.state.record_success(thread_id);
                 }
                 Err(e) => {
                     if self.state.record_failure(e.clone()) {
@@ -672,10 +694,8 @@ impl ThreadSetup {
             });
 
         if let Some(ref registry) = self.thread_registry {
-            let block_id = owner
-                .split_once(':')
-                .map(|(prefix, _)| prefix)
-                .or(block_id)
+            let block_id = block_id
+                .or_else(|| owner.split_once(':').map(|(prefix, _)| prefix))
                 .map(str::to_string);
             registry.register(
                 handle,
@@ -786,6 +806,41 @@ pub fn setup_thread_priority_handler(
     state
 }
 
+/// Give the streaming threads of `pipeline`, one Strom runs outside any flow
+/// (GPU detection, stinger clip analysis), their own scheduling back as they
+/// enter their streaming loops.
+///
+/// GStreamer's streaming threads come from a shared pool. A WebRTC session
+/// thread (WHEP and WHIP Output) goes back to it still elevated: webrtcsink
+/// drops its Leave, so nothing of ours sees it leave. Every pipeline that
+/// picks a thread from the pool sets its scheduling on Enter instead. A flow
+/// and the pipelines its blocks run do that through their own handlers, and
+/// a pipeline outside any flow does it through this one. The cost is per
+/// thread start, not per buffer.
+///
+/// Uses `sync-message`, so it leaves the bus's sync handler free.
+pub fn reset_streaming_threads(pipeline: &gst::Pipeline) {
+    let Some(bus) = pipeline.bus() else {
+        return;
+    };
+    bus.enable_sync_message_emission();
+    bus.connect_sync_message(Some("stream-status"), |_bus, msg| {
+        let gst::MessageView::StreamStatus(status) = msg.view() else {
+            return;
+        };
+        if status.get().0 != gst::StreamStatusType::Enter {
+            return;
+        }
+        if let Err(e) = restore_current_thread_priority() {
+            warn!(
+                "Failed to restore scheduling of a streaming thread of '{}': {}",
+                msg.src().map(|s| s.name()).unwrap_or_default(),
+                e
+            );
+        }
+    });
+}
+
 /// Set CPU affinity for a specific thread (Linux only).
 #[cfg(target_os = "linux")]
 fn set_thread_cpu_affinity(thread_id: u64, cpus: &[usize]) -> Result<(), String> {
@@ -816,227 +871,6 @@ fn set_thread_cpu_affinity(_thread_id: u64, _cpus: &[usize]) -> Result<(), Strin
     Ok(())
 }
 
-/// A flow's thread priority, CPU affinity and thread registry, for the
-/// pipelines its blocks run of their own.
-///
-/// The flow's sync handler sees only the flow's own bus. A block that runs
-/// part of its work in a pipeline of its own (an isolation pipeline behind an
-/// appsink/appsrc pair, a WebRTC session) hands this config to every such
-/// pipeline it creates, so the threads there run like the flow's own:
-///
-/// * [`SessionThreadConfig::install_on_internal_pipeline`] where the block
-///   owns the pipeline and its bus (Media Player, WHIP Input).
-/// * [`SessionThreadConfig::install_on_session_pipeline`] where webrtcsink
-///   owns it (WHEP Output, WHIP Output).
-///
-/// Created empty at block-build time (`BlockBuildContext::session_thread_config`)
-/// and populated in `PipelineManager::start()`, after the blocks are built.
-/// Both install paths read it when a thread enters, not when they install, so
-/// a pipeline built with the block picks up the flow's settings.
-#[derive(Clone, Default)]
-pub struct SessionThreadConfig(Arc<std::sync::OnceLock<ThreadSetup>>);
-
-impl SessionThreadConfig {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Populate the config with the flow's settings. `state` is the flow's
-    /// own, from [`setup_thread_priority_handler`], so the threads configured
-    /// here count toward the flow's status.
-    /// Must be called before the pipeline reaches PLAYING (i.e. before sessions are created).
-    pub fn populate(
-        &self,
-        state: &ThreadPriorityState,
-        assigned_cpus: Option<Vec<usize>>,
-        flow_id: FlowId,
-        thread_registry: Option<ThreadRegistry>,
-    ) {
-        let _ = self.0.set(ThreadSetup {
-            priority: state.requested,
-            assigned_cpus,
-            flow_id,
-            thread_registry,
-            state: state.clone(),
-        });
-    }
-
-    /// Returns true if thread priority or registration is configured.
-    pub fn is_active(&self) -> bool {
-        self.0.get().is_some_and(ThreadSetup::is_active)
-    }
-
-    /// Give the streaming threads of `pipeline`, a pipeline block `block_id`
-    /// runs of its own and whose bus it owns, the flow's settings.
-    ///
-    /// Subscribes to the bus's `sync-message::stream-status` signal rather
-    /// than taking its sync handler: a bus has only one sync handler, and a
-    /// block may need it for something else (`context_forward`). GStreamer
-    /// emits `sync-message` beside the sync handler, on the posting thread,
-    /// unless that handler drops the message.
-    ///
-    /// Call it once per pipeline, before the pipeline starts. A thread that
-    /// enters before the flow has populated this config keeps its scheduling
-    /// and stays out of the registry; one that leaves restores whatever
-    /// [`ThreadSetup::enter`] changed.
-    pub fn install_on_internal_pipeline(&self, pipeline: &gst::Pipeline, block_id: &str) {
-        let Some(bus) = pipeline.bus() else {
-            warn!(
-                "Internal pipeline '{}' of block {} has no bus - its threads keep normal priority",
-                pipeline.name(),
-                block_id
-            );
-            return;
-        };
-        bus.enable_sync_message_emission();
-
-        // The closure holds the config and two strings, nothing from
-        // GStreamer: the bus belongs to the pipeline.
-        let config = self.clone();
-        let owner_block = block_id.to_string();
-        let pipeline_name = pipeline.name().to_string();
-        bus.connect_sync_message(Some("stream-status"), move |_bus, msg| {
-            let Some(setup) = config.0.get() else {
-                debug!(
-                    "Flow thread settings not populated yet when a thread of '{}' changed state",
-                    pipeline_name
-                );
-                return;
-            };
-            if setup.is_active() {
-                setup.on_stream_status(msg, Some(&owner_block), &pipeline_name);
-            }
-        });
-        debug!(
-            "Flow thread settings installed on internal pipeline '{}' of block {}",
-            pipeline.name(),
-            block_id
-        );
-    }
-
-    /// Give every session pipeline a webrtcsink-based element of block
-    /// `block_id` creates (`whepserversink`, `whipclientsink`) the flow's
-    /// settings, through [`SessionThreadConfig::install_on_session_pipeline`].
-    ///
-    /// `consumer-pipeline-created` fires before webrtcsink sets its own bus
-    /// sync handler on the session pipeline. A webrtcsink without the signal
-    /// keeps its session threads at normal priority, with a warning.
-    pub fn install_on_webrtcsink(&self, sink: &gst::Element, block_id: &str) {
-        const SIGNAL: &str = "consumer-pipeline-created";
-        if gst::glib::subclass::signal::SignalId::lookup(SIGNAL, sink.type_()).is_none() {
-            warn!(
-                "{} ({}) has no {} signal - its session threads keep normal priority",
-                sink.name(),
-                sink.type_().name(),
-                SIGNAL
-            );
-            return;
-        }
-        let config = self.clone();
-        let block_id = block_id.to_string();
-        sink.connect(SIGNAL, false, move |values| {
-            if !config.is_active() {
-                return None;
-            }
-            let session_id = values[1].get::<String>().unwrap_or_default();
-            let pipeline = values[2].get::<gst::Pipeline>().ok()?;
-            config.install_on_session_pipeline(&pipeline, &session_id, &block_id);
-            None
-        });
-    }
-
-    /// Install pad-probe-based thread priority on a session pipeline of block
-    /// `block_id`.
-    ///
-    /// Call this from the `consumer-pipeline-created` signal handler, which
-    /// fires before webrtcsink sets its own bus sync handler. That handler
-    /// returns `BusSyncReply::Drop` and routes messages through an internal
-    /// channel, so neither a sync handler of ours nor `sync-message` sees the
-    /// session's `STREAM_STATUS`, and replacing the handler breaks session
-    /// lifecycle. Instead we connect to `deep-element-added` on the pipeline
-    /// so that every element that is added gets an `EVENT_DOWNSTREAM` probe on
-    /// its sink pad. On `STREAM_START`, which arrives on the streaming thread,
-    /// we set priority, CPU affinity, and register the thread, then remove the
-    /// probe.
-    pub fn install_on_session_pipeline(
-        &self,
-        pipeline: &gst::Pipeline,
-        session_id: &str,
-        block_id: &str,
-    ) {
-        let Some(setup) = self.0.get() else {
-            warn!(
-                "SessionThreadConfig not yet populated when session {} was created",
-                session_id
-            );
-            return;
-        };
-
-        if !setup.is_active() {
-            return;
-        }
-
-        info!(
-            "Installing pad-probe thread priority on session pipeline '{}' for session {} \
-             (priority: {:?}, cpus: {:?})",
-            pipeline.name(),
-            session_id,
-            setup.priority,
-            setup.assigned_cpus
-        );
-
-        let setup = setup.clone();
-        let block_id = block_id.to_string();
-        let pipeline_name = pipeline.name().to_string();
-
-        // Track which native thread IDs have already been configured so we
-        // don't set priority twice when multiple pads share a thread.
-        let configured_threads: Arc<std::sync::Mutex<std::collections::HashSet<u64>>> =
-            Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-
-        pipeline.connect("deep-element-added", false, move |args| {
-            let added: gst::Element = args[2].get().unwrap();
-
-            let sink_pad = added.static_pad("sink")?;
-
-            let setup = setup.clone();
-            let block_id = block_id.clone();
-            let pipeline_name = pipeline_name.clone();
-            let configured = configured_threads.clone();
-            let element_name = added.name().to_string();
-
-            sink_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
-                // Only a streaming thread pushes STREAM_START. Any other first
-                // event can come from an application thread (an EOS sent on
-                // teardown before any data), which must keep its scheduling.
-                // Wait for STREAM_START instead.
-                if !matches!(info.event(), Some(e) if e.type_() == gst::EventType::StreamStart) {
-                    return gst::PadProbeReturn::Ok;
-                }
-
-                // Skip if this thread was already configured (multiple pads
-                // can share the same streaming thread).
-                {
-                    let mut set = configured.lock().unwrap();
-                    if !set.insert(ThreadHandle::current().id()) {
-                        return gst::PadProbeReturn::Remove;
-                    }
-                }
-
-                // These threads never send a Leave, so an elevation here goes
-                // back to the pool with the thread; the next flow's Enter, or
-                // Normal session, restores it. The registry entry lives until
-                // the flow's entries are dropped by unregister_flow.
-                setup.enter(&element_name, Some(&block_id), &pipeline_name);
-
-                gst::PadProbeReturn::Remove
-            });
-
-            None
-        });
-    }
-}
-
 /// Remove the sync handler from the pipeline bus.
 pub fn remove_thread_priority_handler(pipeline: &gst::Pipeline) {
     if let Some(bus) = pipeline.bus() {
@@ -1063,13 +897,14 @@ mod tests {
         assert!(status.error.is_none());
 
         // Record success
-        state.record_success();
+        state.record_success(1);
         let status = state.get_status();
         assert!(status.achieved);
         assert_eq!(status.threads_configured, 1);
 
-        // Record another success
-        state.record_success();
+        // Another thread counts, the same thread entering again does not
+        state.record_success(2);
+        state.record_success(1);
         let status = state.get_status();
         assert_eq!(status.threads_configured, 2);
     }
@@ -1233,6 +1068,142 @@ mod tests {
         );
 
         pipeline.set_state(gst::State::Null).unwrap();
+    }
+
+    /// An internal pipeline with the flow's settings installed, one element
+    /// named like a flow element of another block, and the bus it posts on.
+    fn internal_pipeline(config: &SessionThreadConfig) -> (gst::Pipeline, gst::Element, gst::Bus) {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let owner = gst::ElementFactory::make("identity")
+            .name("other:identity")
+            .build()
+            .unwrap();
+        pipeline.add(&owner).unwrap();
+        config.install_on_internal_pipeline(&pipeline, "player");
+        let bus = pipeline.bus().unwrap();
+        (pipeline, owner, bus)
+    }
+
+    /// A thread of an internal pipeline is filed under the block that runs
+    /// the pipeline, even when its element's name carries another prefix.
+    #[test]
+    fn internal_thread_is_filed_under_the_block_that_runs_it() {
+        let registry = ThreadRegistry::new();
+        let config = SessionThreadConfig::new();
+        config.populate(
+            &ThreadPriorityState::new(ThreadPriority::Normal),
+            None,
+            FlowId::new_v4(),
+            Some(registry.clone()),
+        );
+        let (_pipeline, owner, bus) = internal_pipeline(&config);
+        on_fresh_thread(move || post_stream_status(&bus, gst::StreamStatusType::Enter, &owner));
+
+        let threads = registry.get_all();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].block_id.as_deref(), Some("player"));
+    }
+
+    /// A thread that enters before the flow has populated its settings (a
+    /// control call can preroll the Media Player first) is registered and
+    /// pinned when the flow does, and one that left by then is not.
+    #[test]
+    fn thread_entering_before_populate_is_adopted() {
+        let registry = ThreadRegistry::new();
+        let config = SessionThreadConfig::new();
+        let (_pipeline, owner, bus) = internal_pipeline(&config);
+
+        let (early_bus, early_owner) = (bus.clone(), owner.clone());
+        let early = on_fresh_thread(move || {
+            post_stream_status(&early_bus, gst::StreamStatusType::Enter, &early_owner);
+            ThreadHandle::current().id()
+        });
+        let (gone_bus, gone_owner) = (bus.clone(), owner.clone());
+        on_fresh_thread(move || {
+            post_stream_status(&gone_bus, gst::StreamStatusType::Enter, &gone_owner);
+            post_stream_status(&gone_bus, gst::StreamStatusType::Leave, &gone_owner);
+        });
+        assert_eq!(
+            registry.len(),
+            0,
+            "nothing registers before the flow has settings"
+        );
+
+        let flow_id = FlowId::new_v4();
+        config.populate(
+            &ThreadPriorityState::new(ThreadPriority::Normal),
+            Some(vec![0]),
+            flow_id,
+            Some(registry.clone()),
+        );
+
+        let threads = registry.get_all();
+        assert_eq!(threads.len(), 1, "only the thread still running is adopted");
+        assert_eq!(threads[0].thread_id(), early);
+        assert_eq!(threads[0].flow_id, flow_id);
+        assert_eq!(threads[0].block_id.as_deref(), Some("player"));
+        assert_eq!(threads[0].pinned_cpus, Some(vec![0]));
+    }
+
+    /// A second populate replaces the settings: a thread entering after it
+    /// counts toward the new state, not the first one.
+    #[test]
+    fn populate_again_replaces_the_settings() {
+        let config = SessionThreadConfig::new();
+        let first = ThreadPriorityState::new(ThreadPriority::Normal);
+        let second = ThreadPriorityState::new(ThreadPriority::Normal);
+        let registry = ThreadRegistry::new();
+        config.populate(&first, None, FlowId::new_v4(), Some(registry.clone()));
+        config.populate(&second, None, FlowId::new_v4(), Some(registry));
+        let (_pipeline, owner, bus) = internal_pipeline(&config);
+
+        let thread = on_fresh_thread(move || {
+            post_stream_status(&bus, gst::StreamStatusType::Enter, &owner);
+            ThreadHandle::current().id()
+        });
+        assert!(second.is_configured(thread));
+        assert!(!first.is_configured(thread));
+    }
+
+    /// A thread a WebRTC session left elevated gets its own scheduling back
+    /// when a pipeline outside any flow picks it from the pool.
+    #[test]
+    fn pipeline_outside_a_flow_resets_a_thread_left_elevated() {
+        gst::init().unwrap();
+        let config = SessionThreadConfig::new();
+        config.populate(
+            &ThreadPriorityState::new(ThreadPriority::High),
+            None,
+            FlowId::new_v4(),
+            None,
+        );
+        let session = gst::Pipeline::new();
+        config.install_on_session_pipeline(&session, "session", "out");
+        let session_element = gst::ElementFactory::make("identity").build().unwrap();
+        session.add(&session_element).unwrap();
+        session.set_state(gst::State::Paused).unwrap();
+        let session_pad = session_element.static_pad("sink").unwrap();
+
+        let other = gst::Pipeline::new();
+        let other_owner = gst::ElementFactory::make("identity").build().unwrap();
+        other.add(&other_owner).unwrap();
+        reset_streaming_threads(&other);
+        let other_bus = other.bus().unwrap();
+
+        let (elevated, after) = on_fresh_thread(move || {
+            session_pad.send_event(gst::event::StreamStart::new("session-stream"));
+            let elevated = BASELINE.with(|b| b.borrow().is_some());
+            post_stream_status(&other_bus, gst::StreamStatusType::Enter, &other_owner);
+            (elevated, BASELINE.with(|b| b.borrow().is_some()))
+        });
+        session.set_state(gst::State::Null).unwrap();
+
+        assert!(elevated, "the session should have taken the thread over");
+        assert!(
+            !after,
+            "the next pipeline kept the session's priority on the thread"
+        );
     }
 
     /// `High` must leave the thread in `USER_INITIATED`.
