@@ -67,6 +67,11 @@ pub(super) fn build_whipclientsink(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("whipclientsink: {}", e)))?;
 
+    // The session pipeline encodes and payloads: it runs with the flow's
+    // thread priority.
+    ctx.session_thread_config()
+        .install_on_webrtcsink(&whipclientsink, instance_id);
+
     // Set ICE server properties (explicitly clear defaults when not configured,
     // since webrtcsink defaults to stun://stun.l.google.com:19302)
     match stun_server {

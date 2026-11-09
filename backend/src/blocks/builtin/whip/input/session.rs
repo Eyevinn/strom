@@ -616,6 +616,12 @@ pub fn create_whipserversrc_for_session(
     // Install while it is still NULL so no depayloader is missed.
     rtp_hdrext::install(&session_pipeline);
 
+    // The session's ICE, depayload and decode threads work for the flow, and
+    // run with the flow's thread priority.
+    config
+        .session_thread_config
+        .install_on_internal_pipeline(&session_pipeline, &config.instance_id);
+
     // Set session pipeline to PLAYING and wait. On failure, take it back to
     // NULL before dropping it: a session pipeline dropped above NULL leaves
     // its whipserversrc's sockets and threads behind.
