@@ -4,6 +4,8 @@ use crate::blocks::BlockBuildError;
 use crate::gpu;
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_base as gst_base;
+use gstreamer_base::prelude::*;
 use gstreamer_gl as gst_gl;
 use gstreamer_video as gst_video;
 use tracing::{debug, info, trace};
@@ -116,6 +118,16 @@ fn apply_post_build_properties(
     if mixer.find_property("min-upstream-latency").is_some() {
         let latency_ns = min_upstream_latency_ms * 1_000_000;
         mixer.set_property("min-upstream-latency", latency_ns);
+    }
+    // Pads that never got a buffer (an input or DSK layer nobody feeds yet)
+    // would make the live aggregator wait for its deadline on every frame,
+    // adding the whole latency budget to program. With this set, the
+    // aggregator waits for such a pad once (one timeout after the pad is
+    // added) and ignores it from then on, until its first buffer; then it
+    // counts as before. glvideomixerelement has no property for it, so set
+    // it through the aggregator API, which every backend has.
+    if let Some(aggregator) = mixer.downcast_ref::<gst_base::Aggregator>() {
+        aggregator.set_ignore_inactive_pads(true);
     }
     if mixer.find_property("start-time-selection").is_some() {
         // Use "zero" instead of "first" to avoid a race condition in GStreamer 1.26:
