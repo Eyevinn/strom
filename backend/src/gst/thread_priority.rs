@@ -22,10 +22,8 @@ use strom_types::FlowId;
 use tracing::{debug, error, info, warn};
 
 mod affinity;
-mod background;
 mod session;
 
-pub use background::leave_background_process;
 pub use session::SessionThreadConfig;
 
 /// Shared state for tracking thread priority configuration across threads.

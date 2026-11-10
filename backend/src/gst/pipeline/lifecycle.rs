@@ -62,10 +62,6 @@ impl PipelineManager {
         // Works around gstreamer#5057, which aborts the whole process.
         rtp_hdrext::install(&self.pipeline);
 
-        // A macOS background process has its clock waits delayed, and a live
-        // flow drops frames to QoS.
-        thread_priority::leave_background_process();
-
         // Set up thread priority handler FIRST (before any state changes)
         // This must be done before the pipeline starts so we catch all thread enter events
         info!(
