@@ -934,6 +934,9 @@ mod tests {
     #[tokio::test]
     async fn buffers_ahead_of_the_clock_are_counted() {
         init_gst();
+        // As a flow does when it starts: in a macOS background process the
+        // sink's clock waits wake up to ~100 ms late, and so do the buffers.
+        crate::gst::thread_priority::leave_background_process();
         let pipeline = gst::parse::launch(
             "videotestsrc ! video/x-raw,framerate=30/1 ! \
              fakesink name=sink sync=true",
@@ -966,15 +969,7 @@ mod tests {
         pipeline.set_state(gst::State::Null).unwrap();
 
         assert!(count > 0, "no samples for buffers ahead of the clock");
-        // Most buffers lead the clock here and measure 0
-        // (`early_buffers_have_age_zero` pins that). A streaming thread that
-        // a loaded runner stalls makes a frame or two late for real: the
-        // macOS runner measured 68 ms. A negative age that wrapped would be
-        // enormous, so a bound still catches that.
-        assert!(
-            latest < 1000 && max < 1000,
-            "ages out of range: latest {latest} ms, max {max} ms"
-        );
+        assert_eq!((latest, max), (0, 0));
     }
 
     #[test]
