@@ -5,8 +5,7 @@
 //! no data and no EOS, as when a WHIP publisher's video freezes.
 
 use crate::common;
-#[path = "../common/recorder.rs"]
-pub mod recorder;
+use crate::recorder;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

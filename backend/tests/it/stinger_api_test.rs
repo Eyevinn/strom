@@ -4,10 +4,8 @@
 //! naming inputs.
 
 use crate::common;
-#[path = "../common/http_file.rs"]
-mod http_file;
-#[path = "../common/stinger.rs"]
-pub mod rig;
+use crate::http_file;
+use crate::stinger as rig;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

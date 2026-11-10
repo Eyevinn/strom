@@ -3,8 +3,7 @@
 //! flow being torn down in a neighbouring test can stall it.
 
 use crate::common;
-#[path = "../common/stinger.rs"]
-pub mod rig;
+use crate::stinger as rig;
 
 use gstreamer::prelude::*;
 use rig::*;

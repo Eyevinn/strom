@@ -14,8 +14,7 @@
 //!   not deadlock `splitmuxsink`.
 
 use crate::common;
-#[path = "../common/recorder.rs"]
-pub mod recorder;
+use crate::recorder;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

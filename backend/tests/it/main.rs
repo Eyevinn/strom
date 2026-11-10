@@ -11,6 +11,14 @@
 pub mod common;
 #[path = "../vision_mixer_input_format/mod.rs"]
 pub mod vision_mixer_input_format;
+// Helpers several test files share. A file loaded as a module more than once
+// (one `#[path]` per test file) is a clippy error in one crate.
+#[path = "../common/http_file.rs"]
+pub mod http_file;
+#[path = "../common/recorder.rs"]
+pub mod recorder;
+#[path = "../common/stinger.rs"]
+pub mod stinger;
 
 pub mod aes67_buffersplit_queue_test;
 pub mod api_not_found_test;

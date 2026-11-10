@@ -13,8 +13,6 @@
 //! the slow input failed not-negotiated, and the mixer, which cannot answer a
 //! latency query before both inputs can, never warned (#1136).
 
-use crate::common;
-
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;

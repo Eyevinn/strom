@@ -9,8 +9,7 @@
 //! with the program frame it was meant for.
 
 use crate::common;
-#[path = "../common/stinger.rs"]
-pub mod rig;
+use crate::stinger as rig;
 
 use gstreamer::prelude::*;
 use rig::*;

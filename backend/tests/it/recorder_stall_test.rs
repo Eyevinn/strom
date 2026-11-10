@@ -5,9 +5,7 @@
 //! the whole process (`set_track_stall_timeout_for_tests`), which the other
 //! recorder tests should not run with.
 
-use crate::common;
-#[path = "../common/recorder.rs"]
-pub mod recorder;
+use crate::recorder;
 
 use std::path::Path;
 use std::time::{Duration, Instant};
