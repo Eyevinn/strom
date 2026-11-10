@@ -569,7 +569,10 @@ impl McpHandler {
 
                 info!(
                     "MCP: Updating property {}.{} = {:?} in flow {}",
-                    element_id, property_name, value, flow_id
+                    element_id,
+                    property_name,
+                    crate::redact::value(property_name, &value),
+                    flow_id
                 );
                 state
                     .update_element_property(&flow_id, element_id, property_name, value, None)

@@ -211,7 +211,11 @@ async fn navigate(port: u16, target_id: String, url: String) {
 
     let endpoint = format!("ws://127.0.0.1:{}/devtools/page/{}", port, target_id);
     let Ok((mut socket, _)) = tokio_tungstenite::connect_async(&endpoint).await else {
-        warn!("Could not reach page {} to load {}", target_id, url);
+        warn!(
+            "Could not reach page {} to load {}",
+            target_id,
+            crate::redact::text(&url)
+        );
         return;
     };
     let command =
