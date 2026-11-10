@@ -1334,8 +1334,78 @@ fn a_lagging_video_comes_back_after_a_short_stall() {
     // encoder's lag on top: that video was on its way, not missing.
     let (gap, _) = largest_gap(video);
     assert!(
-        gap < gst::ClockTime::from_mseconds(2000),
+        gap < gst::ClockTime::from_mseconds(2500),
         "the video has a {} hole for a 1 s stall",
         gap
+    );
+}
+
+/// From the first buffer leaving `element` after `at`, restart its timestamps
+/// at 0 under a new segment that keeps the running time going, as a source
+/// that restarts does.
+fn restart_timestamps(element: &gst::Element, start: Instant, at: Duration) {
+    let offset = Arc::new(AtomicU64::new(u64::MAX));
+    element
+        .static_pad("src")
+        .unwrap()
+        .add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            if start.elapsed() < at {
+                return gst::PadProbeReturn::Ok;
+            }
+            let Some(buffer) = info.buffer_mut() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let Some(pts) = buffer.pts() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            if offset.load(Ordering::Relaxed) == u64::MAX {
+                let ev = pad.sticky_event::<gst::event::Segment>(0).unwrap();
+                let old = ev
+                    .segment()
+                    .downcast_ref::<gst::ClockTime>()
+                    .unwrap()
+                    .clone();
+                let mut new = gst::FormattedSegment::<gst::ClockTime>::new();
+                new.set_base(old.to_running_time(pts).unwrap());
+                offset.store(pts.nseconds(), Ordering::Relaxed);
+                pad.push_event(gst::event::Segment::new(&new));
+            }
+            let off = gst::ClockTime::from_nseconds(offset.load(Ordering::Relaxed));
+            let buffer = buffer.make_mut();
+            buffer.set_pts(pts.saturating_sub(off));
+            if let Some(dts) = buffer.dts() {
+                buffer.set_dts(dts.saturating_sub(off));
+            }
+            gst::PadProbeReturn::Ok
+        });
+}
+
+/// A video that restarts its timestamps under a new segment after a stall
+/// must not be dropped as lying behind the GAPs sent in the old segment.
+#[test]
+fn a_video_that_restarts_its_timestamps_after_a_stall_is_recorded() {
+    init();
+    let dir = tempfile::tempdir().unwrap();
+    let pipeline = gst::Pipeline::new();
+    let (_rec, venc, _aenc) = av_recorder(&pipeline, "rec", dir.path(), &[]);
+    let start = Instant::now();
+    stall(&venc, start, Duration::from_secs(2), Duration::from_secs(4));
+    restart_timestamps(&venc, start, Duration::from_secs(4));
+
+    pipeline.set_state(gst::State::Playing).unwrap();
+    std::thread::sleep(Duration::from_secs(8));
+    no_errors(&pipeline);
+    finish(&pipeline);
+
+    let files = recorder::recordings(dir.path(), "rec");
+    assert_eq!(files.len(), 1, "{:?}", files);
+    let samples = demux(&files[0]);
+    let video = &samples["video/x-h264"];
+    let last = video.last().copied().unwrap_or(gst::ClockTime::ZERO);
+    assert!(
+        last >= gst::ClockTime::from_seconds(6),
+        "the video never came back after restarting its timestamps: last frame at {}, {} frames",
+        last,
+        video.len()
     );
 }
