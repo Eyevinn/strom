@@ -31,7 +31,7 @@ pub(super) fn set_av1_properties(
         }
         // SVT-AV1's random-access defaults hold frames back for look-ahead,
         // temporal filtering and a 5-level hierarchy: 1.7 s on average at
-        // 720p25 (2.3 s worst). The live settings bring that to ~0.2 s.
+        // 720p25 (2.3 s worst). The live settings bring that to ~0.25 s.
         // Low-delay prediction (`pred-struct=1`, `rtc=1`) would go lower, but
         // svtav1enc stalls after its first frames in that mode.
         if tune == "zerolatency" {
@@ -62,8 +62,10 @@ pub(super) fn set_av1_properties(
 
 /// svtav1enc `parameters-string` for live output (`tune=zerolatency`): no
 /// look-ahead beyond what the encoder needs, no temporal filtering, the
-/// shallowest prediction hierarchy.
-pub(super) const SVTAV1_LIVE_PARAMETERS: &str = "lookahead=0:enable-tf=0:hierarchical-levels=1";
+/// shallowest prediction hierarchy every SVT-AV1 accepts. SVT-AV1 3.x and
+/// older refuse fewer than 2 levels ("Only hierarchical levels 2-5 is
+/// currently supported"), and svtav1enc then fails to start; 4.x takes 1.
+pub(super) const SVTAV1_LIVE_PARAMETERS: &str = "lookahead=0:enable-tf=0:hierarchical-levels=2";
 
 /// libaom `av1enc` properties for live output (`tune=zerolatency`).
 const AV1ENC_LIVE_PROPERTIES: &[(&str, &str)] = &[

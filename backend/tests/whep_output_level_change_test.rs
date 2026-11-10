@@ -89,13 +89,6 @@ fn whep_output_starts_and_follows_a_size_change_vp9() {
 /// av1parse refines its caps the same way as vp9parse.
 #[test]
 fn whep_output_starts_and_follows_a_size_change_av1() {
-    if common::skip_known_ci_failure(
-        &["linux"],
-        "svtav1enc fails to reinitialise on the 360p to 1080p switch on the Linux runner \
-         (\"Could not initialize supporting library\")",
-    ) {
-        return;
-    }
     // The Video Encoder's software AV1 encoders, either will do.
     if common::missing_elements(&["svtav1enc", "av1enc"]).len() == 2
         && !common::require_or_skip(&["svtav1enc or av1enc"])

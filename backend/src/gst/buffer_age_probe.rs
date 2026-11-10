@@ -966,7 +966,15 @@ mod tests {
         pipeline.set_state(gst::State::Null).unwrap();
 
         assert!(count > 0, "no samples for buffers ahead of the clock");
-        assert_eq!((latest, max), (0, 0));
+        // Most buffers lead the clock here and measure 0
+        // (`early_buffers_have_age_zero` pins that). A streaming thread that
+        // a loaded runner stalls makes a frame or two late for real: the
+        // macOS runner measured 68 ms. A negative age that wrapped would be
+        // enormous, so a bound still catches that.
+        assert!(
+            latest < 1000 && max < 1000,
+            "ages out of range: latest {latest} ms, max {max} ms"
+        );
     }
 
     #[test]
