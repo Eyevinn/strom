@@ -116,33 +116,46 @@ pub async fn set_playlist(
     );
 
     // Always store playlist as a block property so it persists
-    let mut flow = state.get_flow(&flow_id).await.ok_or((
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse::new("Flow not found")),
-    ))?;
-
-    // Find the block and update its playlist property
-    let block = flow.blocks.iter_mut().find(|b| b.id == block_id).ok_or((
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse::new("Block not found")),
-    ))?;
-
-    // Store playlist as JSON string in properties
     let playlist_json = serde_json::to_string(&req.files).unwrap_or_else(|_| "[]".to_string());
-    block
-        .properties
-        .insert("playlist".to_string(), PropertyValue::String(playlist_json));
-
-    // Save the updated flow
-    if let Err(e) = state.upsert_flow(flow).await {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::with_details(
-                "Failed to save flow",
-                e.to_string(),
-            )),
-        ));
-    }
+    state
+        .update_flow_with(&flow_id, |flow| {
+            // Find the block and update its playlist property
+            let block = flow
+                .blocks
+                .iter_mut()
+                .find(|b| b.id == block_id)
+                .ok_or::<&str>("Block not found")?;
+            // Store playlist as JSON string in properties
+            block
+                .properties
+                .insert("playlist".to_string(), PropertyValue::String(playlist_json));
+            Ok(())
+        })
+        .await
+        .map_err(|e: crate::state::FlowUpdateError<&str>| {
+            use crate::state::FlowUpdateError;
+            match e {
+                FlowUpdateError::NotFound => (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse::new("Flow not found")),
+                ),
+                FlowUpdateError::Rejected(message) => {
+                    (StatusCode::NOT_FOUND, Json(ErrorResponse::new(message)))
+                }
+                FlowUpdateError::Save(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::with_details(
+                        "Failed to save flow",
+                        e.to_string(),
+                    )),
+                ),
+                // The change keeps the id.
+                FlowUpdateError::IdChanged => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Failed to save flow")),
+                ),
+            }
+        })?;
 
     // If flow is running, also update the runtime player
     let key = MediaPlayerKey {

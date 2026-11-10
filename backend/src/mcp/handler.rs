@@ -131,6 +131,24 @@ fn required_flow_id(args: &Value) -> Result<strom_types::FlowId, ToolError> {
     })
 }
 
+/// The tool error for a failed `AppState::update_flow_with` of `flow_id`.
+fn flow_update_error(
+    error: crate::state::FlowUpdateError<std::convert::Infallible>,
+    flow_id: &strom_types::FlowId,
+) -> ToolError {
+    use crate::state::FlowUpdateError;
+    match error {
+        FlowUpdateError::NotFound => {
+            ToolError::Execution(anyhow::anyhow!("Flow not found: {}", flow_id))
+        }
+        FlowUpdateError::IdChanged => {
+            ToolError::BadRequest(format!("flow.id must be {} (the flow_id)", flow_id))
+        }
+        FlowUpdateError::Rejected(never) => match never {},
+        FlowUpdateError::Save(e) => ToolError::Execution(e),
+    }
+}
+
 /// MCP request handler with direct AppState access.
 pub struct McpHandler;
 
@@ -446,7 +464,13 @@ impl McpHandler {
                 let flow: Flow = serde_json::from_value(args["flow"].clone())
                     .map_err(|e| ToolError::BadRequest(format!("Invalid flow object: {}", e)))?;
                 info!("MCP: Updating flow {}", flow_id);
-                state.upsert_flow(flow.clone()).await?;
+                let (_, flow) = state
+                    .update_flow_with(&flow_id, |stored| {
+                        *stored = flow;
+                        Ok::<(), std::convert::Infallible>(())
+                    })
+                    .await
+                    .map_err(|e| flow_update_error(e, &flow_id))?;
                 json!({ "flow": flow })
             }
 
@@ -478,25 +502,26 @@ impl McpHandler {
                 let flow_id = required_flow_id(&args)?;
                 info!("MCP: Updating properties for flow {}", flow_id);
 
-                // Get current flow
-                let mut flow = state
-                    .get_flow(&flow_id)
+                // Parse clock_type if provided
+                let clock_type = args["clock_type"]
+                    .as_str()
+                    .map(|s| s.parse::<GStreamerClockType>())
+                    .transpose()
+                    .map_err(ToolError::BadRequest)?;
+
+                let (_, flow) = state
+                    .update_flow_with(&flow_id, |flow| {
+                        // Update description if provided
+                        if let Some(desc) = args["description"].as_str() {
+                            flow.properties.description = Some(desc.to_string());
+                        }
+                        if let Some(clock_type) = clock_type {
+                            flow.properties.clock_type = clock_type;
+                        }
+                        Ok::<(), std::convert::Infallible>(())
+                    })
                     .await
-                    .ok_or_else(|| anyhow::anyhow!("Flow not found: {}", flow_id))?;
-
-                // Update description if provided
-                if let Some(desc) = args["description"].as_str() {
-                    flow.properties.description = Some(desc.to_string());
-                }
-
-                // Update clock_type if provided
-                if let Some(clock_type_str) = args["clock_type"].as_str() {
-                    flow.properties.clock_type = clock_type_str
-                        .parse::<GStreamerClockType>()
-                        .map_err(ToolError::BadRequest)?;
-                }
-
-                state.upsert_flow(flow.clone()).await?;
+                    .map_err(|e| flow_update_error(e, &flow_id))?;
                 json!({ "flow": flow })
             }
 
