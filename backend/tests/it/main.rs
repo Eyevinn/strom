@@ -2,10 +2,12 @@
 //!
 //! One binary links `strom` once, where one binary per file linked it once per
 //! file, and its tests run in parallel with each other instead of one binary at
-//! a time. A test that changes process-global state (registers a stand-in
-//! element under a real name, removes or re-ranks a factory, installs a log
-//! handler that counts every critical) cannot share a process with the rest. It
-//! stays its own `[[test]]` target in `backend/Cargo.toml`, which says why.
+//! a time. A new test file goes here, as `pub mod <name>;` below.
+//!
+//! A test that changes process-global state (registers a stand-in element
+//! under a real name, removes or re-ranks a factory, installs a log handler
+//! that counts every critical) cannot share a process with the rest. It gets
+//! its own `[[test]]` target in `backend/Cargo.toml`, which says why.
 
 #[path = "../common/mod.rs"]
 pub mod common;
@@ -40,7 +42,6 @@ pub mod flow_id_honoured_test;
 pub mod gl_memory_link_test;
 pub mod gl_probe_test;
 pub mod gpu_selection_test;
-pub mod gst_floor_smoke_test;
 pub mod html_remote_control_property_test;
 pub mod inter_gl_context_test;
 pub mod internal_pipeline_thread_priority_test;
@@ -85,6 +86,7 @@ pub mod stinger_clip_test;
 pub mod stinger_prores_test;
 pub mod stinger_test;
 pub mod tams_output_test;
+pub mod test_layout_test;
 pub mod thread_port_lifetime_test;
 pub mod thumbnail_tap_gl_test;
 pub mod video_input_bridge_gl_test;

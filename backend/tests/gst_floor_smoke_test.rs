@@ -11,7 +11,7 @@
 //! Every element it needs is in the core, base, good, ugly and libav packages
 //! bookworm ships, and each test fails rather than skips when one is missing.
 
-use crate::common;
+pub mod common;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

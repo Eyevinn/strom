@@ -80,7 +80,7 @@ The block contract (what a block emits and accepts, memory formats, output block
 
 ## API Contract
 - Every new endpoint must have a `#[utoipa::path(...)]` annotation AND be registered in `openapi.rs`. Both are required — an annotation without registration does not appear in the schema.
-- After changes to API types or endpoints, run the snapshot test (`cargo test --test openapi_test`). If it fails, update `openapi.json` in the repo root intentionally — do not silently let the schema drift.
+- After changes to API types or endpoints, run the snapshot test (`cargo test --test it openapi_test`). If it fails, update `openapi.json` in the repo root intentionally — do not silently let the schema drift.
 
 ## WebSocket Contract
 - Any type referenced by a new `StromEvent` variant must have a `ToSchema` annotation (`#[cfg_attr(feature = "openapi", derive(ToSchema))]`). If the variant introduces new inner types, those need `ToSchema` too.
