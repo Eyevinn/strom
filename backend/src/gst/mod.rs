@@ -13,6 +13,7 @@ pub mod gl_link;
 pub mod ice_preflight;
 pub mod intel_qsv;
 pub mod keyframe_request;
+pub mod latency;
 pub mod latency_diagnosis;
 pub mod orphan_guard;
 pub mod pipeline;

@@ -109,6 +109,35 @@ workaround can go once we move past that version.
   `ConstantBitRate` and is honoured.
 - **Upstream:** not searched.
 
+### `avfvideosrc`: reports one frame of latency, frames arrive 37–114 ms after capture
+- **Seen on:** Homebrew GStreamer 1.28.6, MacBook Pro (Apple Silicon) built-in camera,
+  1280x720 at 30 fps.
+- **Symptom:** the source answers the latency query with one frame (33.3 ms) as both minimum
+  and maximum. Its own `AVF clock diff` debug line (capture timestamp to delegate callback)
+  measured 37–53 ms at best and up to 114 ms, the same in milliseconds from 15 to 30 fps. The
+  capture timestamps were evenly spaced (one frame duration);
+  the delivery to the callback jittered (21–45 ms between callbacks). A syncing sink downstream
+  saw the frames late and QoS dropped up to ~5 frames a second upstream. How large the delay
+  was changed from run to run and minute to minute.
+- **Repro:** `GST_DEBUG=avfvideosrc:5 gst-launch-1.0 avfvideosrc ! video/x-raw,width=1280,height=720,framerate=30/1 ! queue ! videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast ! mpegtsmux ! srtsink uri=srt://127.0.0.1:5099 sync=true qos=true`
+  with an SRT listener on port 5099; count `qos` bus messages from `videoconvert` (`-m`).
+  The drops come and go with the camera's delivery delay.
+- **Hint:** `avfvideosrc.m` sets `latency` to one frame duration in `setCaps` and reports it
+  as min and max. `getSampleBuffer` already computes the delivery delay per frame
+  (`input_clock_diff`), so it could report that instead, or post a latency message when it
+  grows.
+- **Tests:** `avf_capture_latency_raises_live_minimum` (the Strom workaround, not the
+  upstream element).
+- **Upstream:** not reported. Searched 2026-11-10: no issue or MR about this. The one-frame
+  report dates from 2014. The capture-time timestamps came in 2015 ("subtract time spent in AVF
+  queues"), and the latency report did not change with them. Main is unchanged. Related:
+  [gst-plugins-bad#517](https://gitlab.freedesktop.org/gstreamer/gst-plugins-bad/-/issues/517)
+  (no latency message after renegotiation),
+  [gstreamer#103](https://gitlab.freedesktop.org/gstreamer/gstreamer/-/issues/103) (queue
+  design of OS-thread sources). `mfvideosrc` on Windows does report a latency from its
+  measured capture delay.
+- **Found in:** #1183.
+
 ## HTTP
 
 ### libsoup HTTP/2: a paused download reads the whole file into memory

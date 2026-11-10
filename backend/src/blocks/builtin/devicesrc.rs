@@ -87,7 +87,7 @@
 //! without changes here.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
-use crate::gst::video_adapt;
+use crate::gst::{latency, video_adapt};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -218,6 +218,15 @@ impl BlockBuilder for LocalInputBuilder {
                 .property("caps", &src_caps)
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("videosrc_caps: {}", e)))?;
+
+            if may_be_avfoundation(&videosrc) {
+                if let Some(pad) = videosrc_caps.static_pad("src") {
+                    let source = videosrc.downgrade();
+                    latency::raise_live_min_latency(&pad, AVF_CAPTURE_MIN_LATENCY, move || {
+                        source.upgrade().is_some_and(|s| contains_avfvideosrc(&s))
+                    });
+                }
+            }
 
             let videosrc_queue = source_queue(&videosrc_queue_id)?;
 
@@ -518,9 +527,10 @@ pub const VIDEO_SOURCE_QUEUE: &str = "videosrc_queue";
 /// Video has the same problem. `avfvideosrc` reports one frame as both its
 /// minimum and its maximum latency (33.3 ms at 30 fps), so with nothing after
 /// it that buffers, a syncing sink downstream had no room for its processing
-/// deadline. srtsink shortened the deadline to 0, and every millisecond the
-/// encoder took made a frame late: a Mac camera into Video Encoder and
-/// MPEG-TS/SRT Output lost about 10 frames a second to QoS.
+/// deadline: srtsink shortened the deadline to 0. That was one cause of a Mac
+/// camera losing frames to QoS in MPEG-TS/SRT Output. The other is that the
+/// camera's frames arrive later than the one frame it reports; the block
+/// reports that separately (see [`AVF_CAPTURE_MIN_LATENCY`]).
 ///
 /// This queue is the buffering the block itself has, and it reports it: a
 /// non-leaky queue adds its `max-size-time` (1 s, the default) to the
@@ -537,6 +547,48 @@ fn source_queue(id: &str) -> Result<gst::Element, BlockBuildError> {
         .property("max-size-bytes", 0u32)
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("queue ({}): {}", id, e)))
+}
+
+/// The minimum latency Local Input reports for an AVFoundation camera.
+///
+/// `avfvideosrc` stamps each frame with its capture time but reports one
+/// frame (33.3 ms at 30 fps) as its latency. A MacBook Pro camera at 720p30
+/// delivered frames 37-53 ms after capture at best and up to 114 ms when the
+/// delivery jittered (#1183), so a syncing sink saw them late and QoS dropped
+/// them upstream. 150 ms covers the worst measured with ~35 ms to spare, and
+/// does not lean on the sink's own processing deadline for the rest.
+///
+/// It is a fixed time, not a frame count: from 15 to 30 fps the same camera
+/// delivered at a ~53 ms floor with peaks of 70-90 ms, so the delay did not
+/// scale with the frame duration. A frame count would over-report at low
+/// rates and under-report at 60 fps. Below ~7 fps the source's own one-frame
+/// report is already above the floor and passes unchanged.
+///
+/// The maximum is raised with it: frames that arrive that long after their
+/// timestamps were held and not lost, so the source does buffer that much.
+const AVF_CAPTURE_MIN_LATENCY: gst::ClockTime = gst::ClockTime::from_mseconds(150);
+
+/// Whether `source` can be an AVFoundation camera: `avfvideosrc` itself, or
+/// `autovideosrc`, which picks its child only on the way to READY. Whether it
+/// actually is one is decided per latency query by [`contains_avfvideosrc`].
+fn may_be_avfoundation(source: &gst::Element) -> bool {
+    source
+        .factory()
+        .is_some_and(|f| matches!(f.name().as_str(), "avfvideosrc" | "autovideosrc"))
+}
+
+/// Whether `source` is `avfvideosrc`, or a bin with one inside: the source
+/// that reports less latency than its frames have.
+fn contains_avfvideosrc(source: &gst::Element) -> bool {
+    let is_avf = |e: &gst::Element| e.factory().is_some_and(|f| f.name() == "avfvideosrc");
+    if is_avf(source) {
+        return true;
+    }
+    source.downcast_ref::<gst::Bin>().is_some_and(|bin| {
+        bin.iterate_recurse()
+            .into_iter()
+            .any(|child| child.is_ok_and(|c| is_avf(&c)))
+    })
 }
 
 /// Widest channel count GStreamer's channel mixer takes. `audioconvert`
@@ -1392,5 +1444,32 @@ mod tests {
                 pad.internal_pad_name
             );
         }
+    }
+
+    // --- AVFoundation capture latency (#1183) ---
+    // The probe itself is tested in `gst::latency`.
+
+    #[test]
+    fn avfoundation_candidates_by_factory() {
+        gst::init().unwrap();
+        let make = |f: &str| gst::ElementFactory::make(f).build().ok();
+        let test_src = make("videotestsrc").unwrap();
+        assert!(!may_be_avfoundation(&test_src));
+        assert!(!contains_avfvideosrc(&test_src));
+        if let Some(auto) = make("autovideosrc") {
+            assert!(may_be_avfoundation(&auto));
+            // Before READY autovideosrc has no child, so it is not counted
+            // as a camera until it has picked one.
+            assert!(!contains_avfvideosrc(&auto));
+        }
+    }
+
+    #[test]
+    fn a_bin_holding_another_source_is_not_avfoundation() {
+        gst::init().unwrap();
+        let bin = gst::Bin::new();
+        bin.add(&gst::ElementFactory::make("videotestsrc").build().unwrap())
+            .unwrap();
+        assert!(!contains_avfvideosrc(bin.upcast_ref()));
     }
 }
