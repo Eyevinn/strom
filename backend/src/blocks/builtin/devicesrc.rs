@@ -553,20 +553,20 @@ fn source_queue(id: &str) -> Result<gst::Element, BlockBuildError> {
 ///
 /// `avfvideosrc` stamps each frame with its capture time but reports one
 /// frame (33.3 ms at 30 fps) as its latency. A MacBook Pro camera at 720p30
-/// delivered frames 52 ms after capture at best and up to 89 ms when the
+/// delivered frames 37-53 ms after capture at best and up to 114 ms when the
 /// delivery jittered (#1183), so a syncing sink saw them late and QoS dropped
-/// them upstream. 100 ms covers what was measured, with some margin.
+/// them upstream. 150 ms covers the worst measured with ~35 ms to spare, and
+/// does not lean on the sink's own processing deadline for the rest.
 ///
 /// It is a fixed time, not a frame count: from 15 to 30 fps the same camera
 /// delivered at a ~53 ms floor with peaks of 70-90 ms, so the delay did not
 /// scale with the frame duration. A frame count would over-report at low
-/// rates and under-report at 60 fps. Below 10 fps the source's own one-frame
+/// rates and under-report at 60 fps. Below ~7 fps the source's own one-frame
 /// report is already above the floor and passes unchanged.
 ///
-/// The maximum is raised with it: frames that arrive up to ~90 ms after their
-/// timestamps were held that long and not lost, so the source does buffer
-/// that much.
-const AVF_CAPTURE_MIN_LATENCY: gst::ClockTime = gst::ClockTime::from_mseconds(100);
+/// The maximum is raised with it: frames that arrive that long after their
+/// timestamps were held and not lost, so the source does buffer that much.
+const AVF_CAPTURE_MIN_LATENCY: gst::ClockTime = gst::ClockTime::from_mseconds(150);
 
 /// Whether `source` can be an AVFoundation camera: `avfvideosrc` itself, or
 /// `autovideosrc`, which picks its child only on the way to READY. Whether it

@@ -109,12 +109,13 @@ workaround can go once we move past that version.
   `ConstantBitRate` and is honoured.
 - **Upstream:** not searched.
 
-### `avfvideosrc`: reports one frame of latency, frames arrive 52–89 ms after capture
+### `avfvideosrc`: reports one frame of latency, frames arrive 37–114 ms after capture
 - **Seen on:** Homebrew GStreamer 1.28.6, MacBook Pro (Apple Silicon) built-in camera,
   1280x720 at 30 fps.
 - **Symptom:** the source answers the latency query with one frame (33.3 ms) as both minimum
   and maximum. Its own `AVF clock diff` debug line (capture timestamp to delegate callback)
-  measured 52 ms at best and up to 89 ms. The capture timestamps were evenly spaced (33.3 ms);
+  measured 37–53 ms at best and up to 114 ms, the same in milliseconds from 15 to 30 fps. The
+  capture timestamps were evenly spaced (one frame duration);
   the delivery to the callback jittered (21–45 ms between callbacks). A syncing sink downstream
   saw the frames late and QoS dropped up to ~5 frames a second upstream. How large the delay
   was changed from run to run and minute to minute.
