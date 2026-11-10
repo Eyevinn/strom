@@ -24,7 +24,6 @@ pub mod stinger;
 
 pub mod aes67_buffersplit_queue_test;
 pub mod api_not_found_test;
-pub mod api_tests;
 pub mod audioprocessor_test;
 pub mod bare_link_pads_test;
 pub mod block_properties_persist_test;

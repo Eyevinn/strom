@@ -236,7 +236,16 @@ async fn four_raw_video_tracks_fail_the_flow_naming_the_video_encoder() {
     let block_id = "tsout_raw";
     let mut manager = start(&sender_flow(block_id, common::free_udp_port(), false));
     let bus = manager.pipeline().bus().expect("pipeline bus");
-    let errors = common::bus::collect_errors(&bus, Duration::from_secs(3));
+    // Wait for the refusal rather than for a fixed window: with the other
+    // tests running beside it, the caps that trigger it can take more than the
+    // 3 s this used to allow. The refusals of all four inputs come together.
+    let mut errors: Vec<_> = common::bus::first_error(&bus, Duration::from_secs(20))
+        .into_iter()
+        .collect();
+    errors.extend(common::bus::collect_errors(
+        &bus,
+        Duration::from_millis(500),
+    ));
     let _ = manager.stop();
 
     assert!(

@@ -193,6 +193,13 @@ path = "src/bin/gen_icons.rs"
 name = "it"
 path = "tests/it/main.rs"
 
+# Lists and inspects every element, which loads every installed plugin into the
+# process. A system copy of a plugin Strom links in statically (gstrsrtp on the
+# Windows runner) then blocks the static registration the other tests need.
+[[test]]
+name = "api_tests"
+path = "tests/api_tests.rs"
+
 # Installs the process-wide GLib default log handler.
 [[test]]
 name = "bus_signal_watch_balance_test"
