@@ -27,9 +27,18 @@ const POLL: Duration = Duration::from_millis(100);
 /// jitter buffer's normal hiccups.
 const QUIET: Duration = Duration::from_millis(500);
 
-/// GAPs stop this far short of the pipeline's running time, so a buffer still
-/// in flight is not overtaken by a GAP that claims its time.
+/// GAPs stop this far short of where the track's data would be by now, so a
+/// buffer still in flight is not overtaken by a GAP that claims its time.
 const GAP_MARGIN: gst::ClockTime = gst::ClockTime::from_mseconds(300);
+
+/// How long a lag measurement counts. The lag is the smallest measured over
+/// the last one to two windows: a measurement can only come out too high (a
+/// reordered frame, a moment of backpressure), never too low.
+const LAG_WINDOW: Duration = Duration::from_secs(5);
+
+/// The most lag a GAP makes room for. A GAP held back further would keep the
+/// other tracks in memory for that long on every stall.
+const MAX_LAG: gst::ClockTime = gst::ClockTime::from_seconds(5);
 
 /// A connected track that has had no caps by the time another track has carried
 /// data for this long is released from the muxer, which cannot write its header
@@ -74,6 +83,9 @@ pub struct Track {
     last_seen_ms: AtomicU64,
     /// End of the last buffer, in the track's segment time (ns).
     last_end_ns: AtomicU64,
+    /// DTS (else PTS) of the last buffer that arrived, kept or dropped, in
+    /// segment time (ns). Decode order, so it only moves forward.
+    last_seen_ts_ns: AtomicU64,
     /// End of the GAPs sent so far, in segment time (ns). A buffer that starts
     /// before it arrived too late: its time is already declared empty.
     gap_until_ns: AtomicU64,
@@ -102,6 +114,7 @@ impl Track {
             last_buffer_ms: AtomicU64::new(0),
             last_seen_ms: AtomicU64::new(0),
             last_end_ns: AtomicU64::new(NONE),
+            last_seen_ts_ns: AtomicU64::new(NONE),
             gap_until_ns: AtomicU64::new(0),
             wait_keyframe: AtomicBool::new(false),
             segment: Mutex::new(None),
@@ -236,7 +249,16 @@ impl Track {
             if let Some(gst::PadProbeData::Event(event)) = info.data.as_ref() {
                 if let gst::EventView::Segment(segment) = event.view() {
                     if let Some(segment) = segment.segment().downcast_ref::<gst::ClockTime>() {
-                        *track.segment.lock().unwrap() = Some(segment.clone());
+                        let mut current = track.segment.lock().unwrap();
+                        if current.as_ref().is_some_and(|c| !same_mapping(c, segment)) {
+                            // Positions kept in the old segment's time mean nothing
+                            // in the new one. A restart at 0 would otherwise have
+                            // every buffer dropped as behind the last GAP.
+                            track.last_end_ns.store(NONE, Ordering::Relaxed);
+                            track.gap_until_ns.store(0, Ordering::Relaxed);
+                            track.last_seen_ts_ns.store(NONE, Ordering::Relaxed);
+                        }
+                        *current = Some(segment.clone());
                     }
                 }
             }
@@ -253,9 +275,13 @@ impl Track {
             };
             let pts = pts.nseconds();
             let keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
+            let ts = buffer.dts().map_or(pts, |d| d.nseconds());
+            track.last_seen_ts_ns.store(ts, Ordering::Relaxed);
+            // Release: the keepalive reads the arrival time first, then a
+            // timestamp at least as new as the one that arrived then.
             track.last_seen_ms.store(
                 track.epoch.elapsed().as_millis().max(1) as u64,
-                Ordering::Relaxed,
+                Ordering::Release,
             );
 
             // Its time was already declared empty by a GAP.
@@ -302,17 +328,57 @@ impl Track {
         }
     }
 
-    /// Send a GAP from where the track stands to `running_time` (less the
-    /// margin). Returns whether one went out.
-    fn fill_gap(&self, running_time: gst::ClockTime) -> bool {
-        let Some(target) = running_time.checked_sub(GAP_MARGIN) else {
+    /// The segment the track's data is in.
+    fn segment(&self) -> Option<gst::FormattedSegment<gst::ClockTime>> {
+        self.segment.lock().unwrap().clone()
+    }
+
+    /// How far the last buffer that arrived ran behind the pipeline's running
+    /// time when it arrived, with `running_time` taken at `now_ms`. None when
+    /// no buffer has arrived since `since_ms`.
+    fn arrival_lag(
+        &self,
+        running_time: gst::ClockTime,
+        now_ms: u64,
+        since_ms: u64,
+    ) -> Option<(u64, gst::ClockTime)> {
+        let seen_ms = self.last_seen_ms.load(Ordering::Acquire);
+        if seen_ms <= since_ms {
+            return None;
+        }
+        let ts = self.last_seen_ts_ns.load(Ordering::Relaxed);
+        if ts == NONE {
+            return None;
+        }
+        let data_time = self
+            .segment()?
+            .to_running_time(gst::ClockTime::from_nseconds(ts))?;
+        let arrived_at = running_time.saturating_sub(gst::ClockTime::from_mseconds(
+            now_ms.saturating_sub(seen_ms),
+        ));
+        Some((seen_ms, arrived_at.saturating_sub(data_time)))
+    }
+
+    /// Buffers are arriving, but behind the GAPs already sent, so they are
+    /// dropped. The track is catching up, not quiet: another GAP would only
+    /// move the line it has to catch up to.
+    fn catching_up(&self, now_ms: u64) -> bool {
+        let seen_ms = now_ms.saturating_sub(self.last_seen_ms.load(Ordering::Relaxed));
+        let seen_ts = self.last_seen_ts_ns.load(Ordering::Relaxed);
+        seen_ms < QUIET.as_millis() as u64
+            && seen_ts != NONE
+            && seen_ts < self.gap_until_ns.load(Ordering::Relaxed)
+    }
+
+    /// Send a GAP from where the track stands to where its data would be by
+    /// `running_time`: less its `lag` and the margin. Returns whether one went
+    /// out.
+    fn fill_gap(&self, running_time: gst::ClockTime, lag: gst::ClockTime) -> bool {
+        let Some(target) = running_time.checked_sub(GAP_MARGIN + lag) else {
             return false;
         };
         let Some(position) = self
-            .segment
-            .lock()
-            .unwrap()
-            .as_ref()
+            .segment()
             .and_then(|s| s.position_from_running_time(target))
         else {
             return false;
@@ -349,6 +415,58 @@ impl Track {
     }
 }
 
+/// Whether two segments put the same timestamp at the same running time.
+fn same_mapping(
+    a: &gst::FormattedSegment<gst::ClockTime>,
+    b: &gst::FormattedSegment<gst::ClockTime>,
+) -> bool {
+    a.start() == b.start()
+        && a.base() == b.base()
+        && a.offset() == b.offset()
+        && a.rate() == b.rate()
+}
+
+/// How far a track's data runs behind the pipeline's running time: the
+/// smallest lag measured in the current and the previous [`LAG_WINDOW`]. A
+/// program behind a mixer and an encoder with lookahead runs a second or more
+/// behind; a GAP up to the running time would claim time its data has not
+/// reached yet, and the data would be dropped when it came.
+#[derive(Default)]
+struct Lag {
+    current: Option<gst::ClockTime>,
+    previous: Option<gst::ClockTime>,
+    window_start: Option<Instant>,
+    /// Arrival time (ms since the track's epoch) of the last buffer measured.
+    last_ms: u64,
+}
+
+impl Lag {
+    fn add(&mut self, lag: gst::ClockTime) {
+        let now = Instant::now();
+        if self
+            .window_start
+            .is_none_or(|start| now.duration_since(start) >= LAG_WINDOW)
+        {
+            // A window with no measurement (the track was quiet) keeps the
+            // one before it.
+            if self.current.is_some() {
+                self.previous = self.current.take();
+            }
+            self.window_start = Some(now);
+        }
+        self.current = Some(self.current.map_or(lag, |c| c.min(lag)));
+    }
+
+    fn get(&self) -> gst::ClockTime {
+        let lag = match (self.current, self.previous) {
+            (Some(c), Some(p)) => c.min(p),
+            (Some(l), None) | (None, Some(l)) => l,
+            (None, None) => gst::ClockTime::ZERO,
+        };
+        lag.min(MAX_LAG)
+    }
+}
+
 fn error_no_pad(block_id: &str, label: &str) {
     tracing::error!(
         "Live Recorder {}: the muxer refused a pad for {} — it will not be recorded",
@@ -377,6 +495,7 @@ fn run(block_id: &str, mux: gst::glib::WeakRef<gst::Element>, tracks: &[Arc<Trac
     let mut first_data: Option<Instant> = None;
     let mut quiet_reported = vec![false; tracks.len()];
     let mut asked_on_return = vec![false; tracks.len()];
+    let mut lags: Vec<Lag> = tracks.iter().map(|_| Lag::default()).collect();
 
     loop {
         std::thread::sleep(POLL);
@@ -388,10 +507,11 @@ fn run(block_id: &str, mux: gst::glib::WeakRef<gst::Element>, tracks: &[Arc<Trac
         }
         let running_time = mux.current_running_time();
 
-        for ((track, reported), asked_on_return) in tracks
+        for (((track, reported), asked_on_return), lag) in tracks
             .iter()
             .zip(quiet_reported.iter_mut())
             .zip(asked_on_return.iter_mut())
+            .zip(lags.iter_mut())
         {
             if !track.is_connected() || track.is_retired() {
                 continue;
@@ -411,6 +531,12 @@ fn run(block_id: &str, mux: gst::glib::WeakRef<gst::Element>, tracks: &[Arc<Trac
             }
 
             let now_ms = track.epoch.elapsed().as_millis() as u64;
+            if let Some((seen_ms, measured)) =
+                running_time.and_then(|rt| track.arrival_lag(rt, now_ms, lag.last_ms))
+            {
+                lag.last_ms = seen_ms;
+                lag.add(measured);
+            }
             let quiet_ms = now_ms.saturating_sub(track.last_buffer_ms.load(Ordering::Relaxed));
             if quiet_ms < QUIET.as_millis() as u64 {
                 if *reported {
@@ -423,6 +549,10 @@ fn run(block_id: &str, mux: gst::glib::WeakRef<gst::Element>, tracks: &[Arc<Trac
             let Some(running_time) = running_time else {
                 continue;
             };
+            // Asking for a keyframe now would get one that is dropped too.
+            if track.catching_up(now_ms) {
+                continue;
+            }
             // Video is arriving again but everything so far was a delta, dropped
             // while waiting for a keyframe. An encoder that went on encoding
             // through the stall used up the first request, so ask once more.
@@ -435,7 +565,7 @@ fn run(block_id: &str, mux: gst::glib::WeakRef<gst::Element>, tracks: &[Arc<Trac
                 track.request_keyframe();
                 *asked_on_return = true;
             }
-            if track.fill_gap(running_time) && !*reported {
+            if track.fill_gap(running_time, lag.get()) && !*reported {
                 if track.kind == TrackKind::Video {
                     track.wait_for_keyframe();
                 }

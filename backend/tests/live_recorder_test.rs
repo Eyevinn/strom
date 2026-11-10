@@ -1259,3 +1259,153 @@ fn a_stop_before_a_dataless_track_is_released_still_writes_the_file() {
         span
     );
 }
+
+/// H.264 that leaves the encoder well behind the pipeline's running time, as
+/// a program does after a mixer and an encoder with lookahead: x264enc without
+/// `zerolatency` holds about a second of frames.
+fn lagging_video_source(pipeline: &gst::Pipeline) -> gst::Element {
+    let src = gst::ElementFactory::make("videotestsrc")
+        .property("is-live", true)
+        .build()
+        .unwrap();
+    let caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("width", 320i32)
+                .field("height", 240i32)
+                .field("framerate", gst::Fraction::new(30, 1))
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let enc = gst::ElementFactory::make("x264enc")
+        .property("key-int-max", 30u32)
+        .property("bframes", 0u32)
+        .build()
+        .unwrap();
+    pipeline.add_many([&src, &caps, &enc]).unwrap();
+    gst::Element::link_many([&src, &caps, &enc]).unwrap();
+    enc
+}
+
+/// A short video stall must not shut the video out for good when the video
+/// runs behind the pipeline's running time. Issue #1240: a program recording
+/// had two frames, then no picture for 56 s while its audio recorded.
+#[test]
+fn a_lagging_video_comes_back_after_a_short_stall() {
+    init();
+    let dir = tempfile::tempdir().unwrap();
+    let pipeline = gst::Pipeline::new();
+    let rec = add_live_recorder(
+        &pipeline,
+        "rec",
+        dir.path(),
+        &[
+            ("num_video_tracks", PropertyValue::UInt(1)),
+            ("num_audio_tracks", PropertyValue::UInt(1)),
+        ],
+    );
+    let venc = lagging_video_source(&pipeline);
+    let aenc = recorder::audio_source(&pipeline, -1, true);
+    venc.link(&rec.input("video_input_0")).unwrap();
+    aenc.link(&rec.input("audio_input_0")).unwrap();
+    rec.run_setups();
+    let start = Instant::now();
+    stall(&venc, start, Duration::from_secs(3), Duration::from_secs(4));
+
+    pipeline.set_state(gst::State::Playing).unwrap();
+    std::thread::sleep(Duration::from_secs(10));
+    no_errors(&pipeline);
+    finish(&pipeline);
+
+    let files = recorder::recordings(dir.path(), "rec");
+    assert_eq!(files.len(), 1, "{:?}", files);
+    let samples = demux(&files[0]);
+    let video = &samples["video/x-h264"];
+    let last = video.last().copied().unwrap_or(gst::ClockTime::ZERO);
+    assert!(
+        last >= gst::ClockTime::from_seconds(7),
+        "the video never came back after the 1 s stall: last frame at {}, {} frames",
+        last,
+        video.len()
+    );
+    // The 1 s stall shows as a gap, plus the wait for a keyframe. Not the
+    // encoder's lag on top: that video was on its way, not missing.
+    let (gap, _) = largest_gap(video);
+    assert!(
+        gap < gst::ClockTime::from_mseconds(2500),
+        "the video has a {} hole for a 1 s stall",
+        gap
+    );
+}
+
+/// From the first buffer leaving `element` after `at`, restart its timestamps
+/// at 0 under a new segment that keeps the running time going, as a source
+/// that restarts does.
+fn restart_timestamps(element: &gst::Element, start: Instant, at: Duration) {
+    let offset = Arc::new(AtomicU64::new(u64::MAX));
+    element
+        .static_pad("src")
+        .unwrap()
+        .add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            if start.elapsed() < at {
+                return gst::PadProbeReturn::Ok;
+            }
+            let Some(buffer) = info.buffer_mut() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let Some(pts) = buffer.pts() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            if offset.load(Ordering::Relaxed) == u64::MAX {
+                let ev = pad.sticky_event::<gst::event::Segment>(0).unwrap();
+                let old = ev
+                    .segment()
+                    .downcast_ref::<gst::ClockTime>()
+                    .unwrap()
+                    .clone();
+                let mut new = gst::FormattedSegment::<gst::ClockTime>::new();
+                new.set_base(old.to_running_time(pts).unwrap());
+                offset.store(pts.nseconds(), Ordering::Relaxed);
+                pad.push_event(gst::event::Segment::new(&new));
+            }
+            let off = gst::ClockTime::from_nseconds(offset.load(Ordering::Relaxed));
+            let buffer = buffer.make_mut();
+            buffer.set_pts(pts.saturating_sub(off));
+            if let Some(dts) = buffer.dts() {
+                buffer.set_dts(dts.saturating_sub(off));
+            }
+            gst::PadProbeReturn::Ok
+        });
+}
+
+/// A video that restarts its timestamps under a new segment after a stall
+/// must not be dropped as lying behind the GAPs sent in the old segment.
+#[test]
+fn a_video_that_restarts_its_timestamps_after_a_stall_is_recorded() {
+    init();
+    let dir = tempfile::tempdir().unwrap();
+    let pipeline = gst::Pipeline::new();
+    let (_rec, venc, _aenc) = av_recorder(&pipeline, "rec", dir.path(), &[]);
+    let start = Instant::now();
+    stall(&venc, start, Duration::from_secs(2), Duration::from_secs(4));
+    restart_timestamps(&venc, start, Duration::from_secs(4));
+
+    pipeline.set_state(gst::State::Playing).unwrap();
+    std::thread::sleep(Duration::from_secs(8));
+    no_errors(&pipeline);
+    finish(&pipeline);
+
+    let files = recorder::recordings(dir.path(), "rec");
+    assert_eq!(files.len(), 1, "{:?}", files);
+    let samples = demux(&files[0]);
+    let video = &samples["video/x-h264"];
+    let last = video.last().copied().unwrap_or(gst::ClockTime::ZERO);
+    assert!(
+        last >= gst::ClockTime::from_seconds(6),
+        "the video never came back after restarting its timestamps: last frame at {}, {} frames",
+        last,
+        video.len()
+    );
+}
