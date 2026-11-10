@@ -48,7 +48,7 @@ Read the mechanism, not the description. In rough order of what matters:
    or captures a pipeline object: find where it is destroyed. CLAUDE.md's rules on closures
    and probes exist because these leak.
 4. **Tests.** Does a test call the changed code, and would it fail if the fix were reverted?
-   Does it need an element the CI image lacks (`.github/workflows/ci.yml`), so it skips and
+   Does it need an element the CI image lacks (`.github/ci-images/`), so it skips and
    guards nothing? Read the check runs (`gh pr checks <N>`): zero runs is not green.
 5. **CLAUDE.md and `docs/BLOCK_GUIDELINES.md`.** Quote the rule a diff breaks.
 
