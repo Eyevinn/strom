@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 default-run = "strom"
+autotests = false
 
 [features]
 default = ["nvidia"]
@@ -178,3 +179,88 @@ serial_test = "4.0"
 [[bin]]
 name = "gen-icons"
 path = "src/bin/gen_icons.rs"
+
+# Integration tests. All of them are modules of one binary, tests/it, except
+# the ones below: each changes process-global GStreamer or GLib state (a
+# stand-in element under a real name, a removed or re-ranked factory, a log
+# handler that counts every critical) or crashes on its own (#1097), and so
+# needs a process of its own. See the top of each file.
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+
+[[test]]
+name = "bus_signal_watch_balance_test"
+path = "tests/bus_signal_watch_balance_test.rs"
+
+[[test]]
+name = "ice_preflight_test"
+path = "tests/ice_preflight_test.rs"
+
+[[test]]
+name = "isobmff_plugin_test"
+path = "tests/isobmff_plugin_test.rs"
+
+[[test]]
+name = "ndi_input_native_video_test"
+path = "tests/ndi_input_native_video_test.rs"
+
+[[test]]
+name = "ndi_output_input_memory_test"
+path = "tests/ndi_output_input_memory_test.rs"
+
+[[test]]
+name = "qos_probe_criticals_test"
+path = "tests/qos_probe_criticals_test.rs"
+
+[[test]]
+name = "stinger_software_decode_test"
+path = "tests/stinger_software_decode_test.rs"
+
+[[test]]
+name = "thumbnail_tap_cuda_test"
+path = "tests/thumbnail_tap_cuda_test.rs"
+
+[[test]]
+name = "video_input_bridge_test"
+path = "tests/video_input_bridge_test.rs"
+
+[[test]]
+name = "videoenc_input_memory_test"
+path = "tests/videoenc_input_memory_test.rs"
+
+[[test]]
+name = "videoformat_input_memory_test"
+path = "tests/videoformat_input_memory_test.rs"
+
+[[test]]
+name = "vision_mixer_cuda_input_test"
+path = "tests/vision_mixer_cuda_input_test.rs"
+
+[[test]]
+name = "vision_mixer_cuda_missing_test"
+path = "tests/vision_mixer_cuda_missing_test.rs"
+
+[[test]]
+name = "vision_mixer_d3d_input_test"
+path = "tests/vision_mixer_d3d_input_test.rs"
+
+[[test]]
+name = "vision_mixer_d3d_missing_test"
+path = "tests/vision_mixer_d3d_missing_test.rs"
+
+[[test]]
+name = "vision_mixer_input_format_cuda_test"
+path = "tests/vision_mixer_input_format_cuda_test.rs"
+
+[[test]]
+name = "vision_mixer_input_format_test"
+path = "tests/vision_mixer_input_format_test.rs"
+
+[[test]]
+name = "whep_fanout_bench"
+path = "tests/whep_fanout_bench.rs"
+
+[[test]]
+name = "whip_slot_flush_test"
+path = "tests/whip_slot_flush_test.rs"
