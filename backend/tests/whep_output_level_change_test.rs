@@ -91,8 +91,8 @@ fn whep_output_starts_and_follows_a_size_change_vp9() {
 fn whep_output_starts_and_follows_a_size_change_av1() {
     if common::skip_known_ci_failure(
         &["linux"],
-        "svtav1enc fails to reinitialise on the 360p to 1080p switch on the Linux runner \
-         (\"Could not initialize supporting library\")",
+        "whepserversink posts \"There is no codec present that can handle the stream's type\" \
+         on the 360p to 1080p switch with SVT-AV1 2.3 on the Linux runner (#1252)",
     ) {
         return;
     }

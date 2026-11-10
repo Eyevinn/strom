@@ -931,12 +931,18 @@ mod tests {
     /// Downstream of a source with latency (SRT, tsdemux) that is the
     /// normal case; here a non-live source runs ahead of a syncing sink,
     /// which waits for each buffer's time after the probe has seen it.
+    ///
+    /// The sink renders each buffer 300 ms before its time (`ts-offset`), so
+    /// the next one reaches the probe about 270 ms ahead of the clock. With a
+    /// lead of one frame (33 ms) the test measured the host's timers instead:
+    /// on the virtual macOS CI runner a timed wait wakes 40 ms late on average
+    /// and up to about 110 ms, and buffers there measured late.
     #[tokio::test]
     async fn buffers_ahead_of_the_clock_are_counted() {
         init_gst();
         let pipeline = gst::parse::launch(
             "videotestsrc ! video/x-raw,framerate=30/1 ! \
-             fakesink name=sink sync=true",
+             fakesink name=sink sync=true ts-offset=-300000000",
         )
         .unwrap()
         .downcast::<gst::Pipeline>()
