@@ -571,6 +571,7 @@ pub fn build_whipserversrc(
             do_retransmission,
             drop_on_latency,
             dynamic_webrtcbin_store: ctx.dynamic_webrtcbin_store(),
+            session_thread_config: ctx.session_thread_config(),
             max_video_bitrate_kbps,
             max_sessions,
             slot_audio_appsrcs,

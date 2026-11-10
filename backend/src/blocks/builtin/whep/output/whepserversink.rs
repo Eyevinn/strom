@@ -245,26 +245,9 @@ pub(super) fn build_whepserversink(
         whepserversink.set_property("video-caps", gst::Caps::new_empty());
     }
 
-    // Install thread priority on session pipelines via pad probes.
-    //
-    // consumer-pipeline-created fires BEFORE webrtcsink sets its bus sync handler,
-    // giving us the session pipeline to connect deep-element-added. Each element
-    // gets a one-shot EVENT_DOWNSTREAM probe that sets thread priority on the
-    // streaming thread.
-    //
-    // We cannot use a bus sync handler because webrtcsink's own handler returns
-    // BusSyncReply::Drop and routes all messages through an internal channel.
-    // Replacing it breaks session lifecycle (sessions never terminate).
-    let session_thread_config = ctx.session_thread_config();
-    whepserversink.connect("consumer-pipeline-created", false, move |values| {
-        if !session_thread_config.is_active() {
-            return None;
-        }
-        let consumer_id = values[1].get::<String>().unwrap_or_default();
-        let pipeline = values[2].get::<gst::Pipeline>().unwrap();
-        session_thread_config.install_on_session_pipeline(&pipeline, &consumer_id);
-        None
-    });
+    // Each viewer's session pipeline runs with the flow's thread priority.
+    ctx.session_thread_config()
+        .install_on_webrtcsink(&whepserversink, instance_id);
 
     // WORKAROUND #1: Relax transceiver codec-preferences BEFORE SDP offer is processed.
     //

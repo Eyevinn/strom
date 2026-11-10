@@ -9,6 +9,7 @@ use crate::blocks::{
     BusMessageConnectFn, APPSRC_MAX_BYTES_AUDIO, APPSRC_MAX_BYTES_VIDEO,
 };
 use crate::events::EventBroadcaster;
+use crate::gst::SessionThreadConfig;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -79,7 +80,7 @@ impl BlockBuilder for MediaPlayerBuilder {
         &self,
         instance_id: &str,
         properties: &HashMap<String, PropertyValue>,
-        _ctx: &BlockBuildContext,
+        ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         info!("Building Media Player block instance: {}", instance_id);
 
@@ -217,6 +218,7 @@ impl BlockBuilder for MediaPlayerBuilder {
             media_path,
             num_video_tracks,
             num_audio_tracks,
+            ctx.session_thread_config(),
         )
     }
 }
@@ -242,6 +244,7 @@ fn build_media_player(
     media_path: std::path::PathBuf,
     num_video_tracks: usize,
     num_audio_tracks: usize,
+    thread_config: SessionThreadConfig,
 ) -> Result<BlockBuildResult, BlockBuildError> {
     // --- Main pipeline elements, per track slot: appsrc → queue → identity ---
     // The queue keeps downstream sinks (e.g. srtsink) from warning about
@@ -368,6 +371,10 @@ fn build_media_player(
             network_buffer,
         )?
     };
+
+    // Its demux, decode and clocksync threads work for the flow, and run with
+    // the flow's thread priority.
+    thread_config.install_on_internal_pipeline(&internal_pipeline, block_id);
 
     // Store internal pipeline in state
     if let Ok(mut guard) = state.internal_pipeline.write() {

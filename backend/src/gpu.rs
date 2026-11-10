@@ -61,6 +61,7 @@ fn detect_gl_renderer() -> Option<GlRendererInfo> {
     .ok()?;
 
     let pipeline = pipeline.downcast::<gst::Pipeline>().ok()?;
+    crate::gst::thread_priority::reset_streaming_threads(&pipeline);
 
     let sink = pipeline
         .by_name("sink")

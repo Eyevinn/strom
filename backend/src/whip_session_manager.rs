@@ -68,6 +68,9 @@ pub struct WhipEndpointConfig {
     pub drop_on_latency: bool,
     /// Shared dynamic webrtcbin store for ICE policy tracking
     pub dynamic_webrtcbin_store: DynamicWebrtcbinStore,
+    /// The flow's thread priority, CPU affinity and thread registry, for each
+    /// session's own pipeline.
+    pub session_thread_config: crate::gst::SessionThreadConfig,
     /// Maximum video bitrate hint for Chrome (kbps). Injected into the SDP
     /// answer as x-google-max-bitrate so Chrome's encoder ramps up accordingly.
     pub max_video_bitrate_kbps: u32,
@@ -498,6 +501,7 @@ impl WhipEndpointConfig {
             do_retransmission: true,
             drop_on_latency: true,
             dynamic_webrtcbin_store: Arc::new(Mutex::new(HashMap::new())),
+            session_thread_config: Default::default(),
             max_video_bitrate_kbps: 4000,
             max_sessions,
             slot_audio_appsrcs: Vec::new(),
