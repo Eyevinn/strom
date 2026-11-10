@@ -1,10 +1,22 @@
 name: CI
 
+# Changes to docs alone start no CI run. YAML anchors are not supported in
+# workflows, so the two lists are kept identical by hand.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - 'LICENSE*'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - 'LICENSE*'
     # `labeled` is what lets a maintainer ask for a macOS or Windows build on a
     # pull request (see build-macos). Naming `types` at all replaces the default
     # set, so the three defaults have to be listed again or pushes to a PR stop
@@ -161,7 +173,7 @@ jobs:
             echo "$name=$image" >> "$GITHUB_OUTPUT"
           done
 
-  # Fast checks on Linux: fmt + clippy + test
+  # Tests on Linux (fmt and clippy run in clippy-linux)
   check-linux:
     name: Check (Linux)
     # See preflight for the label condition. `github.event.action` is unset
@@ -206,12 +218,6 @@ jobs:
         if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run Clippy on backend
-        run: cargo clippy --package strom --all-targets --features efp -- -D warnings
-
       # --no-fail-fast: without it cargo stops at the first failing test
       # binary, and every binary after it alphabetically never runs, so one
       # flaky or crashing test hides the rest of the suite.
@@ -237,6 +243,44 @@ jobs:
       # so without this step frontend test code is neither run nor compiled.
       - name: Run tests on frontend
         run: cargo test --package strom-frontend
+
+  # fmt + clippy on Linux, in parallel with check-linux's tests. Clippy only
+  # type-checks, so it shares no build output with the test build and gains
+  # nothing from running before it in the same job.
+  clippy-linux:
+    name: Clippy (Linux)
+    if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
+    needs: [preflight, ci-images]
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ needs.ci-images.outputs.linux }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    timeout-minutes: 25
+    env:
+      RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      # Its own key: check-mode output is not what check-linux's test build
+      # caches, and two jobs on one key race to save it (see build-linux-x86_64).
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-clippy-ubuntu-26.04
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Setup sccache
+        if: needs.preflight.outputs.cache_ok == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy on backend
+        run: cargo clippy --package strom --all-targets --features efp -- -D warnings
 
   # WASM: clippy + build frontend
   check-wasm:
@@ -518,8 +562,11 @@ jobs:
   # Linux ARM64 build (build only - no native clippy/test)
   build-linux-arm64:
     name: Build (Linux ARM64)
-    # See preflight for the label condition.
-    if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
+    # After merge and on demand, not on pull requests: x86_64 already proves
+    # the release build on every PR, and ARM64 differs only where the
+    # toolchain or a native dependency does (#941 broke only the ARM64 link).
+    # Run such a bump's branch through workflow_dispatch before merging.
+    if: github.event_name != 'pull_request'
     needs: [check-wasm, preflight]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
@@ -619,7 +666,7 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # Windows: clippy + test + build
+  # Windows: clippy + test (+ release build on demand)
   # Runs on every merge to main, on a pull request carrying the `ci:windows`
   # label, and on demand. Not on every pull request: it is the slowest job in
   # the workflow and most diffs contain no `target_os = "windows"` code.
@@ -712,16 +759,15 @@ jobs:
           # common::skip_known_ci_failure(). Linux CI still runs them.
           STROM_SKIP_KNOWN_CI_FAILURES: 1
 
-      # A pull request asks this job to verify the platform code, which
-      # clippy and the tests do. The release binary is only wanted from main
-      # and dispatch, and building it is a second full compile of the tree.
+      # The release binary is a second full compile of the tree. release.yml
+      # builds its own from the tag, so CI builds one only when asked for it.
       - name: Build
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'workflow_dispatch'
         run: |
           cargo build --release --package strom --features efp
 
       - name: Upload backend binary
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
           name: strom-v${{ steps.version.outputs.version }}-windows-x86_64-pc-windows-msvc
@@ -729,7 +775,7 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # macOS: clippy + test + build
+  # macOS: clippy + test (+ release build on demand)
   #
   # Runs on every merge to main, on a pull request carrying the `ci:macos`
   # label, and on demand.
@@ -815,14 +861,14 @@ jobs:
           # See the Windows job.
           STROM_SKIP_KNOWN_CI_FAILURES: 1
 
-      # Not on a pull request: see the Windows job.
+      # Only on demand: see the Windows job.
       - name: Build
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'workflow_dispatch'
         run: |
           cargo build --release --package strom --features efp
 
       - name: Upload backend binary
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
           name: strom-v${{ steps.version.outputs.version }}-macos-aarch64-apple-darwin
