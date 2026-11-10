@@ -552,6 +552,12 @@ fn source_queue(id: &str) -> Result<gst::Element, BlockBuildError> {
 /// delivered frames 52 ms after capture at best and up to 89 ms when the
 /// delivery jittered (#1183), so a syncing sink saw them late and QoS dropped
 /// them upstream. 100 ms covers what was measured, with some margin.
+///
+/// It is a fixed time, not a frame count: from 15 to 30 fps the same camera
+/// delivered at a ~53 ms floor with peaks of 70-90 ms, so the delay did not
+/// scale with the frame duration. A frame count would over-report at low
+/// rates and under-report at 60 fps. Below 10 fps the source's own one-frame
+/// report is already above the floor and passes unchanged.
 const AVF_CAPTURE_MIN_LATENCY: gst::ClockTime = gst::ClockTime::from_mseconds(100);
 
 /// Whether `source` is an AVFoundation camera, which reports less latency
