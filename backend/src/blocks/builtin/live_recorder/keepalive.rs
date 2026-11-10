@@ -27,8 +27,8 @@ const POLL: Duration = Duration::from_millis(100);
 /// jitter buffer's normal hiccups.
 const QUIET: Duration = Duration::from_millis(500);
 
-/// GAPs stop this far short of the pipeline's running time, so a buffer still
-/// in flight is not overtaken by a GAP that claims its time.
+/// GAPs stop this far short of where the track's data would be by now, so a
+/// buffer still in flight is not overtaken by a GAP that claims its time.
 const GAP_MARGIN: gst::ClockTime = gst::ClockTime::from_mseconds(300);
 
 /// A connected track that has had no caps by the time another track has carried
@@ -74,6 +74,13 @@ pub struct Track {
     last_seen_ms: AtomicU64,
     /// End of the last buffer, in the track's segment time (ns).
     last_end_ns: AtomicU64,
+    /// PTS of the last buffer that arrived, kept or dropped, in segment time (ns).
+    last_seen_pts_ns: AtomicU64,
+    /// How far the track's data runs behind the pipeline's running time, the
+    /// most seen while it flowed (ns). A program behind a mixer and an encoder
+    /// with lookahead runs a second or more behind; a GAP up to the running
+    /// time would claim time its data has not reached yet.
+    lag_ns: AtomicU64,
     /// End of the GAPs sent so far, in segment time (ns). A buffer that starts
     /// before it arrived too late: its time is already declared empty.
     gap_until_ns: AtomicU64,
@@ -102,6 +109,8 @@ impl Track {
             last_buffer_ms: AtomicU64::new(0),
             last_seen_ms: AtomicU64::new(0),
             last_end_ns: AtomicU64::new(NONE),
+            last_seen_pts_ns: AtomicU64::new(NONE),
+            lag_ns: AtomicU64::new(0),
             gap_until_ns: AtomicU64::new(0),
             wait_keyframe: AtomicBool::new(false),
             segment: Mutex::new(None),
@@ -253,6 +262,7 @@ impl Track {
             };
             let pts = pts.nseconds();
             let keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
+            track.last_seen_pts_ns.store(pts, Ordering::Relaxed);
             track.last_seen_ms.store(
                 track.epoch.elapsed().as_millis().max(1) as u64,
                 Ordering::Relaxed,
@@ -302,10 +312,42 @@ impl Track {
         }
     }
 
-    /// Send a GAP from where the track stands to `running_time` (less the
-    /// margin). Returns whether one went out.
+    /// While the track flows, note how far its data runs behind the
+    /// pipeline's running time.
+    fn measure_lag(&self, running_time: gst::ClockTime) {
+        let last_end = self.last_end_ns.load(Ordering::Relaxed);
+        if last_end == NONE {
+            return;
+        }
+        let Some(data_time) = self
+            .segment
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|s| s.to_running_time(gst::ClockTime::from_nseconds(last_end)))
+        else {
+            return;
+        };
+        let lag = running_time.saturating_sub(data_time).nseconds();
+        self.lag_ns.fetch_max(lag, Ordering::Relaxed);
+    }
+
+    /// Buffers are arriving, but behind the GAPs already sent, so they are
+    /// dropped. The track is catching up, not quiet: another GAP would only
+    /// move the line it has to catch up to.
+    fn catching_up(&self, now_ms: u64) -> bool {
+        let seen_ms = now_ms.saturating_sub(self.last_seen_ms.load(Ordering::Relaxed));
+        let seen_pts = self.last_seen_pts_ns.load(Ordering::Relaxed);
+        seen_ms < QUIET.as_millis() as u64
+            && seen_pts != NONE
+            && seen_pts < self.gap_until_ns.load(Ordering::Relaxed)
+    }
+
+    /// Send a GAP from where the track stands to where its data would be by
+    /// `running_time`: less its lag and the margin. Returns whether one went out.
     fn fill_gap(&self, running_time: gst::ClockTime) -> bool {
-        let Some(target) = running_time.checked_sub(GAP_MARGIN) else {
+        let lag = gst::ClockTime::from_nseconds(self.lag_ns.load(Ordering::Relaxed));
+        let Some(target) = running_time.checked_sub(GAP_MARGIN + lag) else {
             return false;
         };
         let Some(position) = self
@@ -413,6 +455,9 @@ fn run(block_id: &str, mux: gst::glib::WeakRef<gst::Element>, tracks: &[Arc<Trac
             let now_ms = track.epoch.elapsed().as_millis() as u64;
             let quiet_ms = now_ms.saturating_sub(track.last_buffer_ms.load(Ordering::Relaxed));
             if quiet_ms < QUIET.as_millis() as u64 {
+                if let Some(running_time) = running_time {
+                    track.measure_lag(running_time);
+                }
                 if *reported {
                     info!("Live Recorder {}: {} is back", block_id, track.label);
                     *reported = false;
@@ -423,6 +468,10 @@ fn run(block_id: &str, mux: gst::glib::WeakRef<gst::Element>, tracks: &[Arc<Trac
             let Some(running_time) = running_time else {
                 continue;
             };
+            // Asking for a keyframe now would get one that is dropped too.
+            if track.catching_up(now_ms) {
+                continue;
+            }
             // Video is arriving again but everything so far was a delta, dropped
             // while waiting for a keyframe. An encoder that went on encoding
             // through the stall used up the first request, so ask once more.
