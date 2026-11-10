@@ -619,7 +619,7 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # Windows: clippy + test + build
+  # Windows: clippy + test (+ release build on demand)
   # Runs on every merge to main, on a pull request carrying the `ci:windows`
   # label, and on demand. Not on every pull request: it is the slowest job in
   # the workflow and most diffs contain no `target_os = "windows"` code.
@@ -712,16 +712,15 @@ jobs:
           # common::skip_known_ci_failure(). Linux CI still runs them.
           STROM_SKIP_KNOWN_CI_FAILURES: 1
 
-      # A pull request asks this job to verify the platform code, which
-      # clippy and the tests do. The release binary is only wanted from main
-      # and dispatch, and building it is a second full compile of the tree.
+      # The release binary is a second full compile of the tree. release.yml
+      # builds its own from the tag, so CI builds one only when asked for it.
       - name: Build
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'workflow_dispatch'
         run: |
           cargo build --release --package strom --features efp
 
       - name: Upload backend binary
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
           name: strom-v${{ steps.version.outputs.version }}-windows-x86_64-pc-windows-msvc
@@ -729,7 +728,7 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # macOS: clippy + test + build
+  # macOS: clippy + test (+ release build on demand)
   #
   # Runs on every merge to main, on a pull request carrying the `ci:macos`
   # label, and on demand.
@@ -815,14 +814,14 @@ jobs:
           # See the Windows job.
           STROM_SKIP_KNOWN_CI_FAILURES: 1
 
-      # Not on a pull request: see the Windows job.
+      # Only on demand: see the Windows job.
       - name: Build
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'workflow_dispatch'
         run: |
           cargo build --release --package strom --features efp
 
       - name: Upload backend binary
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
           name: strom-v${{ steps.version.outputs.version }}-macos-aarch64-apple-darwin
