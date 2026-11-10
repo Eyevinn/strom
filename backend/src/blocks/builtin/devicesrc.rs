@@ -87,7 +87,7 @@
 //! without changes here.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
-use crate::gst::video_adapt;
+use crate::gst::{latency, video_adapt};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -219,9 +219,12 @@ impl BlockBuilder for LocalInputBuilder {
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("videosrc_caps: {}", e)))?;
 
-            if reports_short_capture_latency(&videosrc) {
+            if may_be_avfoundation(&videosrc) {
                 if let Some(pad) = videosrc_caps.static_pad("src") {
-                    raise_min_latency(&pad, AVF_CAPTURE_MIN_LATENCY);
+                    let source = videosrc.downgrade();
+                    latency::raise_live_min_latency(&pad, AVF_CAPTURE_MIN_LATENCY, move || {
+                        source.upgrade().is_some_and(|s| contains_avfvideosrc(&s))
+                    });
                 }
             }
 
@@ -524,9 +527,10 @@ pub const VIDEO_SOURCE_QUEUE: &str = "videosrc_queue";
 /// Video has the same problem. `avfvideosrc` reports one frame as both its
 /// minimum and its maximum latency (33.3 ms at 30 fps), so with nothing after
 /// it that buffers, a syncing sink downstream had no room for its processing
-/// deadline. srtsink shortened the deadline to 0, and every millisecond the
-/// encoder took made a frame late: a Mac camera into Video Encoder and
-/// MPEG-TS/SRT Output lost about 10 frames a second to QoS.
+/// deadline: srtsink shortened the deadline to 0. That was one cause of a Mac
+/// camera losing frames to QoS in MPEG-TS/SRT Output. The other is that the
+/// camera's frames arrive later than the one frame it reports; the block
+/// reports that separately (see [`AVF_CAPTURE_MIN_LATENCY`]).
 ///
 /// This queue is the buffering the block itself has, and it reports it: a
 /// non-leaky queue adds its `max-size-time` (1 s, the default) to the
@@ -558,43 +562,33 @@ fn source_queue(id: &str) -> Result<gst::Element, BlockBuildError> {
 /// scale with the frame duration. A frame count would over-report at low
 /// rates and under-report at 60 fps. Below 10 fps the source's own one-frame
 /// report is already above the floor and passes unchanged.
+///
+/// The maximum is raised with it: frames that arrive up to ~90 ms after their
+/// timestamps were held that long and not lost, so the source does buffer
+/// that much.
 const AVF_CAPTURE_MIN_LATENCY: gst::ClockTime = gst::ClockTime::from_mseconds(100);
 
-/// Whether `source` is an AVFoundation camera, which reports less latency
-/// than its frames actually have (see [`AVF_CAPTURE_MIN_LATENCY`]).
-/// `autovideosrc` picks `avfvideosrc` on macOS.
-fn reports_short_capture_latency(source: &gst::Element) -> bool {
+/// Whether `source` can be an AVFoundation camera: `avfvideosrc` itself, or
+/// `autovideosrc`, which picks its child only on the way to READY. Whether it
+/// actually is one is decided per latency query by [`contains_avfvideosrc`].
+fn may_be_avfoundation(source: &gst::Element) -> bool {
     source
         .factory()
-        .is_some_and(|f| factory_reports_short_capture_latency(&f.name()))
+        .is_some_and(|f| matches!(f.name().as_str(), "avfvideosrc" | "autovideosrc"))
 }
 
-fn factory_reports_short_capture_latency(factory: &str) -> bool {
-    factory == "avfvideosrc" || (factory == "autovideosrc" && cfg!(target_os = "macos"))
-}
-
-/// Raise the minimum of every live latency answer that passes `pad` to at
-/// least `floor`, and the maximum with it so it never falls below the
-/// minimum.
-///
-/// A QUERY probe on the answered query: it fires per latency query, never
-/// per buffer.
-fn raise_min_latency(pad: &gst::Pad, floor: gst::ClockTime) {
-    pad.add_probe(
-        gst::PadProbeType::QUERY_UPSTREAM | gst::PadProbeType::PULL,
-        move |_pad, info| {
-            let Some(query) = info.query_mut() else {
-                return gst::PadProbeReturn::Ok;
-            };
-            if let gst::QueryViewMut::Latency(latency) = query.view_mut() {
-                let (live, min, max) = latency.result();
-                if live && min < floor {
-                    latency.set(live, floor, max.map(|max| max.max(floor)));
-                }
-            }
-            gst::PadProbeReturn::Ok
-        },
-    );
+/// Whether `source` is `avfvideosrc`, or a bin with one inside: the source
+/// that reports less latency than its frames have.
+fn contains_avfvideosrc(source: &gst::Element) -> bool {
+    let is_avf = |e: &gst::Element| e.factory().is_some_and(|f| f.name() == "avfvideosrc");
+    if is_avf(source) {
+        return true;
+    }
+    source.downcast_ref::<gst::Bin>().is_some_and(|bin| {
+        bin.iterate_recurse()
+            .into_iter()
+            .any(|child| child.is_ok_and(|c| is_avf(&c)))
+    })
 }
 
 /// Widest channel count GStreamer's channel mixer takes. `audioconvert`
@@ -1453,75 +1447,29 @@ mod tests {
     }
 
     // --- AVFoundation capture latency (#1183) ---
+    // The probe itself is tested in `gst::latency`.
 
-    /// Run a live or non-live `videotestsrc` into a capsfilter carrying
-    /// [`raise_min_latency`] and return the latency answer the sink gets.
-    fn latency_through_floor(is_live: bool) -> (bool, gst::ClockTime, Option<gst::ClockTime>) {
+    #[test]
+    fn avfoundation_candidates_by_factory() {
         gst::init().unwrap();
-        let pipeline = gst::Pipeline::new();
-        let src = gst::ElementFactory::make("videotestsrc")
-            .property("is-live", is_live)
-            .build()
+        let make = |f: &str| gst::ElementFactory::make(f).build().ok();
+        let test_src = make("videotestsrc").unwrap();
+        assert!(!may_be_avfoundation(&test_src));
+        assert!(!contains_avfvideosrc(&test_src));
+        if let Some(auto) = make("autovideosrc") {
+            assert!(may_be_avfoundation(&auto));
+            // Before READY autovideosrc has no child, so it is not counted
+            // as a camera until it has picked one.
+            assert!(!contains_avfvideosrc(&auto));
+        }
+    }
+
+    #[test]
+    fn a_bin_holding_another_source_is_not_avfoundation() {
+        gst::init().unwrap();
+        let bin = gst::Bin::new();
+        bin.add(&gst::ElementFactory::make("videotestsrc").build().unwrap())
             .unwrap();
-        let caps = gst::ElementFactory::make("capsfilter")
-            .property(
-                "caps",
-                gst::Caps::builder("video/x-raw")
-                    .field("width", 320)
-                    .field("height", 240)
-                    .field("framerate", gst::Fraction::new(30, 1))
-                    .build(),
-            )
-            .build()
-            .unwrap();
-        let sink = gst::ElementFactory::make("fakesink").build().unwrap();
-        pipeline.add_many([&src, &caps, &sink]).unwrap();
-        gst::Element::link_many([&src, &caps, &sink]).unwrap();
-        raise_min_latency(&caps.static_pad("src").unwrap(), AVF_CAPTURE_MIN_LATENCY);
-
-        pipeline.set_state(gst::State::Playing).unwrap();
-        let (res, _, _) = pipeline.state(gst::ClockTime::from_seconds(5));
-        res.unwrap();
-        let mut query = gst::query::Latency::new();
-        assert!(sink.static_pad("sink").unwrap().peer_query(&mut query));
-        pipeline.set_state(gst::State::Null).unwrap();
-        query.result()
-    }
-
-    #[test]
-    fn avf_capture_latency_raises_live_minimum() {
-        // videotestsrc reports one frame, as avfvideosrc does. Without the
-        // floor the minimum stays at 33.3 ms and a camera that delivers
-        // frames 50-90 ms after capture is judged late downstream.
-        let (live, min, max) = latency_through_floor(true);
-        assert!(live);
-        assert_eq!(min, AVF_CAPTURE_MIN_LATENCY);
-        assert!(
-            max.is_none_or(|max| max >= min),
-            "max {max:?} below min {min}"
-        );
-    }
-
-    #[test]
-    fn avf_capture_latency_leaves_non_live_answer_alone() {
-        // videotestsrc answers one frame (33.3 ms) even when not live. The
-        // floor only applies to live answers, so this one passes unchanged.
-        let (live, min, _) = latency_through_floor(false);
-        assert!(!live);
-        assert!(
-            min < AVF_CAPTURE_MIN_LATENCY,
-            "non-live minimum raised to {min}"
-        );
-    }
-
-    #[test]
-    fn avf_capture_latency_applies_to_avfoundation_only() {
-        assert!(factory_reports_short_capture_latency("avfvideosrc"));
-        assert_eq!(
-            factory_reports_short_capture_latency("autovideosrc"),
-            cfg!(target_os = "macos")
-        );
-        assert!(!factory_reports_short_capture_latency("v4l2src"));
-        assert!(!factory_reports_short_capture_latency("mfvideosrc"));
+        assert!(!contains_avfvideosrc(bin.upcast_ref()));
     }
 }
