@@ -102,58 +102,92 @@ jobs:
             echo "sccache backend reachable and writable - cache enabled"
             echo "cache_ok=true" >> "$GITHUB_OUTPUT"
           fi
+
+  # The container images check-linux and check-floor run in, prebuilt on GHCR
+  # so those jobs skip a 1-10 minute apt-get install and a rustup install.
+  # Each tag is a hash of its Dockerfile (.github/ci-images/) and
+  # rust-toolchain.toml: a package or toolchain change gets a new tag, which
+  # this job builds and pushes the first time a run needs it, so a PR that
+  # changes an image tests against its own image. Old tags stay, so old runs
+  # can still be rerun. Usually a manifest lookup and nothing else.
+  ci-images:
+    name: CI images
+    if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      linux: ${{ steps.images.outputs.linux }}
+      floor: ${{ steps.images.outputs.floor }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            .github/ci-images
+            rust-toolchain.toml
+          sparse-checkout-cone-mode: false
+
+      # A pull request from a fork gets a read-only token and cannot push. If
+      # it changes an image, the job fails and says so; a maintainer pushes
+      # the branch to this repository (or merges the image change first).
+      - name: Find or build the images
+        id: images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          set -euo pipefail
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          for name in linux floor; do
+            dockerfile=.github/ci-images/$name.Dockerfile
+            tag=$(cat "$dockerfile" rust-toolchain.toml | sha256sum | cut -c1-16)
+            image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/strom-ci-$name:$tag"
+            if docker manifest inspect "$image" >/dev/null 2>&1; then
+              echo "$image exists"
+            elif [ "$FORK_PR" = true ]; then
+              echo "::error::$image is not built yet, and a pull request from a fork cannot push it. A maintainer pushes this branch to the repository, or merges the change to $dockerfile / rust-toolchain.toml first."
+              exit 1
+            else
+              echo "Building $image"
+              docker build --pull --build-arg RUST_CHANNEL="$channel" \
+                --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+                -t "$image" -f "$dockerfile" .github/ci-images
+              docker push "$image"
+            fi
+            echo "$name=$image" >> "$GITHUB_OUTPUT"
+          done
+
   # Fast checks on Linux: fmt + clippy + test
   check-linux:
     name: Check (Linux)
     # See preflight for the label condition. `github.event.action` is unset
     # for push and workflow_dispatch, so it is a no-op there.
     if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
-    needs: preflight
+    needs: [preflight, ci-images]
     # The tests run on the GStreamer baseline (#964), not on the runner's
     # Ubuntu 24.04 GStreamer 1.24.2, which fails on bugs the shipped versions
     # do not have (avdec dropping an intra-only clip's last frame, fixed in
     # 1.24.4). ubuntu:26.04 carries 1.28, the base the Docker images move to (#1101).
+    # The image (.github/ci-images/linux.Dockerfile, see ci-images) holds the
+    # packages and the pinned Rust toolchain.
     runs-on: ubuntu-24.04
-    container: ubuntu:26.04
+    container:
+      image: ${{ needs.ci-images.outputs.linux }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 25
     env:
       RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
     steps:
-      # The container has none of the hosted runner's tools, and no sudo.
-      # Plain apt-get, not cache-apt-pkgs-action: a real install runs the
-      # postinst scripts and triggers (the libblas alternatives, the GSettings
-      # schemas) that a restored package cache skips.
-      # libegl-mesa0 and libgl1-mesa-dri give the GL tests a surfaceless EGL
-      # context (llvmpipe). libsoup-3.0-0 and gsettings-desktop-schemas are
-      # what souphttpsrc loads and looks up the system proxy in.
-      - name: Install build and GStreamer packages
-        run: |
-          apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential ca-certificates curl git pkg-config cmake libclang-dev procps \
-            libunwind-dev libssl-dev libcairo2-dev \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
-            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-            gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice gstreamer1.0-gl \
-            gstreamer1.0-tools libsoup-3.0-0 gsettings-desktop-schemas libegl-mesa0 libgl1-mesa-dri \
-            zstd
-
       - uses: actions/checkout@v6
 
       - name: Check GStreamer is the baseline
         run: .github/scripts/check-gst-baseline.sh
-
-      # The channel rust-toolchain.toml pins, with the rustfmt and clippy this
-      # job uses but without the wasm32 target it also lists (check-wasm's).
-      # RUSTUP_TOOLCHAIN overrides the file, so rustup installs nothing more.
-      - name: Install Rust
-        run: |
-          CHANNEL=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
-          test -n "$CHANNEL"
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain "$CHANNEL" --component rustfmt,clippy
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          echo "RUSTUP_TOOLCHAIN=$CHANNEL" >> "$GITHUB_ENV"
 
       # save-if main: PR runs restore the main-branch cache (GHA cache scoping
       # falls back to the base branch) but don't save their own per-branch
@@ -268,38 +302,26 @@ jobs:
   check-floor:
     name: Check GStreamer floor (Debian 12, GStreamer 1.22)
     if: github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')
-    needs: preflight
+    needs: [preflight, ci-images]
     runs-on: ubuntu-24.04
-    container: debian:bookworm
+    # The image (.github/ci-images/floor.Dockerfile, see ci-images) holds
+    # GStreamer 1.22 and the pinned Rust toolchain.
+    container:
+      image: ${{ needs.ci-images.outputs.floor }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 30
     env:
       RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
     steps:
-      # The check-linux package list, as far as bookworm has it (all of it,
-      # today), plus what a bare container lacks. No trunk: the build script
-      # then embeds a placeholder page instead of the WASM frontend, as in
-      # check-linux.
-      - name: Install build tools and GStreamer 1.22
+      - name: Show GStreamer and Rust versions
         run: |
-          apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential gstreamer1.0-tools \
-            libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-gl gstreamer1.0-plugins-good libsoup-3.0-0 gsettings-desktop-schemas gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice libegl-mesa0 libgl1-mesa-dri pkg-config cmake libclang-dev
           gst-inspect-1.0 --version
           pkg-config --modversion gstreamer-1.0
+          rustc --version
 
       - uses: actions/checkout@v6
-
-      # The channel rust-toolchain.toml pins, without the rustfmt, clippy and
-      # wasm32 extras it lists: this job only builds and tests the backend.
-      # RUSTUP_TOOLCHAIN overrides the file, so rustup installs nothing more.
-      - name: Install Rust
-        run: |
-          CHANNEL=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
-          test -n "$CHANNEL"
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$CHANNEL"
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          echo "RUSTUP_TOOLCHAIN=$CHANNEL" >> "$GITHUB_ENV"
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
