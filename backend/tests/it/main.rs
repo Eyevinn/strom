@@ -64,7 +64,6 @@ pub mod mpegtssrt_absent_caller_test;
 pub mod mpegtssrt_input_audio_pid_order_test;
 pub mod mpegtssrt_input_dual_audio_test;
 pub mod mpegtssrt_input_program_change_test;
-pub mod mpegtssrt_multi_video_test;
 pub mod mpegtssrt_streamheader_test;
 pub mod openapi_test;
 pub mod output_refusal_test;

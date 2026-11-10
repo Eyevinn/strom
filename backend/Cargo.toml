@@ -188,7 +188,7 @@ path = "src/bin/gen_icons.rs"
 #
 # The targets below keep a process of their own, each for the reason above
 # it. Most change process-global GStreamer or GLib state that would break the
-# other tests in a shared process.
+# other tests in a shared process. One fails there for a reason not yet found.
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
@@ -229,6 +229,12 @@ path = "tests/ndi_input_native_video_test.rs"
 [[test]]
 name = "ndi_output_input_memory_test"
 path = "tests/ndi_output_input_memory_test.rs"
+
+# Its raw-video refusal never fires in the shared process (Windows 3/3, Linux
+# 2/4), though it passes on its own. The cause is not found: #1254.
+[[test]]
+name = "mpegtssrt_multi_video_test"
+path = "tests/mpegtssrt_multi_video_test.rs"
 
 # Counts every GStreamer critical in the process.
 [[test]]

@@ -14,7 +14,7 @@
 //! Input, which emits raw video in system memory. The EFP/SRT Output had the
 //! same mismatch; its shape test runs with the `efp` feature.
 
-use crate::common;
+pub mod common;
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
