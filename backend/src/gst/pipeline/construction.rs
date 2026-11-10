@@ -44,6 +44,27 @@ fn drop_upstream_qos_events(pad: &gst::Pad) {
     });
 }
 
+/// Drop the upstream QoS events of `element` if it is a qos-enabled sink.
+///
+/// Blocks build their elements themselves and bypass `add_element`, so the
+/// sinks they enable QoS on (RTMP, SRT) need this here as well. There it is
+/// more than a leak: behind a muxer a sink's QoS events carry the running
+/// time of whichever stream the muxer let through last. When the video
+/// arrives late against the clock (a loaded mixer, a slow source), the muxer
+/// times the video out and passes the audio, the sink reports the audio's
+/// running time, and the encoder's `videoconvert` drops every video frame as
+/// too late. The stream then carries no video at all for as long as the
+/// video stays that far behind.
+fn drop_sink_qos_events(element: &gst::Element) {
+    if !is_sink_element(element) || !element.has_property("qos") || !element.property::<bool>("qos")
+    {
+        return;
+    }
+    for pad in element.sink_pads() {
+        drop_upstream_qos_events(&pad);
+    }
+}
+
 impl PipelineManager {
     /// Create a new pipeline from a flow definition.
     #[allow(clippy::too_many_arguments)]
@@ -193,6 +214,7 @@ impl PipelineManager {
                     element_id, e
                 ))
             })?;
+            drop_sink_qos_events(&gst_element);
             manager.elements.insert(element_id.clone(), gst_element);
             debug!("Successfully added block element: {}", element_id);
         }

@@ -288,7 +288,9 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
         //
         // Solution for transcoding (encode-as-fast-as-possible):
         // - sync=false: Don't try to maintain real-time clock synchronization
-        // - qos=true: Enable QoS events so sink can report back pressure to upstream
+        // - qos=true: the sink posts QoS bus messages (QoS statistics); its
+        //   upstream QoS events are dropped, as at every qos-enabled sink
+        //   (`drop_sink_qos_events` in pipeline construction)
         // - Buffers are pushed as fast as they're produced
         //
         // When you WOULD want sync=true:
