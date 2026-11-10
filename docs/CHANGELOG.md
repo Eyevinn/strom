@@ -7,6 +7,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 ### Fixed
 - Live Recorder: a video that runs behind the pipeline (a mixer and an encoder with lookahead) is no longer shut out of the recording after a short stall (#1242)
 - Thread priority: the internal pipelines of Media Player, WHIP Input and WHIP Output now run at the flow's thread priority and CPU affinity, and show in its thread registry (#1241)
+- Local Input: a Mac camera reports the latency it actually has (150 ms minimum), so an encoder and SRT Output no longer drop its frames as late (#1244)
 
 ### Changed
 - Dependencies: strom-dsp v0.2.4, faster on x86 with bit-identical output (#1239)
