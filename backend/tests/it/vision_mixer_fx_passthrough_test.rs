@@ -336,6 +336,7 @@ fn desaturate() -> VideoEffect {
 /// the first frames after being set, and the slots go idle again once
 /// cleared.
 #[test]
+#[serial_test::serial(gl)]
 fn idle_fx_slots_pass_buffers_through_and_effects_still_apply() {
     if !common::gl_available(GL_ELEMENTS) {
         return;
@@ -490,6 +491,7 @@ fn idle_fx_slots_pass_buffers_through_and_effects_still_apply() {
 #[cfg(unix)]
 #[test]
 #[ignore]
+#[serial_test::serial(gl)]
 fn measure_idle_fx_slot_renders() {
     if !common::gl_available(GL_ELEMENTS) {
         return;

@@ -90,6 +90,7 @@ fn run_fragment(fragment: &str) -> Result<(), String> {
 const GL_ELEMENTS: &[&str] = &["glshader", "gltestsrc"];
 
 #[test]
+#[serial_test::serial(gl)]
 fn all_shader_fragments_compile() {
     // Skips only when no GL context can be created at all (the probe has no
     // `glshader`), never on a shader compile failure.
@@ -125,6 +126,7 @@ fn all_shader_fragments_compile() {
 /// the output pixels turn red — the regression test for the silent-no-op
 /// swap bug found in production.
 #[test]
+#[serial_test::serial(gl)]
 fn runtime_fragment_swap_takes_effect() {
     if !common::gl_available(GL_ELEMENTS) {
         return;

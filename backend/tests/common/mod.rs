@@ -13,9 +13,10 @@ pub mod state;
 use gstreamer as gst;
 
 /// The elements in `required` that this GStreamer install does not provide.
-/// Initialises GStreamer first, so it can run before anything else.
+/// Initialises GStreamer and registers the static plugins first, so it can run
+/// before anything else.
 pub fn missing_elements<'a>(required: &[&'a str]) -> Vec<&'a str> {
-    gst::init().expect("GStreamer initialises");
+    init_static_plugins();
     required
         .iter()
         .copied()
@@ -100,6 +101,14 @@ pub fn require_elements(required: &[&str]) {
 /// `plugin_register_static()`: the integration tests share one process, and
 /// two threads registering the same plugin at once fail with "Type ... has
 /// already been registered".
+///
+/// It has to run before the process creates any element. Creating one can load
+/// an installed plugin from disk, and the Windows runner's GStreamer installs
+/// its own copies of plugins Strom links in statically (gstrsrtp): once that
+/// copy is loaded, its GTypes exist and the static registration fails. So the
+/// helpers tests start with ([`missing_elements`], [`init_gl`],
+/// `manager::build`, `block::context`) call it, as the server calls
+/// `register_static_plugins()` before it builds anything.
 pub fn init_static_plugins() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -130,7 +139,7 @@ pub fn init_gl() {
             std::env::set_var("GST_GL_PLATFORM", "egl");
             std::env::set_var("GST_GL_WINDOW", "surfaceless");
         }
-        gst::init().expect("GStreamer initialises");
+        init_static_plugins();
     });
 }
 

@@ -8,7 +8,9 @@ use strom::blocks::{BlockBuildContext, BlockBuildResult};
 use strom::events::EventBroadcaster;
 
 /// A build context with no ICE servers and the `all` transport policy.
+/// Initialises GStreamer and registers the static plugins.
 pub fn context() -> BlockBuildContext {
+    super::init_static_plugins();
     BlockBuildContext::new(Vec::new(), "all".to_string())
 }
 

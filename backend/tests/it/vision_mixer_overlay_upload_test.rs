@@ -454,6 +454,7 @@ fn assert_cut_is_prompt(frames: u32) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn unchanged_overlay_is_not_reuploaded_every_frame() {
     if !common::gl_available(GL_ELEMENTS) {
         return;
@@ -488,6 +489,7 @@ async fn unchanged_overlay_is_not_reuploaded_every_frame() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn meter_redraws_are_capped_but_cuts_are_not() {
     if !common::gl_available(GL_ELEMENTS) || !common::plugins_available(&["audiotestsrc", "level"])
     {
@@ -550,6 +552,7 @@ fn pgm_display_is_blue(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn tally_follows_a_cut_on_the_same_frame_with_late_inputs() {
     if !common::gl_available(GL_ELEMENTS) {
         return;

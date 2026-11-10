@@ -42,6 +42,7 @@ const REQUIRED: &[&str] = &["appsink", "fakesink", "uridecodebin3"];
 const FRAMES: u64 = 15;
 
 #[test]
+#[serial_test::serial(gl)]
 fn gl_frames_from_the_internal_pipeline_convert_in_the_flow() {
     if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
         return;

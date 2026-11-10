@@ -8,6 +8,7 @@
 use crate::common;
 
 #[test]
+#[serial_test::serial(gl)]
 fn the_gl_probe_finds_the_renderer() {
     if !common::gl_available(&["glupload"]) {
         return;

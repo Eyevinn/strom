@@ -200,6 +200,7 @@ fn flow_for(clips: &[PathBuf], preroll_ms: u64) -> Flow {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
+#[serial_test::serial(gl)]
 async fn stinger_measurements() {
     if !common::gl_available(&["glvideomixerelement", "glshader"]) {
         return;

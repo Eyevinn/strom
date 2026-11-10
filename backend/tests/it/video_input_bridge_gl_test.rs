@@ -131,6 +131,7 @@ fn run(caps: &str) -> Outcome {
 /// Without the download the converter cannot take the frames, and without the
 /// conversion every consumer converts RGBA for itself.
 #[test]
+#[serial_test::serial(gl)]
 fn gl_rgba_reaches_the_peer_as_system_memory_nv12() {
     if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
         return;
@@ -151,6 +152,7 @@ fn gl_rgba_reaches_the_peer_as_system_memory_nv12() {
 /// passes GL memory through to a peer that advertises it, which
 /// whepserversink does, so the download is pinned to system memory.
 #[test]
+#[serial_test::serial(gl)]
 fn gl_nv12_is_downloaded_to_system_memory() {
     if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
         return;
@@ -315,6 +317,7 @@ fn assert_downloaded(switch: &Switch) {
 }
 
 #[test]
+#[serial_test::serial(gl)]
 fn a_switch_to_gl_memory_mid_stream_is_downloaded() {
     if !common::gl_available(GL_REQUIRED)
         || !common::plugins_available(REQUIRED)
@@ -335,6 +338,7 @@ fn a_switch_to_gl_memory_mid_stream_is_downloaded() {
 /// GL memory: left to answer for itself, it refused the GL caps and the switch
 /// failed not-negotiated.
 #[test]
+#[serial_test::serial(gl)]
 fn a_switch_to_gl_memory_behind_a_converter_is_downloaded() {
     if !common::gl_available(GL_REQUIRED)
         || !common::plugins_available(REQUIRED)

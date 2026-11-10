@@ -204,6 +204,7 @@ fn wait(
 }
 
 #[test]
+#[serial_test::serial(gl)]
 fn gl_frames_from_another_flow_convert_in_the_subscriber() {
     if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
         return;
@@ -243,6 +244,7 @@ fn gl_frames_from_another_flow_convert_in_the_subscriber() {
 /// B holds the buffer for certain: a blocking probe on its `intersrc` keeps
 /// one of A's GL buffers in the streaming thread while A stops.
 #[test]
+#[serial_test::serial(gl)]
 fn flow_a_gl_context_outlives_flow_a_until_flow_b_lets_go() {
     if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
         return;
@@ -353,6 +355,7 @@ fn flow_a_gl_context_outlives_flow_a_until_flow_b_lets_go() {
 /// another flow's GL frames: downloaded. The download has to be agreed before
 /// the caps arrive, since `intersrc` asks downstream whether it accepts them.
 #[test]
+#[serial_test::serial(gl)]
 fn gl_frames_from_another_flow_reach_a_system_memory_consumer() {
     if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
         return;
@@ -388,6 +391,7 @@ fn gl_frames_from_another_flow_reach_a_system_memory_consumer() {
 /// Vision Mixer whose `gl_download` is turned on) keeps flowing: the download
 /// is taken out again for the new caps.
 #[test]
+#[serial_test::serial(gl)]
 fn a_switch_from_gl_to_system_memory_takes_the_download_out() {
     if !common::gl_available(GL_REQUIRED) || !common::plugins_available(REQUIRED) {
         return;

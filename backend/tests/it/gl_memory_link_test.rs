@@ -101,6 +101,7 @@ fn peer_factory(pipeline: &gstreamer::Pipeline, element: &str) -> Option<String>
 /// with `x264enc` behind it offers system memory and nothing else. Without the
 /// adaptation the link is refused and `gltestsrc:src` is left with no peer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn a_gl_only_producer_reaches_a_system_memory_encoder() {
     gstreamer::init().unwrap();
     common::require_elements(GL_ELEMENTS);
@@ -140,6 +141,7 @@ async fn a_gl_only_producer_reaches_a_system_memory_encoder() {
 /// A link that leaves either pad unnamed is made element to element, and
 /// GStreamer refuses it without saying why. Each spelling must be adapted too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn a_gl_only_producer_is_adapted_when_a_pad_is_unnamed() {
     gstreamer::init().unwrap();
     common::require_elements(GL_ELEMENTS);
@@ -169,6 +171,7 @@ async fn a_gl_only_producer_is_adapted_when_a_pad_is_unnamed() {
 /// The adaptation must cost nothing where it is not needed: a system-memory
 /// producer links straight through, with no download inserted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn a_system_memory_producer_is_left_alone() {
     gstreamer::init().unwrap();
     common::require_elements(GL_ELEMENTS);
@@ -266,6 +269,7 @@ fn gldownloads_in(pipeline: &gstreamer::Pipeline) -> usize {
 /// system-memory one does, but a download cannot link to it either. The
 /// refusal is not a format one, so it must come back unadapted.
 #[test]
+#[serial_test::serial(gl)]
 fn a_link_refused_for_another_reason_is_not_adapted() {
     gstreamer::init().unwrap();
     common::require_elements(GL_ELEMENTS);
@@ -297,6 +301,7 @@ fn a_link_refused_for_another_reason_is_not_adapted() {
 /// only, so the `gldownload` behind it cannot produce the I420 the capsfilter
 /// demands: the first half of the splice links and the second is refused.
 #[test]
+#[serial_test::serial(gl)]
 fn a_failed_adaptation_leaves_nothing_behind() {
     gstreamer::init().unwrap();
     common::require_elements(GL_ELEMENTS);
@@ -349,6 +354,7 @@ fn a_failed_adaptation_leaves_nothing_behind() {
 /// the GL memory as it is, and a consumer that needs system memory downloads
 /// it (`local_input_memory_test`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn the_local_input_capture_front_accepts_gl_memory() {
     gstreamer::init().unwrap();
 

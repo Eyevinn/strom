@@ -50,6 +50,7 @@ fn build_vm_flow() -> Flow {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn vision_mixer_fx_engine_end_to_end() {
     if !common::gl_available(GL_ELEMENTS) {
         return;
@@ -203,6 +204,7 @@ async fn vision_mixer_fx_engine_end_to_end() {
 /// asserts mid-wipe frames contain a substantial amount of BOTH sources
 /// (i.e. the wipe actually animates instead of switching).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn wipe_between_letterboxed_sources_animates() {
     use gstreamer::prelude::*;
     if !common::gl_available(GL_ELEMENTS) {
@@ -548,6 +550,7 @@ fn idx<T: From<usize>>(i: usize) -> T {
 /// envelope is what lands on air, so the take must report the effect, as the
 /// plain-input path does — not the pad morph underneath it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn master_fx_take_out_of_a_pip_reports_the_effect() {
     use gstreamer::prelude::*;
     gstreamer::init().unwrap();
@@ -621,6 +624,7 @@ async fn master_fx_take_out_of_a_pip_reports_the_effect() {
 /// old, and an unlinked one reads null. The CPU flavour of this test lives in
 /// `vision_mixer_signals_test`; it cannot see the GPU builder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn gpu_mixer_reports_media_age_per_input() {
     use gstreamer::prelude::*;
     use strom_types::PropertyValue as PV;

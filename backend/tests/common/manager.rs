@@ -27,7 +27,7 @@ pub fn build_with(
     events: EventBroadcaster,
     media_path: PathBuf,
 ) -> Result<PipelineManager, PipelineError> {
-    gstreamer::init().expect("GStreamer initialises");
+    super::init_static_plugins();
     // The registry resolves block definitions for the automatic buffer-age
     // probes. A fresh one carries every built-in block, so built-in blocks
     // resolve and user-defined blocks do not.
