@@ -2,6 +2,16 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.8.1] - 2026-11-10
+
+### Fixed
+- Live Recorder: a video that runs behind the pipeline (a mixer and an encoder with lookahead) is no longer shut out of the recording after a short stall (#1242)
+
+### Changed
+- Dependencies: strom-dsp v0.2.4, faster on x86 with bit-identical output (#1239)
+
+---
+
 ## [0.8.0] - 2026-11-06
 
 The Docker images move to Ubuntu 26.04 and GStreamer 1.28, and most blocks now emit video in the memory they produce it in (GL, CUDA, D3D) and adapt their own inputs. WHIP Output sends video and WHEP Input decodes it. strom-dsp is the audio mixer's default DSP backend, and a new Audio Processor block (experimental) takes a programme to a loudness target. The Video Encoder uses Media Foundation hardware encoders on Windows and gains VP8. This entry covers everything since 0.7.2, including the 0.8.0-alpha.1 to alpha.5 prereleases.
