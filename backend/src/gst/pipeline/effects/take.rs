@@ -247,7 +247,7 @@ impl PipelineManager {
 
                 let mut master_fx_ran = None;
                 if is_cut {
-                    // Snap apply: hide everything in the region, then set new active pads.
+                    // Snap apply: set the new active pads, then hide the rest of the region.
                     if let Some(p) = new_pgm_pip {
                         apply_pip_layout_to_region(
                             mixer,
