@@ -96,6 +96,17 @@ fn whep_output_starts_and_follows_a_size_change_av1() {
     ) {
         return;
     }
+    if common::skip_known_ci_failure(
+        &["macos"],
+        "SVT-AV1 4.2 (Homebrew) deadlocks with hierarchical-levels=2 under the load of the \
+         parallel test run on the 3-vCPU macOS runner: \"bug, no frame in undisplayed queue\", \
+         then svt_av1_enc_send_picture or svt_av1_enc_deinit waits forever. Main run \
+         42829059439 hung the job; in diag runs 42839687702, 42845199548 and 42849724251 it \
+         hung in 11 of 95 loaded runs with hierarchical-levels=2, 0 of 30 with 1; alone it \
+         passed 80 of 80 (42837468782) (#1252)",
+    ) {
+        return;
+    }
     // The Video Encoder's software AV1 encoders, either will do.
     if common::missing_elements(&["svtav1enc", "av1enc"]).len() == 2
         && !common::require_or_skip(&["svtav1enc or av1enc"])
@@ -304,7 +315,7 @@ fn size_change_in(
         .and_then(|p| p.current_caps())
         .map(|c| c.to_string())
         .unwrap_or_default();
-    let _ = pipeline.set_state(gst::State::Null);
+    stop_within(&pipeline, Duration::from_secs(30), &sink_caps);
     pusher.join().unwrap();
 
     let levels = levels.lock().unwrap().clone();
@@ -333,5 +344,25 @@ fn size_change_in(
     assert!(
         hd_frames > 50,
         "only {hd_frames} 1080p frames reached WHEP Output's sink"
+    );
+}
+
+/// Set `pipeline` to NULL, and fail the test if that does not return within
+/// `limit`. An encoder that stalls inside its library keeps its streaming
+/// thread, and so the pad deactivation, blocked forever: SVT-AV1 4.2 did that
+/// on the macOS runner and hung the CI job until its 45-minute timeout. A
+/// panic here fails the test and lets the others finish; the stuck thread is
+/// left behind and dies with the test process.
+fn stop_within(pipeline: &gst::Pipeline, limit: Duration, sink_caps: &str) {
+    let (stopped, wait) = std::sync::mpsc::channel();
+    let to_stop = pipeline.clone();
+    std::thread::spawn(move || {
+        let _ = to_stop.set_state(gst::State::Null);
+        let _ = stopped.send(());
+    });
+    assert!(
+        wait.recv_timeout(limit).is_ok(),
+        "the pipeline did not reach NULL within {limit:?}: an element is stuck in \
+         its streaming thread or in its stop (sink caps at the end: {sink_caps})"
     );
 }
