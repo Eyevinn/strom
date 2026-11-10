@@ -2,6 +2,13 @@
 - **Frontend** (`strom-frontend`): egui-based GUI that compiles to both native and WASM
 - **Backend** (`strom-backend`): Axum server that can run the native GUI and serve the embedded WASM version
 
+## Lessons Belong in the Repo
+- When a bug, a review or a design discussion teaches something future work on Strom needs (a design that failed, a fix of the wrong kind, a step that let a bug through), write it down in this repo, in the same PR as the fix. Block rules go in `docs/BLOCK_GUIDELINES.md`, everything else here. The PR template's "Lesson" section asks for it.
+- Do not keep project lessons in an agent's local memory. Local memory is read by one agent on one machine; other contributors, other sessions and the CI agents never see it. It is only for what is personal or local: someone's working preferences, their machines, hosts and ports. Before saving a lesson there, ask whether anyone else working on Strom would need it. If so, propose a rule here instead and tell the user.
+- A rule states the decision, why (link the PR or issue that taught it), and how it is checked. Prefer a check nobody can forget, a guard test or a repo setting, over prose. Keep prose for judgement calls.
+- This file is read in every session, and each rule dilutes the others. Add a rule only when the lesson will come back; a one-off belongs in the PR body.
+- When a rule turns out wrong or too broad, change it here. Do not carve out the exception in local memory, and do not leave code that contradicts a rule: fix the code or fix the rule.
+
 ## Language
 - All code, comments, commit messages, PR titles, PR descriptions, and documentation must be in English
 
@@ -77,12 +84,13 @@ The block contract (what a block emits and accepts, memory formats, output block
 
 ## WebSocket Contract
 - Any type referenced by a new `StromEvent` variant must have a `ToSchema` annotation (`#[cfg_attr(feature = "openapi", derive(ToSchema))]`). If the variant introduces new inner types, those need `ToSchema` too.
-- Never modify an existing `StromEvent` variant (rename, change fields, remove) without treating it as an intentional breaking change.
+- Never modify an existing `StromEvent` variant (rename, change fields, remove) without treating it as an intentional breaking change. Breaking means breaking a released consumer. A variant that belongs to something new and unreleased has none: change it directly, say in the PR that the change is intentional, and do not add a parallel variant to keep an unused one stable (#1216).
 
 ## Tests
 - A regression test must exercise the code it guards — it has to call the changed module, not rebuild equivalent behaviour inline. A test that reconstructs a pipeline topology by hand documents a bug; it does not stop the bug returning.
 - A regression test must fail if the fix is reverted. If it hardcodes the fixed path (e.g. a `use_queues: true` flag with no failing counterpart), it is a demonstration, not a guard — say so in the PR body and explain why a real guard is not feasible.
 - A test that requires a GStreamer element must be able to run in CI. Tests that skip on a missing element pass green and guard nothing, so check the package list in `.github/workflows/ci.yml` before relying on one, and add the missing package in the same PR.
+- Exception to the rule above: an element CI cannot have (NDI SDK, a DeckLink card, ASIO) does not hold a fix back. Test the block's own logic with a stand-in, such as its input adaptation into a `fakesink` in place of the hardware sink, and say in the PR body that CI does not run the real element (#969).
 - State in the PR body which tests you actually ran, and which were skipped or not run. "CI is green" is not the same as "the new test executed".
 - Write the PR body from `.github/PULL_REQUEST_TEMPLATE.md`. `gh pr create --body` and `--body-file` skip the template, so read it first.
 
