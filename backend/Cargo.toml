@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 default-run = "strom"
+autotests = false
 
 [features]
 default = ["nvidia"]
@@ -178,3 +179,129 @@ serial_test = "4.0"
 [[bin]]
 name = "gen-icons"
 path = "src/bin/gen_icons.rs"
+
+# Integration tests: every backend/tests/*.rs is a module of one binary,
+# tests/it, so strom is linked once and the tests run in parallel with each
+# other. autotests = false, so a new file under backend/tests/ is not built
+# until it is listed in tests/it/main.rs or here; test_layout_test fails if a
+# file is in neither.
+#
+# The targets below keep a process of their own, each for the reason above
+# it. Most change process-global GStreamer or GLib state that would break the
+# other tests in a shared process. One fails there for a reason not yet found.
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+
+# Lists and inspects every element, which loads every installed plugin into the
+# process. A system copy of a plugin Strom links in statically (gstrsrtp on the
+# Windows runner) then blocks the static registration the other tests need.
+[[test]]
+name = "api_tests"
+path = "tests/api_tests.rs"
+
+# Installs the process-wide GLib default log handler.
+[[test]]
+name = "bus_signal_watch_balance_test"
+path = "tests/bus_signal_watch_balance_test.rs"
+
+# The GStreamer floor job (check-floor) builds and runs only this one.
+[[test]]
+name = "gst_floor_smoke_test"
+path = "tests/gst_floor_smoke_test.rs"
+
+# Removes nicesrc and nicesink from the registry, which every WebRTC test needs.
+[[test]]
+name = "ice_preflight_test"
+path = "tests/ice_preflight_test.rs"
+
+# Registers the isobmff plugin before anything else in the process loads the system one.
+[[test]]
+name = "isobmff_plugin_test"
+path = "tests/isobmff_plugin_test.rs"
+
+# Registers stand-ins under the real ndisrc and ndisrcdemux names.
+[[test]]
+name = "ndi_input_native_video_test"
+path = "tests/ndi_input_native_video_test.rs"
+
+# Registers a cudadownload stand-in under the real name.
+[[test]]
+name = "ndi_output_input_memory_test"
+path = "tests/ndi_output_input_memory_test.rs"
+
+# Its raw-video refusal never fires in the shared process (Windows 3/3, Linux
+# 2/4), though it passes on its own. The cause is not found: #1254.
+[[test]]
+name = "mpegtssrt_multi_video_test"
+path = "tests/mpegtssrt_multi_video_test.rs"
+
+# Counts every GStreamer critical in the process.
+[[test]]
+name = "qos_probe_criticals_test"
+path = "tests/qos_probe_criticals_test.rs"
+
+# Registers a decoder that refuses, ranked above the real decoders.
+[[test]]
+name = "stinger_software_decode_test"
+path = "tests/stinger_software_decode_test.rs"
+
+# Registers a cudadownload stand-in under the real name.
+[[test]]
+name = "thumbnail_tap_cuda_test"
+path = "tests/thumbnail_tap_cuda_test.rs"
+
+# Registers a cudadownload stand-in under the real name.
+[[test]]
+name = "video_input_bridge_test"
+path = "tests/video_input_bridge_test.rs"
+
+# Registers stand-ins under the real nvh264enc and cudadownload names.
+[[test]]
+name = "videoenc_input_memory_test"
+path = "tests/videoenc_input_memory_test.rs"
+
+# Registers a cudadownload stand-in under the real name.
+[[test]]
+name = "videoformat_input_memory_test"
+path = "tests/videoformat_input_memory_test.rs"
+
+# Registers a CUDA adapter stand-in for the life of the process.
+[[test]]
+name = "vision_mixer_cuda_input_test"
+path = "tests/vision_mixer_cuda_input_test.rs"
+
+# Needs a process where no CUDA adapter stand-in was ever registered.
+[[test]]
+name = "vision_mixer_cuda_missing_test"
+path = "tests/vision_mixer_cuda_missing_test.rs"
+
+# Registers a D3D12 download stand-in for the life of the process.
+[[test]]
+name = "vision_mixer_d3d_input_test"
+path = "tests/vision_mixer_d3d_input_test.rs"
+
+# Needs a process where no D3D12 download stand-in was ever registered.
+[[test]]
+name = "vision_mixer_d3d_missing_test"
+path = "tests/vision_mixer_d3d_missing_test.rs"
+
+# Registers a CUDA adapter stand-in for the life of the process.
+[[test]]
+name = "vision_mixer_input_format_cuda_test"
+path = "tests/vision_mixer_input_format_cuda_test.rs"
+
+# Crashes about once in 50 runs (#1097); a crash would end every test in its binary.
+[[test]]
+name = "vision_mixer_input_format_test"
+path = "tests/vision_mixer_input_format_test.rs"
+
+# Measures its own process's CPU use.
+[[test]]
+name = "whep_fanout_bench"
+path = "tests/whep_fanout_bench.rs"
+
+# Re-ranks a factory to NONE and counts every GStreamer critical in the process.
+[[test]]
+name = "whip_slot_flush_test"
+path = "tests/whip_slot_flush_test.rs"

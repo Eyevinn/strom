@@ -931,6 +931,9 @@ mod tests {
 
     #[test]
     fn definition_is_registered_with_a_builder() {
+        // Builds GStreamer objects: a test must not count on another test in
+        // the same process having called gst::init() first.
+        gstreamer::init().unwrap();
         assert!(super::super::get_all_builtin_blocks()
             .iter()
             .any(|b| b.id == BLOCK_ID));

@@ -809,6 +809,9 @@ mod tests {
 
     #[test]
     fn fragments_are_distinct_and_nonempty() {
+        // Builds GStreamer objects: a test must not count on another test in
+        // the same process having called gst::init() first.
+        gstreamer::init().unwrap();
         let frags = all_fragments();
         assert!(frags.len() >= 15);
         for (name, src) in &frags {
@@ -819,6 +822,9 @@ mod tests {
 
     #[test]
     fn wipe_uniforms_carry_timing() {
+        // Builds GStreamer objects: a test must not count on another test in
+        // the same process having called gst::init() first.
+        gstreamer::init().unwrap();
         let s = WipeKind::Left.run_uniforms(12.5, 0.8);
         assert_eq!(s.get::<f32>("u_start").unwrap(), 12.5);
         assert_eq!(s.get::<f32>("u_duration").unwrap(), 0.8);

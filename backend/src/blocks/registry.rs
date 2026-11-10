@@ -169,6 +169,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_builtin_blocks() {
+        // Builds GStreamer objects: a test must not count on another test in
+        // the same process having called gst::init() first.
+        gstreamer::init().unwrap();
         let temp_file = NamedTempFile::new().unwrap();
         let registry = BlockRegistry::new(temp_file.path());
 
@@ -183,6 +186,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_user_block() {
+        // Builds GStreamer objects: a test must not count on another test in
+        // the same process having called gst::init() first.
+        gstreamer::init().unwrap();
         let temp_file = NamedTempFile::new().unwrap();
         let registry = BlockRegistry::new(temp_file.path());
 
@@ -210,6 +216,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_cannot_delete_builtin() {
+        // Builds GStreamer objects: a test must not count on another test in
+        // the same process having called gst::init() first.
+        gstreamer::init().unwrap();
         let temp_file = NamedTempFile::new().unwrap();
         let registry = BlockRegistry::new(temp_file.path());
 
