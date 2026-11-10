@@ -250,7 +250,7 @@ fn efpsrt_output_refuses_raw_video_by_failing_the_flow() {
     }
     // efpmux is a Rust plugin linked into Strom, not installed system-wide, so
     // it has to be registered before the block can make one.
-    gst_plugin_efp::plugin_register_static().expect("register the EFP plugin");
+    common::init_static_plugins();
     let mut props = mpegtssrt_props();
     props.insert("num_data_tracks".to_string(), PropertyValue::UInt(0));
     let errors = errors_after_feeding(

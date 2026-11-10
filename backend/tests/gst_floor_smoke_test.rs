@@ -226,7 +226,7 @@ fn init_like_main() {
     ONCE.call_once(|| {
         gst::init().expect("GStreamer initialises");
         strom::version::log_gstreamer_version();
-        common::init_webrtc_plugins();
+        common::init_static_plugins();
         strom::gpu::detect_gpu_capabilities();
         strom::gst::start_glib_main_loop();
     });

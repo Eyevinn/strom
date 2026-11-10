@@ -7,6 +7,7 @@
 //! webrtcbin's clocksync in the session. A flow adopts the largest latency any
 //! sink reports, so the deadline also delays every other sink in the flow.
 
+use crate::common;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -17,12 +18,7 @@ use strom_types::PropertyValue;
 const DEFAULT_PROCESSING_DEADLINE: gst::ClockTime = gst::ClockTime::from_mseconds(20);
 
 fn init_gst() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        gst::init().expect("gstreamer init");
-        gstrswebrtc::plugin_register_static().expect("register webrtc plugins");
-    });
+    common::init_static_plugins();
 }
 
 /// Build the real block, wire its internal links into a pipeline, link a live

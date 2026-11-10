@@ -52,7 +52,7 @@ const REQUIRED: &[&str] = &[
 ];
 
 fn available(extra: &[&str]) -> bool {
-    common::init_webrtc_plugins();
+    common::init_static_plugins();
     let all: Vec<&str> = REQUIRED.iter().chain(extra.iter()).copied().collect();
     common::plugins_available(&all)
 }

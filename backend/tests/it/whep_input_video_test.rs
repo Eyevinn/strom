@@ -40,7 +40,7 @@ const REQUIRED: &[&str] = &[
 ];
 
 fn available() -> bool {
-    common::init_webrtc_plugins();
+    common::init_static_plugins();
     strom::gpu::detect_gpu_capabilities();
     common::plugins_available(REQUIRED)
 }

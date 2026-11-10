@@ -43,10 +43,7 @@ const FRAMES: u64 = 15;
 /// The inter elements are linked into Strom and registered at startup, so a
 /// test binary registers them too.
 fn register_inter() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        gstrsinter::plugin_register_static().expect("register the inter plugin");
-    });
+    common::init_static_plugins();
 }
 
 fn ctx() -> BlockBuildContext {

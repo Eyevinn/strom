@@ -6,6 +6,7 @@
 //! latency and waited out twice before a packet is sent: by the appsink, and
 //! by webrtcbin's clocksync in the session.
 
+use crate::common;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -28,8 +29,7 @@ struct Built {
 fn build_block(id: &str, num_audio: u32, num_video: u32) -> Built {
     gst::init().expect("gstreamer init");
     strom::gpu::detect_gpu_capabilities();
-    // Both tests call this; a second registration returns an error.
-    let _ = gstrswebrtc::plugin_register_static();
+    common::init_static_plugins();
 
     let properties: HashMap<String, PropertyValue> = [
         (

@@ -385,7 +385,7 @@ fn whip_input_registers_its_session_threads() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn whip_input_session_pipeline_threads_join_the_flow() {
-    common::init_webrtc_plugins();
+    common::init_static_plugins();
     if !common::plugins_available(&[
         "whipserversrc",
         "whipclientsink",
@@ -512,7 +512,7 @@ fn whip_output_registers_its_session_threads() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn whip_output_session_pipeline_threads_join_the_flow() {
-    common::init_webrtc_plugins();
+    common::init_static_plugins();
     if !common::plugins_available(&[
         "whipserversrc",
         "whipclientsink",

@@ -32,7 +32,7 @@ use strom_types::PropertyValue;
 
 /// Register the `gst-plugins-rs` elements, then check `required`.
 fn webrtc_elements_available(required: &[&str]) -> bool {
-    common::init_webrtc_plugins();
+    common::init_static_plugins();
     common::plugins_available(required)
 }
 

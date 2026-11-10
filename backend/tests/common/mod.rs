@@ -90,11 +90,17 @@ pub fn require_elements(required: &[&str]) {
     );
 }
 
-/// Register the plugins the server links in statically, among them the
-/// `gst-plugins-rs` WebRTC elements (`whipsink`, `whepsrc`, ...), through
-/// `strom::gst::register_static_plugins()`, the call the server makes at
-/// startup. Also initialises GStreamer. Safe to call repeatedly.
-pub fn init_webrtc_plugins() {
+/// Register the plugins the server links in statically (the `gst-plugins-rs`
+/// WebRTC, inter, rtp and isobmff elements, strom-dsp, and EFP when the `efp`
+/// feature is on) through `strom::gst::register_static_plugins()`, the call
+/// the server makes at startup. Also initialises GStreamer. Safe to call
+/// repeatedly, from any thread.
+///
+/// Every test registers static plugins through here, never with a plugin's own
+/// `plugin_register_static()`: the integration tests share one process, and
+/// two threads registering the same plugin at once fail with "Type ... has
+/// already been registered".
+pub fn init_static_plugins() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {

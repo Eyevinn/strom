@@ -41,12 +41,7 @@ const REQUIRED: &[&str] = &[
 ];
 
 fn init() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        gst::init().expect("GStreamer initialises");
-        gstisobmff::plugin_register_static().expect("register isobmff plugins");
-    });
+    common::init_static_plugins();
     common::require_elements(REQUIRED);
 }
 

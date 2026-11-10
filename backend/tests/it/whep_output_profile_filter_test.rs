@@ -84,9 +84,7 @@ fn init_gst() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        gst::init().expect("gst init");
-        gstwebrtchttp::plugin_register_static().expect("register webrtchttp plugins");
-        gstrswebrtc::plugin_register_static().expect("register webrtc plugins");
+        common::init_static_plugins();
         strom::gpu::detect_gpu_capabilities();
     });
 }

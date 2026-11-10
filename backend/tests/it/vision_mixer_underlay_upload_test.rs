@@ -349,6 +349,7 @@ fn wait_for_border(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn static_underlays_are_not_reuploaded_gpu() {
     if common::skip_known_ci_failure(
         &["linux"],
@@ -369,6 +370,7 @@ async fn static_underlays_are_not_reuploaded_gpu() {
 /// must still reach PGM. A restarted underlay frame stamped with the clock's
 /// running time lies in such a mixer's future and shows up seconds late.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(gl)]
 async fn borders_keep_up_with_a_mixer_behind_the_clock_gpu() {
     if !common::gl_available(GL_ELEMENTS) {
         return;

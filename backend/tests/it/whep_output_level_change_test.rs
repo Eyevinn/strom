@@ -138,7 +138,7 @@ fn size_change_in(
     profile: Option<&str>,
     format: &'static str,
 ) {
-    common::init_webrtc_plugins();
+    common::init_static_plugins();
     let mut required = REQUIRED.to_vec();
     required.push(parser);
     required.extend(encoder);

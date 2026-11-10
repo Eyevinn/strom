@@ -60,8 +60,7 @@ const DATA_TYPE: i32 = 7;
 const PAYLOAD: &[u8] = b"c2pa-manifest-bytes";
 
 fn init() {
-    let _ = gst::init();
-    let _ = gst_plugin_efp::plugin_register_static();
+    common::init_static_plugins();
 }
 
 fn srt_port() -> u16 {

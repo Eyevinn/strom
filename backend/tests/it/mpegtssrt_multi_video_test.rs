@@ -209,8 +209,7 @@ fn mpegtssrt_output_builds_every_input_it_exposes() {
 #[cfg(feature = "efp")]
 #[test]
 fn efpsrt_output_builds_every_input_it_exposes() {
-    let _ = gst::init();
-    let _ = gst_plugin_efp::plugin_register_static();
+    common::init_static_plugins();
     if !common::plugins_available(&["efpmux", "srtsink"]) {
         return;
     }
