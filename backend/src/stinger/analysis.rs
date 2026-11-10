@@ -276,6 +276,7 @@ fn run(uri: &str, software: bool) -> Result<Run, RunFailure> {
         hardware: None,
     };
     let pipeline = gst::Pipeline::new();
+    crate::gst::thread_priority::reset_streaming_threads(&pipeline);
     let decoder = if software {
         "uridecodebin"
     } else {

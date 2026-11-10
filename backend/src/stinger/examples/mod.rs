@@ -148,6 +148,7 @@ pub fn write_example(example: &Example, path: &Path) -> Result<PathBuf, String> 
     let started = std::time::Instant::now();
     let format = if example.grey { "GRAY8" } else { "BGRA" };
     let pipeline = gst::Pipeline::new();
+    crate::gst::thread_priority::reset_streaming_threads(&pipeline);
     let appsrc = gst_app::AppSrc::builder()
         .caps(
             &gst::Caps::builder("video/x-raw")
