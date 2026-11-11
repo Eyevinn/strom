@@ -97,6 +97,7 @@ pub mod vision_mixer_fx_test;
 pub mod vision_mixer_gl_allocation_test;
 pub mod vision_mixer_gl_output_test;
 pub mod vision_mixer_overlay_upload_test;
+pub mod vision_mixer_premultiplied_alpha_test;
 pub mod vision_mixer_signals_test;
 pub mod vision_mixer_source_resize_test;
 pub mod vision_mixer_underlay_upload_test;
