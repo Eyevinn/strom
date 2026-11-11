@@ -766,6 +766,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         exposed_properties.push(ExposedProperty {
@@ -784,6 +785,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+            visible_when: None,
         });
 
         // ============================================================
