@@ -39,6 +39,27 @@ impl ApiClient {
         Ok(interfaces)
     }
 
+    /// SRT relay status: whether one is configured and its public address.
+    pub async fn get_srt_relay(&self) -> ApiResult<strom_types::srt_relay::SrtRelayInfo> {
+        let url = format!("{}/srt-relay", self.base_url);
+        let response = self
+            .with_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http(status, text));
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| ApiError::Decode(e.to_string()))
+    }
+
     /// List discovered local capture devices in a given category
     /// (e.g. `"video_source"`, `"audio_source"`). Backed by the GStreamer
     /// `DeviceMonitor` running on the backend.
