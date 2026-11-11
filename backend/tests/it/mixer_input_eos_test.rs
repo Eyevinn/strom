@@ -23,7 +23,7 @@ use strom::blocks::builtin::{liveaudiorouter, mixer};
 use strom::blocks::{BlockBuildResult, BlockBuilder};
 use strom_types::PropertyValue;
 
-pub mod common;
+use crate::common;
 
 /// CI installs gstreamer1.0-plugins-{base,good,bad}, which covers all of
 /// these, so a missing element is a failure and not a reason to skip.
