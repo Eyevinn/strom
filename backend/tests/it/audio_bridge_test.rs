@@ -16,7 +16,7 @@ use strom::gst::audio_bridge::control::OVERRUN_SKIPS;
 use strom::gst::audio_bridge::{self, src::AudioBridgeSrc};
 use strom_types::audio_bridge::AudioBridgeStats;
 
-pub mod common;
+use crate::common;
 
 const RATE: usize = 48_000;
 /// Not a whole number of cycles per 20 ms buffer, so a stall cuts the tone
@@ -27,8 +27,7 @@ const AMPLITUDE: f32 = 0.5;
 const MAX_STEP: f32 = AMPLITUDE * 2.0 * std::f32::consts::PI * TONE_HZ as f32 / RATE as f32;
 
 fn init() {
-    gst::init().unwrap();
-    audio_bridge::register().unwrap();
+    common::init_static_plugins();
 }
 
 fn has_scaletempo() -> bool {
