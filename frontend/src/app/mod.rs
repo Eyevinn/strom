@@ -749,6 +749,9 @@ pub struct StromApp {
     renderer_info: crate::info_page::RendererInfo,
     /// Links page state
     links_page: crate::links::LinksPage,
+    /// SRT relay status (`GET /api/srt-relay`), shared by the Links page and
+    /// the SRT blocks' properties.
+    srt_relay: crate::srt_relay::SrtRelayStatus,
     /// Flow list filter text
     flow_filter: String,
     /// Show stream picker modal for this block ID (when browsing discovered streams for AES67 Input)

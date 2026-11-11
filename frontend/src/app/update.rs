@@ -2247,6 +2247,7 @@ impl eframe::App for StromApp {
                                 &ctx,
                                 &self.flows,
                                 server_hostname,
+                                &self.srt_relay,
                             );
                         });
                     }

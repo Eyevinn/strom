@@ -186,6 +186,11 @@ pub struct BlockInspectorResult {
     pub local_devices_needed: bool,
     /// Inspector requested a forced re-scan of capture devices (↻ button).
     pub local_devices_refresh_requested: bool,
+    /// Inspector shows an SRT block's relay helper: the caller should fetch
+    /// the SRT relay status if it has not yet.
+    pub srt_relay_needed: bool,
+    /// The user asked to fetch the SRT relay status again.
+    pub srt_relay_refresh_requested: bool,
 }
 
 /// Side-channel collected by the property editor when it renders a
@@ -531,6 +536,7 @@ impl PropertyInspector {
         recorder_start_time: Option<instant::Instant>,
         block_thumbnail: Option<&egui::TextureHandle>,
         taken_endpoint_ids: &std::collections::HashSet<String>,
+        srt_relay: &crate::srt_relay::SrtRelayFetch,
     ) -> BlockInspectorResult {
         let block_id = block.id.clone();
         let mut result = BlockInspectorResult::default();
@@ -996,6 +1002,20 @@ impl PropertyInspector {
                                     taken_endpoint_ids,
                                     &mut device_picker_actions,
                                 );
+
+                                // SRT blocks: relay address helper under srt_uri.
+                                if exposed_prop.name == "srt_uri" {
+                                    if let Some(direction) =
+                                        crate::srt_relay::srt_relay_direction(&definition.id)
+                                    {
+                                        result.srt_relay_needed = true;
+                                        let outcome = crate::srt_relay::show_srt_uri_helper(
+                                            ui, block, flow_id, direction, srt_relay, qr_cache,
+                                        );
+                                        result.srt_relay_refresh_requested |=
+                                            outcome.refresh_requested;
+                                    }
+                                }
 
                                 // For live properties, route the block-level value
                                 // through the block-properties endpoint so the backend

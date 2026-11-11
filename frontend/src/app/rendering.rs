@@ -1407,6 +1407,7 @@ impl StromApp {
                     // BEFORE taking the mutable borrow on self.graph below —
                     // otherwise the borrow checker rejects the call.
                     let local_devices_loading = self.local_devices_loading();
+                    let srt_relay = self.srt_relay.get();
 
                     // Then get mutable reference to block
                     if let (Some(block), Some(def)) =
@@ -1448,7 +1449,16 @@ impl StromApp {
                             recorder_start_time,
                             block_thumbnail,
                             &taken_endpoint_ids,
+                            &srt_relay,
                         );
+
+                        // The SRT blocks' srt_uri helper needs the relay status.
+                        if result.srt_relay_needed {
+                            self.srt_relay.ensure_requested(&self.api, ui.ctx());
+                        }
+                        if result.srt_relay_refresh_requested {
+                            self.srt_relay.refresh(&self.api, ui.ctx());
+                        }
 
                         // Trigger device discovery whenever a Local Input block's
                         // properties are rendered. 10 s TTL keeps repeated panel
