@@ -1409,6 +1409,30 @@ impl StromApp {
                     let local_devices_loading = self.local_devices_loading();
                     let srt_relay = self.srt_relay.get();
 
+                    // Relay ids used by other SRT blocks, in any flow: a relay
+                    // id names one stream on the whole relay.
+                    let taken_srt_relay_ids = {
+                        let selected = self.graph.get_selected_block();
+                        let mut ids = std::collections::HashSet::new();
+                        if selected.is_some_and(|b| {
+                            strom_types::srt_relay::srt_relay_role(&b.block_definition_id)
+                                .is_some()
+                        }) {
+                            let selected_id = selected.map(|b| b.id.as_str());
+                            for flow in &self.flows {
+                                for b in &flow.blocks {
+                                    if flow_id == Some(flow.id) && selected_id == Some(&b.id) {
+                                        continue;
+                                    }
+                                    if let Some(id) = crate::srt_relay::block_relay_id(b) {
+                                        ids.insert(id);
+                                    }
+                                }
+                            }
+                        }
+                        ids
+                    };
+
                     // Then get mutable reference to block
                     if let (Some(block), Some(def)) =
                         (self.graph.get_selected_block_mut(), definition_opt)
@@ -1450,6 +1474,7 @@ impl StromApp {
                             block_thumbnail,
                             &taken_endpoint_ids,
                             &srt_relay,
+                            &taken_srt_relay_ids,
                         );
 
                         // The SRT blocks' srt_uri helper needs the relay status.

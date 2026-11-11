@@ -7072,9 +7072,11 @@ dependencies = [
 name = "strom-types"
 version = "0.8.1"
 dependencies = [
+ "base64 0.22.1",
  "garde",
  "serde",
  "serde_json",
+ "urlencoding",
  "utoipa",
  "uuid",
 ]

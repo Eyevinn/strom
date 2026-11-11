@@ -2,11 +2,13 @@
 //! the Links page and the block properties panel, and the `srt_uri` helper
 //! the properties panel shows for the SRT blocks.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use egui::{Color32, Context, Ui};
 use strom_types::srt_relay::{
-    is_srt_relay_uri, new_srt_relay_uri, parse_srt_relay_uri, srt_relay_dial_in_uri, SrtRelayInfo,
+    is_srt_relay_uri, mask_srt_uri, new_srt_relay_uri, parse_srt_relay_uri, renew_srt_relay_uri,
+    srt_relay_dial_in_uri, srt_relay_role, srt_uri_query, SrtRelayInfo, SrtRelayRole,
     SRT_RELAY_MIN_SAFE_ID_LEN,
 };
 use strom_types::{BlockInstance, FlowId, PropertyValue};
@@ -14,39 +16,44 @@ use strom_types::{BlockInstance, FlowId, PropertyValue};
 use crate::api::ApiClient;
 use crate::qr::QrCache;
 
-/// Which way the media goes through the relay, seen from Strom.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SrtRelayDirection {
-    /// Strom receives: the outside party sends to the relay.
-    Input,
-    /// Strom sends: the outside party pulls from the relay.
-    Output,
-}
-
-impl SrtRelayDirection {
-    /// What the outside party does with the dial-in URL.
-    pub fn action(self) -> &'static str {
-        match self {
-            SrtRelayDirection::Input => "Send to",
-            SrtRelayDirection::Output => "Pull from",
-        }
+/// What the outside party does with the dial-in URL of a block with this
+/// role: it sends to an input block (Strom requests) and pulls from an output
+/// block (Strom publishes).
+pub fn dial_in_action(role: SrtRelayRole) -> &'static str {
+    match role {
+        SrtRelayRole::Request => "Send to",
+        SrtRelayRole::Publish => "Pull from",
     }
 }
 
-/// The SRT blocks whose `srt_uri` may be `srt+relay://`.
-const SRT_RELAY_BLOCKS: &[(&str, SrtRelayDirection)] = &[
-    ("builtin.mpegtssrt_input", SrtRelayDirection::Input),
-    ("builtin.efpsrt_input", SrtRelayDirection::Input),
-    ("builtin.mpegtssrt_output", SrtRelayDirection::Output),
-    ("builtin.efpsrt_output", SrtRelayDirection::Output),
-];
+/// The relay stream id of an SRT block whose `srt_uri` is a valid
+/// `srt+relay://` URI.
+pub fn block_relay_id(block: &BlockInstance) -> Option<String> {
+    srt_relay_role(&block.block_definition_id)?;
+    match block.properties.get("srt_uri") {
+        Some(PropertyValue::String(uri)) => parse_srt_relay_uri(uri).ok().flatten().map(|p| p.id),
+        _ => None,
+    }
+}
 
-/// The relay direction of a block definition, if it is an SRT block.
-pub fn srt_relay_direction(block_definition_id: &str) -> Option<SrtRelayDirection> {
-    SRT_RELAY_BLOCKS
-        .iter()
-        .find(|(id, _)| *id == block_definition_id)
-        .map(|(_, direction)| *direction)
+/// Give a copied SRT block a fresh relay address (new id and passphrase, the
+/// other parameters kept). Relay ids name a stream across the whole relay,
+/// so a copy that kept the id would pair with, or be refused in favour of,
+/// the original. Returns whether the address changed.
+pub fn renew_relay_address(block: &mut BlockInstance) -> bool {
+    if srt_relay_role(&block.block_definition_id).is_none() {
+        return false;
+    }
+    let Some(PropertyValue::String(uri)) = block.properties.get("srt_uri") else {
+        return false;
+    };
+    let Some(renewed) = renew_srt_relay_uri(uri) else {
+        return false;
+    };
+    block
+        .properties
+        .insert("srt_uri".to_string(), PropertyValue::String(renewed));
+    true
 }
 
 /// `GET /api/srt-relay`, filled in by a background request.
@@ -151,15 +158,45 @@ struct HelperUiState {
 
 const WARNING: Color32 = Color32::from_rgb(255, 180, 50);
 
+/// What a hidden passphrase looks like.
+const MASK: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
+
+/// The `srt_uri` text field of an SRT block. While it does not have the
+/// keyboard focus it shows the URI with the passphrase masked, as the helper
+/// below it does; clicking into it shows and edits the real value. Returns
+/// whether the value changed. `block_id` keeps the field's focus per block.
+pub fn show_srt_uri_editor(ui: &mut Ui, value: &mut String, block_id: &str) -> bool {
+    let id = egui::Id::new(("srt_uri_editor", block_id));
+    if ui.memory(|m| m.has_focus(id)) {
+        return ui.add(egui::TextEdit::singleline(value).id(id)).changed();
+    }
+    let mut shown = mask_srt_uri(value, MASK);
+    let masked = shown != *value;
+    let response = ui.add(egui::TextEdit::singleline(&mut shown).id(id));
+    if masked {
+        response.on_hover_text("Click to show and edit the passphrase");
+        // An edit to the masked copy would save the mask as the passphrase.
+        false
+    } else if response.changed() {
+        *value = shown;
+        true
+    } else {
+        false
+    }
+}
+
 /// The relay helper shown under the `srt_uri` property of an SRT block:
 /// a button that sets a new `srt+relay://` address, and for a relay URI the
 /// address and passphrase the outside party needs.
+///
+/// `taken_relay_ids` are the relay ids other SRT blocks (in any flow) use.
 pub fn show_srt_uri_helper(
     ui: &mut Ui,
     block: &mut BlockInstance,
     flow_id: Option<FlowId>,
-    direction: SrtRelayDirection,
+    role: SrtRelayRole,
     relay: &SrtRelayFetch,
+    taken_relay_ids: &HashSet<String>,
     qr_cache: &mut QrCache,
 ) -> SrtUriHelperOutcome {
     let mut outcome = SrtUriHelperOutcome::default();
@@ -188,14 +225,14 @@ pub fn show_srt_uri_helper(
                 return;
             }
         };
-        let passphrase = parsed.param("passphrase").filter(|p| !p.is_empty());
+        let passphrase = parsed.passphrase();
 
         // Where the outside party dials.
         match relay.public_or_note() {
             Ok(public) => {
                 let url = srt_relay_dial_in_uri(&public, &parsed.id);
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(format!("{}:", direction.action()));
+                    ui.label(format!("{}:", dial_in_action(role)));
                     ui.label(egui::RichText::new(&url).monospace());
                     if ui
                         .small_button(egui_phosphor::regular::COPY)
@@ -225,7 +262,7 @@ pub fn show_srt_uri_helper(
                 ui.horizontal_wrapped(|ui| {
                     ui.label(format!(
                         "{} the relay with",
-                        direction.action().to_lowercase()
+                        dial_in_action(role).to_lowercase()
                     ));
                     let streamid = format!("streamid={}", parsed.id);
                     ui.label(egui::RichText::new(&streamid).monospace());
@@ -279,6 +316,13 @@ pub fn show_srt_uri_helper(
         }
 
         // Weak settings.
+        if taken_relay_ids.contains(&parsed.id) {
+            ui.colored_label(
+                WARNING,
+                "\u{26a0} Another SRT block uses this relay id: only one of them will connect. \
+                 Make a new address for this one.",
+            );
+        }
         if passphrase.is_none() {
             ui.colored_label(
                 WARNING,
@@ -361,9 +405,15 @@ fn show_publish_button(
             )
             .on_disabled_hover_text(&disabled_hint);
         if button.clicked() {
+            // Keep settings such as latency and pbkeylen; the relay path sets
+            // mode and streamid itself.
+            let current = match block.properties.get("srt_uri") {
+                Some(PropertyValue::String(uri)) => uri.clone(),
+                _ => String::new(),
+            };
             block.properties.insert(
                 "srt_uri".to_string(),
-                PropertyValue::String(new_srt_relay_uri("")),
+                PropertyValue::String(new_srt_relay_uri(srt_uri_query(&current))),
             );
             outcome.changed = true;
         }
@@ -383,17 +433,56 @@ fn show_publish_button(
 mod tests {
     use super::*;
 
+    fn block(definition: &str, srt_uri: &str) -> BlockInstance {
+        BlockInstance {
+            id: "b1".to_string(),
+            block_definition_id: definition.to_string(),
+            name: None,
+            properties: [(
+                "srt_uri".to_string(),
+                PropertyValue::String(srt_uri.to_string()),
+            )]
+            .into(),
+            position: strom_types::block::Position { x: 0.0, y: 0.0 },
+            runtime_data: None,
+            computed_external_pads: None,
+        }
+    }
+
+    fn srt_uri(block: &BlockInstance) -> &str {
+        match block.properties.get("srt_uri") {
+            Some(PropertyValue::String(s)) => s,
+            _ => panic!("no srt_uri"),
+        }
+    }
+
     #[test]
-    fn the_four_srt_blocks_have_a_direction() {
-        use SrtRelayDirection::*;
-        assert_eq!(srt_relay_direction("builtin.mpegtssrt_input"), Some(Input));
-        assert_eq!(srt_relay_direction("builtin.efpsrt_input"), Some(Input));
+    fn a_copied_relay_block_gets_a_fresh_address() {
+        let old = "srt+relay://cam1cam1cam1cam1?passphrase=oldoldoldold&latency=200";
+        let mut copy = block("builtin.mpegtssrt_output", old);
+        assert!(renew_relay_address(&mut copy));
+        let parsed = parse_srt_relay_uri(srt_uri(&copy)).unwrap().unwrap();
+        assert_ne!(parsed.id, "cam1cam1cam1cam1");
+        assert_ne!(parsed.passphrase().as_deref(), Some("oldoldoldold"));
+        assert_eq!(parsed.param("latency").as_deref(), Some("200"));
+        assert_eq!(block_relay_id(&copy), Some(parsed.id));
+    }
+
+    #[test]
+    fn other_blocks_keep_their_uri_on_copy() {
+        for (definition, uri) in [
+            ("builtin.mpegtssrt_output", "srt://:5000?mode=listener"),
+            ("builtin.mpegtssrt_input", "srt+relay://bad id"),
+            ("builtin.whep_output", "srt+relay://cam1"),
+        ] {
+            let mut copy = block(definition, uri);
+            assert!(!renew_relay_address(&mut copy), "{definition} {uri}");
+            assert_eq!(srt_uri(&copy), uri);
+        }
         assert_eq!(
-            srt_relay_direction("builtin.mpegtssrt_output"),
-            Some(Output)
+            block_relay_id(&block("builtin.whep_output", "srt+relay://cam1")),
+            None
         );
-        assert_eq!(srt_relay_direction("builtin.efpsrt_output"), Some(Output));
-        assert_eq!(srt_relay_direction("builtin.whep_output"), None);
     }
 
     #[test]

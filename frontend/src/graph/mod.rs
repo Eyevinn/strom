@@ -409,6 +409,31 @@ mod tests {
     }
 
     #[test]
+    fn a_pasted_relay_block_gets_its_own_relay_id() {
+        let mut graph = GraphEditor::new();
+        let uri = "srt+relay://cam1cam1cam1cam1?passphrase=oldoldoldold&latency=200";
+        graph.add_block_with_props(
+            "builtin.mpegtssrt_output".to_string(),
+            egui::pos2(0.0, 0.0),
+            [(
+                "srt_uri".to_string(),
+                strom_types::PropertyValue::String(uri.to_string()),
+            )]
+            .into(),
+        );
+        graph.selected = Some(graph.blocks[0].id.clone());
+        graph.copy_selected();
+        assert!(graph.paste_clipboard());
+        let ids: Vec<_> = graph
+            .blocks
+            .iter()
+            .map(|b| crate::srt_relay::block_relay_id(b).unwrap())
+            .collect();
+        assert_eq!(ids[0], "cam1cam1cam1cam1");
+        assert_ne!(ids[1], ids[0]);
+    }
+
+    #[test]
     fn parse_pad_ref_splits_at_the_first_colon() {
         assert_eq!(parse_pad_ref("mixer:sink_0"), pair("mixer", "sink_0"));
         // Everything after the first colon is the pad name.

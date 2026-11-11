@@ -123,7 +123,7 @@ impl GraphEditor {
                 }
                 ClipboardContent::Block(block) => {
                     let new_id = format!("b{}", Uuid::new_v4().simple());
-                    let new_block = BlockInstance {
+                    let mut new_block = BlockInstance {
                         id: new_id.clone(),
                         block_definition_id: block.block_definition_id.clone(),
                         name: block.name.clone(),
@@ -135,6 +135,8 @@ impl GraphEditor {
                         runtime_data: None, // Don't copy runtime data
                         computed_external_pads: block.computed_external_pads.clone(),
                     };
+                    // A relay id is unique on the relay: the copy gets its own.
+                    crate::srt_relay::renew_relay_address(&mut new_block);
                     self.blocks.push(new_block);
                     self.selected = Some(new_id);
                     self.selected_link = None;

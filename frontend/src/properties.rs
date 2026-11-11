@@ -537,6 +537,7 @@ impl PropertyInspector {
         block_thumbnail: Option<&egui::TextureHandle>,
         taken_endpoint_ids: &std::collections::HashSet<String>,
         srt_relay: &crate::srt_relay::SrtRelayFetch,
+        taken_srt_relay_ids: &std::collections::HashSet<String>,
     ) -> BlockInspectorResult {
         let block_id = block.id.clone();
         let mut result = BlockInspectorResult::default();
@@ -1013,12 +1014,18 @@ impl PropertyInspector {
 
                                 // SRT blocks: relay address helper under srt_uri.
                                 if exposed_prop.name == "srt_uri" {
-                                    if let Some(direction) =
-                                        crate::srt_relay::srt_relay_direction(&definition.id)
+                                    if let Some(role) =
+                                        strom_types::srt_relay::srt_relay_role(&definition.id)
                                     {
                                         result.srt_relay_needed = true;
                                         let outcome = crate::srt_relay::show_srt_uri_helper(
-                                            ui, block, flow_id, direction, srt_relay, qr_cache,
+                                            ui,
+                                            block,
+                                            flow_id,
+                                            role,
+                                            srt_relay,
+                                            taken_srt_relay_ids,
+                                            qr_cache,
                                         );
                                         result.srt_relay_refresh_requested |=
                                             outcome.refresh_requested;
@@ -2432,10 +2439,16 @@ impl PropertyInspector {
                     let is_audiogain_gain =
                         definition.id == "builtin.audiogain" && prop_name == "gain";
 
+                    // SRT blocks' srt_uri: the passphrase is masked unless edited.
+                    let is_srt_uri = prop_name == "srt_uri"
+                        && strom_types::srt_relay::srt_relay_role(&definition.id).is_some();
+
                     changed = if is_inter_input_channel {
                         Self::show_inter_channel_editor(ui, &mut value, available_channels)
                     } else if is_audiogain_gain {
                         Self::show_db_gain_editor(ui, &mut value)
+                    } else if let (true, PropertyValue::String(text)) = (is_srt_uri, &mut value) {
+                        crate::srt_relay::show_srt_uri_editor(ui, text, &block.id)
                     } else {
                         // Check property type for special handling
                         match &exposed_prop.property_type {

@@ -236,8 +236,13 @@ pub fn vlc_player_uri(
 pub fn generate_vlc_playlist(vlc_uri: &str, latency_ms: i32, stream_name: &str) -> String {
     let escaped_uri = escape_xml(vlc_uri);
 
-    // Include SRT URL in the track title for easy identification
-    let title_with_url = format!("{} ({})", stream_name, vlc_uri);
+    // Include the SRT URL in the track title for easy identification, but
+    // not its passphrase: VLC shows the title. The location keeps it.
+    let title_with_url = format!(
+        "{} ({})",
+        stream_name,
+        strom_types::srt_relay::strip_srt_uri_secrets(vlc_uri)
+    );
     let escaped_title = escape_xml(&title_with_url);
 
     format!(
@@ -892,6 +897,10 @@ mod tests {
         assert!(playlist.contains(
             "<location>srt://relay.example.com:9000?streamid=cam1&amp;passphrase=abcdefghijkl</location>"
         ));
+        assert!(
+            playlist.contains("<title>Flow (srt://relay.example.com:9000?streamid=cam1)</title>")
+        );
+        assert_eq!(playlist.matches("abcdefghijkl").count(), 1, "{playlist}");
     }
 
     #[test]

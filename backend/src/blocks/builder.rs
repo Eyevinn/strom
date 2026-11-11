@@ -242,13 +242,21 @@ impl BlockBuildContext {
 
     /// Resolve an SRT block's `srt_uri` into the URI for its `srtsrc` or
     /// `srtsink`. Plain URIs pass through; `srt+relay://<id>` becomes a caller
-    /// URI to the configured relay with `role` as the block's own direction.
+    /// URI to the configured relay, with the block's own role on the relay
+    /// looked up from its definition id in
+    /// [`strom_types::srt_relay::SRT_RELAY_BLOCKS`].
     pub fn resolve_srt_uri(
         &self,
         uri: &str,
-        role: strom_types::srt_relay::SrtRelayRole,
+        block_definition_id: &str,
     ) -> Result<String, BlockBuildError> {
-        strom_types::srt_relay::resolve_srt_uri(uri, role, self.srt_relay.as_deref())
+        use strom_types::srt_relay::{resolve_srt_uri, srt_relay_role};
+        let role = srt_relay_role(block_definition_id).ok_or_else(|| {
+            BlockBuildError::InvalidConfiguration(format!(
+                "{block_definition_id} is not an SRT relay block"
+            ))
+        })?;
+        resolve_srt_uri(uri, role, self.srt_relay.as_deref())
             .map_err(|e| BlockBuildError::InvalidProperty(format!("srt_uri: {e}")))
     }
 

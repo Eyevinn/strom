@@ -46,6 +46,24 @@ impl SrtRelayRole {
     }
 }
 
+/// The SRT blocks whose `srt_uri` may be `srt+relay://`, by block definition
+/// id, with each block's own role on the relay.
+pub const SRT_RELAY_BLOCKS: &[(&str, SrtRelayRole)] = &[
+    ("builtin.mpegtssrt_input", SrtRelayRole::Request),
+    ("builtin.efpsrt_input", SrtRelayRole::Request),
+    ("builtin.mpegtssrt_output", SrtRelayRole::Publish),
+    ("builtin.efpsrt_output", SrtRelayRole::Publish),
+];
+
+/// The relay role of a block definition, or `None` if it is not an SRT block
+/// that can use the relay.
+pub fn srt_relay_role(block_definition_id: &str) -> Option<SrtRelayRole> {
+    SRT_RELAY_BLOCKS
+        .iter()
+        .find(|(id, _)| *id == block_definition_id)
+        .map(|(_, role)| *role)
+}
+
 /// A parsed `srt+relay://<id>[?<query>]` URI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SrtRelayUri {
@@ -72,26 +90,17 @@ impl SrtRelayUri {
             .find(|(k, _)| k.trim().eq_ignore_ascii_case(name))
             .map(|(_, v)| percent_decode(v))
     }
+
+    /// The decoded passphrase, or `None` when there is none or it is empty
+    /// (an empty `passphrase=` encrypts nothing).
+    pub fn passphrase(&self) -> Option<String> {
+        self.param("passphrase").filter(|p| !p.is_empty())
+    }
 }
 
 /// Decode `%XX` escapes; anything malformed is kept as it is.
 fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let hex = |b: u8| (b as char).to_digit(16);
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
-                out.push((h * 16 + l) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8_lossy(&urlencoding::decode_binary(s.as_bytes())).into_owned()
 }
 
 /// Why an `srt+relay://` URI or its resolution was refused.
@@ -234,23 +243,62 @@ pub fn srt_relay_player_uri(public: &str, relay: &SrtRelayUri) -> String {
             uri.push('&');
             uri.push_str(name);
             uri.push('=');
-            uri.push_str(&percent_encode(&value));
+            // Everything but the URI unreserved characters is encoded.
+            uri.push_str(&urlencoding::encode(&value));
         }
     }
     uri
 }
 
-/// Percent-encode everything but the URI unreserved characters.
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
+/// Query parameters of an SRT URI whose values are secrets. Their values are
+/// never logged or shown unasked.
+const SECRET_PARAMS: &[&str] = &["passphrase"];
+
+/// Rewrite the secret query parameters of an SRT URI (`srt://` or
+/// `srt+relay://`): `Some(mask)` replaces a non-empty value with `mask`,
+/// `None` drops the parameter. Keys are matched case-insensitively and after
+/// percent-decoding, as GStreamer reads them; an empty value is left as is.
+fn rewrite_secret_params(uri: &str, mask: Option<&str>) -> String {
+    let Some((head, query)) = uri.split_once('?') else {
+        return uri.to_string();
+    };
+    let params: Vec<String> = query
+        .split('&')
+        .filter_map(|param| {
+            let (key, value) = param.split_once('=').unwrap_or((param, ""));
+            let decoded = percent_decode(key);
+            let secret = SECRET_PARAMS
+                .iter()
+                .any(|s| decoded.trim().eq_ignore_ascii_case(s));
+            if !secret || value.is_empty() {
+                return Some(param.to_string());
+            }
+            mask.map(|mask| format!("{key}={mask}"))
+        })
+        .collect();
+    if params.is_empty() {
+        head.to_string()
+    } else {
+        format!("{head}?{}", params.join("&"))
     }
-    out
+}
+
+/// An SRT URI fit for a log line: the passphrase (and any other secret query
+/// value) replaced with `***`. Use it wherever an SRT URI is logged.
+pub fn redact_srt_uri(uri: &str) -> String {
+    rewrite_secret_params(uri, Some("***"))
+}
+
+/// An SRT URI with the secret query values replaced with `mask`, for showing
+/// the URI on screen without its passphrase.
+pub fn mask_srt_uri(uri: &str, mask: &str) -> String {
+    rewrite_secret_params(uri, Some(mask))
+}
+
+/// An SRT URI without its secret query parameters, for a label next to the
+/// full URI (a playlist title, say).
+pub fn strip_srt_uri_secrets(uri: &str) -> String {
+    rewrite_secret_params(uri, None)
 }
 
 /// Random bytes behind a new stream id: 128 bits, 22 characters.
@@ -262,24 +310,33 @@ pub const SRT_RELAY_NEW_PASSPHRASE_BYTES: usize = 24;
 /// Unpadded base64url (`[A-Za-z0-9_-]`): valid as a relay id and needs no
 /// escaping in a URI query.
 fn base64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = chunk
-            .iter()
-            .enumerate()
-            .fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
-        for i in 0..=chunk.len() {
-            out.push(ALPHABET[((n >> (18 - 6 * i)) & 0x3f) as usize] as char);
-        }
-    }
-    out
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Parameters of the URI being replaced that a new relay address does not
+/// keep: the relay connection sets `mode` and `streamid`, the new address has
+/// its own passphrase, and the local bind settings belong to a direct
+/// connection, not to one through the relay.
+const NOT_KEPT_PARAMS: &[&str] = &[
+    "mode",
+    "streamid",
+    "passphrase",
+    "localaddress",
+    "localport",
+    "adapter",
+];
+
+/// The query string of an SRT URI (after the first `?`), empty if it has none.
+pub fn srt_uri_query(uri: &str) -> &str {
+    uri.trim().split_once('?').map_or("", |(_, q)| q)
 }
 
 /// Build `srt+relay://<id>?passphrase=<passphrase>[&<other params>]` from the
-/// given random bytes. `keep_query` is the query of the URI being replaced:
-/// its parameters other than `passphrase`, `mode` and `streamid` are kept, so
-/// a new address does not drop settings such as `latency`.
+/// given random bytes. `keep_query` is the query of the URI being replaced
+/// (a plain `srt://` URI or an `srt+relay://` one): its parameters other than
+/// those in [`NOT_KEPT_PARAMS`] are kept, so a new address does not drop
+/// settings such as `latency` or `pbkeylen`.
 pub fn srt_relay_uri_from_random(
     id_bytes: &[u8; SRT_RELAY_NEW_ID_BYTES],
     passphrase_bytes: &[u8; SRT_RELAY_NEW_PASSPHRASE_BYTES],
@@ -293,8 +350,7 @@ pub fn srt_relay_uri_from_random(
     );
     for param in keep_query.split('&').filter(|p| !p.is_empty()) {
         let key = param.split_once('=').map_or(param, |(k, _)| k).trim();
-        let dropped = key.eq_ignore_ascii_case("passphrase")
-            || RESERVED_PARAMS.iter().any(|r| key.eq_ignore_ascii_case(r));
+        let dropped = NOT_KEPT_PARAMS.iter().any(|r| key.eq_ignore_ascii_case(r));
         if !dropped {
             uri.push('&');
             uri.push_str(param);
@@ -329,6 +385,18 @@ pub fn new_srt_relay_uri(keep_query: &str) -> String {
     fill_random(&mut id);
     fill_random(&mut passphrase);
     srt_relay_uri_from_random(&id, &passphrase, keep_query)
+}
+
+/// A fresh address for a copy of a block whose `srt_uri` is `uri`: a new id
+/// and passphrase with the other parameters kept, or `None` when `uri` is not
+/// a valid `srt+relay://` URI. A copy that kept the id would share the
+/// stream on the relay with the original, as a copied listener would collide
+/// on its port.
+pub fn renew_srt_relay_uri(uri: &str) -> Option<String> {
+    parse_srt_relay_uri(uri)
+        .ok()
+        .flatten()
+        .map(|parsed| new_srt_relay_uri(&parsed.query))
 }
 
 /// SRT relay status, as `GET /api/srt-relay` reports it.
@@ -605,6 +673,108 @@ mod tests {
         assert_ne!(pa.id, pb.id);
         assert_ne!(pa.param("passphrase"), pb.param("passphrase"));
         assert!(pb.query.ends_with("&latency=120"));
+    }
+
+    #[test]
+    fn passphrase_ignores_an_empty_value() {
+        let parsed = |uri| parse_srt_relay_uri(uri).unwrap().unwrap();
+        assert_eq!(parsed("srt+relay://cam1?passphrase=").passphrase(), None);
+        assert_eq!(parsed("srt+relay://cam1?latency=200").passphrase(), None);
+        assert_eq!(
+            parsed("srt+relay://cam1?passphrase=abc%26def").passphrase(),
+            Some("abc&def".to_string())
+        );
+    }
+
+    #[test]
+    fn the_four_srt_blocks_have_a_role() {
+        use SrtRelayRole::*;
+        assert_eq!(srt_relay_role("builtin.mpegtssrt_input"), Some(Request));
+        assert_eq!(srt_relay_role("builtin.efpsrt_input"), Some(Request));
+        assert_eq!(srt_relay_role("builtin.mpegtssrt_output"), Some(Publish));
+        assert_eq!(srt_relay_role("builtin.efpsrt_output"), Some(Publish));
+        assert_eq!(srt_relay_role("builtin.whep_output"), None);
+    }
+
+    #[test]
+    fn redaction_hides_the_passphrase_and_keeps_the_rest() {
+        let resolved = resolve_srt_uri(
+            "srt+relay://cam1?passphrase=s3cretpassphrase&latency=200&pbkeylen=32",
+            SrtRelayRole::Publish,
+            RELAY,
+        )
+        .unwrap();
+        let redacted = redact_srt_uri(&resolved);
+        assert!(!redacted.contains("s3cret"), "{redacted}");
+        assert_eq!(
+            redacted,
+            "srt://srt-splice:9000?mode=caller&streamid=%23!%3A%3Ar%3Dcam1%2Cm%3Dpublish\
+             &passphrase=***&latency=200&pbkeylen=32"
+        );
+        for (uri, expected) in [
+            // Case and percent-encoding of the key do not matter.
+            (
+                "srt://:5000?mode=listener&PassPhrase=abc",
+                "srt://:5000?mode=listener&PassPhrase=***",
+            ),
+            (
+                "srt://:5000?pass%70hrase=abc",
+                "srt://:5000?pass%70hrase=***",
+            ),
+            // A raw '#' inside the value does not leak the rest of it.
+            ("srt://h:1?passphrase=a#b", "srt://h:1?passphrase=***"),
+            // Nothing to hide.
+            ("srt://:5000?mode=listener", "srt://:5000?mode=listener"),
+            ("srt://:5000?passphrase=", "srt://:5000?passphrase="),
+            ("srt://:5000", "srt://:5000"),
+        ] {
+            assert_eq!(redact_srt_uri(uri), expected);
+        }
+        assert_eq!(
+            mask_srt_uri("srt+relay://cam1?passphrase=abc&latency=1", "..."),
+            "srt+relay://cam1?passphrase=...&latency=1"
+        );
+    }
+
+    #[test]
+    fn stripping_drops_the_passphrase_param() {
+        assert_eq!(
+            strip_srt_uri_secrets(
+                "srt://relay.example.com:9000?streamid=cam1&passphrase=abc&pbkeylen=32"
+            ),
+            "srt://relay.example.com:9000?streamid=cam1&pbkeylen=32"
+        );
+        assert_eq!(
+            strip_srt_uri_secrets("srt://relay.example.com:9000?passphrase=abc"),
+            "srt://relay.example.com:9000"
+        );
+    }
+
+    #[test]
+    fn a_plain_uri_keeps_its_settings_on_the_relay() {
+        let uri = srt_relay_uri_from_random(
+            &[1; 16],
+            &[2; 24],
+            srt_uri_query("srt://:5000?mode=listener&latency=200&localaddress=0.0.0.0&localport=5000&pbkeylen=32&passphrase=old&streamid=x"),
+        );
+        let parsed = assert_generated(&uri);
+        assert_eq!(
+            parsed.query,
+            format!("passphrase={}&latency=200&pbkeylen=32", base64url(&[2; 24]))
+        );
+        assert_eq!(srt_uri_query("srt://:5000"), "");
+    }
+
+    #[test]
+    fn renewing_gives_a_new_id_and_passphrase_and_keeps_settings() {
+        let old = "srt+relay://cam1camcamcamcamcam?passphrase=oldoldoldold&latency=200";
+        let new = renew_srt_relay_uri(old).unwrap();
+        let parsed = assert_generated(&new);
+        assert_ne!(parsed.id, "cam1camcamcamcamcam");
+        assert_ne!(parsed.passphrase().as_deref(), Some("oldoldoldold"));
+        assert!(parsed.query.ends_with("&latency=200"));
+        assert_eq!(renew_srt_relay_uri("srt://:5000?mode=listener"), None);
+        assert_eq!(renew_srt_relay_uri("srt+relay://bad id"), None);
     }
 
     #[test]

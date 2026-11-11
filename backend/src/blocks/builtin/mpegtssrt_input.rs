@@ -34,9 +34,12 @@ use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use strom_types::srt_relay::SrtRelayRole;
+use strom_types::srt_relay::redact_srt_uri;
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
+
+/// Block definition id; also selects the block's role on the SRT relay.
+const BLOCK_DEFINITION_ID: &str = "builtin.mpegtssrt_input";
 
 /// MPEG-TS/SRT Input block builder.
 pub struct MpegTsSrtInputBuilder;
@@ -130,7 +133,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
             })
             .unwrap_or_else(|| DEFAULT_SRT_INPUT_URI.to_string());
         // `srt+relay://<id>` dials out to the configured SRT relay.
-        let srt_uri = ctx.resolve_srt_uri(&srt_uri, SrtRelayRole::Request)?;
+        let srt_uri = ctx.resolve_srt_uri(&srt_uri, BLOCK_DEFINITION_ID)?;
 
         // Get SRT latency
         let latency = properties
@@ -237,7 +240,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
 
         info!(
             "SRT source configured: uri={}, latency={}ms, tsdemux_latency={}ms, ignore_pcr={}, keep-listening={}, auto-reconnect={}, wait-for-connection={}",
-            srt_uri, latency, tsdemux_latency, ignore_pcr, keep_listening, auto_reconnect, wait_for_connection
+            redact_srt_uri(&srt_uri), latency, tsdemux_latency, ignore_pcr, keep_listening, auto_reconnect, wait_for_connection
         );
 
         // Create demux/decode element
@@ -856,7 +859,7 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 /// Get MPEG-TS/SRT Input block definition (metadata only).
 fn mpegtssrt_input_definition() -> BlockDefinition {
     BlockDefinition {
-        id: "builtin.mpegtssrt_input".to_string(),
+        id: BLOCK_DEFINITION_ID.to_string(),
         name: "MPEG-TS/SRT Input".to_string(),
         description: "Receives an SRT stream carrying MPEG Transport Stream and demuxes it into separate video and audio outputs. Supports decode (default) and passthrough modes.".to_string(),
         category: "Inputs".to_string(),

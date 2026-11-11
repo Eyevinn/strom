@@ -359,6 +359,7 @@ mod tests {
             None,
             std::path::PathBuf::from("./media"),
             std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            None,
         )
         .unwrap();
 
@@ -396,6 +397,7 @@ mod tests {
             None,
             std::path::PathBuf::from("./media"),
             std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            None,
         );
         match result {
             Err(PipelineError::ElementCreation(msg)) => assert!(
@@ -459,6 +461,7 @@ mod tests {
             None,
             std::path::PathBuf::from("./media"),
             std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            None,
         );
         assert!(manager.is_ok());
 
@@ -486,6 +489,7 @@ mod tests {
             None,
             std::path::PathBuf::from("./media"),
             std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            None,
         )
         .unwrap();
 

@@ -990,7 +990,7 @@ impl AppState {
 
         // Create pipeline with event broadcaster and block registry
         info!("Creating PipelineManager (this may block)...");
-        let mut manager = match PipelineManager::new_with_srt_relay(
+        let mut manager = match PipelineManager::new(
             &flow,
             self.inner.events.clone(),
             &self.inner.block_registry,

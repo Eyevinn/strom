@@ -45,35 +45,10 @@ fn drop_upstream_qos_events(pad: &gst::Pad) {
 }
 
 impl PipelineManager {
-    /// Create a new pipeline from a flow definition, without an SRT relay.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        flow: &Flow,
-        events: EventBroadcaster,
-        block_registry: &BlockRegistry,
-        ice_servers: Vec<String>,
-        ice_transport_policy: String,
-        whip_registry: Option<WhipRegistry>,
-        media_path: std::path::PathBuf,
-        local_devices: crate::discovery::device::GstDeviceMap,
-    ) -> Result<Self, PipelineError> {
-        Self::new_with_srt_relay(
-            flow,
-            events,
-            block_registry,
-            ice_servers,
-            ice_transport_policy,
-            whip_registry,
-            media_path,
-            local_devices,
-            None,
-        )
-    }
-
     /// Create a new pipeline from a flow definition. `srt_relay` is the SRT
     /// relay `host:port` that `srt+relay://` URIs in SRT blocks resolve to.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_srt_relay(
+    pub fn new(
         flow: &Flow,
         events: EventBroadcaster,
         _block_registry: &BlockRegistry,

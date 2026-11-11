@@ -107,6 +107,32 @@ fn relay_uri_reaches_the_srt_element_as_a_caller_uri() {
     }
 }
 
+/// `strom_types::srt_relay::SRT_RELAY_BLOCKS` names exactly the blocks with
+/// an `srt_uri` property, so the frontend helper and the backend resolution
+/// cover the same blocks.
+#[test]
+fn every_block_with_an_srt_uri_is_a_relay_block() {
+    use strom_types::srt_relay::{srt_relay_role, SRT_RELAY_BLOCKS};
+    let with_srt_uri: Vec<String> = strom::blocks::builtin::get_all_builtin_blocks()
+        .into_iter()
+        .filter(|def| def.exposed_properties.iter().any(|p| p.name == "srt_uri"))
+        .map(|def| def.id)
+        .collect();
+    for id in &with_srt_uri {
+        assert!(
+            srt_relay_role(id).is_some(),
+            "{id} is missing from SRT_RELAY_BLOCKS"
+        );
+    }
+    for (id, _) in SRT_RELAY_BLOCKS {
+        // The EFP blocks exist only with the `efp` feature.
+        if id.starts_with("builtin.efpsrt") && !cfg!(feature = "efp") {
+            continue;
+        }
+        assert!(with_srt_uri.iter().any(|b| b == id), "{id} has no srt_uri");
+    }
+}
+
 #[test]
 fn relay_uri_without_a_relay_fails_the_build() {
     common::init_static_plugins();

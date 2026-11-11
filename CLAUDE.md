@@ -15,6 +15,7 @@
 ## Security
 - Always anonymize sensitive data (IP addresses, hostnames, credentials, internal server names) before including in commits, PRs, or documentation
 - Use `example.com`, `192.0.2.x`, or placeholder values instead of real infrastructure data
+- Never log, or show unasked in the GUI, a URI that can carry a secret as it is. SRT URIs go through `strom_types::srt_relay::redact_srt_uri` (logs) or `mask_srt_uri` / `strip_srt_uri_secrets` (GUI); RTMP locations through the RTMP block's `redact_location`. The SRT blocks once logged the relay passphrase at info level (SRT relay review on `feat/srt-relay`).
 
 ## Code Style
 - Do not add emojis to log macros (`info!`, `debug!`, `trace!`, `warn!`, `error!`)

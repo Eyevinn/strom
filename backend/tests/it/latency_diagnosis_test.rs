@@ -130,6 +130,7 @@ async fn a_mixer_latency_failure_is_reported_once_with_its_inputs() {
         None,
         std::env::temp_dir(),
         Arc::new(std::sync::Mutex::new(HashMap::new())),
+        None,
     )
     .expect("build pipeline");
     manager.start().expect("start pipeline");

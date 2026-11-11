@@ -31,9 +31,12 @@ use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use strom_types::srt_relay::SrtRelayRole;
+use strom_types::srt_relay::redact_srt_uri;
 use strom_types::{block::*, element::ElementPadRef, FlowId, PropertyValue, *};
 use tracing::{debug, error, warn};
+
+/// Block definition id; also selects the block's role on the SRT relay.
+const BLOCK_DEFINITION_ID: &str = "builtin.efpsrt_input";
 
 /// Caps name of `efpdemux`'s embedded-data src pad.
 const EFP_EMBEDDED_CAPS_NAME: &str = "application/x-efp-embedded";
@@ -178,7 +181,7 @@ impl BlockBuilder for EfpSrtInputBuilder {
             })
             .unwrap_or_else(|| DEFAULT_SRT_INPUT_URI.to_string());
         // `srt+relay://<id>` dials out to the configured SRT relay.
-        let srt_uri = ctx.resolve_srt_uri(&srt_uri, SrtRelayRole::Request)?;
+        let srt_uri = ctx.resolve_srt_uri(&srt_uri, BLOCK_DEFINITION_ID)?;
 
         let latency = properties
             .get("latency")
@@ -275,7 +278,7 @@ impl BlockBuilder for EfpSrtInputBuilder {
 
         debug!(
             "SRT source configured: uri={}, latency={}ms, keep-listening={}, auto-reconnect={}, wait-for-connection={}",
-            srt_uri, latency, keep_listening, auto_reconnect, wait_for_connection
+            redact_srt_uri(&srt_uri), latency, keep_listening, auto_reconnect, wait_for_connection
         );
 
         // Always use efpdemux directly. In decode mode, explicit decoder elements
@@ -897,7 +900,7 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 /// Get EFP/SRT Input block definition (metadata only).
 fn efpsrt_input_definition() -> BlockDefinition {
     BlockDefinition {
-        id: "builtin.efpsrt_input".to_string(),
+        id: BLOCK_DEFINITION_ID.to_string(),
         name: "EFP/SRT Input".to_string(),
         description: "Receives an SRT stream carrying EFP (Elastic Frame Protocol) and demuxes it into separate video and audio outputs. Supports decode (default) and passthrough modes.".to_string(),
         category: "Inputs".to_string(),
