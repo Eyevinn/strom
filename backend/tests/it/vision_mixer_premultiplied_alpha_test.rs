@@ -9,7 +9,7 @@
 //! CI has no `cefsrc`, so a `videotestsrc` paints the premultiplied encoding
 //! of 50 % white, `(128, 128, 128, 128)`, into the real block.
 
-pub mod common;
+use crate::common;
 
 use gstreamer::prelude::*;
 use serial_test::serial;
