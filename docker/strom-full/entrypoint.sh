@@ -28,24 +28,20 @@ dbus-daemon --system 2>/dev/null
 rm -f /run/avahi-daemon/pid
 avahi-daemon -D 2>/dev/null
 
-# Clean up stale X server lock files from previous runs/crashes
-rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null
+# Chromium flag sets and the Xvfb/cache/shim setup, shared with CI
+. /usr/local/lib/strom/cef-env.sh
 
-# Start Xvfb on display :99 with 1920x1080 resolution
-Xvfb :99 -screen 0 1920x1080x24 &
-export DISPLAY=:99
+cef_start_xvfb
 
 # Detect GPU availability (container must be launched with --gpus all)
 HAS_GPU=no
 if nvidia-smi > /dev/null 2>&1; then HAS_GPU=yes; fi
 
-# Opt-in CEF GPU path via ANGLE/Vulkan.
-# ANGLE-over-Vulkan bypasses X11/DRI3 (which Xvfb lacks); it needs NVIDIA's
-# Vulkan ICD visible in the container (see header comment for the bind-mount).
+# Opt-in CEF GPU path via ANGLE/Vulkan (see header comment for the bind-mount).
 if [ "${STROM_CEF_GPU:-0}" = "1" ] && [ "$HAS_GPU" = "yes" ]; then
     echo "CEF GPU mode enabled (STROM_CEF_GPU=1) - ANGLE/Vulkan on NVIDIA"
     export GST_CEF_GPU_ENABLED=set
-    export GST_CEF_CHROME_EXTRA_FLAGS="no-sandbox,use-gl=angle,use-angle=vulkan,enable-gpu-rasterization,ignore-gpu-blocklist,enable-zero-copy,disable-features=BackgroundTracing,no-periodic-tasks,force-fieldtrials=,disable-field-trial-config,disable-breakpad,disable-crash-reporter,disable-dev-shm-usage,disable-background-networking,disable-component-update,enable-logging=stderr"
+    export GST_CEF_CHROME_EXTRA_FLAGS="$CEF_GPU_FLAGS"
 elif [ "$HAS_GPU" = "yes" ]; then
     if [ "${STROM_CEF_GPU:-0}" = "1" ]; then
         echo "WARNING: STROM_CEF_GPU=1 but nvidia-smi unavailable - falling back to software"
@@ -53,9 +49,7 @@ elif [ "$HAS_GPU" = "yes" ]; then
         echo "GPU detected - GStreamer uses egl-device; CEF in software (set STROM_CEF_GPU=1 to enable)"
     fi
     # Fully isolate CEF from GPU to prevent SharedImageManager crashes.
-    # disable-gpu alone is not enough - Chromium still starts a GPU subprocess that
-    # probes the NVIDIA driver and initializes SharedImage mailboxes.
-    export GST_CEF_CHROME_EXTRA_FLAGS="no-sandbox,disable-gpu,disable-gpu-compositing,use-gl=disabled,disable-features=BackgroundTracing,no-periodic-tasks,force-fieldtrials=,disable-field-trial-config,disable-breakpad,disable-crash-reporter,disable-dev-shm-usage,disable-background-networking,disable-component-update,enable-logging=stderr"
+    export GST_CEF_CHROME_EXTRA_FLAGS="$CEF_SOFTWARE_FLAGS"
 else
     if [ "${STROM_CEF_GPU:-0}" = "1" ]; then
         echo "WARNING: STROM_CEF_GPU=1 but no GPU visible in container (pass --gpus all) - falling back to software"
@@ -66,28 +60,10 @@ else
     # Without GPU, egl-device will fail since there's no EGL device available
     export GST_GL_WINDOW=x11
     export GST_GL_PLATFORM=glx
-    export GST_CEF_CHROME_EXTRA_FLAGS="no-sandbox,disable-gpu,disable-gpu-compositing,use-gl=disabled,disable-features=BackgroundTracing,no-periodic-tasks,force-fieldtrials=,disable-field-trial-config,disable-breakpad,disable-crash-reporter,disable-dev-shm-usage,disable-background-networking,disable-component-update,enable-logging=stderr"
+    export GST_CEF_CHROME_EXTRA_FLAGS="$CEF_SOFTWARE_FLAGS"
 fi
 
-# CEF cache directory. It holds the browser profiles HTML sources keep their
-# logins in, so it is kept across a restart of the container; mount a volume
-# here (or point GST_CEF_CACHE_LOCATION at one) to keep it across a
-# replacement too. It is not wiped; Strom removes the profiles no flow uses
-# at startup.
-export GST_CEF_CACHE_LOCATION="${GST_CEF_CACHE_LOCATION:-/tmp/cef-cache}"
-mkdir -p "$GST_CEF_CACHE_LOCATION"
-
-# A restarted container keeps its hostname and often its pids, so Chromium's
-# lock from the previous run (a SingletonLock symlink to "<host>-<pid>") can
-# look live. Nothing in this container runs Chromium yet, so a lock naming
-# this host is stale: drop it here. A lock naming another host is left for
-# Strom, which clears it before CEF starts.
-CEF_LOCK="$GST_CEF_CACHE_LOCATION/SingletonLock"
-if [ -L "$CEF_LOCK" ] && [ "$(readlink "$CEF_LOCK" | sed 's/-[0-9]*$//')" = "$(uname -n)" ]; then
-    rm -f "$CEF_LOCK" \
-          "$GST_CEF_CACHE_LOCATION/SingletonSocket" \
-          "$GST_CEF_CACHE_LOCATION/SingletonCookie"
-fi
+cef_setup_cache
 
 # CEF's own logging, to stderr. Warnings and errors only: verbose writes
 # everything Chromium does into the container log. Chromium logs a page's
@@ -95,15 +71,8 @@ fi
 # page logging in a loop out of the log. GST_CEF_LOG_SEVERITY=info shows them.
 export GST_CEF_LOG_SEVERITY="${GST_CEF_LOG_SEVERITY:-warning}"
 
-# LD_PRELOAD the mallinfo shim to neutralise the MemoryInfra SIGILL crash.
-# libcef.so was built against an old sysroot and calls glibc's int-based
-# mallinfo(); when the CEF process arena exceeds 2 GiB, the ints overflow to
-# negative values, Chromium checked_casts them to size_t, and CHECK()s -> SIGILL.
-# The shim returns zeroed values so the cast succeeds harmlessly.
-# Reference: https://github.com/chromiumembedded/cef/issues/3963
-if [ -f /usr/local/lib/cef/libmallinfo_shim.so ]; then
-    export LD_PRELOAD="/usr/local/lib/cef/libmallinfo_shim.so${LD_PRELOAD:+:$LD_PRELOAD}"
-fi
+# See cef-env.sh for why
+cef_preload_mallinfo_shim
 
 # Wait briefly for Xvfb to initialize
 sleep 0.5
