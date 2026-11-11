@@ -452,10 +452,12 @@ fn vision_mixer_definition() -> BlockDefinition {
                     EnumValue {
                         value: AlphaMode::Straight.as_str().to_string(),
                         label: Some("Straight".to_string()),
+                        visible_when: None,
                     },
                     EnumValue {
                         value: AlphaMode::Premultiplied.as_str().to_string(),
                         label: Some("Premultiplied".to_string()),
+                        visible_when: None,
                     },
                 ],
             },
@@ -469,6 +471,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
             persist: None,
+            visible_when: None,
         });
     }
 
