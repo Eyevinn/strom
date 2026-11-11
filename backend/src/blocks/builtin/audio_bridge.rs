@@ -242,6 +242,7 @@ fn channel_property(description: &str) -> ExposedProperty {
         },
         live: false,
         persist: None,
+        visible_when: None,
     }
 }
 
@@ -315,6 +316,7 @@ fn input_definition() -> BlockDefinition {
                 },
                 live: true,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "max_rate_change_percent".to_string(),
@@ -336,6 +338,7 @@ fn input_definition() -> BlockDefinition {
                 },
                 live: true,
                 persist: None,
+                visible_when: None,
             },
             ExposedProperty {
                 name: "max_latency_ms".to_string(),
@@ -353,6 +356,7 @@ fn input_definition() -> BlockDefinition {
                 },
                 live: true,
                 persist: None,
+                visible_when: None,
             },
         ],
         external_pads: ExternalPads {
