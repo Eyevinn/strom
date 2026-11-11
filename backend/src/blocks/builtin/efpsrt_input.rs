@@ -31,6 +31,7 @@ use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use strom_types::srt_relay::SrtRelayRole;
 use strom_types::{block::*, element::ElementPadRef, FlowId, PropertyValue, *};
 use tracing::{debug, error, warn};
 
@@ -154,7 +155,7 @@ impl BlockBuilder for EfpSrtInputBuilder {
         &self,
         instance_id: &str,
         properties: &HashMap<String, PropertyValue>,
-        _ctx: &BlockBuildContext,
+        ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         let decode = properties
             .get("decode")
@@ -176,6 +177,8 @@ impl BlockBuilder for EfpSrtInputBuilder {
                 _ => None,
             })
             .unwrap_or_else(|| DEFAULT_SRT_INPUT_URI.to_string());
+        // `srt+relay://<id>` dials out to the configured SRT relay.
+        let srt_uri = ctx.resolve_srt_uri(&srt_uri, SrtRelayRole::Request)?;
 
         let latency = properties
             .get("latency")
@@ -962,7 +965,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "srt_uri".to_string(),
                 label: "SRT URI".to_string(),
-                description: "SRT URI (e.g., 'srt://:4000?mode=listener' or 'srt://192.0.2.1:4000?mode=caller')".to_string(),
+                description: "SRT URI, e.g. 'srt://:4000?mode=listener', 'srt://192.0.2.1:4000?mode=caller', or 'srt+relay://<id>' to receive via the SRT relay".to_string(),
                 property_type: PropertyType::String,
                 default_value: Some(PropertyValue::String(
                     DEFAULT_SRT_INPUT_URI.to_string(),

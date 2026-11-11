@@ -186,6 +186,8 @@ pub struct BlockBuildContext {
     local_devices: GstDeviceMap,
     /// Elements the flow links into, filled by block expansion after the build.
     flow_link_targets: FlowLinkTargets,
+    /// SRT relay `host:port` that `srt+relay://` URIs resolve to, if configured.
+    srt_relay: Option<String>,
 }
 
 impl BlockBuildContext {
@@ -203,6 +205,7 @@ impl BlockBuildContext {
             session_thread_config: SessionThreadConfig::new(),
             local_devices: Arc::new(Mutex::new(HashMap::new())),
             flow_link_targets: FlowLinkTargets::default(),
+            srt_relay: None,
         }
     }
 
@@ -227,7 +230,26 @@ impl BlockBuildContext {
             session_thread_config,
             local_devices,
             flow_link_targets: FlowLinkTargets::default(),
+            srt_relay: None,
         }
+    }
+
+    /// Set the SRT relay `host:port` that `srt+relay://` URIs resolve to.
+    pub fn with_srt_relay(mut self, srt_relay: Option<String>) -> Self {
+        self.srt_relay = srt_relay;
+        self
+    }
+
+    /// Resolve an SRT block's `srt_uri` into the URI for its `srtsrc` or
+    /// `srtsink`. Plain URIs pass through; `srt+relay://<id>` becomes a caller
+    /// URI to the configured relay with `role` as the block's own direction.
+    pub fn resolve_srt_uri(
+        &self,
+        uri: &str,
+        role: strom_types::srt_relay::SrtRelayRole,
+    ) -> Result<String, BlockBuildError> {
+        strom_types::srt_relay::resolve_srt_uri(uri, role, self.srt_relay.as_deref())
+            .map_err(|e| BlockBuildError::InvalidProperty(format!("srt_uri: {e}")))
     }
 
     /// The elements the flow links into. Empty while blocks build; block

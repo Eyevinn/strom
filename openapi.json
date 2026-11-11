@@ -5629,6 +5629,28 @@
         }
       }
     },
+    "/api/srt-relay": {
+      "get": {
+        "tags": [
+          "SRT Relay"
+        ],
+        "summary": "Report the SRT relay that `srt+relay://<id>` URIs dial out to.",
+        "description": "Whether an SRT relay is configured, its SRT address as Strom reaches it, and the public `host:port` the outside world dials (with `streamid=<id>`). `public` comes from `STROM_SRT_RELAY_PUBLIC` or is asked from the relay and cached; when it is not known, `error` says why. A server without a relay answers `configured: false`.",
+        "operationId": "get_srt_relay",
+        "responses": {
+          "200": {
+            "description": "SRT relay status, configured or not",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SrtRelayInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/system/clock": {
       "get": {
         "tags": [
@@ -10433,6 +10455,40 @@
           "rendezvous"
         ]
       },
+      "SrtRelayInfo": {
+        "type": "object",
+        "description": "SRT relay status, as `GET /api/srt-relay` reports it.",
+        "required": [
+          "configured"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "description": "Whether an SRT relay is configured (`STROM_SRT_RELAY`)."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why `public` is not known, if it is not."
+          },
+          "public": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The relay's public `host:port`, which the outside world dials.\n`null` when it is not known (see `error`)."
+          },
+          "relay": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The relay's SRT `host:port` as Strom reaches it."
+          }
+        }
+      },
       "SrtRole": {
         "type": "string",
         "description": "Direction in which an SRT element transports data.",
@@ -14824,6 +14880,10 @@
     {
       "name": "Network",
       "description": "Network interface discovery endpoints"
+    },
+    {
+      "name": "SRT Relay",
+      "description": "SRT relay (srt-splice) status for srt+relay:// URIs"
     },
     {
       "name": "ports",

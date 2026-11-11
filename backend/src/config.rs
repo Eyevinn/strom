@@ -25,6 +25,22 @@ struct ConfigFile {
     cef: CefConfig,
     #[serde(default)]
     media: MediaConfig,
+    #[serde(default)]
+    srt_relay: SrtRelaySection,
+}
+
+/// `[srt_relay]` section: an SRT relay (srt-splice) that `srt+relay://<id>`
+/// URIs in SRT blocks dial out to. Unset `relay` switches the feature off.
+/// Nothing here is contacted at startup.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SrtRelaySection {
+    /// `host:port` of the relay's SRT UDP port as Strom reaches it.
+    relay: Option<String>,
+    /// Base URL of the relay's HTTP API. Default `http://<relay host>:9001`.
+    api: Option<String>,
+    /// Public `host:port` the outside world dials. When set, the relay's API
+    /// is not asked for it.
+    public: Option<String>,
 }
 
 /// `[media]` section: downloading files from URLs into the media library.
@@ -228,6 +244,9 @@ const SCALAR_ENV_VARS: &[(&str, &str)] = &[
     ("STROM_STORAGE_CEF_CACHE_PATH", "storage.cef_cache_path"),
     ("STROM_LOGGING_LOG_FILE", "logging.log_file"),
     ("STROM_LOGGING_LOG_LEVEL", "logging.log_level"),
+    ("STROM_SRT_RELAY", "srt_relay.relay"),
+    ("STROM_SRT_RELAY_API", "srt_relay.api"),
+    ("STROM_SRT_RELAY_PUBLIC", "srt_relay.public"),
 ];
 
 /// Environment variables that map to a list config key, comma-separated.
@@ -316,6 +335,8 @@ pub struct Config {
     pub media_download_max_bytes: u64,
     /// Time allowed for one whole URL download, in seconds.
     pub media_download_timeout_seconds: u64,
+    /// SRT relay for `srt+relay://` URIs, or `None` when not configured.
+    pub srt_relay: Option<crate::srt_relay::SrtRelayConfig>,
 }
 
 /// Expand the `[ports] ports` entries into the pool.
@@ -430,6 +451,7 @@ impl Config {
             ports: PortsConfig::default(),
             cef: CefConfig::default(),
             media: MediaConfig::default(),
+            srt_relay: SrtRelaySection::default(),
         }));
 
         // 2. Merge user config file if it exists
@@ -640,6 +662,11 @@ impl Config {
                 "media.download_timeout_seconds",
                 config_file.media.download_timeout_seconds,
                 crate::media_download::DEFAULT_TOTAL_TIMEOUT_SECS,
+            )?,
+            srt_relay: crate::srt_relay::SrtRelayConfig::from_settings(
+                config_file.srt_relay.relay,
+                config_file.srt_relay.api,
+                config_file.srt_relay.public,
             )?,
         })
     }
@@ -1134,6 +1161,43 @@ data_dir = "{}"
         let config = Config::from_figment(None, None, None, None, None, None, None, None, None);
         let _ = std::env::set_current_dir(original_dir);
         config.unwrap()
+    }
+
+    #[test]
+    #[serial]
+    fn srt_relay_is_off_by_default() {
+        let _relay = EnvGuard::remove("STROM_SRT_RELAY");
+        let _api = EnvGuard::remove("STROM_SRT_RELAY_API");
+        let _public = EnvGuard::remove("STROM_SRT_RELAY_PUBLIC");
+        assert_eq!(config_from_env().srt_relay, None);
+    }
+
+    #[test]
+    #[serial]
+    fn srt_relay_env_vars() {
+        let _relay = EnvGuard::set("STROM_SRT_RELAY", "srt-splice:9000");
+        let _api = EnvGuard::remove("STROM_SRT_RELAY_API");
+        let _public = EnvGuard::set("STROM_SRT_RELAY_PUBLIC", "srt.example.com:9000");
+        let relay = config_from_env().srt_relay.unwrap();
+        assert_eq!(relay.relay, "srt-splice:9000");
+        assert_eq!(relay.api, "http://srt-splice:9001");
+        assert_eq!(relay.public.as_deref(), Some("srt.example.com:9000"));
+
+        let _api = EnvGuard::set("STROM_SRT_RELAY_API", "http://relay-api.example.com:8000");
+        let relay = config_from_env().srt_relay.unwrap();
+        assert_eq!(relay.api, "http://relay-api.example.com:8000");
+    }
+
+    #[test]
+    #[serial]
+    fn malformed_srt_relay_fails_config_loading() {
+        let _relay = EnvGuard::set("STROM_SRT_RELAY", "srt-splice");
+        let temp_dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+        let result = Config::from_figment(None, None, None, None, None, None, None, None, None);
+        let _ = std::env::set_current_dir(original_dir);
+        assert!(result.unwrap_err().to_string().contains("STROM_SRT_RELAY"));
     }
 
     #[test]

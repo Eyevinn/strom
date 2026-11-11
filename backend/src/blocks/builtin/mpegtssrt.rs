@@ -36,6 +36,7 @@ use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use strom_types::srt_relay::SrtRelayRole;
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
 
@@ -167,7 +168,7 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
         &self,
         instance_id: &str,
         properties: &HashMap<String, PropertyValue>,
-        _ctx: &BlockBuildContext,
+        ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         info!(
             "Building MPEG-TS/SRT Output block instance: {}",
@@ -182,6 +183,8 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
                 _ => None,
             })
             .unwrap_or_else(|| DEFAULT_SRT_OUTPUT_URI.to_string());
+        // `srt+relay://<id>` dials out to the configured SRT relay.
+        let srt_uri = ctx.resolve_srt_uri(&srt_uri, SrtRelayRole::Publish)?;
 
         // Get SRT latency
         let latency = properties
@@ -989,7 +992,7 @@ fn mpegtssrt_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "srt_uri".to_string(),
                 label: "SRT URI".to_string(),
-                description: "SRT URI (e.g., 'srt://127.0.0.1:5000?mode=caller' or 'srt://:5000?mode=listener')".to_string(),
+                description: "SRT URI, e.g. 'srt://127.0.0.1:5000?mode=caller', 'srt://:5000?mode=listener', or 'srt+relay://<id>' to send via the SRT relay".to_string(),
                 property_type: PropertyType::String,
                 default_value: Some(PropertyValue::String(DEFAULT_SRT_OUTPUT_URI.to_string())),
                 mapping: PropertyMapping {

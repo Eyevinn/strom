@@ -53,10 +53,18 @@ The common ones:
 | `STROM_SERVER_ICE_TRANSPORT_POLICY` | `all` (default) or `relay` to force WebRTC through TURN |
 | `STROM_PORTS` | Port numbers the pool hands out to callers (unset = pool off) — see [PORT_POOL.md](PORT_POOL.md) |
 | `STROM_TLS_CERT` / `STROM_TLS_KEY` | Built-in TLS (PEM) |
+| `STROM_SRT_RELAY` | `host:port` of an SRT relay ([srt-splice](https://github.com/Eyevinn/srt-splice)) as Strom reaches it, e.g. `srt-splice:9000`. SRT blocks with `srt_uri` `srt+relay://<id>` dial out to it instead of listening on a public port (unset = off) |
+| `STROM_SRT_RELAY_API` | Base URL of the relay's HTTP API (default `http://<relay host>:9001`), asked for the relay's public address |
+| `STROM_SRT_RELAY_PUBLIC` | Public `host:port` of the relay that the outside world dials; overrides what the relay reports |
 | `STROM_MEDIA_PATH` | Media library directory (default `media/` under the data directory) |
 | `STROM_LOGGING_STDOUT_LOG_FORMAT` | `json` for container log collectors |
 | `STROM_SOUP_HTTP2` | `true` lets libsoup (HTTP sources, HLS/DASH segments) use HTTP/2; it also overrides a `SOUP_FORCE_HTTP1` you set. Default `false`: HTTP/1.1, because libsoup's HTTP/2 buffers whole files in memory while a player is paused |
 | `RUST_LOG` | Logging level (default `info`) |
+
+With an SRT relay, an SRT block's `srt_uri` can be `srt+relay://<id>[?passphrase=...]`.
+Strom then connects to the relay as an SRT caller, and the other side connects to the relay
+with `srt://<relay public host:port>?streamid=<id>`. The relay need not be up when Strom
+starts. `GET /api/srt-relay` and the Links page show the public address.
 
 Volumes: mount `./data:/data` for persistent storage. The `/data` volume holds all of
 Strom's own state.

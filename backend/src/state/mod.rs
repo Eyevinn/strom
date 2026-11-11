@@ -1,6 +1,7 @@
 //! Application state management.
 
 mod ports;
+mod srt_relay;
 
 use crate::affinity_manager::AffinityManager;
 use crate::blocks::BlockRegistry;
@@ -125,6 +126,8 @@ struct AppStateInner {
     port_lease_ttl: parking_lot::Mutex<u64>,
     /// Whether to bind-probe a candidate before handing it out.
     port_probe: parking_lot::Mutex<bool>,
+    /// SRT relay for `srt+relay://` URIs. `None` until main configures one.
+    srt_relay: parking_lot::RwLock<Option<Arc<crate::srt_relay::SrtRelayService>>>,
 }
 
 /// Pick the ramp_ms that should apply to a single property in a batched
@@ -190,6 +193,7 @@ impl AppState {
                     strom_types::ports::DEFAULT_PORT_LEASE_TTL_SECS,
                 ),
                 port_probe: parking_lot::Mutex::new(true),
+                srt_relay: parking_lot::RwLock::new(None),
             }),
         }
     }
@@ -986,7 +990,7 @@ impl AppState {
 
         // Create pipeline with event broadcaster and block registry
         info!("Creating PipelineManager (this may block)...");
-        let mut manager = match PipelineManager::new(
+        let mut manager = match PipelineManager::new_with_srt_relay(
             &flow,
             self.inner.events.clone(),
             &self.inner.block_registry,
@@ -995,6 +999,7 @@ impl AppState {
             Some(self.inner.whip_registry.clone()),
             self.inner.media_path.clone(),
             local_devices,
+            self.srt_relay_address(),
         ) {
             Ok(manager) => manager,
             Err(e) => {
