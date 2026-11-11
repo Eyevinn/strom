@@ -1498,7 +1498,7 @@ impl StromApp {
                         }
 
                         // Handle VLC playlist download request (for MPEG-TS/SRT Output)
-                        if let Some((srt_uri, latency_ms)) = result.vlc_playlist_requested {
+                        if let Some((vlc_uri, latency_ms)) = result.vlc_playlist_requested {
                             // Get flow name for the stream title
                             let stream_name = self
                                 .current_flow()
@@ -1506,7 +1506,7 @@ impl StromApp {
                                 .unwrap_or_else(|| "SRT Stream".to_string());
 
                             let playlist_content =
-                                generate_vlc_playlist(&srt_uri, latency_ms, &stream_name);
+                                generate_vlc_playlist(&vlc_uri, latency_ms, &stream_name);
 
                             // Generate filename based on flow name
                             let safe_name: String = stream_name
@@ -1520,14 +1520,14 @@ impl StromApp {
 
                         // Handle VLC playlist download-only request (native mode)
                         #[cfg(not(target_arch = "wasm32"))]
-                        if let Some((srt_uri, latency_ms)) = result.vlc_playlist_download_only {
+                        if let Some((vlc_uri, latency_ms)) = result.vlc_playlist_download_only {
                             let stream_name = self
                                 .current_flow()
                                 .map(|f| f.name.clone())
                                 .unwrap_or_else(|| "SRT Stream".to_string());
 
                             let playlist_content =
-                                generate_vlc_playlist(&srt_uri, latency_ms, &stream_name);
+                                generate_vlc_playlist(&vlc_uri, latency_ms, &stream_name);
 
                             let safe_name: String = stream_name
                                 .chars()

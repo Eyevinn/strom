@@ -196,16 +196,45 @@ pub(crate) fn escape_xml(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-/// Generate XSPF playlist content for VLC to play an SRT stream.
-///
-/// If the block is in listener mode (e.g., `srt://:5000?mode=listener`), VLC needs to
-/// connect as a caller. We transform the URI to use the server's hostname from the
-/// current browser URL.
-pub fn generate_vlc_playlist(srt_uri: &str, latency_ms: i32, stream_name: &str) -> String {
-    // Transform URI if it's in listener mode - VLC needs to connect as caller
-    let vlc_uri = transform_srt_uri_for_vlc(srt_uri);
+/// Whether VLC can play this kind of SRT block at all: MPEG-TS/SRT Output only.
+/// EFP/SRT Output carries EFP, which VLC cannot demux, and VLC cannot send to
+/// an SRT input block.
+pub fn vlc_can_play_block(block_definition_id: &str) -> bool {
+    block_definition_id == "builtin.mpegtssrt_output"
+}
 
-    let escaped_uri = escape_xml(&vlc_uri);
+/// The URL VLC opens to play an SRT output block, or `None` when VLC cannot
+/// reach the block.
+///
+/// - A listener (`mode=listener`) is dialled at this server, see
+///   [`transform_srt_uri_for_vlc`].
+/// - An `srt+relay://` output is pulled from the relay's public address
+///   `relay_public`, with its passphrase. `None` while that is not known.
+///
+/// Only blocks that pass [`vlc_can_play_block`] qualify.
+pub fn vlc_player_uri(
+    block_definition_id: &str,
+    srt_uri: &str,
+    relay_public: Option<&str>,
+) -> Option<String> {
+    if !vlc_can_play_block(block_definition_id) {
+        return None;
+    }
+    match strom_types::srt_relay::parse_srt_relay_uri(srt_uri) {
+        Ok(Some(relay)) => {
+            relay_public.map(|public| strom_types::srt_relay::srt_relay_player_uri(public, &relay))
+        }
+        Err(_) => None,
+        // Default SRT mode is caller, so a listener needs explicit mode=listener.
+        Ok(None) if srt_uri.contains("mode=listener") => Some(transform_srt_uri_for_vlc(srt_uri)),
+        Ok(None) => None,
+    }
+}
+
+/// Generate XSPF playlist content for VLC to play the SRT stream at
+/// `vlc_uri`, the URL VLC opens (see [`vlc_player_uri`]).
+pub fn generate_vlc_playlist(vlc_uri: &str, latency_ms: i32, stream_name: &str) -> String {
+    let escaped_uri = escape_xml(vlc_uri);
 
     // Include SRT URL in the track title for easy identification
     let title_with_url = format!("{} ({})", stream_name, vlc_uri);
@@ -801,4 +830,104 @@ pub struct StromApp {
         crate::properties::LivePropertyKey,
         crate::properties::LivePropertyDebounce,
     >,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MPEGTS_OUT: &str = "builtin.mpegtssrt_output";
+    const PUBLIC: Option<&str> = Some("relay.example.com:9000");
+
+    #[test]
+    fn listener_is_dialled_at_this_server() {
+        assert_eq!(
+            vlc_player_uri(MPEGTS_OUT, "srt://:5000?mode=listener&latency=200", None).as_deref(),
+            Some("srt://127.0.0.1:5000?latency=200&mode=caller")
+        );
+    }
+
+    #[test]
+    fn listener_playlist_is_unchanged() {
+        let uri = vlc_player_uri(MPEGTS_OUT, "srt://:5000?mode=listener", PUBLIC).unwrap();
+        assert_eq!(
+            generate_vlc_playlist(&uri, 1000, "My Flow"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<playlist xmlns="http://xspf.org/ns/0/" xmlns:vlc="http://www.videolan.org/vlc/playlist/ns/0/" version="1">
+  <title>Strom SRT Stream</title>
+  <trackList>
+    <track>
+      <location>srt://127.0.0.1:5000?mode=caller</location>
+      <title>My Flow (srt://127.0.0.1:5000?mode=caller)</title>
+      <extension application="http://www.videolan.org/vlc/playlist/0">
+        <vlc:option>network-caching=1000</vlc:option>
+      </extension>
+    </track>
+  </trackList>
+</playlist>
+"#
+        );
+    }
+
+    #[test]
+    fn caller_output_has_no_player_uri() {
+        assert_eq!(
+            vlc_player_uri(MPEGTS_OUT, "srt://192.0.2.1:5000?mode=caller", PUBLIC),
+            None
+        );
+    }
+
+    #[test]
+    fn relay_output_is_pulled_from_the_relay_with_passphrase() {
+        let uri = vlc_player_uri(
+            MPEGTS_OUT,
+            "srt+relay://cam1?passphrase=abcdefghijkl&latency=200",
+            PUBLIC,
+        );
+        assert_eq!(
+            uri.as_deref(),
+            Some("srt://relay.example.com:9000?streamid=cam1&passphrase=abcdefghijkl")
+        );
+        let playlist = generate_vlc_playlist(&uri.unwrap(), 1000, "Flow");
+        assert!(playlist.contains(
+            "<location>srt://relay.example.com:9000?streamid=cam1&amp;passphrase=abcdefghijkl</location>"
+        ));
+    }
+
+    #[test]
+    fn relay_output_without_passphrase() {
+        assert_eq!(
+            vlc_player_uri(MPEGTS_OUT, "srt+relay://cam1", PUBLIC).as_deref(),
+            Some("srt://relay.example.com:9000?streamid=cam1")
+        );
+    }
+
+    #[test]
+    fn relay_output_needs_the_public_address() {
+        assert_eq!(vlc_player_uri(MPEGTS_OUT, "srt+relay://cam1", None), None);
+    }
+
+    #[test]
+    fn invalid_relay_uri_has_no_player_uri() {
+        assert_eq!(
+            vlc_player_uri(MPEGTS_OUT, "srt+relay://cam1?mode=listener", PUBLIC),
+            None
+        );
+    }
+
+    #[test]
+    fn only_mpegts_output_qualifies() {
+        for id in [
+            "builtin.mpegtssrt_input",
+            "builtin.efpsrt_input",
+            "builtin.efpsrt_output",
+        ] {
+            assert_eq!(vlc_player_uri(id, "srt+relay://cam1", PUBLIC), None, "{id}");
+            assert_eq!(
+                vlc_player_uri(id, "srt://:5000?mode=listener", PUBLIC),
+                None,
+                "{id}"
+            );
+        }
+    }
 }

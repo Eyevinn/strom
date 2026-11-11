@@ -150,9 +150,9 @@ pub struct BlockInspectorResult {
     pub browse_streams_requested: bool,
     /// Whether browse NDI sources was requested (for NDI Input)
     pub browse_ndi_sources_requested: bool,
-    /// VLC playlist download requested (for MPEG-TS/SRT blocks) - contains (srt_uri, latency_ms)
+    /// VLC playlist download requested (for MPEG-TS/SRT blocks) - contains (VLC URL, latency_ms)
     pub vlc_playlist_requested: Option<(String, i32)>,
-    /// VLC playlist download-only requested (native mode) - contains (srt_uri, latency_ms)
+    /// VLC playlist download-only requested (native mode) - contains (VLC URL, latency_ms)
     #[cfg(not(target_arch = "wasm32"))]
     pub vlc_playlist_download_only: Option<(String, i32)>,
     /// WHEP player endpoint_id (for WHEP Output blocks) - used to construct full player URL
@@ -655,7 +655,8 @@ impl PropertyInspector {
                 crate::app::set_local_storage("open_routing_editor", &block.id);
             }
 
-            // Download VLC Playlist button for MPEG-TS/SRT output blocks (only in listener mode)
+            // Open in VLC / Download buttons for MPEG-TS/SRT output blocks that
+            // VLC can reach: listeners and srt+relay:// outputs.
             if definition.id == "builtin.mpegtssrt_output" {
                 // Get SRT URI from block properties
                 let srt_uri = block
@@ -667,9 +668,16 @@ impl PropertyInspector {
                     })
                     .unwrap_or_else(|| DEFAULT_SRT_OUTPUT_URI.to_string());
 
-                // Only show buttons if in listener mode (VLC can connect to us)
-                // Default SRT mode is caller, so we need explicit mode=listener
-                if srt_uri.contains("mode=listener") {
+                if strom_types::srt_relay::is_srt_relay_uri(&srt_uri) {
+                    // The relay's public address is fetched on demand.
+                    result.srt_relay_needed = true;
+                }
+                let relay_public = srt_relay.public_or_note().ok();
+                if let Some(vlc_uri) = crate::app::vlc_player_uri(
+                    &definition.id,
+                    &srt_uri,
+                    relay_public.as_deref(),
+                ) {
                     // Use fixed network-caching for VLC (not tied to SRT buffer latency)
                     // 1000ms is a reasonable default for smooth playback
                     let network_caching_ms = 1000;
@@ -682,7 +690,7 @@ impl PropertyInspector {
                             .clicked()
                         {
                             result.vlc_playlist_requested =
-                                Some((srt_uri.clone(), network_caching_ms));
+                                Some((vlc_uri.clone(), network_caching_ms));
                         }
 
                         // Download-only button (native mode only - lets user save to specific location)
@@ -693,7 +701,7 @@ impl PropertyInspector {
                             .clicked()
                         {
                             result.vlc_playlist_download_only =
-                                Some((srt_uri.clone(), network_caching_ms));
+                                Some((vlc_uri.clone(), network_caching_ms));
                         }
                     });
                 }

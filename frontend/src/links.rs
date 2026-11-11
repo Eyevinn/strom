@@ -6,14 +6,28 @@ use strom_types::srt_relay::{parse_srt_relay_uri, srt_relay_dial_in_uri};
 use strom_types::{Flow, PropertyValue};
 
 use crate::api::ApiClient;
-use crate::app::{download_file, escape_xml, generate_vlc_playlist};
+use crate::app::{
+    download_file, escape_xml, generate_vlc_playlist, vlc_can_play_block, vlc_player_uri,
+};
 use crate::qr::QrCache;
 use crate::srt_relay::{srt_relay_direction, SrtRelayDirection, SrtRelayFetch, SrtRelayStatus};
 
-/// Information about an SRT listener stream.
-struct SrtListenerInfo {
-    flow_name: String,
-    srt_uri: String,
+/// An SRT stream VLC can play: a listener on this server or an output on the
+/// SRT relay.
+struct VlcStreamInfo {
+    /// Track name: the flow name, plus the block for a relay output.
+    name: String,
+    /// The URL VLC opens (see `crate::app::vlc_player_uri`).
+    vlc_uri: String,
+    /// `vlc_uri` carries a passphrase.
+    has_passphrase: bool,
+}
+
+/// The SRT streams VLC can play.
+struct VlcStreams {
+    streams: Vec<VlcStreamInfo>,
+    /// Relay outputs left out because the relay's public address is not known.
+    relay_outputs_without_public: usize,
 }
 
 /// A block whose `srt_uri` is `srt+relay://<id>`.
@@ -84,36 +98,56 @@ impl LinksPage {
         found
     }
 
-    /// Extract SRT listener streams from flows.
-    fn get_srt_listeners(flows: &[Flow]) -> Vec<SrtListenerInfo> {
-        let mut listeners = Vec::new();
+    /// Extract the SRT streams VLC can play from flows. `relay_public` is the
+    /// relay's public address, if known.
+    fn get_vlc_streams(flows: &[Flow], relay_public: Option<&str>) -> VlcStreams {
+        let mut found = VlcStreams {
+            streams: Vec::new(),
+            relay_outputs_without_public: 0,
+        };
 
         for flow in flows {
             for block in &flow.blocks {
-                if block.block_definition_id == "builtin.mpegtssrt_output" {
-                    if let Some(PropertyValue::String(srt_uri)) = block.properties.get("srt_uri") {
-                        if srt_uri.contains("mode=listener") {
-                            listeners.push(SrtListenerInfo {
-                                flow_name: flow.name.clone(),
-                                srt_uri: srt_uri.clone(),
-                            });
-                        }
+                let Some(PropertyValue::String(srt_uri)) = block.properties.get("srt_uri") else {
+                    continue;
+                };
+                let relay = parse_srt_relay_uri(srt_uri).ok().flatten();
+                match vlc_player_uri(&block.block_definition_id, srt_uri, relay_public) {
+                    Some(vlc_uri) => {
+                        let name = if relay.is_some() {
+                            let label = block.name.as_deref().unwrap_or(&block.id);
+                            format!("{} / {}", flow.name, label)
+                        } else {
+                            flow.name.clone()
+                        };
+                        found.streams.push(VlcStreamInfo {
+                            name,
+                            has_passphrase: relay.is_some_and(|r| r.has_param("passphrase")),
+                            vlc_uri,
+                        });
                     }
+                    None if relay.is_some()
+                        && relay_public.is_none()
+                        && vlc_can_play_block(&block.block_definition_id) =>
+                    {
+                        found.relay_outputs_without_public += 1;
+                    }
+                    None => {}
                 }
             }
         }
 
-        listeners
+        found.streams.sort_by(|a, b| a.name.cmp(&b.name));
+        found
     }
 
-    /// Generate a combined VLC playlist for all SRT listeners.
-    fn generate_combined_playlist(listeners: &[SrtListenerInfo]) -> String {
+    /// Generate a combined VLC playlist for all SRT streams VLC can play.
+    fn generate_combined_playlist(streams: &[VlcStreamInfo]) -> String {
         let mut tracks = String::new();
 
-        for listener in listeners {
-            let vlc_uri = crate::app::transform_srt_uri_for_vlc(&listener.srt_uri);
-            let escaped_uri = escape_xml(&vlc_uri);
-            let escaped_title = escape_xml(&format!("{} ({})", listener.flow_name, vlc_uri));
+        for stream in streams {
+            let escaped_uri = escape_xml(&stream.vlc_uri);
+            let escaped_title = escape_xml(&format!("{} ({})", stream.name, stream.vlc_uri));
 
             tracks.push_str(&format!(
                 r#"    <track>
@@ -178,7 +212,7 @@ impl LinksPage {
                         server_hostname,
                     ),
                     LinksTab::Srt => {
-                        self.render_srt_tab(ui, ctx, flows);
+                        self.render_srt_tab(ui, ctx, api, flows, srt_relay);
                         self.render_srt_relay_section(
                             ui,
                             ctx,
@@ -361,33 +395,54 @@ impl LinksPage {
         }
     }
 
-    fn render_srt_tab(&self, ui: &mut Ui, ctx: &Context, flows: &[Flow]) {
+    fn render_srt_tab(
+        &self,
+        ui: &mut Ui,
+        ctx: &Context,
+        api: &ApiClient,
+        flows: &[Flow],
+        srt_relay: &SrtRelayStatus,
+    ) {
         ui.heading("MPEG-TS/SRT Streams");
         ui.add_space(8.0);
-        ui.label("SRT listener streams that can be played with VLC or other players.");
+        ui.label(
+            "SRT streams that can be played with VLC or other players: listeners on this server and outputs on the SRT relay.",
+        );
         ui.add_space(16.0);
 
-        let mut listeners = Self::get_srt_listeners(flows);
-        listeners.sort_by(|a, b| a.flow_name.cmp(&b.flow_name));
+        let has_relay_blocks = !Self::get_srt_relay_blocks(flows).is_empty();
+        if has_relay_blocks {
+            srt_relay.ensure_requested(api, ctx);
+        }
+        let relay_public = srt_relay.get().public_or_note().ok();
+        let VlcStreams {
+            streams,
+            relay_outputs_without_public,
+        } = Self::get_vlc_streams(flows, relay_public.as_deref());
 
         egui::Frame::group(ui.style())
             .inner_margin(12.0)
             .show(ui, |ui| {
-                if listeners.is_empty() {
-                    ui.label(
-                        egui::RichText::new(
-                            "No SRT listener streams configured.\n\n\
-                             Add an MPEGTSSRT Output block with mode=listener to see streams here.",
-                        )
-                        .weak(),
-                    );
+                if streams.is_empty() {
+                    let text = if relay_outputs_without_public > 0 {
+                        "No SRT streams VLC can play yet.\n\n\
+                         The SRT relay outputs are listed here once the relay's public address is known (see Via SRT relay below)."
+                    } else if has_relay_blocks {
+                        "No SRT streams VLC can play here.\n\n\
+                         The SRT relay blocks below are reached through the relay. Add an MPEGTSSRT Output block \
+                         with mode=listener or srt+relay:// to play it in VLC."
+                    } else {
+                        "No SRT listener streams configured.\n\n\
+                         Add an MPEGTSSRT Output block with mode=listener to see streams here."
+                    };
+                    ui.label(egui::RichText::new(text).weak());
                 } else {
                     // Header with download all button
                     ui.horizontal(|ui| {
                         ui.strong(format!(
                             "{} stream{} available",
-                            listeners.len(),
-                            if listeners.len() == 1 { "" } else { "s" }
+                            streams.len(),
+                            if streams.len() == 1 { "" } else { "s" }
                         ));
 
                         if ui
@@ -398,7 +453,7 @@ impl LinksPage {
                             .on_hover_text("Download a VLC playlist containing all SRT streams")
                             .clicked()
                         {
-                            let content = Self::generate_combined_playlist(&listeners);
+                            let content = Self::generate_combined_playlist(&streams);
                             download_file(
                                 "strom-srt-streams.xspf",
                                 &content,
@@ -412,18 +467,21 @@ impl LinksPage {
                     ui.add_space(8.0);
 
                     // List individual streams
-                    for listener in &listeners {
-                        let client_uri = crate::app::transform_srt_uri_for_vlc(&listener.srt_uri);
-
+                    for stream in &streams {
                         ui.horizontal(|ui| {
-                            ui.label(&listener.flow_name);
+                            ui.label(&stream.name);
 
+                            let copy_hover = if stream.has_passphrase {
+                                "Copy URL to clipboard (includes the passphrase)"
+                            } else {
+                                stream.vlc_uri.as_str()
+                            };
                             if ui
                                 .small_button(egui_phosphor::regular::COPY)
-                                .on_hover_text(&client_uri)
+                                .on_hover_text(copy_hover)
                                 .clicked()
                             {
-                                crate::clipboard::copy_text_with_ctx(ctx, &client_uri);
+                                crate::clipboard::copy_text_with_ctx(ctx, &stream.vlc_uri);
                             }
 
                             if ui
@@ -435,12 +493,12 @@ impl LinksPage {
                                 .clicked()
                             {
                                 let content = generate_vlc_playlist(
-                                    &listener.srt_uri,
+                                    &stream.vlc_uri,
                                     1000,
-                                    &listener.flow_name,
+                                    &stream.name,
                                 );
-                                let safe_name: String = listener
-                                    .flow_name
+                                let safe_name: String = stream
+                                    .name
                                     .chars()
                                     .map(|c| {
                                         if c.is_alphanumeric() || c == '-' || c == '_' {
@@ -632,5 +690,88 @@ impl LinksPage {
                 crate::clipboard::copy_text_with_ctx(ctx, url);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use strom_types::block::{BlockInstance, Position};
+
+    fn block(id: &str, definition: &str, srt_uri: &str) -> BlockInstance {
+        BlockInstance {
+            id: id.to_string(),
+            block_definition_id: definition.to_string(),
+            name: None,
+            properties: [(
+                "srt_uri".to_string(),
+                PropertyValue::String(srt_uri.to_string()),
+            )]
+            .into(),
+            position: Position { x: 0.0, y: 0.0 },
+            runtime_data: None,
+            computed_external_pads: None,
+        }
+    }
+
+    fn flows() -> Vec<Flow> {
+        let mut flow = Flow::new("Show");
+        flow.blocks = vec![
+            block(
+                "out",
+                "builtin.mpegtssrt_output",
+                "srt://:5000?mode=listener",
+            ),
+            block(
+                "relay_out",
+                "builtin.mpegtssrt_output",
+                "srt+relay://cam1?passphrase=abcdefghijkl",
+            ),
+            block("relay_in", "builtin.mpegtssrt_input", "srt+relay://cam2"),
+            block("efp_out", "builtin.efpsrt_output", "srt+relay://cam3"),
+            block(
+                "caller",
+                "builtin.mpegtssrt_output",
+                "srt://192.0.2.1:5000?mode=caller",
+            ),
+        ];
+        vec![flow]
+    }
+
+    #[test]
+    fn listeners_and_relay_outputs_are_playable() {
+        let found = LinksPage::get_vlc_streams(&flows(), Some("relay.example.com:9000"));
+        let streams: Vec<_> = found
+            .streams
+            .iter()
+            .map(|s| (s.name.as_str(), s.vlc_uri.as_str(), s.has_passphrase))
+            .collect();
+        assert_eq!(
+            streams,
+            vec![
+                ("Show", "srt://127.0.0.1:5000?mode=caller", false),
+                (
+                    "Show / relay_out",
+                    "srt://relay.example.com:9000?streamid=cam1&passphrase=abcdefghijkl",
+                    true
+                ),
+            ]
+        );
+        assert_eq!(found.relay_outputs_without_public, 0);
+
+        let playlist = LinksPage::generate_combined_playlist(&found.streams);
+        assert!(playlist.contains(
+            "<location>srt://relay.example.com:9000?streamid=cam1&amp;passphrase=abcdefghijkl</location>"
+        ));
+        assert!(playlist.contains("<location>srt://127.0.0.1:5000?mode=caller</location>"));
+    }
+
+    #[test]
+    fn relay_outputs_wait_for_the_public_address() {
+        let found = LinksPage::get_vlc_streams(&flows(), None);
+        assert_eq!(found.streams.len(), 1);
+        assert_eq!(found.streams[0].name, "Show");
+        // Only the MPEG-TS relay output counts; inputs and EFP never play in VLC.
+        assert_eq!(found.relay_outputs_without_public, 1);
     }
 }

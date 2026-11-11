@@ -220,6 +220,39 @@ pub fn srt_relay_dial_in_uri(public: &str, id: &str) -> String {
     format!("srt://{}?streamid={}", public, id)
 }
 
+/// Query parameters of the relay URI that a player needs to decrypt the stream.
+const PLAYER_PARAMS: &[&str] = &["passphrase", "pbkeylen"];
+
+/// The URI a player such as VLC opens to pull an SRT output block from the
+/// relay: the dial-in URI plus the block's `passphrase` and `pbkeylen`, if it
+/// has them. Their values are percent-encoded where they are not URI
+/// unreserved characters (generated passphrases never need it).
+pub fn srt_relay_player_uri(public: &str, relay: &SrtRelayUri) -> String {
+    let mut uri = srt_relay_dial_in_uri(public, &relay.id);
+    for name in PLAYER_PARAMS {
+        if let Some(value) = relay.param(name).filter(|v| !v.is_empty()) {
+            uri.push('&');
+            uri.push_str(name);
+            uri.push('=');
+            uri.push_str(&percent_encode(&value));
+        }
+    }
+    uri
+}
+
+/// Percent-encode everything but the URI unreserved characters.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// Random bytes behind a new stream id: 128 bits, 22 characters.
 pub const SRT_RELAY_NEW_ID_BYTES: usize = 16;
 /// Random bytes behind a new passphrase: 192 bits, 32 characters (SRT
@@ -318,6 +351,44 @@ mod tests {
     use super::*;
 
     const RELAY: Option<&str> = Some("srt-splice:9000");
+
+    fn player(uri: &str) -> String {
+        let parsed = parse_srt_relay_uri(uri).unwrap().unwrap();
+        srt_relay_player_uri("relay.example.com:9000", &parsed)
+    }
+
+    #[test]
+    fn player_uri_without_passphrase() {
+        assert_eq!(
+            player("srt+relay://cam1?latency=200"),
+            "srt://relay.example.com:9000?streamid=cam1"
+        );
+    }
+
+    #[test]
+    fn player_uri_with_passphrase_and_pbkeylen() {
+        assert_eq!(
+            player("srt+relay://cam1?latency=200&passphrase=abcdefghij_-12&pbkeylen=32"),
+            "srt://relay.example.com:9000?streamid=cam1&passphrase=abcdefghij_-12&pbkeylen=32"
+        );
+    }
+
+    #[test]
+    fn player_uri_encodes_passphrase() {
+        // `a%26b c` decodes to `a&b c`, which is encoded again for the player.
+        assert_eq!(
+            player("srt+relay://cam1?passphrase=a%26b c#d=e"),
+            "srt://relay.example.com:9000?streamid=cam1&passphrase=a%26b%20c%23d%3De"
+        );
+    }
+
+    #[test]
+    fn player_uri_skips_empty_passphrase() {
+        assert_eq!(
+            player("srt+relay://cam1?passphrase="),
+            "srt://relay.example.com:9000?streamid=cam1"
+        );
+    }
 
     #[test]
     fn input_resolves_to_request() {
