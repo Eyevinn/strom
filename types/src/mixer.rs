@@ -10,6 +10,10 @@ pub const DEFAULT_PAN: f32 = 0.0;
 // HPF
 pub const DEFAULT_HPF_FREQ: f32 = 80.0;
 
+// Voice isolation
+/// An attenuation limit at or above this means no limit.
+pub const VOICE_ISOLATION_NO_LIMIT_DB: f32 = 100.0;
+
 // Gate
 pub const DEFAULT_GATE_THRESHOLD: f32 = -40.0;
 pub const DEFAULT_GATE_ATTACK: f32 = 5.0;
