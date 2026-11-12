@@ -31,16 +31,14 @@ struct ConfigFile {
 
 /// `[srt_relay]` section: an SRT relay (srt-splice) that `srt+relay://<id>`
 /// URIs in SRT blocks dial out to. Unset `relay` switches the feature off.
-/// Nothing here is contacted at startup.
+/// Nothing here is contacted.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct SrtRelaySection {
-    /// `host:port` of the relay's SRT UDP port as Strom reaches it.
+    /// The relay's public SRT `host:port`, which the outside world dials.
+    /// Strom dials it too unless `internal` is set.
     relay: Option<String>,
-    /// Base URL of the relay's HTTP API. Default `http://<relay host>:9001`.
-    api: Option<String>,
-    /// Public `host:port` the outside world dials. When set, the relay's API
-    /// is not asked for it.
-    public: Option<String>,
+    /// `host:port` Strom dials instead, when it sits next to the relay.
+    internal: Option<String>,
 }
 
 /// `[media]` section: downloading files from URLs into the media library.
@@ -245,8 +243,7 @@ const SCALAR_ENV_VARS: &[(&str, &str)] = &[
     ("STROM_LOGGING_LOG_FILE", "logging.log_file"),
     ("STROM_LOGGING_LOG_LEVEL", "logging.log_level"),
     ("STROM_SRT_RELAY", "srt_relay.relay"),
-    ("STROM_SRT_RELAY_API", "srt_relay.api"),
-    ("STROM_SRT_RELAY_PUBLIC", "srt_relay.public"),
+    ("STROM_SRT_RELAY_INTERNAL", "srt_relay.internal"),
 ];
 
 /// Environment variables that map to a list config key, comma-separated.
@@ -665,8 +662,7 @@ impl Config {
             )?,
             srt_relay: crate::srt_relay::SrtRelayConfig::from_settings(
                 config_file.srt_relay.relay,
-                config_file.srt_relay.api,
-                config_file.srt_relay.public,
+                config_file.srt_relay.internal,
             )?,
         })
     }
@@ -1167,37 +1163,43 @@ data_dir = "{}"
     #[serial]
     fn srt_relay_is_off_by_default() {
         let _relay = EnvGuard::remove("STROM_SRT_RELAY");
-        let _api = EnvGuard::remove("STROM_SRT_RELAY_API");
-        let _public = EnvGuard::remove("STROM_SRT_RELAY_PUBLIC");
+        let _internal = EnvGuard::remove("STROM_SRT_RELAY_INTERNAL");
         assert_eq!(config_from_env().srt_relay, None);
     }
 
     #[test]
     #[serial]
     fn srt_relay_env_vars() {
-        let _relay = EnvGuard::set("STROM_SRT_RELAY", "srt-splice:9000");
-        let _api = EnvGuard::remove("STROM_SRT_RELAY_API");
-        let _public = EnvGuard::set("STROM_SRT_RELAY_PUBLIC", "srt.example.com:9000");
+        let _relay = EnvGuard::set("STROM_SRT_RELAY", "srt.example.com:9000");
+        let _internal = EnvGuard::remove("STROM_SRT_RELAY_INTERNAL");
         let relay = config_from_env().srt_relay.unwrap();
-        assert_eq!(relay.relay, "srt-splice:9000");
-        assert_eq!(relay.api, "http://srt-splice:9001");
-        assert_eq!(relay.public.as_deref(), Some("srt.example.com:9000"));
+        assert_eq!(relay.public, "srt.example.com:9000");
+        assert_eq!(relay.dial_address(), "srt.example.com:9000");
 
-        let _api = EnvGuard::set("STROM_SRT_RELAY_API", "http://relay-api.example.com:8000");
+        let _internal = EnvGuard::set("STROM_SRT_RELAY_INTERNAL", "srt-splice:9000");
         let relay = config_from_env().srt_relay.unwrap();
-        assert_eq!(relay.api, "http://relay-api.example.com:8000");
+        assert_eq!(relay.public, "srt.example.com:9000");
+        assert_eq!(relay.dial_address(), "srt-splice:9000");
     }
 
     #[test]
     #[serial]
     fn malformed_srt_relay_fails_config_loading() {
+        let load = || {
+            let temp_dir = TempDir::new().unwrap();
+            let original_dir = std::env::current_dir().unwrap();
+            std::env::set_current_dir(&temp_dir).unwrap();
+            let result = Config::from_figment(None, None, None, None, None, None, None, None, None);
+            let _ = std::env::set_current_dir(original_dir);
+            result.unwrap_err().to_string()
+        };
+        let _internal = EnvGuard::remove("STROM_SRT_RELAY_INTERNAL");
         let _relay = EnvGuard::set("STROM_SRT_RELAY", "srt-splice");
-        let temp_dir = TempDir::new().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&temp_dir).unwrap();
-        let result = Config::from_figment(None, None, None, None, None, None, None, None, None);
-        let _ = std::env::set_current_dir(original_dir);
-        assert!(result.unwrap_err().to_string().contains("STROM_SRT_RELAY"));
+        assert!(load().contains("STROM_SRT_RELAY"));
+
+        let _relay = EnvGuard::set("STROM_SRT_RELAY", "srt.example.com:9000");
+        let _internal = EnvGuard::set("STROM_SRT_RELAY_INTERNAL", "srt-splice");
+        assert!(load().contains("STROM_SRT_RELAY_INTERNAL"));
     }
 
     #[test]

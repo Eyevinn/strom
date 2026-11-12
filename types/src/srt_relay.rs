@@ -129,7 +129,7 @@ impl std::fmt::Display for SrtRelayUriError {
             ),
             SrtRelayUriError::NotConfigured => write!(
                 f,
-                "{} URI used but no SRT relay is configured: set STROM_SRT_RELAY to the relay's host:port",
+                "{} URI used but no SRT relay is configured: set STROM_SRT_RELAY to the relay's public host:port",
                 SRT_RELAY_SCHEME
             ),
         }
@@ -405,12 +405,13 @@ pub fn renew_srt_relay_uri(uri: &str) -> Option<String> {
 pub struct SrtRelayInfo {
     /// Whether an SRT relay is configured (`STROM_SRT_RELAY`).
     pub configured: bool,
-    /// The relay's SRT `host:port` as Strom reaches it.
+    /// The relay's SRT `host:port` that Strom dials: `STROM_SRT_RELAY_INTERNAL`
+    /// if set, else `STROM_SRT_RELAY`.
     pub relay: Option<String>,
-    /// The relay's public `host:port`, which the outside world dials.
-    /// `null` when it is not known (see `error`).
+    /// The relay's public `host:port` (`STROM_SRT_RELAY`), which the outside
+    /// world dials. Set whenever `configured` is.
     pub public: Option<String>,
-    /// Why `public` is not known, if it is not.
+    /// Reserved, always `null`. Kept so clients that read it keep working.
     pub error: Option<String>,
 }
 

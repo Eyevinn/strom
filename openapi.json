@@ -5635,7 +5635,7 @@
           "SRT Relay"
         ],
         "summary": "Report the SRT relay that `srt+relay://<id>` URIs dial out to.",
-        "description": "Whether an SRT relay is configured, its SRT address as Strom reaches it, and the public `host:port` the outside world dials (with `streamid=<id>`). `public` comes from `STROM_SRT_RELAY_PUBLIC` or is asked from the relay and cached; when it is not known, `error` says why. A server without a relay answers `configured: false`.",
+        "description": "Whether an SRT relay is configured, the SRT address Strom dials (`STROM_SRT_RELAY_INTERNAL` if set, else `STROM_SRT_RELAY`), and the public `host:port` the outside world dials with `streamid=<id>` (`STROM_SRT_RELAY`). Read from the configuration only; the relay is not contacted. A server without a relay answers `configured: false`.",
         "operationId": "get_srt_relay",
         "responses": {
           "200": {
@@ -10471,21 +10471,21 @@
               "string",
               "null"
             ],
-            "description": "Why `public` is not known, if it is not."
+            "description": "Reserved, always `null`. Kept so clients that read it keep working."
           },
           "public": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The relay's public `host:port`, which the outside world dials.\n`null` when it is not known (see `error`)."
+            "description": "The relay's public `host:port` (`STROM_SRT_RELAY`), which the outside\nworld dials. Set whenever `configured` is."
           },
           "relay": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The relay's SRT `host:port` as Strom reaches it."
+            "description": "The relay's SRT `host:port` that Strom dials: `STROM_SRT_RELAY_INTERNAL`\nif set, else `STROM_SRT_RELAY`."
           }
         }
       },

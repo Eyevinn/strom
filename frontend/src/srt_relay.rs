@@ -78,19 +78,14 @@ impl SrtRelayFetch {
     /// The relay's public address, or a note saying why it is not known.
     pub fn public_or_note(&self) -> Result<String, String> {
         match self {
-            SrtRelayFetch::Loaded(info) if !info.configured => {
+            SrtRelayFetch::Loaded(SrtRelayInfo {
+                configured: true,
+                public: Some(public),
+                ..
+            }) => Ok(public.clone()),
+            SrtRelayFetch::Loaded(_) => {
                 Err("No SRT relay is configured on this server (STROM_SRT_RELAY).".to_string())
             }
-            SrtRelayFetch::Loaded(info) => match &info.public {
-                Some(public) => Ok(public.clone()),
-                None => Err(format!(
-                    "The relay's public address is not known{}.",
-                    info.error
-                        .as_ref()
-                        .map(|e| format!(": {e}"))
-                        .unwrap_or_default()
-                )),
-            },
             SrtRelayFetch::Failed(e) => Err(format!("Could not ask for the SRT relay status: {e}")),
             SrtRelayFetch::NotRequested | SrtRelayFetch::Loading => {
                 Err("Asking for the SRT relay status...".to_string())
@@ -487,26 +482,22 @@ mod tests {
 
     #[test]
     fn public_or_note_explains_a_missing_address() {
-        let info = |configured, public: Option<&str>, error: Option<&str>| {
+        let info = |configured, public: Option<&str>| {
             SrtRelayFetch::Loaded(SrtRelayInfo {
                 configured,
                 relay: configured.then(|| "relay:9000".to_string()),
                 public: public.map(str::to_string),
-                error: error.map(str::to_string),
+                error: None,
             })
         };
         assert_eq!(
-            info(true, Some("srt.example.com:9000"), None).public_or_note(),
+            info(true, Some("srt.example.com:9000")).public_or_note(),
             Ok("srt.example.com:9000".to_string())
         );
-        assert!(info(false, None, None)
+        assert!(info(false, None)
             .public_or_note()
             .unwrap_err()
             .contains("STROM_SRT_RELAY"));
-        assert!(info(true, None, Some("timeout"))
-            .public_or_note()
-            .unwrap_err()
-            .contains("timeout"));
         assert!(SrtRelayFetch::Loading.public_or_note().is_err());
         assert_eq!(SrtRelayFetch::Loading.configured(), None);
     }

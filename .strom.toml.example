@@ -240,19 +240,15 @@ port = 8080
 
 [srt_relay]
 # SRT relay (srt-splice) that SRT blocks with srt_uri "srt+relay://<id>" dial
-# out to, so Strom needs no public SRT listener port. host:port of the relay's
-# SRT UDP port as Strom reaches it. Unset = off. The relay is not contacted at
-# startup and may start after Strom.
+# out to, so Strom needs no public SRT listener port. Public host:port of the
+# relay's SRT UDP port: Strom dials it, and the outside party dials
+# srt://<relay>?streamid=<id>. Unset = off. Strom never contacts the relay
+# other than through the SRT blocks, so it may start after Strom.
 # Env: STROM_SRT_RELAY
-# relay = "srt-splice:9000"
+# relay = "srt.example.com:9000"
 
-# Base URL of the relay's HTTP API, asked for the relay's public address
-# (GET /api/srt-relay, Links page).
-# Default: http://<relay host>:9001
-# Env: STROM_SRT_RELAY_API
-# api = "http://srt-splice:9001"
-
-# Public host:port of the relay that the outside world dials. When set, the
-# relay's API is not asked.
-# Env: STROM_SRT_RELAY_PUBLIC
-# public = "srt.example.com:9000"
+# host:port Strom dials instead of the public address, when it runs next to
+# the relay (same cluster or host), to avoid hairpin NAT. The public address
+# above is then only shown to the outside party.
+# Env: STROM_SRT_RELAY_INTERNAL
+# internal = "srt-splice:9000"

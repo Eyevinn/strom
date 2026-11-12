@@ -12,7 +12,7 @@ use crate::app::{
     download_file, escape_xml, generate_vlc_playlist, vlc_can_play_block, vlc_player_uri,
 };
 use crate::qr::QrCache;
-use crate::srt_relay::{dial_in_action, SrtRelayFetch, SrtRelayStatus};
+use crate::srt_relay::{dial_in_action, SrtRelayStatus};
 
 /// An SRT stream VLC can play: a listener on this server or an output on the
 /// SRT relay.
@@ -447,7 +447,7 @@ impl LinksPage {
                 if streams.is_empty() {
                     let text = if relay_outputs_without_public > 0 {
                         "No SRT streams VLC can play yet.\n\n\
-                         The SRT relay outputs are listed here once the relay's public address is known (see Via SRT relay below)."
+                         The SRT relay outputs are listed here once the SRT relay status is known (see Via SRT relay below)."
                     } else if has_relay_blocks {
                         "No SRT streams VLC can play here.\n\n\
                          The SRT relay blocks below are reached through the relay. Add an MPEGTSSRT Output block \
@@ -562,10 +562,6 @@ impl LinksPage {
             Err(note) if relay.configured() == Some(false) => {
                 (None, Some(format!("{note} These blocks will not start.")))
             }
-            Err(note) if matches!(relay, SrtRelayFetch::Loaded(_)) => (
-                None,
-                Some(format!("{note} Dial the relay with streamid=<id>.")),
-            ),
             Err(note) => (None, Some(note)),
         };
 
@@ -577,7 +573,7 @@ impl LinksPage {
                     ui.strong("Via SRT relay");
                     if ui
                         .small_button(egui_phosphor::regular::ARROWS_CLOCKWISE)
-                        .on_hover_text("Ask the server for the relay's public address again")
+                        .on_hover_text("Ask the server for the SRT relay status again")
                         .clicked()
                     {
                         srt_relay.refresh(api, ctx);

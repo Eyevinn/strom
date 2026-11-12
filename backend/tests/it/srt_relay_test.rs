@@ -192,39 +192,66 @@ fn relay_input_flow(srt_uri: &str) -> strom_types::Flow {
     flow
 }
 
-/// The relay configured on the server reaches the blocks of a flow it starts.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_started_flow_dials_the_configured_relay() {
-    common::init_static_plugins();
-    // A local UDP port nobody answers on: the caller just keeps retrying.
-    let relay = std::net::UdpSocket::bind("127.0.0.1:0")
-        .and_then(|s| s.local_addr())
-        .map(|a| a.to_string())
-        .unwrap();
-    let state = common::state::new();
-    state.configure_srt_relay(
-        strom::srt_relay::SrtRelayConfig::from_settings(Some(relay.clone()), None, None).unwrap(),
-    );
-    let flow = relay_input_flow("srt+relay://cam1?latency=200");
+/// Start `flow` on `state` and return the `uri` its `relay_in` srtsrc got.
+async fn started_srtsrc_uri(state: &strom::state::AppState, flow: strom_types::Flow) -> String {
     let flow_id = flow.id;
     state.upsert_flow(flow).await.unwrap();
     state.start_flow(&flow_id).await.expect("start_flow");
-
     let props = state
         .get_element_properties(&flow_id, "relay_in:srtsrc")
         .await
         .expect("srtsrc properties");
-    let Some(PropertyValue::String(uri)) = props.get("uri") else {
-        panic!("srtsrc has no uri: {:?}", props.get("uri"));
-    };
     state.stop_flow(&flow_id).await.unwrap();
+    match props.get("uri") {
+        Some(PropertyValue::String(uri)) => uri.clone(),
+        other => panic!("srtsrc has no uri: {other:?}"),
+    }
+}
+
+/// A local UDP address nobody answers on: an SRT caller just keeps retrying.
+fn silent_udp_address() -> String {
+    std::net::UdpSocket::bind("127.0.0.1:0")
+        .and_then(|s| s.local_addr())
+        .map(|a| a.to_string())
+        .unwrap()
+}
+
+/// The relay configured on the server reaches the blocks of a flow it starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_started_flow_dials_the_configured_relay() {
+    common::init_static_plugins();
+    let relay = silent_udp_address();
+    let state = common::state::new();
+    state.configure_srt_relay(
+        strom::srt_relay::SrtRelayConfig::from_settings(Some(relay.clone()), None).unwrap(),
+    );
+    let uri = started_srtsrc_uri(&state, relay_input_flow("srt+relay://cam1?latency=200")).await;
 
     assert!(uri.starts_with(&format!("srt://{relay}?")), "{uri}");
     assert!(uri.contains("mode=caller"), "{uri}");
     assert!(
-        decode(uri).contains("streamid=#!::r=cam1,m=request"),
+        decode(&uri).contains("streamid=#!::r=cam1,m=request"),
         "{uri}"
     );
+}
+
+/// With `STROM_SRT_RELAY_INTERNAL` set, Strom dials the internal address and
+/// the public one is only shown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_started_flow_dials_the_internal_relay_address() {
+    common::init_static_plugins();
+    let internal = silent_udp_address();
+    let state = common::state::new();
+    state.configure_srt_relay(
+        strom::srt_relay::SrtRelayConfig::from_settings(
+            Some("srt.example.com:9000".into()),
+            Some(internal.clone()),
+        )
+        .unwrap(),
+    );
+    let uri = started_srtsrc_uri(&state, relay_input_flow("srt+relay://cam1")).await;
+    assert!(uri.starts_with(&format!("srt://{internal}?")), "{uri}");
+    assert!(!uri.contains("srt.example.com"), "{uri}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -297,22 +324,35 @@ mod api {
         );
     }
 
-    #[tokio::test]
-    async fn configured_relay_with_public_override() {
+    async fn configured(public: &str, internal: Option<&str>) -> Value {
         gstreamer::init().unwrap();
         let state = crate::common::state::new();
         state.configure_srt_relay(
-            SrtRelayConfig::from_settings(
-                Some("srt-splice:9000".into()),
-                None,
-                Some("srt.example.com:9000".into()),
-            )
-            .unwrap(),
+            SrtRelayConfig::from_settings(Some(public.into()), internal.map(str::to_string))
+                .unwrap(),
         );
         let (status, body) = get(&app(&state, None).await, None).await;
         assert_eq!(status, StatusCode::OK);
+        body
+    }
+
+    #[tokio::test]
+    async fn configured_relay_is_dialed_and_shown() {
         assert_eq!(
-            body,
+            configured("srt.example.com:9000", None).await,
+            json!({
+                "configured": true,
+                "relay": "srt.example.com:9000",
+                "public": "srt.example.com:9000",
+                "error": null
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_address_is_dialed_and_public_is_shown() {
+        assert_eq!(
+            configured("srt.example.com:9000", Some("srt-splice:9000")).await,
             json!({
                 "configured": true,
                 "relay": "srt-splice:9000",

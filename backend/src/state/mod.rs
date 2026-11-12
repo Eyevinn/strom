@@ -127,7 +127,7 @@ struct AppStateInner {
     /// Whether to bind-probe a candidate before handing it out.
     port_probe: parking_lot::Mutex<bool>,
     /// SRT relay for `srt+relay://` URIs. `None` until main configures one.
-    srt_relay: parking_lot::RwLock<Option<Arc<crate::srt_relay::SrtRelayService>>>,
+    srt_relay: parking_lot::RwLock<Option<crate::srt_relay::SrtRelayConfig>>,
 }
 
 /// Pick the ramp_ms that should apply to a single property in a batched

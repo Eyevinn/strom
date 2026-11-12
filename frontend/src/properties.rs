@@ -670,7 +670,7 @@ impl PropertyInspector {
                     .unwrap_or_else(|| DEFAULT_SRT_OUTPUT_URI.to_string());
 
                 if strom_types::srt_relay::is_srt_relay_uri(&srt_uri) {
-                    // The relay's public address is fetched on demand.
+                    // The relay status is asked from the server on demand.
                     result.srt_relay_needed = true;
                 }
                 let relay_public = srt_relay.public_or_note().ok();
