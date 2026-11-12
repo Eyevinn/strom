@@ -17,8 +17,8 @@ use std::collections::HashSet;
 use egui::{Color32, RichText, Ui};
 use strom_types::block::ExposedProperty;
 use strom_types::srt_relay::{
-    mask_srt_uri, new_srt_passphrase, new_srt_relay_id, srt_relay_dial_in_uri,
-    strip_srt_uri_secrets, SrtRelayRole, SRT_RELAY_MIN_SAFE_ID_LEN,
+    mask_srt_uri, new_srt_passphrase, new_srt_relay_id, parse_srt_relay_uri, srt_relay_dial_in_uri,
+    srt_relay_player_uri, SrtRelayRole, SRT_RELAY_MIN_SAFE_ID_LEN,
 };
 use strom_types::srt_uri::{
     is_short_relay_stream_id, is_valid_relay_stream_id, passphrase_problem, SrtConnectionMode,
@@ -263,7 +263,7 @@ pub fn show_connection(
                 ui.colored_label(MODIFIED, "• Type:")
                     .on_hover_text("Changed from the default");
             } else {
-                ui.label("Type:");
+                ui.label("Connection Type");
             }
             let picked = ui
                 .add_enabled_ui(readable, |ui| {
@@ -553,9 +553,11 @@ pub fn connect_heading(role: SrtRelayRole) -> &'static str {
     }
 }
 
-/// The URL the other side dials, without any passphrase, for a block whose
-/// `srt_uri` is `uri`: the listener at this server, or the relay with the
-/// stream ID. `Ok(None)` for a caller (Strom dials out, nobody dials in) and
+/// The URL the other side dials for a block whose `srt_uri` is `uri`: the
+/// listener at this server, or the relay with the stream ID. It includes the
+/// passphrase (and key length), in clear: the operator configures the block
+/// and pastes this into the other device, and can see the passphrase here
+/// anyway. `Ok(None)` for a caller (Strom dials out, nobody dials in) and
 /// for a URI that cannot be read; `Err(note)` when the relay address is not
 /// known.
 pub fn connect_url(uri: &str, relay: &SrtRelayFetch) -> Result<Option<String>, String> {
@@ -564,13 +566,15 @@ pub fn connect_url(uri: &str, relay: &SrtRelayFetch) -> Result<Option<String>, S
     };
     match fields.mode {
         SrtConnectionMode::Caller => Ok(None),
-        SrtConnectionMode::Listener => Ok(Some(strip_srt_uri_secrets(
-            &crate::app::transform_srt_uri_for_vlc(uri.trim()),
-        ))),
+        SrtConnectionMode::Listener => Ok(Some(crate::app::transform_srt_uri_for_vlc(uri.trim()))),
         SrtConnectionMode::Relay if !is_valid_relay_stream_id(&fields.stream_id) => Ok(None),
-        SrtConnectionMode::Relay => relay
-            .public_or_note()
-            .map(|public| Some(srt_relay_dial_in_uri(&public, &fields.stream_id))),
+        SrtConnectionMode::Relay => {
+            let public = relay.public_or_note()?;
+            Ok(Some(match parse_srt_relay_uri(uri.trim()) {
+                Ok(Some(parsed)) => srt_relay_player_uri(&public, &parsed),
+                _ => srt_relay_dial_in_uri(&public, &fields.stream_id),
+            }))
+        }
     }
 }
 
@@ -615,10 +619,7 @@ pub fn show_connect_actions(
     ui.horizontal(|ui| {
         if ui
             .button(format!("{} Copy address", egui_phosphor::regular::COPY))
-            .on_hover_text(format!(
-                "{}:\n{url}\n\nCopied without the passphrase.",
-                connect_heading(ctx.role)
-            ))
+            .on_hover_text(format!("{}:\n{url}", connect_heading(ctx.role)))
             .clicked()
         {
             crate::clipboard::copy_text_with_ctx(ui.ctx(), &url);
@@ -758,12 +759,13 @@ mod tests {
     }
 
     #[test]
-    fn a_relay_connect_url_has_no_passphrase() {
+    fn a_relay_connect_url_carries_the_passphrase() {
         let uri = "srt+relay://cam1cam1cam1cam1?passphrase=abcdefghijkl&pbkeylen=32";
         assert_eq!(
             connect_url(uri, &relay(Some("relay.example.com:9000"))),
             Ok(Some(
-                "srt://relay.example.com:9000?streamid=cam1cam1cam1cam1".to_string()
+                "srt://relay.example.com:9000?streamid=cam1cam1cam1cam1&passphrase=abcdefghijkl&pbkeylen=32"
+                    .to_string()
             ))
         );
         let note = connect_url(uri, &relay(None)).unwrap_err();
@@ -771,15 +773,18 @@ mod tests {
     }
 
     #[test]
-    fn a_listener_connect_url_has_no_passphrase() {
+    fn a_listener_connect_url_carries_the_passphrase() {
         let url = connect_url(
             "srt://:5000?mode=listener&passphrase=abcdefghijkl&latency=200",
             &relay(None),
         )
         .unwrap()
         .unwrap();
-        assert!(!url.contains("abcdefghijkl"), "{url}");
-        assert!(url.ends_with(":5000?latency=200&mode=caller"), "{url}");
+        assert!(url.contains("passphrase=abcdefghijkl"), "{url}");
+        assert!(
+            url.ends_with(":5000?passphrase=abcdefghijkl&latency=200&mode=caller"),
+            "{url}"
+        );
     }
 
     #[test]
