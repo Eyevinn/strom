@@ -410,11 +410,10 @@ pub fn show_connection(
                 {
                     crate::clipboard::copy_text_with_ctx(ui.ctx(), &fields.stream_id);
                 }
-                if relay
-                    && ui
-                        .small_button(egui_phosphor::regular::ARROWS_CLOCKWISE)
-                        .on_hover_text("Generate a new random stream ID")
-                        .clicked()
+                if ui
+                    .small_button(egui_phosphor::regular::ARROWS_CLOCKWISE)
+                    .on_hover_text("Generate a new random stream ID")
+                    .clicked()
                 {
                     new_stream_id = true;
                 }
