@@ -400,10 +400,20 @@ pub fn show_connection(
                         id
                     };
                 }
+                if ui
+                    .add_enabled(
+                        !fields.stream_id.is_empty(),
+                        egui::Button::new(egui_phosphor::regular::COPY).small(),
+                    )
+                    .on_hover_text("Copy stream ID")
+                    .clicked()
+                {
+                    crate::clipboard::copy_text_with_ctx(ui.ctx(), &fields.stream_id);
+                }
                 if relay
                     && ui
-                        .small_button("Generate")
-                        .on_hover_text("Set a new random stream ID")
+                        .small_button(egui_phosphor::regular::ARROWS_CLOCKWISE)
+                        .on_hover_text("Generate a new random stream ID")
                         .clicked()
                 {
                     new_stream_id = true;
@@ -456,14 +466,6 @@ pub fn show_connection(
                 {
                     fields.passphrase = passphrase;
                 }
-                let (icon, hover) = if state.show_passphrase {
-                    (egui_phosphor::regular::EYE_SLASH, "Hide passphrase")
-                } else {
-                    (egui_phosphor::regular::EYE, "Show passphrase")
-                };
-                if ui.small_button(icon).on_hover_text(hover).clicked() {
-                    state.show_passphrase = !state.show_passphrase;
-                }
                 if ui
                     .add_enabled(
                         !fields.passphrase.is_empty(),
@@ -475,11 +477,19 @@ pub fn show_connection(
                     crate::clipboard::copy_text_with_ctx(ui.ctx(), &fields.passphrase);
                 }
                 if ui
-                    .small_button("Generate")
-                    .on_hover_text("Set a new random 32-character passphrase")
+                    .small_button(egui_phosphor::regular::ARROWS_CLOCKWISE)
+                    .on_hover_text("Generate a new random 32-character passphrase")
                     .clicked()
                 {
                     fields.passphrase = new_srt_passphrase();
+                }
+                let (icon, hover) = if state.show_passphrase {
+                    (egui_phosphor::regular::EYE_SLASH, "Hide passphrase")
+                } else {
+                    (egui_phosphor::regular::EYE, "Show passphrase")
+                };
+                if ui.small_button(icon).on_hover_text(hover).clicked() {
+                    state.show_passphrase = !state.show_passphrase;
                 }
             });
             ui.end_row();
