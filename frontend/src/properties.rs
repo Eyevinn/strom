@@ -3,7 +3,7 @@
 use crate::graph::PropertyTab;
 use egui::{Color32, ScrollArea, Ui};
 use strom_types::{
-    block::{EnumValue, ExposedProperty, DEFAULT_SRT_OUTPUT_URI},
+    block::{EnumValue, ExposedProperty},
     element::{ElementInfo, PropertyInfo, PropertyType},
     BlockDefinition, BlockInstance, Element, FlowId, PropertyValue,
 };
@@ -595,7 +595,6 @@ impl PropertyInspector {
                     | "builtin.glcompositor"
                     | "builtin.compositor"
                     | "builtin.media_player"
-                    | "builtin.mpegtssrt_output"
                     | "builtin.vision_mixer"
                     | "builtin.whep_output"
                     | "builtin.whip_input"
@@ -654,58 +653,6 @@ impl PropertyInspector {
                 && ui.button(format!("{} Routing", egui_phosphor::regular::GRAPH)).clicked()
             {
                 crate::app::set_local_storage("open_routing_editor", &block.id);
-            }
-
-            // Open in VLC / Download buttons for MPEG-TS/SRT output blocks that
-            // VLC can reach: listeners and srt+relay:// outputs.
-            if definition.id == "builtin.mpegtssrt_output" {
-                // Get SRT URI from block properties
-                let srt_uri = block
-                    .properties
-                    .get("srt_uri")
-                    .and_then(|v| match v {
-                        PropertyValue::String(s) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| DEFAULT_SRT_OUTPUT_URI.to_string());
-
-                if strom_types::srt_relay::is_srt_relay_uri(&srt_uri) {
-                    // The relay status is asked from the server on demand.
-                    result.srt_relay_needed = true;
-                }
-                let relay_public = srt_relay.public_or_note().ok();
-                if let Some(vlc_uri) = crate::app::vlc_player_uri(
-                    &definition.id,
-                    &srt_uri,
-                    relay_public.as_deref(),
-                ) {
-                    // Use fixed network-caching for VLC (not tied to SRT buffer latency)
-                    // 1000ms is a reasonable default for smooth playback
-                    let network_caching_ms = 1000;
-
-                    ui.horizontal(|ui| {
-                        // Open in VLC button (saves and opens automatically in native mode)
-                        if ui
-                            .button(format!("{} Open in VLC", egui_phosphor::regular::PLAY))
-                            .on_hover_text("Download XSPF playlist and open in VLC")
-                            .clicked()
-                        {
-                            result.vlc_playlist_requested =
-                                Some((vlc_uri.clone(), network_caching_ms));
-                        }
-
-                        // Download-only button (native mode only - lets user save to specific location)
-                        #[cfg(not(target_arch = "wasm32"))]
-                        if ui
-                            .button(format!("{} Download", egui_phosphor::regular::DOWNLOAD_SIMPLE))
-                            .on_hover_text("Download XSPF playlist file")
-                            .clicked()
-                        {
-                            result.vlc_playlist_download_only =
-                                Some((vlc_uri.clone(), network_caching_ms));
-                        }
-                    });
-                }
             }
 
             // Remote control for HTML sources. The link is minted by the
@@ -984,6 +931,11 @@ impl PropertyInspector {
                                 None
                             };
 
+                            let has_latency = definition
+                                .exposed_properties
+                                .iter()
+                                .any(|p| p.name == "latency");
+
                             for exposed_prop in &definition.exposed_properties {
                                 if let Some(ref skip) = skip_set {
                                     if skip.contains(exposed_prop.name.as_str()) {
@@ -997,6 +949,35 @@ impl PropertyInspector {
                                 {
                                     ui.separator();
                                 }
+                                // SRT blocks: the connection editor over srt_uri,
+                                // with latency inside its group (see
+                                // `crate::srt_editor`).
+                                let srt_role =
+                                    strom_types::srt_relay::srt_relay_role(&definition.id);
+                                if let (Some(role), "srt_uri") =
+                                    (srt_role, exposed_prop.name.as_str())
+                                {
+                                    result.srt_relay_needed = true;
+                                    let ctx = crate::srt_editor::SrtEditorContext::new(
+                                        definition,
+                                        exposed_prop,
+                                        flow_id,
+                                        role,
+                                        srt_relay,
+                                        taken_srt_relay_ids,
+                                    );
+                                    let outcome =
+                                        crate::srt_editor::show_connection(ui, block, &ctx);
+                                    outcome.apply_to(&mut result);
+                                    if !has_latency {
+                                        let outcome = crate::srt_editor::show_connect_card(
+                                            ui, block, &ctx, qr_cache,
+                                        );
+                                        outcome.apply_to(&mut result);
+                                    }
+                                    continue;
+                                }
+
                                 let changed = Self::show_exposed_property(
                                     ui,
                                     block,
@@ -1012,23 +993,26 @@ impl PropertyInspector {
                                     &mut device_picker_actions,
                                 );
 
-                                // SRT blocks: relay address helper under srt_uri.
-                                if exposed_prop.name == "srt_uri" {
-                                    if let Some(role) =
-                                        strom_types::srt_relay::srt_relay_role(&definition.id)
+                                if let (Some(role), "latency") =
+                                    (srt_role, exposed_prop.name.as_str())
+                                {
+                                    if let Some(uri_prop) = definition
+                                        .exposed_properties
+                                        .iter()
+                                        .find(|p| p.name == "srt_uri")
                                     {
-                                        result.srt_relay_needed = true;
-                                        let outcome = crate::srt_relay::show_srt_uri_helper(
-                                            ui,
-                                            block,
+                                        let ctx = crate::srt_editor::SrtEditorContext::new(
+                                            definition,
+                                            uri_prop,
                                             flow_id,
                                             role,
                                             srt_relay,
                                             taken_srt_relay_ids,
-                                            qr_cache,
                                         );
-                                        result.srt_relay_refresh_requested |=
-                                            outcome.refresh_requested;
+                                        let outcome = crate::srt_editor::show_connect_card(
+                                            ui, block, &ctx, qr_cache,
+                                        );
+                                        outcome.apply_to(&mut result);
                                     }
                                 }
 
@@ -2439,16 +2423,10 @@ impl PropertyInspector {
                     let is_audiogain_gain =
                         definition.id == "builtin.audiogain" && prop_name == "gain";
 
-                    // SRT blocks' srt_uri: the passphrase is masked unless edited.
-                    let is_srt_uri = prop_name == "srt_uri"
-                        && strom_types::srt_relay::srt_relay_role(&definition.id).is_some();
-
                     changed = if is_inter_input_channel {
                         Self::show_inter_channel_editor(ui, &mut value, available_channels)
                     } else if is_audiogain_gain {
                         Self::show_db_gain_editor(ui, &mut value)
-                    } else if let (true, PropertyValue::String(text)) = (is_srt_uri, &mut value) {
-                        crate::srt_relay::show_srt_uri_editor(ui, text, &block.id)
                     } else {
                         // Check property type for special handling
                         match &exposed_prop.property_type {

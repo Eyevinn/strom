@@ -376,6 +376,21 @@ fn fill_random(out: &mut [u8]) {
     }
 }
 
+/// A new random relay stream id: 22 characters from `[A-Za-z0-9_-]`.
+pub fn new_srt_relay_id() -> String {
+    let mut id = [0u8; SRT_RELAY_NEW_ID_BYTES];
+    fill_random(&mut id);
+    base64url(&id)
+}
+
+/// A new random SRT passphrase: 32 characters from `[A-Za-z0-9_-]`, so it
+/// needs no escaping in a URI.
+pub fn new_srt_passphrase() -> String {
+    let mut passphrase = [0u8; SRT_RELAY_NEW_PASSPHRASE_BYTES];
+    fill_random(&mut passphrase);
+    base64url(&passphrase)
+}
+
 /// A new `srt+relay://` URI with a random 22-character id and a random
 /// 32-character passphrase. See [`srt_relay_uri_from_random`] for
 /// `keep_query`.
@@ -674,6 +689,18 @@ mod tests {
         assert_ne!(pa.id, pb.id);
         assert_ne!(pa.param("passphrase"), pb.param("passphrase"));
         assert!(pb.query.ends_with("&latency=120"));
+    }
+
+    #[test]
+    fn new_ids_and_passphrases_are_url_safe_and_differ() {
+        let (a, b) = (new_srt_relay_id(), new_srt_relay_id());
+        assert_eq!(a.len(), 22);
+        assert_ne!(a, b);
+        assert!(parse_srt_relay_uri(&format!("srt+relay://{a}")).is_ok());
+        let p = new_srt_passphrase();
+        assert_eq!(p.len(), 32);
+        assert_ne!(p, new_srt_passphrase());
+        assert_eq!(urlencoding::encode(&p), p);
     }
 
     #[test]

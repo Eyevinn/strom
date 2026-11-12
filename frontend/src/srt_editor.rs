@@ -1,0 +1,790 @@
+//! The connection editor of the SRT blocks.
+//!
+//! The four SRT blocks keep their whole connection in one `srt_uri` property.
+//! This module shows it two ways at once: the `srt_uri` text itself, and
+//! fields read out of it (connection mode, host, port, stream id,
+//! passphrase, key length). Both edit the same property: an edited field
+//! rebuilds `srt_uri`, edited text is parsed into the fields again on the
+//! next frame. Nothing else is stored. The parsing and writing live in
+//! `strom_types::srt_uri`.
+//!
+//! The properties panel calls [`show_connection`] in place of the `srt_uri`
+//! row and [`show_connect_card`] after the latency row, so latency stays in
+//! the same group.
+
+use std::collections::HashSet;
+
+use egui::{Color32, RichText, Ui};
+use strom_types::block::ExposedProperty;
+use strom_types::srt_relay::{
+    mask_srt_uri, new_srt_passphrase, new_srt_relay_id, srt_relay_dial_in_uri,
+    strip_srt_uri_secrets, SrtRelayRole, SRT_RELAY_MIN_SAFE_ID_LEN,
+};
+use strom_types::srt_uri::{
+    is_short_relay_stream_id, is_valid_relay_stream_id, passphrase_problem, SrtConnectionMode,
+    SrtUriFields, SRT_PBKEYLEN_VALUES,
+};
+use strom_types::{BlockDefinition, BlockInstance, FlowId, PropertyValue};
+
+use crate::qr::QrCache;
+use crate::srt_relay::SrtRelayFetch;
+
+const WARNING: Color32 = Color32::from_rgb(255, 180, 50);
+
+/// The colour of a property label whose value differs from the default.
+const MODIFIED: Color32 = Color32::from_rgb(150, 100, 255);
+
+/// Width of the label column, shared by the grids above and below the URI
+/// text so their fields line up.
+const LABEL_WIDTH: f32 = 80.0;
+
+/// What a hidden passphrase looks like in the URI text.
+const MASK: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
+
+/// What the editor needs to know besides the block.
+pub struct SrtEditorContext<'a> {
+    pub flow_id: Option<FlowId>,
+    pub definition_id: &'a str,
+    pub role: SrtRelayRole,
+    /// The `srt_uri` default of the block definition. A value equal to it is
+    /// not stored, as for every other property.
+    pub default_uri: Option<&'a str>,
+    /// The `srt_uri` description, shown on hover over the URI label.
+    pub description: &'a str,
+    pub relay: &'a SrtRelayFetch,
+    /// Relay stream ids other SRT blocks (in any flow) use.
+    pub taken_relay_ids: &'a HashSet<String>,
+}
+
+impl<'a> SrtEditorContext<'a> {
+    /// The context for an SRT block whose `srt_uri` property is `uri_prop`.
+    pub fn new(
+        definition: &'a BlockDefinition,
+        uri_prop: &'a ExposedProperty,
+        flow_id: Option<FlowId>,
+        role: SrtRelayRole,
+        relay: &'a SrtRelayFetch,
+        taken_relay_ids: &'a HashSet<String>,
+    ) -> Self {
+        SrtEditorContext {
+            flow_id,
+            definition_id: &definition.id,
+            role,
+            default_uri: match &uri_prop.default_value {
+                Some(PropertyValue::String(s)) => Some(s.as_str()),
+                _ => None,
+            },
+            description: &uri_prop.description,
+            relay,
+            taken_relay_ids,
+        }
+    }
+}
+
+/// What the editor did.
+#[derive(Default)]
+pub struct SrtEditorOutcome {
+    /// The user asked to fetch the relay status again.
+    pub refresh_requested: bool,
+    /// Open this URL in VLC (an XSPF playlist).
+    pub vlc_requested: Option<String>,
+    /// Save an XSPF playlist for this URL (native only).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub vlc_download_requested: Option<String>,
+}
+
+impl SrtEditorOutcome {
+    /// Hand the editor's requests on to the app.
+    pub fn apply_to(self, result: &mut crate::properties::BlockInspectorResult) {
+        // Fixed network caching for VLC, not tied to the SRT latency.
+        const VLC_NETWORK_CACHING_MS: i32 = 1000;
+        result.srt_relay_refresh_requested |= self.refresh_requested;
+        if let Some(uri) = self.vlc_requested {
+            result.vlc_playlist_requested = Some((uri, VLC_NETWORK_CACHING_MS));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(uri) = self.vlc_download_requested {
+            result.vlc_playlist_download_only = Some((uri, VLC_NETWORK_CACHING_MS));
+        }
+    }
+}
+
+/// Per-block UI state, kept in egui memory.
+#[derive(Clone, Default)]
+struct EditorState {
+    show_passphrase: bool,
+    show_qr: bool,
+    confirm_new_stream_id: bool,
+    /// Host and port from before a switch to the relay, restored on the way
+    /// back: the relay URI has no room for them.
+    remembered_host: String,
+    remembered_port: String,
+    /// The fields of the last URI that could be read, shown (disabled) while
+    /// the text cannot be.
+    last_readable: Option<SrtUriFields>,
+}
+
+fn state_id(ctx: &SrtEditorContext<'_>, block: &BlockInstance) -> egui::Id {
+    egui::Id::new(("srt_editor", ctx.flow_id, block.id.as_str()))
+}
+
+fn current_uri(block: &BlockInstance, ctx: &SrtEditorContext<'_>) -> String {
+    match block.properties.get("srt_uri") {
+        Some(PropertyValue::String(s)) => s.clone(),
+        _ => ctx.default_uri.unwrap_or_default().to_string(),
+    }
+}
+
+/// Store `uri` as the block's `srt_uri`, or drop the property when it is
+/// the default.
+fn store_uri(block: &mut BlockInstance, ctx: &SrtEditorContext<'_>, uri: String) {
+    if ctx.default_uri == Some(uri.as_str()) {
+        block.properties.remove("srt_uri");
+    } else {
+        block
+            .properties
+            .insert("srt_uri".to_string(), PropertyValue::String(uri));
+    }
+}
+
+/// Keep only what a host may hold: no URI delimiters, no whitespace.
+pub fn clean_host(host: &str) -> String {
+    host.chars()
+        .filter(|c| !c.is_whitespace() && !matches!(c, '[' | ']' | '/' | '@' | '?' | '#' | '&'))
+        .collect()
+}
+
+/// Keep only the digits of a port.
+pub fn clean_port(port: &str) -> String {
+    port.chars().filter(char::is_ascii_digit).collect()
+}
+
+/// Keep only the characters a relay stream id may hold.
+pub fn clean_relay_stream_id(id: &str) -> String {
+    id.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect()
+}
+
+/// Why the relay cannot be picked, or `None` when it can.
+fn relay_unavailable_reason(relay: &SrtRelayFetch) -> Option<String> {
+    match relay {
+        SrtRelayFetch::Loaded(info) if info.configured => None,
+        SrtRelayFetch::Loaded(_) => {
+            Some("No SRT relay is configured on this server (STROM_SRT_RELAY).".to_string())
+        }
+        SrtRelayFetch::Failed(e) => Some(format!("Could not ask for the SRT relay status: {e}")),
+        SrtRelayFetch::NotRequested | SrtRelayFetch::Loading => {
+            Some("Asking for the SRT relay status...".to_string())
+        }
+    }
+}
+
+/// One short note line in the value column of the grid.
+fn note_row(ui: &mut Ui, color: Color32, text: impl Into<String>) {
+    ui.label("");
+    ui.add(egui::Label::new(RichText::new(text.into()).color(color).small()).wrap());
+    ui.end_row();
+}
+
+/// The connection mode buttons. Returns the mode picked, if one was.
+fn mode_buttons(
+    ui: &mut Ui,
+    current: Option<SrtConnectionMode>,
+    relay: &SrtRelayFetch,
+    outcome: &mut SrtEditorOutcome,
+) -> Option<SrtConnectionMode> {
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        let relay_reason = relay_unavailable_reason(relay);
+        for mode in SrtConnectionMode::ALL {
+            let selected = current == Some(mode);
+            // A block already on the relay keeps the choice.
+            let enabled = mode != SrtConnectionMode::Relay || relay_reason.is_none() || selected;
+            let mut response =
+                ui.add_enabled(enabled, egui::Button::selectable(selected, mode.label()));
+            if let (SrtConnectionMode::Relay, Some(reason)) = (mode, &relay_reason) {
+                response = response.on_disabled_hover_text(reason);
+            }
+            let hover = match mode {
+                SrtConnectionMode::Listener => "Strom waits on a port; the other side dials in",
+                SrtConnectionMode::Caller => "Strom dials the other side",
+                SrtConnectionMode::Relay => {
+                    "Strom dials the SRT relay; the other side dials the relay with the stream ID"
+                }
+            };
+            if response.on_hover_text(hover).clicked() && !selected {
+                picked = Some(mode);
+            }
+        }
+        if matches!(relay, SrtRelayFetch::Failed(_))
+            && ui
+                .small_button(egui_phosphor::regular::ARROWS_CLOCKWISE)
+                .on_hover_text("Ask the server for the SRT relay status again")
+                .clicked()
+        {
+            outcome.refresh_requested = true;
+        }
+    });
+    picked
+}
+
+/// The connection group: mode, the `srt_uri` text, host, port, stream id,
+/// passphrase and key length. Shown where the `srt_uri` row would be.
+pub fn show_connection(
+    ui: &mut Ui,
+    block: &mut BlockInstance,
+    ctx: &SrtEditorContext<'_>,
+) -> SrtEditorOutcome {
+    let mut outcome = SrtEditorOutcome::default();
+    let sid = state_id(ctx, block);
+    let mut state: EditorState = ui.data(|d| d.get_temp(sid)).unwrap_or_default();
+    let uri = current_uri(block, ctx);
+    let custom = block.properties.contains_key("srt_uri");
+
+    let parsed = SrtUriFields::parse(&uri);
+    let readable = parsed.is_ok();
+    let mut fields = match &parsed {
+        Ok(fields) => {
+            state.last_readable = Some(fields.clone());
+            fields.clone()
+        }
+        Err(_) => state.last_readable.clone().unwrap_or_default(),
+    };
+    let before = fields.clone();
+    let mut text_edited = false;
+    let mut new_stream_id = false;
+
+    egui::Grid::new(("srt_editor_mode", ctx.flow_id, block.id.as_str()))
+        .num_columns(2)
+        .min_col_width(LABEL_WIDTH)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            // Connection mode.
+            if custom {
+                ui.colored_label(MODIFIED, "• Connection")
+                    .on_hover_text("Changed from the default");
+            } else {
+                ui.label("Connection");
+            }
+            let picked = ui
+                .add_enabled_ui(readable, |ui| {
+                    mode_buttons(ui, readable.then_some(fields.mode), ctx.relay, &mut outcome)
+                })
+                .inner;
+            ui.end_row();
+            if let Some(mode) = picked {
+                if fields.mode != SrtConnectionMode::Relay {
+                    state.remembered_host = fields.host.clone();
+                    state.remembered_port = fields.port.clone();
+                }
+                let leaving_relay = fields.mode == SrtConnectionMode::Relay;
+                fields.switch_mode(mode, new_srt_relay_id);
+                if leaving_relay {
+                    fields.port = state.remembered_port.clone();
+                    if mode == SrtConnectionMode::Caller {
+                        fields.host = state.remembered_host.clone();
+                    }
+                }
+                state.confirm_new_stream_id = false;
+            }
+        });
+
+    // The srt_uri text, full width: always editable, also when the fields
+    // are not.
+    ui.horizontal(|ui| {
+        let label = ui.label("SRT URI");
+        if !ctx.description.is_empty() {
+            label.on_hover_text(ctx.description);
+        }
+        if custom
+            && ui
+                .small_button(egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE)
+                .on_hover_text("Reset to default")
+                .clicked()
+        {
+            block.properties.remove("srt_uri");
+            text_edited = true;
+        }
+    });
+    let mut text = uri.clone();
+    if show_srt_uri_text(ui, &mut text, ctx.flow_id, &block.id) {
+        store_uri(block, ctx, text);
+        text_edited = true;
+    }
+    if let Err(e) = &parsed {
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!("Can't read this URI: {e}."))
+                    .color(WARNING)
+                    .small(),
+            )
+            .wrap(),
+        );
+    }
+    ui.add_space(4.0);
+
+    egui::Grid::new(("srt_editor_fields", ctx.flow_id, block.id.as_str()))
+        .num_columns(2)
+        .min_col_width(LABEL_WIDTH)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            // The fields follow the text; while it cannot be read they
+            // show the last readable value, disabled.
+            if !readable {
+                ui.disable();
+            }
+
+            // Host and port.
+            if fields.mode == SrtConnectionMode::Caller {
+                ui.label("Host");
+                let mut host = fields.host.clone();
+                if ui
+                    .add(egui::TextEdit::singleline(&mut host).hint_text("host or IP address"))
+                    .changed()
+                {
+                    fields.host = clean_host(&host);
+                }
+                ui.end_row();
+                if readable && fields.host.is_empty() {
+                    note_row(ui, ui.visuals().error_fg_color, "Enter the address to dial.");
+                }
+            }
+            if fields.mode != SrtConnectionMode::Relay {
+                ui.label("Port");
+                let mut port = fields.port.clone();
+                if ui
+                    .add(egui::TextEdit::singleline(&mut port).desired_width(80.0))
+                    .changed()
+                {
+                    fields.port = clean_port(&port);
+                }
+                ui.end_row();
+                let port_ok = fields.port.parse::<u16>().is_ok_and(|p| p > 0);
+                if readable && !port_ok {
+                    note_row(
+                        ui,
+                        ui.visuals().error_fg_color,
+                        "Enter a port from 1 to 65535.",
+                    );
+                }
+            }
+
+            // Stream ID.
+            let relay = fields.mode == SrtConnectionMode::Relay;
+            ui.label("Stream ID");
+            ui.horizontal(|ui| {
+                let mut id = fields.stream_id.clone();
+                let hint = if relay { "required" } else { "optional" };
+                if ui
+                    .add(egui::TextEdit::singleline(&mut id).hint_text(hint))
+                    .changed()
+                {
+                    fields.stream_id = if relay {
+                        clean_relay_stream_id(&id)
+                    } else {
+                        id
+                    };
+                    state.confirm_new_stream_id = false;
+                }
+                if relay
+                    && ui
+                        .button("New")
+                        .on_hover_text("Make a new random stream ID")
+                        .clicked()
+                {
+                    if fields.stream_id.is_empty() {
+                        new_stream_id = true;
+                    } else {
+                        state.confirm_new_stream_id = true;
+                    }
+                }
+            });
+            ui.end_row();
+            if relay && state.confirm_new_stream_id {
+                ui.label("");
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(WARNING, "The current address stops working.");
+                    if ui.small_button("Replace").clicked() {
+                        new_stream_id = true;
+                        state.confirm_new_stream_id = false;
+                    }
+                    if ui.small_button("Cancel").clicked() {
+                        state.confirm_new_stream_id = false;
+                    }
+                });
+                ui.end_row();
+            }
+            if relay && readable {
+                let id = &fields.stream_id;
+                if id.is_empty() {
+                    note_row(
+                        ui,
+                        ui.visuals().error_fg_color,
+                        "The relay needs a stream ID: press New.",
+                    );
+                } else if !is_valid_relay_stream_id(id) {
+                    note_row(
+                        ui,
+                        ui.visuals().error_fg_color,
+                        "Use at most 64 characters from A-Z, a-z, 0-9, '_' and '-'.",
+                    );
+                } else if is_short_relay_stream_id(id) {
+                    note_row(
+                        ui,
+                        WARNING,
+                        format!(
+                            "\u{26a0} Short stream IDs are easy to guess: use {SRT_RELAY_MIN_SAFE_ID_LEN}+ characters."
+                        ),
+                    );
+                }
+                if ctx.taken_relay_ids.contains(id) {
+                    note_row(
+                        ui,
+                        WARNING,
+                        "\u{26a0} Another SRT block uses this stream ID: only one of them connects.",
+                    );
+                }
+            }
+
+            // Passphrase.
+            ui.label("Passphrase");
+            ui.horizontal(|ui| {
+                let mut passphrase = fields.passphrase.clone();
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut passphrase)
+                            .password(!state.show_passphrase)
+                            .hint_text("none (unencrypted)"),
+                    )
+                    .changed()
+                {
+                    fields.passphrase = passphrase;
+                }
+                let (icon, hover) = if state.show_passphrase {
+                    (egui_phosphor::regular::EYE_SLASH, "Hide passphrase")
+                } else {
+                    (egui_phosphor::regular::EYE, "Show passphrase")
+                };
+                if ui.small_button(icon).on_hover_text(hover).clicked() {
+                    state.show_passphrase = !state.show_passphrase;
+                }
+                if ui
+                    .add_enabled(
+                        !fields.passphrase.is_empty(),
+                        egui::Button::new(egui_phosphor::regular::COPY).small(),
+                    )
+                    .on_hover_text("Copy passphrase")
+                    .clicked()
+                {
+                    crate::clipboard::copy_text_with_ctx(ui.ctx(), &fields.passphrase);
+                }
+                if ui
+                    .small_button("Generate")
+                    .on_hover_text("Set a new random 32-character passphrase")
+                    .clicked()
+                {
+                    fields.passphrase = new_srt_passphrase();
+                }
+            });
+            ui.end_row();
+            if readable {
+                // Empty is fine: no encryption.
+                if let Some(problem) = passphrase_problem(&fields.passphrase) {
+                    note_row(ui, ui.visuals().error_fg_color, problem);
+                }
+            }
+
+            // Key length, only where it matters: with a passphrase, or when
+            // the URI sets one.
+            if !fields.passphrase.is_empty() || fields.pbkeylen.is_some() {
+                ui.label("Key length");
+                let shown = match fields.pbkeylen.as_deref() {
+                    None => "Default".to_string(),
+                    Some(v) => format!("{v} bytes"),
+                };
+                egui::ComboBox::from_id_salt((
+                    "srt_editor_pbkeylen",
+                    ctx.flow_id,
+                    block.id.as_str(),
+                ))
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut fields.pbkeylen, None, "Default");
+                    for v in SRT_PBKEYLEN_VALUES {
+                        let bits = v.parse::<u32>().unwrap_or(0) * 8;
+                        ui.selectable_value(
+                            &mut fields.pbkeylen,
+                            Some(v.to_string()),
+                            format!("{v} bytes (AES-{bits})"),
+                        );
+                    }
+                })
+                .response
+                .on_hover_text("AES key length (pbkeylen). Used only with a passphrase.");
+                ui.end_row();
+            }
+        });
+
+    if new_stream_id {
+        fields.stream_id = new_srt_relay_id();
+    }
+    // Rebuild the text only from an edited field, and never over text the
+    // user typed this frame.
+    if readable && !text_edited && fields != before {
+        store_uri(block, ctx, fields.to_uri());
+    }
+
+    ui.data_mut(|d| d.insert_temp(sid, state));
+    ui.add_space(8.0);
+    outcome
+}
+
+/// The heading of the connect card: what the other side does with the URL.
+pub fn connect_heading(role: SrtRelayRole) -> &'static str {
+    match role {
+        SrtRelayRole::Request => "Senders connect to",
+        SrtRelayRole::Publish => "Viewers connect to",
+    }
+}
+
+/// The URL the other side dials, without any passphrase, for a block whose
+/// `srt_uri` is `uri`: the listener at this server, or the relay with the
+/// stream ID. `Ok(None)` for a caller (Strom dials out, nobody dials in) and
+/// for a URI that cannot be read; `Err(note)` when the relay address is not
+/// known.
+pub fn connect_url(uri: &str, relay: &SrtRelayFetch) -> Result<Option<String>, String> {
+    let Ok(fields) = SrtUriFields::parse(uri) else {
+        return Ok(None);
+    };
+    match fields.mode {
+        SrtConnectionMode::Caller => Ok(None),
+        SrtConnectionMode::Listener => Ok(Some(strip_srt_uri_secrets(
+            &crate::app::transform_srt_uri_for_vlc(uri.trim()),
+        ))),
+        SrtConnectionMode::Relay if !is_valid_relay_stream_id(&fields.stream_id) => Ok(None),
+        SrtConnectionMode::Relay => relay
+            .public_or_note()
+            .map(|public| Some(srt_relay_dial_in_uri(&public, &fields.stream_id))),
+    }
+}
+
+/// The card with the address the other side dials, for listeners and relay
+/// blocks. Shown after the latency row.
+pub fn show_connect_card(
+    ui: &mut Ui,
+    block: &BlockInstance,
+    ctx: &SrtEditorContext<'_>,
+    qr_cache: &mut QrCache,
+) -> SrtEditorOutcome {
+    let mut outcome = SrtEditorOutcome::default();
+    let uri = current_uri(block, ctx);
+    let url = connect_url(&uri, ctx.relay);
+    if matches!(url, Ok(None)) {
+        return outcome;
+    }
+    let sid = state_id(ctx, block);
+    let mut state: EditorState = ui.data(|d| d.get_temp(sid)).unwrap_or_default();
+
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.label(RichText::new(connect_heading(ctx.role)).strong());
+        match &url {
+            Ok(Some(url)) => {
+                ui.add(egui::Label::new(RichText::new(url).monospace()).wrap());
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .button(format!("{} Copy", egui_phosphor::regular::COPY))
+                        .on_hover_text("Copy the URL (without the passphrase)")
+                        .clicked()
+                    {
+                        crate::clipboard::copy_text_with_ctx(ui.ctx(), url);
+                    }
+                    let relay_public = ctx.relay.public_or_note().ok();
+                    if let Some(vlc_uri) =
+                        crate::app::vlc_player_uri(ctx.definition_id, &uri, relay_public.as_deref())
+                    {
+                        if ui
+                            .button(format!("{} Open in VLC", egui_phosphor::regular::PLAY))
+                            .on_hover_text("Download an XSPF playlist and open it in VLC")
+                            .clicked()
+                        {
+                            outcome.vlc_requested = Some(vlc_uri.clone());
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if ui
+                            .button(egui_phosphor::regular::DOWNLOAD_SIMPLE)
+                            .on_hover_text("Save the XSPF playlist")
+                            .clicked()
+                        {
+                            outcome.vlc_download_requested = Some(vlc_uri);
+                        }
+                    }
+                    if ui
+                        .selectable_label(
+                            state.show_qr,
+                            format!("{} QR", egui_phosphor::regular::QR_CODE),
+                        )
+                        .on_hover_text("Show the URL as a QR code")
+                        .clicked()
+                    {
+                        state.show_qr = !state.show_qr;
+                    }
+                });
+                if state.show_qr {
+                    if let Some(texture) = qr_cache.get_or_create(ui.ctx(), url) {
+                        ui.image(egui::load::SizedTexture::new(
+                            texture.id(),
+                            egui::vec2(160.0, 160.0),
+                        ));
+                    }
+                }
+            }
+            Err(note) => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(egui::Label::new(RichText::new(note).weak().small()).wrap());
+                    if ui
+                        .small_button(egui_phosphor::regular::ARROWS_CLOCKWISE)
+                        .on_hover_text("Ask the server again")
+                        .clicked()
+                    {
+                        outcome.refresh_requested = true;
+                    }
+                });
+            }
+            Ok(None) => {}
+        }
+    });
+
+    ui.data_mut(|d| d.insert_temp(sid, state));
+    ui.add_space(8.0);
+    outcome
+}
+
+/// The text as one URI: whitespace and line breaks (from Enter or a paste)
+/// removed.
+pub fn single_line_uri(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// The `srt_uri` text box: one logical line, soft-wrapped to the panel width
+/// so a long URI shows whole. While it has the keyboard focus it shows and
+/// edits the real value; otherwise it shows the URI with the passphrase
+/// masked, so the secret is not on screen unasked. Enter ends the edit.
+/// Returns whether the value changed.
+fn show_srt_uri_text(
+    ui: &mut Ui,
+    value: &mut String,
+    flow_id: Option<FlowId>,
+    block_id: &str,
+) -> bool {
+    let id = egui::Id::new(("srt_uri_text", flow_id, block_id));
+    fn edit(text: &mut String, id: egui::Id) -> egui::TextEdit<'_> {
+        egui::TextEdit::multiline(text)
+            .id(id)
+            .desired_rows(2)
+            .desired_width(f32::INFINITY)
+            .font(egui::TextStyle::Monospace)
+    }
+    if ui.memory(|m| m.has_focus(id)) {
+        let mut text = value.clone();
+        let response = ui.add(edit(&mut text, id));
+        if text.contains(['\n', '\r']) && !value.contains(['\n', '\r']) {
+            // Enter: done.
+            response.surrender_focus();
+        }
+        let text = single_line_uri(&text);
+        if response.changed() && text != *value {
+            *value = text;
+            return true;
+        }
+        return false;
+    }
+    let mut shown = mask_srt_uri(value, MASK);
+    let masked = shown != *value;
+    let response = ui.add(edit(&mut shown, id));
+    if masked {
+        response.on_hover_text("Click to show and edit the passphrase");
+        // An edit to the masked copy would save the mask as the passphrase.
+        false
+    } else if response.changed() {
+        let text = single_line_uri(&shown);
+        let changed = text != *value;
+        *value = text;
+        changed
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use strom_types::srt_relay::SrtRelayInfo;
+
+    fn relay(public: Option<&str>) -> SrtRelayFetch {
+        SrtRelayFetch::Loaded(SrtRelayInfo {
+            configured: public.is_some(),
+            relay: public.map(str::to_string),
+            public: public.map(str::to_string),
+            error: None,
+        })
+    }
+
+    #[test]
+    fn inputs_are_cleaned() {
+        assert_eq!(clean_host(" [2001:db8::1]/x "), "2001:db8::1x");
+        assert_eq!(clean_port("50a00 "), "5000");
+        assert_eq!(clean_relay_stream_id("Ab 3?k#Q_-"), "Ab3kQ_-");
+    }
+
+    #[test]
+    fn a_caller_has_no_connect_url() {
+        let r = relay(Some("relay.example.com:9000"));
+        assert_eq!(
+            connect_url("srt://192.0.2.1:4000?mode=caller", &r),
+            Ok(None)
+        );
+        assert_eq!(connect_url("not a uri", &r), Ok(None));
+        assert_eq!(connect_url("srt+relay://bad id", &r), Ok(None));
+    }
+
+    #[test]
+    fn a_relay_connect_url_has_no_passphrase() {
+        let uri = "srt+relay://cam1cam1cam1cam1?passphrase=abcdefghijkl&pbkeylen=32";
+        assert_eq!(
+            connect_url(uri, &relay(Some("relay.example.com:9000"))),
+            Ok(Some(
+                "srt://relay.example.com:9000?streamid=cam1cam1cam1cam1".to_string()
+            ))
+        );
+        let note = connect_url(uri, &relay(None)).unwrap_err();
+        assert!(note.contains("STROM_SRT_RELAY"), "{note}");
+    }
+
+    #[test]
+    fn a_listener_connect_url_has_no_passphrase() {
+        let url = connect_url(
+            "srt://:5000?mode=listener&passphrase=abcdefghijkl&latency=200",
+            &relay(None),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!url.contains("abcdefghijkl"), "{url}");
+        assert!(url.ends_with(":5000?latency=200&mode=caller"), "{url}");
+    }
+
+    #[test]
+    fn the_uri_text_is_one_line() {
+        assert_eq!(
+            single_line_uri(" srt://:5000?mode=listener\n&latency=200\r\n"),
+            "srt://:5000?mode=listener&latency=200"
+        );
+    }
+
+    #[test]
+    fn the_heading_names_who_dials() {
+        assert_eq!(connect_heading(SrtRelayRole::Request), "Senders connect to");
+        assert_eq!(connect_heading(SrtRelayRole::Publish), "Viewers connect to");
+    }
+}

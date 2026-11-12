@@ -36,6 +36,7 @@ mod ptp_monitor;
 mod qos_monitor;
 mod qr;
 mod spectrum;
+mod srt_editor;
 mod srt_relay;
 mod srt_stats;
 mod state;
