@@ -159,13 +159,13 @@ mod tests {
 
     #[test]
     fn a_copied_relay_block_gets_a_fresh_address() {
-        let old = "srt+relay://cam1cam1cam1cam1?passphrase=oldoldoldold&latency=200";
+        let old = "srt+relay://cam1cam1cam1cam1?passphrase=oldoldoldold&pbkeylen=32";
         let mut copy = block("builtin.mpegtssrt_output", old);
         assert!(renew_relay_address(&mut copy));
         let parsed = parse_srt_relay_uri(srt_uri(&copy)).unwrap().unwrap();
         assert_ne!(parsed.id, "cam1cam1cam1cam1");
         assert_ne!(parsed.passphrase().as_deref(), Some("oldoldoldold"));
-        assert_eq!(parsed.param("latency").as_deref(), Some("200"));
+        assert_eq!(parsed.param("pbkeylen").as_deref(), Some("32"));
         assert_eq!(block_relay_id(&copy), Some(parsed.id));
     }
 

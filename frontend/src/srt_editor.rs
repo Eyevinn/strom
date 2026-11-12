@@ -21,8 +21,8 @@ use strom_types::srt_relay::{
     srt_relay_player_uri, SrtRelayRole, SRT_RELAY_MIN_SAFE_ID_LEN,
 };
 use strom_types::srt_uri::{
-    is_short_relay_stream_id, is_valid_relay_stream_id, passphrase_problem, SrtConnectionMode,
-    SrtUriFields, SRT_PBKEYLEN_VALUES,
+    is_short_relay_stream_id, is_valid_relay_stream_id, passphrase_problem, validate_srt_uri,
+    SrtConnectionMode, SrtUriError, SrtUriFields, SRT_PBKEYLEN_VALUES,
 };
 use strom_types::{BlockDefinition, BlockInstance, FlowId, PropertyValue};
 
@@ -325,16 +325,19 @@ pub fn show_connection(
     header
         .header_response
         .on_hover_text("The block's srt_uri property: the fields read and write it");
-    // Shown with the header closed too: the fields are disabled until fixed.
-    if let Err(e) = &parsed {
-        ui.add(
-            egui::Label::new(
-                RichText::new(format!("Can't read this URI: {e}."))
-                    .color(WARNING)
-                    .small(),
-            )
-            .wrap(),
-        );
+    // Shown with the header closed too: what GStreamer would read otherwise
+    // than written (the blocks refuse to build on it), else why the fields
+    // are disabled, then what has no effect.
+    let checked = validate_srt_uri(&uri);
+    let problem = match (&checked, &parsed) {
+        // The passphrase field shows its own length problem.
+        (Err(SrtUriError::PassphraseLength(_)), Ok(_)) | (Ok(_), Ok(_)) => None,
+        (Err(e), _) => Some((ui.visuals().error_fg_color, e.to_string())),
+        (Ok(_), Err(e)) => Some((WARNING, format!("Can't read this URI: {e}"))),
+    };
+    let warnings = checked.iter().flatten().map(|w| (WARNING, w.to_string()));
+    for (color, text) in problem.into_iter().chain(warnings) {
+        ui.add(egui::Label::new(RichText::new(format!("{text}.")).color(color).small()).wrap());
     }
     ui.add_space(4.0);
 

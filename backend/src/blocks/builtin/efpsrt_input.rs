@@ -181,7 +181,7 @@ impl BlockBuilder for EfpSrtInputBuilder {
             })
             .unwrap_or_else(|| DEFAULT_SRT_INPUT_URI.to_string());
         // `srt+relay://<id>` dials out to the configured SRT relay.
-        let srt_uri = ctx.resolve_srt_uri(&srt_uri, BLOCK_DEFINITION_ID)?;
+        let srt_uri = ctx.resolve_srt_uri(instance_id, &srt_uri, BLOCK_DEFINITION_ID)?;
 
         let latency = properties
             .get("latency")

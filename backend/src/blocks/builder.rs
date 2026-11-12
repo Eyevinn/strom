@@ -240,22 +240,41 @@ impl BlockBuildContext {
         self
     }
 
-    /// Resolve an SRT block's `srt_uri` into the URI for its `srtsrc` or
-    /// `srtsink`. Plain URIs pass through; `srt+relay://<id>` becomes a caller
-    /// URI to the configured relay, with the block's own role on the relay
-    /// looked up from its definition id in
+    /// Check and resolve an SRT block's `srt_uri` into the URI for its
+    /// `srtsrc` or `srtsink`.
+    ///
+    /// The URI is trimmed and checked with
+    /// [`strom_types::srt_uri::validate_srt_uri`] first: what GStreamer would
+    /// read differently from how it is written (a key in the wrong case, a
+    /// malformed escape, a raw `#`, a passphrase libsrt refuses, ...) fails
+    /// the build here with a clear message, instead of libsrt silently running
+    /// with other settings or failing later. Warnings (`latency` in the URI,
+    /// which the block's own property overrides) are logged.
+    ///
+    /// Plain URIs then pass through; `srt+relay://<id>` becomes a caller URI
+    /// to the configured relay, with the block's own role on the relay looked
+    /// up from its definition id in
     /// [`strom_types::srt_relay::SRT_RELAY_BLOCKS`].
     pub fn resolve_srt_uri(
         &self,
+        instance_id: &str,
         uri: &str,
         block_definition_id: &str,
     ) -> Result<String, BlockBuildError> {
         use strom_types::srt_relay::{resolve_srt_uri, srt_relay_role};
+        use strom_types::srt_uri::validate_srt_uri;
         let role = srt_relay_role(block_definition_id).ok_or_else(|| {
             BlockBuildError::InvalidConfiguration(format!(
                 "{block_definition_id} is not an SRT relay block"
             ))
         })?;
+        // GStreamer accepts the URI only if it starts with `srt://` exactly.
+        let uri = uri.trim();
+        let warnings = validate_srt_uri(uri)
+            .map_err(|e| BlockBuildError::InvalidProperty(format!("srt_uri: {e}")))?;
+        for warning in warnings {
+            warn!("{instance_id}: srt_uri: {warning}");
+        }
         resolve_srt_uri(uri, role, self.srt_relay.as_deref())
             .map_err(|e| BlockBuildError::InvalidProperty(format!("srt_uri: {e}")))
     }

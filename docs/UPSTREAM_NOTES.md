@@ -238,6 +238,32 @@ workaround can go once we move past that version.
 - **Found in:** the SRT relay work, [#1258](https://github.com/Eyevinn/strom/pull/1258).
   Peers that reconnect by themselves only see one dropped attempt.
 
+### `srtsrc` / `srtsink`: URI problems are ignored without a word
+- **Seen on:** GStreamer 1.22 and 1.28 (read in `gstsrtobject.c` and `gsturi.c`, not
+  run); libsrt 1.5.4 for the passphrase limit.
+- **Symptom:** much of what can be wrong in the `uri` property is dropped silently, and
+  the element runs with other settings than the URI says:
+  a key in another case (`PassPhrase=`, `Mode=`) or a `mode` value in another case
+  (`mode=Listener`) is ignored; a value with a malformed escape (`%zz`, `%2`) or `%00` is
+  not set (so an encrypted URI runs unencrypted); a raw `#` starts the fragment, so a
+  `streamid=#!::r=...` arrives empty; of a key given twice the last wins; a scheme other
+  than exactly `srt://` (`SRT://`, leading space) makes `set_uri` fail with only a
+  `g_warning`. Setting `uri` also resets `latency` to 125, so a `latency=` in the URI is
+  lost whenever the `latency` property is set after `uri`.
+- **Repro:** untested sketch:
+  `srtsrc uri="srt://:5000?mode=listener&PassPhrase=0123456789abc" ! fakesink` accepts an
+  unencrypted caller.
+- **Hint:** `gst_srt_object_set_uri` matches keys with `g_strcmp0`, mode values with
+  `g_enum_get_value_by_nick`, and skips anything it does not know; the query table comes
+  from `gst_uri_from_string` (`g_uri_unescape_segment`/`_string`, NULL on a bad escape).
+  libsrt takes a passphrase of 10 to 80 bytes and refuses others only when the socket
+  option is set.
+- **Tests:** `strom-types` `srt_uri::tests::validate_*`, `srt_uri_validation_test`.
+- **Upstream:** not searched. Strom checks every `srt_uri` with
+  `strom_types::srt_uri::validate_srt_uri`: the SRT blocks refuse to build on an error and
+  log the ignored `latency`, and the GUI shows both.
+- **Found in:** the SRT relay work on `feat/srt-relay`.
+
 ### `rtpjitterbuffer`: packets held for the length of a mute gap
 - **Seen on:** versions not recorded.
 - **Symptom:** after a gap with no RTP packets (a muted sender), the jitterbuffer holds

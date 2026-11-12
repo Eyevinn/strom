@@ -4,8 +4,23 @@
 //! relay), host, port, stream id, passphrase and key length. The block
 //! property stays the single `srt_uri` string: [`SrtUriFields::parse`] reads
 //! the fields out of it and [`SrtUriFields::to_uri`] writes them back. Query
-//! parameters the fields do not cover (`latency`, `localaddress`, ...) are
+//! parameters the fields do not cover (`localaddress`, `rcvlatency`, ...) are
 //! kept as they were written.
+//!
+//! [`validate_srt_uri`] checks an `srt_uri` against what GStreamer's SRT
+//! elements actually read from it. The GUI shows its result next to the
+//! fields, and the SRT blocks refuse to build on an error, so a URI that
+//! GStreamer would read differently from how it is written fails loudly
+//! instead of libsrt running with other settings.
+//!
+//! How GStreamer reads the URI (`gst_srt_object_set_uri`, 1.22 to 1.28): the
+//! scheme must be exactly `srt://`; the query is split on `&` and the first
+//! `=`, keys and values are percent-decoded, and keys and `mode` values are
+//! matched exactly, lower-case. An unknown key is ignored without a word, a
+//! value with a malformed escape (or `%00`) is not set at all, and a raw `#`
+//! starts the fragment, which is dropped. The query is a hash table, so of a
+//! key given twice the last one wins. Without `mode`, a URI with a host is a
+//! caller and one without is a listener.
 //!
 //! Pure string logic, unit-tested here; the frontend only draws the fields.
 
@@ -14,13 +29,65 @@ use crate::srt_relay::{SRT_RELAY_MAX_ID_LEN, SRT_RELAY_MIN_SAFE_ID_LEN, SRT_RELA
 /// The plain SRT URI scheme.
 pub const SRT_SCHEME: &str = "srt://";
 
-/// Shortest passphrase SRT accepts.
+/// Shortest passphrase libsrt accepts, in bytes.
 pub const SRT_PASSPHRASE_MIN_LEN: usize = 10;
-/// Longest passphrase SRT accepts.
-pub const SRT_PASSPHRASE_MAX_LEN: usize = 79;
+/// Longest passphrase libsrt accepts, in bytes (`HAICRYPT_SECRET_MAX_SZ`).
+pub const SRT_PASSPHRASE_MAX_LEN: usize = 80;
 
-/// The AES key lengths SRT accepts for `pbkeylen`, in bytes.
+/// The AES key lengths the GUI offers for `pbkeylen`, in bytes.
 pub const SRT_PBKEYLEN_VALUES: &[&str] = &["16", "24", "32"];
+
+/// Every `pbkeylen` libsrt accepts: 0 (the default) or an AES key length.
+const SRT_PBKEYLEN_ACCEPTED: &[&str] = &["0", "16", "24", "32"];
+
+/// The `mode` values GStreamer reads.
+const GST_SRT_MODES: &[&str] = &["caller", "listener", "rendezvous"];
+
+/// The query keys GStreamer's SRT elements read from the URI: the four
+/// `gst_srt_object_set_uri` handles itself and its `srt_options` table
+/// (identical in 1.22 and 1.28). Used to name the right spelling when a key
+/// differs from one of them only in case.
+const GST_SRT_URI_KEYS: &[&str] = &[
+    "mode",
+    "localaddress",
+    "localport",
+    "poll-timeout",
+    "mss",
+    "fc",
+    "sndbuf",
+    "rcvbuf",
+    "maxbw",
+    "tsbpdmode",
+    "latency",
+    "inputbw",
+    "oheadbw",
+    "passphrase",
+    "pbkeylen",
+    "ipttl",
+    "iptos",
+    "tlpktdrop",
+    "snddropdelay",
+    "nakreport",
+    "conntimeo",
+    "drifttracer",
+    "lossmaxttl",
+    "rcvlatency",
+    "peerlatency",
+    "minversion",
+    "streamid",
+    "congestion",
+    "messageapi",
+    "payloadsize",
+    "transtype",
+    "kmrefreshrate",
+    "kmpreannounce",
+    "enforcedencryption",
+    "ipv6only",
+    "peeridletimeo",
+    "bindtodevice",
+    "packetfilter",
+    "retransmitalgo",
+];
 
 /// Parameters the relay connection drops when an address moves onto the
 /// relay: they bind a direct connection to a local address or adapter.
@@ -31,7 +98,7 @@ const DIRECT_ONLY_PARAMS: &[&str] = &["localaddress", "localport", "adapter"];
 pub enum SrtConnectionMode {
     /// Strom waits on a port for the other side to dial in.
     Listener,
-    /// Strom dials the other side. A plain `srt://` URI without `mode`.
+    /// Strom dials the other side.
     #[default]
     Caller,
     /// Strom dials the configured SRT relay (`srt+relay://<stream id>`).
@@ -81,9 +148,15 @@ impl std::fmt::Display for SrtUriParseError {
             SrtUriParseError::UnsupportedAddress => {
                 write!(f, "the address is not a plain host:port")
             }
-            SrtUriParseError::UnsupportedMode(mode) => {
-                write!(f, "mode '{mode}' is not supported here")
-            }
+            SrtUriParseError::UnsupportedMode(mode) => match mode_spelling(mode) {
+                Some(expected) => {
+                    write!(
+                        f,
+                        "mode '{mode}' is not read by GStreamer: use '{expected}'"
+                    )
+                }
+                None => write!(f, "mode '{mode}' is not supported here"),
+            },
             SrtUriParseError::DuplicateParam(name) => write!(f, "'{name}' is given more than once"),
             SrtUriParseError::ReservedRelayParam(name) => {
                 write!(f, "'{name}' is not allowed in an {SRT_RELAY_SCHEME} URI")
@@ -175,9 +248,10 @@ enum Known {
 }
 
 impl Known {
+    /// The field a raw query key names. Matched after decoding and exactly,
+    /// as GStreamer matches it: `PassPhrase` is no passphrase.
     fn of(key: &str) -> Option<Known> {
         let key = percent_decode(key);
-        let key = key.trim();
         [
             ("mode", Known::Mode),
             ("streamid", Known::StreamId),
@@ -185,7 +259,7 @@ impl Known {
             ("pbkeylen", Known::Pbkeylen),
         ]
         .into_iter()
-        .find(|(name, _)| key.eq_ignore_ascii_case(name))
+        .find(|(name, _)| key == *name)
         .map(|(_, known)| known)
     }
 
@@ -222,7 +296,7 @@ pub fn passphrase_problem(passphrase: &str) -> Option<String> {
         None
     } else {
         Some(format!(
-            "Use {SRT_PASSPHRASE_MIN_LEN} to {SRT_PASSPHRASE_MAX_LEN} characters ({len} now), or leave it empty for no encryption."
+            "Use {SRT_PASSPHRASE_MIN_LEN} to {SRT_PASSPHRASE_MAX_LEN} bytes ({len} now), or leave it empty for no encryption."
         ))
     }
 }
@@ -230,8 +304,11 @@ pub fn passphrase_problem(passphrase: &str) -> Option<String> {
 impl SrtUriFields {
     /// Read the fields out of an `srt_uri`.
     ///
-    /// A plain `srt://` URI without `mode` is a caller, as for `srtsrc` and
-    /// `srtsink`. The relay stream id is taken as written, valid or not, so
+    /// A plain `srt://` URI without `mode` is a caller when it has a host
+    /// and a listener when it has none, as for `srtsrc` and `srtsink`. Keys
+    /// and `mode` values are matched exactly, as GStreamer matches them, so
+    /// `PassPhrase` is just another parameter and `mode=Listener` is
+    /// refused; [`validate_srt_uri`] explains both. The relay stream id is taken as written, valid or not, so
     /// that the GUI can point at a bad one instead of falling back to the raw
     /// field; [`is_valid_relay_stream_id`] checks it.
     pub fn parse(uri: &str) -> Result<SrtUriFields, SrtUriParseError> {
@@ -257,6 +334,9 @@ impl SrtUriFields {
             fields.stream_id = authority.to_string();
         } else {
             (fields.host, fields.port) = split_authority(authority)?;
+            if fields.host.is_empty() {
+                fields.mode = SrtConnectionMode::Listener;
+            }
         }
 
         let mut seen: Vec<Known> = Vec::new();
@@ -279,7 +359,7 @@ impl SrtUriFields {
                     ));
                 }
                 Known::Mode => {
-                    fields.mode = match value.trim().to_ascii_lowercase().as_str() {
+                    fields.mode = match value.as_str() {
                         "listener" => SrtConnectionMode::Listener,
                         "caller" => SrtConnectionMode::Caller,
                         _ => return Err(SrtUriParseError::UnsupportedMode(value)),
@@ -349,10 +429,7 @@ impl SrtUriFields {
                         continue;
                     };
                     let read = percent_decode(raw.split_once('=').map_or("", |(_, v)| v));
-                    let unchanged = match known {
-                        Known::Mode => read.trim().eq_ignore_ascii_case(&value),
-                        _ => read == value,
-                    };
+                    let unchanged = read == value;
                     params.push(if unchanged {
                         raw.clone()
                     } else {
@@ -414,10 +491,7 @@ impl SrtUriFields {
                     return true;
                 };
                 let key = raw.split_once('=').map_or(raw.as_str(), |(k, _)| k);
-                let key = percent_decode(key);
-                !DIRECT_ONLY_PARAMS
-                    .iter()
-                    .any(|d| key.trim().eq_ignore_ascii_case(d))
+                !DIRECT_ONLY_PARAMS.contains(&percent_decode(key).as_str())
             });
         }
         if self.mode == SrtConnectionMode::Listener && mode == SrtConnectionMode::Caller {
@@ -426,6 +500,250 @@ impl SrtUriFields {
         }
         self.mode = mode;
     }
+}
+
+/// The right spelling of a `mode` value that differs from one GStreamer
+/// reads only in case (`Listener` for `listener`), else `None`.
+fn mode_spelling(mode: &str) -> Option<&'static str> {
+    GST_SRT_MODES
+        .iter()
+        .find(|m| **m != mode && m.eq_ignore_ascii_case(mode))
+        .copied()
+}
+
+/// Decode `%XX` escapes as `g_uri_unescape_string` does: `None` for a `%`
+/// not followed by two hex digits and for `%00`. GStreamer then reads no
+/// value at all. `+` stays a `+`.
+pub(crate) fn gst_unescape(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3)?;
+            if !hex.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            let byte = u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
+            if byte == 0 {
+                return None;
+            }
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Some(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// The parameters of a query string as GStreamer splits them: on `&`, then
+/// on the first `=`, empty segments skipped. Yields the raw key, the
+/// decoded key (`None` if malformed) and the raw value (`None` without `=`).
+pub(crate) fn gst_query_params(
+    query: &str,
+) -> impl Iterator<Item = (&str, Option<String>, Option<&str>)> {
+    query.split('&').filter(|p| !p.is_empty()).map(|p| {
+        let (key, value) = match p.split_once('=') {
+            Some((k, v)) => (k, Some(v)),
+            None => (p, None),
+        };
+        (key, gst_unescape(key), value)
+    })
+}
+
+/// Why GStreamer would not use an `srt_uri` as written. The SRT blocks
+/// refuse to build on one; the GUI shows it.
+///
+/// No variant carries a parameter value that may be secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SrtUriError {
+    /// Neither `srt://` nor `srt+relay://`.
+    UnknownScheme,
+    /// `SRT://` and the like: GStreamer's SRT elements accept only `srt://`
+    /// and refuse any other spelling.
+    SchemeCase,
+    /// A raw `#`: GStreamer reads the rest of the URI as its fragment and
+    /// drops it, so a `streamid=#!::r=...` or a passphrase with a `#` is
+    /// cut short.
+    Fragment,
+    /// A key or value with a malformed escape (`%zz`, `%2`) or `%00`, which
+    /// GStreamer does not set. Holds the key as written.
+    BadEscape(String),
+    /// A key that GStreamer ignores because it differs only in case from
+    /// one it reads.
+    KeyCase {
+        written: String,
+        expected: &'static str,
+    },
+    /// A `mode` value that differs only in case from one GStreamer reads.
+    ModeCase {
+        written: String,
+        expected: &'static str,
+    },
+    /// A `mode` that is none of `caller`, `listener` and `rendezvous`.
+    UnknownMode(String),
+    /// A key given more than once (after decoding). GStreamer would take
+    /// the last one; Strom refuses the URI instead, because a second
+    /// `passphrase` or `mode` is a mistake, and its fields and helpers would
+    /// otherwise have to guess which one was meant.
+    DuplicateParam(String),
+    /// A passphrase outside 10 to 80 bytes (its length here). Empty is no
+    /// encryption and fine.
+    PassphraseLength(usize),
+    /// A `pbkeylen` other than 0, 16, 24 or 32.
+    Pbkeylen(String),
+}
+
+impl std::fmt::Display for SrtUriError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SrtUriError::UnknownScheme => {
+                write!(f, "not an {SRT_SCHEME} or {SRT_RELAY_SCHEME} URI")
+            }
+            SrtUriError::SchemeCase => write!(
+                f,
+                "GStreamer accepts the scheme only as '{SRT_SCHEME}', in lower case"
+            ),
+            SrtUriError::Fragment => write!(
+                f,
+                "'#' ends the URI for GStreamer, which drops everything after it: write it as %23"
+            ),
+            SrtUriError::BadEscape(key) => write!(
+                f,
+                "'{key}' has a malformed %-escape or %00, so GStreamer does not set it: \
+                 write '%' as %25"
+            ),
+            SrtUriError::KeyCase { written, expected } => {
+                write!(f, "'{written}' is not read by GStreamer: use '{expected}'")
+            }
+            SrtUriError::ModeCase { written, expected } => {
+                write!(
+                    f,
+                    "mode '{written}' is not read by GStreamer: use '{expected}'"
+                )
+            }
+            SrtUriError::UnknownMode(mode) => write!(
+                f,
+                "mode '{mode}' is not one of {}",
+                GST_SRT_MODES.join(", ")
+            ),
+            SrtUriError::DuplicateParam(key) => write!(f, "'{key}' is given more than once"),
+            SrtUriError::PassphraseLength(len) => write!(
+                f,
+                "the passphrase must be {SRT_PASSPHRASE_MIN_LEN} to {SRT_PASSPHRASE_MAX_LEN} \
+                 bytes ({len} now), or empty for no encryption"
+            ),
+            SrtUriError::Pbkeylen(value) => write!(
+                f,
+                "pbkeylen '{value}' is not one of {}",
+                SRT_PBKEYLEN_ACCEPTED.join(", ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SrtUriError {}
+
+/// Something in an `srt_uri` that has no effect. Logged when the block
+/// builds and shown in the GUI; it does not stop the build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SrtUriWarning {
+    /// `latency=`: the SRT blocks set the element's `latency` property after
+    /// its `uri`, and setting `uri` resets the latency, so the block's own
+    /// Latency property always wins. (`rcvlatency` and `peerlatency` do
+    /// apply: they are set after `latency`.)
+    IgnoredLatency,
+}
+
+impl std::fmt::Display for SrtUriWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SrtUriWarning::IgnoredLatency => write!(
+                f,
+                "'latency' in the URI is ignored: the block's Latency property is used"
+            ),
+        }
+    }
+}
+
+/// Check an `srt_uri` (`srt://` or `srt+relay://`) against how GStreamer
+/// reads it (see the module docs): an error for what GStreamer would read
+/// differently from how it is written, or what libsrt would refuse, and
+/// warnings for what has no effect.
+///
+/// Surrounding whitespace is ignored: the blocks trim the URI. The relay
+/// specifics (stream id, `mode` and `streamid` reserved) are checked by
+/// [`crate::srt_relay::parse_srt_relay_uri`].
+pub fn validate_srt_uri(uri: &str) -> Result<Vec<SrtUriWarning>, SrtUriError> {
+    let uri = uri.trim();
+    let rest = if let Some(rest) = strip_scheme(uri, SRT_RELAY_SCHEME) {
+        rest
+    } else if let Some(rest) = uri.strip_prefix(SRT_SCHEME) {
+        rest
+    } else if strip_scheme(uri, SRT_SCHEME).is_some() {
+        return Err(SrtUriError::SchemeCase);
+    } else {
+        return Err(SrtUriError::UnknownScheme);
+    };
+    if rest.contains('#') {
+        return Err(SrtUriError::Fragment);
+    }
+    let query = rest.split_once('?').map_or("", |(_, q)| q);
+
+    let mut warnings = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for (raw_key, key, value) in gst_query_params(query) {
+        let Some(key) = key else {
+            return Err(SrtUriError::BadEscape(raw_key.to_string()));
+        };
+        let value = match value {
+            Some(raw) => {
+                Some(gst_unescape(raw).ok_or_else(|| SrtUriError::BadEscape(key.clone()))?)
+            }
+            None => None,
+        };
+        if !GST_SRT_URI_KEYS.contains(&key.as_str()) {
+            if let Some(expected) = GST_SRT_URI_KEYS
+                .iter()
+                .find(|k| k.eq_ignore_ascii_case(&key))
+            {
+                return Err(SrtUriError::KeyCase {
+                    written: key,
+                    expected,
+                });
+            }
+        }
+        if seen.contains(&key) {
+            return Err(SrtUriError::DuplicateParam(key));
+        }
+        let value = value.unwrap_or_default();
+        match key.as_str() {
+            "mode" if !GST_SRT_MODES.contains(&value.as_str()) => {
+                return Err(match mode_spelling(&value) {
+                    Some(expected) => SrtUriError::ModeCase {
+                        written: value,
+                        expected,
+                    },
+                    None => SrtUriError::UnknownMode(value),
+                });
+            }
+            "passphrase" => {
+                let len = value.len();
+                if len != 0 && !(SRT_PASSPHRASE_MIN_LEN..=SRT_PASSPHRASE_MAX_LEN).contains(&len) {
+                    return Err(SrtUriError::PassphraseLength(len));
+                }
+            }
+            "pbkeylen" if !value.is_empty() && !SRT_PBKEYLEN_ACCEPTED.contains(&value.as_str()) => {
+                return Err(SrtUriError::Pbkeylen(value));
+            }
+            "latency" => warnings.push(SrtUriWarning::IgnoredLatency),
+            _ => {}
+        }
+        seen.push(key);
+    }
+    Ok(warnings)
 }
 
 #[cfg(test)]
@@ -452,33 +770,37 @@ mod tests {
 
     #[test]
     fn caller_round_trip() {
-        let f = parse("srt://192.0.2.1:4000?mode=caller&streamid=cam1&latency=200");
+        let f = parse("srt://192.0.2.1:4000?mode=caller&streamid=cam1&rcvlatency=200");
         assert_eq!(f.mode, SrtConnectionMode::Caller);
         assert_eq!(f.host, "192.0.2.1");
         assert_eq!(f.port, "4000");
         assert_eq!(f.stream_id, "cam1");
-        assert_eq!(f.other_params().collect::<Vec<_>>(), ["latency=200"]);
-        round_trip("srt://192.0.2.1:4000?mode=caller&streamid=cam1&latency=200");
+        assert_eq!(f.other_params().collect::<Vec<_>>(), ["rcvlatency=200"]);
+        round_trip("srt://192.0.2.1:4000?mode=caller&streamid=cam1&rcvlatency=200");
     }
 
     #[test]
-    fn caller_is_the_default_mode() {
+    fn without_mode_a_host_makes_a_caller_and_no_host_a_listener() {
+        // As GStreamer: caller when the URI has a host, listener when not.
         let f = parse("srt://example.com:4000");
         assert_eq!(f.mode, SrtConnectionMode::Caller);
         assert_eq!(f.to_uri(), "srt://example.com:4000?mode=caller");
+        let f = parse("srt://:5000?latency=200");
+        assert_eq!(f.mode, SrtConnectionMode::Listener);
+        assert_eq!(f.to_uri(), "srt://:5000?mode=listener&latency=200");
     }
 
     #[test]
     fn relay_round_trip() {
         let f = parse(
-            "srt+relay://Ab3kQ9xR2Ab3kQ9xR2Ab?passphrase=abcdefghijkl&pbkeylen=32&latency=200",
+            "srt+relay://Ab3kQ9xR2Ab3kQ9xR2Ab?passphrase=abcdefghijkl&pbkeylen=32&rcvlatency=200",
         );
         assert_eq!(f.mode, SrtConnectionMode::Relay);
         assert_eq!(f.stream_id, "Ab3kQ9xR2Ab3kQ9xR2Ab");
         assert_eq!(f.passphrase, "abcdefghijkl");
         assert_eq!(f.pbkeylen.as_deref(), Some("32"));
         round_trip(
-            "srt+relay://Ab3kQ9xR2Ab3kQ9xR2Ab?passphrase=abcdefghijkl&pbkeylen=32&latency=200",
+            "srt+relay://Ab3kQ9xR2Ab3kQ9xR2Ab?passphrase=abcdefghijkl&pbkeylen=32&rcvlatency=200",
         );
         round_trip("srt+relay://cam1");
     }
@@ -497,29 +819,29 @@ mod tests {
     #[test]
     fn order_and_spelling_survive_an_edit() {
         // Only the edited parameter is rewritten; the rest stays as pasted.
-        let mut f = parse("srt://h:1?latency=200&PassPhrase=abc%2Ddefghij&MODE=Caller&x=1");
+        let mut f = parse("srt://h:1?rcvlatency=200&pass%70hrase=abc%2Ddefghij&mode=caller&x=1");
         assert_eq!(f.passphrase, "abc-defghij");
         f.port = "2".to_string();
         assert_eq!(
             f.to_uri(),
-            "srt://h:2?latency=200&PassPhrase=abc%2Ddefghij&MODE=Caller&x=1"
+            "srt://h:2?rcvlatency=200&pass%70hrase=abc%2Ddefghij&mode=caller&x=1"
         );
         f.passphrase = "new passphrase".to_string();
         assert_eq!(
             f.to_uri(),
-            "srt://h:2?latency=200&passphrase=new%20passphrase&MODE=Caller&x=1"
+            "srt://h:2?rcvlatency=200&passphrase=new%20passphrase&mode=caller&x=1"
         );
         // A cleared field drops out; a new one goes at the end.
         f.passphrase.clear();
         f.stream_id = "cam1".to_string();
         assert_eq!(
             f.to_uri(),
-            "srt://h:2?latency=200&MODE=Caller&x=1&streamid=cam1"
+            "srt://h:2?rcvlatency=200&mode=caller&x=1&streamid=cam1"
         );
         // A new mode goes first.
-        let mut f = parse("srt://h:1?latency=200");
+        let mut f = parse("srt://h:1?rcvlatency=200");
         f.switch_mode(SrtConnectionMode::Listener, String::new);
-        assert_eq!(f.to_uri(), "srt://h:1?mode=listener&latency=200");
+        assert_eq!(f.to_uri(), "srt://h:1?mode=listener&rcvlatency=200");
     }
 
     #[test]
@@ -586,11 +908,31 @@ mod tests {
     }
 
     #[test]
-    fn scheme_and_mode_are_case_insensitive() {
-        let f = parse("  SRT://:5000?MODE=Listener ");
+    fn keys_and_mode_are_matched_exactly_as_gstreamer_does() {
+        // The scheme is read loosely (the fields write it back in lower
+        // case; validate_srt_uri points at it), keys and mode are not.
+        let f = parse("  SRT://h:5000?mode=listener ");
         assert_eq!(f.mode, SrtConnectionMode::Listener);
-        assert_eq!(f.to_uri(), "srt://:5000?MODE=Listener");
         assert_eq!(parse("SRT+Relay://cam1").mode, SrtConnectionMode::Relay);
+        // GStreamer ignores `MODE` and `PassPhrase`, and so do the fields.
+        let f = parse("srt://h:1?MODE=listener&PassPhrase=abcdefghijk");
+        assert_eq!(f.mode, SrtConnectionMode::Caller);
+        assert_eq!(f.passphrase, "");
+        assert_eq!(
+            f.other_params().collect::<Vec<_>>(),
+            ["MODE=listener", "PassPhrase=abcdefghijk"]
+        );
+        // A mode value in another case is refused, naming the spelling.
+        let err = SrtUriFields::parse("srt://h:1?mode=Listener").unwrap_err();
+        assert_eq!(
+            err,
+            SrtUriParseError::UnsupportedMode("Listener".to_string())
+        );
+        assert_eq!(
+            err.to_string(),
+            "mode 'Listener' is not read by GStreamer: use 'listener'"
+        );
+        assert!(SrtUriFields::parse("srt://h:1?mode=%20caller").is_err());
     }
 
     #[test]
@@ -610,7 +952,7 @@ mod tests {
                 SrtUriParseError::UnsupportedMode("rendezvous".to_string()),
             ),
             (
-                "srt://h:1?passphrase=abcdefghijk&PASSPHRASE=x",
+                "srt://h:1?passphrase=abcdefghijk&pass%70hrase=x",
                 SrtUriParseError::DuplicateParam("passphrase".to_string()),
             ),
             (
@@ -663,10 +1005,10 @@ mod tests {
     #[test]
     fn switching_to_the_relay_makes_a_stream_id_and_drops_local_binds() {
         let mut f = parse(
-            "srt://h:1?mode=caller&localaddress=0.0.0.0&LocalPort=5000&adapter=1&latency=200",
+            "srt://h:1?mode=caller&localaddress=0.0.0.0&localport=5000&adapter=1&rcvlatency=200",
         );
         f.switch_mode(SrtConnectionMode::Relay, || "newid".to_string());
-        assert_eq!(f.to_uri(), "srt+relay://newid?latency=200");
+        assert_eq!(f.to_uri(), "srt+relay://newid?rcvlatency=200");
 
         let mut f = parse("srt://h:1?mode=caller&streamid=%23!%3A%3Ar%3Dx");
         f.switch_mode(SrtConnectionMode::Relay, || "newid".to_string());
@@ -677,8 +1019,227 @@ mod tests {
     fn passphrase_length_is_checked() {
         assert_eq!(passphrase_problem(""), None);
         assert_eq!(passphrase_problem(&"a".repeat(10)), None);
-        assert_eq!(passphrase_problem(&"a".repeat(79)), None);
+        assert_eq!(passphrase_problem(&"a".repeat(80)), None);
         assert!(passphrase_problem("short").is_some());
-        assert!(passphrase_problem(&"a".repeat(80)).is_some());
+        assert!(passphrase_problem(&"a".repeat(81)).is_some());
+        // Bytes, as libsrt counts them: 41 two-byte characters are 82.
+        assert!(passphrase_problem(&"\u{e9}".repeat(41)).is_some());
+    }
+
+    fn invalid(uri: &str) -> SrtUriError {
+        validate_srt_uri(uri).expect_err(uri)
+    }
+
+    fn valid(uri: &str) -> Vec<SrtUriWarning> {
+        validate_srt_uri(uri).unwrap_or_else(|e| panic!("{uri}: {e}"))
+    }
+
+    #[test]
+    fn validate_accepts_only_srt_and_relay_schemes() {
+        assert_eq!(valid("srt://:5000?mode=listener"), []);
+        assert_eq!(valid(" srt://h:1 "), []);
+        assert_eq!(valid("SRT+Relay://cam1?passphrase=abcdefghij"), []);
+        assert_eq!(invalid("SRT://h:1"), SrtUriError::SchemeCase);
+        assert_eq!(invalid("udp://h:1"), SrtUriError::UnknownScheme);
+        assert_eq!(invalid(""), SrtUriError::UnknownScheme);
+    }
+
+    #[test]
+    fn validate_refuses_a_raw_hash() {
+        for uri in [
+            "srt://h:1?streamid=#!::r=cam1,m=publish",
+            "srt://h:1?passphrase=abcdef#ghijk",
+            "srt+relay://cam1#x",
+        ] {
+            assert_eq!(invalid(uri), SrtUriError::Fragment, "{uri}");
+        }
+        assert!(SrtUriError::Fragment.to_string().contains("%23"));
+        assert_eq!(valid("srt://h:1?streamid=%23!%3A%3Ar%3Dcam1"), []);
+    }
+
+    #[test]
+    fn validate_refuses_malformed_escapes() {
+        for (uri, key) in [
+            ("srt://h:1?passphrase=abcdefghij%zz", "passphrase"),
+            ("srt://h:1?passphrase=abcdefghij%2", "passphrase"),
+            ("srt://h:1?passphrase=abcdefghij%", "passphrase"),
+            ("srt://h:1?streamid=a%00b", "streamid"),
+            ("srt://h:1?streamid=a%+1b", "streamid"),
+            ("srt://h:1?pass%zzphrase=abcdefghij", "pass%zzphrase"),
+        ] {
+            assert_eq!(
+                invalid(uri),
+                SrtUriError::BadEscape(key.to_string()),
+                "{uri}"
+            );
+        }
+        // The message names the key, never the secret value.
+        let msg = invalid("srt://h:1?passphrase=s3cretvalue%zz").to_string();
+        assert!(!msg.contains("s3cret"), "{msg}");
+        assert_eq!(valid("srt://h:1?passphrase=abc%2Bdef+ghij%25"), []);
+    }
+
+    #[test]
+    fn validate_refuses_keys_in_another_case() {
+        for (uri, written, expected) in [
+            (
+                "srt://h:1?PassPhrase=abcdefghij",
+                "PassPhrase",
+                "passphrase",
+            ),
+            ("srt://h:1?Mode=listener", "Mode", "mode"),
+            ("srt://h:1?LocalPort=5000", "LocalPort", "localport"),
+            ("srt://h:1?StreamID=cam1", "StreamID", "streamid"),
+            ("srt://h:1?Latency=200", "Latency", "latency"),
+        ] {
+            assert_eq!(
+                invalid(uri),
+                SrtUriError::KeyCase {
+                    written: written.to_string(),
+                    expected
+                },
+                "{uri}"
+            );
+        }
+        assert_eq!(
+            invalid("srt://h:1?PassPhrase=x").to_string(),
+            "'PassPhrase' is not read by GStreamer: use 'passphrase'"
+        );
+        // A key GStreamer does not know at all is left alone.
+        assert_eq!(valid("srt://h:1?foo=1&Bar"), []);
+    }
+
+    #[test]
+    fn validate_checks_the_mode() {
+        for mode in ["caller", "listener", "rendezvous"] {
+            assert_eq!(valid(&format!("srt://h:1?mode={mode}")), []);
+        }
+        assert_eq!(
+            invalid("srt://h:1?mode=Listener"),
+            SrtUriError::ModeCase {
+                written: "Listener".to_string(),
+                expected: "listener"
+            }
+        );
+        assert_eq!(
+            invalid("srt://h:1?mode=push"),
+            SrtUriError::UnknownMode("push".to_string())
+        );
+        assert_eq!(
+            invalid("srt://h:1?mode=%20caller"),
+            SrtUriError::UnknownMode(" caller".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_refuses_a_key_given_twice() {
+        for uri in [
+            "srt://h:1?passphrase=abcdefghij&passphrase=0123456789",
+            "srt://h:1?passphrase=abcdefghij&pass%70hrase=0123456789",
+            "srt://h:1?mode=caller&x=1&mode=listener",
+            "srt://h:1?foo&foo=1",
+        ] {
+            assert!(
+                matches!(invalid(uri), SrtUriError::DuplicateParam(_)),
+                "{uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_checks_the_passphrase_length_in_bytes() {
+        for len in [10, 80] {
+            assert_eq!(
+                valid(&format!("srt://h:1?passphrase={}", "a".repeat(len))),
+                []
+            );
+        }
+        assert_eq!(valid("srt://h:1?passphrase="), []);
+        assert_eq!(valid("srt://h:1?passphrase"), []);
+        for len in [9, 81] {
+            assert_eq!(
+                invalid(&format!("srt://h:1?passphrase={}", "a".repeat(len))),
+                SrtUriError::PassphraseLength(len)
+            );
+        }
+        // Decoded first: ten `%41` are ten bytes, not thirty.
+        assert_eq!(
+            valid(&format!("srt://h:1?passphrase={}", "%41".repeat(10))),
+            []
+        );
+        assert_eq!(
+            invalid(&format!("srt://h:1?passphrase={}", "%41".repeat(9))),
+            SrtUriError::PassphraseLength(9)
+        );
+        // Bytes, not characters.
+        let e_acute = "%C3%A9";
+        assert_eq!(
+            valid(&format!("srt://h:1?passphrase={}", e_acute.repeat(40))),
+            []
+        );
+        assert_eq!(
+            invalid(&format!("srt://h:1?passphrase={}", e_acute.repeat(41))),
+            SrtUriError::PassphraseLength(82)
+        );
+    }
+
+    #[test]
+    fn validate_checks_pbkeylen() {
+        for v in ["0", "16", "24", "32", ""] {
+            assert_eq!(valid(&format!("srt://h:1?pbkeylen={v}")), [], "{v}");
+        }
+        for v in ["20", "128", "aes-128"] {
+            assert_eq!(
+                invalid(&format!("srt://h:1?pbkeylen={v}")),
+                SrtUriError::Pbkeylen(v.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn validate_warns_that_latency_in_the_uri_is_ignored() {
+        assert_eq!(
+            valid("srt://:5000?mode=listener&latency=200"),
+            [SrtUriWarning::IgnoredLatency]
+        );
+        assert_eq!(
+            valid("srt+relay://cam1?latency=200"),
+            [SrtUriWarning::IgnoredLatency]
+        );
+        assert!(SrtUriWarning::IgnoredLatency
+            .to_string()
+            .contains("Latency property"));
+        // These do apply.
+        assert_eq!(valid("srt://h:1?rcvlatency=200&peerlatency=200"), []);
+    }
+
+    #[test]
+    fn what_strom_writes_validates() {
+        let mut f = parse("srt://h:1?mode=caller");
+        f.passphrase = "a&b c#d=e%f+g/h?".to_string();
+        f.stream_id = "#!::r=cam1,m=publish".to_string();
+        f.pbkeylen = Some("32".to_string());
+        assert_eq!(valid(&f.to_uri()), []);
+        let mut f = parse("srt+relay://cam1");
+        f.passphrase = crate::srt_relay::new_srt_passphrase();
+        assert_eq!(valid(&f.to_uri()), []);
+        assert_eq!(valid(&crate::srt_relay::new_srt_relay_uri("")), []);
+        let resolved = crate::srt_relay::resolve_srt_uri(
+            "srt+relay://cam1?passphrase=abcdefghij",
+            crate::srt_relay::SrtRelayRole::Publish,
+            Some("relay.example.com:9000"),
+        )
+        .unwrap();
+        assert_eq!(valid(&resolved), []);
+    }
+
+    #[test]
+    fn gst_unescape_matches_glib() {
+        assert_eq!(gst_unescape("a%26b+c").as_deref(), Some("a&b+c"));
+        assert_eq!(gst_unescape("%e9").as_deref(), Some("\u{fffd}"));
+        assert_eq!(gst_unescape("%C3%A9").as_deref(), Some("\u{e9}"));
+        for bad in ["%", "%2", "%zz", "%00", "%+1", "a%-1"] {
+            assert_eq!(gst_unescape(bad), None, "{bad}");
+        }
     }
 }
