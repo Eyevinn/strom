@@ -9,8 +9,8 @@
 //! `strom_types::srt_uri`.
 //!
 //! The properties panel calls [`show_connection`] in place of the `srt_uri`
-//! row and [`show_connect_card`] after the latency row, so latency stays in
-//! the same group.
+//! row, and [`show_connect_actions`] in the action row at the top, where
+//! the dial-in address and VLC buttons live apart from the parameters.
 
 use std::collections::HashSet;
 
@@ -196,16 +196,15 @@ fn mode_buttons(
 ) -> Option<SrtConnectionMode> {
     let mut picked = None;
     ui.horizontal(|ui| {
-        let relay_reason = relay_unavailable_reason(relay);
+        let relay_configured = relay_unavailable_reason(relay).is_none();
         for mode in SrtConnectionMode::ALL {
             let selected = current == Some(mode);
-            // A block already on the relay keeps the choice.
-            let enabled = mode != SrtConnectionMode::Relay || relay_reason.is_none() || selected;
-            let mut response =
-                ui.add_enabled(enabled, egui::Button::selectable(selected, mode.label()));
-            if let (SrtConnectionMode::Relay, Some(reason)) = (mode, &relay_reason) {
-                response = response.on_disabled_hover_text(reason);
+            // Relay is offered only with a relay configured, but a block
+            // already on the relay keeps showing it.
+            if mode == SrtConnectionMode::Relay && !relay_configured && !selected {
+                continue;
             }
+            let response = ui.add(egui::Button::selectable(selected, mode.label()));
             let hover = match mode {
                 SrtConnectionMode::Listener => "Strom waits on a port; the other side dials in",
                 SrtConnectionMode::Caller => "Strom dials the other side",
@@ -262,10 +261,10 @@ pub fn show_connection(
         .show(ui, |ui| {
             // Connection mode.
             if custom {
-                ui.colored_label(MODIFIED, "• Connection")
+                ui.colored_label(MODIFIED, "• Type:")
                     .on_hover_text("Changed from the default");
             } else {
-                ui.label("Connection");
+                ui.label("Type:");
             }
             let picked = ui
                 .add_enabled_ui(readable, |ui| {
@@ -288,30 +287,47 @@ pub fn show_connection(
                 }
                 state.confirm_new_stream_id = false;
             }
+            let relay_known = matches!(
+                ctx.relay,
+                SrtRelayFetch::Loaded(_) | SrtRelayFetch::Failed(_)
+            );
+            if readable && relay_known && fields.mode == SrtConnectionMode::Relay {
+                if let Some(reason) = relay_unavailable_reason(ctx.relay) {
+                    note_row(ui, WARNING, reason);
+                }
+            }
         });
 
-    // The srt_uri text, full width: always editable, also when the fields
-    // are not.
-    ui.horizontal(|ui| {
-        let label = ui.label("SRT URI");
-        if !ctx.description.is_empty() {
-            label.on_hover_text(ctx.description);
-        }
-        if custom
-            && ui
-                .small_button(egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE)
-                .on_hover_text("Reset to default")
-                .clicked()
-        {
-            block.properties.remove("srt_uri");
-            text_edited = true;
-        }
-    });
-    let mut text = uri.clone();
-    if show_srt_uri_text(ui, &mut text, ctx.flow_id, &block.id) {
-        store_uri(block, ctx, text);
-        text_edited = true;
-    }
+    // The srt_uri text, full width when opened: always editable, also when
+    // the fields are not.
+    let header = egui::CollapsingHeader::new("SRT URI")
+        .id_salt(("srt_editor_uri", ctx.flow_id, block.id.as_str()))
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if !ctx.description.is_empty() {
+                    ui.add(egui::Label::new(RichText::new(ctx.description).small().weak()).wrap());
+                }
+                if custom
+                    && ui
+                        .small_button(egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE)
+                        .on_hover_text("Reset to default")
+                        .clicked()
+                {
+                    block.properties.remove("srt_uri");
+                    text_edited = true;
+                }
+            });
+            let mut text = uri.clone();
+            if show_srt_uri_text(ui, &mut text, ctx.flow_id, &block.id) {
+                store_uri(block, ctx, text);
+                text_edited = true;
+            }
+        });
+    header
+        .header_response
+        .on_hover_text("The block's srt_uri property: the fields read and write it");
+    // Shown with the header closed too: the fields are disabled until fixed.
     if let Err(e) = &parsed {
         ui.add(
             egui::Label::new(
@@ -540,7 +556,7 @@ pub fn show_connection(
     outcome
 }
 
-/// The heading of the connect card: what the other side does with the URL.
+/// Who dials the address of a block with this role.
 pub fn connect_heading(role: SrtRelayRole) -> &'static str {
     match role {
         SrtRelayRole::Request => "Senders connect to",
@@ -569,9 +585,17 @@ pub fn connect_url(uri: &str, relay: &SrtRelayFetch) -> Result<Option<String>, S
     }
 }
 
-/// The card with the address the other side dials, for listeners and relay
-/// blocks. Shown after the latency row.
-pub fn show_connect_card(
+/// Whether the block has dial-in actions: a listener, or a relay block
+/// (with a note when the relay address is not known).
+pub fn has_connect_actions(block: &BlockInstance, ctx: &SrtEditorContext<'_>) -> bool {
+    !matches!(connect_url(&current_uri(block, ctx), ctx.relay), Ok(None))
+}
+
+/// The dial-in actions of an SRT block, for the action row at the top of
+/// its properties: copy the address the other side dials, show it as a QR
+/// code, and open it in VLC (MPEG-TS outputs). Listeners and relay blocks
+/// only; a caller shows nothing (see [`has_connect_actions`]).
+pub fn show_connect_actions(
     ui: &mut Ui,
     block: &BlockInstance,
     ctx: &SrtEditorContext<'_>,
@@ -579,85 +603,80 @@ pub fn show_connect_card(
 ) -> SrtEditorOutcome {
     let mut outcome = SrtEditorOutcome::default();
     let uri = current_uri(block, ctx);
-    let url = connect_url(&uri, ctx.relay);
-    if matches!(url, Ok(None)) {
-        return outcome;
-    }
+    let url = match connect_url(&uri, ctx.relay) {
+        Ok(Some(url)) => url,
+        Ok(None) => return outcome,
+        Err(note) => {
+            ui.horizontal_wrapped(|ui| {
+                ui.add(egui::Label::new(RichText::new(note).weak().small()).wrap());
+                if ui
+                    .small_button(egui_phosphor::regular::ARROWS_CLOCKWISE)
+                    .on_hover_text("Ask the server again")
+                    .clicked()
+                {
+                    outcome.refresh_requested = true;
+                }
+            });
+            return outcome;
+        }
+    };
     let sid = state_id(ctx, block);
     let mut state: EditorState = ui.data(|d| d.get_temp(sid)).unwrap_or_default();
 
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
-        ui.label(RichText::new(connect_heading(ctx.role)).strong());
-        match &url {
-            Ok(Some(url)) => {
-                ui.add(egui::Label::new(RichText::new(url).monospace()).wrap());
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .button(format!("{} Copy", egui_phosphor::regular::COPY))
-                        .on_hover_text("Copy the URL (without the passphrase)")
-                        .clicked()
-                    {
-                        crate::clipboard::copy_text_with_ctx(ui.ctx(), url);
-                    }
-                    let relay_public = ctx.relay.public_or_note().ok();
-                    if let Some(vlc_uri) =
-                        crate::app::vlc_player_uri(ctx.definition_id, &uri, relay_public.as_deref())
-                    {
-                        if ui
-                            .button(format!("{} Open in VLC", egui_phosphor::regular::PLAY))
-                            .on_hover_text("Download an XSPF playlist and open it in VLC")
-                            .clicked()
-                        {
-                            outcome.vlc_requested = Some(vlc_uri.clone());
-                        }
-                        #[cfg(not(target_arch = "wasm32"))]
-                        if ui
-                            .button(egui_phosphor::regular::DOWNLOAD_SIMPLE)
-                            .on_hover_text("Save the XSPF playlist")
-                            .clicked()
-                        {
-                            outcome.vlc_download_requested = Some(vlc_uri);
-                        }
-                    }
-                    if ui
-                        .selectable_label(
-                            state.show_qr,
-                            format!("{} QR", egui_phosphor::regular::QR_CODE),
-                        )
-                        .on_hover_text("Show the URL as a QR code")
-                        .clicked()
-                    {
-                        state.show_qr = !state.show_qr;
-                    }
-                });
-                if state.show_qr {
-                    if let Some(texture) = qr_cache.get_or_create(ui.ctx(), url) {
-                        ui.image(egui::load::SizedTexture::new(
-                            texture.id(),
-                            egui::vec2(160.0, 160.0),
-                        ));
-                    }
-                }
+    ui.horizontal(|ui| {
+        if ui
+            .button(format!("{} Copy address", egui_phosphor::regular::COPY))
+            .on_hover_text(format!(
+                "{}:\n{url}\n\nCopied without the passphrase.",
+                connect_heading(ctx.role)
+            ))
+            .clicked()
+        {
+            crate::clipboard::copy_text_with_ctx(ui.ctx(), &url);
+        }
+        if ui
+            .selectable_label(state.show_qr, egui_phosphor::regular::QR_CODE)
+            .on_hover_text("Toggle a QR code of the address")
+            .clicked()
+        {
+            state.show_qr = !state.show_qr;
+        }
+        let relay_public = ctx.relay.public_or_note().ok();
+        if let Some(vlc_uri) =
+            crate::app::vlc_player_uri(ctx.definition_id, &uri, relay_public.as_deref())
+        {
+            if ui
+                .button(format!("{} Open in VLC", egui_phosphor::regular::PLAY))
+                .on_hover_text("Download XSPF playlist and open in VLC")
+                .clicked()
+            {
+                outcome.vlc_requested = Some(vlc_uri.clone());
             }
-            Err(note) => {
-                ui.horizontal_wrapped(|ui| {
-                    ui.add(egui::Label::new(RichText::new(note).weak().small()).wrap());
-                    if ui
-                        .small_button(egui_phosphor::regular::ARROWS_CLOCKWISE)
-                        .on_hover_text("Ask the server again")
-                        .clicked()
-                    {
-                        outcome.refresh_requested = true;
-                    }
-                });
+            #[cfg(not(target_arch = "wasm32"))]
+            if ui
+                .button(format!(
+                    "{} Download",
+                    egui_phosphor::regular::DOWNLOAD_SIMPLE
+                ))
+                .on_hover_text("Download XSPF playlist file")
+                .clicked()
+            {
+                outcome.vlc_download_requested = Some(vlc_uri);
             }
-            Ok(None) => {}
         }
     });
+    if state.show_qr {
+        ui.add_space(4.0);
+        if let Some(texture) = qr_cache.get_or_create(ui.ctx(), &url) {
+            ui.image(egui::load::SizedTexture::new(
+                texture.id(),
+                egui::vec2(200.0, 200.0),
+            ));
+        }
+        ui.label(RichText::new(&url).monospace().small());
+    }
 
     ui.data_mut(|d| d.insert_temp(sid, state));
-    ui.add_space(8.0);
     outcome
 }
 

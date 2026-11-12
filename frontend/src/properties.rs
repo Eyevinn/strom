@@ -587,8 +587,28 @@ impl PropertyInspector {
                 }
             });
 
+            // SRT blocks: the address the other side dials (listener and
+            // relay), with copy, QR and VLC actions.
+            let srt_ctx = strom_types::srt_relay::srt_relay_role(&definition.id).and_then(|role| {
+                let uri_prop = definition
+                    .exposed_properties
+                    .iter()
+                    .find(|p| p.name == "srt_uri")?;
+                Some(crate::srt_editor::SrtEditorContext::new(
+                    definition,
+                    uri_prop,
+                    flow_id,
+                    role,
+                    srt_relay,
+                    taken_srt_relay_ids,
+                ))
+            });
+            let has_srt_actions = srt_ctx
+                .as_ref()
+                .is_some_and(|ctx| crate::srt_editor::has_connect_actions(block, ctx));
+
             // Check if this block type has action buttons
-            let has_action_buttons = matches!(
+            let has_action_buttons = has_srt_actions || matches!(
                 definition.id.as_str(),
                 "builtin.aes67_input"
                     | "builtin.ndi_input"
@@ -653,6 +673,12 @@ impl PropertyInspector {
                 && ui.button(format!("{} Routing", egui_phosphor::regular::GRAPH)).clicked()
             {
                 crate::app::set_local_storage("open_routing_editor", &block.id);
+            }
+
+            if let (true, Some(ctx)) = (has_srt_actions, &srt_ctx) {
+                result.srt_relay_needed = true;
+                let outcome = crate::srt_editor::show_connect_actions(ui, block, ctx, qr_cache);
+                outcome.apply_to(&mut result);
             }
 
             // Remote control for HTML sources. The link is minted by the
@@ -931,11 +957,6 @@ impl PropertyInspector {
                                 None
                             };
 
-                            let has_latency = definition
-                                .exposed_properties
-                                .iter()
-                                .any(|p| p.name == "latency");
-
                             for exposed_prop in &definition.exposed_properties {
                                 if let Some(ref skip) = skip_set {
                                     if skip.contains(exposed_prop.name.as_str()) {
@@ -949,9 +970,8 @@ impl PropertyInspector {
                                 {
                                     ui.separator();
                                 }
-                                // SRT blocks: the connection editor over srt_uri,
-                                // with latency inside its group (see
-                                // `crate::srt_editor`).
+                                // SRT blocks: the connection editor over srt_uri
+                                // (see `crate::srt_editor`), as its own section.
                                 let srt_role =
                                     strom_types::srt_relay::srt_relay_role(&definition.id);
                                 if let (Some(role), "srt_uri") =
@@ -966,15 +986,11 @@ impl PropertyInspector {
                                         srt_relay,
                                         taken_srt_relay_ids,
                                     );
+                                    ui.separator();
                                     let outcome =
                                         crate::srt_editor::show_connection(ui, block, &ctx);
                                     outcome.apply_to(&mut result);
-                                    if !has_latency {
-                                        let outcome = crate::srt_editor::show_connect_card(
-                                            ui, block, &ctx, qr_cache,
-                                        );
-                                        outcome.apply_to(&mut result);
-                                    }
+                                    ui.separator();
                                     continue;
                                 }
 
@@ -992,29 +1008,6 @@ impl PropertyInspector {
                                     taken_endpoint_ids,
                                     &mut device_picker_actions,
                                 );
-
-                                if let (Some(role), "latency") =
-                                    (srt_role, exposed_prop.name.as_str())
-                                {
-                                    if let Some(uri_prop) = definition
-                                        .exposed_properties
-                                        .iter()
-                                        .find(|p| p.name == "srt_uri")
-                                    {
-                                        let ctx = crate::srt_editor::SrtEditorContext::new(
-                                            definition,
-                                            uri_prop,
-                                            flow_id,
-                                            role,
-                                            srt_relay,
-                                            taken_srt_relay_ids,
-                                        );
-                                        let outcome = crate::srt_editor::show_connect_card(
-                                            ui, block, &ctx, qr_cache,
-                                        );
-                                        outcome.apply_to(&mut result);
-                                    }
-                                }
 
                                 // For live properties, route the block-level value
                                 // through the block-properties endpoint so the backend
