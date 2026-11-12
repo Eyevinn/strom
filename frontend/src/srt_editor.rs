@@ -418,6 +418,16 @@ pub fn show_connection(
                 {
                     new_stream_id = true;
                 }
+                if ui
+                    .add_enabled(
+                        !fields.stream_id.is_empty(),
+                        egui::Button::new(egui_phosphor::regular::X).small(),
+                    )
+                    .on_hover_text("Clear stream ID")
+                    .clicked()
+                {
+                    fields.stream_id.clear();
+                }
             });
             ui.end_row();
             if relay && readable {
@@ -488,8 +498,25 @@ pub fn show_connection(
                 } else {
                     (egui_phosphor::regular::EYE, "Show passphrase")
                 };
-                if ui.small_button(icon).on_hover_text(hover).clicked() {
+                if ui
+                    .add_enabled(
+                        !fields.passphrase.is_empty(),
+                        egui::Button::new(icon).small(),
+                    )
+                    .on_hover_text(hover)
+                    .clicked()
+                {
                     state.show_passphrase = !state.show_passphrase;
+                }
+                if ui
+                    .add_enabled(
+                        !fields.passphrase.is_empty(),
+                        egui::Button::new(egui_phosphor::regular::X).small(),
+                    )
+                    .on_hover_text("Clear passphrase (no encryption)")
+                    .clicked()
+                {
+                    fields.passphrase.clear();
                 }
             });
             ui.end_row();
