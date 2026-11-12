@@ -135,9 +135,12 @@ impl LinksPage {
                         } else {
                             flow.name.clone()
                         };
+                        // From the URL itself, so a listener's passphrase
+                        // counts too, not only a relay's.
+                        let has_passphrase = strip_srt_uri_secrets(&vlc_uri) != vlc_uri;
                         found.streams.push(VlcStreamInfo {
                             name,
-                            has_passphrase: relay.is_some_and(|r| r.passphrase().is_some()),
+                            has_passphrase,
                             vlc_uri,
                         });
                     }
@@ -784,6 +787,20 @@ mod tests {
             "<location>srt://relay.example.com:9000?streamid=cam1&amp;passphrase=abcdefghijkl</location>"
         ));
         assert!(playlist.contains("<location>srt://127.0.0.1:5000?mode=caller</location>"));
+    }
+
+    #[test]
+    fn a_listener_passphrase_is_flagged_so_the_hover_hides_it() {
+        let mut flow = Flow::new("Show");
+        flow.blocks = vec![block(
+            "out",
+            "builtin.mpegtssrt_output",
+            "srt://:5000?mode=listener&passphrase=topsecret123",
+        )];
+        let found = LinksPage::get_vlc_streams(&[flow], None);
+        assert_eq!(found.streams.len(), 1);
+        assert!(found.streams[0].vlc_uri.contains("topsecret123"));
+        assert!(found.streams[0].has_passphrase);
     }
 
     #[test]
