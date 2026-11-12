@@ -494,8 +494,10 @@ impl SrtUriFields {
                 !DIRECT_ONLY_PARAMS.contains(&percent_decode(key).as_str())
             });
         }
-        if self.mode == SrtConnectionMode::Listener && mode == SrtConnectionMode::Caller {
-            // The bind address is no address to dial.
+        if self.mode == SrtConnectionMode::Listener || mode == SrtConnectionMode::Listener {
+            // The bind address is no address to dial, and the host a caller
+            // (or a relay block, kept from before) dials is no local address
+            // to bind: a listener starts on all addresses.
             self.host.clear();
         }
         self.mode = mode;
@@ -841,7 +843,7 @@ mod tests {
         // A new mode goes first.
         let mut f = parse("srt://h:1?rcvlatency=200");
         f.switch_mode(SrtConnectionMode::Listener, String::new);
-        assert_eq!(f.to_uri(), "srt://h:1?mode=listener&rcvlatency=200");
+        assert_eq!(f.to_uri(), "srt://:1?mode=listener&rcvlatency=200");
     }
 
     #[test]
@@ -998,8 +1000,15 @@ mod tests {
         f.switch_mode(SrtConnectionMode::Listener, || unreachable!());
         assert_eq!(
             f.to_uri(),
-            "srt://example.com:5000?mode=listener&streamid=cam1&passphrase=abcdefghijk&latency=200"
+            "srt://:5000?mode=listener&streamid=cam1&passphrase=abcdefghijk&latency=200"
         );
+    }
+
+    #[test]
+    fn caller_to_listener_does_not_bind_the_remote_host() {
+        let mut f = parse("srt://192.0.2.1:4000?mode=caller");
+        f.switch_mode(SrtConnectionMode::Listener, || unreachable!());
+        assert_eq!(f.to_uri(), "srt://:4000?mode=listener");
     }
 
     #[test]
