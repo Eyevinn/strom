@@ -114,7 +114,6 @@ impl SrtEditorOutcome {
 struct EditorState {
     show_passphrase: bool,
     show_qr: bool,
-    confirm_new_stream_id: bool,
     /// Host and port from before a switch to the relay, restored on the way
     /// back: the relay URI has no room for them.
     remembered_host: String,
@@ -285,7 +284,6 @@ pub fn show_connection(
                         fields.host = state.remembered_host.clone();
                     }
                 }
-                state.confirm_new_stream_id = false;
             }
             let relay_known = matches!(
                 ctx.relay,
@@ -401,36 +399,17 @@ pub fn show_connection(
                     } else {
                         id
                     };
-                    state.confirm_new_stream_id = false;
                 }
                 if relay
                     && ui
-                        .button("New")
-                        .on_hover_text("Make a new random stream ID")
+                        .small_button("Generate")
+                        .on_hover_text("Set a new random stream ID")
                         .clicked()
                 {
-                    if fields.stream_id.is_empty() {
-                        new_stream_id = true;
-                    } else {
-                        state.confirm_new_stream_id = true;
-                    }
+                    new_stream_id = true;
                 }
             });
             ui.end_row();
-            if relay && state.confirm_new_stream_id {
-                ui.label("");
-                ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(WARNING, "The current address stops working.");
-                    if ui.small_button("Replace").clicked() {
-                        new_stream_id = true;
-                        state.confirm_new_stream_id = false;
-                    }
-                    if ui.small_button("Cancel").clicked() {
-                        state.confirm_new_stream_id = false;
-                    }
-                });
-                ui.end_row();
-            }
             if relay && readable {
                 let id = &fields.stream_id;
                 if id.is_empty() {
