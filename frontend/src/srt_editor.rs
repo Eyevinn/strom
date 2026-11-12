@@ -582,6 +582,19 @@ pub fn connect_heading(role: SrtRelayRole) -> &'static str {
     }
 }
 
+/// The hover text of "Copy address": who connects, and the address with the
+/// passphrase masked. The copied text keeps it (see [`connect_url`]), so the
+/// hover says so, but the secret is not shown on screen unasked.
+fn copy_address_hover(role: SrtRelayRole, url: &str) -> String {
+    let masked = mask_srt_uri(url, MASK);
+    let note = if masked == url {
+        ""
+    } else {
+        "\n(copies with the passphrase)"
+    };
+    format!("{}:\n{masked}{note}", connect_heading(role))
+}
+
 /// The URL the other side dials for a block whose `srt_uri` is `uri`: the
 /// listener at this server, or the relay with the stream ID. It includes the
 /// passphrase (and key length), in clear: the operator configures the block
@@ -648,7 +661,7 @@ pub fn show_connect_actions(
     ui.horizontal(|ui| {
         if ui
             .button(format!("{} Copy address", egui_phosphor::regular::COPY))
-            .on_hover_text(format!("{}:\n{url}", connect_heading(ctx.role)))
+            .on_hover_text(copy_address_hover(ctx.role, &url))
             .clicked()
         {
             crate::clipboard::copy_text_with_ctx(ui.ctx(), &url);
@@ -767,6 +780,20 @@ mod tests {
             public: public.map(str::to_string),
             error: None,
         })
+    }
+
+    #[test]
+    fn copy_address_hover_masks_the_passphrase() {
+        let hover = copy_address_hover(
+            SrtRelayRole::Publish,
+            "srt://relay.example.com:9000?streamid=abc&passphrase=topsecret123",
+        );
+        assert!(!hover.contains("topsecret123"), "{hover}");
+        assert!(hover.contains("streamid=abc"), "{hover}");
+        assert!(hover.contains("copies with the passphrase"), "{hover}");
+
+        let hover = copy_address_hover(SrtRelayRole::Request, "srt://host:5000?mode=caller");
+        assert_eq!(hover, "Senders connect to:\nsrt://host:5000?mode=caller");
     }
 
     #[test]
