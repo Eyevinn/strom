@@ -21,6 +21,10 @@ These are rules, not a description of the code. The code is the source of truth 
 - A block that hands media into a flow through an `appsrc` (a pipeline of its own, a callback, a network session) builds it with `blocks::live_bridge_appsrc`. A live `appsrc` at its defaults reports a maximum of 0, even though it queues seconds of data.
 - When a mixer fails its latency configuration, fix the input that reports the wrong latency. Do not raise queue sizes in front of the mixer to hide it.
 
+## Sinks That Block
+- **A sink that can block on the network (a caller that connects or reconnects inside `render`) must not stall the flow.** Strom links one block output to several blocks through a `tee` without queues, so a sink that blocks holds up everything upstream: a live mixer stalls, the other outputs stop, and the backlog bursts out when the sink unblocks. Give such a sink a thread of its own and let it drop only its own data: a `queue` with `leaky=downstream` in front of it. That is a documented requirement in the sense of the queue rule in `CLAUDE.md`; justify each limit you change in the code. The SRT outputs in caller mode do this (#1259).
+- A guard test builds the real block with nobody to connect to, tees a live source into it and into a counting sink, and fails if the counting sink stops receiving at the source rate.
+
 ## Thread Priority
 - **A block that runs a pipeline of its own gives its streaming threads the flow's priority.** The flow's thread priority, CPU affinity and thread registry follow the flow's bus. An internal pipeline has its own bus, and gets none of them unless the block hands them over. Hand them over through `SessionThreadConfig` on every pipeline the block creates: `install_on_internal_pipeline` where the block owns the bus, `install_on_webrtcsink` where webrtcsink owns it. A pipeline Strom runs outside any flow calls `thread_priority::reset_streaming_threads`, so a pooled thread a WebRTC session left elevated gets its own scheduling back.
 - A guard test builds the real block with a thread registry, and fails if no streaming thread of the internal pipeline is registered under the block.
