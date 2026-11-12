@@ -205,6 +205,39 @@ workaround can go once we move past that version.
 - **Upstream:** not searched. Strom puts a leaky queue in front of a calling `srtsink`.
 - **Found in:** [#1259](https://github.com/Eyevinn/strom/issues/1259)
 
+### libsrt / `srtsink`: a connection that just succeeded is closed as "broken"
+- **Seen on:** libsrt 1.5.4 inside strom-full 0.8.1 with GStreamer 1.28.2 (Linux). The
+  libsrt code is the same in 1.5.6 and on `master` (read, not run).
+- **Symptom:** a calling `srtsink` that has just reconnected logs "Socket is broken or
+  closed. Trying to reconnect" about 2 ms after it opened the new socket. It closes that
+  socket and opens another one, although the connection to the peer had just succeeded.
+  Measured: in the libsrt log, the streaming thread's "broken" comes 13 µs **before**
+  libsrt's own "Connection established" for the same socket. The peer sees a session that
+  ends at once. Hit 2 times in about 30 attempts when a receiver connected through an SRT
+  relay just before the sink's next reconnect, so the answer came right after the sink
+  reconnected.
+- **Repro:** not as one line. A calling `srtsink` with no peer (it reconnects every 3 s),
+  and a peer that becomes available 30–50 ms before one of those reconnects, so the
+  handshake completes right after the new socket opens. Log with
+  `GST_DEBUG=srtobject:6,srtlib:6`.
+- **Hint:** read in the source. In `CUDT::postConnect` (core.cpp, "And, I am connected
+  too"), libsrt sets `m_bConnecting = false`, then calls `locateSocket()` (which takes the
+  global control lock), and only then sets `m_bConnected = true`. During that gap
+  `CUDTSocket::getStatus()` (api.cpp) returns `SRTS_BROKEN` through its "connecting timed
+  out" branch (`SRTS_CONNECTING && !m_bConnecting && !m_bConnected`), although its own
+  comment says that branch must not catch the regular CONNECTING → CONNECTED transition.
+  `gst_srt_object_write_one` (gstsrtobject.c) checks `srt_getsockstate()` after `epoll`
+  wakes it on the new socket, gets `SRTS_BROKEN`, and closes the socket. A guess: the
+  window is widest right after a reconnect, when closing the old socket contends for the
+  same lock.
+- **Tests:** none (timing-dependent).
+- **Upstream:** not reported. Possible fixes: libsrt sets `m_bConnected` before clearing
+  `m_bConnecting`, or `getStatus()` tells the transition apart from a timeout. In
+  GStreamer, `write_one` could re-check before treating a socket opened moments ago as
+  broken.
+- **Found in:** the SRT relay work, [#1258](https://github.com/Eyevinn/strom/pull/1258).
+  Peers that reconnect by themselves only see one dropped attempt.
+
 ### `rtpjitterbuffer`: packets held for the length of a mute gap
 - **Seen on:** versions not recorded.
 - **Symptom:** after a gap with no RTP packets (a muted sender), the jitterbuffer holds
