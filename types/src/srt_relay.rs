@@ -256,13 +256,20 @@ pub fn srt_relay_player_uri(public: &str, relay: &SrtRelayUri) -> String {
 /// never logged or shown unasked.
 const SECRET_PARAMS: &[&str] = &["passphrase"];
 
+/// Query parameters kept out of log lines: the secrets, and `streamid`. On
+/// the relay the stream id is what pairs the two sides, so without a
+/// passphrase it is the only thing that grants access to the stream, and
+/// many SRT servers use it as an access token too. The GUI shows it (it is
+/// the address), but a log line does not need it.
+const LOG_HIDDEN_PARAMS: &[&str] = &["passphrase", "streamid"];
+
 /// Rewrite the secret query parameters of an SRT URI (`srt://` or
 /// `srt+relay://`): `Some(mask)` replaces a non-empty value with `mask`,
 /// `None` drops the parameter. Keys are matched after percent-decoding, and
 /// ignoring case and surrounding whitespace: GStreamer reads only the exact
 /// key, but a misspelled one is still the user's secret, so it is hidden
 /// too. An empty value is left as is.
-fn rewrite_secret_params(uri: &str, mask: Option<&str>) -> String {
+fn rewrite_secret_params(uri: &str, keys: &[&str], mask: Option<&str>) -> String {
     let Some((head, query)) = uri.split_once('?') else {
         return uri.to_string();
     };
@@ -271,9 +278,7 @@ fn rewrite_secret_params(uri: &str, mask: Option<&str>) -> String {
         .filter_map(|param| {
             let (key, value) = param.split_once('=').unwrap_or((param, ""));
             let decoded = percent_decode(key);
-            let secret = SECRET_PARAMS
-                .iter()
-                .any(|s| decoded.trim().eq_ignore_ascii_case(s));
+            let secret = keys.iter().any(|s| decoded.trim().eq_ignore_ascii_case(s));
             if !secret || value.is_empty() {
                 return Some(param.to_string());
             }
@@ -287,22 +292,35 @@ fn rewrite_secret_params(uri: &str, mask: Option<&str>) -> String {
     }
 }
 
-/// An SRT URI fit for a log line: the passphrase (and any other secret query
-/// value) replaced with `***`. Use it wherever an SRT URI is logged.
+/// An SRT URI fit for a log line: the passphrase and the stream id replaced
+/// with `***`, and so is the id of an `srt+relay://<id>` address. Use it
+/// wherever an SRT URI is logged.
 pub fn redact_srt_uri(uri: &str) -> String {
-    rewrite_secret_params(uri, Some("***"))
+    let redacted = rewrite_secret_params(uri, LOG_HIDDEN_PARAMS, Some("***"));
+    let Some(rest) = redacted
+        .get(..SRT_RELAY_SCHEME.len())
+        .filter(|scheme| scheme.eq_ignore_ascii_case(SRT_RELAY_SCHEME))
+        .map(|_| &redacted[SRT_RELAY_SCHEME.len()..])
+    else {
+        return redacted;
+    };
+    let id_end = rest.find(['?', '#']).unwrap_or(rest.len());
+    if id_end == 0 {
+        return redacted;
+    }
+    format!("{SRT_RELAY_SCHEME}***{}", &rest[id_end..])
 }
 
 /// An SRT URI with the secret query values replaced with `mask`, for showing
 /// the URI on screen without its passphrase.
 pub fn mask_srt_uri(uri: &str, mask: &str) -> String {
-    rewrite_secret_params(uri, Some(mask))
+    rewrite_secret_params(uri, SECRET_PARAMS, Some(mask))
 }
 
 /// An SRT URI without its secret query parameters, for a label next to the
 /// full URI (a playlist title, say).
 pub fn strip_srt_uri_secrets(uri: &str) -> String {
-    rewrite_secret_params(uri, None)
+    rewrite_secret_params(uri, SECRET_PARAMS, None)
 }
 
 /// Random bytes behind a new stream id: 128 bits, 22 characters.
@@ -779,8 +797,20 @@ mod tests {
         assert!(!redacted.contains("s3cret"), "{redacted}");
         assert_eq!(
             redacted,
-            "srt://srt-splice:9000?mode=caller&streamid=%23!%3A%3Ar%3Dcam1%2Cm%3Dpublish\
-             &passphrase=***&latency=200&pbkeylen=32"
+            "srt://srt-splice:9000?mode=caller&streamid=***&passphrase=***&latency=200&pbkeylen=32"
+        );
+        // The relay id grants access without a passphrase: kept out of logs
+        // in both the resolved and the srt+relay:// form.
+        let resolved =
+            resolve_srt_uri("srt+relay://cam1secretid", SrtRelayRole::Publish, RELAY).unwrap();
+        assert!(!redact_srt_uri(&resolved).contains("cam1secretid"));
+        assert_eq!(
+            redact_srt_uri("srt+relay://cam1secretid?passphrase=abc&latency=1"),
+            "srt+relay://***?passphrase=***&latency=1"
+        );
+        assert_eq!(
+            redact_srt_uri("srt+relay://cam1secretid"),
+            "srt+relay://***"
         );
         for (uri, expected) in [
             // Case and percent-encoding of the key do not matter.
