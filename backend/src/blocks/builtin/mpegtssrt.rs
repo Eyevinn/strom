@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use strom_types::srt_relay::redact_srt_uri;
-use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
+use strom_types::{block::*, PropertyValue, *};
 use tracing::{debug, error, info, warn};
 
 /// Block definition id; also selects the block's role on the SRT relay.
@@ -347,7 +347,7 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
         // Get weak reference to mux BEFORE moving it into elements (for dynamic linking in pad probe)
         let mux_weak = mux.downgrade();
 
-        let mut elements = vec![(mux_id.clone(), mux), (sink_id.clone(), srtsink)];
+        let mut elements = vec![(mux_id.clone(), mux), (sink_id.clone(), srtsink.clone())];
 
         // Create one video input chain per track.
         // Video linking is DYNAMIC - we don't link to mpegtsmux at construction time.
@@ -770,11 +770,15 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
             elements.push((audio_input_id, audio_input));
         }
 
-        // Link mux to sink
-        internal_links.push((
-            ElementPadRef::pad(&mux_id, "src"),
-            ElementPadRef::pad(&sink_id, "sink"),
-        ));
+        // Link mux to sink; a caller gets a leaky queue in between (#1259).
+        super::srt_sink::link_mux_to_srtsink(
+            instance_id,
+            &mux_id,
+            &sink_id,
+            &srtsink,
+            &mut elements,
+            &mut internal_links,
+        )?;
 
         info!(
             "Created MPEG-TS/SRT block with {} video track(s) and {} audio chain(s)",

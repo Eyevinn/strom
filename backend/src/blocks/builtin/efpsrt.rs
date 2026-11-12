@@ -298,7 +298,7 @@ impl BlockBuilder for EfpSrtOutputBuilder {
 
         let mut internal_links = data_links;
         let mux_weak = mux.downgrade();
-        let mut elements = vec![(mux_id.clone(), mux), (sink_id.clone(), srtsink)];
+        let mut elements = vec![(mux_id.clone(), mux), (sink_id.clone(), srtsink.clone())];
         elements.extend(data_elements);
 
         // Create one video input chain per track, with dynamic parser insertion.
@@ -634,11 +634,15 @@ impl BlockBuilder for EfpSrtOutputBuilder {
             elements.push((audio_input_id, audio_input));
         }
 
-        // Link mux to sink
-        internal_links.push((
-            ElementPadRef::pad(&mux_id, "src"),
-            ElementPadRef::pad(&sink_id, "sink"),
-        ));
+        // Link mux to sink; a caller gets a leaky queue in between (#1259).
+        super::srt_sink::link_mux_to_srtsink(
+            instance_id,
+            &mux_id,
+            &sink_id,
+            &srtsink,
+            &mut elements,
+            &mut internal_links,
+        )?;
 
         info!(
             "Created EFP/SRT block with {} video track(s), {} audio chain(s) and {} data track(s)",

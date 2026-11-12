@@ -188,6 +188,23 @@ workaround can go once we move past that version.
 - **Found in:** [#1101](https://github.com/Eyevinn/strom/issues/1101),
   [#1132](https://github.com/Eyevinn/strom/pull/1132)
 
+### `srtsink`: a caller without a peer blocks the streaming thread
+- **Seen on:** GStreamer 1.28.2 (Linux) and 1.28.6 (macOS, Homebrew). 1.22 not checked.
+- **Symptom:** an `srtsink` in caller mode with `auto-reconnect=true` (the default) holds
+  the buffer it is rendering for as long as it has no peer. Measured: a live 100 buffers/s
+  source teed into the sink and into a `fakesink` delivered 2-13 buffers in 10 s to the
+  `fakesink`. In the field a production flow stood still for 76 s, then burst its backlog
+  when a receiver connected.
+- **Repro:** untested as one line, the test below is the repro:
+  `audiotestsrc is-live=true ! tee name=t ! fakesink silent=false -v t. ! audioconvert ! avenc_aac ! aacparse ! mpegtsmux ! srtsink uri="srt://127.0.0.1:<port with no listener>?mode=caller"`,
+  and watch the `fakesink` stop.
+- **Hint:** a guess from the log line "Socket is broken or closed. Trying to reconnect":
+  the reconnect runs inside `render` (`gst_srt_object_write`), with blocking connect
+  attempts (`SRTO_CONNTIMEO`, 3 s by default). Source not read.
+- **Tests:** `srt_output_peerless_caller_test`.
+- **Upstream:** not searched. Strom puts a leaky queue in front of a calling `srtsink`.
+- **Found in:** [#1259](https://github.com/Eyevinn/strom/issues/1259)
+
 ### `rtpjitterbuffer`: packets held for the length of a mute gap
 - **Seen on:** versions not recorded.
 - **Symptom:** after a gap with no RTP packets (a muted sender), the jitterbuffer holds
