@@ -111,7 +111,8 @@ pub(crate) fn queue_max_size_time(latency: Option<gst::ClockTime>) -> gst::Clock
 /// What the queue drops is counted, and logged per output every 5 s from a
 /// timer: as a warning when the sink was connected and sending on time (an
 /// unexpected drop), at info level when it could not send (no peer, or a link
-/// that cannot keep up). See `QueueDropMonitor`.
+/// that cannot keep up). Buffers a flush or a stop discards are not drops.
+/// See `QueueDropMonitor`.
 ///
 /// A listener does not block without a peer as long as `wait-for-connection`
 /// is false (the block default); with it true the operator asked for blocking.
@@ -171,8 +172,9 @@ fn caller_queue(
 /// Counters for the queue in front of a calling `srtsink`.
 ///
 /// The queue does not count what it leaks, so drops are derived: buffers in,
-/// minus buffers out, minus what the queue holds. The work is split by thread so that the buffer probes stay
-/// cheap (CLAUDE.md, "GStreamer Pad Probes"):
+/// minus buffers out, minus what the queue holds, minus what was discarded for
+/// other reasons (a flush, a stop). The work is split by thread so that the
+/// buffer probes stay cheap (CLAUDE.md, "GStreamer Pad Probes"):
 ///
 /// - The buffer probes only add to counters and store timestamps (atomics).
 /// - The accounting reads the queue's level, a property read that takes the
@@ -183,6 +185,11 @@ fn caller_queue(
 ///   At an overrun the leak of the overrun before is complete and the buffer
 ///   being chained is not queued yet, so the count covers every leak up to the
 ///   previous overrun. A leak is accounted at the next overrun, or at EOS.
+/// - FLUSH_STOP and STREAM_START rebase the counters: whatever is unaccounted
+///   then was flushed (FLUSH_STOP, or a stop through READY, which flushes the
+///   queue on pad deactivation), not leaked. A leak that was not accounted
+///   yet is dropped from the count with it, so a flush can hide a drop but
+///   never invent one.
 /// - The logging runs on a 5 s timer on the system clock thread and only reads
 ///   counters; it logs what is left when the queue goes away, too.
 ///
@@ -225,6 +232,8 @@ struct QueueDropMonitor {
     /// `max-size-time` it led to, in ns.
     latency: AtomicU64,
     limit: AtomicU64,
+    /// Buffers that left the count without a leak (flushed), see `rebase`.
+    discarded: AtomicU64,
     /// Every drop counted so far: the high-water mark of the estimate.
     accounted: AtomicU64,
     /// `accounted`, split by verdict.
@@ -272,6 +281,7 @@ impl QueueDropMonitor {
             out_segment: Mutex::new(None),
             latency: AtomicU64::new(0),
             limit: AtomicU64::new(queue_max_size_time(None).nseconds()),
+            discarded: AtomicU64::new(0),
             accounted: AtomicU64::new(0),
             dropped_on_time: AtomicU64::new(0),
             dropped_late: AtomicU64::new(0),
@@ -343,11 +353,13 @@ impl QueueDropMonitor {
     /// dequeued in between is missing from neither.
     fn unaccounted(&self, level: u64, in_chain: u64) -> u64 {
         let out = self.out_buffers.load(Ordering::Relaxed);
-        // `in` only moves on the thread calling this.
+        // `in` and `discarded` only move on the thread calling this.
         let inn = self.in_buffers.load(Ordering::Relaxed);
+        let discarded = self.discarded.load(Ordering::Relaxed);
         inn.saturating_sub(in_chain)
             .saturating_sub(out)
             .saturating_sub(level)
+            .saturating_sub(discarded)
     }
 
     /// Count the drops so far. Upstream streaming thread, while it is not in
@@ -379,6 +391,20 @@ impl QueueDropMonitor {
     /// EOS reached the queue; `level` is what it holds.
     fn end_of_stream(&self, level: u64) {
         self.account(level, 0);
+    }
+
+    /// The queue is about to drop what it holds but `level` buffers, or did:
+    /// whatever is not accounted for now was flushed, not leaked.
+    fn rebase(&self, level: u64) {
+        let unaccounted = self.unaccounted(level, 0);
+        let accounted = self.accounted.load(Ordering::Relaxed);
+        let discarded = self.discarded.load(Ordering::Relaxed);
+        self.discarded.store(
+            discarded + unaccounted.saturating_sub(accounted),
+            Ordering::Relaxed,
+        );
+        self.last_overrun_on_time.store(false, Ordering::Relaxed);
+        self.limit_lowered.store(false, Ordering::Relaxed);
     }
 
     /// The drops since the last report. `None` when there were none. Only
@@ -532,18 +558,30 @@ fn install_queue_monitor(instance_id: &str, queue: &gst::Element) -> Arc<QueueDr
     });
 
     // Events into the queue, on the upstream thread, before the queue handles
-    // them (so its lock is free for the level read).
+    // them (so its lock is free for the level read). Flush events reach only
+    // a probe that asks for them.
     let mon = monitor.clone();
-    sink_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
-        let Some(gst::PadProbeData::Event(ref event)) = info.data else {
-            return gst::PadProbeReturn::Ok;
-        };
-        // The last leak is complete; account for it before the queue drains.
-        if event.type_() == gst::EventType::Eos {
-            mon.end_of_stream(level_buffers(pad));
-        }
-        gst::PadProbeReturn::Ok
-    });
+    sink_pad.add_probe(
+        gst::PadProbeType::EVENT_DOWNSTREAM | gst::PadProbeType::EVENT_FLUSH,
+        move |pad, info| {
+            let Some(gst::PadProbeData::Event(ref event)) = info.data else {
+                return gst::PadProbeReturn::Ok;
+            };
+            match event.type_() {
+                // The queue flushes all it holds right after forwarding this;
+                // its `src` thread is paused since FLUSH_START.
+                gst::EventType::FlushStop => mon.rebase(0),
+                // A new stream: after a stop through READY the queue was
+                // flushed on pad deactivation, with no event to tell.
+                gst::EventType::StreamStart => mon.rebase(level_buffers(pad)),
+                // The last leak is complete; account for it before the queue
+                // drains.
+                gst::EventType::Eos => mon.end_of_stream(level_buffers(pad)),
+                _ => {}
+            }
+            gst::PadProbeReturn::Ok
+        },
+    );
 
     // The sink takes a buffer (or a list: mpegtsmux pushes lists). Per buffer:
     // atomics only.
@@ -806,6 +844,141 @@ mod tests {
         mon.end_of_stream(4);
         let report = mon.take_report().expect("a report");
         assert_eq!((report.on_time, report.late), (0, 6));
+    }
+
+    #[test]
+    fn a_flush_is_not_a_drop() {
+        let ms = gst::ClockTime::from_mseconds;
+        let mon = QueueDropMonitor::new("t");
+        for i in 0..40 {
+            mon.buffer_in(1, ms(i * 100));
+        }
+        mon.buffer_out(1, Some(ms(0)));
+        // 40 in, 1 out, 30 queued, 1 in the chain call: 8 dropped.
+        mon.overrun(None, 30);
+        assert_eq!(mon.dropped(), 8);
+        // The queue flushes what it holds.
+        mon.rebase(0);
+        // After the flush, 10 in, 1 out, 7 queued: 2 dropped, counted at EOS.
+        for i in 0..10 {
+            mon.buffer_in(1, ms(i * 100));
+        }
+        mon.buffer_out(1, Some(ms(0)));
+        mon.end_of_stream(7);
+        assert_eq!(mon.dropped(), 10);
+
+        // A new stream after a stop: the queue is empty, nothing was leaked.
+        for i in 0..5 {
+            mon.buffer_in(1, ms(i * 100));
+        }
+        mon.rebase(0);
+        mon.end_of_stream(0);
+        assert_eq!(mon.dropped(), 10);
+    }
+
+    /// Fill the block's queue while the sink holds a buffer, flush it, then
+    /// overrun it a little: only the buffers the overrun leaked are drops.
+    /// The pushes, the flush and EOS go through a pad linked to the queue, so
+    /// the real queue decides what it holds, leaks and flushes.
+    #[test]
+    fn the_queue_counts_a_flush_as_no_drop() {
+        gst::init().unwrap();
+        let (queue, mon) = caller_queue("t").expect("a queue");
+        let fakesink = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .property("signal-handoffs", true)
+            .build()
+            .unwrap();
+        let rendered = Arc::new(AtomicU64::new(0));
+        let counter = rendered.clone();
+        fakesink.connect("handoff", false, move |_| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            None
+        });
+        let pipeline = gst::Pipeline::new();
+        pipeline.add_many([&queue, &fakesink]).unwrap();
+        queue.link(&fakesink).unwrap();
+        // Hold the sink's first buffer, so the queue fills.
+        let block = fakesink
+            .static_pad("sink")
+            .unwrap()
+            .add_probe(
+                gst::PadProbeType::BLOCK | gst::PadProbeType::BUFFER,
+                |_, _| gst::PadProbeReturn::Ok,
+            )
+            .unwrap();
+
+        let src = gst::Pad::builder(gst::PadDirection::Src).build();
+        src.link(&queue.static_pad("sink").unwrap()).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        src.set_active(true).unwrap();
+        let start = |src: &gst::Pad| {
+            assert!(
+                src.push_event(gst::event::Segment::new(&gst::FormattedSegment::<
+                    gst::ClockTime,
+                >::new()))
+            );
+        };
+        let push = |src: &gst::Pad, range: std::ops::Range<u64>| {
+            for i in range {
+                let mut b = gst::Buffer::with_size(188).unwrap();
+                b.get_mut()
+                    .unwrap()
+                    .set_pts(gst::ClockTime::from_mseconds(i * 100));
+                assert_eq!(src.push(b), Ok(gst::FlowSuccess::Ok));
+            }
+        };
+        assert!(src.push_event(gst::event::StreamStart::new("s")));
+        assert!(
+            src.push_event(gst::event::Caps::new(&gst::Caps::new_empty_simple(
+                "video/mpegts"
+            )))
+        );
+        start(&src);
+
+        // 2.6 s of media: below the 3 s limit, nothing leaks.
+        push(&src, 0..27);
+        let wait_level = |level: u32| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while queue.property::<u32>("current-level-buffers") != level {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "queue level {}",
+                    queue.property::<u32>("current-level-buffers")
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        wait_level(26);
+
+        assert!(src.push_event(gst::event::FlushStart::new()));
+        assert!(src.push_event(gst::event::FlushStop::new(true)));
+        assert_eq!(queue.property::<u32>("current-level-buffers"), 0);
+        start(&src);
+
+        // 3.6 s of media into an empty queue whose sink holds one buffer:
+        // the last few leak.
+        let pushed = 37;
+        push(&src, 0..pushed);
+        assert!(src.push_event(gst::event::Eos::new()));
+        fakesink.static_pad("sink").unwrap().remove_probe(block);
+
+        let msg = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(5),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .expect("EOS");
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert!(matches!(msg.view(), gst::MessageView::Eos(_)), "{msg:?}");
+
+        // The buffer the sink held at the flush was not rendered, so every
+        // rendered buffer came after it.
+        let leaked = pushed - rendered.load(Ordering::Relaxed);
+        assert!((1..10).contains(&leaked), "leaked {leaked}");
+        assert_eq!(mon.dropped(), leaked, "the 26 flushed buffers are no drops");
     }
 
     /// The queue a caller gets, fed a buffer without a timestamp between two
