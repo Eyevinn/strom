@@ -66,8 +66,15 @@ fn a_uri_gstreamer_would_misread_fails_the_build() {
         ),
         (
             "srt://:5000?mode=Listener",
-            "mode 'Listener' is not read by GStreamer: use 'listener'",
+            "mode 'Listener' behaves differently across GLib versions",
         ),
+        // A key without a value crashes GStreamer 1.28.6 when the element
+        // starts (docs/UPSTREAM_NOTES.md).
+        (
+            "srt://:5000?mode=listener&latency",
+            "'latency' has no value",
+        ),
+        ("srt+relay://cam1?localport", "'localport' has no value"),
         (
             "srt://:5000?mode=listener&passphrase=0123456789%zz",
             "%-escape",

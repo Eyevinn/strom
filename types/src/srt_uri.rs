@@ -22,7 +22,8 @@
 //! `=`, keys and values are percent-decoded, and keys are matched exactly,
 //! lower-case. `mode` values are matched exactly before GLib 2.88 and
 //! ignoring ASCII case from 2.88 on. An unknown key is ignored without a
-//! word, a value with a malformed escape (or `%00`) is not set at all, and a
+//! word, a value with a malformed escape (or `%00`) is not set at all, a key
+//! without `=` crashes GStreamer 1.28.6 (see `docs/UPSTREAM_NOTES.md`), and a
 //! raw `#` starts the fragment, which is dropped. The query is a hash table,
 //! so of a key given twice the last one wins. Without a host the element is
 //! a listener whatever `mode` says; with a host and no `mode` it is a caller.
@@ -158,7 +159,7 @@ impl std::fmt::Display for SrtUriParseError {
                 Some(expected) => {
                     write!(
                         f,
-                        "mode '{mode}' is not read by GStreamer: use '{expected}'"
+                        "mode '{mode}' behaves differently across GLib versions: use '{expected}'"
                     )
                 }
                 None => write!(f, "mode '{mode}' is not supported here"),
@@ -516,8 +517,9 @@ impl SrtUriFields {
     }
 }
 
-/// The right spelling of a `mode` value that differs from one GStreamer
-/// reads only in case (`Listener` for `listener`), else `None`.
+/// The right spelling of a `mode` value that differs from a mode name only
+/// in case (`Listener` for `listener`), else `None`. GLib 2.88 and later
+/// accept such a value, older GLib ignores it.
 fn mode_spelling(mode: &str) -> Option<&'static str> {
     GST_SRT_MODES
         .iter()
@@ -750,13 +752,19 @@ pub enum SrtUriError {
         written: String,
         expected: &'static str,
     },
-    /// A `mode` value that differs only in case from one GStreamer reads.
+    /// A `mode` value that differs only in case from a mode name. GLib 2.88
+    /// and later match it ignoring case, older GLib (the Debian 12 floor)
+    /// ignores it, so the mode would differ between GStreamer builds.
     ModeCase {
         written: String,
         expected: &'static str,
     },
     /// A `mode` that is none of `caller`, `listener` and `rendezvous`.
     UnknownMode(String),
+    /// A query key without `=`. GStreamer stores a NULL value for it and
+    /// crashes reading it (1.28.6, see `docs/UPSTREAM_NOTES.md`). Holds the
+    /// key as decoded.
+    MissingValue(String),
     /// A key given more than once (after decoding). GStreamer would take
     /// the last one; Strom refuses the URI instead, because a second
     /// `passphrase` or `mode` is a mistake, and its fields and helpers would
@@ -794,9 +802,14 @@ impl std::fmt::Display for SrtUriError {
             SrtUriError::ModeCase { written, expected } => {
                 write!(
                     f,
-                    "mode '{written}' is not read by GStreamer: use '{expected}'"
+                    "mode '{written}' behaves differently across GLib versions \
+                     (older ones ignore it): use '{expected}'"
                 )
             }
+            SrtUriError::MissingValue(key) => write!(
+                f,
+                "'{key}' has no value, which crashes GStreamer: write '{key}=<value>' or remove it"
+            ),
             SrtUriError::UnknownMode(mode) => write!(
                 f,
                 "mode '{mode}' is not one of {}",
@@ -871,12 +884,10 @@ pub fn validate_srt_uri(uri: &str) -> Result<Vec<SrtUriWarning>, SrtUriError> {
         let Some(key) = key else {
             return Err(SrtUriError::BadEscape(raw_key.to_string()));
         };
-        let value = match value {
-            Some(raw) => {
-                Some(gst_unescape(raw).ok_or_else(|| SrtUriError::BadEscape(key.clone()))?)
-            }
-            None => None,
+        let Some(raw_value) = value else {
+            return Err(SrtUriError::MissingValue(key));
         };
+        let value = gst_unescape(raw_value).ok_or_else(|| SrtUriError::BadEscape(key.clone()))?;
         if !GST_SRT_URI_KEYS.contains(&key.as_str()) {
             if let Some(expected) = GST_SRT_URI_KEYS
                 .iter()
@@ -891,7 +902,6 @@ pub fn validate_srt_uri(uri: &str) -> Result<Vec<SrtUriWarning>, SrtUriError> {
         if seen.contains(&key) {
             return Err(SrtUriError::DuplicateParam(key));
         }
-        let value = value.unwrap_or_default();
         match key.as_str() {
             "mode" if !GST_SRT_MODES.contains(&value.as_str()) => {
                 return Err(match mode_spelling(&value) {
@@ -1106,7 +1116,8 @@ mod tests {
             f.other_params().collect::<Vec<_>>(),
             ["MODE=listener", "PassPhrase=abcdefghijk"]
         );
-        // A mode value in another case is refused, naming the spelling.
+        // A mode value in another case is refused, naming the spelling: GLib
+        // 2.88 reads it, older GLib ignores it.
         let err = SrtUriFields::parse("srt://h:1?mode=Listener").unwrap_err();
         assert_eq!(
             err,
@@ -1114,7 +1125,7 @@ mod tests {
         );
         assert_eq!(
             err.to_string(),
-            "mode 'Listener' is not read by GStreamer: use 'listener'"
+            "mode 'Listener' behaves differently across GLib versions: use 'listener'"
         );
         assert!(SrtUriFields::parse("srt://h:1?mode=%20caller").is_err());
     }
@@ -1297,7 +1308,7 @@ mod tests {
             "'PassPhrase' is not read by GStreamer: use 'passphrase'"
         );
         // A key GStreamer does not know at all is left alone.
-        assert_eq!(valid("srt://h:1?foo=1&Bar"), []);
+        assert_eq!(valid("srt://h:1?foo=1&Bar=2"), []);
     }
 
     #[test]
@@ -1312,6 +1323,9 @@ mod tests {
                 expected: "listener"
             }
         );
+        let msg = invalid("srt://h:1?mode=Listener").to_string();
+        assert!(msg.contains("differently across GLib versions"), "{msg}");
+        assert!(msg.contains("use 'listener'"), "{msg}");
         assert_eq!(
             invalid("srt://h:1?mode=push"),
             SrtUriError::UnknownMode("push".to_string())
@@ -1323,12 +1337,37 @@ mod tests {
     }
 
     #[test]
+    fn validate_refuses_a_key_without_a_value() {
+        // GStreamer 1.28.6 segfaults on these (docs/UPSTREAM_NOTES.md).
+        for (uri, key) in [
+            ("srt://:5000?latency", "latency"),
+            ("srt://:5000?localport", "localport"),
+            ("srt://:5000?mode", "mode"),
+            ("srt://h:1?passphrase", "passphrase"),
+            ("srt://h:1?mode=caller&foo", "foo"),
+            ("srt://h:1?lat%65ncy", "latency"),
+            ("srt+relay://cam1?latency", "latency"),
+        ] {
+            assert_eq!(
+                invalid(uri),
+                SrtUriError::MissingValue(key.to_string()),
+                "{uri}"
+            );
+        }
+        let msg = invalid("srt://:5000?latency").to_string();
+        assert!(msg.contains("'latency' has no value"), "{msg}");
+        // An empty value is a value; empty segments are skipped.
+        assert_eq!(valid("srt://h:1?streamid="), []);
+        assert_eq!(valid("srt://h:1?&&streamid=a&"), []);
+    }
+
+    #[test]
     fn validate_refuses_a_key_given_twice() {
         for uri in [
             "srt://h:1?passphrase=abcdefghij&passphrase=0123456789",
             "srt://h:1?passphrase=abcdefghij&pass%70hrase=0123456789",
             "srt://h:1?mode=caller&x=1&mode=listener",
-            "srt://h:1?foo&foo=1",
+            "srt://h:1?foo=&foo=1",
         ] {
             assert!(
                 matches!(invalid(uri), SrtUriError::DuplicateParam(_)),
@@ -1346,7 +1385,6 @@ mod tests {
             );
         }
         assert_eq!(valid("srt://h:1?passphrase="), []);
-        assert_eq!(valid("srt://h:1?passphrase"), []);
         for len in [9, 81] {
             assert_eq!(
                 invalid(&format!("srt://h:1?passphrase={}", "a".repeat(len))),
@@ -1584,6 +1622,16 @@ mod endpoint_tests {
             Some((L, Some(6002)))
         );
         assert_eq!(p("srt://:5000#?localport=6002"), Some((L, Some(5000))));
+    }
+
+    #[test]
+    fn keys_without_a_value_do_not_crash_the_reader() {
+        // validate_srt_uri refuses these; the reader still answers.
+        assert_eq!(p("srt://:5000?latency"), Some((L, Some(5000))));
+        assert_eq!(p("srt://:5000?latency&mode"), Some((L, Some(5000))));
+        assert_eq!(p("srt://192.0.2.1:5000?mode"), Some((C, None)));
+        assert_eq!(p("srt://:5000?&&"), Some((L, Some(5000))));
+        assert_eq!(p("srt://:5000?="), Some((L, Some(5000))));
     }
 
     #[test]

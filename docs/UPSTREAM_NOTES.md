@@ -320,6 +320,7 @@ workaround can go once we move past that version.
 - **Repro:** `gst-launch-1.0 srtsrc uri="srt://:5000?latency" ! fakesink`.
 - **Hint:** `gst_uri_get_query_table()` stores a NULL value for such a key, and
   `gst_srt_object_set_uri()` passes it to `g_ascii_strtoll()` and friends unchecked.
-- **Tests:** none.
+- **Tests:** none run the element. `validate_srt_uri` refuses a key without `=` and a
+  malformed escape, so the SRT blocks fail to build instead (`srt_uri_validation_test`).
 - **Upstream:** not searched.
 - **Found in:** #1257 (capabilities review).
