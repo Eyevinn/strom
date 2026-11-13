@@ -344,6 +344,9 @@ fn build_media_player(
         .map(|f| normalize_uri(f, &media_path));
 
     if let Some(ref uri) = initial_uri {
+        if crate::blocks::builtin::srt_uri_check::is_srt_uri(uri) {
+            crate::blocks::builtin::srt_uri_check::check_srt_uri_query("playlist", uri)?;
+        }
         info!("Media Player {}: Initial URI: {}", instance_id, uri);
     }
     *state

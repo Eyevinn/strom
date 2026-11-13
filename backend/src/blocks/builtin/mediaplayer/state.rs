@@ -612,6 +612,10 @@ impl MediaPlayerState {
             .ok_or("Source element no longer exists")?;
 
         let uri = normalize_uri(&file_path, &self.media_path);
+        if crate::blocks::builtin::srt_uri_check::is_srt_uri(&uri) {
+            crate::blocks::builtin::srt_uri_check::check_srt_uri_query("playlist", &uri)
+                .map_err(|e| e.to_string())?;
+        }
         info!("Loading file: {}", uri);
 
         let pipeline_guard = self

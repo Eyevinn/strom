@@ -188,6 +188,20 @@ workaround can go once we move past that version.
 - **Found in:** [#1101](https://github.com/Eyevinn/strom/issues/1101),
   [#1132](https://github.com/Eyevinn/strom/pull/1132)
 
+### `srtsrc`/`srtsink`: a URI query key without `=` segfaults the process
+- **Seen on:** measured: 1.28.6 (macOS, Homebrew) crashes. 1.22.0 (Debian 12 arm64) does
+  not crash on the same URI, although the code path is the same.
+- **Symptom:** setting `uri` to `srt://:5000?latency` (or `?pbkeylen`, any numeric option)
+  segfaults in `strtoll_l`, from `gst_srt_object_set_uri`. Also through `uridecodebin`.
+- **Repro:** `gst-launch-1.0 srtsrc uri="srt://:5000?latency" ! fakesink` exits with 139.
+  `?latency=`, `&&` and a trailing `&` do not crash.
+- **Hint:** `gst_uri_get_query_table` stores NULL for a key without `=`, and
+  `gst_srt_object_set_uri` (`ext/srt/gstsrtobject.c`) passes it on unchecked; the numeric
+  setters call `g_ascii_strtoll (NULL, ...)`. Why 1.22 on Linux survives is not checked.
+- **Tests:** `srt_uri_key_without_value_test`. Strom refuses such a URI before it reaches
+  the element.
+- **Upstream:** not searched.
+
 ### `rtpjitterbuffer`: packets held for the length of a mute gap
 - **Seen on:** versions not recorded.
 - **Symptom:** after a gap with no RTP packets (a muted sender), the jitterbuffer holds

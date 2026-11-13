@@ -138,6 +138,7 @@ impl BlockBuilder for EfpSrtOutputBuilder {
                 _ => None,
             })
             .unwrap_or_else(|| DEFAULT_SRT_OUTPUT_URI.to_string());
+        super::srt_uri_check::check_srt_uri_query("srt_uri", &srt_uri)?;
 
         let latency = properties
             .get("latency")

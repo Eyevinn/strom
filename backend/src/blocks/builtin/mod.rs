@@ -33,6 +33,7 @@ pub mod recorder;
 pub(crate) mod refusal;
 pub mod rtmp;
 pub mod spectrum;
+pub(crate) mod srt_uri_check;
 pub mod tams_output;
 pub mod thumbnail;
 pub mod time_offset;
