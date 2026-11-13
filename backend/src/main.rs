@@ -622,6 +622,9 @@ fn run_with_gui(
             )
             .await
             .expect("failed to configure port pool");
+        state.set_reachability(strom::capabilities::ReachabilitySettings {
+            inbound_reachable: config.inbound_reachable,
+        });
         state
             .media_downloads()
             .configure(config.media_download_settings());
@@ -893,6 +896,9 @@ async fn run_headless(
             config.probe_before_handout,
         )
         .await?;
+    state.set_reachability(strom::capabilities::ReachabilitySettings {
+        inbound_reachable: config.inbound_reachable,
+    });
     state
         .media_downloads()
         .configure(config.media_download_settings());

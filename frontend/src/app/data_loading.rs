@@ -81,6 +81,18 @@ impl StromApp {
                     tracing::warn!("Failed to load version info: {}", e);
                 }
             }
+            // Capabilities follow the server configuration, which only
+            // changes with a restart, so they are reloaded with the version.
+            // An older Strom has no such endpoint; the UI then warns about
+            // nothing.
+            match api.get_capabilities().await {
+                Ok(capabilities) => {
+                    let _ = tx.send(AppMessage::CapabilitiesLoaded(capabilities));
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to load capabilities: {}", e);
+                }
+            }
             ctx.request_repaint();
         });
     }

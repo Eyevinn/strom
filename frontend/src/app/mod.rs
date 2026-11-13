@@ -713,6 +713,8 @@ pub struct StromApp {
     needs_initial_settings_apply: bool,
     /// System information from the backend (version, host details, runtime environment)
     system_info: Option<crate::api::SystemInfo>,
+    /// What this Strom can do on its network (`GET /api/capabilities`)
+    capabilities: Option<strom_types::capabilities::Capabilities>,
     /// Authentication status
     auth_status: Option<AuthStatusResponse>,
     /// Whether we're checking auth status

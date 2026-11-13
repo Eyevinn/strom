@@ -143,6 +143,25 @@ port = 8080
 # probe_before_handout = true
 
 # ============================================================================
+# Network
+# ============================================================================
+[network]
+# Whether a port Strom binds locally can be reached from outside. It describes
+# the host and network, not a protocol, and cannot be detected reliably, so
+# whoever deploys Strom states it.
+#
+# true on its own server or VM, or in Docker with network_mode: host (if the
+# firewall allows it). false in Kubernetes or in Docker on a bridge network
+# (NAT), where a bound port is not reachable unless published one by one.
+#
+# GET /api/capabilities reports it, with the SRT modes that can work (caller
+# always; listener and rendezvous only when reachable), and the UI warns on an
+# SRT block in listener or rendezvous mode when it is false. It never blocks.
+# Default: true
+# Env: STROM_INBOUND_REACHABLE=false
+# inbound_reachable = true
+
+# ============================================================================
 # Media library: download from URL
 # ============================================================================
 [media]

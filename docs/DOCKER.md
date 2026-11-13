@@ -52,6 +52,7 @@ The common ones:
 | `STROM_SERVER_ICE_SERVERS` | STUN/TURN servers for WebRTC |
 | `STROM_SERVER_ICE_TRANSPORT_POLICY` | `all` (default) or `relay` to force WebRTC through TURN |
 | `STROM_PORTS` | Port numbers the pool hands out to callers (unset = pool off) — see [PORT_POOL.md](PORT_POOL.md) |
+| `STROM_INBOUND_REACHABLE` | Whether ports Strom binds can be reached from outside (default `true`). Set `false` on a bridge network (NAT) or in Kubernetes: `GET /api/capabilities` then reports SRT listener and rendezvous as unavailable, and the UI warns on them |
 | `STROM_TLS_CERT` / `STROM_TLS_KEY` | Built-in TLS (PEM) |
 | `STROM_SRT_RELAY` | Public `host:port` of an SRT relay ([srt-splice](https://github.com/Eyevinn/srt-splice)), e.g. `srt.example.com:9000`. SRT blocks with `srt_uri` `srt+relay://<id>` dial out to it instead of listening on a public port, and the other side dials it too (unset = off) |
 | `STROM_SRT_RELAY_INTERNAL` | `host:port` Strom dials instead when it runs next to the relay (same cluster or host, avoids hairpin NAT), e.g. `srt-splice:9000`. `STROM_SRT_RELAY` is then only shown to the other side |

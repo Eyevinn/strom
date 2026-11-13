@@ -538,6 +538,7 @@ impl PropertyInspector {
         taken_endpoint_ids: &std::collections::HashSet<String>,
         srt_relay: &crate::srt_relay::SrtRelayFetch,
         taken_srt_relay_ids: &std::collections::HashSet<String>,
+        capabilities: Option<&strom_types::capabilities::Capabilities>,
     ) -> BlockInspectorResult {
         let block_id = block.id.clone();
         let mut result = BlockInspectorResult::default();
@@ -1008,6 +1009,25 @@ impl PropertyInspector {
                                     taken_endpoint_ids,
                                     &mut device_picker_actions,
                                 );
+
+                                // Warn when the SRT mode cannot work on this
+                                // Strom's network.
+                                if exposed_prop.name == "srt_uri"
+                                    && crate::srt_reachability::is_srt_block(&definition.id)
+                                {
+                                    if let Some(caps) = capabilities {
+                                        let uri = block
+                                            .properties
+                                            .get("srt_uri")
+                                            .or(exposed_prop.default_value.as_ref());
+                                        if let Some(PropertyValue::String(uri)) = uri {
+                                            crate::srt_reachability::show(
+                                                ui,
+                                                &crate::srt_reachability::warnings(uri, caps),
+                                            );
+                                        }
+                                    }
+                                }
 
                                 // For live properties, route the block-level value
                                 // through the block-properties endpoint so the backend

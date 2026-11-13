@@ -1,6 +1,7 @@
 //! API handlers.
 
 pub mod blocks;
+pub mod capabilities;
 pub mod devtools;
 pub mod discovery;
 pub mod elements;

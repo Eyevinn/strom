@@ -1475,6 +1475,7 @@ impl StromApp {
                             &taken_endpoint_ids,
                             &srt_relay,
                             &taken_srt_relay_ids,
+                            self.capabilities.as_ref(),
                         );
 
                         // The SRT blocks' srt_uri helper needs the relay status.

@@ -29,6 +29,7 @@ pub mod bare_link_pads_test;
 pub mod block_properties_persist_test;
 pub mod block_property_range_test;
 pub mod build_version_test;
+pub mod capabilities_api_test;
 pub mod compositor_cpu_input_memory_test;
 pub mod cors_expose_headers_test;
 pub mod decklink_output_audio_test;

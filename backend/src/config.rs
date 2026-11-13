@@ -27,6 +27,17 @@ struct ConfigFile {
     media: MediaConfig,
     #[serde(default)]
     srt_relay: SrtRelaySection,
+    #[serde(default)]
+    network: NetworkConfig,
+}
+
+/// `[network]` section: the host and network Strom runs on.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct NetworkConfig {
+    /// Whether a port Strom binds locally can be reached from outside. Default
+    /// true. False in Kubernetes or behind NAT (a container on a bridge
+    /// network), where listener modes cannot work.
+    inbound_reachable: Option<bool>,
 }
 
 /// `[srt_relay]` section: an SRT relay (srt-splice) that `srt+relay://<id>`
@@ -334,6 +345,8 @@ pub struct Config {
     pub media_download_timeout_seconds: u64,
     /// SRT relay for `srt+relay://` URIs, or `None` when not configured.
     pub srt_relay: Option<crate::srt_relay::SrtRelayConfig>,
+    /// Whether a port Strom binds locally can be reached from outside.
+    pub inbound_reachable: bool,
 }
 
 /// Expand the `[ports] ports` entries into the pool.
@@ -449,6 +462,7 @@ impl Config {
             cef: CefConfig::default(),
             media: MediaConfig::default(),
             srt_relay: SrtRelaySection::default(),
+            network: NetworkConfig::default(),
         }));
 
         // 2. Merge user config file if it exists
@@ -581,6 +595,16 @@ impl Config {
             figment = figment.merge(Serialized::default("media.download_timeout_seconds", secs));
         }
 
+        // 4g. Network settings, named explicitly for the same reason.
+        if let Some(value) = strom_types::env::var_opt("STROM_INBOUND_REACHABLE") {
+            let reachable = match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                _ => anyhow::bail!("STROM_INBOUND_REACHABLE must be true or false, got {value}"),
+            };
+            figment = figment.merge(Serialized::default("network.inbound_reachable", reachable));
+        }
+
         // 5. Merge CLI arguments (highest priority)
         if let Some(ref cert) = tls_cert {
             figment = figment.merge(Serialized::default("server.tls_cert", cert));
@@ -664,6 +688,7 @@ impl Config {
                 config_file.srt_relay.relay,
                 config_file.srt_relay.internal,
             )?,
+            inbound_reachable: config_file.network.inbound_reachable.unwrap_or(true),
         })
     }
 
@@ -1344,6 +1369,50 @@ lease_ttl_seconds = 600
         let config =
             Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap();
         assert!(!config.probe_before_handout);
+    }
+
+    #[test]
+    #[serial]
+    fn inbound_reachable_defaults_to_true() {
+        let _reachable = EnvGuard::remove("STROM_INBOUND_REACHABLE");
+        assert!(config_from_env().inbound_reachable);
+    }
+
+    #[test]
+    #[serial]
+    fn inbound_reachable_env_var_turns_it_off() {
+        let _reachable = EnvGuard::set("STROM_INBOUND_REACHABLE", "false");
+        assert!(!config_from_env().inbound_reachable);
+        let _reachable = EnvGuard::set("STROM_INBOUND_REACHABLE", "0");
+        assert!(!config_from_env().inbound_reachable);
+        let _reachable = EnvGuard::set("STROM_INBOUND_REACHABLE", "maybe");
+        let err =
+            Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("STROM_INBOUND_REACHABLE"));
+    }
+
+    #[test]
+    #[serial]
+    fn inbound_reachable_from_config_file() {
+        let _reachable = EnvGuard::remove("STROM_INBOUND_REACHABLE");
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(
+            temp_dir.path().join(".strom.toml"),
+            "[network]\ninbound_reachable = false\n",
+        )
+        .unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+        let result = Config::from_figment(None, None, None, None, None, None, None, None, None);
+        let _ = std::env::set_current_dir(&original_dir);
+        assert!(!result.unwrap().inbound_reachable);
+
+        // The environment wins over the file.
+        let _reachable = EnvGuard::set("STROM_INBOUND_REACHABLE", "true");
+        std::env::set_current_dir(&temp_dir).unwrap();
+        let result = Config::from_figment(None, None, None, None, None, None, None, None, None);
+        let _ = std::env::set_current_dir(&original_dir);
+        assert!(result.unwrap().inbound_reachable);
     }
 
     #[test]

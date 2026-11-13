@@ -128,6 +128,8 @@ struct AppStateInner {
     port_probe: parking_lot::Mutex<bool>,
     /// SRT relay for `srt+relay://` URIs. `None` until main configures one.
     srt_relay: parking_lot::RwLock<Option<crate::srt_relay::SrtRelayConfig>>,
+    /// Whether locally bound ports are reachable from outside.
+    reachability: parking_lot::Mutex<crate::capabilities::ReachabilitySettings>,
 }
 
 /// Pick the ramp_ms that should apply to a single property in a batched
@@ -194,6 +196,7 @@ impl AppState {
                 ),
                 port_probe: parking_lot::Mutex::new(true),
                 srt_relay: parking_lot::RwLock::new(None),
+                reachability: parking_lot::Mutex::new(Default::default()),
             }),
         }
     }
@@ -350,6 +353,24 @@ impl AppState {
     /// Get the configured ICE transport policy for WebRTC.
     pub fn ice_transport_policy(&self) -> &str {
         &self.inner.ice_transport_policy
+    }
+
+    /// Set whether locally bound ports are reachable from outside. Called
+    /// once from main after the configuration is loaded.
+    pub fn set_reachability(&self, settings: crate::capabilities::ReachabilitySettings) {
+        *self.inner.reachability.lock() = settings;
+    }
+
+    /// What this Strom can do on the network it runs on.
+    pub async fn capabilities(&self) -> strom_types::capabilities::Capabilities {
+        let reachability = *self.inner.reachability.lock();
+        let ports = self.inner.port_pool.read().await.ports().clone();
+        crate::capabilities::build(
+            reachability,
+            &ports,
+            !self.inner.ice_servers.is_empty(),
+            &self.inner.ice_transport_policy,
+        )
     }
 
     /// Get current thread CPU statistics.
