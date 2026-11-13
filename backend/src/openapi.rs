@@ -26,6 +26,10 @@ use strom_types::block::{
     CreateBlockRequest, ExposedProperty, ExternalPad, ExternalPads, PropertyCondition,
     PropertyMapping, PropertyType,
 };
+use strom_types::capabilities::{
+    Capabilities, NetworkCapabilities, ProtocolCapabilities, RelayEndpoint, SrtCapabilities,
+    SrtModes, WebRtcCapabilities,
+};
 use strom_types::devtools::{
     DevToolsLink, DevToolsLinkSummary, DevToolsLinks, DevToolsRevokedLinks, DevToolsTarget,
     DevToolsTargets,
@@ -127,6 +131,7 @@ use utoipa::OpenApi;
         crate::api::ports::assign_ports,
         crate::api::ports::unassign_ports,
         crate::api::version::get_version,
+        crate::api::capabilities::get_capabilities,
         crate::api::system_clock::get_system_clock,
         crate::api::logging::get_log_level,
         crate::api::logging::set_log_level,
@@ -212,6 +217,13 @@ use utoipa::OpenApi;
             PortEntry,
             PortState,
             PortSpan,
+            Capabilities,
+            NetworkCapabilities,
+            ProtocolCapabilities,
+            SrtCapabilities,
+            SrtModes,
+            RelayEndpoint,
+            WebRtcCapabilities,
             DevToolsLink,
             DevToolsLinkSummary,
             DevToolsLinks,
