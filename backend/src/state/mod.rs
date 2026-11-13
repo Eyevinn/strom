@@ -1,6 +1,7 @@
 //! Application state management.
 
 mod ports;
+mod relay;
 
 use crate::affinity_manager::AffinityManager;
 use crate::blocks::BlockRegistry;
@@ -125,6 +126,8 @@ struct AppStateInner {
     port_lease_ttl: parking_lot::Mutex<u64>,
     /// Whether to bind-probe a candidate before handing it out.
     port_probe: parking_lot::Mutex<bool>,
+    /// Relays for `<proto>+relay://` URIs. Empty until main configures them.
+    relays: parking_lot::RwLock<crate::relay::Relays>,
     /// Whether locally bound ports are reachable from outside.
     reachability: parking_lot::Mutex<crate::capabilities::ReachabilitySettings>,
 }
@@ -192,6 +195,7 @@ impl AppState {
                     strom_types::ports::DEFAULT_PORT_LEASE_TTL_SECS,
                 ),
                 port_probe: parking_lot::Mutex::new(true),
+                relays: parking_lot::RwLock::new(Default::default()),
                 reachability: parking_lot::Mutex::new(Default::default()),
             }),
         }
@@ -361,9 +365,15 @@ impl AppState {
     pub async fn capabilities(&self) -> strom_types::capabilities::Capabilities {
         let reachability = *self.inner.reachability.lock();
         let ports = self.inner.port_pool.read().await.ports().clone();
+        let srt_relays = self
+            .inner
+            .relays
+            .read()
+            .endpoints(strom_types::relay::RelayProtocol::Srt);
         crate::capabilities::build(
             reachability,
             &ports,
+            srt_relays,
             !self.inner.ice_servers.is_empty(),
             &self.inner.ice_transport_policy,
         )
@@ -1016,6 +1026,7 @@ impl AppState {
             Some(self.inner.whip_registry.clone()),
             self.inner.media_path.clone(),
             local_devices,
+            self.relay_targets(strom_types::relay::RelayProtocol::Srt),
         ) {
             Ok(manager) => manager,
             Err(e) => {

@@ -1408,6 +1408,30 @@ impl StromApp {
                     // otherwise the borrow checker rejects the call.
                     let local_devices_loading = self.local_devices_loading();
 
+                    // Relay streams used by other SRT blocks, in any flow: a
+                    // relay id names one stream on its relay.
+                    let taken_srt_relay_ids = {
+                        let selected = self.graph.get_selected_block();
+                        let mut ids = std::collections::HashSet::new();
+                        if selected.is_some_and(|b| {
+                            strom_types::srt_relay::srt_relay_role(&b.block_definition_id)
+                                .is_some()
+                        }) {
+                            let selected_id = selected.map(|b| b.id.as_str());
+                            for flow in &self.flows {
+                                for b in &flow.blocks {
+                                    if flow_id == Some(flow.id) && selected_id == Some(&b.id) {
+                                        continue;
+                                    }
+                                    if let Some(key) = crate::srt_relay::block_relay_key(b) {
+                                        ids.insert(key);
+                                    }
+                                }
+                            }
+                        }
+                        ids
+                    };
+
                     // Then get mutable reference to block
                     if let (Some(block), Some(def)) =
                         (self.graph.get_selected_block_mut(), definition_opt)
@@ -1448,8 +1472,14 @@ impl StromApp {
                             recorder_start_time,
                             block_thumbnail,
                             &taken_endpoint_ids,
+                            &taken_srt_relay_ids,
                             &self.capabilities,
                         );
+
+                        // The SRT editor reads the relays from the capabilities.
+                        if result.capabilities_refresh_requested {
+                            self.load_capabilities(ui.ctx().clone());
+                        }
 
                         // Trigger device discovery whenever a Local Input block's
                         // properties are rendered. 10 s TTL keeps repeated panel
@@ -1489,7 +1519,7 @@ impl StromApp {
                         }
 
                         // Handle VLC playlist download request (for MPEG-TS/SRT Output)
-                        if let Some((srt_uri, latency_ms)) = result.vlc_playlist_requested {
+                        if let Some((vlc_uri, latency_ms)) = result.vlc_playlist_requested {
                             // Get flow name for the stream title
                             let stream_name = self
                                 .current_flow()
@@ -1497,7 +1527,7 @@ impl StromApp {
                                 .unwrap_or_else(|| "SRT Stream".to_string());
 
                             let playlist_content =
-                                generate_vlc_playlist(&srt_uri, latency_ms, &stream_name);
+                                generate_vlc_playlist(&vlc_uri, latency_ms, &stream_name);
 
                             // Generate filename based on flow name
                             let safe_name: String = stream_name
@@ -1511,14 +1541,14 @@ impl StromApp {
 
                         // Handle VLC playlist download-only request (native mode)
                         #[cfg(not(target_arch = "wasm32"))]
-                        if let Some((srt_uri, latency_ms)) = result.vlc_playlist_download_only {
+                        if let Some((vlc_uri, latency_ms)) = result.vlc_playlist_download_only {
                             let stream_name = self
                                 .current_flow()
                                 .map(|f| f.name.clone())
                                 .unwrap_or_else(|| "SRT Stream".to_string());
 
                             let playlist_content =
-                                generate_vlc_playlist(&srt_uri, latency_ms, &stream_name);
+                                generate_vlc_playlist(&vlc_uri, latency_ms, &stream_name);
 
                             let safe_name: String = stream_name
                                 .chars()

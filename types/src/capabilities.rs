@@ -18,9 +18,6 @@ use utoipa::ToSchema;
 use crate::api::SrtMode;
 use crate::ports::PortSpan;
 
-mod srt_uri;
-pub use srt_uri::{parse_srt_uri, SrtUriEndpoint};
-
 /// Everything `GET /api/capabilities` reports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
@@ -73,7 +70,8 @@ pub struct ProtocolCapabilities {
 pub struct SrtCapabilities {
     /// Which connection modes can work.
     pub modes: SrtModes,
-    /// Relays a flow can use instead of listening itself.
+    /// Relays a flow can use instead of listening itself (`srt+relay://<id>[@<name>]`),
+    /// `default` first, then by name. Empty when none is configured.
     pub relays: Vec<RelayEndpoint>,
 }
 

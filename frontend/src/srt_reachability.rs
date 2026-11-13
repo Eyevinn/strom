@@ -5,19 +5,9 @@
 use crate::capabilities::CapabilitiesState;
 use egui::{Color32, Ui};
 use strom_types::api::SrtMode;
-use strom_types::capabilities::{parse_srt_uri, Capabilities};
+use strom_types::capabilities::Capabilities;
 use strom_types::ports::PortSpan;
-
-/// The blocks whose `srt_uri` selects a mode.
-pub fn is_srt_block(definition_id: &str) -> bool {
-    matches!(
-        definition_id,
-        "builtin.mpegtssrt_input"
-            | "builtin.mpegtssrt_output"
-            | "builtin.efpsrt_input"
-            | "builtin.efpsrt_output"
-    )
-}
+use strom_types::srt_uri::parse_srt_uri;
 
 /// What is wrong with `srt_uri` on a Strom with these capabilities. Empty when
 /// nothing is, or when the URI is not one we can read.
@@ -31,14 +21,14 @@ pub fn warnings(srt_uri: &str, caps: &Capabilities) -> Vec<String> {
 
     let mut out = Vec::new();
     if !caps.protocols.srt.modes.allows(endpoint.mode) {
-        out.push(match endpoint.mode {
-            SrtMode::Rendezvous => "This Strom is not reachable from outside: the peer cannot \
-                 reach it in rendezvous mode. Use caller mode or an SRT relay."
-                .to_string(),
-            _ => "This Strom is not reachable from outside: a listener cannot be reached. \
-                 Use caller mode or an SRT relay."
-                .to_string(),
-        });
+        let problem = match endpoint.mode {
+            SrtMode::Rendezvous => "the peer cannot reach it in rendezvous mode",
+            _ => "a listener cannot be reached",
+        };
+        out.push(format!(
+            "This Strom is not reachable from outside: {problem}. {}",
+            suggestion(caps)
+        ));
     }
     // The port Strom binds (`localport=`, else the URI port, else 7001); the
     // URI port alone is the peer's in rendezvous mode. Skipped when it cannot
@@ -53,6 +43,19 @@ pub fn warnings(srt_uri: &str, caps: &Capabilities) -> Vec<String> {
         }
     }
     out
+}
+
+/// What to use instead of a mode that cannot work: the relay when the server
+/// reports one (by name unless it is `default`), else caller mode.
+fn suggestion(caps: &Capabilities) -> String {
+    // The server reports `default` first.
+    match caps.protocols.srt.relays.first() {
+        Some(relay) => format!(
+            "Use caller mode, or Relay mode to go through {}.",
+            crate::srt_relay::relay_label(&relay.name)
+        ),
+        None => "Use caller mode, or ask the operator for an SRT relay.".to_string(),
+    }
 }
 
 /// `47100-47199, 47250`.
@@ -211,10 +214,37 @@ mod tests {
         assert!(warnings("srt+relay://edge/stream", &caps).is_empty());
     }
 
+    fn with_relays(mut caps: Capabilities, names: &[&str]) -> Capabilities {
+        caps.protocols.srt.relays = names
+            .iter()
+            .map(|n| strom_types::capabilities::RelayEndpoint {
+                name: n.to_string(),
+                public: format!("{n}.example.com:9000"),
+            })
+            .collect();
+        caps
+    }
+
     #[test]
-    fn srt_blocks_are_recognised() {
-        assert!(is_srt_block("builtin.mpegtssrt_input"));
-        assert!(is_srt_block("builtin.efpsrt_output"));
-        assert!(!is_srt_block("builtin.whep_output"));
+    fn an_unreachable_strom_suggests_the_relay() {
+        let w = warnings("srt://:5000?mode=listener", &caps(false, None));
+        assert!(
+            w[0].contains("ask the operator for an SRT relay"),
+            "{}",
+            w[0]
+        );
+
+        let caps_default = with_relays(caps(false, None), &["default", "eu-north"]);
+        let w = warnings("srt://:5000?mode=listener", &caps_default);
+        assert!(
+            w[0].ends_with("Relay mode to go through the SRT relay."),
+            "{}",
+            w[0]
+        );
+
+        let caps_named = with_relays(caps(false, None), &["eu-north"]);
+        let w = warnings("srt://192.0.2.1:5000?mode=rendezvous", &caps_named);
+        assert!(w[0].contains("rendezvous"), "{}", w[0]);
+        assert!(w[0].contains("SRT relay 'eu-north'"), "{}", w[0]);
     }
 }

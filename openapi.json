@@ -10504,7 +10504,7 @@
             "items": {
               "$ref": "#/components/schemas/RelayEndpoint"
             },
-            "description": "Relays a flow can use instead of listening itself."
+            "description": "Relays a flow can use instead of listening itself (`srt+relay://<id>[@<name>]`),\n`default` first, then by name. Empty when none is configured."
           }
         }
       },

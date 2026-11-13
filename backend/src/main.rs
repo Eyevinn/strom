@@ -628,6 +628,7 @@ fn run_with_gui(
         state
             .media_downloads()
             .configure(config.media_download_settings());
+        state.configure_relays(config.relays.clone());
         strom::media_download::spawn_temp_file_sweeper(state.media_path().clone());
         state
             .load_from_storage()
@@ -901,6 +902,7 @@ async fn run_headless(
     state
         .media_downloads()
         .configure(config.media_download_settings());
+    state.configure_relays(config.relays.clone());
     strom::media_download::spawn_temp_file_sweeper(state.media_path().clone());
     state.load_from_storage().await?;
 

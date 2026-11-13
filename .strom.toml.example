@@ -256,3 +256,40 @@ port = 8080
 #     "239.255.255.255",
 #     "224.2.127.254"
 # ]
+
+# ============================================================================
+# Relays
+# ============================================================================
+# Named relays per protocol (today SRT, through srt-splice). An SRT block whose
+# srt_uri is "srt+relay://<id>[@<relay>]" dials the named relay as a caller
+# instead of listening itself, and the outside party dials the relay's public
+# address with streamid=<id>. Without "@<relay>" the block uses "default".
+# Several relays serve routing, regions, HA or separate productions.
+#
+# Relay names: 1 to 32 characters from a-z, 0-9 and '-'. Addresses are
+# host:port (use DNS names for public); they are checked at startup, but no
+# relay is contacted, so a relay may start after Strom.
+#
+#   public   host:port the outside party dials. Strom dials it too unless
+#            internal is set. Reported by GET /api/capabilities.
+#   internal host:port Strom dials instead, when it runs next to the relay
+#            (same cluster or host, avoids hairpin NAT). Never reported.
+#            Setting internal without public is an error.
+#
+# Env: STROM_SRT_RELAY_PUBLIC / STROM_SRT_RELAY_INTERNAL set "default";
+#      STROM_SRT_RELAYS sets named relays as name=public[|internal], comma-
+#      separated, e.g.
+#      STROM_SRT_RELAYS=eu-north=srt-eu.example.com:9000,us=srt-us.example.com:9000|srt-splice-us:9000
+#      "name=public" sets only public; an empty internal after "|" is an
+#      error. Each address merges on its own, lowest to highest precedence:
+#      this file, then STROM_SRT_RELAYS, then STROM_SRT_RELAY_PUBLIC /
+#      _INTERNAL (default only). An address set by more than one source logs
+#      a startup warning naming the one used.
+# See docs/SRT_RELAY.md.
+#
+# [relays.srt.default]
+# public   = "srt.example.com:9000"
+# internal = "srt-splice:9000"
+#
+# [relays.srt.eu-north]
+# public   = "srt-eu.example.com:9000"

@@ -340,7 +340,13 @@ impl StromApp {
         flow_copy.name = format!("{} (copy)", flow.name);
 
         // Regenerate all IDs
-        let flow_copy = Self::regenerate_flow_ids(flow_copy);
+        let mut flow_copy = Self::regenerate_flow_ids(flow_copy);
+
+        // SRT relay ids are unique on the relay, like listener ports on a
+        // host: the copied blocks get fresh relay addresses.
+        for block in &mut flow_copy.blocks {
+            crate::srt_relay::renew_relay_address(block);
+        }
 
         let api = self.api.clone();
         let tx = self.channels.sender();

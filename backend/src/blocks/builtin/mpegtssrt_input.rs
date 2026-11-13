@@ -34,8 +34,12 @@ use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use strom_types::srt_relay::redact_srt_uri;
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
+
+/// Block definition id; also selects the block's role on the SRT relay.
+const BLOCK_DEFINITION_ID: &str = "builtin.mpegtssrt_input";
 
 /// MPEG-TS/SRT Input block builder.
 pub struct MpegTsSrtInputBuilder;
@@ -105,7 +109,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
         &self,
         instance_id: &str,
         properties: &HashMap<String, PropertyValue>,
-        _ctx: &BlockBuildContext,
+        ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         let decode = properties
             .get("decode")
@@ -128,6 +132,9 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                 _ => None,
             })
             .unwrap_or_else(|| DEFAULT_SRT_INPUT_URI.to_string());
+        super::srt_uri_check::check_srt_uri_query("srt_uri", &srt_uri)?;
+        // `srt+relay://<id>` dials out to the configured SRT relay.
+        let srt_uri = ctx.resolve_srt_uri(instance_id, &srt_uri, BLOCK_DEFINITION_ID)?;
 
         // Get SRT latency
         let latency = properties
@@ -234,7 +241,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
 
         info!(
             "SRT source configured: uri={}, latency={}ms, tsdemux_latency={}ms, ignore_pcr={}, keep-listening={}, auto-reconnect={}, wait-for-connection={}",
-            srt_uri, latency, tsdemux_latency, ignore_pcr, keep_listening, auto_reconnect, wait_for_connection
+            redact_srt_uri(&srt_uri), latency, tsdemux_latency, ignore_pcr, keep_listening, auto_reconnect, wait_for_connection
         );
 
         // Create demux/decode element
@@ -853,7 +860,7 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 /// Get MPEG-TS/SRT Input block definition (metadata only).
 fn mpegtssrt_input_definition() -> BlockDefinition {
     BlockDefinition {
-        id: "builtin.mpegtssrt_input".to_string(),
+        id: BLOCK_DEFINITION_ID.to_string(),
         name: "MPEG-TS/SRT Input".to_string(),
         description: "Receives an SRT stream carrying MPEG Transport Stream and demuxes it into separate video and audio outputs. Supports decode (default) and passthrough modes.".to_string(),
         category: "Inputs".to_string(),
@@ -905,7 +912,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "srt_uri".to_string(),
                 label: "SRT URI".to_string(),
-                description: "SRT URI (e.g., 'srt://:4000?mode=listener' or 'srt://192.0.2.1:4000?mode=caller')".to_string(),
+                description: "SRT URI, e.g. 'srt://:4000?mode=listener', 'srt://192.0.2.1:4000?mode=caller', or 'srt+relay://<id>' to receive via the SRT relay".to_string(),
                 property_type: PropertyType::String,
                 default_value: Some(PropertyValue::String(
                     DEFAULT_SRT_INPUT_URI.to_string(),

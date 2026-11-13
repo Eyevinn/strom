@@ -49,6 +49,7 @@ pub mod osc;
 pub mod paths;
 pub mod ports;
 pub mod ptp_monitor;
+pub mod relay;
 pub mod rtsp_server;
 pub mod server_hardening;
 pub mod sharing;

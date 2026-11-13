@@ -42,5 +42,6 @@ pub fn build_with(
         None,
         media_path,
         Arc::new(Mutex::new(HashMap::new())),
+        Vec::new(),
     )
 }

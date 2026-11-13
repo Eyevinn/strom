@@ -186,6 +186,8 @@ pub struct BlockBuildContext {
     local_devices: GstDeviceMap,
     /// Elements the flow links into, filled by block expansion after the build.
     flow_link_targets: FlowLinkTargets,
+    /// The configured SRT relays that `srt+relay://` URIs resolve to.
+    srt_relays: Vec<strom_types::relay::RelayTarget>,
 }
 
 impl BlockBuildContext {
@@ -203,6 +205,7 @@ impl BlockBuildContext {
             session_thread_config: SessionThreadConfig::new(),
             local_devices: Arc::new(Mutex::new(HashMap::new())),
             flow_link_targets: FlowLinkTargets::default(),
+            srt_relays: Vec::new(),
         }
     }
 
@@ -227,7 +230,54 @@ impl BlockBuildContext {
             session_thread_config,
             local_devices,
             flow_link_targets: FlowLinkTargets::default(),
+            srt_relays: Vec::new(),
         }
+    }
+
+    /// Set the SRT relays that `srt+relay://` URIs resolve to.
+    pub fn with_srt_relays(mut self, srt_relays: Vec<strom_types::relay::RelayTarget>) -> Self {
+        self.srt_relays = srt_relays;
+        self
+    }
+
+    /// Check and resolve an SRT block's `srt_uri` into the URI for its
+    /// `srtsrc` or `srtsink`.
+    ///
+    /// The URI is trimmed and checked with
+    /// [`strom_types::srt_uri::validate_srt_uri`] first: what GStreamer would
+    /// read differently from how it is written (a key in the wrong case, a
+    /// malformed escape, a raw `#`, a passphrase libsrt refuses, ...) fails
+    /// the build here with a clear message, instead of libsrt silently running
+    /// with other settings or failing later. Warnings (`latency` in the URI,
+    /// which the block's own property overrides) are logged.
+    ///
+    /// Plain URIs then pass through; `srt+relay://<id>[@<relay>]` becomes a
+    /// caller URI to the named relay (`default` without `@<relay>`), with the
+    /// block's own role on the relay looked up from its definition id in
+    /// [`strom_types::srt_relay::SRT_RELAY_BLOCKS`]. An unknown relay name
+    /// fails the build with the configured names.
+    pub fn resolve_srt_uri(
+        &self,
+        instance_id: &str,
+        uri: &str,
+        block_definition_id: &str,
+    ) -> Result<String, BlockBuildError> {
+        use strom_types::srt_relay::{resolve_srt_uri, srt_relay_role};
+        use strom_types::srt_uri::validate_srt_uri;
+        let role = srt_relay_role(block_definition_id).ok_or_else(|| {
+            BlockBuildError::InvalidConfiguration(format!(
+                "{block_definition_id} is not an SRT relay block"
+            ))
+        })?;
+        // GStreamer accepts the URI only if it starts with `srt://` exactly.
+        let uri = uri.trim();
+        let warnings = validate_srt_uri(uri)
+            .map_err(|e| BlockBuildError::InvalidProperty(format!("srt_uri: {e}")))?;
+        for warning in warnings {
+            warn!("{instance_id}: srt_uri: {warning}");
+        }
+        resolve_srt_uri(uri, role, &self.srt_relays)
+            .map_err(|e| BlockBuildError::InvalidProperty(format!("srt_uri: {e}")))
     }
 
     /// The elements the flow links into. Empty while blocks build; block

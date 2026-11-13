@@ -275,6 +275,10 @@ fn run(uri: &str, software: bool) -> Result<Run, RunFailure> {
         error,
         hardware: None,
     };
+    if crate::blocks::builtin::srt_uri_check::is_srt_uri(uri) {
+        crate::blocks::builtin::srt_uri_check::check_srt_uri_query("uri", uri)
+            .map_err(|e| fail(e.to_string()))?;
+    }
     let pipeline = gst::Pipeline::new();
     crate::gst::thread_priority::reset_streaming_threads(&pipeline);
     let decoder = if software {

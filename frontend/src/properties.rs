@@ -3,7 +3,7 @@
 use crate::graph::PropertyTab;
 use egui::{Color32, ScrollArea, Ui};
 use strom_types::{
-    block::{EnumValue, ExposedProperty, DEFAULT_SRT_OUTPUT_URI},
+    block::{EnumValue, ExposedProperty},
     element::{ElementInfo, PropertyInfo, PropertyType},
     BlockDefinition, BlockInstance, Element, FlowId, PropertyValue,
 };
@@ -150,9 +150,9 @@ pub struct BlockInspectorResult {
     pub browse_streams_requested: bool,
     /// Whether browse NDI sources was requested (for NDI Input)
     pub browse_ndi_sources_requested: bool,
-    /// VLC playlist download requested (for MPEG-TS/SRT blocks) - contains (srt_uri, latency_ms)
+    /// VLC playlist download requested (for MPEG-TS/SRT blocks) - contains (VLC URL, latency_ms)
     pub vlc_playlist_requested: Option<(String, i32)>,
-    /// VLC playlist download-only requested (native mode) - contains (srt_uri, latency_ms)
+    /// VLC playlist download-only requested (native mode) - contains (VLC URL, latency_ms)
     #[cfg(not(target_arch = "wasm32"))]
     pub vlc_playlist_download_only: Option<(String, i32)>,
     /// WHEP player endpoint_id (for WHEP Output blocks) - used to construct full player URL
@@ -186,6 +186,9 @@ pub struct BlockInspectorResult {
     pub local_devices_needed: bool,
     /// Inspector requested a forced re-scan of capture devices (↻ button).
     pub local_devices_refresh_requested: bool,
+    /// The user asked to fetch the server's capabilities (with its SRT
+    /// relays) again.
+    pub capabilities_refresh_requested: bool,
 }
 
 /// Side-channel collected by the property editor when it renders a
@@ -531,6 +534,7 @@ impl PropertyInspector {
         recorder_start_time: Option<instant::Instant>,
         block_thumbnail: Option<&egui::TextureHandle>,
         taken_endpoint_ids: &std::collections::HashSet<String>,
+        taken_srt_relay_ids: &crate::srt_relay::TakenRelayIds,
         capabilities: &crate::capabilities::CapabilitiesState,
     ) -> BlockInspectorResult {
         let block_id = block.id.clone();
@@ -581,15 +585,34 @@ impl PropertyInspector {
                 }
             });
 
+            // SRT blocks: the address the other side dials (listener and
+            // relay), with copy, QR and VLC actions.
+            let srt_ctx = strom_types::srt_relay::srt_relay_role(&definition.id).and_then(|role| {
+                let uri_prop = definition
+                    .exposed_properties
+                    .iter()
+                    .find(|p| p.name == "srt_uri")?;
+                Some(crate::srt_editor::SrtEditorContext::new(
+                    definition,
+                    uri_prop,
+                    flow_id,
+                    role,
+                    capabilities,
+                    taken_srt_relay_ids,
+                ))
+            });
+            let has_srt_actions = srt_ctx
+                .as_ref()
+                .is_some_and(|ctx| crate::srt_editor::has_connect_actions(block, ctx));
+
             // Check if this block type has action buttons
-            let has_action_buttons = matches!(
+            let has_action_buttons = has_srt_actions || matches!(
                 definition.id.as_str(),
                 "builtin.aes67_input"
                     | "builtin.ndi_input"
                     | "builtin.glcompositor"
                     | "builtin.compositor"
                     | "builtin.media_player"
-                    | "builtin.mpegtssrt_output"
                     | "builtin.vision_mixer"
                     | "builtin.whep_output"
                     | "builtin.whip_input"
@@ -650,48 +673,9 @@ impl PropertyInspector {
                 crate::app::set_local_storage("open_routing_editor", &block.id);
             }
 
-            // Download VLC Playlist button for MPEG-TS/SRT output blocks (only in listener mode)
-            if definition.id == "builtin.mpegtssrt_output" {
-                // Get SRT URI from block properties
-                let srt_uri = block
-                    .properties
-                    .get("srt_uri")
-                    .and_then(|v| match v {
-                        PropertyValue::String(s) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| DEFAULT_SRT_OUTPUT_URI.to_string());
-
-                // Only show buttons if in listener mode (VLC can connect to us)
-                // Default SRT mode is caller, so we need explicit mode=listener
-                if srt_uri.contains("mode=listener") {
-                    // Use fixed network-caching for VLC (not tied to SRT buffer latency)
-                    // 1000ms is a reasonable default for smooth playback
-                    let network_caching_ms = 1000;
-
-                    ui.horizontal(|ui| {
-                        // Open in VLC button (saves and opens automatically in native mode)
-                        if ui
-                            .button(format!("{} Open in VLC", egui_phosphor::regular::PLAY))
-                            .on_hover_text("Download XSPF playlist and open in VLC")
-                            .clicked()
-                        {
-                            result.vlc_playlist_requested =
-                                Some((srt_uri.clone(), network_caching_ms));
-                        }
-
-                        // Download-only button (native mode only - lets user save to specific location)
-                        #[cfg(not(target_arch = "wasm32"))]
-                        if ui
-                            .button(format!("{} Download", egui_phosphor::regular::DOWNLOAD_SIMPLE))
-                            .on_hover_text("Download XSPF playlist file")
-                            .clicked()
-                        {
-                            result.vlc_playlist_download_only =
-                                Some((srt_uri.clone(), network_caching_ms));
-                        }
-                    });
-                }
+            if let (true, Some(ctx)) = (has_srt_actions, &srt_ctx) {
+                let outcome = crate::srt_editor::show_connect_actions(ui, block, ctx, qr_cache);
+                outcome.apply_to(&mut result);
             }
 
             // Remote control for HTML sources. The link is minted by the
@@ -983,6 +967,38 @@ impl PropertyInspector {
                                 {
                                     ui.separator();
                                 }
+                                // SRT blocks: the connection editor over srt_uri
+                                // (see `crate::srt_editor`), as its own section.
+                                let srt_role =
+                                    strom_types::srt_relay::srt_relay_role(&definition.id);
+                                if let (Some(role), "srt_uri") =
+                                    (srt_role, exposed_prop.name.as_str())
+                                {
+                                    let ctx = crate::srt_editor::SrtEditorContext::new(
+                                        definition,
+                                        exposed_prop,
+                                        flow_id,
+                                        role,
+                                        capabilities,
+                                        taken_srt_relay_ids,
+                                    );
+                                    ui.separator();
+                                    let outcome =
+                                        crate::srt_editor::show_connection(ui, block, &ctx);
+                                    outcome.apply_to(&mut result);
+                                    // Warn when the SRT mode cannot work on
+                                    // this Strom's network.
+                                    let uri = block
+                                        .properties
+                                        .get("srt_uri")
+                                        .or(exposed_prop.default_value.as_ref());
+                                    if let Some(PropertyValue::String(uri)) = uri {
+                                        crate::srt_reachability::show(ui, uri, capabilities);
+                                    }
+                                    ui.separator();
+                                    continue;
+                                }
+
                                 let changed = Self::show_exposed_property(
                                     ui,
                                     block,
@@ -997,20 +1013,6 @@ impl PropertyInspector {
                                     taken_endpoint_ids,
                                     &mut device_picker_actions,
                                 );
-
-                                // Warn when the SRT mode cannot work on this
-                                // Strom's network.
-                                if exposed_prop.name == "srt_uri"
-                                    && crate::srt_reachability::is_srt_block(&definition.id)
-                                {
-                                    let uri = block
-                                        .properties
-                                        .get("srt_uri")
-                                        .or(exposed_prop.default_value.as_ref());
-                                    if let Some(PropertyValue::String(uri)) = uri {
-                                        crate::srt_reachability::show(ui, uri, capabilities);
-                                    }
-                                }
 
                                 // For live properties, route the block-level value
                                 // through the block-properties endpoint so the backend

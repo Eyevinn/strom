@@ -26,6 +26,8 @@ struct ConfigFile {
     #[serde(default)]
     media: MediaConfig,
     #[serde(default)]
+    relays: crate::relay::RelaysSection,
+    #[serde(default)]
     network: NetworkConfig,
 }
 
@@ -327,6 +329,9 @@ pub struct Config {
     pub media_download_max_bytes: u64,
     /// Time allowed for one whole URL download, in seconds.
     pub media_download_timeout_seconds: u64,
+    /// Named relays per protocol for `<proto>+relay://` URIs (`[relays]`,
+    /// `STROM_<PROTO>_RELAY_*`).
+    pub relays: crate::relay::Relays,
     /// Whether a port Strom binds locally can be reached from outside.
     pub inbound_reachable: bool,
 }
@@ -443,6 +448,7 @@ impl Config {
             ports: PortsConfig::default(),
             cef: CefConfig::default(),
             media: MediaConfig::default(),
+            relays: Default::default(),
             network: NetworkConfig::default(),
         }));
 
@@ -664,6 +670,13 @@ impl Config {
                 "media.download_timeout_seconds",
                 config_file.media.download_timeout_seconds,
                 crate::media_download::DEFAULT_TOTAL_TIMEOUT_SECS,
+            )?,
+            // The relay variables are read here rather than merged into the
+            // figment: relay names are map keys, and the SRT variables merge
+            // into the file's relays field by field with their own rules.
+            relays: crate::relay::Relays::from_settings(
+                &config_file.relays,
+                strom_types::env::var_opt,
             )?,
             inbound_reachable: config_file.network.inbound_reachable.unwrap_or(true),
         })
@@ -1159,6 +1172,130 @@ data_dir = "{}"
         let config = Config::from_figment(None, None, None, None, None, None, None, None, None);
         let _ = std::env::set_current_dir(original_dir);
         config.unwrap()
+    }
+
+    /// Clears every relay variable for the duration of a test.
+    fn clear_relay_env() -> [EnvGuard; 3] {
+        [
+            EnvGuard::remove("STROM_SRT_RELAY_PUBLIC"),
+            EnvGuard::remove("STROM_SRT_RELAY_INTERNAL"),
+            EnvGuard::remove("STROM_SRT_RELAYS"),
+        ]
+    }
+
+    /// Loads a config with this `.strom.toml` from a temp directory.
+    fn config_with_file(toml: &str) -> anyhow::Result<Config> {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join(".strom.toml"), toml).unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+        let result = Config::from_figment(None, None, None, None, None, None, None, None, None);
+        let _ = std::env::set_current_dir(original_dir);
+        result
+    }
+
+    fn srt_relays(config: &Config) -> Vec<(String, String, Option<String>)> {
+        config
+            .relays
+            .for_protocol(strom_types::relay::RelayProtocol::Srt)
+            .iter()
+            .map(|r| (r.name.clone(), r.public.clone(), r.internal.clone()))
+            .collect()
+    }
+
+    fn relay(name: &str, public: &str, internal: Option<&str>) -> (String, String, Option<String>) {
+        (name.into(), public.into(), internal.map(str::to_string))
+    }
+
+    #[test]
+    #[serial]
+    fn relays_are_off_by_default() {
+        let _env = clear_relay_env();
+        assert!(srt_relays(&config_from_env()).is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn env_vars_configure_the_default_relay() {
+        let _env = clear_relay_env();
+        let _public = EnvGuard::set("STROM_SRT_RELAY_PUBLIC", "srt.example.com:9000");
+        assert_eq!(
+            srt_relays(&config_from_env()),
+            [relay("default", "srt.example.com:9000", None)]
+        );
+
+        let _internal = EnvGuard::set("STROM_SRT_RELAY_INTERNAL", "srt-splice:9000");
+        assert_eq!(
+            srt_relays(&config_from_env()),
+            [relay(
+                "default",
+                "srt.example.com:9000",
+                Some("srt-splice:9000")
+            )]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn env_var_configures_named_relays() {
+        let _env = clear_relay_env();
+        let _relays = EnvGuard::set(
+            "STROM_SRT_RELAYS",
+            "eu-north=srt-eu.example.com:9000,us=srt-us.example.com:9000|srt-splice-us:9000",
+        );
+        assert_eq!(
+            srt_relays(&config_from_env()),
+            [
+                relay("eu-north", "srt-eu.example.com:9000", None),
+                relay("us", "srt-us.example.com:9000", Some("srt-splice-us:9000")),
+            ]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn relays_from_the_file_and_env_overriding_it() {
+        let _env = clear_relay_env();
+        let toml = "[relays.srt.default]\n\
+                    public = \"srt.example.com:9000\"\n\
+                    internal = \"srt-splice:9000\"\n\
+                    [relays.srt.eu-north]\n\
+                    public = \"srt-eu.example.com:9000\"\n";
+        assert_eq!(
+            srt_relays(&config_with_file(toml).unwrap()),
+            [
+                relay("default", "srt.example.com:9000", Some("srt-splice:9000")),
+                relay("eu-north", "srt-eu.example.com:9000", None),
+            ]
+        );
+
+        let _relays = EnvGuard::set("STROM_SRT_RELAYS", "eu-north=srt-eu2.example.com:9000");
+        assert_eq!(
+            srt_relays(&config_with_file(toml).unwrap()),
+            [
+                relay("default", "srt.example.com:9000", Some("srt-splice:9000")),
+                relay("eu-north", "srt-eu2.example.com:9000", None),
+            ]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn bad_relay_settings_fail_config_loading() {
+        let _env = clear_relay_env();
+        let err = config_with_file("[relays.srt.EU]\npublic = \"h:9000\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid relay name"), "{err}");
+
+        let err = config_with_file("[relays.srt.eu]\ninternal = \"h:9000\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no public"), "{err}");
+
+        let _public = EnvGuard::set("STROM_SRT_RELAY_PUBLIC", "srt-splice");
+        let err = config_with_file("").unwrap_err().to_string();
+        assert!(err.contains("STROM_SRT_RELAY_PUBLIC"), "{err}");
     }
 
     #[test]

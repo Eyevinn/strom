@@ -34,8 +34,12 @@ use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use strom_types::srt_relay::redact_srt_uri;
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
+
+/// Block definition id; also selects the block's role on the SRT relay.
+const BLOCK_DEFINITION_ID: &str = "builtin.efpsrt_output";
 
 const BLOCK_NAME: &str = "EFP/SRT Output";
 
@@ -127,7 +131,7 @@ impl BlockBuilder for EfpSrtOutputBuilder {
         &self,
         instance_id: &str,
         properties: &HashMap<String, PropertyValue>,
-        _ctx: &BlockBuildContext,
+        ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         info!("Building EFP/SRT Output block instance: {}", instance_id);
 
@@ -138,6 +142,9 @@ impl BlockBuilder for EfpSrtOutputBuilder {
                 _ => None,
             })
             .unwrap_or_else(|| DEFAULT_SRT_OUTPUT_URI.to_string());
+        super::srt_uri_check::check_srt_uri_query("srt_uri", &srt_uri)?;
+        // `srt+relay://<id>` dials out to the configured SRT relay.
+        let srt_uri = ctx.resolve_srt_uri(instance_id, &srt_uri, BLOCK_DEFINITION_ID)?;
 
         let latency = properties
             .get("latency")
@@ -223,12 +230,12 @@ impl BlockBuilder for EfpSrtOutputBuilder {
         if has_auto_reconnect {
             info!(
                 "SRT sink configured: uri={}, latency={}ms, wait={}, auto-reconnect={}, sync={}, qos=true",
-                srt_uri, latency, wait_for_connection, auto_reconnect, sync
+                redact_srt_uri(&srt_uri), latency, wait_for_connection, auto_reconnect, sync
             );
         } else {
             info!(
                 "SRT sink configured: uri={}, latency={}ms, wait={}, sync={}, qos=true (auto-reconnect not available)",
-                srt_uri, latency, wait_for_connection, sync
+                redact_srt_uri(&srt_uri), latency, wait_for_connection, sync
             );
         }
 
@@ -837,7 +844,7 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 /// Get EFP/SRT Output block definition (metadata only).
 fn efpsrt_output_definition() -> BlockDefinition {
     BlockDefinition {
-        id: "builtin.efpsrt_output".to_string(),
+        id: BLOCK_DEFINITION_ID.to_string(),
         name: BLOCK_NAME.to_string(),
         description: "Muxes multiple audio/video streams using EFP (Elastic Frame Protocol) and outputs via SRT. Supports H.264, H.265 video and Opus audio natively. Auto-encodes raw audio to Opus. Other formats are transported as private data.".to_string(),
         category: "Outputs".to_string(),
@@ -890,7 +897,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "srt_uri".to_string(),
                 label: "SRT URI".to_string(),
-                description: "SRT URI (e.g., 'srt://127.0.0.1:5000?mode=caller' or 'srt://:5000?mode=listener')".to_string(),
+                description: "SRT URI, e.g. 'srt://127.0.0.1:5000?mode=caller', 'srt://:5000?mode=listener', or 'srt+relay://<id>' to send via the SRT relay".to_string(),
                 property_type: PropertyType::String,
                 default_value: Some(PropertyValue::String(DEFAULT_SRT_OUTPUT_URI.to_string())),
                 mapping: PropertyMapping {

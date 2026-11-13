@@ -45,7 +45,8 @@ fn drop_upstream_qos_events(pad: &gst::Pad) {
 }
 
 impl PipelineManager {
-    /// Create a new pipeline from a flow definition.
+    /// Create a new pipeline from a flow definition. `srt_relays` are the
+    /// configured SRT relays that `srt+relay://` URIs in SRT blocks resolve to.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         flow: &Flow,
@@ -56,6 +57,7 @@ impl PipelineManager {
         whip_registry: Option<WhipRegistry>,
         media_path: std::path::PathBuf,
         local_devices: crate::discovery::device::GstDeviceMap,
+        srt_relays: Vec<strom_types::relay::RelayTarget>,
     ) -> Result<Self, PipelineError> {
         info!("Creating pipeline for flow: {} ({})", flow.name, flow.id);
         info!(
@@ -138,6 +140,7 @@ impl PipelineManager {
                     whip_registry,
                     session_thread_config,
                     local_devices,
+                    srt_relays,
                 )
                 .await;
                 info!("expand_blocks completed");

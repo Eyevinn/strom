@@ -9,6 +9,8 @@ authors.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
+base64 = "0.22"
+urlencoding = "2.1"
 utoipa = { workspace = true, optional = true, features = ["uuid"] }
 garde = { workspace = true, optional = true }
 
