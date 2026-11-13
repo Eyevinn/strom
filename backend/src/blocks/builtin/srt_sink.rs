@@ -1,4 +1,10 @@
 //! What the SRT output blocks share around their `srtsink`.
+//!
+//! The leaky queue in front of a calling `srtsink` (#1259) is a targeted fix
+//! for the SRT outputs in caller mode. The root cause is wider: Strom links a
+//! block output to several blocks through a `tee` without a queue per branch,
+//! so any network sink that blocks in `render` (RTMP, WHIP, ...) can stall the
+//! whole flow. That is tracked separately.
 
 use crate::blocks::BlockBuildError;
 use gstreamer as gst;
