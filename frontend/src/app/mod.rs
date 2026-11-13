@@ -680,7 +680,9 @@ pub struct StromApp {
     /// System information from the backend (version, host details, runtime environment)
     system_info: Option<crate::api::SystemInfo>,
     /// What this Strom can do on its network (`GET /api/capabilities`)
-    capabilities: Option<strom_types::capabilities::Capabilities>,
+    capabilities: crate::capabilities::CapabilitiesState,
+    /// Bumped by each capabilities load, so a newer one stops an older retry loop
+    capabilities_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Authentication status
     auth_status: Option<AuthStatusResponse>,
     /// Whether we're checking auth status

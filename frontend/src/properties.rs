@@ -531,7 +531,7 @@ impl PropertyInspector {
         recorder_start_time: Option<instant::Instant>,
         block_thumbnail: Option<&egui::TextureHandle>,
         taken_endpoint_ids: &std::collections::HashSet<String>,
-        capabilities: Option<&strom_types::capabilities::Capabilities>,
+        capabilities: &crate::capabilities::CapabilitiesState,
     ) -> BlockInspectorResult {
         let block_id = block.id.clone();
         let mut result = BlockInspectorResult::default();
@@ -1003,17 +1003,12 @@ impl PropertyInspector {
                                 if exposed_prop.name == "srt_uri"
                                     && crate::srt_reachability::is_srt_block(&definition.id)
                                 {
-                                    if let Some(caps) = capabilities {
-                                        let uri = block
-                                            .properties
-                                            .get("srt_uri")
-                                            .or(exposed_prop.default_value.as_ref());
-                                        if let Some(PropertyValue::String(uri)) = uri {
-                                            crate::srt_reachability::show(
-                                                ui,
-                                                &crate::srt_reachability::warnings(uri, caps),
-                                            );
-                                        }
+                                    let uri = block
+                                        .properties
+                                        .get("srt_uri")
+                                        .or(exposed_prop.default_value.as_ref());
+                                    if let Some(PropertyValue::String(uri)) = uri {
+                                        crate::srt_reachability::show(ui, uri, capabilities);
                                     }
                                 }
 

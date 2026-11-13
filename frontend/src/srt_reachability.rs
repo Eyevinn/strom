@@ -2,6 +2,7 @@
 //! on this Strom's network (#1257). They warn, never block: the operator may
 //! know better than the configuration.
 
+use crate::capabilities::CapabilitiesState;
 use egui::{Color32, Ui};
 use strom_types::api::SrtMode;
 use strom_types::capabilities::{parse_srt_uri, Capabilities};
@@ -69,14 +70,35 @@ fn format_spans(spans: &[PortSpan]) -> String {
         .join(", ")
 }
 
-/// Render the warnings, in the orange used for other warnings in the UI.
-pub fn show(ui: &mut Ui, warnings: &[String]) {
+/// Render the warnings for `srt_uri`, in the orange used for other warnings
+/// in the UI, or why they cannot be checked yet.
+pub fn show(ui: &mut Ui, srt_uri: &str, state: &CapabilitiesState) {
     let color = Color32::from_rgb(255, 165, 0);
-    for warning in warnings {
-        ui.horizontal_wrapped(|ui| {
-            ui.colored_label(color, egui_phosphor::regular::WARNING);
-            ui.colored_label(color, warning);
-        });
+    match state {
+        CapabilitiesState::Loaded(caps) => {
+            for warning in warnings(srt_uri, caps) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(color, egui_phosphor::regular::WARNING);
+                    ui.colored_label(color, warning);
+                });
+            }
+        }
+        CapabilitiesState::Loading => {
+            ui.weak("Checking whether this SRT mode works on this Strom...");
+        }
+        CapabilitiesState::Failed(error) => {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(color, egui_phosphor::regular::WARNING);
+                ui.colored_label(
+                    color,
+                    format!(
+                        "Cannot check whether this SRT mode works on this Strom: \
+                         loading its capabilities failed ({error}). Retrying."
+                    ),
+                );
+            });
+        }
+        CapabilitiesState::Unsupported => {}
     }
 }
 

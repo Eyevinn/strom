@@ -1448,7 +1448,7 @@ impl StromApp {
                             recorder_start_time,
                             block_thumbnail,
                             &taken_endpoint_ids,
-                            self.capabilities.as_ref(),
+                            &self.capabilities,
                         );
 
                         // Trigger device discovery whenever a Local Input block's
