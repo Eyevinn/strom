@@ -18,6 +18,9 @@ use utoipa::ToSchema;
 use crate::api::SrtMode;
 use crate::ports::PortSpan;
 
+mod srt_uri;
+pub use srt_uri::{parse_srt_uri, SrtUriEndpoint};
+
 /// Everything `GET /api/capabilities` reports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
@@ -117,52 +120,6 @@ pub struct WebRtcCapabilities {
     pub ice_servers: bool,
     /// The ICE transport policy (`"all"` or `"relay"`).
     pub ice_transport_policy: String,
-}
-
-/// The local side of an `srt://` URI: the mode it selects and the port.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SrtUriEndpoint {
-    /// The mode the URI selects.
-    pub mode: SrtMode,
-    /// The port in the URI, if any.
-    pub port: Option<u16>,
-}
-
-/// Read the mode and port from an `srt://` URI, the way the GStreamer SRT
-/// elements do: an explicit `mode=` wins, otherwise a URI without a host is a
-/// listener and one with a host is a caller. `None` for other schemes or an
-/// unknown mode.
-pub fn parse_srt_uri(uri: &str) -> Option<SrtUriEndpoint> {
-    let rest = uri.trim().strip_prefix("srt://")?;
-    let (authority, query) = match rest.split_once('?') {
-        Some((a, q)) => (a, Some(q)),
-        None => (rest, None),
-    };
-    let authority = authority.split('/').next().unwrap_or("");
-
-    let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
-        let (host, after) = v6.split_once(']').unwrap_or((v6, ""));
-        (host, after.strip_prefix(':'))
-    } else {
-        match authority.rsplit_once(':') {
-            Some((h, p)) => (h, Some(p)),
-            None => (authority, None),
-        }
-    };
-    let port = port.and_then(|p| p.parse::<u16>().ok());
-
-    let explicit_mode = query.and_then(|q| {
-        q.split('&').find_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            (key == "mode").then(|| value.to_ascii_lowercase())
-        })
-    });
-    let mode = match explicit_mode.as_deref() {
-        Some(nick) => SrtMode::from_nick(nick)?,
-        None if host.is_empty() => SrtMode::Listener,
-        None => SrtMode::Caller,
-    };
-    Some(SrtUriEndpoint { mode, port })
 }
 
 #[cfg(test)]
@@ -272,55 +229,5 @@ mod tests {
         assert!(modes.allows(SrtMode::Caller));
         assert!(!modes.allows(SrtMode::Listener));
         assert!(!modes.allows(SrtMode::Rendezvous));
-    }
-
-    #[test]
-    fn parses_srt_uri_modes_and_ports() {
-        let p = |uri| parse_srt_uri(uri);
-        assert_eq!(
-            p("srt://:5000"),
-            Some(SrtUriEndpoint {
-                mode: SrtMode::Listener,
-                port: Some(5000)
-            })
-        );
-        assert_eq!(
-            p("srt://192.0.2.1:5000"),
-            Some(SrtUriEndpoint {
-                mode: SrtMode::Caller,
-                port: Some(5000)
-            })
-        );
-        assert_eq!(
-            p("srt://:5000?mode=listener&latency=200"),
-            Some(SrtUriEndpoint {
-                mode: SrtMode::Listener,
-                port: Some(5000)
-            })
-        );
-        assert_eq!(
-            p("srt://192.0.2.1:6000?latency=200&mode=rendezvous"),
-            Some(SrtUriEndpoint {
-                mode: SrtMode::Rendezvous,
-                port: Some(6000)
-            })
-        );
-        assert_eq!(
-            p("srt://0.0.0.0:5000?mode=listener").map(|e| e.mode),
-            Some(SrtMode::Listener)
-        );
-        assert_eq!(
-            p("srt://example.com:5000?mode=caller").map(|e| e.mode),
-            Some(SrtMode::Caller)
-        );
-        assert_eq!(
-            p("srt://[::]:7000"),
-            Some(SrtUriEndpoint {
-                mode: SrtMode::Caller,
-                port: Some(7000)
-            })
-        );
-        assert_eq!(p("udp://:5000"), None);
-        assert_eq!(p("srt://:5000?mode=bogus"), None);
     }
 }

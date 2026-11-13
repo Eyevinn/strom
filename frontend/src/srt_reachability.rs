@@ -39,7 +39,10 @@ pub fn warnings(srt_uri: &str, caps: &Capabilities) -> Vec<String> {
                 .to_string(),
         });
     }
-    if let (Some(port), Some(spans)) = (endpoint.port, caps.network.ports.as_ref()) {
+    // The port Strom binds (`localport=`, else the URI port, else 7001); the
+    // URI port alone is the peer's in rendezvous mode. Skipped when it cannot
+    // be told.
+    if let (Some(port), Some(spans)) = (endpoint.local_port, caps.network.ports.as_ref()) {
         if !caps.network.port_allowed(port) {
             out.push(format!(
                 "Port {port} is outside the ports this Strom is configured for ({}): \
@@ -147,6 +150,36 @@ mod tests {
         assert!(w[0].contains("Port 5000"));
         assert!(w[0].contains("(47100-47199, 47250)"), "{}", w[0]);
         assert!(warnings("srt://:47150?mode=listener", &caps).is_empty());
+        // A listener binds `localport=` over the URI port.
+        assert!(warnings("srt://:5000?localport=47150", &caps).is_empty());
+        let w = warnings("srt://:47150?localport=5000", &caps);
+        assert!(w.len() == 1 && w[0].contains("Port 5000"), "{w:?}");
+    }
+
+    #[test]
+    fn rendezvous_checks_the_port_strom_binds() {
+        let caps = caps(true, Some(vec![(47100, 47199)]));
+        // Without localport, GStreamer binds the URI port locally too.
+        let w = warnings("srt://192.0.2.1:5000?mode=rendezvous", &caps);
+        assert!(w.len() == 1 && w[0].contains("Port 5000"), "{w:?}");
+        // With localport, the URI port is only the peer's.
+        assert!(warnings(
+            "srt://192.0.2.1:5000?mode=rendezvous&localport=47150",
+            &caps
+        )
+        .is_empty());
+        let w = warnings(
+            "srt://192.0.2.1:47150?mode=rendezvous&localport=5000",
+            &caps,
+        );
+        assert!(w.len() == 1 && w[0].contains("Port 5000"), "{w:?}");
+    }
+
+    #[test]
+    fn unknown_local_port_skips_the_port_warning() {
+        let caps = caps(true, Some(vec![(47100, 47199)]));
+        assert!(warnings("srt://:5000?localport=0", &caps).is_empty());
+        assert!(warnings("srt://:5000?mode=caller", &caps).is_empty());
     }
 
     #[test]
