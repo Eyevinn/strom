@@ -73,12 +73,19 @@ pub fn relay_public(caps: Option<&Capabilities>, name: &str) -> Result<String, S
     };
     match find_relay(SRT, relays, name) {
         Ok(relay) => Ok(relay.public.clone()),
-        Err(RelayLookupError::NotConfigured { protocol }) => Err(format!(
-            "No SRT relay is configured on this server ({}).",
-            protocol.public_env_var()
+        // STROM_SRT_RELAY_PUBLIC configures `default` only, so it is no
+        // hint for a named relay.
+        Err(RelayLookupError::NotConfigured { protocol }) if name == DEFAULT_RELAY_NAME => {
+            Err(format!(
+                "No SRT relay is configured on this server ({}).",
+                protocol.public_env_var()
+            ))
+        }
+        Err(RelayLookupError::NotConfigured { .. }) => Err(format!(
+            "SRT relay '{name}' is not configured on this server (no relay is)."
         )),
         Err(RelayLookupError::Unknown { configured, .. }) => Err(format!(
-            "This server has no SRT relay named '{name}' (configured: {}).",
+            "SRT relay '{name}' is not configured on this server (configured: {}).",
             configured.join(", ")
         )),
     }
@@ -220,6 +227,10 @@ pub(crate) mod tests {
         let none = caps_with_relays(&[]);
         let note = relay_public(Some(&none), "default").unwrap_err();
         assert!(note.contains("STROM_SRT_RELAY_PUBLIC"), "{note}");
+        // The default relay's variable is no hint for a named relay.
+        let note = relay_public(Some(&none), "eu-north").unwrap_err();
+        assert!(note.contains("'eu-north' is not configured"), "{note}");
+        assert!(!note.contains("STROM_SRT_RELAY_PUBLIC"), "{note}");
         assert!(relay_public(None, "default").is_err());
     }
 

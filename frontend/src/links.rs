@@ -14,7 +14,7 @@ use crate::app::{
     download_file, escape_xml, generate_vlc_playlist, vlc_can_play_block, vlc_player_uri,
 };
 use crate::qr::QrCache;
-use crate::srt_relay::{dial_in_action, relay_public};
+use crate::srt_relay::{dial_in_action, relay_public, reported_relays};
 
 /// An SRT stream VLC can play: a listener on this server or an output on the
 /// SRT relay.
@@ -40,14 +40,33 @@ struct SrtRelayBlockInfo {
     flow_name: String,
     block_label: String,
     role: SrtRelayRole,
-    /// The name of the relay the URI uses (`default` without `@<relay>`).
-    relay: String,
-    /// The stream id, or why the URI is not valid.
-    id: Result<String, String>,
+    /// The relay and stream id the URI names, or why the URI is not valid.
+    stream: Result<RelayStream, String>,
     has_passphrase: bool,
     /// Another SRT block, in this flow or another, uses the same id on the
     /// same relay.
     duplicate_id: bool,
+}
+
+/// The stream a valid `srt+relay://` URI names.
+struct RelayStream {
+    /// The relay name (`default` without `@<relay>`).
+    relay: String,
+    /// The stream id on that relay.
+    id: String,
+}
+
+/// The public address of `relay`, or a note on why it is not known. Once
+/// the server has reported its relays, a missing one means the block will
+/// not start, and the note says so.
+fn relay_block_public(caps: Option<&Capabilities>, relay: &str) -> Result<String, String> {
+    relay_public(caps, relay).map_err(|note| {
+        if reported_relays(caps).is_some() {
+            format!("{note} The block will not start.")
+        } else {
+            note
+        }
+    })
 }
 
 /// Tab selection for Links page.
@@ -89,24 +108,25 @@ impl LinksPage {
                 let Some(PropertyValue::String(srt_uri)) = block.properties.get("srt_uri") else {
                     continue;
                 };
-                let (relay, id, has_passphrase) = match parse_srt_relay_uri(srt_uri) {
+                // An invalid URI is filed under no relay: whatever its relay
+                // part says, it names no stream.
+                let (stream, has_passphrase) = match parse_srt_relay_uri(srt_uri) {
                     Ok(None) => continue,
                     Ok(Some(parsed)) => {
                         let has_passphrase = parsed.passphrase().is_some();
-                        (
-                            parsed.relay_name().to_string(),
-                            Ok(parsed.id),
-                            has_passphrase,
-                        )
+                        let stream = RelayStream {
+                            relay: parsed.relay_name().to_string(),
+                            id: parsed.id,
+                        };
+                        (Ok(stream), has_passphrase)
                     }
-                    Err(e) => (DEFAULT_RELAY_NAME.to_string(), Err(e.to_string()), false),
+                    Err(e) => (Err(format!("Invalid srt+relay URI: {e}")), false),
                 };
                 found.push(SrtRelayBlockInfo {
                     flow_name: flow.name.clone(),
                     block_label: block.name.clone().unwrap_or_else(|| block.id.clone()),
                     role,
-                    relay,
-                    id,
+                    stream,
                     has_passphrase,
                     duplicate_id: false,
                 });
@@ -115,15 +135,15 @@ impl LinksPage {
         // A relay id names one stream on its relay, across flows.
         let mut uses: HashMap<(String, String), usize> = HashMap::new();
         for block in &found {
-            if let Ok(id) = &block.id {
-                *uses.entry((block.relay.clone(), id.clone())).or_default() += 1;
+            if let Ok(s) = &block.stream {
+                *uses.entry((s.relay.clone(), s.id.clone())).or_default() += 1;
             }
         }
         for block in &mut found {
             block.duplicate_id = block
-                .id
+                .stream
                 .as_ref()
-                .is_ok_and(|id| uses[&(block.relay.clone(), id.clone())] > 1);
+                .is_ok_and(|s| uses[&(s.relay.clone(), s.id.clone())] > 1);
         }
         found.sort_by(|a, b| (&a.flow_name, &a.block_label).cmp(&(&b.flow_name, &b.block_label)));
         found
@@ -604,17 +624,21 @@ impl LinksPage {
 
                 for block in blocks {
                     let action = dial_in_action(block.role).to_lowercase();
-                    let public = relay_public(capabilities, &block.relay);
+                    let stream = block.stream.as_ref();
+                    // Only a valid URI names a relay to look up.
+                    let public = stream.map(|s| relay_block_public(capabilities, &s.relay));
                     ui.horizontal(|ui| {
                         ui.label(format!("{} / {}", block.flow_name, block.block_label));
-                        if block.relay != DEFAULT_RELAY_NAME {
-                            ui.label(egui::RichText::new(format!("@{}", block.relay)).weak());
+                        if let Ok(s) = stream {
+                            if s.relay != DEFAULT_RELAY_NAME {
+                                ui.label(egui::RichText::new(format!("@{}", s.relay)).weak());
+                            }
                         }
-                        match (&block.id, &public) {
+                        match (stream, &public) {
                             (Err(e), _) => {
                                 ui.colored_label(ui.visuals().error_fg_color, e);
                             }
-                            (Ok(id), Ok(public)) => {
+                            (Ok(RelayStream { id, .. }), Ok(Ok(public))) => {
                                 let url = srt_relay_dial_in_uri(public, id);
                                 ui.label(egui::RichText::new(&action).weak());
                                 ui.label(egui::RichText::new(&url).monospace());
@@ -630,7 +654,7 @@ impl LinksPage {
                                     ui.label(egui::RichText::new("plus the passphrase").weak());
                                 }
                             }
-                            (Ok(id), Err(_)) => {
+                            (Ok(RelayStream { id, .. }), _) => {
                                 ui.label(egui::RichText::new(&action).weak());
                                 ui.label(egui::RichText::new(format!("streamid={id}")).monospace());
                                 if block.has_passphrase {
@@ -639,8 +663,13 @@ impl LinksPage {
                             }
                         }
                     });
-                    if let (Ok(_), Err(note)) = (&block.id, &public) {
-                        ui.label(egui::RichText::new(note).weak());
+                    if let Ok(Err(note)) = &public {
+                        if reported_relays(capabilities).is_some() {
+                            // The relay is missing: the block will not start.
+                            ui.colored_label(egui::Color32::from_rgb(255, 180, 50), note);
+                        } else {
+                            ui.label(egui::RichText::new(note).weak());
+                        }
                     }
                     if block.duplicate_id {
                         ui.colored_label(
@@ -649,8 +678,8 @@ impl LinksPage {
                              will connect. Give one a new address in its properties.",
                         );
                     }
-                    if let (Ok(id), Ok(public)) = (&block.id, &public) {
-                        let url = srt_relay_dial_in_uri(public, id);
+                    if let (Ok(s), Ok(Ok(public))) = (stream, &public) {
+                        let url = srt_relay_dial_in_uri(public, &s.id);
                         if self.qr_visible.contains(&url) {
                             Self::show_inline_qr(
                                 ui,
@@ -900,9 +929,47 @@ mod tests {
         let found = LinksPage::get_srt_relay_blocks(&[flow]);
         let flagged: Vec<_> = found
             .iter()
-            .map(|b| (b.relay.as_str(), b.duplicate_id))
+            .map(|b| (b.stream.as_ref().unwrap().relay.as_str(), b.duplicate_id))
             .collect();
         assert_eq!(flagged, [("default", false), ("eu-north", false)]);
+    }
+
+    #[test]
+    fn an_invalid_relay_part_is_filed_under_no_relay() {
+        let mut flow = Flow::new("Show");
+        flow.blocks = vec![
+            block("bad", "builtin.mpegtssrt_input", "srt+relay://cam1@EU"),
+            block("good", "builtin.mpegtssrt_input", "srt+relay://cam1"),
+        ];
+        let found = LinksPage::get_srt_relay_blocks(&[flow]);
+        let err = found[0].stream.as_ref().err().expect("the URI is invalid");
+        assert!(err.starts_with("Invalid srt+relay URI: "), "{err}");
+        // Not counted as a second `cam1` on the default relay.
+        assert!(!found[1].duplicate_id);
+    }
+
+    #[test]
+    fn a_missing_relay_means_the_block_will_not_start() {
+        let none = caps_with_relays(&[]);
+        let note = relay_block_public(Some(&none), "default").unwrap_err();
+        assert!(note.contains("STROM_SRT_RELAY_PUBLIC"), "{note}");
+        assert!(note.ends_with("The block will not start."), "{note}");
+
+        let note = relay_block_public(Some(&relay_caps()), "us").unwrap_err();
+        assert!(
+            note.contains("SRT relay 'us' is not configured on this server"),
+            "{note}"
+        );
+        assert!(note.ends_with("The block will not start."), "{note}");
+
+        // While the relays are not known, nothing is said about starting.
+        let note = relay_block_public(None, "default").unwrap_err();
+        assert!(!note.contains("will not start"), "{note}");
+
+        assert_eq!(
+            relay_block_public(Some(&relay_caps()), "eu-north"),
+            Ok("relay-eu.example.com:9000".to_string())
+        );
     }
 
     #[test]
