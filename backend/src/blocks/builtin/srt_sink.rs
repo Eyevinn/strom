@@ -5,7 +5,6 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use strom_types::element::ElementPadRef;
 use tracing::{debug, info, warn};
 
@@ -16,8 +15,8 @@ pub(crate) const QUEUE_LATENCY_MARGIN: gst::ClockTime = gst::ClockTime::from_sec
 /// The least `max-size-time` of that queue, whatever the pipeline latency.
 pub(crate) const QUEUE_MIN_SIZE_TIME: gst::ClockTime = gst::ClockTime::from_seconds(3);
 
-/// How often a drop report may be logged per output.
-const DROP_REPORT_INTERVAL_NS: u64 = 5_000_000_000;
+/// How often drops are logged per output.
+const DROP_REPORT_INTERVAL: gst::ClockTime = gst::ClockTime::from_seconds(5);
 
 /// Whether `srtsink` dials out (caller or rendezvous) rather than listens.
 ///
@@ -99,7 +98,8 @@ pub(crate) fn queue_max_size_time(latency: Option<gst::ClockTime>) -> gst::Clock
 /// bound. `mpegtsmux` stamps every buffer it pushes, and `efpmux` copies the
 /// timestamps of its input frame; `srt_output_latency_test` checks both. A
 /// probe on the queue's `sink` pad drops any buffer that arrives with neither
-/// anyway, and warns, so the bound holds whatever the muxer does.
+/// anyway, and a warning is logged, so the bound holds whatever the muxer
+/// does.
 ///
 /// When a peer connects after a stretch without one, the sink first sends
 /// what the queue holds: up to `max-size-time` of stale media, rendered at
@@ -108,8 +108,8 @@ pub(crate) fn queue_max_size_time(latency: Option<gst::ClockTime>) -> gst::Clock
 /// emits, and its `stats` keep no connection state), so that is the price of
 /// a limit that never binds while connected. Receivers resync on it.
 ///
-/// What the queue drops is counted and logged per output, at most every 5 s:
-/// as a warning when the sink was connected and sending on time (an
+/// What the queue drops is counted, and logged per output every 5 s from a
+/// timer: as a warning when the sink was connected and sending on time (an
 /// unexpected drop), at info level when it could not send (no peer, or a link
 /// that cannot keep up). See `QueueDropMonitor`.
 ///
@@ -132,16 +132,8 @@ pub(crate) fn link_mux_to_srtsink(
         return Ok(());
     }
 
-    let queue_id = format!("{}:srtsink_queue", instance_id);
-    let queue = gst::ElementFactory::make("queue")
-        .name(&queue_id)
-        .property_from_str("leaky", "downstream")
-        .property("max-size-buffers", 0u32)
-        .property("max-size-bytes", 0u32)
-        .property("max-size-time", queue_max_size_time(None).nseconds())
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("srtsink queue: {}", e)))?;
-    install_queue_monitor(instance_id, &queue);
+    let (queue, _monitor) = caller_queue(instance_id)?;
+    let queue_id = queue.name().to_string();
     info!(
         "SRT output {}: caller mode, srtsink behind a leaky queue so a missing peer only drops this output's data (#1259)",
         instance_id
@@ -159,14 +151,45 @@ pub(crate) fn link_mux_to_srtsink(
     Ok(())
 }
 
+/// The leaky queue in front of a calling `srtsink`, with its probes, signal
+/// handler and drop report timer installed. See [`link_mux_to_srtsink`].
+fn caller_queue(
+    instance_id: &str,
+) -> Result<(gst::Element, Arc<QueueDropMonitor>), BlockBuildError> {
+    let queue = gst::ElementFactory::make("queue")
+        .name(format!("{}:srtsink_queue", instance_id))
+        .property_from_str("leaky", "downstream")
+        .property("max-size-buffers", 0u32)
+        .property("max-size-bytes", 0u32)
+        .property("max-size-time", queue_max_size_time(None).nseconds())
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("srtsink queue: {}", e)))?;
+    let monitor = install_queue_monitor(instance_id, &queue);
+    Ok((queue, monitor))
+}
+
 /// Counters for the queue in front of a calling `srtsink`.
 ///
-/// Updated from buffer probes, so atomics only on that path. The queue does
-/// not count what it leaks, so drops are derived: buffers in, minus buffers
-/// out, minus what the queue holds. That estimate is only looked at after the
-/// queue reported itself full (`overrun`, emitted right before it leaks), so a
-/// buffer in flight between the queue and the sink never shows up as a drop on
-/// its own.
+/// The queue does not count what it leaks, so drops are derived: buffers in,
+/// minus buffers out, minus what the queue holds. The work is split by thread so that the buffer probes stay
+/// cheap (CLAUDE.md, "GStreamer Pad Probes"):
+///
+/// - The buffer probes only add to counters and store timestamps (atomics).
+/// - The accounting reads the queue's level, a property read that takes the
+///   queue's lock. It runs on the upstream streaming thread where the queue's
+///   lock is not held: in the `overrun` handler (gstqueue.c emits `overrun`
+///   from its chain function after unlocking, right before
+///   `gst_queue_leak_downstream`), and in the `sink` pad's event probe at EOS.
+///   At an overrun the leak of the overrun before is complete and the buffer
+///   being chained is not queued yet, so the count covers every leak up to the
+///   previous overrun. A leak is accounted at the next overrun, or at EOS.
+/// - The logging runs on a 5 s timer on the system clock thread and only reads
+///   counters; it logs what is left when the queue goes away, too.
+///
+/// One error is left: a buffer the queue's `src` thread dequeued but did not
+/// push yet is missing from both the level and `out`, so an accounting that
+/// falls in that window counts it as dropped. The total is a high-water mark,
+/// so it is not counted twice, but it may be reported one overrun early.
 ///
 /// Whether a drop was expected is decided at the `overrun`, from where the
 /// sink stands. A syncing sink that took its last buffer and is waiting for
@@ -174,82 +197,110 @@ pub(crate) fn link_mux_to_srtsink(
 /// the buffer before it, so it is connected and keeping up: a drop then means
 /// the limit is too small, which is a bug. A sink still holding a buffer whose
 /// time has passed is stuck in `render`: no peer, or a link that cannot keep
-/// up, and dropping is what the queue is for.
+/// up, and dropping is what the queue is for. The drops counted at an overrun
+/// come from the leak of the overrun before, so they take its verdict.
 #[derive(Debug)]
 struct QueueDropMonitor {
+    instance_id: String,
+
+    // Written by the buffer probes.
     in_buffers: AtomicU64,
     out_buffers: AtomicU64,
+    /// Buffers in the chain call that passed the `sink` pad last: counted in,
+    /// not queued yet while `overrun` runs.
+    in_chain: AtomicU64,
     /// Timestamp (DTS, else PTS) of the first and the last buffer in, and of
     /// the last buffer out, in ns; `u64::MAX` for none yet.
     first_in_ts: AtomicU64,
     in_ts: AtomicU64,
     out_ts: AtomicU64,
+    /// Buffers dropped at the `sink` pad for carrying no timestamp.
+    untimestamped: AtomicU64,
+
+    // Written by event probes and the `overrun` handler.
     /// The segment of the buffers going out, to turn `out_ts` into running
     /// time. Set per SEGMENT event, read only at an overrun.
     out_segment: Mutex<Option<gst::FormattedSegment<gst::ClockTime>>>,
-    /// The pipeline latency, from the last LATENCY event, in ns.
+    /// The pipeline latency, from the last LATENCY event, and the queue's
+    /// `max-size-time` it led to, in ns.
     latency: AtomicU64,
-    /// Buffers dropped at the `sink` pad for carrying no timestamp.
-    untimestamped: AtomicU64,
-    /// Set on `overrun`: the queue is about to leak.
-    overran: AtomicBool,
-    /// Set on `overrun` while the sink was waiting for its buffer's time.
-    overran_while_on_time: AtomicBool,
-    /// Drops already reported, and the state at the last report.
-    reported_dropped: AtomicU64,
+    limit: AtomicU64,
+    /// Every drop counted so far: the high-water mark of the estimate.
+    accounted: AtomicU64,
+    /// `accounted`, split by verdict.
+    dropped_on_time: AtomicU64,
+    dropped_late: AtomicU64,
+    /// The verdict of the last overrun.
+    last_overrun_on_time: AtomicBool,
+    /// The limit was lowered, which leaks without an `overrun`: whatever the
+    /// next accounting finds is an expected drop.
+    limit_lowered: AtomicBool,
+
+    // Written by the reporter (the timer, or `drop`).
+    reported_on_time: AtomicU64,
+    reported_late: AtomicU64,
     reported_untimestamped: AtomicU64,
     report_in_ts: AtomicU64,
     report_in_buffers: AtomicU64,
-    /// When the last report was due, in ns since `epoch`.
-    epoch: Instant,
-    last_report_ns: AtomicU64,
 }
 
 /// What [`QueueDropMonitor::take_report`] found since the last report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DropReport {
-    buffers: u64,
-    /// Media time dropped, an estimate: see `take_report`.
-    duration: gst::ClockTime,
-    /// Some of it while the sink was connected and on time.
-    while_on_time: bool,
+    /// Buffers dropped while the sink was connected and on time.
+    on_time: u64,
+    /// Buffers dropped while the sink could not send.
+    late: u64,
+    /// Media time dropped, estimates: see `take_report`.
+    on_time_duration: gst::ClockTime,
+    late_duration: gst::ClockTime,
+    /// Buffers dropped at the `sink` pad for carrying no timestamp.
+    untimestamped: u64,
 }
 
 impl QueueDropMonitor {
-    fn new() -> Self {
+    fn new(instance_id: &str) -> Self {
         Self {
+            instance_id: instance_id.to_string(),
             in_buffers: AtomicU64::new(0),
             out_buffers: AtomicU64::new(0),
+            in_chain: AtomicU64::new(0),
             first_in_ts: AtomicU64::new(u64::MAX),
             in_ts: AtomicU64::new(u64::MAX),
             out_ts: AtomicU64::new(u64::MAX),
+            untimestamped: AtomicU64::new(0),
             out_segment: Mutex::new(None),
             latency: AtomicU64::new(0),
-            untimestamped: AtomicU64::new(0),
-            overran: AtomicBool::new(false),
-            overran_while_on_time: AtomicBool::new(false),
-            reported_dropped: AtomicU64::new(0),
+            limit: AtomicU64::new(queue_max_size_time(None).nseconds()),
+            accounted: AtomicU64::new(0),
+            dropped_on_time: AtomicU64::new(0),
+            dropped_late: AtomicU64::new(0),
+            last_overrun_on_time: AtomicBool::new(false),
+            limit_lowered: AtomicBool::new(false),
+            reported_on_time: AtomicU64::new(0),
+            reported_late: AtomicU64::new(0),
             reported_untimestamped: AtomicU64::new(0),
             report_in_ts: AtomicU64::new(u64::MAX),
             report_in_buffers: AtomicU64::new(0),
-            epoch: Instant::now(),
-            last_report_ns: AtomicU64::new(0),
         }
     }
 
-    /// Buffers entered the queue (call before they are queued).
+    /// Buffers entered the queue (call before they are queued). Atomics only.
     fn buffer_in(&self, count: u64, ts: gst::ClockTime) {
+        self.in_chain.store(count, Ordering::Relaxed);
         if self.in_buffers.fetch_add(count, Ordering::Relaxed) == 0 {
             self.first_in_ts.store(ts.nseconds(), Ordering::Relaxed);
         }
         self.in_ts.store(ts.nseconds(), Ordering::Relaxed);
     }
 
+    /// Buffers without a timestamp were dropped at the `sink` pad. Atomics
+    /// only; the timer logs them.
     fn untimestamped_dropped(&self, count: u64) {
         self.untimestamped.fetch_add(count, Ordering::Relaxed);
     }
 
-    /// The sink is about to take buffers.
+    /// The sink is about to take buffers. Atomics only.
     fn buffer_out(&self, count: u64, ts: Option<gst::ClockTime>) {
         if let Some(ts) = ts {
             self.out_ts.store(ts.nseconds(), Ordering::Relaxed);
@@ -261,8 +312,13 @@ impl QueueDropMonitor {
         *self.out_segment.lock().unwrap_or_else(|e| e.into_inner()) = Some(segment);
     }
 
-    fn set_latency(&self, latency: gst::ClockTime) {
+    /// A LATENCY event set the queue's `max-size-time` to `limit`.
+    fn set_latency(&self, latency: gst::ClockTime, limit: gst::ClockTime) {
         self.latency.store(latency.nseconds(), Ordering::Relaxed);
+        let old = self.limit.swap(limit.nseconds(), Ordering::Relaxed);
+        if limit.nseconds() < old {
+            self.limit_lowered.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Whether the sink waits for the time of the buffer it took last, given
@@ -281,62 +337,69 @@ impl QueueDropMonitor {
         out_rt.is_some_and(|rt| now < rt.saturating_add(latency))
     }
 
-    /// The queue is full and about to leak; `now` is the pipeline's running
-    /// time.
-    fn overrun(&self, now: Option<gst::ClockTime>) {
-        if self.sink_on_time(now) {
-            self.overran_while_on_time.store(true, Ordering::Relaxed);
-        }
-        self.overran.store(true, Ordering::Relaxed);
-    }
-
-    /// Mark that the queue may have leaked without an `overrun` (its limit
-    /// was lowered).
-    fn may_have_leaked(&self) {
-        self.overran.store(true, Ordering::Relaxed);
-    }
-
-    /// Every buffer the queue has dropped so far, estimated from its counters
-    /// and `level_buffers`, what it holds now. Only meaningful after an
-    /// overrun; see the type's documentation.
-    fn dropped_total(&self, level_buffers: u64) -> u64 {
-        // Read `out` before `in`: `in` only moves on the thread calling this.
+    /// Buffers counted in and not accounted for otherwise, given `level`, what
+    /// the queue holds, and `in_chain`, what is counted in but not queued yet.
+    /// Read `level` before calling: `out` is read here, after it, so a buffer
+    /// dequeued in between is missing from neither.
+    fn unaccounted(&self, level: u64, in_chain: u64) -> u64 {
         let out = self.out_buffers.load(Ordering::Relaxed);
+        // `in` only moves on the thread calling this.
         let inn = self.in_buffers.load(Ordering::Relaxed);
-        inn.saturating_sub(out).saturating_sub(level_buffers)
+        inn.saturating_sub(in_chain)
+            .saturating_sub(out)
+            .saturating_sub(level)
     }
 
-    /// Whether a report is due, at most every 5 s. Cheap; per buffer.
-    fn report_due(&self) -> bool {
-        let now = self.epoch.elapsed().as_nanos() as u64;
-        let last = self.last_report_ns.load(Ordering::Relaxed);
-        if now.saturating_sub(last) < DROP_REPORT_INTERVAL_NS {
-            return false;
+    /// Count the drops so far. Upstream streaming thread, while it is not in
+    /// the queue's chain function (or in the `overrun` it emits).
+    fn account(&self, level: u64, in_chain: u64) {
+        let total = self.unaccounted(level, in_chain);
+        let lowered = self.limit_lowered.swap(false, Ordering::Relaxed);
+        let prev = self.accounted.load(Ordering::Relaxed);
+        if total <= prev {
+            return;
         }
-        self.last_report_ns.store(now, Ordering::Relaxed);
-        true
+        self.accounted.store(total, Ordering::Relaxed);
+        let new = total - prev;
+        if self.last_overrun_on_time.load(Ordering::Relaxed) && !lowered {
+            self.dropped_on_time.fetch_add(new, Ordering::Relaxed);
+        } else {
+            self.dropped_late.fetch_add(new, Ordering::Relaxed);
+        }
     }
 
-    /// The drops since the last report, given what the queue holds now.
-    /// `None` when there were none.
-    fn take_report(&self, level_buffers: u64) -> Option<DropReport> {
+    /// The queue is full and about to leak; `now` is the pipeline's running
+    /// time and `level` the buffers it holds.
+    fn overrun(&self, now: Option<gst::ClockTime>, level: u64) {
+        self.account(level, self.in_chain.load(Ordering::Relaxed));
+        self.last_overrun_on_time
+            .store(self.sink_on_time(now), Ordering::Relaxed);
+    }
+
+    /// EOS reached the queue; `level` is what it holds.
+    fn end_of_stream(&self, level: u64) {
+        self.account(level, 0);
+    }
+
+    /// The drops since the last report. `None` when there were none. Only
+    /// one reporter at a time: the timer, or `drop`.
+    fn take_report(&self) -> Option<DropReport> {
         let first_in_ts = self.first_in_ts.load(Ordering::Relaxed);
         let in_ts = self.in_ts.load(Ordering::Relaxed);
         let in_buffers = self.in_buffers.load(Ordering::Relaxed);
         let prev_in_ts = self.report_in_ts.swap(in_ts, Ordering::Relaxed);
         let prev_in_buffers = self.report_in_buffers.swap(in_buffers, Ordering::Relaxed);
 
-        if !self.overran.swap(false, Ordering::Relaxed) {
+        let since = |total: &AtomicU64, reported: &AtomicU64| {
+            let total = total.load(Ordering::Relaxed);
+            total.saturating_sub(reported.swap(total, Ordering::Relaxed))
+        };
+        let on_time = since(&self.dropped_on_time, &self.reported_on_time);
+        let late = since(&self.dropped_late, &self.reported_late);
+        let untimestamped = since(&self.untimestamped, &self.reported_untimestamped);
+        if on_time == 0 && late == 0 && untimestamped == 0 {
             return None;
         }
-        let while_on_time = self.overran_while_on_time.swap(false, Ordering::Relaxed);
-        let total = self.dropped_total(level_buffers);
-        let prev = self.reported_dropped.load(Ordering::Relaxed);
-        if total <= prev {
-            return None;
-        }
-        self.reported_dropped.store(total, Ordering::Relaxed);
-        let dropped = total - prev;
 
         // The media time that came in since the last report (before the first
         // one: since the first buffer), in the share of buffers dropped. Exact
@@ -351,24 +414,78 @@ impl QueueDropMonitor {
         } else {
             in_ts.saturating_sub(prev_in_ts)
         };
-        let came_in = in_buffers.saturating_sub(prev_in_buffers).max(dropped);
-        let duration = (u128::from(span) * u128::from(dropped) / u128::from(came_in)) as u64;
+        let came_in = in_buffers
+            .saturating_sub(prev_in_buffers)
+            .max(on_time + late)
+            .max(1);
+        let share = |dropped: u64| {
+            gst::ClockTime::from_nseconds(
+                (u128::from(span) * u128::from(dropped) / u128::from(came_in)) as u64,
+            )
+        };
 
         Some(DropReport {
-            buffers: dropped,
-            duration: gst::ClockTime::from_nseconds(duration),
-            while_on_time,
+            on_time,
+            late,
+            on_time_duration: share(on_time),
+            late_duration: share(late),
+            untimestamped,
         })
+    }
+
+    /// Log the drops since the last report, if any.
+    fn report(&self) {
+        let Some(report) = self.take_report() else {
+            return;
+        };
+        let id = &self.instance_id;
+        if report.untimestamped > 0 {
+            warn!(
+                "SRT output {}: dropped {} buffer(s) from the muxer that had no timestamp ({} in all); the queue in front of srtsink is bounded by time and cannot hold them",
+                id,
+                report.untimestamped,
+                self.untimestamped.load(Ordering::Relaxed)
+            );
+        }
+        if report.on_time > 0 {
+            let limit = gst::ClockTime::from_nseconds(self.limit.load(Ordering::Relaxed));
+            let latency = gst::ClockTime::from_nseconds(self.latency.load(Ordering::Relaxed));
+            warn!(
+                "SRT output {}: the queue in front of srtsink dropped {} buffer(s), about {} of media, while srtsink was connected and sending on time. This is unexpected: the queue holds up to {} for a pipeline latency of {}; timestamps may have jumped",
+                id, report.on_time, report.on_time_duration, limit, latency
+            );
+        }
+        if report.late > 0 {
+            info!(
+                "SRT output {}: dropped {} buffer(s), about {} of media, while srtsink could not send (no peer, or the link cannot keep up)",
+                id, report.late, report.late_duration
+            );
+        }
+    }
+
+    /// Every drop counted so far, both verdicts.
+    #[cfg(test)]
+    fn dropped(&self) -> u64 {
+        self.dropped_on_time.load(Ordering::Relaxed) + self.dropped_late.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for QueueDropMonitor {
+    /// The queue is gone (the probes and handler that held this): log what
+    /// the timer did not get to.
+    fn drop(&mut self) {
+        self.report();
     }
 }
 
 /// Probes and signals on the queue in front of a calling `srtsink`: follow the
-/// pipeline latency, drop buffers without a timestamp, count and log drops.
-fn install_queue_monitor(instance_id: &str, queue: &gst::Element) {
-    let monitor = Arc::new(QueueDropMonitor::new());
+/// pipeline latency, drop buffers without a timestamp, count drops; and a
+/// timer that logs them.
+fn install_queue_monitor(instance_id: &str, queue: &gst::Element) -> Arc<QueueDropMonitor> {
+    let monitor = Arc::new(QueueDropMonitor::new(instance_id));
     let (Some(sink_pad), Some(src_pad)) = (queue.static_pad("sink"), queue.static_pad("src"))
     else {
-        return;
+        return monitor;
     };
 
     // Follow the pipeline latency. The LATENCY event travels upstream from
@@ -381,14 +498,12 @@ fn install_queue_monitor(instance_id: &str, queue: &gst::Element) {
             if let gst::EventView::Latency(latency) = event.view() {
                 if let Some(queue) = queue_weak.upgrade() {
                     let latency = latency.latency();
-                    mon.set_latency(latency);
                     let size = queue_max_size_time(Some(latency));
                     let old: u64 = queue.property("max-size-time");
+                    // Before the property: lowering it leaks at once.
+                    mon.set_latency(latency, size);
                     if old != size.nseconds() {
                         queue.set_property("max-size-time", size.nseconds());
-                        if size.nseconds() < old {
-                            mon.may_have_leaked();
-                        }
                         debug!(
                             "SRT output {}: pipeline latency {}, srtsink queue max-size-time {} -> {}",
                             id,
@@ -416,6 +531,20 @@ fn install_queue_monitor(instance_id: &str, queue: &gst::Element) {
         gst::PadProbeReturn::Ok
     });
 
+    // Events into the queue, on the upstream thread, before the queue handles
+    // them (so its lock is free for the level read).
+    let mon = monitor.clone();
+    sink_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+        let Some(gst::PadProbeData::Event(ref event)) = info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        // The last leak is complete; account for it before the queue drains.
+        if event.type_() == gst::EventType::Eos {
+            mon.end_of_stream(level_buffers(pad));
+        }
+        gst::PadProbeReturn::Ok
+    });
+
     // The sink takes a buffer (or a list: mpegtsmux pushes lists). Per buffer:
     // atomics only.
     let mon = monitor.clone();
@@ -426,17 +555,9 @@ fn install_queue_monitor(instance_id: &str, queue: &gst::Element) {
         gst::PadProbeReturn::Ok
     });
 
-    // A buffer arrives. Per buffer: atomics and a clock read, plus a report
-    // (two property reads and a log line) at most every 5 s.
-    let queue_weak = queue.downgrade();
+    // A buffer arrives. Per buffer: atomics only.
     let mon = monitor.clone();
-    let id = instance_id.to_string();
     sink_pad.add_probe(BUFFERS, move |_, info| {
-        if mon.report_due() {
-            if let Some(queue) = queue_weak.upgrade() {
-                report_drops(&id, &queue, &mon);
-            }
-        }
         let Some((count, ts)) = buffers_and_timestamp(info) else {
             return gst::PadProbeReturn::Ok;
         };
@@ -450,16 +571,46 @@ fn install_queue_monitor(instance_id: &str, queue: &gst::Element) {
         gst::PadProbeReturn::Ok
     });
 
-    // Emitted right before the queue leaks; per buffer only while it does.
-    // The queue is the signal's first argument, so no reference is captured.
+    // Emitted from the chain function on the upstream thread, with the
+    // queue's lock released, right before the queue leaks; per buffer only
+    // while it does. The queue is the signal's first argument, so no
+    // reference is captured.
+    let mon = monitor.clone();
     queue.connect("overrun", false, move |args| {
-        let now = args
-            .first()
-            .and_then(|v| v.get::<gst::Element>().ok())
-            .and_then(|queue| queue.current_running_time());
-        monitor.overrun(now);
+        if let Some(queue) = args.first().and_then(|v| v.get::<gst::Element>().ok()) {
+            let level = u64::from(queue.property::<u32>("current-level-buffers"));
+            mon.overrun(queue.current_running_time(), level);
+        }
         None
     });
+
+    start_report_timer(&monitor);
+    monitor
+}
+
+/// Log the drops every 5 s, on the system clock's thread. Holds the monitor
+/// weakly and stops once the queue is gone.
+fn start_report_timer(monitor: &Arc<QueueDropMonitor>) {
+    let clock = gst::SystemClock::obtain();
+    let id = clock.new_periodic_id(clock.time() + DROP_REPORT_INTERVAL, DROP_REPORT_INTERVAL);
+    let weak = Arc::downgrade(monitor);
+    if let Err(e) = id.wait_async(move |_, _, id| match weak.upgrade() {
+        Some(mon) => mon.report(),
+        None => id.unschedule(),
+    }) {
+        warn!(
+            "SRT output {}: could not start the drop report timer, drops will be logged when the output stops: {:?}",
+            monitor.instance_id, e
+        );
+    }
+}
+
+/// The buffers the queue owning `pad` holds. Takes the queue's lock: not from
+/// a buffer probe, nor with the lock held.
+fn level_buffers(pad: &gst::Pad) -> u64 {
+    pad.parent_element()
+        .map(|queue| u64::from(queue.property::<u32>("current-level-buffers")))
+        .unwrap_or(0)
 }
 
 const BUFFERS: gst::PadProbeType = gst::PadProbeType::BUFFER.union(gst::PadProbeType::BUFFER_LIST);
@@ -474,39 +625,6 @@ fn buffers_and_timestamp(info: &gst::PadProbeInfo) -> Option<(u64, Option<gst::C
             Some((list.len() as u64, ts))
         }
         _ => None,
-    }
-}
-
-fn report_drops(instance_id: &str, queue: &gst::Element, mon: &QueueDropMonitor) {
-    let untimestamped = mon.untimestamped.load(Ordering::Relaxed);
-    let prev_untimestamped = mon
-        .reported_untimestamped
-        .swap(untimestamped, Ordering::Relaxed);
-    if untimestamped > prev_untimestamped {
-        warn!(
-            "SRT output {}: dropped {} buffer(s) from the muxer that had no timestamp ({} in all); the queue in front of srtsink is bounded by time and cannot hold them",
-            instance_id,
-            untimestamped - prev_untimestamped,
-            untimestamped
-        );
-    }
-
-    let level_buffers = u64::from(queue.property::<u32>("current-level-buffers"));
-    let Some(report) = mon.take_report(level_buffers) else {
-        return;
-    };
-    if report.while_on_time {
-        let limit = gst::ClockTime::from_nseconds(queue.property::<u64>("max-size-time"));
-        let latency = gst::ClockTime::from_nseconds(mon.latency.load(Ordering::Relaxed));
-        warn!(
-            "SRT output {}: the queue in front of srtsink dropped {} buffer(s), about {} of media, while srtsink was connected and sending on time. This is unexpected: the queue holds up to {} for a pipeline latency of {}; timestamps may have jumped",
-            instance_id, report.buffers, report.duration, limit, latency
-        );
-    } else {
-        info!(
-            "SRT output {}: dropped {} buffer(s), about {} of media, while srtsink could not send (no peer, or the link cannot keep up)",
-            instance_id, report.buffers, report.duration
-        );
     }
 }
 
@@ -558,46 +676,63 @@ mod tests {
 
     #[test]
     fn no_report_without_an_overrun() {
-        let mon = QueueDropMonitor::new();
+        let mon = QueueDropMonitor::new("t");
         for i in 0..10 {
             mon.buffer_in(1, gst::ClockTime::from_mseconds(i));
         }
         // 10 in, none out, 5 queued: 5 unaccounted for, but no overrun, so
         // they are in flight, not dropped.
-        assert_eq!(mon.take_report(5), None);
+        assert_eq!(mon.take_report(), None);
+        assert_eq!(mon.dropped(), 0);
     }
 
     #[test]
-    fn report_counts_drops_once() {
-        let mon = QueueDropMonitor::new();
+    fn an_overrun_counts_the_drops_before_it_once() {
+        let mon = QueueDropMonitor::new("t");
         for i in 0..100 {
             mon.buffer_in(1, gst::ClockTime::from_mseconds(i * 10));
         }
-        mon.overrun(None);
-        // 100 in, none out, 40 queued: 60 dropped.
-        let report = mon.take_report(40).expect("a report");
-        assert_eq!(report.buffers, 60);
+        // 100 in, the last one still in the chain call, none out, 40 queued:
+        // 59 dropped.
+        mon.overrun(None, 40);
+        let report = mon.take_report().expect("a report");
+        assert_eq!((report.on_time, report.late), (0, 59));
         // Nothing new: no second report.
-        mon.overrun(None);
-        assert_eq!(mon.take_report(40), None);
+        mon.overrun(None, 40);
+        assert_eq!(mon.take_report(), None);
+        assert_eq!(mon.dropped(), 59);
+    }
+
+    #[test]
+    fn eos_counts_the_last_leak() {
+        let mon = QueueDropMonitor::new("t");
+        for i in 0..50 {
+            mon.buffer_in(1, gst::ClockTime::from_mseconds(i * 10));
+        }
+        mon.overrun(None, 30);
+        assert_eq!(mon.dropped(), 19);
+        // The leak of that overrun took one more; at EOS nothing is in the
+        // chain call.
+        mon.end_of_stream(29);
+        assert_eq!(mon.dropped(), 21);
     }
 
     #[test]
     fn report_estimates_the_dropped_duration() {
-        let mon = QueueDropMonitor::new();
+        let mon = QueueDropMonitor::new("t");
         let ms = gst::ClockTime::from_mseconds;
-        // 1001 buffers over 10 s of media, 201 out, 300 queued: 500 dropped,
-        // so about 5 s.
+        // 1001 buffers over 10 s of media, 201 out, 300 queued, the last one
+        // in the chain call: 499 dropped, so about 5 s.
         for i in 0..=1000 {
             mon.buffer_in(1, ms(i * 10));
         }
         mon.buffer_out(201, Some(ms(2000)));
-        mon.overrun(None);
-        let report = mon.take_report(300).expect("a report");
-        assert_eq!(report.buffers, 500);
+        mon.overrun(None, 300);
+        let report = mon.take_report().expect("a report");
+        assert_eq!(report.late, 499);
         assert_eq!(
-            report.duration,
-            gst::ClockTime::from_nseconds(10_000_000_000 * 500 / 1001)
+            report.late_duration,
+            gst::ClockTime::from_nseconds(10_000_000_000 * 499 / 1001)
         );
 
         // 5 s more in 500 buffers, 100 of them dropped: 1 s.
@@ -605,36 +740,40 @@ mod tests {
             mon.buffer_in(1, ms(i * 10));
         }
         mon.buffer_out(400, Some(ms(7000)));
-        mon.overrun(None);
-        let report = mon.take_report(300).expect("a report");
-        assert_eq!(report.buffers, 100);
-        assert_eq!(report.duration, ms(1000));
+        mon.overrun(None, 300);
+        let report = mon.take_report().expect("a report");
+        assert_eq!(report.late, 100);
+        assert_eq!(report.late_duration, ms(1000));
     }
 
     #[test]
-    fn a_drop_is_unexpected_only_while_the_sink_is_on_time() {
+    fn drops_take_the_verdict_of_the_overrun_that_leaked_them() {
         gst::init().unwrap();
         let ms = gst::ClockTime::from_mseconds;
-        let mon = QueueDropMonitor::new();
-        mon.set_latency(ms(2500));
+        let mon = QueueDropMonitor::new("t");
+        mon.set_latency(ms(2500), queue_max_size_time(Some(ms(2500))));
         mon.buffer_in(1, ms(10_000));
         // The sink took the buffer stamped 10 s; with 2.5 s of latency it
         // sends it at 12.5 s.
         mon.buffer_out(1, Some(ms(10_000)));
 
-        // At 12 s it is waiting for that time: connected and on time.
+        // At 12 s it is waiting for that time: connected and on time. The
+        // queue then leaks one buffer, counted at the next overrun.
         assert!(mon.sink_on_time(Some(ms(12_000))));
-        mon.overrun(Some(ms(12_000)));
+        mon.overrun(Some(ms(12_000)), 0);
         mon.buffer_in(1, ms(10_020));
-        let report = mon.take_report(0).expect("a report");
-        assert!(report.while_on_time);
-
+        mon.buffer_in(1, ms(10_040));
         // At 20 s it still holds it: stuck in render, no peer.
         assert!(!mon.sink_on_time(Some(ms(20_000))));
-        mon.overrun(Some(ms(20_000)));
-        mon.buffer_in(1, ms(10_040));
-        let report = mon.take_report(0).expect("a report");
-        assert!(!report.while_on_time);
+        mon.overrun(Some(ms(20_000)), 0);
+        let report = mon.take_report().expect("a report");
+        assert_eq!((report.on_time, report.late), (1, 0));
+
+        // What this overrun leaked is expected.
+        mon.buffer_in(1, ms(10_060));
+        mon.end_of_stream(0);
+        let report = mon.take_report().expect("a report");
+        assert_eq!((report.on_time, report.late), (0, 2));
 
         // Running time comes from the segment of what goes out.
         let mut segment = gst::FormattedSegment::<gst::ClockTime>::new();
@@ -645,9 +784,28 @@ mod tests {
         assert!(!mon.sink_on_time(Some(ms(3000))));
 
         // Nothing taken yet, or no clock: not on time.
-        let fresh = QueueDropMonitor::new();
+        let fresh = QueueDropMonitor::new("t");
         assert!(!fresh.sink_on_time(Some(ms(1000))));
         assert!(!mon.sink_on_time(None));
+    }
+
+    #[test]
+    fn a_lowered_limit_leaks_as_expected() {
+        let ms = gst::ClockTime::from_mseconds;
+        let mon = QueueDropMonitor::new("t");
+        mon.set_latency(ms(5000), ms(7000));
+        mon.buffer_in(1, ms(0));
+        mon.buffer_out(1, Some(ms(0)));
+        mon.overrun(Some(ms(100)), 0);
+        assert!(mon.last_overrun_on_time.load(Ordering::Relaxed));
+        // The latency drops: the queue leaks on the property change.
+        mon.set_latency(ms(200), ms(3000));
+        for i in 1..=10 {
+            mon.buffer_in(1, ms(i * 10));
+        }
+        mon.end_of_stream(4);
+        let report = mon.take_report().expect("a report");
+        assert_eq!((report.on_time, report.late), (0, 6));
     }
 
     /// The queue a caller gets, fed a buffer without a timestamp between two
