@@ -2,6 +2,42 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.8.2] - 2026-11-13
+
+Strom can run where its own ports cannot be reached from outside (Kubernetes, NAT, Docker on a bridge network): SRT blocks dial out through named SRT relays ([srt-splice](https://github.com/Eyevinn/srt-splice)), and `GET /api/capabilities` tells clients what works on the network Strom runs on. See [CLOUD_CONNECTIVITY.md](CLOUD_CONNECTIVITY.md) and [SRT_RELAY.md](SRT_RELAY.md).
+
+### Upgrade notes
+- **`srt_uri` is checked the way GStreamer reads it** (#1262). GStreamer silently ignores some mistakes, so a URI that looked encrypted could run unencrypted. A flow whose `srt_uri` has a wrong-case key or mode, a duplicate key, a bad percent escape, or a passphrase outside 10–80 bytes now fails to start instead of running with the value ignored. Check saved flows with SRT blocks before upgrading.
+- **A query key without a value is refused** (#1262): `srt://:5000?latency` segfaults GStreamer 1.28.6 in the srt plugin. The SRT blocks, the Media Player and the stinger analysis now refuse such a URI with an error that names the key.
+- **New configuration**, all optional; without it Strom behaves as before:
+  - `[network] inbound_reachable` / `STROM_INBOUND_REACHABLE` (default `true`). Set `false` in Kubernetes or behind NAT: SRT listener and rendezvous are then reported as unavailable, and the UI warns on them (#1260).
+  - `[relays.srt.<name>] public` / `internal`, and the environment variables `STROM_SRT_RELAY_PUBLIC` and `STROM_SRT_RELAY_INTERNAL` (the `default` relay) and `STROM_SRT_RELAYS=name=public[|internal],...` (named relays) (#1262).
+
+### Added
+- SRT relays: `srt_uri` `srt+relay://<id>[@<relay>]` in the MPEG-TS/SRT and EFP/SRT Input and Output blocks dials a named relay as a caller, so the block needs no port the outside can reach. The properties panel edits `srt_uri` as fields (Listener / Caller / Relay), with copy address, QR code and VLC for the address the other side dials, and warnings for no passphrase, a short or reused id and an unknown relay (#1262)
+- API: `GET /api/capabilities` reports inbound reachability, the port pool, the SRT modes that can work, the configured SRT relays (name and public address) and whether ICE servers are configured, never ICE credentials or internal addresses (#1260)
+
+### Fixed
+- MPEG-TS/SRT and EFP/SRT Output: an output in caller or rendezvous mode without a peer no longer stalls the rest of the flow; it drops only its own data, through a leaky queue bounded by time from the pipeline latency (#1261)
+- Video Encoder: AV1 with `tune=zerolatency` starts on SVT-AV1 before 4.0, which includes the Windows GStreamer build and Ubuntu 26.04 (#1249)
+
+### Security
+- SRT URIs, stream ids and relay ids are redacted in logs, and the passphrase is masked on screen (#1262)
+
+### Documentation
+- CLOUD_CONNECTIVITY.md: srt-splice for SRT and [uTURN](https://github.com/Eyevinn/uturn) for WebRTC, each on one public UDP port, also as managed services in Eyevinn Open Source Cloud (#1263)
+- SRT_RELAY.md: deploying SRT relays on bare metal, Docker Compose, Kubernetes and OSC (#1262)
+- Block guidelines: a sink that can block on the network must not stall the flow (#1261)
+
+### CI
+- Run Check (Linux) and the GStreamer 1.22 floor check in prebuilt GHCR images (#1247)
+- Run clippy beside the tests, skip docs-only changes, build ARM64 after merge (#1248)
+- macOS timing tests vs the virtual runner (#1249)
+- Tests: run the integration tests as one binary (#1251)
+- Tests: bound the WHEP Output AV1 size-change teardown; skip it on macOS CI (#1255)
+
+---
+
 ## [0.8.1] - 2026-11-10
 
 ### Fixed
