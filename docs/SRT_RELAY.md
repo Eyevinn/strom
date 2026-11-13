@@ -5,7 +5,8 @@
 An SRT relay lets an SRT block reach the outside world without a port of its own that the
 outside can reach. Strom dials the relay as an SRT caller, the outside party dials the relay
 too, and the relay pairs the two by a stream id. Strom uses
-[srt-splice](https://github.com/Eyevinn/srt-splice) as the relay.
+[srt-splice](https://github.com/Eyevinn/srt-splice) as the relay. For WebRTC behind the same
+kind of network, see [CLOUD_CONNECTIVITY.md](CLOUD_CONNECTIVITY.md).
 
 ## When you need one
 

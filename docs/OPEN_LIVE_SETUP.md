@@ -309,7 +309,7 @@ The same list is what the WHEP player and WHIP blocks hand to their `webrtcbin` 
 
 ### Notes
 
-- For self-hosted TURN, [coturn](https://github.com/coturn/coturn) is the common open-source option. Use long random shared secrets, not human-friendly passwords.
+- For self-hosted TURN, [coturn](https://github.com/coturn/coturn) is the common open-source option. Where a TURN port range cannot be exposed (Kubernetes, NAT), [uTURN](https://github.com/Eyevinn/uturn) relays WebRTC on one UDP port — see [CLOUD_CONNECTIVITY.md](CLOUD_CONNECTIVITY.md). Use long random shared secrets, not human-friendly passwords.
 - TURN traffic goes via the TURN server's ports, not through Strom — Strom only needs reachability to the TURN server's STUN/TURN listener.
 - Restart Strom after changing the list — it is read at startup.
 

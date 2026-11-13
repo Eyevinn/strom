@@ -13,6 +13,7 @@ Common questions are answered in the [FAQ](FAQ.md).
 - [AUTHENTICATION.md](AUTHENTICATION.md) — session login and API keys.
 - [POSTGRESQL.md](POSTGRESQL.md) — PostgreSQL storage backend for production.
 - [PORT_POOL.md](PORT_POOL.md) — port numbers Strom hands out to callers sharing one instance.
+- [CLOUD_CONNECTIVITY.md](CLOUD_CONNECTIVITY.md) — Strom in Kubernetes, behind NAT or in Docker: srt-splice for SRT and uTURN for WebRTC, one public UDP port each.
 - [SRT_RELAY.md](SRT_RELAY.md) — SRT relays: reaching SRT blocks behind NAT or in Kubernetes, `public`/`internal` per deployment.
 
 ## Using Strom
