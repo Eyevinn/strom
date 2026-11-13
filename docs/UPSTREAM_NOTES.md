@@ -313,7 +313,8 @@ workaround can go once we move past that version.
 - **Found in:** #1257 (capabilities review).
 
 ### `srtsrc`/`srtsink`: segfault on a URI query key without a value
-- **Seen on:** GStreamer 1.28.6 (Homebrew, macOS). 1.22 not checked, the code is the same.
+- **Seen on:** measured: GStreamer 1.28.6 (Homebrew, macOS) crashes. 1.22.0 (Debian 12
+  arm64) does not crash on the same URI, although the code path is the same (not checked why).
 - **Symptom:** measured. `srt://:5000?latency` or `?localport` (no `=`), or a value with an
   invalid escape (`localport=6%zz`), crashes the process (exit 139) when the element starts.
   `?mode` alone only logs a `g_enum_get_value_by_nick` critical.
@@ -322,5 +323,7 @@ workaround can go once we move past that version.
   `gst_srt_object_set_uri()` passes it to `g_ascii_strtoll()` and friends unchecked.
 - **Tests:** none run the element. `validate_srt_uri` refuses a key without `=` and a
   malformed escape, so the SRT blocks fail to build instead (`srt_uri_validation_test`).
+  `check_srt_uri_query` also guards Media Player `srt://` entries and the stinger analysis
+  (`srt_uri_key_without_value_test`).
 - **Upstream:** not searched.
 - **Found in:** #1257 (capabilities review).

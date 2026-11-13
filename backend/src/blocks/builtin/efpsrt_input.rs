@@ -180,6 +180,7 @@ impl BlockBuilder for EfpSrtInputBuilder {
                 _ => None,
             })
             .unwrap_or_else(|| DEFAULT_SRT_INPUT_URI.to_string());
+        super::srt_uri_check::check_srt_uri_query("srt_uri", &srt_uri)?;
         // `srt+relay://<id>` dials out to the configured SRT relay.
         let srt_uri = ctx.resolve_srt_uri(instance_id, &srt_uri, BLOCK_DEFINITION_ID)?;
 
