@@ -672,8 +672,8 @@ impl Config {
                 crate::media_download::DEFAULT_TOTAL_TIMEOUT_SECS,
             )?,
             // The relay variables are read here rather than merged into the
-            // figment: relay names are map keys, and an env entry replaces
-            // the file entry of the same name as a whole.
+            // figment: relay names are map keys, and the SRT variables merge
+            // into the file's relays field by field with their own rules.
             relays: crate::relay::Relays::from_settings(
                 &config_file.relays,
                 strom_types::env::var_opt,

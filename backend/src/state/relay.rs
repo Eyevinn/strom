@@ -3,12 +3,15 @@
 use super::AppState;
 use crate::relay::Relays;
 use strom_types::relay::{RelayProtocol, RelayTarget};
-use tracing::info;
+use tracing::{info, warn};
 
 impl AppState {
     /// Configure the relays. Called once from main after the configuration
     /// is loaded. No relay is contacted: they may start after Strom.
     pub fn configure_relays(&self, relays: Relays) {
+        for warning in relays.warnings() {
+            warn!("{warning}");
+        }
         for (protocol, relay) in relays.iter() {
             match &relay.internal {
                 Some(internal) => info!(

@@ -280,7 +280,11 @@ port = 8080
 #      STROM_SRT_RELAYS sets named relays as name=public[|internal], comma-
 #      separated, e.g.
 #      STROM_SRT_RELAYS=eu-north=srt-eu.example.com:9000,us=srt-us.example.com:9000|srt-splice-us:9000
-#      An env entry replaces the file entry of the same name as a whole.
+#      "name=public" sets only public; an empty internal after "|" is an
+#      error. Each address merges on its own, lowest to highest precedence:
+#      this file, then STROM_SRT_RELAYS, then STROM_SRT_RELAY_PUBLIC /
+#      _INTERNAL (default only). An address set by more than one source logs
+#      a startup warning naming the one used.
 # See docs/SRT_RELAY.md.
 #
 # [relays.srt.default]

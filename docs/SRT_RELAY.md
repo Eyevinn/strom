@@ -70,7 +70,13 @@ STROM_SRT_RELAY_INTERNAL=srt-splice:9000
 STROM_SRT_RELAYS=eu-north=srt-eu.example.com:9000,us=srt-us.example.com:9000|srt-splice-us:9000
 ```
 
-An environment entry replaces the file entry of the same name as a whole. Names are 1 to 32
+Each address of a relay is merged on its own. Lowest to highest precedence: the file's
+`[relays.srt.<name>]`, then the `STROM_SRT_RELAYS` entry of that name, then
+`STROM_SRT_RELAY_PUBLIC` / `STROM_SRT_RELAY_INTERNAL` (for `default` only). So `public` can live
+in `.strom.toml` and `internal` in the compose environment. `name=public` in `STROM_SRT_RELAYS`
+sets only the public address; an empty address after `|` is an error. When more than one source
+sets the same address of a relay, Strom logs a warning at startup naming the sources and the one it
+uses. Setting `internal` without `public` (after merging) is an error. Names are 1 to 32
 characters from `a-z 0-9 -`. Addresses are checked as `host:port` at startup; no relay is
 contacted, so a relay may start after Strom. `GET /api/capabilities` reports each relay's name
 and public address under `protocols.srt.relays`, never the internal one.

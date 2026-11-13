@@ -56,7 +56,7 @@ The common ones:
 | `STROM_TLS_CERT` / `STROM_TLS_KEY` | Built-in TLS (PEM) |
 | `STROM_SRT_RELAY_PUBLIC` | Public `host:port` of the `default` SRT relay ([srt-splice](https://github.com/Eyevinn/srt-splice)), e.g. `srt.example.com:9000`. SRT blocks with `srt_uri` `srt+relay://<id>` dial out to it instead of listening on a public port, and the other side dials it too (unset = no default relay) |
 | `STROM_SRT_RELAY_INTERNAL` | `host:port` Strom dials for the `default` relay instead, when it runs next to the relay (same cluster or host, avoids hairpin NAT), e.g. `srt-splice:9000`. The public address is then only shown to the other side |
-| `STROM_SRT_RELAYS` | More SRT relays by name, `name=public[\|internal]` comma-separated, e.g. `eu-north=srt-eu.example.com:9000,us=srt-us.example.com:9000\|srt-splice-us:9000`. A block picks one with `srt+relay://<id>@<name>` |
+| `STROM_SRT_RELAYS` | More SRT relays by name, `name=public[\|internal]` comma-separated, e.g. `eu-north=srt-eu.example.com:9000,us=srt-us.example.com:9000\|srt-splice-us:9000`. A block picks one with `srt+relay://<id>@<name>`. `name=public` sets only the public address; an empty address after `\|` is an error |
 | `STROM_MEDIA_PATH` | Media library directory (default `media/` under the data directory) |
 | `STROM_LOGGING_STDOUT_LOG_FORMAT` | `json` for container log collectors |
 | `STROM_SOUP_HTTP2` | `true` lets libsoup (HTTP sources, HLS/DASH segments) use HTTP/2; it also overrides a `SOUP_FORCE_HTTP1` you set. Default `false`: HTTP/1.1, because libsoup's HTTP/2 buffers whole files in memory while a player is paused |
@@ -66,6 +66,10 @@ With an SRT relay, an SRT block's `srt_uri` can be `srt+relay://<id>[@<relay>][?
 Strom then connects to the named relay (`default` without `@<relay>`) as an SRT caller, and the
 other side connects to the relay's public address with `srt://<public>?streamid=<id>`. Strom does
 not talk to the relay otherwise, so the relay need not be up when Strom starts.
+Each relay address merges on its own over `[relays.srt.<name>]` in `.strom.toml`: `STROM_SRT_RELAYS`
+overrides the file, and `STROM_SRT_RELAY_PUBLIC` / `STROM_SRT_RELAY_INTERNAL` override both for
+`default`. So the public address can stay in the file while compose sets only
+`STROM_SRT_RELAY_INTERNAL`. An address set twice logs a startup warning naming the one used.
 `GET /api/capabilities` (`protocols.srt.relays`) and the Links page show the public addresses.
 When you need a relay, and how to set `public` and `internal` in Docker Compose, Kubernetes and
 OSC: [SRT_RELAY.md](SRT_RELAY.md).
