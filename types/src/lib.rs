@@ -14,6 +14,7 @@ pub mod api;
 pub mod audioprocessor;
 pub mod auth;
 pub mod block;
+pub mod capabilities;
 pub mod clock_health;
 pub mod devtools;
 pub mod discovery;
