@@ -188,6 +188,70 @@ workaround can go once we move past that version.
 - **Found in:** [#1101](https://github.com/Eyevinn/strom/issues/1101),
   [#1132](https://github.com/Eyevinn/strom/pull/1132)
 
+### `srtsink`: a caller without a peer blocks the streaming thread
+- **Seen on:** GStreamer 1.28.2 (Linux) and 1.28.6 (macOS, Homebrew). 1.22 not checked.
+- **Symptom:** an `srtsink` in caller mode with `auto-reconnect=true` (the default) holds
+  the buffer it is rendering for as long as it has no peer. Measured: a live 100 buffers/s
+  source teed into the sink and into a `fakesink` delivered 2-13 buffers in 10 s to the
+  `fakesink`. In the field a production flow stood still for 76 s, then burst its backlog
+  when a receiver connected.
+- **Repro:** untested as one line, the test below is the repro:
+  `audiotestsrc is-live=true ! tee name=t ! fakesink silent=false -v t. ! audioconvert ! avenc_aac ! aacparse ! mpegtsmux ! srtsink uri="srt://127.0.0.1:<port with no listener>?mode=caller"`,
+  and watch the `fakesink` stop.
+- **Hint:** read in the 1.28.6 source (`gstsrtobject.c`), not stepped through. The
+  reconnect runs inside `render`: `gst_srt_object_write_one` closes the socket, opens a new
+  one and retries the same buffer (`goto retry`) for as long as there is no peer. The
+  connect itself is non-blocking; the time goes into the loop around `srt_epoll_wait`. With
+  `wait-for-connection=true` it waits `poll-timeout` (1 s) per round. With
+  `wait-for-connection=false` (what Strom sets) it polls with a 0 timeout, but the
+  `SRT_ETIMEOUT` → `continue` comes before the "Not connected yet. Dropping the buffer"
+  branch, so that branch is not reached while connecting and the loop spins until the
+  connect times out (`SRTO_CONNTIMEO`, 3 s) and the next reconnect starts. In 1.22.0 the
+  `wait-for-connection=false` check comes first and drops the buffer at once, so 1.22 may
+  not block there (read, not run).
+- **No connection signal in caller mode:** `caller-added` / `caller-removed` are only
+  emitted for callers a listener accepts. The `stats` property of a caller is the libsrt
+  socket statistics plus a `bytes-sent-total` counter, with no connection state; the only
+  sign of a lost peer is the "Trying to reconnect" element warning on the bus. Checked in the
+  1.22.0 and 1.28.6 source and with `gst-inspect-1.0 srtsink` (1.28.6).
+- **Tests:** `srt_output_peerless_caller_test`, `srt_output_latency_test`.
+- **Upstream:** not searched. Strom puts a leaky queue, bounded by time from the pipeline
+  latency, in front of a calling `srtsink`.
+- **Found in:** [#1259](https://github.com/Eyevinn/strom/issues/1259)
+
+### libsrt / `srtsink`: a connection that just succeeded is closed as "broken"
+- **Seen on:** libsrt 1.5.4 inside strom-full 0.8.1 with GStreamer 1.28.2 (Linux). The
+  libsrt code is the same in 1.5.6 and on `master` (read, not run).
+- **Symptom:** a calling `srtsink` that has just reconnected logs "Socket is broken or
+  closed. Trying to reconnect" about 2 ms after it opened the new socket. It closes that
+  socket and opens another one, although the connection to the peer had just succeeded.
+  Measured: in the libsrt log, the streaming thread's "broken" comes 13 µs **before**
+  libsrt's own "Connection established" for the same socket. The peer sees a session that
+  ends at once. Hit 2 times in about 30 attempts when a receiver connected through an SRT
+  relay just before the sink's next reconnect, so the answer came right after the sink
+  reconnected.
+- **Repro:** not as one line. A calling `srtsink` with no peer (it reconnects every 3 s),
+  and a peer that becomes available 30–50 ms before one of those reconnects, so the
+  handshake completes right after the new socket opens. Log with
+  `GST_DEBUG=srtobject:6,srtlib:6`.
+- **Hint:** read in the source. In `CUDT::postConnect` (core.cpp, "And, I am connected
+  too"), libsrt sets `m_bConnecting = false`, then calls `locateSocket()` (which takes the
+  global control lock), and only then sets `m_bConnected = true`. During that gap
+  `CUDTSocket::getStatus()` (api.cpp) returns `SRTS_BROKEN` through its "connecting timed
+  out" branch (`SRTS_CONNECTING && !m_bConnecting && !m_bConnected`), although its own
+  comment says that branch must not catch the regular CONNECTING → CONNECTED transition.
+  `gst_srt_object_write_one` (gstsrtobject.c) checks `srt_getsockstate()` after `epoll`
+  wakes it on the new socket, gets `SRTS_BROKEN`, and closes the socket. A guess: the
+  window is widest right after a reconnect, when closing the old socket contends for the
+  same lock.
+- **Tests:** none (timing-dependent).
+- **Upstream:** not reported. Possible fixes: libsrt sets `m_bConnected` before clearing
+  `m_bConnecting`, or `getStatus()` tells the transition apart from a timeout. In
+  GStreamer, `write_one` could re-check before treating a socket opened moments ago as
+  broken.
+- **Found in:** the SRT relay work, [#1258](https://github.com/Eyevinn/strom/pull/1258).
+  Peers that reconnect by themselves only see one dropped attempt.
+
 ### `rtpjitterbuffer`: packets held for the length of a mute gap
 - **Seen on:** versions not recorded.
 - **Symptom:** after a gap with no RTP packets (a muted sender), the jitterbuffer holds
