@@ -79,6 +79,7 @@ pub mod recorder_test;
 pub mod rtmp_output_test;
 pub mod rtp_hdrext_aggregation_test;
 pub mod shader_validation_test;
+pub mod srt_output_latency_test;
 pub mod srt_output_peerless_caller_test;
 pub mod srt_relay_test;
 pub mod srt_uri_key_without_value_test;

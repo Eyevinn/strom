@@ -198,11 +198,25 @@ workaround can go once we move past that version.
 - **Repro:** untested as one line, the test below is the repro:
   `audiotestsrc is-live=true ! tee name=t ! fakesink silent=false -v t. ! audioconvert ! avenc_aac ! aacparse ! mpegtsmux ! srtsink uri="srt://127.0.0.1:<port with no listener>?mode=caller"`,
   and watch the `fakesink` stop.
-- **Hint:** a guess from the log line "Socket is broken or closed. Trying to reconnect":
-  the reconnect runs inside `render` (`gst_srt_object_write`), with blocking connect
-  attempts (`SRTO_CONNTIMEO`, 3 s by default). Source not read.
-- **Tests:** `srt_output_peerless_caller_test`.
-- **Upstream:** not searched. Strom puts a leaky queue in front of a calling `srtsink`.
+- **Hint:** read in the 1.28.6 source (`gstsrtobject.c`), not stepped through. The
+  reconnect runs inside `render`: `gst_srt_object_write_one` closes the socket, opens a new
+  one and retries the same buffer (`goto retry`) for as long as there is no peer. The
+  connect itself is non-blocking; the time goes into the loop around `srt_epoll_wait`. With
+  `wait-for-connection=true` it waits `poll-timeout` (1 s) per round. With
+  `wait-for-connection=false` (what Strom sets) it polls with a 0 timeout, but the
+  `SRT_ETIMEOUT` → `continue` comes before the "Not connected yet. Dropping the buffer"
+  branch, so that branch is not reached while connecting and the loop spins until the
+  connect times out (`SRTO_CONNTIMEO`, 3 s) and the next reconnect starts. In 1.22.0 the
+  `wait-for-connection=false` check comes first and drops the buffer at once, so 1.22 may
+  not block there (read, not run).
+- **No connection signal in caller mode:** `caller-added` / `caller-removed` are only
+  emitted for callers a listener accepts. The `stats` property of a caller is the libsrt
+  socket statistics plus a `bytes-sent-total` counter, with no connection state; the only
+  sign of a lost peer is the "Trying to reconnect" element warning on the bus. Checked in the
+  1.22.0 and 1.28.6 source and with `gst-inspect-1.0 srtsink` (1.28.6).
+- **Tests:** `srt_output_peerless_caller_test`, `srt_output_latency_test`.
+- **Upstream:** not searched. Strom puts a leaky queue, bounded by time from the pipeline
+  latency, in front of a calling `srtsink`.
 - **Found in:** [#1259](https://github.com/Eyevinn/strom/issues/1259)
 
 ### libsrt / `srtsink`: a connection that just succeeded is closed as "broken"
