@@ -49,7 +49,7 @@ The common ones:
 | `STROM_DATA_DIR` | Data directory (default `/data` in the image) |
 | `STROM_DATABASE_URL` | PostgreSQL connection string (optional) — see [POSTGRESQL.md](POSTGRESQL.md) |
 | `STROM_ADMIN_USER` / `STROM_ADMIN_PASSWORD_HASH` / `STROM_API_KEY` / `STROM_SESSION_SECRET` | Authentication — see [AUTHENTICATION.md](AUTHENTICATION.md) |
-| `STROM_SERVER_ICE_SERVERS` | STUN/TURN servers for WebRTC |
+| `STROM_SERVER_ICE_SERVERS` | STUN/TURN servers for WebRTC. For a TURN relay on one UDP port, see [CLOUD_CONNECTIVITY.md](CLOUD_CONNECTIVITY.md) |
 | `STROM_SERVER_ICE_TRANSPORT_POLICY` | `all` (default) or `relay` to force WebRTC through TURN |
 | `STROM_PORTS` | Port numbers the pool hands out to callers (unset = pool off) — see [PORT_POOL.md](PORT_POOL.md) |
 | `STROM_INBOUND_REACHABLE` | Whether ports Strom binds can be reached from outside (default `true`). Set `false` on a bridge network (NAT) or in Kubernetes: `GET /api/capabilities` then reports SRT listener and rendezvous as unavailable, and the UI warns on them |

@@ -81,7 +81,7 @@ For interactive API docs, visit `http://localhost:8080/swagger-ui`.
 - **[Documentation index](docs/README.md)** — everything, organized by topic.
 - **[FAQ](docs/FAQ.md)** — short answers to common questions.
 
-Quick links: [Open Live setup](docs/OPEN_LIVE_SETUP.md) · [Docker](docs/DOCKER.md) · [GPU setup](docs/DOCKER_GPU_SETUP.md) · [Authentication](docs/AUTHENTICATION.md) · [Vision Mixer](docs/VISION_MIXER_OPERATOR_GUIDE.md) · [Audio Mixer](docs/AUDIO_MIXER_OPERATOR_GUIDE.md) · [MCP](docs/MCP.md) · [Development](docs/DEVELOPMENT.md) · [Changelog](docs/CHANGELOG.md)
+Quick links: [Open Live setup](docs/OPEN_LIVE_SETUP.md) · [Docker](docs/DOCKER.md) · [Cloud connectivity](docs/CLOUD_CONNECTIVITY.md) · [GPU setup](docs/DOCKER_GPU_SETUP.md) · [Authentication](docs/AUTHENTICATION.md) · [Vision Mixer](docs/VISION_MIXER_OPERATOR_GUIDE.md) · [Audio Mixer](docs/AUDIO_MIXER_OPERATOR_GUIDE.md) · [MCP](docs/MCP.md) · [Development](docs/DEVELOPMENT.md) · [Changelog](docs/CHANGELOG.md)
 
 ## Architecture
 
