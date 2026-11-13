@@ -9,22 +9,16 @@ use tracing::info;
 /// Whether `srtsink` dials out (caller or rendezvous) rather than listens.
 ///
 /// Reads the `mode` the sink parsed from its `uri`, so call it after setting
-/// the URI. An SRT URI with no host and no `mode` is opened as a listener, so
-/// that counts as listening too.
+/// the URI. A URI with no host is opened as a listener whatever its `mode`
+/// says, which [`strom_types::srt_uri::parse_srt_uri`] tells.
 pub(crate) fn dials_out(srtsink: &gst::Element) -> bool {
     let mode = srtsink.property_value("mode");
     if gst::glib::EnumValue::from_value(&mode).is_some_and(|(_, v)| v.nick() == "listener") {
         return false;
     }
     let uri: String = srtsink.property("uri");
-    let host = uri
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(&uri)
-        .split(['?', '/'])
-        .next()
-        .unwrap_or("");
-    !host.is_empty() && !host.starts_with(':')
+    strom_types::srt_uri::parse_srt_uri(&uri)
+        .is_some_and(|e| e.mode != strom_types::api::SrtMode::Listener)
 }
 
 /// Link the muxer's `src` pad to `srtsink`, through a leaky queue when the
@@ -119,6 +113,9 @@ mod tests {
             ("srt://127.0.0.1:5000?mode=listener", false),
             ("srt://:5000?mode=listener", false),
             ("srt://:5000", false),
+            // No host: GStreamer opens a listener whatever mode says.
+            ("srt://:5000?mode=caller", false),
+            ("srt://0.0.0.0:5000", true),
         ];
         for (uri, expected) in cases {
             assert_eq!(dials_out(&srtsink(uri)), expected, "{uri}");
