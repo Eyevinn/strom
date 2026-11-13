@@ -8,8 +8,8 @@
 use std::collections::BTreeSet;
 
 use strom_types::capabilities::{
-    Capabilities, NetworkCapabilities, ProtocolCapabilities, SrtCapabilities, SrtModes,
-    WebRtcCapabilities,
+    Capabilities, NetworkCapabilities, ProtocolCapabilities, RelayEndpoint, SrtCapabilities,
+    SrtModes, WebRtcCapabilities,
 };
 
 /// A protocol where a remote party may connect to a port Strom binds.
@@ -75,10 +75,13 @@ fn port_ranges(ports: &BTreeSet<u16>) -> Option<Vec<String>> {
 }
 
 /// Build the capabilities report. Takes only what it may expose: never pass
-/// ICE URLs or credentials through here, only whether any are configured.
+/// ICE URLs, credentials or internal relay addresses through here, only
+/// whether ICE servers are configured and each relay's name and public
+/// address (`crate::relay::Relays::endpoints`).
 pub fn build(
     reachability: ReachabilitySettings,
     ports: &BTreeSet<u16>,
+    srt_relays: Vec<RelayEndpoint>,
     has_ice_servers: bool,
     ice_transport_policy: &str,
 ) -> Capabilities {
@@ -90,7 +93,7 @@ pub fn build(
         protocols: ProtocolCapabilities {
             srt: SrtCapabilities {
                 modes: reachability.srt_modes(),
-                relays: Vec::new(),
+                relays: srt_relays,
             },
             webrtc: WebRtcCapabilities {
                 ice_servers: has_ice_servers,
@@ -109,6 +112,7 @@ mod tests {
         let caps = build(
             ReachabilitySettings::default(),
             &BTreeSet::new(),
+            Vec::new(),
             false,
             "all",
         );
@@ -132,6 +136,7 @@ mod tests {
                 inbound_reachable: false,
             },
             &BTreeSet::new(),
+            Vec::new(),
             true,
             "relay",
         );
@@ -151,7 +156,13 @@ mod tests {
     #[test]
     fn ports_are_reported_as_ranges() {
         let ports: BTreeSet<u16> = (47100..=47199).chain([47250]).collect();
-        let caps = build(ReachabilitySettings::default(), &ports, false, "all");
+        let caps = build(
+            ReachabilitySettings::default(),
+            &ports,
+            Vec::new(),
+            false,
+            "all",
+        );
         assert_eq!(
             caps.network.ports,
             Some(vec!["47100-47199".to_string(), "47250".to_string()])

@@ -186,11 +186,9 @@ pub struct BlockInspectorResult {
     pub local_devices_needed: bool,
     /// Inspector requested a forced re-scan of capture devices (↻ button).
     pub local_devices_refresh_requested: bool,
-    /// Inspector shows an SRT block's relay helper: the caller should fetch
-    /// the SRT relay status if it has not yet.
-    pub srt_relay_needed: bool,
-    /// The user asked to fetch the SRT relay status again.
-    pub srt_relay_refresh_requested: bool,
+    /// The user asked to fetch the server's capabilities (with its SRT
+    /// relays) again.
+    pub capabilities_refresh_requested: bool,
 }
 
 /// Side-channel collected by the property editor when it renders a
@@ -536,8 +534,7 @@ impl PropertyInspector {
         recorder_start_time: Option<instant::Instant>,
         block_thumbnail: Option<&egui::TextureHandle>,
         taken_endpoint_ids: &std::collections::HashSet<String>,
-        srt_relay: &crate::srt_relay::SrtRelayFetch,
-        taken_srt_relay_ids: &std::collections::HashSet<String>,
+        taken_srt_relay_ids: &crate::srt_relay::TakenRelayIds,
         capabilities: Option<&strom_types::capabilities::Capabilities>,
     ) -> BlockInspectorResult {
         let block_id = block.id.clone();
@@ -600,7 +597,7 @@ impl PropertyInspector {
                     uri_prop,
                     flow_id,
                     role,
-                    srt_relay,
+                    capabilities,
                     taken_srt_relay_ids,
                 ))
             });
@@ -677,7 +674,6 @@ impl PropertyInspector {
             }
 
             if let (true, Some(ctx)) = (has_srt_actions, &srt_ctx) {
-                result.srt_relay_needed = true;
                 let outcome = crate::srt_editor::show_connect_actions(ui, block, ctx, qr_cache);
                 outcome.apply_to(&mut result);
             }
@@ -978,19 +974,32 @@ impl PropertyInspector {
                                 if let (Some(role), "srt_uri") =
                                     (srt_role, exposed_prop.name.as_str())
                                 {
-                                    result.srt_relay_needed = true;
                                     let ctx = crate::srt_editor::SrtEditorContext::new(
                                         definition,
                                         exposed_prop,
                                         flow_id,
                                         role,
-                                        srt_relay,
+                                        capabilities,
                                         taken_srt_relay_ids,
                                     );
                                     ui.separator();
                                     let outcome =
                                         crate::srt_editor::show_connection(ui, block, &ctx);
                                     outcome.apply_to(&mut result);
+                                    // Warn when the SRT mode cannot work on
+                                    // this Strom's network.
+                                    if let Some(caps) = capabilities {
+                                        let uri = block
+                                            .properties
+                                            .get("srt_uri")
+                                            .or(exposed_prop.default_value.as_ref());
+                                        if let Some(PropertyValue::String(uri)) = uri {
+                                            crate::srt_reachability::show(
+                                                ui,
+                                                &crate::srt_reachability::warnings(uri, caps),
+                                            );
+                                        }
+                                    }
                                     ui.separator();
                                     continue;
                                 }
@@ -1009,25 +1018,6 @@ impl PropertyInspector {
                                     taken_endpoint_ids,
                                     &mut device_picker_actions,
                                 );
-
-                                // Warn when the SRT mode cannot work on this
-                                // Strom's network.
-                                if exposed_prop.name == "srt_uri"
-                                    && crate::srt_reachability::is_srt_block(&definition.id)
-                                {
-                                    if let Some(caps) = capabilities {
-                                        let uri = block
-                                            .properties
-                                            .get("srt_uri")
-                                            .or(exposed_prop.default_value.as_ref());
-                                        if let Some(PropertyValue::String(uri)) = uri {
-                                            crate::srt_reachability::show(
-                                                ui,
-                                                &crate::srt_reachability::warnings(uri, caps),
-                                            );
-                                        }
-                                    }
-                                }
 
                                 // For live properties, route the block-level value
                                 // through the block-properties endpoint so the backend

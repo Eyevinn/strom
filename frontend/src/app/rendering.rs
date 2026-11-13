@@ -1407,10 +1407,9 @@ impl StromApp {
                     // BEFORE taking the mutable borrow on self.graph below —
                     // otherwise the borrow checker rejects the call.
                     let local_devices_loading = self.local_devices_loading();
-                    let srt_relay = self.srt_relay.get();
 
-                    // Relay ids used by other SRT blocks, in any flow: a relay
-                    // id names one stream on the whole relay.
+                    // Relay streams used by other SRT blocks, in any flow: a
+                    // relay id names one stream on its relay.
                     let taken_srt_relay_ids = {
                         let selected = self.graph.get_selected_block();
                         let mut ids = std::collections::HashSet::new();
@@ -1424,8 +1423,8 @@ impl StromApp {
                                     if flow_id == Some(flow.id) && selected_id == Some(&b.id) {
                                         continue;
                                     }
-                                    if let Some(id) = crate::srt_relay::block_relay_id(b) {
-                                        ids.insert(id);
+                                    if let Some(key) = crate::srt_relay::block_relay_key(b) {
+                                        ids.insert(key);
                                     }
                                 }
                             }
@@ -1473,17 +1472,14 @@ impl StromApp {
                             recorder_start_time,
                             block_thumbnail,
                             &taken_endpoint_ids,
-                            &srt_relay,
                             &taken_srt_relay_ids,
                             self.capabilities.as_ref(),
                         );
 
-                        // The SRT blocks' srt_uri helper needs the relay status.
-                        if result.srt_relay_needed {
-                            self.srt_relay.ensure_requested(&self.api, ui.ctx());
-                        }
-                        if result.srt_relay_refresh_requested {
-                            self.srt_relay.refresh(&self.api, ui.ctx());
+                        // The SRT editor reads the relays from the capabilities,
+                        // which are reloaded with the version.
+                        if result.capabilities_refresh_requested {
+                            self.load_version(ui.ctx().clone());
                         }
 
                         // Trigger device discovery whenever a Local Input block's

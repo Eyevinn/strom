@@ -49,10 +49,10 @@ pub mod osc;
 pub mod paths;
 pub mod ports;
 pub mod ptp_monitor;
+pub mod relay;
 pub mod rtsp_server;
 pub mod server_hardening;
 pub mod sharing;
-pub mod srt_relay;
 pub mod state;
 pub mod stats;
 pub mod stinger;
@@ -144,7 +144,6 @@ pub async fn create_app_with_config(
         .route("/flows", get(api::flows::list_flows))
         .route("/flows", post(api::flows::create_flow))
         .route("/ports", get(api::ports::get_pool))
-        .route("/srt-relay", get(api::srt_relay::get_srt_relay))
         .route("/ports/reservations", get(api::ports::list_reservations))
         .route("/ports/reservations", post(api::ports::create_reservation))
         .route(

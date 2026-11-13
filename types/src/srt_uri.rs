@@ -24,7 +24,7 @@
 //!
 //! Pure string logic, unit-tested here; the frontend only draws the fields.
 
-use crate::srt_relay::{SRT_RELAY_MAX_ID_LEN, SRT_RELAY_MIN_SAFE_ID_LEN, SRT_RELAY_SCHEME};
+use crate::srt_relay::{SRT_RELAY_MIN_SAFE_ID_LEN, SRT_RELAY_SCHEME};
 
 /// The plain SRT URI scheme.
 pub const SRT_SCHEME: &str = "srt://";
@@ -101,7 +101,7 @@ pub enum SrtConnectionMode {
     /// Strom dials the other side.
     #[default]
     Caller,
-    /// Strom dials the configured SRT relay (`srt+relay://<stream id>`).
+    /// Strom dials a configured SRT relay (`srt+relay://<stream id>[@<relay>]`).
     Relay,
 }
 
@@ -182,6 +182,9 @@ pub struct SrtUriFields {
     /// `streamid` for listener and caller; the relay stream id (the part
     /// after `srt+relay://`) for the relay. Empty = none.
     pub stream_id: String,
+    /// The relay name after `@` in a relay URI, as written. Empty = the
+    /// `default` relay. Kept across mode switches, written only for the relay.
+    pub relay: String,
     /// The decoded passphrase. Empty = unencrypted.
     pub passphrase: String,
     /// The decoded `pbkeylen`, if given.
@@ -276,11 +279,7 @@ impl Known {
 /// Whether `id` is a valid relay stream id: 1 to 64 characters from
 /// `[A-Za-z0-9_-]`.
 pub fn is_valid_relay_stream_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= SRT_RELAY_MAX_ID_LEN
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    crate::relay::is_valid_relay_id(id)
 }
 
 /// Whether a relay stream id is long enough not to be guessed.
@@ -331,7 +330,9 @@ impl SrtUriFields {
             ..SrtUriFields::default()
         };
         if relay {
-            fields.stream_id = authority.to_string();
+            let (id, relay_name, _) = crate::relay::split_relay_uri(authority);
+            fields.stream_id = id.to_string();
+            fields.relay = relay_name.unwrap_or_default().to_string();
         } else {
             (fields.host, fields.port) = split_authority(authority)?;
             if fields.host.is_empty() {
@@ -401,7 +402,12 @@ impl SrtUriFields {
     /// which goes first. An IPv6 host gets its brackets.
     pub fn to_uri(&self) -> String {
         let mut uri = match self.mode {
-            SrtConnectionMode::Relay => format!("{SRT_RELAY_SCHEME}{}", self.stream_id),
+            SrtConnectionMode::Relay if self.relay.is_empty() => {
+                format!("{SRT_RELAY_SCHEME}{}", self.stream_id)
+            }
+            SrtConnectionMode::Relay => {
+                format!("{SRT_RELAY_SCHEME}{}@{}", self.stream_id, self.relay)
+            }
             SrtConnectionMode::Listener | SrtConnectionMode::Caller => {
                 let host = if self.host.contains(':') {
                     format!("[{}]", self.host)
@@ -805,6 +811,17 @@ mod tests {
             "srt+relay://Ab3kQ9xR2Ab3kQ9xR2Ab?passphrase=abcdefghijkl&pbkeylen=32&rcvlatency=200",
         );
         round_trip("srt+relay://cam1");
+        let f = parse("srt+relay://cam1@eu-north?passphrase=abcdefghijkl");
+        assert_eq!(f.stream_id, "cam1");
+        assert_eq!(f.relay, "eu-north");
+        round_trip("srt+relay://cam1@eu-north?passphrase=abcdefghijkl");
+        round_trip("srt+relay://cam1@default");
+        let mut f = parse("srt+relay://cam1@eu-north");
+        f.relay.clear();
+        assert_eq!(f.to_uri(), "srt+relay://cam1");
+        f.relay = "us".to_string();
+        f.stream_id = "cam2".to_string();
+        assert_eq!(f.to_uri(), "srt+relay://cam2@us");
     }
 
     #[test]
@@ -1232,11 +1249,19 @@ mod tests {
         let mut f = parse("srt+relay://cam1");
         f.passphrase = crate::srt_relay::new_srt_passphrase();
         assert_eq!(valid(&f.to_uri()), []);
-        assert_eq!(valid(&crate::srt_relay::new_srt_relay_uri("")), []);
+        assert_eq!(valid(&crate::srt_relay::new_srt_relay_uri(None, "")), []);
+        assert_eq!(
+            valid(&crate::srt_relay::new_srt_relay_uri(Some("eu-north"), "")),
+            []
+        );
         let resolved = crate::srt_relay::resolve_srt_uri(
             "srt+relay://cam1?passphrase=abcdefghij",
             crate::srt_relay::SrtRelayRole::Publish,
-            Some("relay.example.com:9000"),
+            &[crate::relay::RelayTarget {
+                name: "default".into(),
+                public: "relay.example.com:9000".into(),
+                internal: None,
+            }],
         )
         .unwrap();
         assert_eq!(valid(&resolved), []);

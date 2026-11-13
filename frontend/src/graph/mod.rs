@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn a_pasted_relay_block_gets_its_own_relay_id() {
         let mut graph = GraphEditor::new();
-        let uri = "srt+relay://cam1cam1cam1cam1?passphrase=oldoldoldold&latency=200";
+        let uri = "srt+relay://cam1cam1cam1cam1@eu-north?passphrase=oldoldoldold&latency=200";
         graph.add_block_with_props(
             "builtin.mpegtssrt_output".to_string(),
             egui::pos2(0.0, 0.0),
@@ -427,10 +427,15 @@ mod tests {
         let ids: Vec<_> = graph
             .blocks
             .iter()
-            .map(|b| crate::srt_relay::block_relay_id(b).unwrap())
+            .map(|b| crate::srt_relay::block_relay_key(b).unwrap())
             .collect();
-        assert_eq!(ids[0], "cam1cam1cam1cam1");
-        assert_ne!(ids[1], ids[0]);
+        assert_eq!(
+            ids[0],
+            ("eu-north".to_string(), "cam1cam1cam1cam1".to_string())
+        );
+        // A new id on the same relay.
+        assert_eq!(ids[1].0, "eu-north");
+        assert_ne!(ids[1].1, ids[0].1);
     }
 
     #[test]

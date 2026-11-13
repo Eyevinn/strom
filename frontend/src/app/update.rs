@@ -2240,19 +2240,26 @@ impl eframe::App for StromApp {
                         }
                     }
                     AppPage::Links => {
-                        CentralPanel::default().show_inside(ui, |ui| {
-                            let ctx = ui.ctx().clone();
-                            let server_hostname =
-                                self.system_info.as_ref().map(|s| s.hostname.as_str());
-                            self.links_page.render(
-                                ui,
-                                &self.api,
-                                &ctx,
-                                &self.flows,
-                                server_hostname,
-                                &self.srt_relay,
-                            );
-                        });
+                        let refresh = CentralPanel::default()
+                            .show_inside(ui, |ui| {
+                                let ctx = ui.ctx().clone();
+                                let server_hostname =
+                                    self.system_info.as_ref().map(|s| s.hostname.as_str());
+                                self.links_page.render(
+                                    ui,
+                                    &self.api,
+                                    &ctx,
+                                    &self.flows,
+                                    server_hostname,
+                                    self.capabilities.as_ref(),
+                                )
+                            })
+                            .inner;
+                        // The relays come with the capabilities, which are
+                        // reloaded with the version.
+                        if refresh {
+                            self.load_version(ui.ctx().clone());
+                        }
                     }
                 }
 

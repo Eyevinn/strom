@@ -12,10 +12,10 @@
 //! row, and [`show_connect_actions`] in the action row at the top, where
 //! the dial-in address and VLC buttons live apart from the parameters.
 
-use std::collections::HashSet;
-
 use egui::{Color32, RichText, Ui};
 use strom_types::block::ExposedProperty;
+use strom_types::capabilities::{Capabilities, RelayEndpoint};
+use strom_types::relay::DEFAULT_RELAY_NAME;
 use strom_types::srt_relay::{
     mask_srt_uri, new_srt_passphrase, new_srt_relay_id, parse_srt_relay_uri, srt_relay_dial_in_uri,
     srt_relay_player_uri, SrtRelayRole, SRT_RELAY_MIN_SAFE_ID_LEN,
@@ -27,7 +27,7 @@ use strom_types::srt_uri::{
 use strom_types::{BlockDefinition, BlockInstance, FlowId, PropertyValue};
 
 use crate::qr::QrCache;
-use crate::srt_relay::SrtRelayFetch;
+use crate::srt_relay::{relay_public, reported_relays, TakenRelayIds};
 
 const WARNING: Color32 = Color32::from_rgb(255, 180, 50);
 
@@ -51,9 +51,10 @@ pub struct SrtEditorContext<'a> {
     pub default_uri: Option<&'a str>,
     /// The `srt_uri` description, shown on hover over the URI label.
     pub description: &'a str,
-    pub relay: &'a SrtRelayFetch,
-    /// Relay stream ids other SRT blocks (in any flow) use.
-    pub taken_relay_ids: &'a HashSet<String>,
+    /// `GET /api/capabilities`, with the SRT relays; `None` while not loaded.
+    pub capabilities: Option<&'a Capabilities>,
+    /// Relay streams other SRT blocks (in any flow) use.
+    pub taken_relay_ids: &'a TakenRelayIds,
 }
 
 impl<'a> SrtEditorContext<'a> {
@@ -63,8 +64,8 @@ impl<'a> SrtEditorContext<'a> {
         uri_prop: &'a ExposedProperty,
         flow_id: Option<FlowId>,
         role: SrtRelayRole,
-        relay: &'a SrtRelayFetch,
-        taken_relay_ids: &'a HashSet<String>,
+        capabilities: Option<&'a Capabilities>,
+        taken_relay_ids: &'a TakenRelayIds,
     ) -> Self {
         SrtEditorContext {
             flow_id,
@@ -75,7 +76,7 @@ impl<'a> SrtEditorContext<'a> {
                 _ => None,
             },
             description: &uri_prop.description,
-            relay,
+            capabilities,
             taken_relay_ids,
         }
     }
@@ -84,7 +85,7 @@ impl<'a> SrtEditorContext<'a> {
 /// What the editor did.
 #[derive(Default)]
 pub struct SrtEditorOutcome {
-    /// The user asked to fetch the relay status again.
+    /// The user asked to fetch the server's capabilities (and relays) again.
     pub refresh_requested: bool,
     /// Open this URL in VLC (an XSPF playlist).
     pub vlc_requested: Option<String>,
@@ -98,7 +99,7 @@ impl SrtEditorOutcome {
     pub fn apply_to(self, result: &mut crate::properties::BlockInspectorResult) {
         // Fixed network caching for VLC, not tied to the SRT latency.
         const VLC_NETWORK_CACHING_MS: i32 = 1000;
-        result.srt_relay_refresh_requested |= self.refresh_requested;
+        result.capabilities_refresh_requested |= self.refresh_requested;
         if let Some(uri) = self.vlc_requested {
             result.vlc_playlist_requested = Some((uri, VLC_NETWORK_CACHING_MS));
         }
@@ -166,16 +167,49 @@ pub fn clean_relay_stream_id(id: &str) -> String {
 }
 
 /// Why the relay cannot be picked, or `None` when it can.
-fn relay_unavailable_reason(relay: &SrtRelayFetch) -> Option<String> {
-    match relay {
-        SrtRelayFetch::Loaded(info) if info.configured => None,
-        SrtRelayFetch::Loaded(_) => {
-            Some("No SRT relay is configured on this server (STROM_SRT_RELAY).".to_string())
-        }
-        SrtRelayFetch::Failed(e) => Some(format!("Could not ask for the SRT relay status: {e}")),
-        SrtRelayFetch::NotRequested | SrtRelayFetch::Loading => {
-            Some("Asking for the SRT relay status...".to_string())
-        }
+fn relay_unavailable_reason(caps: Option<&Capabilities>) -> Option<String> {
+    match reported_relays(caps) {
+        Some(relays) if !relays.is_empty() => None,
+        Some(_) => relay_public(caps, DEFAULT_RELAY_NAME).err(),
+        None => Some("The server's SRT relays are not known yet.".to_string()),
+    }
+}
+
+/// The relay names to offer in the relay selector, or `None` when it is
+/// hidden: only the `default` relay is configured and the URI uses it. A URI
+/// naming a relay the server does not report keeps the selector, so the
+/// user can pick a configured one.
+pub fn relay_choices(relays: &[RelayEndpoint], current: &str) -> Option<Vec<String>> {
+    let names: Vec<String> = relays.iter().map(|r| r.name.clone()).collect();
+    let only_default = names.len() == 1 && names[0] == DEFAULT_RELAY_NAME;
+    let current_reported = names.iter().any(|n| n == current);
+    if names.is_empty() || (only_default && current_reported) {
+        None
+    } else {
+        Some(names)
+    }
+}
+
+/// The relay a block switching onto the relay gets: the one its URI names,
+/// else `default`, else the first one the server reports. Empty means
+/// `default` (no `@<relay>` written).
+pub fn relay_for_switch(relays: &[RelayEndpoint], current: &str) -> String {
+    let has = |name: &str| relays.iter().any(|r| r.name == name);
+    if !current.is_empty() && has(current) {
+        return current.to_string();
+    }
+    match relays.first() {
+        Some(first) if !has(DEFAULT_RELAY_NAME) => first.name.clone(),
+        _ => String::new(),
+    }
+}
+
+/// The name of the relay an `SrtUriFields::relay` value means.
+fn relay_name(relay: &str) -> &str {
+    if relay.is_empty() {
+        DEFAULT_RELAY_NAME
+    } else {
+        relay
     }
 }
 
@@ -190,12 +224,12 @@ fn note_row(ui: &mut Ui, color: Color32, text: impl Into<String>) {
 fn mode_buttons(
     ui: &mut Ui,
     current: Option<SrtConnectionMode>,
-    relay: &SrtRelayFetch,
+    caps: Option<&Capabilities>,
     outcome: &mut SrtEditorOutcome,
 ) -> Option<SrtConnectionMode> {
     let mut picked = None;
     ui.horizontal(|ui| {
-        let relay_configured = relay_unavailable_reason(relay).is_none();
+        let relay_configured = relay_unavailable_reason(caps).is_none();
         for mode in SrtConnectionMode::ALL {
             let selected = current == Some(mode);
             // Relay is offered only with a relay configured, but a block
@@ -215,10 +249,10 @@ fn mode_buttons(
                 picked = Some(mode);
             }
         }
-        if matches!(relay, SrtRelayFetch::Failed(_))
+        if caps.is_none()
             && ui
                 .small_button(egui_phosphor::regular::ARROWS_CLOCKWISE)
-                .on_hover_text("Ask the server for the SRT relay status again")
+                .on_hover_text("Ask the server for its SRT relays again")
                 .clicked()
         {
             outcome.refresh_requested = true;
@@ -267,7 +301,12 @@ pub fn show_connection(
             }
             let picked = ui
                 .add_enabled_ui(readable, |ui| {
-                    mode_buttons(ui, readable.then_some(fields.mode), ctx.relay, &mut outcome)
+                    mode_buttons(
+                        ui,
+                        readable.then_some(fields.mode),
+                        ctx.capabilities,
+                        &mut outcome,
+                    )
                 })
                 .inner;
             ui.end_row();
@@ -278,6 +317,11 @@ pub fn show_connection(
                 }
                 let leaving_relay = fields.mode == SrtConnectionMode::Relay;
                 fields.switch_mode(mode, new_srt_relay_id);
+                if mode == SrtConnectionMode::Relay {
+                    if let Some(relays) = reported_relays(ctx.capabilities) {
+                        fields.relay = relay_for_switch(relays, &fields.relay);
+                    }
+                }
                 if leaving_relay {
                     fields.port = state.remembered_port.clone();
                     if mode == SrtConnectionMode::Caller {
@@ -285,12 +329,51 @@ pub fn show_connection(
                     }
                 }
             }
-            let relay_known = matches!(
-                ctx.relay,
-                SrtRelayFetch::Loaded(_) | SrtRelayFetch::Failed(_)
-            );
-            if readable && relay_known && fields.mode == SrtConnectionMode::Relay {
-                if let Some(reason) = relay_unavailable_reason(ctx.relay) {
+            let relays = reported_relays(ctx.capabilities);
+            if readable && fields.mode == SrtConnectionMode::Relay {
+                if let Some(relays) = relays {
+                    let current = relay_name(&fields.relay).to_string();
+                    if let Some(names) = relay_choices(relays, &current) {
+                        ui.label("Relay").on_hover_text(
+                            "The SRT relay Strom dials; the other side dials its public address",
+                        );
+                        egui::ComboBox::from_id_salt((
+                            "srt_editor_relay",
+                            ctx.flow_id,
+                            block.id.as_str(),
+                        ))
+                        .selected_text(&current)
+                        .show_ui(ui, |ui| {
+                            for name in &names {
+                                let public = relays
+                                    .iter()
+                                    .find(|r| &r.name == name)
+                                    .map(|r| r.public.as_str())
+                                    .unwrap_or_default();
+                                if ui
+                                    .selectable_label(current == *name, name)
+                                    .on_hover_text(public)
+                                    .clicked()
+                                {
+                                    fields.relay = if name == DEFAULT_RELAY_NAME {
+                                        String::new()
+                                    } else {
+                                        name.clone()
+                                    };
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    }
+                    // The URI names a relay the server does not report: the
+                    // block will not start.
+                    if !relays.is_empty() {
+                        if let Err(note) = relay_public(ctx.capabilities, &current) {
+                            note_row(ui, WARNING, format!("\u{26a0} {note}"));
+                        }
+                    }
+                }
+                if let Some(reason) = relay_unavailable_reason(ctx.capabilities) {
                     note_row(ui, WARNING, reason);
                 }
             }
@@ -455,7 +538,8 @@ pub fn show_connection(
                         ),
                     );
                 }
-                if ctx.taken_relay_ids.contains(id) {
+                let key = (relay_name(&fields.relay).to_string(), id.clone());
+                if ctx.taken_relay_ids.contains(&key) {
                     note_row(
                         ui,
                         WARNING,
@@ -596,13 +680,14 @@ fn copy_address_hover(role: SrtRelayRole, url: &str) -> String {
 }
 
 /// The URL the other side dials for a block whose `srt_uri` is `uri`: the
-/// listener at this server, or the relay with the stream ID. It includes the
+/// listener at this server, or the public address of the relay the URI names
+/// with the stream ID. It includes the
 /// passphrase (and key length), in clear: the operator configures the block
 /// and pastes this into the other device, and can see the passphrase here
 /// anyway. `Ok(None)` for a caller (Strom dials out, nobody dials in) and
 /// for a URI that cannot be read; `Err(note)` when the relay address is not
-/// known.
-pub fn connect_url(uri: &str, relay: &SrtRelayFetch) -> Result<Option<String>, String> {
+/// known (capabilities not loaded, or no such relay on the server).
+pub fn connect_url(uri: &str, caps: Option<&Capabilities>) -> Result<Option<String>, String> {
     let Ok(fields) = SrtUriFields::parse(uri) else {
         return Ok(None);
     };
@@ -611,7 +696,7 @@ pub fn connect_url(uri: &str, relay: &SrtRelayFetch) -> Result<Option<String>, S
         SrtConnectionMode::Listener => Ok(Some(crate::app::transform_srt_uri_for_vlc(uri.trim()))),
         SrtConnectionMode::Relay if !is_valid_relay_stream_id(&fields.stream_id) => Ok(None),
         SrtConnectionMode::Relay => {
-            let public = relay.public_or_note()?;
+            let public = relay_public(caps, relay_name(&fields.relay))?;
             Ok(Some(match parse_srt_relay_uri(uri.trim()) {
                 Ok(Some(parsed)) => srt_relay_player_uri(&public, &parsed),
                 _ => srt_relay_dial_in_uri(&public, &fields.stream_id),
@@ -623,7 +708,10 @@ pub fn connect_url(uri: &str, relay: &SrtRelayFetch) -> Result<Option<String>, S
 /// Whether the block has dial-in actions: a listener, or a relay block
 /// (with a note when the relay address is not known).
 pub fn has_connect_actions(block: &BlockInstance, ctx: &SrtEditorContext<'_>) -> bool {
-    !matches!(connect_url(&current_uri(block, ctx), ctx.relay), Ok(None))
+    !matches!(
+        connect_url(&current_uri(block, ctx), ctx.capabilities),
+        Ok(None)
+    )
 }
 
 /// The dial-in actions of an SRT block, for the action row at the top of
@@ -638,7 +726,7 @@ pub fn show_connect_actions(
 ) -> SrtEditorOutcome {
     let mut outcome = SrtEditorOutcome::default();
     let uri = current_uri(block, ctx);
-    let url = match connect_url(&uri, ctx.relay) {
+    let url = match connect_url(&uri, ctx.capabilities) {
         Ok(Some(url)) => url,
         Ok(None) => return outcome,
         Err(note) => {
@@ -673,9 +761,11 @@ pub fn show_connect_actions(
         {
             state.show_qr = !state.show_qr;
         }
-        let relay_public = ctx.relay.public_or_note().ok();
+        let public = SrtUriFields::parse(&uri)
+            .ok()
+            .and_then(|f| relay_public(ctx.capabilities, relay_name(&f.relay)).ok());
         if let Some(vlc_uri) =
-            crate::app::vlc_player_uri(ctx.definition_id, &uri, relay_public.as_deref())
+            crate::app::vlc_player_uri(ctx.definition_id, &uri, public.as_deref())
         {
             if ui
                 .button(format!("{} Open in VLC", egui_phosphor::regular::PLAY))
@@ -771,15 +861,79 @@ fn show_srt_uri_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strom_types::srt_relay::SrtRelayInfo;
+    use crate::srt_relay::tests::caps_with_relays;
 
-    fn relay(public: Option<&str>) -> SrtRelayFetch {
-        SrtRelayFetch::Loaded(SrtRelayInfo {
-            configured: public.is_some(),
-            relay: public.map(str::to_string),
-            public: public.map(str::to_string),
-            error: None,
-        })
+    fn relay(public: Option<&str>) -> Capabilities {
+        match public {
+            Some(public) => caps_with_relays(&[("default", public)]),
+            None => caps_with_relays(&[]),
+        }
+    }
+
+    fn endpoints(names: &[&str]) -> Vec<RelayEndpoint> {
+        names
+            .iter()
+            .map(|n| RelayEndpoint {
+                name: n.to_string(),
+                public: format!("{n}.example.com:9000"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_relay_selector_shows_only_with_a_choice() {
+        // Only `default`: implicit.
+        assert_eq!(relay_choices(&endpoints(&["default"]), "default"), None);
+        assert_eq!(relay_choices(&endpoints(&[]), "default"), None);
+        // Several relays: all of them, `default` first as the server sends them.
+        assert_eq!(
+            relay_choices(&endpoints(&["default", "eu-north"]), "default"),
+            Some(vec!["default".to_string(), "eu-north".to_string()])
+        );
+        // A URI naming a relay the server does not report keeps the selector.
+        assert_eq!(
+            relay_choices(&endpoints(&["default"]), "us"),
+            Some(vec!["default".to_string()])
+        );
+        // One relay that is not `default`: a URI without `@relay` cannot use it.
+        assert_eq!(
+            relay_choices(&endpoints(&["eu-north"]), "default"),
+            Some(vec!["eu-north".to_string()])
+        );
+    }
+
+    #[test]
+    fn switching_onto_the_relay_picks_a_configured_relay() {
+        let both = endpoints(&["default", "eu-north"]);
+        assert_eq!(relay_for_switch(&both, ""), "");
+        assert_eq!(relay_for_switch(&both, "eu-north"), "eu-north");
+        assert_eq!(relay_for_switch(&both, "us"), "");
+        let eu_only = endpoints(&["eu-north"]);
+        assert_eq!(relay_for_switch(&eu_only, ""), "eu-north");
+        assert_eq!(relay_for_switch(&[], "us"), "");
+    }
+
+    #[test]
+    fn the_dial_in_address_uses_the_named_relay() {
+        let caps = caps_with_relays(&[
+            ("default", "srt.example.com:9000"),
+            ("eu-north", "srt-eu.example.com:9000"),
+        ]);
+        assert_eq!(
+            connect_url("srt+relay://cam1cam1cam1cam1@eu-north", Some(&caps)),
+            Ok(Some(
+                "srt://srt-eu.example.com:9000?streamid=cam1cam1cam1cam1".to_string()
+            ))
+        );
+        assert_eq!(
+            connect_url("srt+relay://cam1cam1cam1cam1", Some(&caps)),
+            Ok(Some(
+                "srt://srt.example.com:9000?streamid=cam1cam1cam1cam1".to_string()
+            ))
+        );
+        let note = connect_url("srt+relay://cam1cam1cam1cam1@us", Some(&caps)).unwrap_err();
+        assert!(note.contains("'us'"), "{note}");
+        assert!(connect_url("srt+relay://cam1cam1cam1cam1", None).is_err());
     }
 
     #[test]
@@ -807,32 +961,32 @@ mod tests {
     fn a_caller_has_no_connect_url() {
         let r = relay(Some("relay.example.com:9000"));
         assert_eq!(
-            connect_url("srt://192.0.2.1:4000?mode=caller", &r),
+            connect_url("srt://192.0.2.1:4000?mode=caller", Some(&r)),
             Ok(None)
         );
-        assert_eq!(connect_url("not a uri", &r), Ok(None));
-        assert_eq!(connect_url("srt+relay://bad id", &r), Ok(None));
+        assert_eq!(connect_url("not a uri", Some(&r)), Ok(None));
+        assert_eq!(connect_url("srt+relay://bad id", Some(&r)), Ok(None));
     }
 
     #[test]
     fn a_relay_connect_url_carries_the_passphrase() {
         let uri = "srt+relay://cam1cam1cam1cam1?passphrase=abcdefghijkl&pbkeylen=32";
         assert_eq!(
-            connect_url(uri, &relay(Some("relay.example.com:9000"))),
+            connect_url(uri, Some(&relay(Some("relay.example.com:9000")))),
             Ok(Some(
                 "srt://relay.example.com:9000?streamid=cam1cam1cam1cam1&passphrase=abcdefghijkl&pbkeylen=32"
                     .to_string()
             ))
         );
-        let note = connect_url(uri, &relay(None)).unwrap_err();
-        assert!(note.contains("STROM_SRT_RELAY"), "{note}");
+        let note = connect_url(uri, Some(&relay(None))).unwrap_err();
+        assert!(note.contains("STROM_SRT_RELAY_PUBLIC"), "{note}");
     }
 
     #[test]
     fn a_listener_connect_url_carries_the_passphrase() {
         let url = connect_url(
             "srt://:5000?mode=listener&passphrase=abcdefghijkl&latency=200",
-            &relay(None),
+            None,
         )
         .unwrap()
         .unwrap();

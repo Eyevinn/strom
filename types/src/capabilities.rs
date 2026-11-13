@@ -72,7 +72,8 @@ pub struct ProtocolCapabilities {
 pub struct SrtCapabilities {
     /// Which connection modes can work.
     pub modes: SrtModes,
-    /// Relays a flow can use instead of listening itself.
+    /// Relays a flow can use instead of listening itself (`srt+relay://<id>[@<name>]`),
+    /// `default` first, then by name. Empty when none is configured.
     pub relays: Vec<RelayEndpoint>,
 }
 

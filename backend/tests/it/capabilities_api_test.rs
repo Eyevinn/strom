@@ -1,6 +1,6 @@
 //! `GET /api/capabilities` end to end (#1257): what it reports by default,
 //! with inbound reachability off and ports configured, and that it never
-//! exposes ICE/TURN URLs or credentials.
+//! exposes ICE/TURN URLs, credentials or internal relay addresses.
 
 use axum::{
     body::Body,
@@ -132,4 +132,50 @@ async fn unreachable_with_ports_reports_caller_only_and_hides_ice_urls() {
             "capabilities leak '{secret}': {body}"
         );
     }
+}
+
+/// Configured SRT relays are reported by name and public address, `default`
+/// first; their internal addresses never leave the server.
+#[tokio::test]
+async fn relays_are_reported_without_internal_addresses() {
+    use strom::relay::{RelayEntry, Relays, RelaysSection};
+    gstreamer::init().unwrap();
+    let dir = TempDir::new().unwrap();
+    let state = new_state(&dir, vec![]);
+    let entry = |public: &str, internal: &str| RelayEntry {
+        public: Some(public.to_string()),
+        internal: Some(internal.to_string()),
+    };
+    let section: RelaysSection = [(
+        "srt".to_string(),
+        [
+            (
+                "us".to_string(),
+                entry("srt-us.example.com:9000", "splice-us.internal:9000"),
+            ),
+            (
+                "default".to_string(),
+                entry("srt.example.com:9000", "srt-splice.internal:9000"),
+            ),
+        ]
+        .into(),
+    )]
+    .into();
+    state.configure_relays(Relays::from_settings(&section, |_| None).unwrap());
+    let app = app(&state).await;
+
+    let (status, body) = get_capabilities(&app).await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        value["protocols"]["srt"]["relays"],
+        json!([
+            { "name": "default", "public": "srt.example.com:9000" },
+            { "name": "us", "public": "srt-us.example.com:9000" }
+        ])
+    );
+    assert!(
+        !body.contains(".internal"),
+        "internal address leaked: {body}"
+    );
 }

@@ -186,8 +186,8 @@ pub struct BlockBuildContext {
     local_devices: GstDeviceMap,
     /// Elements the flow links into, filled by block expansion after the build.
     flow_link_targets: FlowLinkTargets,
-    /// SRT relay `host:port` that `srt+relay://` URIs resolve to, if configured.
-    srt_relay: Option<String>,
+    /// The configured SRT relays that `srt+relay://` URIs resolve to.
+    srt_relays: Vec<strom_types::relay::RelayTarget>,
 }
 
 impl BlockBuildContext {
@@ -205,7 +205,7 @@ impl BlockBuildContext {
             session_thread_config: SessionThreadConfig::new(),
             local_devices: Arc::new(Mutex::new(HashMap::new())),
             flow_link_targets: FlowLinkTargets::default(),
-            srt_relay: None,
+            srt_relays: Vec::new(),
         }
     }
 
@@ -230,13 +230,13 @@ impl BlockBuildContext {
             session_thread_config,
             local_devices,
             flow_link_targets: FlowLinkTargets::default(),
-            srt_relay: None,
+            srt_relays: Vec::new(),
         }
     }
 
-    /// Set the SRT relay `host:port` that `srt+relay://` URIs resolve to.
-    pub fn with_srt_relay(mut self, srt_relay: Option<String>) -> Self {
-        self.srt_relay = srt_relay;
+    /// Set the SRT relays that `srt+relay://` URIs resolve to.
+    pub fn with_srt_relays(mut self, srt_relays: Vec<strom_types::relay::RelayTarget>) -> Self {
+        self.srt_relays = srt_relays;
         self
     }
 
@@ -251,10 +251,11 @@ impl BlockBuildContext {
     /// with other settings or failing later. Warnings (`latency` in the URI,
     /// which the block's own property overrides) are logged.
     ///
-    /// Plain URIs then pass through; `srt+relay://<id>` becomes a caller URI
-    /// to the configured relay, with the block's own role on the relay looked
-    /// up from its definition id in
-    /// [`strom_types::srt_relay::SRT_RELAY_BLOCKS`].
+    /// Plain URIs then pass through; `srt+relay://<id>[@<relay>]` becomes a
+    /// caller URI to the named relay (`default` without `@<relay>`), with the
+    /// block's own role on the relay looked up from its definition id in
+    /// [`strom_types::srt_relay::SRT_RELAY_BLOCKS`]. An unknown relay name
+    /// fails the build with the configured names.
     pub fn resolve_srt_uri(
         &self,
         instance_id: &str,
@@ -275,7 +276,7 @@ impl BlockBuildContext {
         for warning in warnings {
             warn!("{instance_id}: srt_uri: {warning}");
         }
-        resolve_srt_uri(uri, role, self.srt_relay.as_deref())
+        resolve_srt_uri(uri, role, &self.srt_relays)
             .map_err(|e| BlockBuildError::InvalidProperty(format!("srt_uri: {e}")))
     }
 

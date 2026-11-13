@@ -1,17 +1,37 @@
-//! `srt+relay://<id>` in an SRT block's `srt_uri` reaches the block's
-//! `srtsrc`/`srtsink` as a caller URI to the configured SRT relay, with the
-//! block's own direction in the streamid. Each test builds the real block.
+//! `srt+relay://<id>[@<relay>]` in an SRT block's `srt_uri` reaches the
+//! block's `srtsrc`/`srtsink` as a caller URI to the named SRT relay
+//! (`default` without `@<relay>`), with the block's own direction in the
+//! streamid. Each test builds the real block.
 
 use crate::common;
 
 use std::collections::HashMap;
 use strom::blocks::builtin::get_builder;
 use strom::blocks::{BlockBuildContext, BlockBuildError};
+use strom::relay::Relays;
+use strom_types::relay::{RelayProtocol, RelayTarget};
 use strom_types::PropertyValue;
 
 use gstreamer::prelude::*;
 
 const RELAY: &str = "127.0.0.1:9000";
+const EU_RELAY: &str = "127.0.0.2:9001";
+
+fn target(name: &str, public: &str, internal: Option<&str>) -> RelayTarget {
+    RelayTarget {
+        name: name.to_string(),
+        public: public.to_string(),
+        internal: internal.map(str::to_string),
+    }
+}
+
+/// `default` at [`RELAY`] and `eu-north` at [`EU_RELAY`].
+fn relays() -> Vec<RelayTarget> {
+    vec![
+        target("default", RELAY, None),
+        target("eu-north", EU_RELAY, None),
+    ]
+}
 
 /// The SRT blocks, the element in each that carries the URI, and the role
 /// the block takes on the relay.
@@ -28,15 +48,14 @@ const BLOCKS: &[(&str, &str, &str)] = &[
 fn build(
     definition_id: &str,
     srt_uri: &str,
-    relay: Option<&str>,
+    relays: &[RelayTarget],
 ) -> Result<strom::blocks::BlockBuildResult, BlockBuildError> {
     let mut properties = HashMap::new();
     properties.insert(
         "srt_uri".to_string(),
         PropertyValue::String(srt_uri.to_string()),
     );
-    let ctx =
-        BlockBuildContext::new(vec![], "all".to_string()).with_srt_relay(relay.map(str::to_string));
+    let ctx = BlockBuildContext::new(vec![], "all".to_string()).with_srt_relays(relays.to_vec());
     get_builder(definition_id)
         .unwrap_or_else(|| panic!("no builder for {definition_id}"))
         .build("relay_block", &properties, &ctx)
@@ -87,7 +106,7 @@ fn relay_uri_reaches_the_srt_element_as_a_caller_uri() {
         let result = build(
             definition_id,
             "srt+relay://cam-1?passphrase=0123456789abcdef&pbkeylen=32",
-            Some(RELAY),
+            &relays(),
         )
         .unwrap_or_else(|e| panic!("{definition_id}: {e}"));
         let (address, params) = srt_uri_of(&result, factory);
@@ -104,6 +123,35 @@ fn relay_uri_reaches_the_srt_element_as_a_caller_uri() {
             "{definition_id}"
         );
         assert_eq!(params.get("pbkeylen").map(String::as_str), Some("32"));
+    }
+}
+
+#[test]
+fn a_named_relay_is_dialed() {
+    common::init_static_plugins();
+    for (definition_id, factory, role) in BLOCKS {
+        let result = build(definition_id, "srt+relay://cam-1@eu-north", &relays())
+            .unwrap_or_else(|e| panic!("{definition_id}: {e}"));
+        let (address, params) = srt_uri_of(&result, factory);
+        assert_eq!(address, format!("srt://{EU_RELAY}"), "{definition_id}");
+        assert_eq!(
+            params.get("streamid").map(|s| decode(s)),
+            Some(format!("#!::r=cam-1,m={role}")),
+            "{definition_id}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_relay_fails_the_build_with_the_configured_names() {
+    common::init_static_plugins();
+    for (definition_id, _, _) in BLOCKS {
+        let err = match build(definition_id, "srt+relay://cam-1@us", &relays()) {
+            Ok(_) => panic!("{definition_id} built with an unknown relay"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("'us'"), "{definition_id}: {err}");
+        assert!(err.contains("default, eu-north"), "{definition_id}: {err}");
     }
 }
 
@@ -137,11 +185,14 @@ fn every_block_with_an_srt_uri_is_a_relay_block() {
 fn relay_uri_without_a_relay_fails_the_build() {
     common::init_static_plugins();
     for (definition_id, _, _) in BLOCKS {
-        let err = match build(definition_id, "srt+relay://cam-1", None) {
+        let err = match build(definition_id, "srt+relay://cam-1", &[]) {
             Ok(_) => panic!("{definition_id} built without a relay"),
             Err(e) => e.to_string(),
         };
-        assert!(err.contains("STROM_SRT_RELAY"), "{definition_id}: {err}");
+        assert!(
+            err.contains("STROM_SRT_RELAY_PUBLIC"),
+            "{definition_id}: {err}"
+        );
     }
 }
 
@@ -149,11 +200,7 @@ fn relay_uri_without_a_relay_fails_the_build() {
 fn relay_uri_with_mode_fails_the_build() {
     common::init_static_plugins();
     for (definition_id, _, _) in BLOCKS {
-        let err = match build(
-            definition_id,
-            "srt+relay://cam-1?mode=listener",
-            Some(RELAY),
-        ) {
+        let err = match build(definition_id, "srt+relay://cam-1?mode=listener", &relays()) {
             Ok(_) => panic!("{definition_id} built with mode in the relay uri"),
             Err(e) => e.to_string(),
         };
@@ -165,7 +212,7 @@ fn relay_uri_with_mode_fails_the_build() {
 fn plain_uri_is_untouched_with_a_relay_configured() {
     common::init_static_plugins();
     for (definition_id, factory, _) in BLOCKS {
-        let result = build(definition_id, "srt://:5000?mode=listener", Some(RELAY))
+        let result = build(definition_id, "srt://:5000?mode=listener", &relays())
             .unwrap_or_else(|e| panic!("{definition_id}: {e}"));
         let (address, params) = srt_uri_of(&result, factory);
         assert_eq!(address, "srt://:5000", "{definition_id}");
@@ -216,15 +263,17 @@ fn silent_udp_address() -> String {
         .unwrap()
 }
 
+fn configure(state: &strom::state::AppState, relays: Vec<RelayTarget>) {
+    state.configure_relays(Relays::from_targets(RelayProtocol::Srt, relays));
+}
+
 /// The relay configured on the server reaches the blocks of a flow it starts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_started_flow_dials_the_configured_relay() {
     common::init_static_plugins();
     let relay = silent_udp_address();
     let state = common::state::new();
-    state.configure_srt_relay(
-        strom::srt_relay::SrtRelayConfig::from_settings(Some(relay.clone()), None).unwrap(),
-    );
+    configure(&state, vec![target("default", &relay, None)]);
     let uri = started_srtsrc_uri(&state, relay_input_flow("srt+relay://cam1?latency=200")).await;
 
     assert!(uri.starts_with(&format!("srt://{relay}?")), "{uri}");
@@ -235,23 +284,43 @@ async fn a_started_flow_dials_the_configured_relay() {
     );
 }
 
-/// With `STROM_SRT_RELAY_INTERNAL` set, Strom dials the internal address and
-/// the public one is only shown.
+/// With an internal address set, Strom dials it and the public one is only
+/// shown.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_started_flow_dials_the_internal_relay_address() {
     common::init_static_plugins();
     let internal = silent_udp_address();
     let state = common::state::new();
-    state.configure_srt_relay(
-        strom::srt_relay::SrtRelayConfig::from_settings(
-            Some("srt.example.com:9000".into()),
-            Some(internal.clone()),
-        )
-        .unwrap(),
+    configure(
+        &state,
+        vec![target("default", "srt.example.com:9000", Some(&internal))],
     );
     let uri = started_srtsrc_uri(&state, relay_input_flow("srt+relay://cam1")).await;
     assert!(uri.starts_with(&format!("srt://{internal}?")), "{uri}");
     assert!(!uri.contains("srt.example.com"), "{uri}");
+}
+
+/// A flow picks the relay its URI names, and dials that relay's internal
+/// address when it has one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_started_flow_dials_the_named_relay() {
+    common::init_static_plugins();
+    let default = silent_udp_address();
+    let eu_internal = silent_udp_address();
+    let state = common::state::new();
+    configure(
+        &state,
+        vec![
+            target("default", &default, None),
+            target("eu-north", "srt-eu.example.com:9000", Some(&eu_internal)),
+        ],
+    );
+    let uri = started_srtsrc_uri(&state, relay_input_flow("srt+relay://cam1@eu-north")).await;
+    assert!(uri.starts_with(&format!("srt://{eu_internal}?")), "{uri}");
+    assert!(
+        decode(&uri).contains("streamid=#!::r=cam1,m=request"),
+        "{uri}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -265,109 +334,5 @@ async fn a_flow_with_a_relay_uri_fails_to_start_without_a_relay() {
         .start_flow(&flow_id)
         .await
         .expect_err("a relay uri without a relay must not start");
-    assert!(err.to_string().contains("STROM_SRT_RELAY"), "{err}");
-}
-
-mod api {
-    use axum::{body::Body, http::Request, http::StatusCode, Router};
-    use serde_json::{json, Value};
-    use strom::auth::AuthConfig;
-    use strom::srt_relay::SrtRelayConfig;
-    use strom::state::AppState;
-    use tower::ServiceExt;
-
-    fn auth(api_key: Option<&str>) -> AuthConfig {
-        AuthConfig {
-            admin_user: None,
-            admin_password_hash: None,
-            api_key: api_key.map(str::to_string),
-            native_gui_token: None,
-            enabled: api_key.is_some(),
-            session_key: strom::auth::SessionKey::random(),
-            session_cookie_secure: false,
-        }
-    }
-
-    async fn app(state: &AppState, api_key: Option<&str>) -> Router {
-        strom::create_app_with_state_and_auth(state.clone(), auth(api_key)).await
-    }
-
-    async fn get(app: &Router, bearer: Option<&str>) -> (StatusCode, Value) {
-        let mut req = Request::builder().uri("/api/srt-relay");
-        if let Some(token) = bearer {
-            req = req.header("Authorization", format!("Bearer {token}"));
-        }
-        let response = app
-            .clone()
-            .oneshot(req.body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        (
-            status,
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-        )
-    }
-
-    #[tokio::test]
-    async fn unconfigured_server_reports_no_relay() {
-        gstreamer::init().unwrap();
-        let state = crate::common::state::new();
-        let (status, body) = get(&app(&state, None).await, None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            body,
-            json!({"configured": false, "relay": null, "public": null, "error": null})
-        );
-    }
-
-    async fn configured(public: &str, internal: Option<&str>) -> Value {
-        gstreamer::init().unwrap();
-        let state = crate::common::state::new();
-        state.configure_srt_relay(
-            SrtRelayConfig::from_settings(Some(public.into()), internal.map(str::to_string))
-                .unwrap(),
-        );
-        let (status, body) = get(&app(&state, None).await, None).await;
-        assert_eq!(status, StatusCode::OK);
-        body
-    }
-
-    #[tokio::test]
-    async fn configured_relay_is_dialed_and_shown() {
-        assert_eq!(
-            configured("srt.example.com:9000", None).await,
-            json!({
-                "configured": true,
-                "relay": "srt.example.com:9000",
-                "public": "srt.example.com:9000",
-                "error": null
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn internal_address_is_dialed_and_public_is_shown() {
-        assert_eq!(
-            configured("srt.example.com:9000", Some("srt-splice:9000")).await,
-            json!({
-                "configured": true,
-                "relay": "srt-splice:9000",
-                "public": "srt.example.com:9000",
-                "error": null
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn the_route_requires_authentication() {
-        gstreamer::init().unwrap();
-        let state = crate::common::state::new();
-        let app = app(&state, Some("test-key")).await;
-        assert_eq!(get(&app, None).await.0, StatusCode::UNAUTHORIZED);
-        assert_eq!(get(&app, Some("test-key")).await.0, StatusCode::OK);
-    }
+    assert!(err.to_string().contains("STROM_SRT_RELAY_PUBLIC"), "{err}");
 }

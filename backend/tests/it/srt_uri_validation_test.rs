@@ -31,8 +31,13 @@ fn build(
         .iter()
         .map(|(k, v)| (k.to_string(), v.clone()))
         .collect();
-    let ctx = BlockBuildContext::new(vec![], "all".to_string())
-        .with_srt_relay(Some("127.0.0.1:9000".to_string()));
+    let ctx = BlockBuildContext::new(vec![], "all".to_string()).with_srt_relays(vec![
+        strom_types::relay::RelayTarget {
+            name: "default".to_string(),
+            public: "127.0.0.1:9000".to_string(),
+            internal: None,
+        },
+    ]);
     get_builder(definition_id)
         .unwrap_or_else(|| panic!("no builder for {definition_id}"))
         .build("srt_block", &properties, &ctx)

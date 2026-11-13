@@ -5651,28 +5651,6 @@
         }
       }
     },
-    "/api/srt-relay": {
-      "get": {
-        "tags": [
-          "SRT Relay"
-        ],
-        "summary": "Report the SRT relay that `srt+relay://<id>` URIs dial out to.",
-        "description": "Whether an SRT relay is configured, the SRT address Strom dials (`STROM_SRT_RELAY_INTERNAL` if set, else `STROM_SRT_RELAY`), and the public `host:port` the outside world dials with `streamid=<id>` (`STROM_SRT_RELAY`). Read from the configuration only; the relay is not contacted. A server without a relay answers `configured: false`.",
-        "operationId": "get_srt_relay",
-        "responses": {
-          "200": {
-            "description": "SRT relay status, configured or not",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SrtRelayInfo"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/system/clock": {
       "get": {
         "tags": [
@@ -10526,7 +10504,7 @@
             "items": {
               "$ref": "#/components/schemas/RelayEndpoint"
             },
-            "description": "Relays a flow can use instead of listening itself."
+            "description": "Relays a flow can use instead of listening itself (`srt+relay://<id>[@<name>]`),\n`default` first, then by name. Empty when none is configured."
           }
         }
       },
@@ -10575,40 +10553,6 @@
           "listener",
           "rendezvous"
         ]
-      },
-      "SrtRelayInfo": {
-        "type": "object",
-        "description": "SRT relay status, as `GET /api/srt-relay` reports it.",
-        "required": [
-          "configured"
-        ],
-        "properties": {
-          "configured": {
-            "type": "boolean",
-            "description": "Whether an SRT relay is configured (`STROM_SRT_RELAY`)."
-          },
-          "error": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Reserved, always `null`. Kept so clients that read it keep working."
-          },
-          "public": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The relay's public `host:port` (`STROM_SRT_RELAY`), which the outside\nworld dials. Set whenever `configured` is."
-          },
-          "relay": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The relay's SRT `host:port` that Strom dials: `STROM_SRT_RELAY_INTERNAL`\nif set, else `STROM_SRT_RELAY`."
-          }
-        }
       },
       "SrtModes": {
         "type": "object",
@@ -15042,10 +14986,6 @@
     {
       "name": "Network",
       "description": "Network interface discovery endpoints"
-    },
-    {
-      "name": "SRT Relay",
-      "description": "SRT relay (srt-splice) status for srt+relay:// URIs"
     },
     {
       "name": "ports",
