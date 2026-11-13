@@ -5,8 +5,9 @@
 use crate::capabilities::CapabilitiesState;
 use egui::{Color32, Ui};
 use strom_types::api::SrtMode;
-use strom_types::capabilities::{parse_srt_uri, Capabilities};
+use strom_types::capabilities::Capabilities;
 use strom_types::ports::PortSpan;
+use strom_types::srt_uri::parse_srt_uri;
 
 /// What is wrong with `srt_uri` on a Strom with these capabilities. Empty when
 /// nothing is, or when the URI is not one we can read.

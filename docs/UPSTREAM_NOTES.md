@@ -307,7 +307,7 @@ workaround can go once we move past that version.
 - **Hint:** `gst_srt_object_validate_parameters()` in `ext/srt/gstsrtobject.c` defaults
   `localaddress` to the URI host for listener *and* rendezvous; only the listener case wants
   that.
-- **Tests:** none run the element. `strom_types::capabilities::parse_srt_uri` mirrors the
+- **Tests:** none run the element. `strom_types::srt_uri::parse_srt_uri` mirrors the
   port it binds.
 - **Upstream:** not searched.
 - **Found in:** #1257 (capabilities review).

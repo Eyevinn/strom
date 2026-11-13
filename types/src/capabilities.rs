@@ -18,9 +18,6 @@ use utoipa::ToSchema;
 use crate::api::SrtMode;
 use crate::ports::PortSpan;
 
-mod srt_uri;
-pub use srt_uri::{parse_srt_uri, SrtUriEndpoint};
-
 /// Everything `GET /api/capabilities` reports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
