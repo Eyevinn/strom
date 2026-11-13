@@ -1473,13 +1473,12 @@ impl StromApp {
                             block_thumbnail,
                             &taken_endpoint_ids,
                             &taken_srt_relay_ids,
-                            self.capabilities.as_ref(),
+                            &self.capabilities,
                         );
 
-                        // The SRT editor reads the relays from the capabilities,
-                        // which are reloaded with the version.
+                        // The SRT editor reads the relays from the capabilities.
                         if result.capabilities_refresh_requested {
-                            self.load_version(ui.ctx().clone());
+                            self.load_capabilities(ui.ctx().clone());
                         }
 
                         // Trigger device discovery whenever a Local Input block's

@@ -1,8 +1,8 @@
 //! Links page for quick access to WHEP players, SRT streams, and API endpoints.
 
+use crate::capabilities::CapabilitiesState;
 use egui::{Context, Ui};
 use std::collections::{HashMap, HashSet};
-use strom_types::capabilities::Capabilities;
 use strom_types::relay::DEFAULT_RELAY_NAME;
 use strom_types::srt_relay::{
     parse_srt_relay_uri, srt_relay_dial_in_uri, srt_relay_role, strip_srt_uri_secrets, SrtRelayRole,
@@ -59,7 +59,7 @@ struct RelayStream {
 /// The public address of `relay`, or a note on why it is not known. Once
 /// the server has reported its relays, a missing one means the block will
 /// not start, and the note says so.
-fn relay_block_public(caps: Option<&Capabilities>, relay: &str) -> Result<String, String> {
+fn relay_block_public(caps: &CapabilitiesState, relay: &str) -> Result<String, String> {
     relay_public(caps, relay).map_err(|note| {
         if reported_relays(caps).is_some() {
             format!("{note} The block will not start.")
@@ -152,7 +152,7 @@ impl LinksPage {
     /// Extract the SRT streams VLC can play from flows. A relay output is
     /// pulled from the public address of the relay its URI names, as `caps`
     /// reports it.
-    fn get_vlc_streams(flows: &[Flow], caps: Option<&Capabilities>) -> VlcStreams {
+    fn get_vlc_streams(flows: &[Flow], caps: &CapabilitiesState) -> VlcStreams {
         let mut found = VlcStreams {
             streams: Vec::new(),
             relay_outputs_without_public: 0,
@@ -246,7 +246,7 @@ impl LinksPage {
         ctx: &Context,
         flows: &[Flow],
         server_hostname: Option<&str>,
-        capabilities: Option<&Capabilities>,
+        capabilities: &CapabilitiesState,
     ) -> bool {
         let mut refresh_requested = false;
         let server_base = api.base_url().trim_end_matches("/api");
@@ -467,7 +467,7 @@ impl LinksPage {
         ctx: &Context,
         flows: &[Flow],
         relay_blocks: &[SrtRelayBlockInfo],
-        capabilities: Option<&Capabilities>,
+        capabilities: &CapabilitiesState,
     ) {
         ui.heading("MPEG-TS/SRT Streams");
         ui.add_space(8.0);
@@ -591,7 +591,7 @@ impl LinksPage {
         ctx: &Context,
         blocks: &[SrtRelayBlockInfo],
         server_hostname: Option<&str>,
-        capabilities: Option<&Capabilities>,
+        capabilities: &CapabilitiesState,
     ) -> bool {
         let mut refresh_requested = false;
         if blocks.is_empty() {
@@ -664,8 +664,10 @@ impl LinksPage {
                         }
                     });
                     if let Ok(Err(note)) = &public {
-                        if reported_relays(capabilities).is_some() {
-                            // The relay is missing: the block will not start.
+                        // The relay is missing (the block will not start),
+                        // or the relays could not be loaded; loading is
+                        // only a weak note.
+                        if !matches!(capabilities, CapabilitiesState::Loading) {
                             ui.colored_label(egui::Color32::from_rgb(255, 180, 50), note);
                         } else {
                             ui.label(egui::RichText::new(note).weak());
@@ -765,7 +767,7 @@ mod tests {
     use crate::srt_relay::tests::caps_with_relays;
     use strom_types::block::{BlockInstance, Position};
 
-    fn relay_caps() -> Capabilities {
+    fn relay_caps() -> CapabilitiesState {
         caps_with_relays(&[
             ("default", "relay.example.com:9000"),
             ("eu-north", "relay-eu.example.com:9000"),
@@ -814,7 +816,7 @@ mod tests {
 
     #[test]
     fn listeners_and_relay_outputs_are_playable() {
-        let found = LinksPage::get_vlc_streams(&flows(), Some(&relay_caps()));
+        let found = LinksPage::get_vlc_streams(&flows(), &relay_caps());
         let streams: Vec<_> = found
             .streams
             .iter()
@@ -848,7 +850,7 @@ mod tests {
             "builtin.mpegtssrt_output",
             "srt://:5000?mode=listener&passphrase=topsecret123",
         )];
-        let found = LinksPage::get_vlc_streams(&[flow], None);
+        let found = LinksPage::get_vlc_streams(&[flow], &CapabilitiesState::Loading);
         assert_eq!(found.streams.len(), 1);
         assert!(found.streams[0].vlc_uri.contains("topsecret123"));
         assert!(found.streams[0].has_passphrase);
@@ -856,7 +858,7 @@ mod tests {
 
     #[test]
     fn playlist_titles_leave_out_the_passphrase() {
-        let found = LinksPage::get_vlc_streams(&flows(), Some(&relay_caps()));
+        let found = LinksPage::get_vlc_streams(&flows(), &relay_caps());
         let playlist = LinksPage::generate_combined_playlist(&found.streams);
         assert!(playlist.contains(
             "<title>Show / relay_out (srt://relay.example.com:9000?streamid=cam1)</title>"
@@ -912,7 +914,7 @@ mod tests {
             ),
             block("us", "builtin.mpegtssrt_output", "srt+relay://cam2@us"),
         ];
-        let found = LinksPage::get_vlc_streams(&[flow], Some(&relay_caps()));
+        let found = LinksPage::get_vlc_streams(&[flow], &relay_caps());
         let uris: Vec<_> = found.streams.iter().map(|s| s.vlc_uri.as_str()).collect();
         assert_eq!(uris, ["srt://relay-eu.example.com:9000?streamid=cam1"]);
         // `us` is not configured: left out, and counted.
@@ -951,11 +953,11 @@ mod tests {
     #[test]
     fn a_missing_relay_means_the_block_will_not_start() {
         let none = caps_with_relays(&[]);
-        let note = relay_block_public(Some(&none), "default").unwrap_err();
+        let note = relay_block_public(&none, "default").unwrap_err();
         assert!(note.contains("STROM_SRT_RELAY_PUBLIC"), "{note}");
         assert!(note.ends_with("The block will not start."), "{note}");
 
-        let note = relay_block_public(Some(&relay_caps()), "us").unwrap_err();
+        let note = relay_block_public(&relay_caps(), "us").unwrap_err();
         assert!(
             note.contains("SRT relay 'us' is not configured on this server"),
             "{note}"
@@ -963,18 +965,18 @@ mod tests {
         assert!(note.ends_with("The block will not start."), "{note}");
 
         // While the relays are not known, nothing is said about starting.
-        let note = relay_block_public(None, "default").unwrap_err();
+        let note = relay_block_public(&CapabilitiesState::Loading, "default").unwrap_err();
         assert!(!note.contains("will not start"), "{note}");
 
         assert_eq!(
-            relay_block_public(Some(&relay_caps()), "eu-north"),
+            relay_block_public(&relay_caps(), "eu-north"),
             Ok("relay-eu.example.com:9000".to_string())
         );
     }
 
     #[test]
     fn relay_outputs_wait_for_the_public_address() {
-        let found = LinksPage::get_vlc_streams(&flows(), None);
+        let found = LinksPage::get_vlc_streams(&flows(), &CapabilitiesState::Loading);
         assert_eq!(found.streams.len(), 1);
         assert_eq!(found.streams[0].name, "Show");
         // Only the MPEG-TS relay output counts; inputs and EFP never play in VLC.

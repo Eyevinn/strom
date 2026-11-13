@@ -535,7 +535,7 @@ impl PropertyInspector {
         block_thumbnail: Option<&egui::TextureHandle>,
         taken_endpoint_ids: &std::collections::HashSet<String>,
         taken_srt_relay_ids: &crate::srt_relay::TakenRelayIds,
-        capabilities: Option<&strom_types::capabilities::Capabilities>,
+        capabilities: &crate::capabilities::CapabilitiesState,
     ) -> BlockInspectorResult {
         let block_id = block.id.clone();
         let mut result = BlockInspectorResult::default();
@@ -988,17 +988,12 @@ impl PropertyInspector {
                                     outcome.apply_to(&mut result);
                                     // Warn when the SRT mode cannot work on
                                     // this Strom's network.
-                                    if let Some(caps) = capabilities {
-                                        let uri = block
-                                            .properties
-                                            .get("srt_uri")
-                                            .or(exposed_prop.default_value.as_ref());
-                                        if let Some(PropertyValue::String(uri)) = uri {
-                                            crate::srt_reachability::show(
-                                                ui,
-                                                &crate::srt_reachability::warnings(uri, caps),
-                                            );
-                                        }
+                                    let uri = block
+                                        .properties
+                                        .get("srt_uri")
+                                        .or(exposed_prop.default_value.as_ref());
+                                    if let Some(PropertyValue::String(uri)) = uri {
+                                        crate::srt_reachability::show(ui, uri, capabilities);
                                     }
                                     ui.separator();
                                     continue;

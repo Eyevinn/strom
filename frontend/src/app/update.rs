@@ -1080,8 +1080,8 @@ impl eframe::App for StromApp {
                     tracing::info!("Refresh requested due to flow fetch failure");
                     self.needs_refresh = true;
                 }
-                AppMessage::CapabilitiesLoaded(capabilities) => {
-                    self.capabilities = Some(capabilities);
+                AppMessage::Capabilities(update) => {
+                    self.capabilities.apply(update);
                 }
                 AppMessage::SystemInfoLoaded(system_info) => {
                     tracing::info!(
@@ -2251,14 +2251,13 @@ impl eframe::App for StromApp {
                                     &ctx,
                                     &self.flows,
                                     server_hostname,
-                                    self.capabilities.as_ref(),
+                                    &self.capabilities,
                                 )
                             })
                             .inner;
-                        // The relays come with the capabilities, which are
-                        // reloaded with the version.
+                        // The relays come with the capabilities.
                         if refresh {
-                            self.load_version(ui.ctx().clone());
+                            self.load_capabilities(ui.ctx().clone());
                         }
                     }
                 }

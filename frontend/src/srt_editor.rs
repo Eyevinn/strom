@@ -14,7 +14,7 @@
 
 use egui::{Color32, RichText, Ui};
 use strom_types::block::ExposedProperty;
-use strom_types::capabilities::{Capabilities, RelayEndpoint};
+use strom_types::capabilities::RelayEndpoint;
 use strom_types::relay::DEFAULT_RELAY_NAME;
 use strom_types::srt_relay::{
     mask_srt_uri, new_srt_passphrase, new_srt_relay_id, parse_srt_relay_uri, srt_relay_dial_in_uri,
@@ -26,8 +26,9 @@ use strom_types::srt_uri::{
 };
 use strom_types::{BlockDefinition, BlockInstance, FlowId, PropertyValue};
 
+use crate::capabilities::CapabilitiesState;
 use crate::qr::QrCache;
-use crate::srt_relay::{relay_public, reported_relays, TakenRelayIds};
+use crate::srt_relay::{relay_public, relays_unknown_note, reported_relays, TakenRelayIds};
 
 const WARNING: Color32 = Color32::from_rgb(255, 180, 50);
 
@@ -51,8 +52,8 @@ pub struct SrtEditorContext<'a> {
     pub default_uri: Option<&'a str>,
     /// The `srt_uri` description, shown on hover over the URI label.
     pub description: &'a str,
-    /// `GET /api/capabilities`, with the SRT relays; `None` while not loaded.
-    pub capabilities: Option<&'a Capabilities>,
+    /// `GET /api/capabilities`, with the SRT relays once loaded.
+    pub capabilities: &'a CapabilitiesState,
     /// Relay streams other SRT blocks (in any flow) use.
     pub taken_relay_ids: &'a TakenRelayIds,
 }
@@ -64,7 +65,7 @@ impl<'a> SrtEditorContext<'a> {
         uri_prop: &'a ExposedProperty,
         flow_id: Option<FlowId>,
         role: SrtRelayRole,
-        capabilities: Option<&'a Capabilities>,
+        capabilities: &'a CapabilitiesState,
         taken_relay_ids: &'a TakenRelayIds,
     ) -> Self {
         SrtEditorContext {
@@ -167,11 +168,11 @@ pub fn clean_relay_stream_id(id: &str) -> String {
 }
 
 /// Why the relay cannot be picked, or `None` when it can.
-fn relay_unavailable_reason(caps: Option<&Capabilities>) -> Option<String> {
+fn relay_unavailable_reason(caps: &CapabilitiesState) -> Option<String> {
     match reported_relays(caps) {
         Some(relays) if !relays.is_empty() => None,
         Some(_) => relay_public(caps, DEFAULT_RELAY_NAME).err(),
-        None => Some("The server's SRT relays are not known yet.".to_string()),
+        None => relays_unknown_note(caps),
     }
 }
 
@@ -224,7 +225,7 @@ fn note_row(ui: &mut Ui, color: Color32, text: impl Into<String>) {
 fn mode_buttons(
     ui: &mut Ui,
     current: Option<SrtConnectionMode>,
-    caps: Option<&Capabilities>,
+    caps: &CapabilitiesState,
     outcome: &mut SrtEditorOutcome,
 ) -> Option<SrtConnectionMode> {
     let mut picked = None;
@@ -249,7 +250,7 @@ fn mode_buttons(
                 picked = Some(mode);
             }
         }
-        if caps.is_none()
+        if reported_relays(caps).is_none()
             && ui
                 .small_button(egui_phosphor::regular::ARROWS_CLOCKWISE)
                 .on_hover_text("Ask the server for its SRT relays again")
@@ -687,7 +688,7 @@ fn copy_address_hover(role: SrtRelayRole, url: &str) -> String {
 /// anyway. `Ok(None)` for a caller (Strom dials out, nobody dials in) and
 /// for a URI that cannot be read; `Err(note)` when the relay address is not
 /// known (capabilities not loaded, or no such relay on the server).
-pub fn connect_url(uri: &str, caps: Option<&Capabilities>) -> Result<Option<String>, String> {
+pub fn connect_url(uri: &str, caps: &CapabilitiesState) -> Result<Option<String>, String> {
     let Ok(fields) = SrtUriFields::parse(uri) else {
         return Ok(None);
     };
@@ -863,7 +864,7 @@ mod tests {
     use super::*;
     use crate::srt_relay::tests::caps_with_relays;
 
-    fn relay(public: Option<&str>) -> Capabilities {
+    fn relay(public: Option<&str>) -> CapabilitiesState {
         match public {
             Some(public) => caps_with_relays(&[("default", public)]),
             None => caps_with_relays(&[]),
@@ -920,20 +921,20 @@ mod tests {
             ("eu-north", "srt-eu.example.com:9000"),
         ]);
         assert_eq!(
-            connect_url("srt+relay://cam1cam1cam1cam1@eu-north", Some(&caps)),
+            connect_url("srt+relay://cam1cam1cam1cam1@eu-north", &caps),
             Ok(Some(
                 "srt://srt-eu.example.com:9000?streamid=cam1cam1cam1cam1".to_string()
             ))
         );
         assert_eq!(
-            connect_url("srt+relay://cam1cam1cam1cam1", Some(&caps)),
+            connect_url("srt+relay://cam1cam1cam1cam1", &caps),
             Ok(Some(
                 "srt://srt.example.com:9000?streamid=cam1cam1cam1cam1".to_string()
             ))
         );
-        let note = connect_url("srt+relay://cam1cam1cam1cam1@us", Some(&caps)).unwrap_err();
+        let note = connect_url("srt+relay://cam1cam1cam1cam1@us", &caps).unwrap_err();
         assert!(note.contains("'us'"), "{note}");
-        assert!(connect_url("srt+relay://cam1cam1cam1cam1", None).is_err());
+        assert!(connect_url("srt+relay://cam1cam1cam1cam1", &CapabilitiesState::Loading).is_err());
     }
 
     #[test]
@@ -961,24 +962,24 @@ mod tests {
     fn a_caller_has_no_connect_url() {
         let r = relay(Some("relay.example.com:9000"));
         assert_eq!(
-            connect_url("srt://192.0.2.1:4000?mode=caller", Some(&r)),
+            connect_url("srt://192.0.2.1:4000?mode=caller", &r),
             Ok(None)
         );
-        assert_eq!(connect_url("not a uri", Some(&r)), Ok(None));
-        assert_eq!(connect_url("srt+relay://bad id", Some(&r)), Ok(None));
+        assert_eq!(connect_url("not a uri", &r), Ok(None));
+        assert_eq!(connect_url("srt+relay://bad id", &r), Ok(None));
     }
 
     #[test]
     fn a_relay_connect_url_carries_the_passphrase() {
         let uri = "srt+relay://cam1cam1cam1cam1?passphrase=abcdefghijkl&pbkeylen=32";
         assert_eq!(
-            connect_url(uri, Some(&relay(Some("relay.example.com:9000")))),
+            connect_url(uri, &relay(Some("relay.example.com:9000"))),
             Ok(Some(
                 "srt://relay.example.com:9000?streamid=cam1cam1cam1cam1&passphrase=abcdefghijkl&pbkeylen=32"
                     .to_string()
             ))
         );
-        let note = connect_url(uri, Some(&relay(None))).unwrap_err();
+        let note = connect_url(uri, &relay(None)).unwrap_err();
         assert!(note.contains("STROM_SRT_RELAY_PUBLIC"), "{note}");
     }
 
@@ -986,7 +987,7 @@ mod tests {
     fn a_listener_connect_url_carries_the_passphrase() {
         let url = connect_url(
             "srt://:5000?mode=listener&passphrase=abcdefghijkl&latency=200",
-            None,
+            &CapabilitiesState::Loading,
         )
         .unwrap()
         .unwrap();

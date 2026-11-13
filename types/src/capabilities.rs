@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::api::SrtMode;
+use crate::ports::PortSpan;
+
+mod srt_uri;
+pub use srt_uri::{parse_srt_uri, SrtUriEndpoint};
 
 /// Everything `GET /api/capabilities` reports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,10 +38,11 @@ pub struct NetworkCapabilities {
     /// Whether a port Strom binds locally can be reached from outside.
     pub inbound_reachable: bool,
     /// The ports meant for remote parties to connect to (`STROM_PORTS`), as
-    /// ranges (`"47100-47199"`) or single ports (`"47250"`). `null` when none
-    /// are configured: any port. Always present.
+    /// ascending runs (`{"first": 47100, "last": 47199}`; a single port has
+    /// `first == last`). `null` when none are configured: any port. Always
+    /// present.
     #[cfg_attr(feature = "openapi", schema(required = true))]
-    pub ports: Option<Vec<String>>,
+    pub ports: Option<Vec<PortSpan>>,
 }
 
 impl NetworkCapabilities {
@@ -46,11 +51,7 @@ impl NetworkCapabilities {
     pub fn port_allowed(&self, port: u16) -> bool {
         match &self.ports {
             None => true,
-            Some(specs) => specs.iter().any(|spec| {
-                crate::ports::parse_port_spec(spec)
-                    .map(|ports| ports.contains(&port))
-                    .unwrap_or(false)
-            }),
+            Some(spans) => spans.iter().any(|span| span.contains(port)),
         }
     }
 }
@@ -122,52 +123,6 @@ pub struct WebRtcCapabilities {
     pub ice_transport_policy: String,
 }
 
-/// The local side of an `srt://` URI: the mode it selects and the port.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SrtUriEndpoint {
-    /// The mode the URI selects.
-    pub mode: SrtMode,
-    /// The port in the URI, if any.
-    pub port: Option<u16>,
-}
-
-/// Read the mode and port from an `srt://` URI, the way the GStreamer SRT
-/// elements do: an explicit `mode=` wins, otherwise a URI without a host is a
-/// listener and one with a host is a caller. `None` for other schemes or an
-/// unknown mode.
-pub fn parse_srt_uri(uri: &str) -> Option<SrtUriEndpoint> {
-    let rest = uri.trim().strip_prefix("srt://")?;
-    let (authority, query) = match rest.split_once('?') {
-        Some((a, q)) => (a, Some(q)),
-        None => (rest, None),
-    };
-    let authority = authority.split('/').next().unwrap_or("");
-
-    let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
-        let (host, after) = v6.split_once(']').unwrap_or((v6, ""));
-        (host, after.strip_prefix(':'))
-    } else {
-        match authority.rsplit_once(':') {
-            Some((h, p)) => (h, Some(p)),
-            None => (authority, None),
-        }
-    };
-    let port = port.and_then(|p| p.parse::<u16>().ok());
-
-    let explicit_mode = query.and_then(|q| {
-        q.split('&').find_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            (key == "mode").then(|| value.to_ascii_lowercase())
-        })
-    });
-    let mode = match explicit_mode.as_deref() {
-        Some(nick) => SrtMode::from_nick(nick)?,
-        None if host.is_empty() => SrtMode::Listener,
-        None => SrtMode::Caller,
-    };
-    Some(SrtUriEndpoint { mode, port })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,7 +131,10 @@ mod tests {
         Capabilities {
             network: NetworkCapabilities {
                 inbound_reachable: false,
-                ports: Some(vec!["47100-47199".to_string()]),
+                ports: Some(vec![PortSpan {
+                    first: 47100,
+                    last: 47199,
+                }]),
             },
             protocols: ProtocolCapabilities {
                 srt: SrtCapabilities {
@@ -201,7 +159,10 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({
-                "network": { "inbound_reachable": false, "ports": ["47100-47199"] },
+                "network": {
+                    "inbound_reachable": false,
+                    "ports": [{ "first": 47100, "last": 47199 }]
+                },
                 "protocols": {
                     "srt": {
                         "modes": { "listener": false, "caller": true, "rendezvous": false },
@@ -242,9 +203,23 @@ mod tests {
         assert!(net.port_allowed(47100));
         assert!(net.port_allowed(47199));
         assert!(!net.port_allowed(5000));
-        net.ports = Some(vec!["47100-47101".to_string(), "47250".to_string()]);
+        net.ports = Some(vec![
+            PortSpan {
+                first: 47100,
+                last: 47101,
+            },
+            PortSpan {
+                first: 47250,
+                last: 47250,
+            },
+        ]);
+        assert!(net.port_allowed(47101));
+        assert!(!net.port_allowed(47102));
         assert!(net.port_allowed(47250));
         assert!(!net.port_allowed(47249));
+        assert!(!net.port_allowed(47251));
+        net.ports = Some(Vec::new());
+        assert!(!net.port_allowed(47250));
         net.ports = None;
         assert!(net.port_allowed(5000));
     }
@@ -255,55 +230,5 @@ mod tests {
         assert!(modes.allows(SrtMode::Caller));
         assert!(!modes.allows(SrtMode::Listener));
         assert!(!modes.allows(SrtMode::Rendezvous));
-    }
-
-    #[test]
-    fn parses_srt_uri_modes_and_ports() {
-        let p = |uri| parse_srt_uri(uri);
-        assert_eq!(
-            p("srt://:5000"),
-            Some(SrtUriEndpoint {
-                mode: SrtMode::Listener,
-                port: Some(5000)
-            })
-        );
-        assert_eq!(
-            p("srt://192.0.2.1:5000"),
-            Some(SrtUriEndpoint {
-                mode: SrtMode::Caller,
-                port: Some(5000)
-            })
-        );
-        assert_eq!(
-            p("srt://:5000?mode=listener&latency=200"),
-            Some(SrtUriEndpoint {
-                mode: SrtMode::Listener,
-                port: Some(5000)
-            })
-        );
-        assert_eq!(
-            p("srt://192.0.2.1:6000?latency=200&mode=rendezvous"),
-            Some(SrtUriEndpoint {
-                mode: SrtMode::Rendezvous,
-                port: Some(6000)
-            })
-        );
-        assert_eq!(
-            p("srt://0.0.0.0:5000?mode=listener").map(|e| e.mode),
-            Some(SrtMode::Listener)
-        );
-        assert_eq!(
-            p("srt://example.com:5000?mode=caller").map(|e| e.mode),
-            Some(SrtMode::Caller)
-        );
-        assert_eq!(
-            p("srt://[::]:7000"),
-            Some(SrtUriEndpoint {
-                mode: SrtMode::Caller,
-                port: Some(7000)
-            })
-        );
-        assert_eq!(p("udp://:5000"), None);
-        assert_eq!(p("srt://:5000?mode=bogus"), None);
     }
 }

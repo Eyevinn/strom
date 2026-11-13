@@ -12,6 +12,7 @@ mod audioanalyzer;
 mod audioprocessor;
 mod audiorouter;
 mod buffer_age;
+mod capabilities;
 mod clipboard;
 mod clocks;
 mod compositor_editor;

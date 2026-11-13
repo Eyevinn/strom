@@ -296,3 +296,30 @@ workaround can go once we move past that version.
   `max-latency` is unset.
 - **Upstream:** not reported. Strom builds its bridge `appsrc`s with explicit latencies.
 - **Found in:** [#1072](https://github.com/Eyevinn/strom/pull/1072)
+
+### `srtsrc`/`srtsink`: rendezvous binds to the peer's address
+- **Seen on:** GStreamer 1.28.6 (Homebrew, macOS). The code is the same in 1.22.
+- **Symptom:** measured. `mode=rendezvous` without `localaddress=` fails to start with
+  `Cannot bind to 192.0.2.1:5000 - Connection setup failure`: the element binds the local
+  socket to the peer's address from the URI.
+- **Repro:** `gst-launch-1.0 srtsrc uri="srt://192.0.2.1:5000?mode=rendezvous" ! fakesink`.
+  Adding `&localaddress=0.0.0.0` makes it bind.
+- **Hint:** `gst_srt_object_validate_parameters()` in `ext/srt/gstsrtobject.c` defaults
+  `localaddress` to the URI host for listener *and* rendezvous; only the listener case wants
+  that.
+- **Tests:** none run the element. `strom_types::capabilities::parse_srt_uri` mirrors the
+  port it binds.
+- **Upstream:** not searched.
+- **Found in:** #1257 (capabilities review).
+
+### `srtsrc`/`srtsink`: segfault on a URI query key without a value
+- **Seen on:** GStreamer 1.28.6 (Homebrew, macOS). 1.22 not checked, the code is the same.
+- **Symptom:** measured. `srt://:5000?latency` or `?localport` (no `=`), or a value with an
+  invalid escape (`localport=6%zz`), crashes the process (exit 139) when the element starts.
+  `?mode` alone only logs a `g_enum_get_value_by_nick` critical.
+- **Repro:** `gst-launch-1.0 srtsrc uri="srt://:5000?latency" ! fakesink`.
+- **Hint:** `gst_uri_get_query_table()` stores a NULL value for such a key, and
+  `gst_srt_object_set_uri()` passes it to `g_ascii_strtoll()` and friends unchecked.
+- **Tests:** none.
+- **Upstream:** not searched.
+- **Found in:** #1257 (capabilities review).

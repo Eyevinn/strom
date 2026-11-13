@@ -158,6 +158,13 @@ pub struct PortSpan {
     pub last: u16,
 }
 
+impl PortSpan {
+    /// Whether `port` is in the run.
+    pub fn contains(&self, port: u16) -> bool {
+        (self.first..=self.last).contains(&port)
+    }
+}
+
 /// The pool, and everything in it that is not free.
 ///
 /// `entries` lists only ports that are reserved, assigned or blocked, so the

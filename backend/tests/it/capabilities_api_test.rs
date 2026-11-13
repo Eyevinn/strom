@@ -100,7 +100,7 @@ async fn unreachable_with_ports_reports_caller_only_and_hides_ice_urls() {
             "turn:user:secret@turn.example.com:3478".to_string(),
         ],
     );
-    let ports: BTreeSet<u16> = (47100..=47199).collect();
+    let ports: BTreeSet<u16> = (47100..=47199).chain([47250]).collect();
     state
         .configure_port_pool(ports, PortReservationStore::new(dir.path()), 600, false)
         .await
@@ -116,7 +116,13 @@ async fn unreachable_with_ports_reports_caller_only_and_hides_ice_urls() {
     assert_eq!(
         value,
         json!({
-            "network": { "inbound_reachable": false, "ports": ["47100-47199"] },
+            "network": {
+                "inbound_reachable": false,
+                "ports": [
+                    { "first": 47100, "last": 47199 },
+                    { "first": 47250, "last": 47250 }
+                ]
+            },
             "protocols": {
                 "srt": {
                     "modes": { "listener": false, "caller": true, "rendezvous": false },

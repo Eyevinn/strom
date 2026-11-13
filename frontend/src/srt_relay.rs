@@ -5,7 +5,8 @@
 
 use std::collections::HashSet;
 
-use strom_types::capabilities::{Capabilities, RelayEndpoint};
+use crate::capabilities::CapabilitiesState;
+use strom_types::capabilities::RelayEndpoint;
 use strom_types::relay::{find_relay, RelayLookupError, DEFAULT_RELAY_NAME};
 use strom_types::srt_relay::{
     parse_srt_relay_uri, renew_srt_relay_uri, srt_relay_role, SrtRelayRole, SRT,
@@ -59,17 +60,35 @@ pub fn renew_relay_address(block: &mut BlockInstance) -> bool {
     true
 }
 
-/// The SRT relays the server reports, `default` first; `None` while the
-/// capabilities are not loaded.
-pub fn reported_relays(caps: Option<&Capabilities>) -> Option<&[RelayEndpoint]> {
-    caps.map(|c| c.protocols.srt.relays.as_slice())
+/// The SRT relays the server reports, `default` first. Only loaded
+/// capabilities say which relays exist: `None` otherwise (see
+/// [`relays_unknown_note`]).
+pub fn reported_relays(caps: &CapabilitiesState) -> Option<&[RelayEndpoint]> {
+    match caps {
+        CapabilitiesState::Loaded(c) => Some(c.protocols.srt.relays.as_slice()),
+        _ => None,
+    }
+}
+
+/// Why the server's SRT relays are not known, or `None` when they are.
+pub fn relays_unknown_note(caps: &CapabilitiesState) -> Option<String> {
+    match caps {
+        CapabilitiesState::Loaded(_) => None,
+        CapabilitiesState::Loading => Some("Loading the server's SRT relays...".to_string()),
+        CapabilitiesState::Failed(error) => Some(format!(
+            "Could not load the server's SRT relays ({error}). Retrying."
+        )),
+        CapabilitiesState::Unsupported => {
+            Some("This Strom does not report SRT relays (an older release).".to_string())
+        }
+    }
 }
 
 /// The public address of the SRT relay called `name`, or a note saying why
 /// it is not known.
-pub fn relay_public(caps: Option<&Capabilities>, name: &str) -> Result<String, String> {
+pub fn relay_public(caps: &CapabilitiesState, name: &str) -> Result<String, String> {
     let Some(relays) = reported_relays(caps) else {
-        return Err("The server's SRT relays are not known yet.".to_string());
+        return Err(relays_unknown_note(caps).unwrap_or_default());
     };
     match find_relay(SRT, relays, name) {
         Ok(relay) => Ok(relay.public.clone()),
@@ -104,7 +123,8 @@ pub fn relay_label(name: &str) -> String {
 pub(crate) mod tests {
     use super::*;
     use strom_types::capabilities::{
-        NetworkCapabilities, ProtocolCapabilities, SrtCapabilities, SrtModes, WebRtcCapabilities,
+        Capabilities, NetworkCapabilities, ProtocolCapabilities, SrtCapabilities, SrtModes,
+        WebRtcCapabilities,
     };
 
     fn block(definition: &str, srt_uri: &str) -> BlockInstance {
@@ -130,9 +150,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// Capabilities that report these SRT relays as `(name, public)`.
-    pub(crate) fn caps_with_relays(relays: &[(&str, &str)]) -> Capabilities {
-        Capabilities {
+    /// Loaded capabilities that report these SRT relays as `(name, public)`.
+    pub(crate) fn caps_with_relays(relays: &[(&str, &str)]) -> CapabilitiesState {
+        CapabilitiesState::Loaded(Capabilities {
             network: NetworkCapabilities {
                 inbound_reachable: false,
                 ports: None,
@@ -157,7 +177,7 @@ pub(crate) mod tests {
                     ice_transport_policy: "all".to_string(),
                 },
             },
-        }
+        })
     }
 
     #[test]
@@ -213,25 +233,34 @@ pub(crate) mod tests {
             ("eu-north", "srt-eu.example.com:9000"),
         ]);
         assert_eq!(
-            relay_public(Some(&caps), "default"),
+            relay_public(&caps, "default"),
             Ok("srt.example.com:9000".to_string())
         );
         assert_eq!(
-            relay_public(Some(&caps), "eu-north"),
+            relay_public(&caps, "eu-north"),
             Ok("srt-eu.example.com:9000".to_string())
         );
-        let note = relay_public(Some(&caps), "us").unwrap_err();
+        let note = relay_public(&caps, "us").unwrap_err();
         assert!(note.contains("'us'"), "{note}");
         assert!(note.contains("default, eu-north"), "{note}");
 
         let none = caps_with_relays(&[]);
-        let note = relay_public(Some(&none), "default").unwrap_err();
+        let note = relay_public(&none, "default").unwrap_err();
         assert!(note.contains("STROM_SRT_RELAY_PUBLIC"), "{note}");
         // The default relay's variable is no hint for a named relay.
-        let note = relay_public(Some(&none), "eu-north").unwrap_err();
+        let note = relay_public(&none, "eu-north").unwrap_err();
         assert!(note.contains("'eu-north' is not configured"), "{note}");
         assert!(!note.contains("STROM_SRT_RELAY_PUBLIC"), "{note}");
-        assert!(relay_public(None, "default").is_err());
+        // Not known: why, never a relay.
+        let note = relay_public(&CapabilitiesState::Loading, "default").unwrap_err();
+        assert!(note.contains("Loading"), "{note}");
+        let failed = CapabilitiesState::Failed("HTTP 502".to_string());
+        let note = relay_public(&failed, "default").unwrap_err();
+        assert!(
+            note.contains("HTTP 502") && note.contains("Retrying"),
+            "{note}"
+        );
+        assert!(relay_public(&CapabilitiesState::Unsupported, "default").is_err());
     }
 
     #[test]
