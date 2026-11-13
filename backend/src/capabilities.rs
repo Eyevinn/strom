@@ -11,6 +11,7 @@ use strom_types::capabilities::{
     Capabilities, NetworkCapabilities, ProtocolCapabilities, SrtCapabilities, SrtModes,
     WebRtcCapabilities,
 };
+use strom_types::ports::PortSpan;
 
 /// A protocol where a remote party may connect to a port Strom binds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,23 +56,12 @@ impl ReachabilitySettings {
     }
 }
 
-/// Format the configured ports as ranges, `None` when none are configured.
-fn port_ranges(ports: &BTreeSet<u16>) -> Option<Vec<String>> {
+/// The configured ports as runs, `None` when none are configured.
+fn port_spans(ports: &BTreeSet<u16>) -> Option<Vec<PortSpan>> {
     if ports.is_empty() {
         return None;
     }
-    Some(
-        strom_types::ports::spans(ports.iter().copied())
-            .into_iter()
-            .map(|s| {
-                if s.first == s.last {
-                    s.first.to_string()
-                } else {
-                    format!("{}-{}", s.first, s.last)
-                }
-            })
-            .collect(),
-    )
+    Some(strom_types::ports::spans(ports.iter().copied()))
 }
 
 /// Build the capabilities report. Takes only what it may expose: never pass
@@ -85,7 +75,7 @@ pub fn build(
     Capabilities {
         network: NetworkCapabilities {
             inbound_reachable: reachability.inbound_reachable,
-            ports: port_ranges(ports),
+            ports: port_spans(ports),
         },
         protocols: ProtocolCapabilities {
             srt: SrtCapabilities {
@@ -154,7 +144,16 @@ mod tests {
         let caps = build(ReachabilitySettings::default(), &ports, false, "all");
         assert_eq!(
             caps.network.ports,
-            Some(vec!["47100-47199".to_string(), "47250".to_string()])
+            Some(vec![
+                PortSpan {
+                    first: 47100,
+                    last: 47199
+                },
+                PortSpan {
+                    first: 47250,
+                    last: 47250
+                },
+            ])
         );
     }
 }

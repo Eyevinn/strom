@@ -5,6 +5,7 @@
 use egui::{Color32, Ui};
 use strom_types::api::SrtMode;
 use strom_types::capabilities::{parse_srt_uri, Capabilities};
+use strom_types::ports::PortSpan;
 
 /// The blocks whose `srt_uri` selects a mode.
 pub fn is_srt_block(definition_id: &str) -> bool {
@@ -38,16 +39,31 @@ pub fn warnings(srt_uri: &str, caps: &Capabilities) -> Vec<String> {
                 .to_string(),
         });
     }
-    if let (Some(port), Some(ranges)) = (endpoint.port, caps.network.ports.as_ref()) {
+    if let (Some(port), Some(spans)) = (endpoint.port, caps.network.ports.as_ref()) {
         if !caps.network.port_allowed(port) {
             out.push(format!(
                 "Port {port} is outside the ports this Strom is configured for ({}): \
                  it may not be reachable from outside.",
-                ranges.join(", ")
+                format_spans(spans)
             ));
         }
     }
     out
+}
+
+/// `47100-47199, 47250`.
+fn format_spans(spans: &[PortSpan]) -> String {
+    spans
+        .iter()
+        .map(|s| {
+            if s.first == s.last {
+                s.first.to_string()
+            } else {
+                format!("{}-{}", s.first, s.last)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Render the warnings, in the orange used for other warnings in the UI.
@@ -68,11 +84,15 @@ mod tests {
         NetworkCapabilities, ProtocolCapabilities, SrtCapabilities, SrtModes, WebRtcCapabilities,
     };
 
-    fn caps(reachable: bool, ports: Option<Vec<&str>>) -> Capabilities {
+    fn caps(reachable: bool, ports: Option<Vec<(u16, u16)>>) -> Capabilities {
         Capabilities {
             network: NetworkCapabilities {
                 inbound_reachable: reachable,
-                ports: ports.map(|p| p.into_iter().map(String::from).collect()),
+                ports: ports.map(|p| {
+                    p.into_iter()
+                        .map(|(first, last)| PortSpan { first, last })
+                        .collect()
+                }),
             },
             protocols: ProtocolCapabilities {
                 srt: SrtCapabilities {
@@ -114,18 +134,18 @@ mod tests {
 
     #[test]
     fn caller_never_warns() {
-        let caps = caps(false, Some(vec!["47100-47199"]));
+        let caps = caps(false, Some(vec![(47100, 47199)]));
         assert!(warnings("srt://192.0.2.1:5000", &caps).is_empty());
         assert!(warnings("srt://192.0.2.1:5000?mode=caller", &caps).is_empty());
     }
 
     #[test]
     fn listener_port_outside_configured_ports_warns() {
-        let caps = caps(true, Some(vec!["47100-47199"]));
+        let caps = caps(true, Some(vec![(47100, 47199), (47250, 47250)]));
         let w = warnings("srt://:5000?mode=listener", &caps);
         assert_eq!(w.len(), 1);
         assert!(w[0].contains("Port 5000"));
-        assert!(w[0].contains("47100-47199"));
+        assert!(w[0].contains("(47100-47199, 47250)"), "{}", w[0]);
         assert!(warnings("srt://:47150?mode=listener", &caps).is_empty());
     }
 

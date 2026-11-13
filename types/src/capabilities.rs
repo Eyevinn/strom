@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::api::SrtMode;
+use crate::ports::PortSpan;
 
 /// Everything `GET /api/capabilities` reports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,10 +35,11 @@ pub struct NetworkCapabilities {
     /// Whether a port Strom binds locally can be reached from outside.
     pub inbound_reachable: bool,
     /// The ports meant for remote parties to connect to (`STROM_PORTS`), as
-    /// ranges (`"47100-47199"`) or single ports (`"47250"`). `null` when none
-    /// are configured: any port. Always present.
+    /// ascending runs (`{"first": 47100, "last": 47199}`; a single port has
+    /// `first == last`). `null` when none are configured: any port. Always
+    /// present.
     #[cfg_attr(feature = "openapi", schema(required = true))]
-    pub ports: Option<Vec<String>>,
+    pub ports: Option<Vec<PortSpan>>,
 }
 
 impl NetworkCapabilities {
@@ -46,11 +48,7 @@ impl NetworkCapabilities {
     pub fn port_allowed(&self, port: u16) -> bool {
         match &self.ports {
             None => true,
-            Some(specs) => specs.iter().any(|spec| {
-                crate::ports::parse_port_spec(spec)
-                    .map(|ports| ports.contains(&port))
-                    .unwrap_or(false)
-            }),
+            Some(spans) => spans.iter().any(|span| span.contains(port)),
         }
     }
 }
@@ -175,7 +173,10 @@ mod tests {
         Capabilities {
             network: NetworkCapabilities {
                 inbound_reachable: false,
-                ports: Some(vec!["47100-47199".to_string()]),
+                ports: Some(vec![PortSpan {
+                    first: 47100,
+                    last: 47199,
+                }]),
             },
             protocols: ProtocolCapabilities {
                 srt: SrtCapabilities {
@@ -200,7 +201,10 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({
-                "network": { "inbound_reachable": false, "ports": ["47100-47199"] },
+                "network": {
+                    "inbound_reachable": false,
+                    "ports": [{ "first": 47100, "last": 47199 }]
+                },
                 "protocols": {
                     "srt": {
                         "modes": { "listener": false, "caller": true, "rendezvous": false },
@@ -241,9 +245,23 @@ mod tests {
         assert!(net.port_allowed(47100));
         assert!(net.port_allowed(47199));
         assert!(!net.port_allowed(5000));
-        net.ports = Some(vec!["47100-47101".to_string(), "47250".to_string()]);
+        net.ports = Some(vec![
+            PortSpan {
+                first: 47100,
+                last: 47101,
+            },
+            PortSpan {
+                first: 47250,
+                last: 47250,
+            },
+        ]);
+        assert!(net.port_allowed(47101));
+        assert!(!net.port_allowed(47102));
         assert!(net.port_allowed(47250));
         assert!(!net.port_allowed(47249));
+        assert!(!net.port_allowed(47251));
+        net.ports = Some(Vec::new());
+        assert!(!net.port_allowed(47250));
         net.ports = None;
         assert!(net.port_allowed(5000));
     }

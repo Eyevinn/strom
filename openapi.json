@@ -8789,9 +8789,9 @@
               "null"
             ],
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/PortSpan"
             },
-            "description": "The ports meant for remote parties to connect to (`STROM_PORTS`), as\nranges (`\"47100-47199\"`) or single ports (`\"47250\"`). `null` when none\nare configured: any port. Always present."
+            "description": "The ports meant for remote parties to connect to (`STROM_PORTS`), as\nascending runs (`{\"first\": 47100, \"last\": 47199}`; a single port has\n`first == last`). `null` when none are configured: any port. Always\npresent."
           }
         }
       },
