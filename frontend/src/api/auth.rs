@@ -29,6 +29,27 @@ impl ApiClient {
         Ok(version_info)
     }
 
+    /// Get what this Strom can do on its network (reachability, ports, modes).
+    pub async fn get_capabilities(&self) -> ApiResult<strom_types::capabilities::Capabilities> {
+        let url = format!("{}/capabilities", self.base_url);
+        let response = self
+            .with_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http(status, text));
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| ApiError::Decode(e.to_string()))
+    }
+
     /// Get system clock synchronization state from the kernel.
     ///
     /// Returns `ApiError::Http(501, _)` on platforms where kernel clock

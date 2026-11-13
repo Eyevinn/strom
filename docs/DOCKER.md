@@ -52,6 +52,7 @@ The common ones:
 | `STROM_SERVER_ICE_SERVERS` | STUN/TURN servers for WebRTC |
 | `STROM_SERVER_ICE_TRANSPORT_POLICY` | `all` (default) or `relay` to force WebRTC through TURN |
 | `STROM_PORTS` | Port numbers the pool hands out to callers (unset = pool off) — see [PORT_POOL.md](PORT_POOL.md) |
+| `STROM_INBOUND_REACHABLE` | Whether ports Strom binds can be reached from outside (default `true`). Set `false` on a bridge network (NAT) or in Kubernetes: `GET /api/capabilities` then reports SRT listener and rendezvous as unavailable, and the UI warns on them |
 | `STROM_TLS_CERT` / `STROM_TLS_KEY` | Built-in TLS (PEM) |
 | `STROM_MEDIA_PATH` | Media library directory (default `media/` under the data directory) |
 | `STROM_LOGGING_STDOUT_LOG_FORMAT` | `json` for container log collectors |

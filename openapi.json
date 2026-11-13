@@ -290,6 +290,28 @@
         }
       }
     },
+    "/api/capabilities": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Get what this Strom can do on the network it runs on",
+        "description": "Reports whether locally bound ports are reachable from outside, the ports\nmeant for remote parties to connect to, and per protocol which connection\nmodes can work. Clients use it to offer only what works, for example SRT\ncaller instead of listener on a Strom behind NAT. It never exposes ICE/TURN\nURLs, credentials or internal addresses.",
+        "operationId": "get_capabilities",
+        "responses": {
+          "200": {
+            "description": "Capabilities of this Strom",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Capabilities"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/client-log": {
       "post": {
         "tags": [
@@ -6629,6 +6651,24 @@
           }
         }
       },
+      "Capabilities": {
+        "type": "object",
+        "description": "Everything `GET /api/capabilities` reports.",
+        "required": [
+          "network",
+          "protocols"
+        ],
+        "properties": {
+          "network": {
+            "$ref": "#/components/schemas/NetworkCapabilities",
+            "description": "The host and network Strom runs on."
+          },
+          "protocols": {
+            "$ref": "#/components/schemas/ProtocolCapabilities",
+            "description": "Per-protocol capabilities."
+          }
+        }
+      },
       "ClientMessage": {
         "oneOf": [
           {
@@ -8731,6 +8771,30 @@
           }
         }
       },
+      "NetworkCapabilities": {
+        "type": "object",
+        "description": "The host and network Strom runs on, independent of any protocol.",
+        "required": [
+          "inbound_reachable",
+          "ports"
+        ],
+        "properties": {
+          "inbound_reachable": {
+            "type": "boolean",
+            "description": "Whether a port Strom binds locally can be reached from outside."
+          },
+          "ports": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/PortSpan"
+            },
+            "description": "The ports meant for remote parties to connect to (`STROM_PORTS`), as\nascending runs (`{\"first\": 47100, \"last\": 47199}`; a single port has\n`first == last`). `null` when none are configured: any port. Always\npresent."
+          }
+        }
+      },
       "NetworkInterfaceInfo": {
         "type": "object",
         "description": "Information about a network interface.",
@@ -9658,6 +9722,24 @@
         ],
         "description": "Property value that can be various types.\n\nGStreamer properties can be strings, numbers, booleans, enums, etc."
       },
+      "ProtocolCapabilities": {
+        "type": "object",
+        "description": "Capabilities per protocol. A protocol added later gets its own key here.",
+        "required": [
+          "srt",
+          "webrtc"
+        ],
+        "properties": {
+          "srt": {
+            "$ref": "#/components/schemas/SrtCapabilities",
+            "description": "SRT."
+          },
+          "webrtc": {
+            "$ref": "#/components/schemas/WebRtcCapabilities",
+            "description": "WebRTC (WHIP/WHEP). ICE and TURN handle reachability, so there are no\nmodes to report, only whether ICE servers are configured."
+          }
+        }
+      },
       "PtpInfo": {
         "type": "object",
         "description": "PTP clock information (IEEE 1588).\n\nContains detailed information about the PTP clock state including\ngrandmaster and master clock identities, and synchronization statistics.",
@@ -9752,6 +9834,24 @@
             ],
             "format": "double",
             "description": "R-squared value of clock estimation regression (0.0-1.0, higher is better)\nValues close to 1.0 indicate stable, accurate synchronization"
+          }
+        }
+      },
+      "RelayEndpoint": {
+        "type": "object",
+        "description": "A relay a flow can publish to or pull from instead of binding a port\nitself. Not tied to one protocol.",
+        "required": [
+          "name",
+          "public"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The relay's configured name."
+          },
+          "public": {
+            "type": "string",
+            "description": "The address remote parties use to reach the relay."
           }
         }
       },
@@ -10387,6 +10487,27 @@
           }
         }
       },
+      "SrtCapabilities": {
+        "type": "object",
+        "description": "What SRT can do on this Strom.",
+        "required": [
+          "modes",
+          "relays"
+        ],
+        "properties": {
+          "modes": {
+            "$ref": "#/components/schemas/SrtModes",
+            "description": "Which connection modes can work."
+          },
+          "relays": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RelayEndpoint"
+            },
+            "description": "Relays a flow can use instead of listening itself."
+          }
+        }
+      },
       "SrtConnectionStats": {
         "type": "object",
         "description": "Stats for a single SRT element (srtsrc or srtsink).",
@@ -10432,6 +10553,29 @@
           "listener",
           "rendezvous"
         ]
+      },
+      "SrtModes": {
+        "type": "object",
+        "description": "SRT connection modes and whether each can work on this Strom.",
+        "required": [
+          "listener",
+          "caller",
+          "rendezvous"
+        ],
+        "properties": {
+          "caller": {
+            "type": "boolean",
+            "description": "Strom connects out to the peer. Always possible."
+          },
+          "listener": {
+            "type": "boolean",
+            "description": "Strom binds a port and waits for the peer. Needs inbound reachability."
+          },
+          "rendezvous": {
+            "type": "boolean",
+            "description": "Both sides connect to each other; the peer must reach a port Strom\nbinds. Needs inbound reachability."
+          }
+        }
       },
       "SrtRole": {
         "type": "string",
@@ -14594,6 +14738,24 @@
             ],
             "description": "PiP index currently displayed on PGM, or `None` if PGM is an input.",
             "minimum": 0
+          }
+        }
+      },
+      "WebRtcCapabilities": {
+        "type": "object",
+        "description": "What WebRTC is configured with, without URLs or credentials.",
+        "required": [
+          "ice_servers",
+          "ice_transport_policy"
+        ],
+        "properties": {
+          "ice_servers": {
+            "type": "boolean",
+            "description": "Whether any ICE (STUN/TURN) servers are configured."
+          },
+          "ice_transport_policy": {
+            "type": "string",
+            "description": "The ICE transport policy (`\"all\"` or `\"relay\"`)."
           }
         }
       },

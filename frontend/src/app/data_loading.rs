@@ -63,6 +63,9 @@ impl StromApp {
     /// Load version information from the backend.
     pub(super) fn load_version(&mut self, ctx: egui::Context) {
         tracing::info!("Loading version information from backend...");
+        // Capabilities follow the server configuration, which only changes
+        // with a restart, so they are reloaded with the version.
+        self.load_capabilities(ctx.clone());
 
         let api = self.api.clone();
         let tx = self.channels.sender();
@@ -82,6 +85,48 @@ impl StromApp {
                 }
             }
             ctx.request_repaint();
+        });
+    }
+
+    /// Load the capabilities (`GET /api/capabilities`), retrying a failure
+    /// with backoff until it succeeds. A 404 (an older Strom) ends it: there
+    /// is nothing to warn about. A newer call supersedes a running one.
+    pub(super) fn load_capabilities(&mut self, ctx: egui::Context) {
+        use crate::capabilities::{next_retry_delay, CapabilitiesUpdate, RETRY_INITIAL};
+        use std::sync::atomic::Ordering;
+
+        let generation = self.capabilities_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let current = self.capabilities_generation.clone();
+        let api = self.api.clone();
+        let tx = self.channels.sender();
+
+        spawn_task(async move {
+            let mut delay = RETRY_INITIAL;
+            while current.load(Ordering::SeqCst) == generation {
+                let update = match api.get_capabilities().await {
+                    Ok(capabilities) => CapabilitiesUpdate::Loaded(capabilities),
+                    Err(crate::api::ApiError::Http(404, _)) => {
+                        tracing::info!("This Strom has no capabilities endpoint");
+                        CapabilitiesUpdate::Unsupported
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to load capabilities, retrying in {}s: {}",
+                            delay.as_secs(),
+                            e
+                        );
+                        CapabilitiesUpdate::Failed(e.to_string())
+                    }
+                };
+                let done = !matches!(update, CapabilitiesUpdate::Failed(_));
+                let _ = tx.send(AppMessage::Capabilities(update));
+                ctx.request_repaint();
+                if done {
+                    break;
+                }
+                sleep(delay).await;
+                delay = next_retry_delay(delay);
+            }
         });
     }
 
@@ -594,4 +639,12 @@ impl StromApp {
             ctx.request_repaint();
         });
     }
+}
+
+/// Wait without blocking the UI.
+async fn sleep(duration: std::time::Duration) {
+    #[cfg(target_arch = "wasm32")]
+    gloo_timers::future::sleep(duration).await;
+    #[cfg(not(target_arch = "wasm32"))]
+    tokio::time::sleep(duration).await;
 }

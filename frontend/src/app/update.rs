@@ -1080,6 +1080,9 @@ impl eframe::App for StromApp {
                     tracing::info!("Refresh requested due to flow fetch failure");
                     self.needs_refresh = true;
                 }
+                AppMessage::Capabilities(update) => {
+                    self.capabilities.apply(update);
+                }
                 AppMessage::SystemInfoLoaded(system_info) => {
                     tracing::info!(
                         "System info loaded: v{} ({}) build_id={}",

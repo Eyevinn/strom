@@ -55,6 +55,9 @@ pub enum AppMessage {
     /// System information loaded from backend
     SystemInfoLoaded(crate::api::SystemInfo),
 
+    /// The outcome of one attempt to load the server capabilities
+    Capabilities(crate::capabilities::CapabilitiesUpdate),
+
     /// Authentication status loaded
     AuthStatusLoaded(crate::api::AuthStatusResponse),
     /// Logout completed

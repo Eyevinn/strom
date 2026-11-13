@@ -25,6 +25,7 @@ pub mod api;
 pub mod assets;
 pub mod auth;
 pub mod blocks;
+pub mod capabilities;
 pub mod cef_flags;
 pub mod cef_media;
 pub mod cef_pages;
@@ -314,6 +315,7 @@ pub async fn create_app_with_config(
             axum::routing::delete(api::blocks::delete_block),
         )
         .route("/version", get(api::version::get_version))
+        .route("/capabilities", get(api::capabilities::get_capabilities))
         .route("/system/clock", get(api::system_clock::get_system_clock))
         .route("/ws", get(api::websocket::websocket_handler))
         // gst-launch-1.0 import/export
