@@ -50,8 +50,15 @@ RUN apt-get update && apt-get install -y \
     && ln -sf /usr/local/lib/cef/*.bin /usr/local/lib/gstreamer-1.0/
 
 # CEF environment variables
-ENV GST_PLUGIN_PATH=/usr/local/lib/gstreamer-1.0:$GST_PLUGIN_PATH
-ENV LD_LIBRARY_PATH=/usr/local/lib/cef:$LD_LIBRARY_PATH
+# Prepend to the base image's value with ${VAR:+:$VAR}, never "dir:$VAR":
+# with VAR unset that leaves a trailing empty element, which means the
+# current directory. The strom image puts /usr/local/nvidia/lib64 (where
+# Kubernetes device plugins without the NVIDIA container toolkit mount the
+# driver) on LD_LIBRARY_PATH; the guard below fails the build if it is lost.
+ENV GST_PLUGIN_PATH=/usr/local/lib/gstreamer-1.0${GST_PLUGIN_PATH:+:${GST_PLUGIN_PATH}}
+ENV LD_LIBRARY_PATH=/usr/local/lib/cef${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
+RUN case ":$LD_LIBRARY_PATH:" in *::*) echo "LD_LIBRARY_PATH has an empty element: $LD_LIBRARY_PATH" >&2; exit 1;; esac \
+    && case ":$LD_LIBRARY_PATH:" in *:/usr/local/nvidia/lib64:*) ;; *) echo "LD_LIBRARY_PATH lacks /usr/local/nvidia/lib64 (strom base image too old?): $LD_LIBRARY_PATH" >&2; exit 1;; esac
 ENV GST_CEF_SUBPROCESS_PATH=/usr/local/lib/gstreamer-1.0/gstcefsubprocess
 
 # Copy entrypoint script that auto-starts Xvfb for headless CEF rendering

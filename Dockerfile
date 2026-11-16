@@ -380,6 +380,24 @@ ENV STROM_DATA_DIR=/data
 # Enable all NVIDIA driver capabilities (needed for NVENC/NVDEC video encoding/decoding)
 ENV NVIDIA_DRIVER_CAPABILITIES=all
 
+# Kubernetes device plugins that run without the NVIDIA container toolkit
+# mount the whole driver at /usr/local/nvidia (lib64/, bin/) and expect the
+# image to search there, as NVIDIA's CUDA images do. The directory is mounted
+# at runtime, so an ld.so.conf.d entry would not help: the ldconfig cache is
+# built when the image is, with the directory empty. With the toolkit the
+# driver lands in the standard directories and /usr/local/nvidia does not
+# exist; the dynamic linker and the shell skip a missing directory.
+# No trailing ":$LD_LIBRARY_PATH": the base image sets none, and an empty
+# element means the current directory. strom-full prepends its CEF dir.
+# The bin dir is appended, not prepended: nvidia-smi exists nowhere else in
+# the image, and a host mount must not shadow the image's own tools.
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64
+ENV PATH=$PATH:/usr/local/nvidia/bin
+# Guard: fail the build if LD_LIBRARY_PATH gains an empty element (the
+# current directory) or loses the device plugin's driver dir (#1267).
+RUN case ":$LD_LIBRARY_PATH:" in *::*) echo "LD_LIBRARY_PATH has an empty element: $LD_LIBRARY_PATH" >&2; exit 1;; esac \
+    && case ":$LD_LIBRARY_PATH:" in *:/usr/local/nvidia/lib64:*) ;; *) echo "LD_LIBRARY_PATH lacks /usr/local/nvidia/lib64: $LD_LIBRARY_PATH" >&2; exit 1;; esac
+
 # Headless GStreamer GL configuration for CUDA-GL interop
 # GST_GL_WINDOW=egl-device: Use EGL device extension - direct GPU access without display server
 # GST_GL_PLATFORM=egl: Use EGL platform (not GLX which requires X11)
