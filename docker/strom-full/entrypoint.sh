@@ -40,11 +40,11 @@ export DISPLAY=:99
 
 # Detect GPU availability: Docker with --gpus all, or Kubernetes with an
 # nvidia.com/gpu limit. The strom image puts /usr/local/nvidia/bin on PATH for
-# device plugins that mount the driver there. /dev/nvidiactl also counts, so a
-# GPU is found where nvidia-smi is not on PATH (a strom-full built on an older
-# strom image).
+# device plugins that mount the driver there. A device node alone does not
+# count: without the driver libraries, egl-device fails where the software
+# branch below would fall back to Mesa.
 HAS_GPU=no
-if nvidia-smi > /dev/null 2>&1 || [ -e /dev/nvidiactl ]; then HAS_GPU=yes; fi
+if nvidia-smi > /dev/null 2>&1; then HAS_GPU=yes; fi
 
 # Kubernetes device plugins without the NVIDIA container toolkit mount the
 # Vulkan ICD at /usr/local/nvidia/vulkan/icd.d, where the Vulkan loader does
