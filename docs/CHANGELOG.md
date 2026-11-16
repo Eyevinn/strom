@@ -2,6 +2,19 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.8.3] - 2026-11-16
+
+### Fixed
+- MPEG-TS/SRT and EFP/SRT Output: a caller or rendezvous output without a peer no longer keeps a CPU core at 100 %, for example while nobody is connected on the other side of an SRT relay. On GStreamer 1.24 and later a calling `srtsink` always waits for its connection; the block's `wait_for_connection` setting now applies to listeners only (#1270)
+- Startup: a Kubernetes service link value such as `STROM_PORT=tcp://192.0.2.10:8080`, injected when a Service is named `strom`, is ignored with a warning instead of crashing Strom; the port then comes from `STROM_SERVER_PORT`, the config file or the default (#1269)
+- Docker: the images find an NVIDIA driver mounted at `/usr/local/nvidia` (Kubernetes device plugins without the NVIDIA container toolkit), so NVENC/NVDEC, NVML and EGL work there; `strom-full` no longer puts an empty element in `LD_LIBRARY_PATH` and `GST_PLUGIN_PATH` (#1268)
+
+### Documentation
+- DOCKER_GPU_SETUP.md: Kubernetes GPU nodes (#1268)
+- DOCKER.md: Kubernetes service links and `STROM_PORT` (#1269)
+
+---
+
 ## [0.8.2] - 2026-11-13
 
 Strom can run where its own ports cannot be reached from outside (Kubernetes, NAT, Docker on a bridge network): SRT blocks dial out through named SRT relays ([srt-splice](https://github.com/Eyevinn/srt-splice)), and `GET /api/capabilities` tells clients what works on the network Strom runs on. See [CLOUD_CONNECTIVITY.md](CLOUD_CONNECTIVITY.md) and [SRT_RELAY.md](SRT_RELAY.md).
