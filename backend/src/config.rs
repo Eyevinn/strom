@@ -714,8 +714,10 @@ mod tests {
     /// Kubernetes sets `<SERVICE>_SERVICE_HOST`, `<SERVICE>_SERVICE_PORT` and
     /// `<SERVICE>_PORT_<n>_TCP*` for every Service in the namespace. No
     /// `STROM_` name in the backend or the shared types may have that form, or
-    /// a Service named `strom` would configure Strom (#1266). Scans the source
-    /// for string literals, which also covers direct `var_opt` reads.
+    /// a Service named `strom` would configure Strom (#1266). Every
+    /// `STROM_..._PORT` name must be one that the startup sweep checks, or a
+    /// Service named after it stops Strom. Scans the source for string
+    /// literals, so names built at runtime are not covered.
     #[test]
     fn no_strom_env_name_is_a_kubernetes_service_link_name() {
         fn scan(dir: &std::path::Path, offenders: &mut Vec<String>) {
@@ -738,6 +740,13 @@ mod tests {
                             .collect();
                         if strom_types::env::is_service_link_name(&name) {
                             offenders.push(format!("{} in {}", name, path.display()));
+                        }
+                        if name.ends_with("_PORT") && !strom_types::env::is_port_var(&name) {
+                            offenders.push(format!(
+                                "{} in {} is not checked for a service link value",
+                                name,
+                                path.display()
+                            ));
                         }
                     }
                 }

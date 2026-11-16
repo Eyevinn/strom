@@ -165,7 +165,10 @@ pub fn is_service_link_value(value: &str) -> bool {
 /// Strom must never read a variable with such a name: a Service named after
 /// the prefix would set it. Guard tests check every variable Strom reads.
 pub fn is_service_link_name(key: &str) -> bool {
-    if key.ends_with("_SERVICE_HOST") || key.contains("_SERVICE_PORT") {
+    if key.ends_with("_SERVICE_HOST")
+        || key.ends_with("_SERVICE_PORT")
+        || key.contains("_SERVICE_PORT_")
+    {
         return true;
     }
     key.match_indices("_PORT_").any(|(i, m)| {
@@ -174,6 +177,13 @@ pub fn is_service_link_name(key: &str) -> bool {
             .next()
             .is_some_and(|c| c.is_ascii_digit())
     })
+}
+
+/// Returns true if `key` is one of the port variables that
+/// [`remove_service_link_port_vars`] checks. Every `STROM_..._PORT` name Strom
+/// reads must be one, or a Service named after it stops Strom at startup.
+pub fn is_port_var(key: &str) -> bool {
+    PORT_VARS.contains(&key)
 }
 
 /// Picks out the Strom port variables in `vars` that hold a Kubernetes
@@ -188,7 +198,7 @@ where
         .filter_map(|(key, value)| {
             let key = key.to_str()?;
             let value = value.to_str()?;
-            (PORT_VARS.contains(&key) && is_service_link_value(value)).then(|| ServiceLinkVar {
+            (is_port_var(key) && is_service_link_value(value)).then(|| ServiceLinkVar {
                 key: key.to_string(),
                 value: value.to_string(),
             })
@@ -204,7 +214,10 @@ where
 /// once logging is up.
 ///
 /// Same placement rules as [`remove_blank_owned_vars`]: only from the
-/// single-threaded prologue of `main`, before argument parsing.
+/// single-threaded prologue of `main`, before argument parsing. Like the
+/// blank sweep, call it both before `dotenvy` (which skips a key that is
+/// already set, so an injected value would shadow `.env` and then be deleted,
+/// losing both) and after it.
 pub fn remove_service_link_port_vars() -> Vec<ServiceLinkVar> {
     let found = service_link_port_vars(std::env::vars_os());
     for var in &found {
@@ -368,9 +381,12 @@ mod tests {
             "STROM_PORTS",
             "STROM_SERVER_PORT",
             "STROM_PORT_POOL",
+            "STROM_SERVICE_PORTAL_URL",
         ] {
             assert!(!is_service_link_name(key), "{key}");
         }
+        assert!(is_port_var("STROM_PORT"));
+        assert!(!is_port_var("STROM_PORTS"));
     }
 
     #[cfg(unix)]

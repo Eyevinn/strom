@@ -301,6 +301,13 @@ fn main() -> anyhow::Result<()> {
     // names are reported further down.
     let mut blank_env_vars = strom_types::env::remove_blank_owned_vars();
 
+    // Kubernetes injects `STROM_PORT=tcp://<cluster ip>:<port>` into every pod
+    // in a namespace with a Service named `strom` (#1266). Drop such values
+    // before clap reads them, so the port falls back to STROM_SERVER_PORT, the
+    // config file or the default. Bracketing dotenvy for the same reason as
+    // the blank sweep; logged once logging is up.
+    let mut service_link_vars = strom_types::env::remove_service_link_port_vars();
+
     // Load environment variables from a local .env file if present (e.g.
     // STROM_OSC_PAT). Real environment variables always take precedence, and a
     // missing .env is fine — this is a no-op in production deployments.
@@ -309,13 +316,7 @@ fn main() -> anyhow::Result<()> {
     blank_env_vars.extend(strom_types::env::remove_blank_owned_vars());
     blank_env_vars.sort();
     blank_env_vars.dedup();
-
-    // Kubernetes injects `STROM_PORT=tcp://<cluster ip>:<port>` into every pod
-    // in a namespace with a Service named `strom` (#1266). Drop such values
-    // before clap reads them, so the port falls back to STROM_SERVER_PORT, the
-    // config file or the default. Same single-threaded window as above;
-    // logged once logging is up.
-    let service_link_vars = strom_types::env::remove_service_link_port_vars();
+    service_link_vars.extend(strom_types::env::remove_service_link_port_vars());
 
     // Make libsoup speak HTTP/1.1 unless STROM_SOUP_HTTP2 is on: its HTTP/2
     // client buffers a paused player's whole file in memory (see

@@ -45,6 +45,7 @@ pub mod gpu_selection_test;
 pub mod html_remote_control_property_test;
 pub mod inter_gl_context_test;
 pub mod internal_pipeline_thread_priority_test;
+pub mod k8s_service_link_env_test;
 pub mod latency_diagnosis_test;
 pub mod latency_redistribute_test;
 pub mod live_recorder_test;
