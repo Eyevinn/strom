@@ -83,6 +83,17 @@ docker run -d \
   eyevinntechnology/strom:latest
 ```
 
+## Kubernetes
+
+Request the GPU with `resources.limits: {nvidia.com/gpu: 1}`. How the driver reaches the container depends on the node:
+
+- **NVIDIA container toolkit or GPU Operator** (most distributions): the toolkit mounts the driver libraries into the standard library directories. It mounts only the capabilities `NVIDIA_DRIVER_CAPABILITIES` asks for; the Strom images set it to `all`, which NVENC/NVDEC and EGL need. Do not override it with a narrower value.
+- **Device plugin that mounts the driver at `/usr/local/nvidia`** (some managed clusters, no toolkit): the images have `/usr/local/nvidia/lib64` on `LD_LIBRARY_PATH` and `/usr/local/nvidia/bin` on `PATH`, so Strom finds the driver with no extra settings. `NVIDIA_DRIVER_CAPABILITIES` has no effect there. If you set `LD_LIBRARY_PATH` or `PATH` on the pod, keep these directories in it (and `/usr/local/lib/cef` for `strom-full`).
+
+`enableServiceLinks: false` is not needed for GPU access.
+
+Check from the startup log that Strom found the GPU (see [Runtime Detection](#runtime-detection)), or run `nvidia-smi` and `gst-inspect-1.0 nvcodec` in the pod.
+
 ## GPU Acceleration in Strom
 
 ### What Gets Accelerated

@@ -35,7 +35,9 @@ rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null
 Xvfb :99 -screen 0 1920x1080x24 &
 export DISPLAY=:99
 
-# Detect GPU availability (container must be launched with --gpus all)
+# Detect GPU availability (container launched with --gpus all, or on Kubernetes
+# with a GPU resource; the image puts /usr/local/nvidia/bin on PATH for device
+# plugins that mount the driver there)
 HAS_GPU=no
 if nvidia-smi > /dev/null 2>&1; then HAS_GPU=yes; fi
 

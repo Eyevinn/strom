@@ -50,8 +50,14 @@ RUN apt-get update && apt-get install -y \
     && ln -sf /usr/local/lib/cef/*.bin /usr/local/lib/gstreamer-1.0/
 
 # CEF environment variables
-ENV GST_PLUGIN_PATH=/usr/local/lib/gstreamer-1.0:$GST_PLUGIN_PATH
-ENV LD_LIBRARY_PATH=/usr/local/lib/cef:$LD_LIBRARY_PATH
+# Both are set in full, not appended to the base image's value: neither
+# variable is set in ubuntu, and "dir:$VAR" with VAR unset leaves a trailing
+# empty element, which means the current directory. /usr/local/nvidia/lib64
+# is where Kubernetes device plugins without the NVIDIA container toolkit
+# mount the driver (see the strom image's Dockerfile); keep it here, since
+# this line replaces the strom image's LD_LIBRARY_PATH.
+ENV GST_PLUGIN_PATH=/usr/local/lib/gstreamer-1.0
+ENV LD_LIBRARY_PATH=/usr/local/lib/cef:/usr/local/nvidia/lib64
 ENV GST_CEF_SUBPROCESS_PATH=/usr/local/lib/gstreamer-1.0/gstcefsubprocess
 
 # Copy entrypoint script that auto-starts Xvfb for headless CEF rendering
