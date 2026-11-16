@@ -189,7 +189,7 @@ workaround can go once we move past that version.
   [#1132](https://github.com/Eyevinn/strom/pull/1132)
 
 ### `srtsink`: a caller without a peer blocks the streaming thread
-- **Seen on:** GStreamer 1.28.2 (Linux) and 1.28.6 (macOS, Homebrew). 1.22 not checked.
+- **Seen on:** GStreamer 1.28.2 (Linux) and 1.28.6 (macOS, Homebrew). 1.22 read in the source, not run.
 - **Symptom:** an `srtsink` in caller mode with `auto-reconnect=true` (the default) holds
   the buffer it is rendering for as long as it has no peer. Measured: a live 100 buffers/s
   source teed into the sink and into a `fakesink` delivered 2-13 buffers in 10 s to the
@@ -216,11 +216,13 @@ workaround can go once we move past that version.
   `srtsink`'s `render`. Repro, run: `audiotestsrc is-live=true ! avenc_aac ! aacparse !
   mpegtsmux ! queue leaky=downstream ! srtsink uri="srt://<relay>?mode=caller&streamid=<unpaired id>"
   wait-for-connection=false` puts the queue thread at 99.9 %; with `=true` no thread is
-  above 5 %. Against a UDP port that never answers (macOS, 1.28.6) neither setting spun,
-  so it depends on how the far end answers the handshake. Strom sets
-  `wait-for-connection=true` on every calling `srtsink`; the queue in front of it already
-  takes the blocking. The `write_one` loop is unchanged
-  on GStreamer main (checked 2026-11-16).
+  above 5 %. Against a UDP port that never answers (macOS, 1.28.6) neither setting spun.
+  That is unexplained: from the source, any caller socket that is connecting should spin
+  until `SRTO_CONNTIMEO`. The 0 ms poll first appears in 1.24.0 (read in the 1.22.0,
+  1.22.12, 1.24.0, 1.26.0, 1.28.2, 1.28.6 and main source; the loop is the same from 1.24.0
+  to main). Strom sets `wait-for-connection=true` on every calling `srtsink` from 1.24 on;
+  the queue in front of it already takes the blocking. On 1.22 the block setting stays,
+  since 1.22 drops the buffer instead.
 - **No connection signal in caller mode:** `caller-added` / `caller-removed` are only
   emitted for callers a listener accepts. The `stats` property of a caller is the libsrt
   socket statistics plus a `bytes-sent-total` counter, with no connection state; the only

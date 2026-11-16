@@ -59,6 +59,30 @@ pub(crate) fn queue_max_size_time(latency: Option<gst::ClockTime>) -> gst::Clock
         .max(QUEUE_MIN_SIZE_TIME)
 }
 
+/// Whether a calling `srtsink` on this GStreamer version needs
+/// `wait-for-connection=true` to not spin while it connects.
+///
+/// From 1.24.0 on (unchanged in 1.28.6 and main), with it false,
+/// `gst_srt_object_write_one` polls a socket that is still connecting with a
+/// 0 ms timeout, and on the timeout it retries the poll instead of dropping
+/// the buffer. So `render` spins at 100 % CPU until the connect times out,
+/// reconnects and spins again, for as long as there is no peer. Through the
+/// SRT relay a caller without a peer stays connecting, and the queue's thread
+/// burned a core. With it true the poll waits `poll-timeout` (1 s default) per
+/// round. The sink then blocks in `render` while it connects, as it did while
+/// spinning, which is what the queue in front of it is for. A stop does not
+/// wait for the round: the sink's cancellable is in the poll set, and libsrt
+/// checks it every 10 ms. Windows may be the exception (not checked): GLib has
+/// no cancellable fd there, so a stop may wait up to `poll-timeout`.
+///
+/// Before 1.24 the loop checks `wait-for-connection=false` first and drops the
+/// buffer at once while connecting, so the sink neither spins nor blocks.
+/// Forcing it true there would make the sink block and fill the queue with
+/// stale media, so the block's setting stays.
+pub(crate) fn caller_needs_wait_for_connection(version: (u32, u32, u32, u32)) -> bool {
+    (version.0, version.1) >= (1, 24)
+}
+
 /// Link the muxer's `src` pad to `srtsink`, through a leaky queue when the
 /// sink dials out.
 ///
@@ -114,19 +138,8 @@ pub(crate) fn queue_max_size_time(latency: Option<gst::ClockTime>) -> gst::Clock
 /// that cannot keep up). Buffers a flush or a stop discards are not drops.
 /// See `QueueDropMonitor`.
 ///
-/// A calling sink gets `wait-for-connection=true`, whatever the block says.
-/// With it false, `gst_srt_object_write_one` (gstsrtobject.c, unchanged up to
-/// GStreamer main as of 1.28.2) polls a socket that is still connecting with a
-/// 0 ms timeout, and on the timeout it retries the poll instead of dropping
-/// the buffer. The socket is never writable while connecting, so `render`
-/// spins at 100 % CPU until the connect times out, reconnects and spins again,
-/// for as long as there is no peer. Through the SRT relay a caller without a
-/// peer stays connecting, so the queue's thread burned a core. With it true
-/// the poll waits `poll-timeout` (1 s default) per round instead. Nothing else
-/// changes: the sink never dropped a buffer while connecting either way, and
-/// blocking in `render` is what the queue is for. The cost is that a stop
-/// while connecting waits for the current poll round: `unlock` only sets a
-/// cancellable that the loop checks between rounds.
+/// A calling sink gets `wait-for-connection=true` from GStreamer 1.24 on,
+/// whatever the block says; see [`caller_needs_wait_for_connection`].
 ///
 /// A listener does not block without a peer as long as `wait-for-connection`
 /// is false (the block default); with it true the operator asked for blocking.
@@ -147,9 +160,11 @@ pub(crate) fn link_mux_to_srtsink(
         return Ok(());
     }
 
-    if !srtsink.property::<bool>("wait-for-connection") {
-        debug!(
-            "SRT output {}: caller mode, wait-for-connection forced on so srtsink does not spin while connecting",
+    if caller_needs_wait_for_connection(gst::version())
+        && !srtsink.property::<bool>("wait-for-connection")
+    {
+        info!(
+            "SRT output {}: caller mode, wait-for-connection set to true (the block setting applies to listeners only) so srtsink does not spin while connecting",
             instance_id
         );
         srtsink.set_property("wait-for-connection", true);
@@ -719,19 +734,33 @@ mod tests {
         }
     }
 
-    /// A calling sink with `wait-for-connection=false` spins at 100 % CPU in
-    /// `render` while it connects (docs/UPSTREAM_NOTES.md), so the link turns
-    /// it on. A listener keeps what the block set.
+    #[test]
+    fn wait_for_connection_is_forced_from_gstreamer_1_24() {
+        assert!(!caller_needs_wait_for_connection((1, 22, 0, 0)));
+        assert!(!caller_needs_wait_for_connection((1, 23, 90, 0)));
+        assert!(caller_needs_wait_for_connection((1, 24, 0, 0)));
+        assert!(caller_needs_wait_for_connection((1, 28, 2, 0)));
+        assert!(caller_needs_wait_for_connection((2, 0, 0, 0)));
+    }
+
+    /// From GStreamer 1.24 a calling sink with `wait-for-connection=false`
+    /// spins at 100 % CPU in `render` while it connects
+    /// (docs/UPSTREAM_NOTES.md), so the link turns it on there. A listener
+    /// keeps what the block set, either way.
     #[test]
     fn a_calling_sink_waits_for_its_connection() {
+        gst::init().unwrap();
+        let forced = caller_needs_wait_for_connection(gst::version());
         let cases = [
-            ("srt://127.0.0.1:5000?mode=caller", true),
-            ("srt://127.0.0.1:5000?mode=rendezvous", true),
-            ("srt://:5000?mode=listener", false),
+            ("srt://127.0.0.1:5000?mode=caller", false, forced),
+            ("srt://127.0.0.1:5000?mode=rendezvous", false, forced),
+            ("srt://127.0.0.1:5000?mode=caller", true, true),
+            ("srt://:5000?mode=listener", false, false),
+            ("srt://:5000?mode=listener", true, true),
         ];
-        for (uri, expected) in cases {
+        for (uri, wait, expected) in cases {
             let sink = srtsink(uri);
-            sink.set_property("wait-for-connection", false);
+            sink.set_property("wait-for-connection", wait);
             let mut elements = Vec::new();
             let mut links = Vec::new();
             link_mux_to_srtsink(
@@ -746,7 +775,7 @@ mod tests {
             assert_eq!(
                 sink.property::<bool>("wait-for-connection"),
                 expected,
-                "{uri}"
+                "{uri}, wait={wait}"
             );
         }
     }
