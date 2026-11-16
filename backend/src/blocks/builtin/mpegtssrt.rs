@@ -1030,7 +1030,7 @@ fn mpegtssrt_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "wait_for_connection".to_string(),
                 label: "Wait For Connection".to_string(),
-                description: "Block the stream until a peer connects (default: false). Same default across all SRT input/output blocks.".to_string(),
+                description: "Listener mode: block the stream until a peer connects (default: false). A caller always waits.".to_string(),
                 property_type: PropertyType::Bool,
                 default_value: Some(PropertyValue::Bool(DEFAULT_SRT_WAIT_FOR_CONNECTION)),
                 mapping: PropertyMapping {
