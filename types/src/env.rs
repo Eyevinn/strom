@@ -108,6 +108,124 @@ pub fn remove_blank_owned_vars() -> Vec<String> {
     keys
 }
 
+/// Strom variables that hold a port number, and whose name Kubernetes can
+/// also produce for a Service.
+///
+/// With `enableServiceLinks` on (the default), Kubernetes gives every pod
+/// Docker-link style variables for each Service in its namespace. A Service
+/// named `strom` sets `STROM_PORT=tcp://<cluster ip>:<port>`, one named
+/// `strom-server` sets `STROM_SERVER_PORT=tcp://...`. Strom reads those names
+/// as its own port settings, and failed to start on the URL (#1266).
+const PORT_VARS: &[&str] = &["STROM_PORT", "STROM_SERVER_PORT", "STROM_CEF_DEBUG_PORT"];
+
+/// A Strom port variable that was dropped because it held a Kubernetes
+/// service link value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceLinkVar {
+    /// The variable name, e.g. `STROM_PORT`.
+    pub key: String,
+    /// The value it held, e.g. `tcp://192.0.2.10:8080`.
+    pub value: String,
+}
+
+impl ServiceLinkVar {
+    /// The name of the Kubernetes Service that injects this variable: the
+    /// variable name without `_PORT`, lowercase, with `-` for `_`.
+    pub fn service_name(&self) -> String {
+        self.key
+            .strip_suffix("_PORT")
+            .unwrap_or(&self.key)
+            .to_lowercase()
+            .replace('_', "-")
+    }
+}
+
+/// Returns true if `value` has the form Kubernetes uses for a service link:
+/// `tcp://<host>:<port>`, `udp://...` or `sctp://...`.
+///
+/// Anything else, `abc` for instance, is not a service link and is left for
+/// the normal parser to accept or refuse.
+pub fn is_service_link_value(value: &str) -> bool {
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return false;
+    };
+    if !matches!(scheme, "tcp" | "udp" | "sctp") {
+        return false;
+    }
+    let Some((host, port)) = rest.rsplit_once(':') else {
+        return false;
+    };
+    !host.is_empty() && port.parse::<u16>().is_ok()
+}
+
+/// Returns true if `key` has the form of a Kubernetes service link variable
+/// other than the bare `<NAME>_PORT`: `<NAME>_SERVICE_HOST`,
+/// `<NAME>_SERVICE_PORT[_<port name>]` or `<NAME>_PORT_<n>_<PROTO>[_ADDR|_PORT|_PROTO]`.
+///
+/// Strom must never read a variable with such a name: a Service named after
+/// the prefix would set it. Guard tests check every variable Strom reads.
+pub fn is_service_link_name(key: &str) -> bool {
+    if key.ends_with("_SERVICE_HOST")
+        || key.ends_with("_SERVICE_PORT")
+        || key.contains("_SERVICE_PORT_")
+    {
+        return true;
+    }
+    key.match_indices("_PORT_").any(|(i, m)| {
+        key[i + m.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
+    })
+}
+
+/// Returns true if `key` is one of the port variables that
+/// [`remove_service_link_port_vars`] checks. Every `STROM_..._PORT` name Strom
+/// reads must be one, or a Service named after it stops Strom at startup.
+pub fn is_port_var(key: &str) -> bool {
+    PORT_VARS.contains(&key)
+}
+
+/// Picks out the Strom port variables in `vars` that hold a Kubernetes
+/// service link value. Pure so it can be tested without mutating the process
+/// environment.
+pub fn service_link_port_vars<I>(vars: I) -> Vec<ServiceLinkVar>
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
+    let mut found: Vec<ServiceLinkVar> = vars
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let key = key.to_str()?;
+            let value = value.to_str()?;
+            (is_port_var(key) && is_service_link_value(value)).then(|| ServiceLinkVar {
+                key: key.to_string(),
+                value: value.to_string(),
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| a.key.cmp(&b.key));
+    found
+}
+
+/// Removes every Strom port variable that holds a Kubernetes service link
+/// value, so the port falls back to the next source (`STROM_SERVER_PORT`, the
+/// config file, the default). Returns what it removed, for the caller to log
+/// once logging is up.
+///
+/// Same placement rules as [`remove_blank_owned_vars`]: only from the
+/// single-threaded prologue of `main`, before argument parsing. Like the
+/// blank sweep, call it both before `dotenvy` (which skips a key that is
+/// already set, so an injected value would shadow `.env` and then be deleted,
+/// losing both) and after it.
+pub fn remove_service_link_port_vars() -> Vec<ServiceLinkVar> {
+    let found = service_link_port_vars(std::env::vars_os());
+    for var in &found {
+        std::env::remove_var(&var.key);
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +311,82 @@ mod tests {
             non_blank(Some(" secret ".to_string())),
             Some(" secret ".to_string())
         );
+    }
+
+    #[test]
+    fn kubernetes_service_link_ports_are_selected() {
+        let found = service_link_port_vars(vars(&[
+            ("STROM_PORT", "tcp://192.0.2.10:8080"),
+            ("STROM_SERVER_PORT", "udp://192.0.2.11:5000"),
+            ("STROM_PORT_8080_TCP", "tcp://192.0.2.10:8080"),
+            ("OTHER_PORT", "tcp://192.0.2.12:80"),
+        ]));
+
+        assert_eq!(
+            found,
+            vec![
+                ServiceLinkVar {
+                    key: "STROM_PORT".to_string(),
+                    value: "tcp://192.0.2.10:8080".to_string(),
+                },
+                ServiceLinkVar {
+                    key: "STROM_SERVER_PORT".to_string(),
+                    value: "udp://192.0.2.11:5000".to_string(),
+                },
+            ]
+        );
+        assert_eq!(found[0].service_name(), "strom");
+        assert_eq!(found[1].service_name(), "strom-server");
+    }
+
+    #[test]
+    fn real_and_invalid_port_values_are_kept() {
+        let found = service_link_port_vars(vars(&[
+            ("STROM_PORT", "9000"),
+            ("STROM_SERVER_PORT", "abc"),
+            ("STROM_CEF_DEBUG_PORT", "http://192.0.2.10:9222"),
+        ]));
+        assert!(found.is_empty(), "unexpectedly dropped {:?}", found);
+
+        for value in [
+            "abc",
+            "9000",
+            "tcp://",
+            "tcp://192.0.2.10",
+            "tcp://:80",
+            "tcp://h:x",
+        ] {
+            assert!(!is_service_link_value(value), "{value}");
+        }
+        for value in ["tcp://192.0.2.10:8080", "udp://192.0.2.10:53", "sctp://h:1"] {
+            assert!(is_service_link_value(value), "{value}");
+        }
+    }
+
+    #[test]
+    fn service_link_names_are_recognised() {
+        for key in [
+            "STROM_SERVICE_HOST",
+            "STROM_SERVICE_PORT",
+            "STROM_SERVICE_PORT_HTTP",
+            "STROM_PORT_8080_TCP",
+            "STROM_PORT_8080_TCP_ADDR",
+            "STROM_PORT_8080_TCP_PORT",
+            "STROM_PORT_8080_TCP_PROTO",
+        ] {
+            assert!(is_service_link_name(key), "{key}");
+        }
+        for key in [
+            "STROM_PORT",
+            "STROM_PORTS",
+            "STROM_SERVER_PORT",
+            "STROM_PORT_POOL",
+            "STROM_SERVICE_PORTAL_URL",
+        ] {
+            assert!(!is_service_link_name(key), "{key}");
+        }
+        assert!(is_port_var("STROM_PORT"));
+        assert!(!is_port_var("STROM_PORTS"));
     }
 
     #[cfg(unix)]

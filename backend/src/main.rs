@@ -301,6 +301,13 @@ fn main() -> anyhow::Result<()> {
     // names are reported further down.
     let mut blank_env_vars = strom_types::env::remove_blank_owned_vars();
 
+    // Kubernetes injects `STROM_PORT=tcp://<cluster ip>:<port>` into every pod
+    // in a namespace with a Service named `strom` (#1266). Drop such values
+    // before clap reads them, so the port falls back to STROM_SERVER_PORT, the
+    // config file or the default. Bracketing dotenvy for the same reason as
+    // the blank sweep; logged once logging is up.
+    let mut service_link_vars = strom_types::env::remove_service_link_port_vars();
+
     // Load environment variables from a local .env file if present (e.g.
     // STROM_OSC_PAT). Real environment variables always take precedence, and a
     // missing .env is fine — this is a no-op in production deployments.
@@ -309,6 +316,7 @@ fn main() -> anyhow::Result<()> {
     blank_env_vars.extend(strom_types::env::remove_blank_owned_vars());
     blank_env_vars.sort();
     blank_env_vars.dedup();
+    service_link_vars.extend(strom_types::env::remove_service_link_port_vars());
 
     // Make libsoup speak HTTP/1.1 unless STROM_SOUP_HTTP2 is on: its HTTP/2
     // client buffers a paused player's whole file in memory (see
@@ -420,6 +428,17 @@ fn main() -> anyhow::Result<()> {
                 warn!("SOUP_FORCE_HTTP1 was set, and removed because STROM_SOUP_HTTP2 is on");
             }
         }
+    }
+
+    for var in &service_link_vars {
+        warn!(
+            "Ignored {}={}: this is a Kubernetes service link for a Service named `{}`, \
+             not a port. Rename the Service or set `enableServiceLinks: false` on the pod \
+             to stop it",
+            var.key,
+            var.value,
+            var.service_name()
+        );
     }
 
     let (blank_credentials, blank_settings): (Vec<String>, Vec<String>) = blank_env_vars
@@ -1281,5 +1300,32 @@ fn promote_va_plugin_ranks() {
             "Promoted {} VA-API element(s) to PRIMARY rank",
             promoted_count
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use clap::CommandFactory;
+
+    /// Kubernetes sets `<SERVICE>_SERVICE_HOST`, `<SERVICE>_SERVICE_PORT` and
+    /// `<SERVICE>_PORT_<n>_TCP*` for every Service in the namespace. Strom must
+    /// not read any such name, or a Service named `strom` configures it (#1266).
+    #[test]
+    fn no_cli_env_var_is_a_kubernetes_service_link_name() {
+        let cmd = Args::command();
+        let names: Vec<String> = cmd
+            .get_arguments()
+            .chain(cmd.get_subcommands().flat_map(|sub| sub.get_arguments()))
+            .filter_map(|arg| arg.get_env())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().any(|n| n == "STROM_PORT"), "{names:?}");
+        for name in &names {
+            assert!(
+                !strom_types::env::is_service_link_name(name),
+                "{name} is a name Kubernetes sets for a Service"
+            );
+        }
     }
 }
