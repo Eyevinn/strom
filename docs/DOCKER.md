@@ -167,6 +167,15 @@ curl http://localhost:8080/health
 docker exec strom gst-inspect-1.0 --version
 ```
 
+### Kubernetes: a Service named `strom`
+
+Kubernetes gives each pod Docker-link style variables for every Service in its namespace
+(`enableServiceLinks`, on by default). A Service named `strom` sets
+`STROM_PORT=tcp://<cluster ip>:8080`, which Strom up to 0.8.2 reads as its listen port and exits
+on. On those versions, name the Service something else or set `enableServiceLinks: false` on the
+pod. Later versions ignore such a value with a warning and take the port from
+`STROM_SERVER_PORT`, the config file or the default.
+
 For GPU issues see [DOCKER_GPU_SETUP.md](DOCKER_GPU_SETUP.md); for segfaults see
 [DEBUGGING_SEGFAULTS_WSL2.md](DEBUGGING_SEGFAULTS_WSL2.md).
 

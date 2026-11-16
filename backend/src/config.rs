@@ -711,6 +711,49 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// Kubernetes sets `<SERVICE>_SERVICE_HOST`, `<SERVICE>_SERVICE_PORT` and
+    /// `<SERVICE>_PORT_<n>_TCP*` for every Service in the namespace. No
+    /// `STROM_` name in the backend or the shared types may have that form, or
+    /// a Service named `strom` would configure Strom (#1266). Scans the source
+    /// for string literals, which also covers direct `var_opt` reads.
+    #[test]
+    fn no_strom_env_name_is_a_kubernetes_service_link_name() {
+        fn scan(dir: &std::path::Path, offenders: &mut Vec<String>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    scan(&path, offenders);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    // The env module names these forms in its own tests.
+                    if path.ends_with("types/src/env.rs") {
+                        continue;
+                    }
+                    let text = fs::read_to_string(&path).unwrap();
+                    for (i, _) in text.match_indices("\"STROM_") {
+                        let name: String = text[i + 1..]
+                            .chars()
+                            .take_while(|c| {
+                                c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_'
+                            })
+                            .collect();
+                        if strom_types::env::is_service_link_name(&name) {
+                            offenders.push(format!("{} in {}", name, path.display()));
+                        }
+                    }
+                }
+            }
+        }
+
+        for (key, _) in SCALAR_ENV_VARS.iter().chain(LIST_ENV_VARS) {
+            assert!(!strom_types::env::is_service_link_name(key), "{key}");
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut offenders = Vec::new();
+        scan(&root.join("src"), &mut offenders);
+        scan(&root.join("..").join("types").join("src"), &mut offenders);
+        assert!(offenders.is_empty(), "{offenders:#?}");
+    }
+
     #[test]
     #[serial]
     fn test_from_figment_defaults() {
