@@ -114,6 +114,20 @@ pub(crate) fn queue_max_size_time(latency: Option<gst::ClockTime>) -> gst::Clock
 /// that cannot keep up). Buffers a flush or a stop discards are not drops.
 /// See `QueueDropMonitor`.
 ///
+/// A calling sink gets `wait-for-connection=true`, whatever the block says.
+/// With it false, `gst_srt_object_write_one` (gstsrtobject.c, unchanged up to
+/// GStreamer main as of 1.28.2) polls a socket that is still connecting with a
+/// 0 ms timeout, and on the timeout it retries the poll instead of dropping
+/// the buffer. The socket is never writable while connecting, so `render`
+/// spins at 100 % CPU until the connect times out, reconnects and spins again,
+/// for as long as there is no peer. Through the SRT relay a caller without a
+/// peer stays connecting, so the queue's thread burned a core. With it true
+/// the poll waits `poll-timeout` (1 s default) per round instead. Nothing else
+/// changes: the sink never dropped a buffer while connecting either way, and
+/// blocking in `render` is what the queue is for. The cost is that a stop
+/// while connecting waits for the current poll round: `unlock` only sets a
+/// cancellable that the loop checks between rounds.
+///
 /// A listener does not block without a peer as long as `wait-for-connection`
 /// is false (the block default); with it true the operator asked for blocking.
 /// So a listener keeps its direct link and no extra thread.
@@ -131,6 +145,14 @@ pub(crate) fn link_mux_to_srtsink(
             ElementPadRef::pad(sink_id, "sink"),
         ));
         return Ok(());
+    }
+
+    if !srtsink.property::<bool>("wait-for-connection") {
+        debug!(
+            "SRT output {}: caller mode, wait-for-connection forced on so srtsink does not spin while connecting",
+            instance_id
+        );
+        srtsink.set_property("wait-for-connection", true);
     }
 
     let (queue, _monitor) = caller_queue(instance_id)?;
@@ -694,6 +716,38 @@ mod tests {
         ];
         for (uri, expected) in cases {
             assert_eq!(dials_out(&srtsink(uri)), expected, "{uri}");
+        }
+    }
+
+    /// A calling sink with `wait-for-connection=false` spins at 100 % CPU in
+    /// `render` while it connects (docs/UPSTREAM_NOTES.md), so the link turns
+    /// it on. A listener keeps what the block set.
+    #[test]
+    fn a_calling_sink_waits_for_its_connection() {
+        let cases = [
+            ("srt://127.0.0.1:5000?mode=caller", true),
+            ("srt://127.0.0.1:5000?mode=rendezvous", true),
+            ("srt://:5000?mode=listener", false),
+        ];
+        for (uri, expected) in cases {
+            let sink = srtsink(uri);
+            sink.set_property("wait-for-connection", false);
+            let mut elements = Vec::new();
+            let mut links = Vec::new();
+            link_mux_to_srtsink(
+                "out",
+                "out:mux",
+                "out:srtsink",
+                &sink,
+                &mut elements,
+                &mut links,
+            )
+            .unwrap();
+            assert_eq!(
+                sink.property::<bool>("wait-for-connection"),
+                expected,
+                "{uri}"
+            );
         }
     }
 

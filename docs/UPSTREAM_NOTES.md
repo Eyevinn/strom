@@ -209,12 +209,25 @@ workaround can go once we move past that version.
   connect times out (`SRTO_CONNTIMEO`, 3 s) and the next reconnect starts. In 1.22.0 the
   `wait-for-connection=false` check comes first and drops the buffer at once, so 1.22 may
   not block there (read, not run).
+- **The spin burns a core:** measured on 1.28.2 (Linux, libsrt 1.5.4). A caller behind
+  Strom's leaky queue, `wait-for-connection=false`, with no peer on the SRT relay, kept the
+  queue's thread at 100 % CPU for as long as the output had no peer. `perf` shows it in
+  `srt_epoll_wait` throwing and catching the libsrt timeout exception, called from
+  `srtsink`'s `render`. Repro, run: `audiotestsrc is-live=true ! avenc_aac ! aacparse !
+  mpegtsmux ! queue leaky=downstream ! srtsink uri="srt://<relay>?mode=caller&streamid=<unpaired id>"
+  wait-for-connection=false` puts the queue thread at 99.9 %; with `=true` no thread is
+  above 5 %. Against a UDP port that never answers (macOS, 1.28.6) neither setting spun,
+  so it depends on how the far end answers the handshake. Strom sets
+  `wait-for-connection=true` on every calling `srtsink`; the queue in front of it already
+  takes the blocking. The `write_one` loop is unchanged
+  on GStreamer main (checked 2026-11-16).
 - **No connection signal in caller mode:** `caller-added` / `caller-removed` are only
   emitted for callers a listener accepts. The `stats` property of a caller is the libsrt
   socket statistics plus a `bytes-sent-total` counter, with no connection state; the only
   sign of a lost peer is the "Trying to reconnect" element warning on the bus. Checked in the
   1.22.0 and 1.28.6 source and with `gst-inspect-1.0 srtsink` (1.28.6).
-- **Tests:** `srt_output_peerless_caller_test`, `srt_output_latency_test`.
+- **Tests:** `srt_output_peerless_caller_test`, `srt_output_latency_test`,
+  `srt_sink::tests::a_calling_sink_waits_for_its_connection`.
 - **Upstream:** not searched. Strom puts a leaky queue, bounded by time from the pipeline
   latency, in front of a calling `srtsink`.
 - **Found in:** [#1259](https://github.com/Eyevinn/strom/issues/1259)
