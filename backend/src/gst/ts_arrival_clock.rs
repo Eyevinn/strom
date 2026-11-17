@@ -9,12 +9,12 @@
 //! latency. PCR would track the sender's clock, but too many senders get PCR
 //! wrong to rely on it.
 //!
-//! This keeps tsdemux's PTS spacing and replaces only its anchor, from when the
-//! data actually arrives. Data cannot arrive before it was sent, so for each
-//! stream the buffer with the largest *lead* (its running time minus its
-//! arrival) in a sliding window is the best estimate of where the sender's
-//! timeline sits against ours. The stream whose best lead is smallest (it
-//! arrives latest for its timestamps, as AAC packed several frames per PES
+//! This keeps tsdemux's timestamp spacing and replaces only its anchor, from
+//! when the data actually arrives. Data cannot arrive before it was sent, so
+//! for each stream the buffer with the largest *lead* (its running time minus
+//! its deadline) in a sliding window is the best estimate of where the
+//! sender's timeline sits against ours. The stream whose best lead is smallest
+//! (it arrives latest for its timestamps, as AAC packed several frames per PES
 //! does) sets one offset for every stream, so A/V sync is kept:
 //!
 //! ```text
@@ -30,13 +30,21 @@
 //! what the pipeline counts with, the configured SRT latency, not what SRT
 //! negotiated with the peer: srtsrc reports the configured value.
 //!
+//! Lead is taken in *decode order*: from the buffer's DTS where it has one,
+//! else its PTS. Buffers leave tsdemux in decode order, so that is when each
+//! one is due. With B-frames, a P-frame's PTS lead is the largest of its
+//! group: anchored on PTS, every B-frame after it missed its deadline by 20 to
+//! 60 ms, and the on-time P-frames in between kept the lateness from being
+//! confirmed. DTS is never after PTS, so a buffer on time by its DTS is on
+//! time by its PTS too.
+//!
 //! The arrival is the pipeline's running time when `srtsrc` pushes the
 //! buffer, not `srtsrc`'s stamp. srtsrc stamps `now - (srt_time - srctime)`:
 //! close to delivery while data flows evenly, but the burst a caller sends on
 //! connecting is stamped up to its send time, more than a second behind the
 //! clock (measured with libsrt 1.5.7). The running time comes from `Instant`,
-//! calibrated against the pipeline clock on one buffer in
-//! [`CALIBRATE_EVERY`], since reading the pipeline clock takes locks.
+//! calibrated against the pipeline clock on the first buffer and then on the
+//! first buffer after each [`CALIBRATE_INTERVAL_NS`] of `Instant` time.
 //!
 //! Rules on top:
 //! - A stream whose best lead is more than [`MAX_STREAM_SPREAD_NS`] behind the
@@ -44,27 +52,38 @@
 //!   sent before going live) and does not count. MPEG-TS bounds how long data
 //!   may wait for its PTS to about a second.
 //! - Buffers that stay late with the current offset re-anchor every stream at
-//!   once, when the lateness is confirmed: late buffers spanning
-//!   [`LATE_CONFIRM_NS`] of the stream's timeline, with no buffer on time in
-//!   between. The whole stream really is later then (a stall, a slower sender,
-//!   a new caller), and moving output forward in time is safe. A stale tail is
-//!   not confirmed: live buffers on time arrive in between.
-//! - For a second after a caller change every late buffer re-anchors at once:
-//!   the new caller's timeline is new, and tsdemux may flush a PES left over
-//!   from the last caller with the new caller's reference, one buffer stamped
-//!   far off.
+//!   once, when the lateness is confirmed: late buffers of one stream spanning
+//!   [`LATE_CONFIRM_NS`] of that stream's own timeline, with no buffer of any
+//!   stream on time in between. The whole stream really is later then (a
+//!   stall, a slower sender, a new caller), and moving output forward in time
+//!   is safe. A stale tail is not confirmed: live buffers on time arrive in
+//!   between. Each stream counts its own span: streams' running times differ
+//!   by up to [`MAX_STREAM_SPREAD_NS`], so one late buffer of each could
+//!   otherwise span 100 ms between them.
+//! - For a second from the first arrival after a caller change, every late
+//!   buffer re-anchors at once: the new caller's timeline is new, and tsdemux
+//!   may flush a PES left over from the last caller with the new caller's
+//!   reference, one buffer stamped far off.
 //! - A pad's output never steps backwards. A smaller offset is applied only as
-//!   far as it keeps this buffer at or after the previous one, in decode order:
-//!   by DTS where the buffer has one. Video with B-frames goes out with its PTS
-//!   stepping back at every B-frame; compared by PTS, each one pushed the video
-//!   offset up and it never came back down, which put video behind audio.
+//!   far as it keeps this buffer at or after the previous one, in decode order.
+//!   Video with B-frames goes out with its PTS stepping back at every B-frame;
+//!   compared by PTS, each one pushed the video offset up and it never came
+//!   back down, which put video behind audio.
+//! - A slot a removed pad released can be claimed by a new pad while the old
+//!   pad's probes still run (a PMT change). Each claim has its own generation
+//!   ([`StreamId`]), and calls made with an older one are ignored.
 //!
 //! The offset is applied with `gst_pad_set_offset` on each tsdemux source pad,
 //! only when it changes by [`APPLY_STEP_NS`] or more (or a buffer is late), so
 //! downstream sees a new segment only then. The per-buffer path uses atomics
-//! only: no allocation, no clock reads, and no locks except the pad's own
-//! object lock inside `set_offset` when the offset changes, and the pipeline
-//! clock read on one `srtsrc` buffer in [`CALIBRATE_EVERY`].
+//! and one `Instant` read: no allocation and no locks, except the pad's own
+//! object lock inside `set_offset` when the offset changes, and the
+//! calibration. Calibrating reads the pipeline's running time
+//! (`parent_element` and `current_running_time`, which take object locks) in
+//! the `srtsrc` buffer probe. That is a deliberate exception to the rule
+//! against locks in a buffer probe, bounded to at most once per
+//! [`CALIBRATE_INTERVAL_NS`] (2 Hz) per input: calibrating on a buffer count
+//! instead left an audio-only stream at ~12 packets/s uncalibrated for ~20 s.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -84,21 +103,32 @@ const MAX_STREAMS: usize = 16;
 pub const MAX_STREAM_SPREAD_NS: i64 = 1_000_000_000;
 /// Smallest change of the offset that is applied (except for late buffers).
 pub const APPLY_STEP_NS: i64 = 5_000_000;
-/// How much of the stream's timeline must arrive late, with nothing on time
-/// in between, before the stream is re-anchored later.
+/// How much of one stream's timeline must arrive late, with nothing on time
+/// in between, before every stream is re-anchored later.
 pub const LATE_CONFIRM_NS: i64 = 100_000_000;
-/// After a caller change, how long a late buffer re-anchors at once.
+/// From the first arrival after a caller change, how long a late buffer
+/// re-anchors at once.
 const CALLER_TRUST_NS: i64 = 1_000_000_000;
-/// One `srtsrc` buffer in this many calibrates `Instant` against the pipeline
-/// clock. Reading the pipeline clock takes the element's object lock.
-pub const CALIBRATE_EVERY: u64 = 256;
+/// `Instant` time between two calibrations against the pipeline clock.
+/// Reading the pipeline clock takes object locks, so at most 2 Hz.
+pub const CALIBRATE_INTERVAL_NS: i64 = 500_000_000;
 
 const NONE_U64: u64 = u64::MAX;
 const NONE_I64: i64 = i64::MIN;
 
+/// A stream slot as one pad claimed it. The generation tells this claim from
+/// a later claim of the same slot by another pad.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamId {
+    slot: usize,
+    generation: u64,
+}
+
 /// One tsdemux source pad.
 struct Stream {
     in_use: AtomicBool,
+    /// Bumped on every claim of the slot.
+    generation: AtomicU64,
     /// From its SEGMENT event: where running time counts from (start plus the
     /// segment's own offset), and base without our pad offset.
     seg_origin: AtomicU64,
@@ -111,18 +141,23 @@ struct Stream {
     /// Decode-order running time (DTS, else PTS) of the last buffer out, with
     /// the offset.
     last_out: AtomicI64,
+    /// Lowest decode-order raw running time in this stream's current run of
+    /// late buffers. `NONE_I64` when no run is open.
+    late_since: AtomicI64,
 }
 
 impl Stream {
     fn new() -> Self {
         Self {
             in_use: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
             seg_origin: AtomicU64::new(NONE_U64),
             seg_raw_base: AtomicI64::new(NONE_I64),
             bucket_epoch: Default::default(),
             bucket_lead: Default::default(),
             applied: AtomicI64::new(0),
             last_out: AtomicI64::new(NONE_I64),
+            late_since: AtomicI64::new(NONE_I64),
         }
     }
 
@@ -132,11 +167,18 @@ impl Stream {
         self.clear_window();
         self.applied.store(0, Ordering::Relaxed);
         self.last_out.store(NONE_I64, Ordering::Relaxed);
+        self.late_since.store(NONE_I64, Ordering::Relaxed);
     }
 
     fn clear_window(&self) {
         for e in &self.bucket_epoch {
             e.store(0, Ordering::Relaxed);
+        }
+    }
+
+    fn end_late_run(&self) {
+        if self.late_since.load(Ordering::Relaxed) != NONE_I64 {
+            self.late_since.store(NONE_I64, Ordering::Relaxed);
         }
     }
 
@@ -178,13 +220,13 @@ pub struct ArrivalClock {
     /// `mono_origin`) it was read at. `NONE_I64` until calibrated.
     calib_rt: AtomicI64,
     calib_mono: AtomicI64,
-    /// Input buffers seen, to calibrate on some of them.
-    arrivals: AtomicU64,
-    /// Lowest raw running time in the current run of late buffers, over all
-    /// streams. `NONE_I64` when the last buffer was on time.
-    late_since: AtomicI64,
-    /// Until this arrival time, late buffers re-anchor without waiting for
-    /// confirmation (set on a caller change).
+    /// Monotonic time from which the next input buffer calibrates.
+    next_calib_mono: AtomicI64,
+    /// A caller connected or left, and its trust window starts at the next
+    /// arrival.
+    caller_changed: AtomicBool,
+    /// Until this deadline, late buffers re-anchor without waiting for
+    /// confirmation (set from the first arrival after a caller change).
     trust_late_until: AtomicI64,
     streams: [Stream; MAX_STREAMS],
 }
@@ -201,18 +243,18 @@ impl ArrivalClock {
             mono_origin: Instant::now(),
             calib_rt: AtomicI64::new(NONE_I64),
             calib_mono: AtomicI64::new(0),
-            arrivals: AtomicU64::new(0),
-            late_since: AtomicI64::new(NONE_I64),
+            next_calib_mono: AtomicI64::new(0),
+            caller_changed: AtomicBool::new(false),
             trust_late_until: AtomicI64::new(NONE_I64),
             streams: std::array::from_fn(|_| Stream::new()),
         }
     }
 
-    /// An input buffer arrived, stamped `arrival_ns` (running time). Returns
-    /// true when the caller should measure the delivery delay for it.
-    /// The arrival is the running time now, from the calibration; before the
-    /// first calibration, the buffer's stamp. Returns true when the caller
-    /// should calibrate on this buffer ([`Self::calibrate`]).
+    /// An input buffer stamped `stamp_ns` by srtsrc arrived. Its arrival is
+    /// the running time now, from the calibration; before the first
+    /// calibration, the stamp. Returns true when the caller should calibrate
+    /// on this buffer ([`Self::calibrate`]): on the first buffer, and then
+    /// once per [`CALIBRATE_INTERVAL_NS`].
     pub fn on_arrival(&self, stamp_ns: u64) -> bool {
         self.arrive(stamp_ns, self.mono_now())
     }
@@ -228,15 +270,26 @@ impl ArrivalClock {
 
     fn arrive(&self, stamp_ns: u64, mono: i64) -> bool {
         let calib_rt = self.calib_rt.load(Ordering::Relaxed);
-        let arrival = if calib_rt == NONE_I64 {
-            stamp_ns
-        } else {
+        let calibrated = calib_rt != NONE_I64;
+        let arrival = if calibrated {
             (calib_rt + mono - self.calib_mono.load(Ordering::Relaxed)).max(0) as u64
+        } else {
+            stamp_ns
         };
         self.last_arrival.store(arrival, Ordering::Relaxed);
-        self.arrivals
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(CALIBRATE_EVERY)
+        // Before the first calibration the arrival is only srtsrc's stamp,
+        // which can lag the clock by a second: the calibration that follows
+        // starts the trust window instead.
+        if calibrated {
+            self.start_pending_trust(arrival);
+        }
+        let calibrate = mono >= self.next_calib_mono.load(Ordering::Relaxed);
+        if calibrate {
+            // Also bounds the retries when the running time is unavailable.
+            self.next_calib_mono
+                .store(mono + CALIBRATE_INTERVAL_NS, Ordering::Relaxed);
+        }
+        calibrate
     }
 
     fn calibrate_at(&self, running_time_ns: u64, mono: i64) {
@@ -244,6 +297,18 @@ impl ArrivalClock {
         self.calib_rt
             .store(running_time_ns as i64, Ordering::Relaxed);
         self.last_arrival.store(running_time_ns, Ordering::Relaxed);
+        self.start_pending_trust(running_time_ns);
+    }
+
+    fn start_pending_trust(&self, arrival: u64) {
+        if self.caller_changed.load(Ordering::Relaxed)
+            && self.caller_changed.swap(false, Ordering::Relaxed)
+        {
+            self.trust_late_until.store(
+                arrival as i64 - self.budget_ns + CALLER_TRUST_NS,
+                Ordering::Relaxed,
+            );
+        }
     }
 
     /// The deadline the last input buffer sets: its arrival minus the
@@ -258,27 +323,36 @@ impl ArrivalClock {
 
     /// A new caller connected, or the last one left. tsdemux takes a fresh
     /// reference for the next caller, which may sit behind the last one's, so
-    /// the next late buffer is a new timeline, not a stale tail.
+    /// the next late buffer is a new timeline, not a stale tail. The trust
+    /// window starts at the next arrival, so a caller that connects before
+    /// any data has arrived gets it too.
     pub fn on_caller_change(&self) {
-        let now = self.deadline().unwrap_or(i64::MIN / 2);
-        self.trust_late_until
-            .store(now.saturating_add(CALLER_TRUST_NS), Ordering::Relaxed);
+        self.caller_changed.store(true, Ordering::Relaxed);
     }
 
     /// Take a stream slot for a new pad. `None` when all are taken.
-    pub fn claim(&self) -> Option<usize> {
-        self.streams
-            .iter()
-            .position(|s| {
-                s.in_use
-                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-            })
-            .inspect(|&i| self.streams[i].reset())
+    pub fn claim(&self) -> Option<StreamId> {
+        let slot = self.streams.iter().position(|s| {
+            s.in_use
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        })?;
+        let s = &self.streams[slot];
+        let generation = s.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        s.reset();
+        Some(StreamId { slot, generation })
     }
 
-    pub fn release(&self, slot: usize) {
-        self.streams[slot].in_use.store(false, Ordering::Relaxed);
+    pub fn release(&self, id: StreamId) {
+        if self.stream(id).is_some() {
+            self.streams[id.slot].in_use.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// The stream `id` claimed, if no later claim has taken its slot.
+    fn stream(&self, id: StreamId) -> Option<&Stream> {
+        let s = &self.streams[id.slot];
+        (s.generation.load(Ordering::Relaxed) == id.generation).then_some(s)
     }
 
     /// A SEGMENT event on the stream's pad, as it leaves the pad: the pad's
@@ -289,13 +363,15 @@ impl ArrivalClock {
     /// offset it is that minus `pad_offset_ns`.
     pub fn on_segment(
         &self,
-        slot: usize,
+        id: StreamId,
         start_ns: u64,
         segment_offset_ns: u64,
         base_ns: u64,
         pad_offset_ns: i64,
     ) {
-        let s = &self.streams[slot];
+        let Some(s) = self.stream(id) else {
+            return;
+        };
         s.seg_origin.store(
             start_ns.saturating_add(segment_offset_ns),
             Ordering::Relaxed,
@@ -304,43 +380,51 @@ impl ArrivalClock {
             .store(base_ns as i64 - pad_offset_ns, Ordering::Relaxed);
     }
 
-    /// Running time of `pts_ns` on this stream as tsdemux stamped it.
-    pub fn raw_running_time(&self, slot: usize, pts_ns: u64) -> Option<i64> {
-        let s = &self.streams[slot];
+    /// Running time of `ts_ns` on this stream as tsdemux stamped it. A
+    /// timestamp before the segment's origin (the DTS of the first frames
+    /// with B-frames) gives a running time below the segment's base, not
+    /// none: it still orders the buffer.
+    pub fn raw_running_time(&self, id: StreamId, ts_ns: u64) -> Option<i64> {
+        let s = self.stream(id)?;
         let origin = s.seg_origin.load(Ordering::Relaxed);
         let base = s.seg_raw_base.load(Ordering::Relaxed);
-        if origin == NONE_U64 || base == NONE_I64 || pts_ns < origin {
+        if origin == NONE_U64 || base == NONE_I64 {
             return None;
         }
-        Some((pts_ns - origin) as i64 + base)
+        Some(ts_ns as i64 - origin.min(i64::MAX as u64) as i64 + base)
     }
 
-    /// A buffer at raw running time `raw_rt` (its PTS) is leaving the stream's
-    /// pad. `order_rt` is its raw running time in decode order: from its DTS
-    /// where it has one, else `raw_rt`. Returns the offset to apply to the pad
-    /// before it goes, if it changes.
-    pub fn on_buffer(&self, slot: usize, raw_rt: i64, order_rt: i64) -> Option<i64> {
+    /// A buffer is leaving the stream's pad. `pts_rt` is its raw running time
+    /// by PTS, `dts_rt` by DTS where it has one. Returns the offset to apply
+    /// to the pad before it goes, if it changes.
+    pub fn on_buffer(&self, id: StreamId, pts_rt: i64, dts_rt: Option<i64>) -> Option<i64> {
+        let s = self.stream(id)?;
         let now = self.deadline()?;
-        let s = &self.streams[slot];
-        let lead = raw_rt - now;
+        // Decode order: the buffer is due when it leaves, by its DTS.
+        let order_rt = dts_rt.unwrap_or(pts_rt);
+        let lead = order_rt - now;
         let epoch = (self.last_arrival.load(Ordering::Relaxed)) / BUCKET_NS;
         let applied = s.applied.load(Ordering::Relaxed);
         let late = lead + applied < 0;
         if late {
-            let since = match self.late_since.load(Ordering::Relaxed) {
-                NONE_I64 => raw_rt,
-                since => since.min(raw_rt),
+            let since = match s.late_since.load(Ordering::Relaxed) {
+                NONE_I64 => order_rt,
+                since => since.min(order_rt),
             };
-            self.late_since.store(since, Ordering::Relaxed);
+            s.late_since.store(since, Ordering::Relaxed);
             let trusted = now < self.trust_late_until.load(Ordering::Relaxed);
-            if trusted || raw_rt - since >= LATE_CONFIRM_NS {
+            if trusted || order_rt - since >= LATE_CONFIRM_NS {
                 for other in &self.streams {
                     other.clear_window();
+                    other.end_late_run();
                 }
-                self.late_since.store(NONE_I64, Ordering::Relaxed);
             }
         } else {
-            self.late_since.store(NONE_I64, Ordering::Relaxed);
+            // A buffer on time, from any stream, ends every stream's run: the
+            // late ones were a stale tail, not a later timeline.
+            for other in &self.streams {
+                other.end_late_run();
+            }
         }
         s.record(epoch, lead);
 
@@ -387,8 +471,8 @@ impl ArrivalClock {
     }
 }
 
-/// A demuxer pad and the stream slot it holds.
-type PadSlot = (gst::glib::WeakRef<gst::Pad>, usize);
+/// A demuxer pad and the stream it claimed.
+type PadSlot = (gst::glib::WeakRef<gst::Pad>, StreamId);
 
 /// Record arrivals from `source_pad`, the pad feeding the demuxer (`srtsrc`'s
 /// source pad). Its buffers carry `srtsrc`'s arrival timestamps.
@@ -399,6 +483,7 @@ pub fn watch_arrivals(source_pad: &gst::Pad, clock: &Arc<ArrivalClock>) {
             return gst::PadProbeReturn::Ok;
         };
         if clock.on_arrival(pts.nseconds()) {
+            // At most once per CALIBRATE_INTERVAL_NS: takes object locks.
             if let Some(now) = pad.parent_element().and_then(|e| e.current_running_time()) {
                 clock.calibrate(now.nseconds());
             }
@@ -417,7 +502,7 @@ pub fn retime_demuxer(tsdemux: &gst::Element, clock: &Arc<ArrivalClock>, label: 
     let slots_added = slots.clone();
     let label_added = label.to_string();
     tsdemux.connect_pad_added(move |_, pad| {
-        let Some(slot) = added.claim() else {
+        let Some(id) = added.claim() else {
             warn!(
                 "{}: more than {} demuxed streams, {} keeps tsdemux's timestamps",
                 label_added,
@@ -427,7 +512,7 @@ pub fn retime_demuxer(tsdemux: &gst::Element, clock: &Arc<ArrivalClock>, label: 
             return;
         };
         if let Ok(mut s) = slots_added.lock() {
-            s.push((pad.downgrade(), slot));
+            s.push((pad.downgrade(), id));
         }
         debug!("{}: retiming {} from arrival", label_added, pad.name());
 
@@ -437,7 +522,7 @@ pub fn retime_demuxer(tsdemux: &gst::Element, clock: &Arc<ArrivalClock>, label: 
                 if let Ok(seg) = e.segment().clone().downcast::<gst::ClockTime>() {
                     if seg.rate() == 1.0 {
                         segments.on_segment(
-                            slot,
+                            id,
                             seg.start().map_or(0, |t| t.nseconds()),
                             seg.offset().map_or(0, |t| t.nseconds()),
                             seg.base().map_or(0, |t| t.nseconds()),
@@ -451,18 +536,19 @@ pub fn retime_demuxer(tsdemux: &gst::Element, clock: &Arc<ArrivalClock>, label: 
 
         let buffers = added.clone();
         pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
-            let Some(pts) = info.buffer().and_then(|b| b.pts()) else {
+            let Some(buffer) = info.buffer() else {
                 return gst::PadProbeReturn::Ok;
             };
-            let Some(raw_rt) = buffers.raw_running_time(slot, pts.nseconds()) else {
+            let Some(pts_rt) = buffer
+                .pts()
+                .and_then(|pts| buffers.raw_running_time(id, pts.nseconds()))
+            else {
                 return gst::PadProbeReturn::Ok;
             };
-            let order_rt = info
-                .buffer()
-                .and_then(|b| b.dts())
-                .and_then(|dts| buffers.raw_running_time(slot, dts.nseconds()))
-                .unwrap_or(raw_rt);
-            if let Some(offset) = buffers.on_buffer(slot, raw_rt, order_rt) {
+            let dts_rt = buffer
+                .dts()
+                .and_then(|dts| buffers.raw_running_time(id, dts.nseconds()));
+            if let Some(offset) = buffers.on_buffer(id, pts_rt, dts_rt) {
                 pad.set_offset(offset);
             }
             gst::PadProbeReturn::Ok
@@ -474,10 +560,10 @@ pub fn retime_demuxer(tsdemux: &gst::Element, clock: &Arc<ArrivalClock>, label: 
         let Ok(mut s) = slots.lock() else {
             return;
         };
-        s.retain(|(weak, slot)| match weak.upgrade() {
+        s.retain(|(weak, id)| match weak.upgrade() {
             Some(p) if &p != pad => true,
             _ => {
-                removed.release(*slot);
+                removed.release(*id);
                 false
             }
         });
@@ -490,6 +576,24 @@ mod tests {
 
     const MS: i64 = 1_000_000;
 
+    /// An input buffer arrives at `arrival_ms`, with the pipeline clock at the
+    /// same running time: the monotonic time is the arrival, and calibration
+    /// happens when the clock asks for it, as the srtsrc probe does.
+    fn arrive(c: &ArrivalClock, arrival_ms: i64) {
+        let a = arrival_ms * MS;
+        if c.arrive(a as u64, a) {
+            c.calibrate_at(a as u64, a);
+        }
+    }
+
+    /// The stream currently claiming `slot`.
+    fn id(c: &ArrivalClock, slot: usize) -> StreamId {
+        StreamId {
+            slot,
+            generation: c.streams[slot].generation.load(Ordering::Relaxed),
+        }
+    }
+
     /// Feed buffers `(arrival_ms, slot, raw_rt_ms)`; return each buffer's
     /// lead after correction (its stamp minus its arrival), in ms.
     fn run(clock: &ArrivalClock, buffers: &[(i64, usize, i64)]) -> Vec<i64> {
@@ -497,8 +601,8 @@ mod tests {
         buffers
             .iter()
             .map(|&(arrival, slot, raw)| {
-                clock.on_arrival((arrival * MS) as u64);
-                if let Some(o) = clock.on_buffer(slot, raw * MS, raw * MS) {
+                arrive(clock, arrival);
+                if let Some(o) = clock.on_buffer(id(clock, slot), raw * MS, None) {
                     offsets[slot] = o;
                 }
                 (raw * MS + offsets[slot] - arrival * MS) / MS
@@ -521,8 +625,8 @@ mod tests {
 
     fn two_streams(margin_ms: i64) -> ArrivalClock {
         let c = ArrivalClock::new(margin_ms * MS, 0);
-        assert_eq!(c.claim(), Some(0));
-        assert_eq!(c.claim(), Some(1));
+        assert_eq!(c.claim().map(|s| s.slot), Some(0));
+        assert_eq!(c.claim().map(|s| s.slot), Some(1));
         c
     }
 
@@ -568,8 +672,8 @@ mod tests {
         let mut offsets = [0i64; MAX_STREAMS];
         let mut last = [i64::MIN; MAX_STREAMS];
         for &(arrival, slot, raw) in &buffers {
-            c.on_arrival((arrival * MS) as u64);
-            if let Some(o) = c.on_buffer(slot, raw * MS, raw * MS) {
+            arrive(&c, arrival);
+            if let Some(o) = c.on_buffer(id(&c, slot), raw * MS, None) {
                 offsets[slot] = o;
             }
             let out = raw * MS + offsets[slot];
@@ -690,8 +794,8 @@ mod tests {
         // `margin` before its deadline, which is 125 ms after its arrival: lead
         // margin - budget = -25 ms, not +margin on top of the budget.
         let c = ArrivalClock::new(100 * MS, 125 * MS);
-        assert_eq!(c.claim(), Some(0));
-        assert_eq!(c.claim(), Some(1));
+        assert_eq!(c.claim().map(|s| s.slot), Some(0));
+        assert_eq!(c.claim().map(|s| s.slot), Some(1));
         let leads = run(&c, &av(0, 6, |s, _| if s == 0 { 0 } else { -190 }));
         let tail = &leads[leads.len() - 100..];
         let video: Vec<_> = tail.iter().step_by(2).collect();
@@ -719,11 +823,27 @@ mod tests {
         let c = ArrivalClock::new(100 * MS, 125 * MS);
         assert!(c.arrive(500 * MS as u64, 0), "the first buffer calibrates");
         c.calibrate_at(500 * MS as u64, 0);
-        c.arrive(0, 40 * MS);
+        assert!(!c.arrive(0, 40 * MS));
         assert_eq!(c.last_arrival.load(Ordering::Relaxed), 540 * MS as u64);
-        c.arrive(10_000 * MS as u64, 80 * MS);
+        assert!(!c.arrive(10_000 * MS as u64, 80 * MS));
         assert_eq!(c.last_arrival.load(Ordering::Relaxed), 580 * MS as u64);
         assert_eq!(c.deadline(), Some(455 * MS));
+    }
+
+    #[test]
+    fn calibration_follows_time_not_buffer_count() {
+        // Audio alone at ~12 packets/s: calibrating on a buffer count (one in
+        // 256) left it uncalibrated for ~20 s. Calibrate on the first buffer
+        // after each interval, however few buffers there are.
+        let c = ArrivalClock::new(100 * MS, 0);
+        assert!(c.arrive(0, 0), "the first buffer calibrates");
+        c.calibrate_at(0, 0);
+        assert!(!c.arrive(0, CALIBRATE_INTERVAL_NS - 1));
+        assert!(c.arrive(0, CALIBRATE_INTERVAL_NS + 80 * MS));
+        assert!(!c.arrive(0, CALIBRATE_INTERVAL_NS + 160 * MS));
+        // A failed calibration is retried one interval later, not per buffer.
+        assert!(c.arrive(0, 2 * CALIBRATE_INTERVAL_NS + 80 * MS));
+        assert!(!c.arrive(0, 2 * CALIBRATE_INTERVAL_NS + 120 * MS));
     }
 
     #[test]
@@ -740,11 +860,11 @@ mod tests {
             let t = k * 40;
             let reorder = if k % 3 == 0 { 2 } else { -1 };
             let pts = t + reorder * 40 + 80;
-            c.on_arrival((t * MS) as u64);
-            if let Some(o) = c.on_buffer(0, pts * MS, t * MS) {
+            arrive(&c, t);
+            if let Some(o) = c.on_buffer(id(&c, 0), pts * MS, Some(t * MS)) {
                 offsets[0] = o;
             }
-            if let Some(o) = c.on_buffer(1, t * MS, t * MS) {
+            if let Some(o) = c.on_buffer(id(&c, 1), t * MS, None) {
                 offsets[1] = o;
             }
             if t >= 2000 {
@@ -764,11 +884,109 @@ mod tests {
         let buffers = av(0, 10, |_, t| (t / 40 % 2) * 4 - 2);
         let mut changes = 0;
         for &(arrival, slot, raw) in &buffers {
-            c.on_arrival((arrival * MS) as u64);
-            if c.on_buffer(slot, raw * MS, raw * MS).is_some() {
+            arrive(&c, arrival);
+            if c.on_buffer(id(&c, slot), raw * MS, None).is_some() {
                 changes += 1;
             }
         }
         assert!(changes <= 4, "{changes} offset changes");
+    }
+    #[test]
+    fn b_frames_are_on_time_when_video_sets_the_anchor() {
+        // Video with two B-frames is the only stream, so it sets the anchor.
+        // It goes out in decode order (I0 P3 B1 B2 P6 B4 B5 ...): a P-frame's
+        // PTS lead is the largest of its group. Anchored on PTS, every B-frame
+        // after it missed its deadline, and the on-time P-frames in between
+        // kept that from being confirmed. Anchored on DTS, every buffer's PTS
+        // stays at or ahead of its deadline.
+        let c = ArrivalClock::new(20 * MS, 125 * MS);
+        let v = c.claim().unwrap();
+        let mut offset = 0;
+        let mut misses = Vec::new();
+        for k in 0..250i64 {
+            let t = k * 40;
+            let dts = t + 300;
+            let pts = dts + if k % 3 == 0 { 120 } else { 0 };
+            arrive(&c, t);
+            if let Some(o) = c.on_buffer(v, pts * MS, Some(dts * MS)) {
+                offset = o;
+            }
+            let lead = (pts * MS + offset - (t - 125) * MS) / MS;
+            if lead < 0 {
+                misses.push((t, lead));
+            }
+        }
+        assert!(
+            misses.is_empty(),
+            "{} buffers missed their deadline by PTS (arrival ms, lead ms): {:?}",
+            misses.len(),
+            &misses[..misses.len().min(10)]
+        );
+    }
+
+    #[test]
+    fn late_buffers_of_two_streams_do_not_confirm_each_other() {
+        // After a 500 ms stall, one late audio buffer, then one late video
+        // buffer whose running time is 155 ms higher (streams' running times
+        // differ by up to MAX_STREAM_SPREAD_NS). Neither stream has 100 ms of
+        // its own timeline late, so nothing is confirmed.
+        let c = two_streams(100);
+        run(&c, &av(0, 2, |_, _| 0));
+        arrive(&c, 2500);
+        assert_eq!(c.on_buffer(id(&c, 1), 2000 * MS, None), None);
+        assert_eq!(
+            c.on_buffer(id(&c, 0), 2155 * MS, None),
+            None,
+            "re-anchored on one late buffer from each of two streams"
+        );
+    }
+
+    #[test]
+    fn the_first_caller_gets_the_trust_window() {
+        // The caller connects before any data arrived (caller-added comes
+        // first), and its first buffer is a leftover PES stamped 1.3 s ahead.
+        // The trust window starts at the first arrival, so the live buffers
+        // after it re-anchor at once instead of waiting for confirmation.
+        let c = two_streams(100);
+        c.on_caller_change();
+        let mut buffers = vec![(0, 0, 1300)];
+        buffers.extend(av(0, 4, |_, _| 0));
+        let leads = run(&c, &buffers);
+        assert!(leads[1..].iter().all(|&l| l >= 0), "{:?}", &leads[..20]);
+    }
+
+    #[test]
+    fn a_reclaimed_slot_ignores_the_pad_that_released_it() {
+        // A PMT change: the old pad is removed and its slot claimed by a new
+        // pad, while the old pad's probes may still run.
+        let c = ArrivalClock::new(100 * MS, 0);
+        let old = c.claim().unwrap();
+        c.on_segment(old, 0, 0, 0, 0);
+        c.release(old);
+        let new = c.claim().unwrap();
+        assert_eq!(new.slot, old.slot);
+        c.on_segment(new, 5000 * MS as u64, 0, 0, 0);
+        c.on_segment(old, 0, 0, 0, 0);
+        assert_eq!(
+            c.raw_running_time(new, 5040 * MS as u64),
+            Some(40 * MS),
+            "the old pad's segment replaced the new pad's"
+        );
+        assert_eq!(c.raw_running_time(old, 40 * MS as u64), None);
+        arrive(&c, 0);
+        assert_eq!(c.on_buffer(old, 10_000 * MS, None), None);
+        assert_eq!(c.streams[new.slot].best_lead(0), None);
+        // Releasing the old claim again leaves the new one in use.
+        c.release(old);
+        assert!(c.streams[new.slot].in_use.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_timestamp_before_the_segment_start_has_a_running_time() {
+        // With B-frames the first frames' DTS lie before the segment start.
+        let c = ArrivalClock::new(100 * MS, 0);
+        let s = c.claim().unwrap();
+        c.on_segment(s, 1000 * MS as u64, 0, 200 * MS as u64, 0);
+        assert_eq!(c.raw_running_time(s, 920 * MS as u64), Some(120 * MS));
     }
 }

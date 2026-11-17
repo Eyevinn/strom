@@ -26,7 +26,7 @@
 //! in PID order instead (see [`audio_by_pid`]).
 //!
 //! With `ignore_pcr` and `arrival_retiming` (both default), tsdemux's output is
-//! retimed from srtsrc's arrival timestamps (see `gst::ts_arrival_clock`).
+//! retimed from when the SRT data arrives (see `gst::ts_arrival_clock`).
 
 pub mod audio_by_pid;
 
@@ -41,6 +41,10 @@ use std::sync::{Arc, Mutex};
 use strom_types::srt_relay::redact_srt_uri;
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
+
+/// The latency tsdemux uses, and reports, when its `latency` property is
+/// negative: `if (latency < 0) latency = 700;` in tsdemux.c.
+const TSDEMUX_LATENCY_FOR_NEGATIVE_MS: i64 = 700;
 
 /// Block definition id; also selects the block's role on the SRT relay.
 const BLOCK_DEFINITION_ID: &str = "builtin.mpegtssrt_input";
@@ -266,11 +270,16 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
         );
 
         // With ignore-pcr, tsdemux anchors its timestamps once, on the first PES
-        // it parses. Re-anchor them from srtsrc's arrival timestamps instead.
+        // it parses. Re-anchor them from when the SRT data arrives instead.
         // The budget is the latency srtsrc and tsdemux report: the configured
         // SRT latency, whatever SRT negotiates with the peer.
         let arrival_clock = (ignore_pcr && arrival_retiming).then(|| {
-            let budget_ns = (latency.max(0) as i64 + tsdemux_latency.max(0) as i64) * 1_000_000;
+            let tsdemux_reported_ms = if tsdemux_latency < 0 {
+                TSDEMUX_LATENCY_FOR_NEGATIVE_MS
+            } else {
+                tsdemux_latency as i64
+            };
+            let budget_ns = (latency.max(0) as i64 + tsdemux_reported_ms) * 1_000_000;
             let clock = Arc::new(ArrivalClock::new(arrival_margin_ms * 1_000_000, budget_ns));
             if let Some(pad) = srtsrc.static_pad("src") {
                 ts_arrival_clock::watch_arrivals(&pad, &clock);
@@ -1100,7 +1109,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "arrival_margin_ms".to_string(),
                 label: "Arrival Margin (ms)".to_string(),
-                description: "With Retime From Arrival: how many ms before its deadline (arrival plus SRT latency) the latest stream is due, to absorb jitter. Late data moves it forward.".to_string(),
+                description: "With Retime From Arrival: jitter margin in ms kept inside the SRT latency. Late data moves the timing forward.".to_string(),
                 property_type: PropertyType::Int,
                 default_value: Some(PropertyValue::Int(DEFAULT_TS_ARRIVAL_MARGIN_MS)),
                 mapping: PropertyMapping {

@@ -3,10 +3,12 @@
 //!
 //! Each test builds the real block, feeds it from an in-process H.264 + AAC
 //! caller over SRT, and measures every buffer's *lead* at the block's outputs:
-//! its running time minus the latest SRT arrival (srtsrc stamps at delivery).
-//! The block may spend the latency it reports upstream (the SRT latency), so a
-//! buffer is late only below `-BUDGET_MS`. The latest stream sits `MARGIN_MS`
-//! before that deadline (#1265).
+//! its running time minus the pipeline's running time as it leaves the block.
+//! Not srtsrc's stamp: that lags the clock by up to 1.3 s in the burst a
+//! caller sends on connecting, which made late buffers look on time. The block
+//! may spend the latency it reports upstream (the SRT latency), so a buffer is
+//! late only below `-BUDGET_MS`. The latest stream sits `MARGIN_MS` before
+//! that deadline (#1265).
 //!
 //! A caller that starts before the listener blocks in `srtsink` until it can
 //! connect, then sends the start of its encode followed by live media. tsdemux
@@ -55,11 +57,33 @@ const TARGET_MS: i64 = MARGIN_MS - BUDGET_MS;
 /// How long the caller runs before the listener exists.
 const EARLY_START: Duration = Duration::from_secs(2);
 
+/// A free UDP port for the SRT listener, below the ephemeral range (macOS
+/// from 49152, Linux from 32768). The early-caller test leaves the port
+/// unbound for `EARLY_START` while the parallel suite's SRT callers bind
+/// ephemeral ports, and a port the OS handed out as ephemeral could be taken
+/// in that window: once in 8 runs the receiver then failed to start.
 fn srt_port() -> u16 {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .and_then(|s| s.local_addr())
-        .map(|a| a.port())
+    static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+    let spread = (std::process::id() % 500) as u16 * 20;
+    (0..1000)
+        .map(|_| {
+            20_000 + (spread + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) % 10_000
+        })
+        .find(|&port| std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok())
         .expect("no free UDP port for the SRT listener")
+}
+
+/// Start the receiver, or fail with what its bus says.
+fn play(r: &Receiver) {
+    if r.pipeline.set_state(gst::State::Playing).is_err() {
+        let error = r
+            .pipeline
+            .bus()
+            .and_then(|bus| bus.pop_filtered(&[gst::MessageType::Error]))
+            .map(|m| format!("{m:?}"))
+            .unwrap_or_default();
+        panic!("the receiver did not start: {error}");
+    }
 }
 
 /// One measured buffer: when it left the block (ms after the first one) and
@@ -128,17 +152,6 @@ fn build_receiver(port: u16, decode: bool, retiming: bool) -> Receiver {
     }
 
     let srtsrc = by_id[&format!("{}:srtsrc", INSTANCE_ID)].clone();
-    let arrival = Arc::new(std::sync::atomic::AtomicI64::new(-1));
-    let arrival_in = arrival.clone();
-    srtsrc
-        .static_pad("src")
-        .unwrap()
-        .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
-            if let Some(pts) = info.buffer().and_then(|b| b.pts()) {
-                arrival_in.store(pts.nseconds() as i64, std::sync::atomic::Ordering::Relaxed);
-            }
-            gst::PadProbeReturn::Ok
-        });
 
     let samples: Arc<Mutex<Vec<Sample>>> = Default::default();
     let first_at = Arc::new(std::sync::atomic::AtomicI64::new(-1));
@@ -153,14 +166,19 @@ fn build_receiver(port: u16, decode: bool, retiming: bool) -> Receiver {
             .unwrap();
         pipeline.add(&sink).unwrap();
         by_id[&id].link(&sink).expect("link output -> fakesink");
-        let (arrival, samples, first_at) = (arrival.clone(), samples.clone(), first_at.clone());
+        let (samples, first_at) = (samples.clone(), first_at.clone());
         by_id[&id].static_pad("src").unwrap().add_probe(
             gst::PadProbeType::BUFFER,
             move |pad, info| {
-                let now = arrival.load(std::sync::atomic::Ordering::Relaxed);
+                // The pipeline's running time now: test code may read the
+                // clock in a buffer probe.
+                let now = pad
+                    .parent_element()
+                    .and_then(|e| e.current_running_time())
+                    .map(|t| t.nseconds() as i64);
                 let pts = info.buffer().and_then(|b| b.pts());
                 let rt = pts.and_then(|pts| running_time(pad, pts));
-                if let (true, Some(rt), Some(pts)) = (now >= 0, rt, pts) {
+                if let (Some(now), Some(rt), Some(pts)) = (now, rt, pts) {
                     let _ = first_at.compare_exchange(
                         -1,
                         now,
@@ -262,7 +280,7 @@ fn early_caller_is_retimed(decode: bool) {
     std::thread::sleep(EARLY_START);
 
     let r = build_receiver(port, decode, true);
-    r.pipeline.set_state(gst::State::Playing).unwrap();
+    play(&r);
     std::thread::sleep(Duration::from_secs(5));
     stop_caller_then_receiver(&caller, &r);
 
@@ -321,7 +339,7 @@ fn a_clean_caller_stays_within_the_margin() {
     }
     let port = srt_port();
     let r = build_receiver(port, false, true);
-    r.pipeline.set_state(gst::State::Playing).unwrap();
+    play(&r);
     std::thread::sleep(Duration::from_millis(500));
     let caller = start_caller(port);
     std::thread::sleep(Duration::from_secs(4));
@@ -367,7 +385,7 @@ fn a_clean_caller_after_a_corrected_one_is_not_late() {
     let first = start_caller(port);
     std::thread::sleep(EARLY_START);
     let r = build_receiver(port, false, true);
-    r.pipeline.set_state(gst::State::Playing).unwrap();
+    play(&r);
     std::thread::sleep(Duration::from_secs(3));
     stop(&first, first.by_name("caller"));
     let switch_at = r.samples.lock().unwrap().last().map_or(0, |s| s.at_ms);
@@ -407,7 +425,7 @@ fn b_frames_get_the_offset_of_every_other_stream() {
     }
     let port = srt_port();
     let r = build_receiver(port, false, true);
-    r.pipeline.set_state(gst::State::Playing).unwrap();
+    play(&r);
     std::thread::sleep(Duration::from_millis(500));
     let caller = start_caller_with(port, B_FRAMES);
     std::thread::sleep(Duration::from_secs(5));
