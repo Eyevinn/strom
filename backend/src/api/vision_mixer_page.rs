@@ -247,3 +247,37 @@ pub async fn get_multiview_endpoint(
         endpoint,
     }))
 }
+
+/// Get the WHEP endpoint fed by a vision mixer's PGM output (followed through
+/// intermediate blocks such as an encoder).
+#[utoipa::path(
+    get,
+    path = "/api/flows/{flow_id}/blocks/{block_id}/pgm-endpoint",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("block_id" = String, Path, description = "Vision mixer block ID"),
+    ),
+    responses(
+        (status = 200, description = "PGM endpoint info", body = strom_types::api::MultiviewEndpointResponse),
+        (status = 404, description = "Flow or block not found"),
+    ),
+    tag = "vision-mixer"
+)]
+pub async fn get_pgm_endpoint(
+    State(state): State<AppState>,
+    Path((flow_id, block_id)): Path<(FlowId, String)>,
+) -> Result<Json<strom_types::api::MultiviewEndpointResponse>, axum::http::StatusCode> {
+    let flows = state.get_flows().await;
+    let flow = flows
+        .iter()
+        .find(|f| f.id == flow_id)
+        .ok_or(axum::http::StatusCode::NOT_FOUND)?;
+    flow.blocks
+        .iter()
+        .find(|b| b.id == block_id && b.block_definition_id == "builtin.vision_mixer")
+        .ok_or(axum::http::StatusCode::NOT_FOUND)?;
+    let endpoint = find_whep_endpoint_for_pad(flow, &block_id, "pgm_out");
+    Ok(Json(strom_types::api::MultiviewEndpointResponse {
+        endpoint,
+    }))
+}

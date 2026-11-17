@@ -53,7 +53,11 @@ impl BlockBuilder for MediaPlayerBuilder {
         &self,
         properties: &HashMap<String, PropertyValue>,
     ) -> Option<ExternalPads> {
-        let (num_video, num_audio) = track_counts(properties);
+        let (num_video, num_audio) = if super::replay::replay_group(properties).is_some() {
+            (1, 0)
+        } else {
+            track_counts(properties)
+        };
         let mut outputs = Vec::new();
         for (count, media_type, kind, tag) in [
             (num_video, MediaType::Video, "video", "V"),
@@ -83,6 +87,10 @@ impl BlockBuilder for MediaPlayerBuilder {
         ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         info!("Building Media Player block instance: {}", instance_id);
+
+        if let Some(group) = super::replay::replay_group(properties) {
+            return super::replay::build(instance_id, &group, properties);
+        }
 
         let loop_playlist = properties
             .get("loop_playlist")

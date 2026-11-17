@@ -283,6 +283,10 @@ pub async fn create_app_with_config(
             get(api::vision_mixer_page::get_multiview_endpoint),
         )
         .route(
+            "/flows/{flow_id}/blocks/{block_id}/pgm-endpoint",
+            get(api::vision_mixer_page::get_pgm_endpoint),
+        )
+        .route(
             "/flows/{flow_id}/blocks/{block_id}/animate",
             post(api::flows::animate_input),
         )
@@ -415,6 +419,8 @@ pub async fn create_app_with_config(
         .route("/devtools/links", delete(api::devtools::revoke_all_links))
         .route("/devtools/links/{id}", delete(api::devtools::revoke_link))
         // Logging
+        // Replay jog control (spike)
+        .route("/replay/{flow_id}/{group}/ws", get(api::replay::replay_ws))
         .route("/log-level", get(api::logging::get_log_level))
         .route("/log-level", put(api::logging::set_log_level))
         .route("/gst-log-level", get(api::logging::get_gst_log_level))
@@ -462,6 +468,7 @@ pub async fn create_app_with_config(
         .route("/whep", get(api::whep_player::whep_player))
         .route("/whep-streams", get(api::whep_player::whep_streams_page))
         .route("/whip-ingest", get(api::whip_ingest::whip_ingest_page))
+        .route("/replay/{flow_id}/{group}", get(api::replay::replay_page))
         .route(
             "/vision-mixer/{flow_id}",
             get(api::vision_mixer_page::vision_mixer_page),

@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Replay Jog (spike) v8</title>
+<style>
+  :root { --bg:#111; --panel:#1b1b1b; --fg:#ddd; --mut:#888; --acc:#4fa3ff; --red:#e5484d; --grn:#46a758; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.4 system-ui, sans-serif; }
+  header { display:flex; gap:12px; align-items:center; padding:8px 12px; background:var(--panel); flex-wrap:wrap; }
+  header select, header button { background:#222; color:var(--fg); border:1px solid #333; border-radius:4px; padding:4px 8px; }
+  main { display:grid; grid-template-columns: 1fr 1fr; gap:8px; padding:8px; }
+  .vid { background:#000; position:relative; aspect-ratio:16/9; }
+  .vid video { width:100%; height:100%; display:block; }
+  .vid .lbl { position:absolute; top:4px; right:6px; color:#fff; background:#0008; padding:1px 6px; border-radius:3px; font-weight:600; }
+  section { background:var(--panel); border-radius:6px; padding:10px; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin:6px 0; }
+  button.b { background:#262626; color:var(--fg); border:1px solid #3a3a3a; border-radius:4px; padding:6px 10px; cursor:pointer; min-width:48px; }
+  button.b:hover { border-color:var(--acc); }
+  button.b.on { background:var(--acc); color:#000; }
+  button.b.pgm { background:var(--red); color:#fff; border-color:var(--red); }
+  button.b.pvw { background:var(--grn); color:#fff; border-color:var(--grn); }
+  #jog { height:90px; border-radius:6px; background:repeating-linear-gradient(90deg,#222 0 6px,#2c2c2c 6px 12px);
+         cursor:ew-resize; display:flex; align-items:center; justify-content:center; color:var(--mut); user-select:none; touch-action:none; }
+  #shuttle { width:100%; }
+  .big { font:600 22px ui-monospace, monospace; }
+  table { border-collapse:collapse; width:100%; font:12px ui-monospace, monospace; }
+  td, th { padding:2px 6px; border-bottom:1px solid #2a2a2a; text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  .mut { color:var(--mut); }
+  kbd { background:#2a2a2a; border:1px solid #444; border-radius:3px; padding:0 4px; font-size:11px; }
+</style>
+</head>
+<body>
+<header>
+  <strong>Replay Jog (spike)</strong>
+  <span class="mut" id="grp"></span>
+  PGM <select id="pgmSel"></select>
+  MV <select id="mvSel"></select>
+  <button id="connectBtn">Connect video</button>
+  <span id="wsState" class="mut">ws: -</span>
+</header>
+<main>
+  <div class="vid"><video id="mv" autoplay muted playsinline></video><span class="lbl">MULTIVIEW</span></div>
+  <div class="vid"><video id="pgm" autoplay muted playsinline></video><span class="lbl">PGM</span></div>
+
+  <section>
+    <div class="row">
+      <span>cursor</span><span class="big" id="curFrame">-</span>
+      <span class="mut">/ <span id="total">-</span></span>
+      <span>speed</span><span class="big" id="curSpeed">-</span>
+      <span>on screen</span><span class="big" id="shownFrame">-</span>
+    </div>
+    <div id="jog">JOG: drag or scroll here &nbsp; <kbd>←</kbd><kbd>→</kbd> step &nbsp; <kbd>Shift</kbd> = 10 frames</div>
+    <div class="row">
+      <span>shuttle</span>
+      <input type="range" id="shuttle" min="-4" max="4" step="0.05" value="0">
+    </div>
+    <div class="row" id="speeds">
+      <button class="b" data-s="-1">◀ 1×</button>
+      <button class="b" data-s="-0.5">◀ ½</button>
+      <button class="b" data-s="0">❚❚</button>
+      <button class="b" data-s="0.1">10%</button>
+      <button class="b" data-s="0.25">25%</button>
+      <button class="b" data-s="0.33">33%</button>
+      <button class="b" data-s="0.5">50%</button>
+      <button class="b" data-s="0.75">75%</button>
+      <button class="b" data-s="1">1×</button>
+      <button class="b" data-s="2">2×</button>
+      <button class="b" data-s="4">4×</button>
+    </div>
+    <div class="row">
+      <button class="b" data-rel="-30000">−30 s</button>
+      <button class="b" data-rel="-10000">−10 s</button>
+      <button class="b" data-rel="-2000">−2 s</button>
+      <button class="b" data-rel="2000">+2 s</button>
+      <button class="b" data-rel="10000">+10 s</button>
+      <button class="b" id="startBtn">⏮ start</button>
+      <button class="b" id="endBtn">end ⏭</button>
+      <button class="b" id="randBtn" title="seek to a random frame (latency test)">random seek</button>
+    </div>
+    <div class="row" id="angles">
+      <span>to air</span>
+      <span id="angleBtns" style="display:contents"></span>
+      <button class="b" id="pipBtn">PIP <kbd>§</kbd></button>
+      <button class="b" id="takeBtn">TAKE <kbd>⏎</kbd></button>
+    </div>
+    <div class="row" id="pipRow">
+      <span>in PIP</span>
+      <span id="pipBtns" style="display:contents"></span>
+    </div>
+    <div class="row mut">
+      Keys: <kbd>1</kbd>–<kbd>9</kbd> <kbd>0</kbd> source straight to PGM ·
+      <kbd>Q</kbd><kbd>W</kbd><kbd>E</kbd>… add/remove source in PIP · <kbd>§</kbd> PIP to PGM ·
+      <kbd>⏎</kbd> take (swap PVW ↔ PGM) · <kbd>Space</kbd> play 1× / pause ·
+      <kbd>L</kbd>/<kbd>J</kbd> speed up/down (−4×…−25 %, 25/50/75 %, 1×, 2×, 4×) · <kbd>K</kbd> pause ·
+      <kbd>←</kbd><kbd>→</kbd> step frame
+    </div>
+  </section>
+
+  <section>
+    <div class="row">
+      <strong>Command → frame on screen</strong>
+      <span class="mut">(read from the bitstrip of the PGM video)</span>
+    </div>
+    <div class="row">
+      last <span class="big" id="latLast">-</span> ms
+      p50 <span class="big" id="latP50">-</span>
+      p95 <span class="big" id="latP95">-</span>
+      n=<span id="latN">0</span>
+      <button class="b" id="latReset">reset</button>
+      <button class="b" id="latCsv">CSV</button>
+    </div>
+    <div class="row mut">measured on the stream in the PGM slot (right): <span id="measSrc">-</span></div>
+    <table id="brk"><tbody>
+      <tr><td>ws round trip</td><td><span id="rtt">-</span> ms</td></tr>
+      <tr><td>server: command → frame pushed by replay player</td><td><span id="c2p">-</span> ms</td></tr>
+      <tr><td>flow pipeline latency (mixer etc.)</td><td><span id="plat">-</span> ms</td></tr>
+      <tr><td>browser: jitter buffer / frame</td><td><span id="jb">-</span> ms</td></tr>
+      <tr><td>browser: decode / frame</td><td><span id="dec">-</span> ms</td></tr>
+      <tr><td>browser: receive→decoded (processing) / frame</td><td><span id="proc">-</span> ms</td></tr>
+      <tr><td>browser: decoder · fps · dropped</td><td><span id="decimpl">-</span> · <span id="fps">-</span> · <span id="drop">-</span></td></tr>
+    </tbody></table>
+    <table id="players"><thead><tr><th>player</th><th>frame</th><th>Δ</th><th>cached seg</th><th>decodes</th><th>dec ms</th><th>misses</th><th>late</th></tr></thead><tbody></tbody></table>
+  </section>
+</main>
+
+<script>
+'use strict';
+// ---- group from URL: /player/replay/{flow_id}/{group}
+const parts = location.pathname.split('/').filter(Boolean);
+const FLOW = parts[2], GROUP = decodeURIComponent(parts[3] || '');
+document.getElementById('grp').textContent = `flow ${FLOW.slice(0,8)} · group ${GROUP}`;
+const $ = id => document.getElementById(id);
+
+// ---- WebSocket control
+let ws, seq = 0, frameNs = 20e6, totalFrames = 0;
+const sentAt = new Map();
+let pending = null; // {target, t0}
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/api/replay/${FLOW}/${encodeURIComponent(GROUP)}/ws`);
+  ws.onopen = () => $('wsState').textContent = 'ws: connected';
+  ws.onclose = () => { $('wsState').textContent = 'ws: closed, retrying'; setTimeout(connectWs, 1000); };
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'state') onState(m);
+    else if (m.type === 'ack') onAck(m);
+    else if (m.type === 'error') console.warn(m);
+  };
+}
+function send(cmd, measure) {
+  if (!ws || ws.readyState !== 1) return;
+  cmd.seq = ++seq;
+  const t0 = performance.now();
+  sentAt.set(cmd.seq, { t0, measure });
+  ws.send(JSON.stringify(cmd));
+}
+let rttEma = null;
+function onAck(m) {
+  const s = sentAt.get(m.seq); sentAt.delete(m.seq);
+  if (!s) return;
+  const rtt = performance.now() - s.t0;
+  rttEma = rttEma == null ? rtt : rttEma * 0.8 + rtt * 0.2;
+  $('rtt').textContent = rttEma.toFixed(1);
+  // Only paused positions have a definite target frame.
+  if (s.measure && m.speed === 0) pending = { target: m.frame, t0: s.t0 };
+}
+let curSpeed = 0;
+function onState(m) {
+  frameNs = m.frame_ns; totalFrames = m.total_frames; curSpeed = +m.speed;
+  if (m.cmd_to_push_ms != null) $('c2p').textContent = (+m.cmd_to_push_ms).toFixed(1);
+  $('curFrame').textContent = m.frame;
+  $('total').textContent = m.total_frames;
+  $('curSpeed').textContent = (m.speed >= 0 ? '' : '') + (+m.speed).toFixed(2) + '×';
+  const tb = document.querySelector('#players tbody');
+  const ref = m.players.length ? m.players[0].shown_frame : 0;
+  tb.innerHTML = m.players.map(p => `<tr><td>${p.block}</td><td>${p.shown_frame}</td>
+    <td style="color:${p.shown_frame - ref ? 'var(--red)' : 'var(--grn)'}">${p.shown_frame - ref}</td>
+    <td>${p.cached_segments}</td><td>${p.decodes}</td><td>${p.last_decode_ms}</td><td>${p.misses}</td><td>${p.late_ticks}</td></tr>`).join('');
+}
+connectWs();
+
+// ---- controls
+const jog = (frames) => send({ cmd: 'jog', frames }, true);
+const speed = (s) => send({ cmd: 'speed', speed: s }, s === 0);
+document.querySelectorAll('[data-s]').forEach(b => b.onclick = () => speed(+b.dataset.s));
+document.querySelectorAll('[data-rel]').forEach(b => b.onclick = () => send({ cmd: 'seek_rel', ms: +b.dataset.rel }, true));
+$('startBtn').onclick = () => send({ cmd: 'seek', frame: 0 }, true);
+$('endBtn').onclick = () => send({ cmd: 'end' }, true);
+$('randBtn').onclick = () => { send({ cmd: 'pause' }); send({ cmd: 'seek', frame: Math.floor(Math.random() * totalFrames) }, true); };
+
+const jogEl = $('jog');
+let dragX = null, dragAcc = 0;
+jogEl.addEventListener('pointerdown', e => { dragX = e.clientX; dragAcc = 0; jogEl.setPointerCapture(e.pointerId); });
+jogEl.addEventListener('pointermove', e => {
+  if (dragX == null) return;
+  dragAcc += e.clientX - dragX; dragX = e.clientX;
+  const px = 6; // pixels per frame
+  const n = Math.trunc(dragAcc / px);
+  if (n) { dragAcc -= n * px; jog(n); }
+});
+jogEl.addEventListener('pointerup', () => dragX = null);
+let wheelAcc = 0;
+jogEl.addEventListener('wheel', e => {
+  e.preventDefault();
+  wheelAcc += (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY);
+  const n = Math.trunc(wheelAcc / 20);
+  if (n) { wheelAcc -= n * 20; jog(n); }
+}, { passive: false });
+
+const sh = $('shuttle');
+let shTimer = null;
+sh.addEventListener('input', () => {
+  // Send at most every 30 ms while dragging.
+  if (shTimer) return;
+  shTimer = setTimeout(() => { shTimer = null; speed(+sh.value); }, 30);
+});
+sh.addEventListener('change', () => { sh.value = 0; speed(0); }); // spring back
+
+// J/L walk a speed ladder; the opposite key steps back towards (and through) zero.
+const LADDER = [-4, -2, -1, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 1, 2, 4];
+function stepSpeed(dir) {
+  let i = LADDER.findIndex(v => Math.abs(v - curSpeed) < 1e-6);
+  if (i < 0) i = dir > 0 ? LADDER.findIndex(v => v > curSpeed) - 1 : LADDER.findIndex(v => v >= curSpeed);
+  let n = Math.max(0, Math.min(LADDER.length - 1, i + dir));
+  if (LADDER[n] === 0) n += dir; // never stop on 0 via J/L: K pauses
+  n = Math.max(0, Math.min(LADDER.length - 1, n));
+  curSpeed = LADDER[n];
+  speed(curSpeed);
+}
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const step = e.shiftKey ? 10 : 1;
+  // Physical keys (layout independent): digit row = straight to PGM, the row
+  // under it toggles the same source in the PIP.
+  const digit = /^Digit(\d)$/.exec(e.code);
+  if (digit) {
+    const d = +digit[1];
+    cutToSource(d === 0 ? 9 : d - 1);
+    e.preventDefault();
+    return;
+  }
+  const row = 'QWERTYUIOP'.indexOf((/^Key([A-Z])$/.exec(e.code) || [])[1]);
+  if (row >= 0) {
+    togglePip(row);
+    e.preventDefault();
+    return;
+  }
+  switch (e.code) {
+    case 'Backquote': case 'IntlBackslash': cutToPip(); break;
+    case 'Enter': case 'NumpadEnter': take(); break;
+    case 'Space': curSpeed = curSpeed === 0 ? 1 : 0; speed(curSpeed); break;
+    case 'ArrowRight': jog(step); break;
+    case 'ArrowLeft': jog(-step); break;
+    case 'KeyK': speed(0); curSpeed = 0; break;
+    case 'KeyL': stepSpeed(1); break;
+    case 'KeyJ': stepSpeed(-1); break;
+    default: return;
+  }
+  e.preventDefault();
+});
+
+// ---- minimal WHEP client with the jitter buffer target at 0
+async function whep(video, endpointId, nAudio) {
+  const pc = new RTCPeerConnection();
+  const vt = pc.addTransceiver('video', { direction: 'recvonly' });
+  for (let i = 0; i < Math.max(nAudio, 0); i++) pc.addTransceiver('audio', { direction: 'recvonly' });
+  pc.ontrack = ev => {
+    if (ev.track.kind !== 'video') return;
+    try { ev.receiver.jitterBufferTarget = 0; } catch (_) {}
+    try { ev.receiver.playoutDelayHint = 0; } catch (_) {}
+    video.srcObject = new MediaStream([ev.track]);
+  };
+  await pc.setLocalDescription(await pc.createOffer());
+  await new Promise(r => {
+    if (pc.iceGatheringState === 'complete') return r();
+    pc.onicegatheringstatechange = () => pc.iceGatheringState === 'complete' && r();
+    setTimeout(r, 1500);
+  });
+  const res = await fetch(`/whep/${endpointId}`, { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription.sdp });
+  if (!res.ok) throw new Error('WHEP ' + res.status);
+  await pc.setRemoteDescription({ type: 'answer', sdp: await res.text() });
+  return { pc, receiver: vt.receiver };
+}
+let streams = [], conns = [], epName = {};
+async function loadStreams() {
+  const r = await fetch('/api/whep-streams');
+  streams = (await r.json()).streams || [];
+  for (const sel of [$('pgmSel'), $('mvSel')]) {
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">(none)</option>' + streams.map(s => `<option value="${s.endpoint_id}">${epName[s.endpoint_id] || s.endpoint_id.slice(0,8)}</option>`).join('');
+    sel.value = keep || localStorage.getItem('rj_' + sel.id) || '';
+  }
+}
+$('connectBtn').onclick = async () => {
+  $('measSrc').textContent = epName[$('pgmSel').value] || '-';
+  conns.forEach(c => c.pc.close()); conns = [];
+  for (const [sel, vid] of [[$('pgmSel'), $('pgm')], [$('mvSel'), $('mv')]]) {
+    if (!sel.value) continue;
+    try { localStorage.setItem('rj_' + sel.id, sel.value); } catch (_) {}
+    const info = streams.find(s => s.endpoint_id === sel.value);
+    conns.push(await whep(vid, sel.value, info ? info.num_audio_tracks : 0));
+  }
+};
+// Mixer: PGM/PVW (inputs or PIP 0), one PIP with a tiled set of sources.
+let VM = null, numInputs = 4;
+let pgmInput = 0, pvwInput = null, pgmPip = null, pvwPip = null, pipSources = [];
+const DIGITS = '1234567890', ROW = 'QWERTYUIOP';
+async function autoConfig() {
+  const r = await fetch(`/api/flows/${FLOW}`);
+  const j = await r.json(); const f = j.flow || j;
+  for (const b of f.blocks) { const ep = (b.runtime_data || {}).whep_endpoint_id; if (ep) epName[ep] = b.id; }
+  await loadStreams();
+  fetch(`/api/flows/${FLOW}/latency`).then(r => r.json()).then(l => $('plat').textContent = (l.min_latency_ns / 1e6).toFixed(0));
+  const vm = f.blocks.find(b => b.block_definition_id === 'builtin.vision_mixer');
+  if (vm) VM = vm.id;
+  // The mixer knows which WHEP outputs its PGM and multiview feed (through encoders etc.).
+  if (VM) {
+    const ep = async (kind) => {
+      try {
+        const r = await fetch(`/api/flows/${FLOW}/blocks/${VM}/${kind}-endpoint`);
+        const e = r.ok ? (await r.json()).endpoint : '';
+        return e ? e.replace(/^\/whep\//, '') : null;
+      } catch (_) { return null; }
+    };
+    const [pgmEp, mvEp] = await Promise.all([ep('pgm'), ep('multiview')]);
+    if (pgmEp) $('pgmSel').value = pgmEp;
+    if (mvEp) $('mvSel').value = mvEp;
+  }
+  if (VM) {
+    const st = await (await fetch(`/api/flows/${FLOW}/blocks/${VM}/state`)).json();
+    numInputs = (st.input_resolutions || []).length || numInputs;
+    buildButtons(); applyState(st);
+  }
+  $('connectBtn').click();
+}
+function buildButtons() {
+  $('angleBtns').innerHTML = Array.from({ length: numInputs }, (_, i) =>
+    `<button class="b" data-a="${i}">CAM ${i + 1} <kbd>${DIGITS[i]}</kbd></button>`).join('');
+  $('pipBtns').innerHTML = Array.from({ length: numInputs }, (_, i) =>
+    `<button class="b" data-p="${i}">CAM ${i + 1} <kbd>${ROW[i]}</kbd></button>`).join('');
+  document.querySelectorAll('[data-a]').forEach(b => b.onclick = () => cutToSource(+b.dataset.a));
+  document.querySelectorAll('[data-p]').forEach(b => b.onclick = () => togglePip(+b.dataset.p));
+}
+function applyState(st) {
+  pgmInput = st.program_input ?? null; pvwInput = st.preview_input ?? null;
+  pgmPip = st.program_pip ?? null; pvwPip = st.preview_pip ?? null;
+  const z = ((st.pips || [])[0] || {}).zones || [];
+  pipSources = z.length ? z[0].sources.slice() : [];
+  markAngle();
+}
+function markAngle() {
+  document.querySelectorAll('[data-a]').forEach(b => {
+    const i = +b.dataset.a;
+    b.classList.toggle('pgm', pgmPip == null && i === pgmInput);
+    b.classList.toggle('pvw', pvwPip == null && i === pvwInput && !(pgmPip == null && i === pgmInput));
+  });
+  document.querySelectorAll('[data-p]').forEach(b => b.classList.toggle('on', pipSources.includes(+b.dataset.p)));
+  $('pipBtn').classList.toggle('pgm', pgmPip === 0);
+  $('pipBtn').classList.toggle('pvw', pvwPip === 0 && pgmPip !== 0);
+}
+const vmApi = (path, method, body) => fetch(`/api/flows/${FLOW}/blocks/${VM}${path}`, {
+  method, headers: { 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) });
+async function refreshMixer() {
+  if (!VM) return;
+  try { applyState(await (await fetch(`/api/flows/${FLOW}/blocks/${VM}/state`)).json()); } catch (_) {}
+}
+// Put a source on PVW, then cut PVW to PGM straight away.
+async function cutTo(source) {
+  if (!VM) return;
+  const r = await vmApi('/preview', 'PUT', { source });
+  if (!r.ok) return;
+  const j = await r.json();
+  await vmApi('/transition', 'POST', {
+    from_input: j.program_input ?? 0, to_input: j.preview_input ?? 0, transition_type: 'cut', duration_ms: 0 });
+  refreshMixer();
+}
+const cutToSource = n => n < numInputs && cutTo({ input: n });
+const cutToPip = () => cutTo({ pip: 0 });
+async function take() {
+  if (!VM) return;
+  await vmApi('/transition', 'POST', {
+    from_input: pgmInput ?? 0, to_input: pvwInput ?? 0, transition_type: 'cut', duration_ms: 0 });
+  refreshMixer();
+}
+async function togglePip(n) {
+  if (!VM || n >= numInputs) return;
+  const src = pipSources.includes(n) ? pipSources.filter(x => x !== n) : [...pipSources, n];
+  pipSources = src; markAngle();
+  await vmApi('/pip/0', 'PUT', { bg: null, zones: src.length ? [{ sources: src }] : [], transforms: {} });
+  refreshMixer();
+}
+$('takeBtn').onclick = take;
+$('pipBtn').onclick = cutToPip;
+setInterval(refreshMixer, 500);
+autoConfig();
+
+// ---- read the bitstrip of each PGM frame
+const BITS = 20, BW = 48, BH = 32;
+const cv = document.createElement('canvas');
+cv.width = BITS * BW / 4; cv.height = BH / 4;
+const cx = cv.getContext('2d', { willReadFrequently: true });
+const lat = [];
+let frames = 0, lastFpsT = performance.now();
+function readStrip(video) {
+  const sx = video.videoWidth / 1920;
+  cx.drawImage(video, 0, 0, BITS * BW * sx, BH * sx, 0, 0, cv.width, cv.height);
+  const d = cx.getImageData(0, 0, cv.width, cv.height).data;
+  let n = 0;
+  const y = Math.floor(cv.height / 2);
+  for (let i = 0; i < BITS; i++) {
+    const x = Math.floor((i + 0.5) * BW / 4);
+    const o = (y * cv.width + x) * 4;
+    if (d[o] + d[o + 1] + d[o + 2] > 384) n |= (1 << i);
+  }
+  return n;
+}
+function onFrame(now, meta) {
+  const v = $('pgm');
+  if (v.videoWidth) {
+    const n = readStrip(v);
+    $('shownFrame').textContent = n;
+    frames++;
+    if (pending && n === pending.target) {
+      const ms = now - pending.t0;
+      lat.push(ms); pending = null;
+      updateLat(ms);
+    }
+  }
+  v.requestVideoFrameCallback(onFrame);
+}
+$('pgm').requestVideoFrameCallback(onFrame);
+function pct(a, p) { const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; }
+function updateLat(ms) {
+  $('latLast').textContent = ms.toFixed(0);
+  $('latP50').textContent = pct(lat, 0.5).toFixed(0);
+  $('latP95').textContent = pct(lat, 0.95).toFixed(0);
+  $('latN').textContent = lat.length;
+}
+$('latReset').onclick = () => { lat.length = 0; ['latLast','latP50','latP95'].forEach(i => $(i).textContent = '-'); $('latN').textContent = 0; };
+$('latCsv').onclick = () => {
+  const blob = new Blob(['ms\n' + lat.map(x => x.toFixed(1)).join('\n')], { type: 'text/csv' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'replay-latency.csv'; a.click();
+};
+let prev = null;
+setInterval(async () => {
+  const t = performance.now();
+  $('fps').textContent = (frames * 1000 / (t - lastFpsT)).toFixed(0);
+  frames = 0; lastFpsT = t;
+  const c = conns[0];
+  if (!c) return;
+  const st = await c.pc.getStats();
+  st.forEach(r => {
+    if (r.type !== 'inbound-rtp' || r.kind !== 'video') return;
+    if (prev) {
+      const n = r.jitterBufferEmittedCount - prev.jbn, f = r.framesDecoded - prev.fd;
+      if (n > 0) $('jb').textContent = ((r.jitterBufferDelay - prev.jbd) / n * 1000).toFixed(1);
+      if (f > 0) {
+        $('dec').textContent = ((r.totalDecodeTime - prev.td) / f * 1000).toFixed(1);
+        if (r.totalProcessingDelay != null) $('proc').textContent = ((r.totalProcessingDelay - prev.tp) / f * 1000).toFixed(1);
+      }
+    }
+    $('decimpl').textContent = (r.decoderImplementation || '?') + (r.powerEfficientDecoder ? ' (hw)' : '');
+    $('drop').textContent = r.framesDropped ?? '-';
+    prev = { jbn: r.jitterBufferEmittedCount, jbd: r.jitterBufferDelay, fd: r.framesDecoded, td: r.totalDecodeTime, tp: r.totalProcessingDelay };
+  });
+}, 1000);
+</script>
+</body>
+</html>

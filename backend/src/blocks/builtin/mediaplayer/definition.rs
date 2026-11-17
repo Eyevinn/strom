@@ -18,6 +18,53 @@ pub fn media_player_definition() -> BlockDefinition {
         category: "Inputs".to_string(),
         exposed_properties: vec![
             ExposedProperty {
+                name: "replay_group".to_string(),
+                label: "Replay Group".to_string(),
+                description: "Experimental. Set to enable replay mode: players with the same group share one jog/speed cursor."
+                    .to_string(),
+                property_type: PropertyType::String,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "replay_group".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
+            ExposedProperty {
+                name: "replay_source".to_string(),
+                label: "Replay Source".to_string(),
+                description: "Replay mode: directory with index.json and MPEG-TS segments (absolute or relative to media path)."
+                    .to_string(),
+                property_type: PropertyType::String,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "replay_source".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
+            ExposedProperty {
+                name: "replay_cache_s".to_string(),
+                label: "Replay Cache Ahead (s)".to_string(),
+                description: "Replay mode: seconds of decoded frames kept ahead of the cursor.".to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(3)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "replay_cache_s".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
+            ExposedProperty {
                 name: "decode".to_string(),
                 label: "Decode".to_string(),
                 description: "Decode to raw video/audio (true) or pass through encoded streams (false). Passthrough is more efficient for transcoding."
