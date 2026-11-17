@@ -267,8 +267,11 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
 
         // With ignore-pcr, tsdemux anchors its timestamps once, on the first PES
         // it parses. Re-anchor them from srtsrc's arrival timestamps instead.
+        // The budget is the latency srtsrc and tsdemux report: the configured
+        // SRT latency, whatever SRT negotiates with the peer.
         let arrival_clock = (ignore_pcr && arrival_retiming).then(|| {
-            let clock = Arc::new(ArrivalClock::new(arrival_margin_ms * 1_000_000));
+            let budget_ns = (latency.max(0) as i64 + tsdemux_latency.max(0) as i64) * 1_000_000;
+            let clock = Arc::new(ArrivalClock::new(arrival_margin_ms * 1_000_000, budget_ns));
             if let Some(pad) = srtsrc.static_pad("src") {
                 ts_arrival_clock::watch_arrivals(&pad, &clock);
             }
@@ -1082,7 +1085,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "arrival_retiming".to_string(),
                 label: "Retime From Arrival".to_string(),
-                description: "With Ignore PCR, place the stream's timestamps from when its data arrives. Without it, tsdemux anchors them once, on the first packet, and keeps any error in that packet for the whole connection (a caller that encoded before it connected arrives seconds late).".to_string(),
+                description: "With Ignore PCR, time the stream from when its data arrives. Off: tsdemux anchors once on the first packet and keeps that error for the whole connection.".to_string(),
                 property_type: PropertyType::Bool,
                 default_value: Some(PropertyValue::Bool(DEFAULT_TS_ARRIVAL_RETIMING)),
                 mapping: PropertyMapping {
@@ -1097,7 +1100,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "arrival_margin_ms".to_string(),
                 label: "Arrival Margin (ms)".to_string(),
-                description: "With Retime From Arrival: how far ahead of arrival the stream is stamped, to absorb jitter within a stream. A buffer that would still be late moves the timing forward on its own.".to_string(),
+                description: "With Retime From Arrival: how many ms before its deadline (arrival plus SRT latency) the latest stream is due, to absorb jitter. Late data moves it forward.".to_string(),
                 property_type: PropertyType::Int,
                 default_value: Some(PropertyValue::Int(DEFAULT_TS_ARRIVAL_MARGIN_MS)),
                 mapping: PropertyMapping {

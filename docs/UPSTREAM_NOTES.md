@@ -188,6 +188,58 @@ workaround can go once we move past that version.
 - **Found in:** [#1101](https://github.com/Eyevinn/strom/issues/1101),
   [#1132](https://github.com/Eyevinn/strom/pull/1132)
 
+### `tsdemux`: `ignore-pcr` anchors every stream once, on the first PES parsed
+- **Seen on:** GStreamer 1.28.6 (macOS, Homebrew), read in the 1.28 source. Linux not run.
+- **Symptom:** with `ignore-pcr=true`, the running time of every stream is the arrival of
+  the first PES with a PTS, plus that stream's PTS minus the first PES's PTS. A sender that
+  sends one stream earlier against its PTS than another (video ahead of AAC packed several
+  frames per PES) has the other stream stamped before its arrival, for the whole
+  connection. Measured with ffmpeg as the sender: audio 190 ms before its arrival, video
+  on time; with `-pes_payload_size 6000`, audio up to 430 ms before. A live mixer drops it.
+- **Repro:** untested as one line: a continuous ffmpeg MPEG-TS stream (H.264 + AAC,
+  `-pes_payload_size 6000`) behind an SRT listener, and
+  `srtsrc uri=srt://127.0.0.1:<port>?mode=caller ! tsdemux ignore-pcr=true ! ...`;
+  compare each stream's running time with the pipeline clock as it leaves `tsdemux`.
+- **Hint:** `mpegts_packetizer_pts_to_ts_internal` in `mpegtspacketizer.c`: with
+  `pcr_pid == 0x1fff` it takes `base_time = last_in_time` and `base_pcrtime = pts` from
+  the first PTS it converts, for every stream, and only moves them by whole spans of 5 s.
+- **Tests:** `mpegtssrt_arrival_retiming_test` (Strom retimes from arrival instead).
+- **Upstream:** not searched. Possibly intended: without a PCR there is no clock to follow.
+- **Found in:** [#1265](https://github.com/Eyevinn/strom/issues/1265)
+
+### `srtsrc`: stamps a connect burst up to its send time and reports the configured latency
+- **Seen on:** GStreamer 1.28.6 with libsrt 1.5.7 (macOS, Homebrew). Linux not run.
+- **Symptom:** `srtsrc` stamps a buffer `now - (srt_time - srctime)`. While data flows
+  evenly the stamp is within ~5 ms of the clock (measured), so the buffer is stamped at
+  delivery, yet the latency query reports the configured `latency` on top. The burst a
+  caller sends when it connects after encoding for a while is stamped up to 1.3 s behind
+  the clock (measured). The negotiated SRT latency (the larger of the two peers') is not
+  what the query reports either.
+- **Repro:** `GST_DEBUG=srtsrc:6`, compare `delay:` in the log with the configured
+  latency, then connect a caller that started 2 s before the listener.
+- **Hint:** `gst_srt_src_fill` in `gstsrtsrc.c`, and what libsrt puts in
+  `SRT_MSGCTRL.srctime` on receive. A guess: libsrt 1.5 gives the packet's play time, so
+  the delay is close to 0 except for packets already overdue. Not checked in libsrt.
+- **Tests:** `mpegtssrt_arrival_retiming_test` (Strom takes arrival from the pipeline clock).
+- **Upstream:** not searched.
+- **Found in:** [#1265](https://github.com/Eyevinn/strom/issues/1265)
+
+### `srtsrc`: a stop right after a caller leaves hangs with `keep-listening`
+- **Seen on:** GStreamer 1.28.6 with libsrt 1.5.7 (macOS, Homebrew). Linux not run.
+- **Symptom:** a listener `srtsrc` with `keep-listening=true`, set to `NULL` within moments
+  of its caller disconnecting, can hang in `set_state` for good. Seen once in about 15
+  runs of a test that stops the caller and then the receiver at once: the streaming thread
+  waits in `gst_srt_object_wait_caller`, the stopping thread in `gst_pad_stop_task`.
+- **Repro:** untested as one line: the test below without its 500 ms pause, in a loop.
+- **Hint:** `gst_srt_src_fill` in `gstsrtsrc.c`: on a read of 0 bytes with `keep-listening`
+  it calls `gst_srt_src_stop` and `gst_srt_src_start`, and `gst_srt_object_open_internal`
+  calls `g_cancellable_reset`. A stop whose `gst_srt_object_unlock` cancelled before that
+  reset is wiped, and `wait_caller` then waits on `sock_cond` with nobody to signal it. A
+  guess from the source; the race window was not measured.
+- **Tests:** `mpegtssrt_arrival_retiming_test` pauses 500 ms between the two stops.
+- **Upstream:** not searched.
+- **Found in:** [#1265](https://github.com/Eyevinn/strom/issues/1265)
+
 ### `srtsink`: a caller without a peer blocks the streaming thread
 - **Seen on:** GStreamer 1.28.2 (Linux) and 1.28.6 (macOS, Homebrew). 1.22 read in the source, not run.
 - **Symptom:** an `srtsink` in caller mode with `auto-reconnect=true` (the default) holds

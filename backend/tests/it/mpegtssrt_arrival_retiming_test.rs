@@ -3,8 +3,10 @@
 //!
 //! Each test builds the real block, feeds it from an in-process H.264 + AAC
 //! caller over SRT, and measures every buffer's *lead* at the block's outputs:
-//! its running time minus the latest SRT arrival. Lead is what the stream adds
-//! as delay downstream; below zero, a sync sink drops the buffer.
+//! its running time minus the latest SRT arrival (srtsrc stamps at delivery).
+//! The block may spend the latency it reports upstream (the SRT latency), so a
+//! buffer is late only below `-BUDGET_MS`. The latest stream sits `MARGIN_MS`
+//! before that deadline (#1265).
 //!
 //! A caller that starts before the listener blocks in `srtsink` until it can
 //! connect, then sends the start of its encode followed by live media. tsdemux
@@ -43,6 +45,13 @@ const REQUIRED: &[&str] = &[
     "fakesink",
 ];
 
+/// The SRT latency the block reports, its default.
+const BUDGET_MS: i64 = strom_types::DEFAULT_SRT_LATENCY_MS as i64;
+/// The block's default arrival margin.
+const MARGIN_MS: i64 = strom_types::DEFAULT_TS_ARRIVAL_MARGIN_MS;
+/// Where the latest stream's earliest buffers land against their arrival.
+const TARGET_MS: i64 = MARGIN_MS - BUDGET_MS;
+
 /// How long the caller runs before the listener exists.
 const EARLY_START: Duration = Duration::from_secs(2);
 
@@ -60,6 +69,8 @@ struct Sample {
     media: &'static str,
     at_ms: i64,
     lead_ms: i64,
+    /// Running time minus PTS (ms): changes only when the pad offset does.
+    shift_ms: i64,
 }
 
 struct Receiver {
@@ -147,11 +158,9 @@ fn build_receiver(port: u16, decode: bool, retiming: bool) -> Receiver {
             gst::PadProbeType::BUFFER,
             move |pad, info| {
                 let now = arrival.load(std::sync::atomic::Ordering::Relaxed);
-                let rt = info
-                    .buffer()
-                    .and_then(|b| b.pts())
-                    .and_then(|pts| running_time(pad, pts));
-                if let (true, Some(rt)) = (now >= 0, rt) {
+                let pts = info.buffer().and_then(|b| b.pts());
+                let rt = pts.and_then(|pts| running_time(pad, pts));
+                if let (true, Some(rt), Some(pts)) = (now >= 0, rt, pts) {
                     let _ = first_at.compare_exchange(
                         -1,
                         now,
@@ -163,6 +172,7 @@ fn build_receiver(port: u16, decode: bool, retiming: bool) -> Receiver {
                         media,
                         at_ms: (now - t0) / 1_000_000,
                         lead_ms: (rt - now) / 1_000_000,
+                        shift_ms: (rt - pts.nseconds() as i64) / 1_000_000,
                     });
                 }
                 gst::PadProbeReturn::Ok
@@ -177,14 +187,21 @@ fn build_receiver(port: u16, decode: bool, retiming: bool) -> Receiver {
     }
 }
 
+/// x264 settings for the caller: no B-frames, or two of them.
+const NO_B_FRAMES: &str = "tune=zerolatency speed-preset=ultrafast";
+const B_FRAMES: &str = "speed-preset=superfast bframes=2 b-adapt=false rc-lookahead=5";
+
 fn start_caller(port: u16) -> gst::Pipeline {
+    start_caller_with(port, NO_B_FRAMES)
+}
+
+fn start_caller_with(port: u16, x264: &str) -> gst::Pipeline {
     let caller = gst::parse::launch(&format!(
         "videotestsrc is-live=true ! video/x-raw,width=320,height=180,framerate=30/1 \
-         ! x264enc tune=zerolatency speed-preset=ultrafast key-int-max=30 ! h264parse ! mux. \
+         ! x264enc {x264} key-int-max=30 ! h264parse ! mux. \
          audiotestsrc is-live=true ! audio/x-raw,rate=48000,channels=2 ! avenc_aac ! aacparse ! mux. \
          mpegtsmux name=mux alignment=7 \
-         ! srtsink name=caller uri=srt://127.0.0.1:{}?mode=caller latency=125",
-        port
+         ! srtsink name=caller uri=srt://127.0.0.1:{port}?mode=caller latency=125"
     ))
     .expect("caller pipeline")
     .downcast::<gst::Pipeline>()
@@ -198,6 +215,16 @@ fn stop(pipeline: &gst::Pipeline, srt_element: Option<gst::Element>) {
         let _ = e.set_state(gst::State::Null);
     }
     pipeline.set_state(gst::State::Null).expect("to NULL");
+}
+
+/// Stops the caller, waits, then the receiver. With `keep-listening`, srtsrc
+/// restarts its listener when the caller leaves, and the restart resets the
+/// cancellable a stop has just cancelled: a stop that lands in that window
+/// hangs in `gst_srt_object_wait_caller` forever (see `docs/UPSTREAM_NOTES.md`).
+fn stop_caller_then_receiver(caller: &gst::Pipeline, r: &Receiver) {
+    stop(caller, caller.by_name("caller"));
+    std::thread::sleep(Duration::from_millis(500));
+    stop(&r.pipeline, Some(r.srtsrc.clone()));
 }
 
 fn summary(samples: &[Sample]) -> String {
@@ -237,8 +264,7 @@ fn early_caller_is_retimed(decode: bool) {
     let r = build_receiver(port, decode, true);
     r.pipeline.set_state(gst::State::Playing).unwrap();
     std::thread::sleep(Duration::from_secs(5));
-    stop(&caller, caller.by_name("caller"));
-    stop(&r.pipeline, Some(r.srtsrc.clone()));
+    stop_caller_then_receiver(&caller, &r);
 
     let samples = r.samples.lock().unwrap().clone();
     let media: std::collections::HashSet<_> = samples.iter().map(|s| s.media).collect();
@@ -251,15 +277,21 @@ fn early_caller_is_retimed(decode: bool) {
     // Without retiming, every buffer leads by about EARLY_START (~2000 ms).
     // Decoded output is measured after the decoder, so its lead also loses the
     // decode time, which varies with load.
-    let lowest = if decode { -300 } else { -50 };
-    let after = leads_from(&samples, 1500);
+    let lowest = if decode { TARGET_MS - 250 } else { -BUDGET_MS };
+    // The stale head (the encode before the connect) is late by design. Decoded,
+    // its last frames can leave the decoder after 1.5 s under load (seen at
+    // 1.54 s with the integration suite in parallel), so look from 2.5 s.
+    let from_ms = if decode { 2500 } else { 1500 };
+    let after = leads_from(&samples, from_ms);
     assert!(
         !after.is_empty(),
-        "no buffers after 1.5 s: {}",
+        "no buffers after {from_ms} ms: {}",
         summary(&samples)
     );
     assert!(
-        after.iter().all(|&l| (lowest..=400).contains(&l)),
+        after
+            .iter()
+            .all(|&l| (lowest..=TARGET_MS + 400).contains(&l)),
         "a caller that encoded {} ms before connecting is still placed off its \
          arrival: {}",
         EARLY_START.as_millis(),
@@ -277,8 +309,10 @@ fn a_caller_that_encoded_before_connecting_is_retimed_decoded() {
     early_caller_is_retimed(true);
 }
 
-/// A caller that connects to a running listener: within the margin from the
-/// start, and never late.
+/// A caller that connects to a running listener: never late, and the latest
+/// stream no later than the margin before its deadline. Retiming against the
+/// raw arrival put it `+MARGIN_MS` after arrival, on top of the SRT latency
+/// the block reports (#1265).
 #[test]
 fn a_clean_caller_stays_within_the_margin() {
     gst::init().unwrap();
@@ -291,15 +325,29 @@ fn a_clean_caller_stays_within_the_margin() {
     std::thread::sleep(Duration::from_millis(500));
     let caller = start_caller(port);
     std::thread::sleep(Duration::from_secs(4));
-    stop(&caller, caller.by_name("caller"));
-    stop(&r.pipeline, Some(r.srtsrc.clone()));
+    stop_caller_then_receiver(&caller, &r);
 
     let samples = r.samples.lock().unwrap().clone();
     let leads = leads_from(&samples, 500);
     assert!(!leads.is_empty(), "no buffers: {}", summary(&samples));
     assert!(
-        leads.iter().all(|&l| (-50..=300).contains(&l)),
-        "a clean caller left the margin: {}",
+        leads
+            .iter()
+            .all(|&l| (-BUDGET_MS..=TARGET_MS + 200).contains(&l)),
+        "a clean caller missed its deadline or left the margin: {}",
+        summary(&samples)
+    );
+    let mut audio: Vec<i64> = samples
+        .iter()
+        .filter(|s| s.media == "audio" && s.at_ms >= 1500)
+        .map(|s| s.lead_ms)
+        .collect();
+    audio.sort();
+    let lowest_audio = audio[audio.len() / 20];
+    assert!(
+        lowest_audio <= TARGET_MS + 40,
+        "the latest stream waits {lowest_audio} ms past arrival, more than the \
+         margin before its deadline ({TARGET_MS} ms): {}",
         summary(&samples)
     );
 }
@@ -327,8 +375,7 @@ fn a_clean_caller_after_a_corrected_one_is_not_late() {
 
     let second = start_caller(port);
     std::thread::sleep(Duration::from_secs(4));
-    stop(&second, second.by_name("caller"));
-    stop(&r.pipeline, Some(r.srtsrc.clone()));
+    stop_caller_then_receiver(&second, &r);
 
     let samples = r.samples.lock().unwrap().clone();
     let second_first = samples
@@ -339,8 +386,60 @@ fn a_clean_caller_after_a_corrected_one_is_not_late() {
     let after = leads_from(&samples, second_first);
     assert!(!after.is_empty(), "{}", summary(&samples));
     assert!(
-        after.iter().all(|&l| (-50..=400).contains(&l)),
+        after
+            .iter()
+            .all(|&l| (-BUDGET_MS..=TARGET_MS + 400).contains(&l)),
         "the second caller is placed off its arrival: {}",
         summary(&samples)
+    );
+}
+
+/// Video with B-frames leaves tsdemux in decode order, its PTS stepping back
+/// at every B-frame. Every buffer of every stream must carry the one offset:
+/// compared by PTS, each B-frame raised video's offset and the next P-frame
+/// lowered it, so B-frames went out at the wrong time and video drifted 40 to
+/// 120 ms behind audio.
+#[test]
+fn b_frames_get_the_offset_of_every_other_stream() {
+    gst::init().unwrap();
+    if !common::plugins_available(REQUIRED) {
+        return;
+    }
+    let port = srt_port();
+    let r = build_receiver(port, false, true);
+    r.pipeline.set_state(gst::State::Playing).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let caller = start_caller_with(port, B_FRAMES);
+    std::thread::sleep(Duration::from_secs(5));
+    stop_caller_then_receiver(&caller, &r);
+
+    let samples = r.samples.lock().unwrap().clone();
+    let shifts = |media: &str| -> Vec<i64> {
+        samples
+            .iter()
+            .filter(|s| s.media == media && s.at_ms >= 2500)
+            .map(|s| s.shift_ms)
+            .collect()
+    };
+    let (video, audio) = (shifts("video"), shifts("audio"));
+    assert!(
+        !video.is_empty() && !audio.is_empty(),
+        "both outputs carry media: {}",
+        summary(&samples)
+    );
+    let mut sorted = audio.clone();
+    sorted.sort();
+    let audio_shift = sorted[sorted.len() / 2];
+    let off: Vec<i64> = video
+        .iter()
+        .map(|v| v - audio_shift)
+        .filter(|d| d.abs() > 10)
+        .collect();
+    assert!(
+        off.is_empty(),
+        "{} of {} video buffers carry another offset than audio (ms off): {:?}",
+        off.len(),
+        video.len(),
+        &off[..off.len().min(30)]
     );
 }
