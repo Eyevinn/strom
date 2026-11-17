@@ -1,4 +1,4 @@
-//! Replay mode of the media player (spike).
+//! Replay mode of the media player.
 //!
 //! With `replay_group` set, the block does not play a playlist. It holds
 //! decoded frames of a segmented recording around a cursor shared by every

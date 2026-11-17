@@ -1,4 +1,4 @@
-//! Replay control (spike): a WebSocket per replay group and a jog test page.
+//! Replay control: a WebSocket per replay group and the replay control page.
 //!
 //! Commands are JSON objects tagged by `cmd` (see `replay::timeline::Command`),
 //! with an optional `seq` echoed in the ack. The socket also streams the group
@@ -14,11 +14,11 @@ use futures::{SinkExt, StreamExt};
 use std::time::Duration;
 use strom_types::FlowId;
 
-const REPLAY_JOG_HTML: &str = include_str!("../../static/replay-jog.html");
+const REPLAY_HTML: &str = include_str!("../../static/replay.html");
 
 /// GET /player/replay/{flow_id}/{group}
 pub async fn replay_page(Path((_flow_id, _group)): Path<(String, String)>) -> Html<&'static str> {
-    Html(REPLAY_JOG_HTML)
+    Html(REPLAY_HTML)
 }
 
 /// GET /api/replay/{flow_id}/{group}/ws

@@ -1,4 +1,4 @@
-//! Shared replay timeline (spike).
+//! Shared replay timeline.
 //!
 //! One timeline per (flow, replay group) owns the cursor T and the speed. T is
 //! a function of the flow's running time, `T(rt) = t0 + speed * (rt - rt0)`,

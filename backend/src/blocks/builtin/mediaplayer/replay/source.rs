@@ -1,4 +1,4 @@
-//! Segment index for replay mode (spike).
+//! Segment index for replay mode.
 //!
 //! Reads a TAMS-like `index.json` from a directory of MPEG-TS segments. Every
 //! angle of a replay group shares one timeline, so a frame number means the

@@ -1,4 +1,4 @@
-//! Replay player engine (spike): frame store + output tick.
+//! Replay player engine: frame store + output tick.
 //!
 //! - Decode workers turn whole segments into decoded frames, as fast as they
 //!   can, into a cache keyed by segment.
