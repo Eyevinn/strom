@@ -795,18 +795,14 @@ impl StromApp {
                                                     .strong(),
                                                 );
                                                 ui.separator();
-                                                for (element_id, data) in &problem_elements {
+                                                for data in &problem_elements {
                                                     let health = data.health();
                                                     ui.horizontal(|ui| {
                                                         ui.colored_label(
                                                             health.color(),
                                                             health.icon(),
                                                         );
-                                                        ui.label(format!(
-                                                            "{}: {:.1}%",
-                                                            element_id,
-                                                            data.avg_proportion * 100.0
-                                                        ));
+                                                        ui.label(data.describe());
                                                     });
                                                 }
                                             });
