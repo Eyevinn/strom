@@ -138,6 +138,41 @@ workaround can go once we move past that version.
   measured capture delay.
 - **Found in:** #1183.
 
+### `GstVideoAggregator`: late input frames are dropped without a QoS message
+- **Seen on:** GStreamer 1.28 (source read, `gstvideoaggregator.c` and `gstaggregator.c`).
+  Applies to `compositor` and `glvideomixerelement`. Other versions not checked.
+- **Symptom:** odd behaviour rather than a bug. In live mode the aggregator drops every
+  queued input buffer that ends before its next output frame
+  (`gst_video_aggregator_pad_skip_buffer`, run from `gst_aggregator_pad_skip_buffers` each
+  cycle), with only a log line. Its only QoS message is about its own late output. An input
+  that reaches the mixer later than its latency window disappears without a signal on the
+  bus.
+- **Repro:** two live `videotestsrc` into `compositor`, one of them with timestamps shifted
+  1 s into the past; `-m` shows no `qos` message for that pad. Untested as a `gst-launch`
+  line; the Strom test below measures it on the vision mixer.
+- **Hint:** the skip path could post a QoS message from the pad (with processed/dropped
+  stats), as `audioaggregator` does for its late input.
+- **Tests:** `late_input_posts_qos_for_its_mixer_pad_only` (the Strom workaround: the vision
+  mixer counts the drops and posts the QoS itself).
+- **Upstream:** not searched.
+- **Found in:** [#1265](https://github.com/Eyevinn/strom/issues/1265).
+
+### `GstVideoAggregator`: abort on a live input with a negative pad offset
+- **Seen on:** GStreamer 1.28.6, macOS. Other versions and platforms not checked.
+- **Symptom:** measured once: `gst_pad_set_offset(-1 s)` on the src pad of a capsfilter
+  behind a live `videotestsrc` that feeds `compositor` aborts the process with
+  `gst_video_aggregator_fill_queues: assertion failed: (start_running_time != -1 && end_running_time != -1)`.
+- **Repro:** untested sketch: a live `videotestsrc ! capsfilter` into a `compositor`, the
+  capsfilter's src pad given an offset of -1 s before PLAYING.
+- **Hint:** a guess. A negative offset larger than the segment's base moves the segment's
+  `offset`, so timestamps between `start` and `start + offset` have no running time.
+  `fill_queues` only checks the buffer against `segment.start` before converting, then
+  asserts on the conversion.
+- **Tests:** none. The Strom late-input test shifts timestamps with a probe instead.
+- **Upstream:** not searched.
+- **Found in:** [#1265](https://github.com/Eyevinn/strom/issues/1265), while writing the
+  vision mixer late-input test.
+
 ## HTTP
 
 ### libsoup HTTP/2: a paused download reads the whole file into memory
