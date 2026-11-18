@@ -335,8 +335,6 @@ fn setup_audio_decode_chain(
                             stream_num_clone,
                             liveadder_sink.name()
                         );
-                        // Enable QoS messages on this pad so we can see if buffers are being dropped
-                        liveadder_sink.set_property("qos-messages", true);
                         let audioresample_src = audioresample.static_pad("src").unwrap();
                         if let Err(e) = audioresample_src.link(&liveadder_sink) {
                             error!("Failed to link audioresample to liveadder: {:?}", e);

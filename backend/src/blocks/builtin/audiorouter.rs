@@ -184,6 +184,7 @@ impl BlockBuilder for AudioRouterBuilder {
                         .map_err(|e| {
                             BlockBuildError::ElementCreation(format!("audiomixer: {}", e))
                         })?;
+                    crate::gst::aggregator_qos::report_late_input_drops(&mixer);
 
                     info!(
                         "Creating audiomixer for output {} channel {} (multiple inputs)",

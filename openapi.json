@@ -12475,7 +12475,7 @@
                   "avg_proportion": {
                     "type": "number",
                     "format": "double",
-                    "description": "Average proportion (< 1.0 = falling behind)"
+                    "description": "Average proportion the element reported. Above 1.0 it is too slow,\nbelow 1.0 it keeps up with time to spare. Not a drop rate."
                   },
                   "block_id": {
                     "type": [
@@ -12483,6 +12483,12 @@
                       "null"
                     ],
                     "description": "Block ID if element is inside a block, None if standalone element"
+                  },
+                  "dropped_in_period": {
+                    "type": "integer",
+                    "format": "int64",
+                    "description": "Amount dropped in the period, in `stats_format` units. Falls back to\n`event_count` when the element does not report a dropped count.",
+                    "minimum": 0
                   },
                   "element_id": {
                     "type": "string",
@@ -12495,7 +12501,7 @@
                   "event_count": {
                     "type": "integer",
                     "format": "int64",
-                    "description": "Number of QoS events in aggregation period",
+                    "description": "Number of QoS messages in the aggregation period (about one per second).\nAn element posts one when it drops late data or lowers its quality.",
                     "minimum": 0
                   },
                   "flow_id": {
@@ -12511,7 +12517,7 @@
                   },
                   "is_falling_behind": {
                     "type": "boolean",
-                    "description": "Whether pipeline is falling behind (avg_proportion < 1.0)"
+                    "description": "Whether the element dropped late data in the period\n(`dropped_in_period > 0`). In Strom 0.8.4 and earlier this was\n`avg_proportion < 1.0`, which is true when an element keeps up."
                   },
                   "max_proportion": {
                     "type": "number",
@@ -12523,11 +12529,41 @@
                     "format": "double",
                     "description": "Minimum proportion seen"
                   },
+                  "pad_name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Input pad the QoS message came from, when a pad posted it: an\naggregator (`audiomixer`) reports drops per input, e.g. `sink_1`."
+                  },
+                  "stats_format": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Unit of the processed and dropped counts: `buffers`, `samples`,\n`frames`, `bytes` or `default`. None when not reported."
+                  },
+                  "total_dropped": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64",
+                    "description": "Cumulative amount the element (or pad) dropped, in `stats_format`\nunits. None when the element does not report it.",
+                    "minimum": 0
+                  },
                   "total_processed": {
                     "type": "integer",
                     "format": "int64",
-                    "description": "Total buffers processed",
+                    "description": "Cumulative amount the element processed, in `stats_format` units\n(0 when the element does not report it). In Strom 0.8.4 and earlier\nthis field carried the dropped count by mistake.",
                     "minimum": 0
+                  },
+                  "upstream_element": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Element linked to `pad_name`, which tells which input was late\n(e.g. `mixer:to_main_queue_1`)."
                   }
                 }
               },

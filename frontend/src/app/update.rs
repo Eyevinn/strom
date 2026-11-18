@@ -813,17 +813,15 @@ impl eframe::App for StromApp {
                         }
                         StromEvent::QoSStats {
                             flow_id,
-                            block_id,
                             element_id,
                             element_name,
-                            internal_element_type,
                             event_count,
-                            avg_proportion,
-                            min_proportion,
-                            max_proportion,
-                            avg_jitter,
-                            total_processed,
                             is_falling_behind,
+                            pad_name,
+                            upstream_element,
+                            dropped_in_period,
+                            stats_format,
+                            ..
                         } => {
                             // Grace period: ignore QoS events in first 3 seconds after flow start
                             // (transient issues during startup are common and not indicative of real problems)
@@ -842,47 +840,33 @@ impl eframe::App for StromApp {
                                 continue;
                             }
 
-                            // Update QoS store
-                            self.qos_stats.update(
-                                flow_id,
-                                crate::qos_monitor::QoSElementData {
-                                    element_id: element_id.clone(),
-                                    block_id: block_id.clone(),
-                                    element_name: element_name.clone(),
-                                    internal_element_type: internal_element_type.clone(),
-                                    avg_proportion,
-                                    min_proportion,
-                                    max_proportion,
-                                    avg_jitter_ns: avg_jitter,
-                                    event_count,
-                                    total_processed,
-                                    is_falling_behind,
-                                    last_update: instant::Instant::now(),
-                                },
-                            );
+                            let data = crate::qos_monitor::QoSElementData {
+                                element_id: element_id.clone(),
+                                element_name,
+                                pad_name,
+                                upstream_element,
+                                event_count,
+                                dropped_in_period,
+                                stats_format,
+                                last_update: instant::Instant::now(),
+                            };
+                            let health = data.health();
+                            let description = data.describe();
+                            self.qos_stats.update(flow_id, data);
 
-                            // Log QoS issues (only when falling behind or recovering)
+                            // Log drops of late data
                             if is_falling_behind {
-                                let display_name = if let Some(ref internal) = internal_element_type
-                                {
-                                    format!("{} ({})", element_name, internal)
-                                } else {
-                                    element_name.clone()
-                                };
-                                let message = format!(
-                                    "QoS: {} falling behind ({:.1}%, {} events)",
-                                    display_name,
-                                    avg_proportion * 100.0,
-                                    event_count
-                                );
                                 self.add_log_entry(LogEntry::new(
-                                    if avg_proportion < 0.8 {
+                                    if health == crate::qos_monitor::QoSHealth::Critical {
                                         LogLevel::Error
                                     } else {
                                         LogLevel::Warning
                                     },
-                                    message,
-                                    Some(element_id.clone()),
+                                    format!(
+                                        "QoS: {} of late data ({} events)",
+                                        description, event_count
+                                    ),
+                                    Some(element_id),
                                     Some(flow_id),
                                 ));
                             }
