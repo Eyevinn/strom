@@ -152,6 +152,8 @@ pub struct VisionMixerOverlayState {
     /// buffer to the dist compositor, or [`NO_MEDIA`] when it never has.
     /// Written from a BUFFER pad probe, so it stays one relaxed store.
     input_last_buffer_ms: Vec<AtomicU64>,
+    /// Late-dropped input frames, reported as QoS from the overlay timer.
+    pub late_input: Arc<super::late_input::LateInputQos>,
 }
 
 /// Initial PiP runtime state passed to [`VisionMixerOverlayState::new`].
@@ -259,6 +261,9 @@ impl VisionMixerOverlayState {
             pgm_peak: AtomicU8::new(0),
             pgm_decay: AtomicU8::new(0),
             input_last_buffer_ms: (0..num_inputs).map(|_| AtomicU64::new(NO_MEDIA)).collect(),
+            late_input: Arc::new(super::late_input::LateInputQos::new(
+                num_inputs + num_dsk_inputs,
+            )),
         }
     }
 
@@ -1480,8 +1485,8 @@ pub fn start_overlay_timer(
             // pipeline actually finalizes, so a leaked strong reference — the
             // case teardown already logs "still alive after drop" for — defeats
             // this too.
-            let appsrc = match renderer.lock() {
-                Ok(r) => r.appsrc.clone(),
+            let (appsrc, late_input) = match renderer.lock() {
+                Ok(r) => (r.appsrc.clone(), Arc::clone(&r.state.late_input)),
                 Err(_) => return,
             };
             let orphaned = move || appsrc.parent().is_none();
@@ -1509,6 +1514,9 @@ pub fn start_overlay_timer(
             // Deadline-based loop: advance by frame_interval per tick so that
             // render/push time doesn't accumulate as drift.
             let mut next_tick = std::time::Instant::now();
+            // Late-dropped input frames are reported once a second at most.
+            let qos_interval = std::time::Duration::from_secs(1);
+            let mut next_qos = next_tick + qos_interval;
             loop {
                 next_tick += frame_interval;
                 let now = std::time::Instant::now();
@@ -1526,6 +1534,11 @@ pub fn start_overlay_timer(
                 }
                 if let Ok(mut r) = renderer.lock() {
                     r.render_if_dirty();
+                }
+                let now = std::time::Instant::now();
+                if now >= next_qos {
+                    next_qos = now + qos_interval;
+                    late_input.post_dropped();
                 }
             }
         });

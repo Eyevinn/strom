@@ -27,6 +27,7 @@ mod builder;
 mod definition;
 mod elements;
 pub(crate) mod geometry;
+pub(crate) mod late_input;
 pub(crate) mod layout;
 pub mod overlay;
 pub(crate) mod properties;

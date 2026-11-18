@@ -629,6 +629,7 @@ pub(super) fn build_gpu_pipeline(
                 &activity_state,
                 num_inputs,
             );
+            super::super::late_input::install(&block_id, &mixer, &activity_state.late_input);
         }));
     }
 

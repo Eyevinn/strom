@@ -633,6 +633,7 @@ pub(super) fn build_cpu_pipeline(
                 &activity_state,
                 num_inputs,
             );
+            super::super::late_input::install(&block_id, &mixer, &activity_state.late_input);
         }));
     }
     let bus_message_handler = Some(audio_meter::build_meter_bus_handler(
