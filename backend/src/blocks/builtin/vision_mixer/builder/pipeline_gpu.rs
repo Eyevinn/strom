@@ -389,13 +389,16 @@ pub(super) fn build_gpu_pipeline(
         let q_thumb_id = p.id(&format!("queue_to_mv_thumb_{}", i));
         let q_pvw_id = p.id(&format!("queue_to_mv_pvw_{}", i));
         elems.push((q_dist_id.clone(), elements::make_queue(&q_dist_id)?));
-        elems.push((q_thumb_id.clone(), elements::make_queue(&q_thumb_id)?));
-        elems.push((q_pvw_id.clone(), elements::make_queue(&q_pvw_id)?));
+        elems.push((
+            q_thumb_id.clone(),
+            elements::make_monitor_queue(&q_thumb_id)?,
+        ));
+        elems.push((q_pvw_id.clone(), elements::make_monitor_queue(&q_pvw_id)?));
 
         // One queue per PiP tile per input — feeds the virtual PiP thumbnail pads on mv_comp.
         for pip_idx in 0..p.num_pips {
             let q_pip_id = p.id(&format!("queue_to_mv_pip_{}_{}", pip_idx, i));
-            elems.push((q_pip_id.clone(), elements::make_queue(&q_pip_id)?));
+            elems.push((q_pip_id.clone(), elements::make_monitor_queue(&q_pip_id)?));
         }
 
         // queue → glupload → glcolorconvert → [fx_look] → tee
