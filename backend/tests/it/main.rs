@@ -62,6 +62,7 @@ pub mod media_player_error_event_test;
 pub mod media_player_hls_test;
 pub mod media_upload_test;
 pub mod mediaplayer_gl_context_test;
+pub mod mixer_input_eos_test;
 pub mod mpegtssrt_absent_caller_test;
 pub mod mpegtssrt_arrival_retiming_test;
 pub mod mpegtssrt_input_audio_pid_order_test;
