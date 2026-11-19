@@ -270,7 +270,7 @@ fn add_block(pipeline: &gst::Pipeline, preference: &str) -> (gst::Pad, gst::Pad)
         .map(|f| f.name().to_string());
     assert_eq!(
         converter.as_deref(),
-        Some("videoconvert"),
+        Some(strom::gpu::video_convert_factory()),
         "the block built {:?} in front of its encoder; \
          autovideoconvert turns CUDA memory into GL RGBA nvh264enc cannot take (#1104)",
         converter

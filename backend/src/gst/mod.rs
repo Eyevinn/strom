@@ -33,6 +33,9 @@ pub mod ts_arrival_clock;
 pub(crate) mod underlay;
 pub mod video_adapt;
 pub mod video_input_bridge;
+/// vImage-backed video conversion. macOS only: the element wraps Accelerate.
+#[cfg(target_os = "macos")]
+pub mod vimage;
 pub mod volume_ramp;
 pub mod whep_probe;
 
