@@ -1,3 +1,4 @@
+# shellcheck shell=bash disable=SC2034
 # Runtime environment for cefsrc (gstcefsrc) on headless Linux.
 #
 # Sourced, not executed. Shared by the strom-full entrypoint and the CI job

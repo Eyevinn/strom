@@ -272,9 +272,11 @@ jobs:
           SHA256=$(sed -n 's/^ARG GSTCEFSRC_SHA256_AMD64=//p' docker/strom-full/Dockerfile)
           test -n "$VERSION"
           test -n "$SHA256"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
-          echo "tarball=$RUNNER_TEMP/gstcefsrc-$VERSION-linux-amd64.tar.gz" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$VERSION"
+            echo "sha256=$SHA256"
+            echo "tarball=$RUNNER_TEMP/gstcefsrc-$VERSION-linux-amd64.tar.gz"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Cache gstcefsrc tarball
         uses: actions/cache@v5
