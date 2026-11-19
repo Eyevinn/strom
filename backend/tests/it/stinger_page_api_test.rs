@@ -13,7 +13,7 @@ use strom_types::stinger::{
 use strom_types::{Flow, Link, PropertyValue as PV};
 use tower::ServiceExt;
 
-pub mod common;
+use crate::common;
 
 const URL: &str = "https://example.com/stinger.html";
 

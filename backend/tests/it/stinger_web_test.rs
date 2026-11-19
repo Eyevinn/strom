@@ -12,10 +12,8 @@
 //! CEF initialises once per process and is slow the first time, so every
 //! wait polls against a generous deadline, and the tests run serially.
 
-pub mod common;
-#[path = "common/stinger.rs"]
-pub mod rig;
-
+use crate::common;
+use crate::stinger as rig;
 use base64::Engine;
 use gstreamer as gst;
 use gstreamer::prelude::*;
