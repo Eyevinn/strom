@@ -11218,11 +11218,11 @@
           "source_kind": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/StingerSourceKind",
                 "description": "What kind of block that is."
+              },
+              {
+                "type": "null"
               }
             ]
           }
