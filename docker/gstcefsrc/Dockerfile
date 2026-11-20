@@ -15,13 +15,16 @@
 
 ARG TARGETARCH
 
-# CEF 144 (Chrome runtime). The MemoryInfra SIGILL that could otherwise crash
+# CEF 158 (Chrome runtime), the newest stable. GPU frame handover needs 156 or
+# later, the first with working OnAcceleratedPaint on Linux for us: CEF 144 hands over linear GBM buffers NVIDIA cannot render
+# into ("Unable to initialize SkSurface"), fixed upstream in CEF c5b06184bd
+# (#4237); see docs/UPSTREAM_NOTES.md. The MemoryInfra SIGILL that could otherwise crash
 # libcef in long-running processes is handled at runtime by LD_PRELOADing
 # libmallinfo_shim.so (see docker/strom-full/entrypoint.sh and
 # docs/archive/CEF_SIGILL_CRASH.md). The shim interposes glibc's legacy int-based
 # mallinfo(), whose fields overflow when the CEF process arena > 2 GiB and
 # trigger a Chromium CHECK() on a failed checked_cast<size_t>.
-ARG CEF_VERSION=144.0.21+g4f5b28c+chromium-144.0.7559.248
+ARG CEF_VERSION=158.0.3+g8c29be2+chromium-158.0.8127.18
 
 # Current gstcefsrc master (pinned to a full SHA for reproducibility).
 ARG GSTCEFSRC_REF=b63340852fc93b0ab67b07200e1ff44f59ba6769
@@ -47,6 +50,8 @@ RUN apt-get update && apt-get install -y \
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
     libgstreamer-plugins-bad1.0-dev \
+    # GPU frame handover (gl-output.patch): GstGL and EGL
+    libegl-dev \
     # CEF dependencies
     libgtk-3-dev \
     libnss3-dev \
@@ -106,6 +111,18 @@ RUN cd /build/gstcefsrc && git apply /build/isolated-context.patch
 COPY strict-network.patch /build/strict-network.patch
 RUN cd /build/gstcefsrc && git apply /build/strict-network.patch
 
+# Strom's patch: GPU frame handover. When Chromium renders on the GPU, cefsrc
+# takes its frames as dma-bufs (OnAcceleratedPaint with shared textures),
+# copies them into GL memory on the GPU and outputs
+# video/x-raw(memory:GLMemory) to a consumer that takes it, or reads them back
+# into system memory for one that does not. Frames Chromium paints to CPU
+# memory are uploaded into the same GL memory, and a browser whose GPU frames
+# cannot be imported, or that delivers none, is reopened without shared
+# textures: the output is the same whichever way the page was painted.
+# Linux only (EGL with dma-buf import); elsewhere cefsrc is unchanged.
+COPY gl-output.patch /build/gl-output.patch
+RUN cd /build/gstcefsrc && git apply /build/gl-output.patch
+
 WORKDIR /build/gstcefsrc
 
 # Build gstcefsrc
@@ -157,7 +174,7 @@ RUN mkdir -p /output/lib/gstreamer-1.0 && \
     # Create version info file
     echo "CEF_VERSION=${CEF_VERSION}" > /output/version.txt && \
     echo "GSTCEFSRC_REF=${GSTCEFSRC_REF}" >> /output/version.txt && \
-    echo "STROM_PATCHES=popup-close isolated-context strict-network" >> /output/version.txt && \
+    echo "STROM_PATCHES=popup-close isolated-context strict-network gl-output" >> /output/version.txt && \
     echo "TARGETARCH=${TARGETARCH}" >> /output/version.txt && \
     echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /output/version.txt && \
     # List what was built
