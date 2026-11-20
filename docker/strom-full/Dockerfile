@@ -2,7 +2,8 @@
 #
 # This image extends the base strom image with:
 # - gstcefsrc GStreamer plugin (Chromium Embedded Framework)
-# - xvfb for headless X11 rendering
+# - xvfb for headless X11 rendering, and Xorg for rendering on an NVIDIA GPU
+#   (the X driver itself comes from the host through the NVIDIA container toolkit)
 #
 # CEF adds ~400MB compressed (~800MB uncompressed) to the image, hence the separate "full" variant.
 #
@@ -13,7 +14,8 @@ ARG VERSION=latest
 FROM eyevinntechnology/strom:${VERSION}
 
 # gstcefsrc build: the CEF version, plus the suffix of Strom's patched build
-# (docker/gstcefsrc: popup-close, isolated-context and strict-network). Each
+# (docker/gstcefsrc: popup-close, isolated-context, strict-network and
+# gl-output). Each
 # archive is pinned
 # by sha256, so a rebuild published under this name cannot reach an image
 # unnoticed. Changing the version means changing both hashes with it; the
@@ -25,10 +27,12 @@ ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install xvfb for headless X11 and download gstcefsrc
+# Install xvfb for headless X11, Xorg for the GPU (see entrypoint.sh), and
+# download gstcefsrc
 RUN apt-get update && apt-get install -y \
     curl \
     xvfb \
+    xserver-xorg-core \
     && case "${TARGETARCH}" in \
          amd64) GSTCEFSRC_SHA256="${GSTCEFSRC_SHA256_AMD64}" ;; \
          arm64) GSTCEFSRC_SHA256="${GSTCEFSRC_SHA256_ARM64}" ;; \

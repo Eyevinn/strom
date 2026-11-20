@@ -156,15 +156,15 @@ testing — field reports especially welcome.
 
 ## HTML/CEF sources
 
-The one area with measured numbers, all from a single machine (an RTX 3090) — treat them as one
-data point. Full detail in [HTML_RENDER.md](HTML_RENDER.md).
+The one area with measured numbers, each from a single machine — treat them as data points.
+Full detail in [HTML_RENDER.md](HTML_RENDER.md).
 
-- **Software rendering is the default**, via Xvfb: near-free for idle or static pages (Chromium
-  elides paint when nothing changes), CPU-bound for canvas/WebGL.
-- **GPU mode (`STROM_CEF_GPU=1`) is opt-in and not a general win** — roughly a **50% CPU floor
-  per `cefsrc` at 1080p30** whatever the page, from continuous Vulkan command-buffer submits. A
-  canvas-heavy wind-map went ~95% → ~57% CPU, but a static page went ~1% → ~53%. Enable it only
-  where the renderer is the bottleneck.
+- **With an NVIDIA GPU, `strom-full` renders HTML on the GPU by default** (Xorg on the NVIDIA
+  driver), and the frames stay in GPU memory into the GPU mixer. On a Tesla T4 at 1080p50: a
+  lower third 22% → 11% of a core, a 4000-particle canvas 122% (45 fps, not keeping up) → 74%
+  (50 fps).
+- **Without one, rendering is in software**, via Xvfb: near-free for idle or static pages
+  (Chromium elides paint when nothing changes), CPU-bound for canvas/WebGL.
 - **Resolution is the biggest lever in software mode**: 640x360 costs roughly 3x less CPU than
   1920x1080, since paint, compositing and BGRA transport scale with pixel count. Render at the
   size you composite at. Dropping 30 → 15 fps roughly halves compositor and transport cost.

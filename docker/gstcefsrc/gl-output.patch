@@ -1,0 +1,1285 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index a502ffe..3e6a6bf 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -86,6 +86,14 @@ set(GSTCEFSUBPROCESS_SRCS
+   gstcefsubprocess.cc
+ )
+ 
++if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
++  # GPU frame handover (OnAcceleratedPaint dma-bufs into GL memory).
++  pkg_check_modules(GSTGL gstreamer-gl-1.0 egl)
++  if (GSTGL_FOUND)
++    list(APPEND GSTCEF_SRCS gstcefgl.cc)
++  endif()
++endif()
++
+ if (APPLE)
+ list(APPEND GSTCEF_SRCS gstcefloader.cc)
+ list(APPEND GSTCEFSUBPROCESS_SRCS gstcefloader.cc)
+@@ -123,6 +131,12 @@ if (APPLE)
+ endif()
+ target_link_libraries("gstcef" libcef_lib PkgConfig::PC_GLib)
+ target_include_directories("gstcef" PUBLIC ${GST_INCLUDE_DIRS})
++if (GSTGL_FOUND)
++  target_compile_definitions("gstcef" PRIVATE GST_CEF_HAVE_GL=1)
++  target_include_directories("gstcef" PRIVATE ${GSTGL_INCLUDE_DIRS})
++  target_link_directories("gstcef" PRIVATE ${GSTGL_LIBRARY_DIRS})
++  target_link_libraries("gstcef" ${GSTGL_LIBRARIES})
++endif()
+ set_target_properties("gstcef" PROPERTIES INSTALL_RPATH "$ORIGIN")
+ set_target_properties("gstcef" PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
+ set_target_properties("gstcef" PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CEF_TARGET_OUT_DIR})
+diff --git a/gstcefdemux.cc b/gstcefdemux.cc
+index 08bf2b3..6bd601b 100644
+--- a/gstcefdemux.cc
++++ b/gstcefdemux.cc
+@@ -4,6 +4,7 @@
+ #include "gstcefaudiometa.h"
+ 
+ #define CEF_VIDEO_CAPS "video/x-raw, format=BGRA, width=[1, 2147483647], height=[1, 2147483647], framerate=[1/1, 60/1], pixel-aspect-ratio=1/1"
++#define CEF_VIDEO_GL_CAPS "video/x-raw(memory:GLMemory), format=BGRA, width=[1, 2147483647], height=[1, 2147483647], framerate=[1/1, 60/1], pixel-aspect-ratio=1/1, texture-target=2D; " CEF_VIDEO_CAPS
+ #define CEF_AUDIO_CAPS "audio/x-raw, format=F32LE, rate=[1, 2147483647], channels=[1, 2147483647], layout=interleaved"
+ 
+ #define GST_CAT_DEFAULT gst_cef_demux_debug
+@@ -18,14 +19,14 @@ static GstStaticPadTemplate gst_cef_demux_sink_template =
+ GST_STATIC_PAD_TEMPLATE ("sink",
+     GST_PAD_SINK,
+     GST_PAD_ALWAYS,
+-    GST_STATIC_CAPS (CEF_VIDEO_CAPS)
++    GST_STATIC_CAPS (CEF_VIDEO_GL_CAPS)
+     );
+ 
+ static GstStaticPadTemplate gst_cef_demux_video_src_template =
+ GST_STATIC_PAD_TEMPLATE ("video",
+     GST_PAD_SRC,
+     GST_PAD_ALWAYS,
+-    GST_STATIC_CAPS (CEF_VIDEO_CAPS)
++    GST_STATIC_CAPS (CEF_VIDEO_GL_CAPS)
+ );
+ 
+ static GstStaticPadTemplate gst_cef_demux_audio_src_template =
+@@ -291,6 +292,10 @@ gst_cef_demux_sink_query (GstPad *pad, GstObject *parent, GstQuery *query)
+ 
+   switch (GST_QUERY_TYPE (query)) {
+     case GST_QUERY_CAPS:
++    // Video buffers go out on the video pad only, so that is where the
++    // allocation and the GL context are decided, not on the audio branch.
++    case GST_QUERY_ALLOCATION:
++    case GST_QUERY_CONTEXT:
+       ret = gst_pad_peer_query(demux->vsrcpad, query);
+       break;
+     default:
+diff --git a/gstcefgl.cc b/gstcefgl.cc
+new file mode 100644
+index 0000000..0b032ea
+--- /dev/null
++++ b/gstcefgl.cc
+@@ -0,0 +1,644 @@
++#include "gstcefgl.h"
++
++#include <string.h>
++#include <gst/gl/gl.h>
++#include <gst/gl/gstglfuncs.h>
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++
++GST_DEBUG_CATEGORY_STATIC (cef_gl_debug);
++#define GST_CAT_DEFAULT cef_gl_debug
++
++/* DRM fourccs, so drm_fourcc.h is not needed. */
++#define CEF_DRM_FORMAT_ARGB8888 0x34325241 /* AR24: bytes B G R A */
++#define CEF_DRM_FORMAT_ABGR8888 0x34324241 /* AB24: bytes R G B A */
++#define CEF_DRM_FORMAT_MOD_INVALID 0x00ffffffffffffffULL
++
++struct _GstCefGl {
++  GstElement *element;          /* not reffed: owns this */
++  GRecMutex lock;  /* recursive: ensure_element_data calls back into set_context */
++
++  GstGLDisplay *display;
++  GstGLContext *other_context;  /* the application's */
++  GstGLContext *context;        /* the one the flow's GL elements use */
++  GstGLContext *worker;         /* ours, shares with context */
++
++  gboolean ready;               /* worker can import dma-bufs */
++  gboolean gl_output;           /* GL memory negotiated */
++  GstVideoInfo info;
++  GstBufferPool *pool;
++
++  /* worker-thread state */
++  GLuint fbo_read, fbo_draw;
++  PFNEGLCREATEIMAGEKHRPROC create_image;
++  PFNEGLDESTROYIMAGEKHRPROC destroy_image;
++  PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_target;
++
++  /* statistics, logged at DEBUG every 10 s */
++  guint64 frames, failures;
++  gdouble ms_sum, ms_max;
++  gint64 stat_start;
++  gboolean announced;
++  guint64 test_break_after;     /* GST_CEF_GL_TEST_BREAK_IMPORT: fail the Nth import */
++  guint64 imports;
++  guint64 uploads;
++  guint mismatches;             /* GPU frames in a row this code cannot take */
++  GstBufferPool *sys_pool;      /* system-memory output buffers */
++};
++
++GstCefGl *
++gst_cef_gl_new (GstElement * element)
++{
++  static gsize init = 0;
++  if (g_once_init_enter (&init)) {
++    GST_DEBUG_CATEGORY_INIT (cef_gl_debug, "cefgl", 0, "cefsrc GPU output");
++    g_once_init_leave (&init, 1);
++  }
++  GstCefGl *gl = g_new0 (GstCefGl, 1);
++  gl->element = element;
++  g_rec_mutex_init (&gl->lock);
++  return gl;
++}
++
++void
++gst_cef_gl_free (GstCefGl * gl)
++{
++  if (!gl)
++    return;
++  gst_cef_gl_reset (gl);
++  gst_clear_object (&gl->display);
++  gst_clear_object (&gl->other_context);
++  g_rec_mutex_clear (&gl->lock);
++  g_free (gl);
++}
++
++void
++gst_cef_gl_set_context (GstCefGl * gl, GstContext * context)
++{
++  g_rec_mutex_lock (&gl->lock);
++  gst_gl_handle_set_context (gl->element, context, &gl->display,
++      &gl->other_context);
++  g_rec_mutex_unlock (&gl->lock);
++}
++
++gboolean
++gst_cef_gl_handle_query (GstCefGl * gl, GstQuery * query)
++{
++  gboolean ret;
++  g_rec_mutex_lock (&gl->lock);
++  ret = gst_gl_handle_context_query (gl->element, query, gl->display,
++      gl->context, gl->other_context);
++  g_rec_mutex_unlock (&gl->lock);
++  return ret;
++}
++
++/* --- worker thread --- */
++
++static gboolean
++has_extension (const char *list, const char *name)
++{
++  size_t n = strlen (name);
++  for (const char *p = list; p && (p = strstr (p, name)); p += n)
++    if ((p == list || p[-1] == ' ') && (p[n] == ' ' || p[n] == '\0'))
++      return TRUE;
++  return FALSE;
++}
++
++static void
++worker_init (GstGLContext * ctx, gpointer data)
++{
++  GstCefGl *gl = (GstCefGl *) data;
++  const GstGLFuncs *f = ctx->gl_vtable;
++
++  gl->ready = FALSE;
++  if (gst_gl_context_get_gl_platform (ctx) != GST_GL_PLATFORM_EGL) {
++    GST_INFO_OBJECT (gl->element, "GL context is not EGL: no dma-buf import");
++    return;
++  }
++  EGLDisplay dpy = eglGetCurrentDisplay ();
++  const char *exts = dpy != EGL_NO_DISPLAY ? eglQueryString (dpy, EGL_EXTENSIONS) : NULL;
++  if (!has_extension (exts, "EGL_EXT_image_dma_buf_import")
++      || !has_extension (exts, "EGL_EXT_image_dma_buf_import_modifiers")) {
++    GST_INFO_OBJECT (gl->element,
++        "EGL display has no dma-buf import with modifiers");
++    return;
++  }
++  gl->create_image = (PFNEGLCREATEIMAGEKHRPROC) eglGetProcAddress ("eglCreateImageKHR");
++  gl->destroy_image = (PFNEGLDESTROYIMAGEKHRPROC) eglGetProcAddress ("eglDestroyImageKHR");
++  gl->image_target = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)
++      gst_gl_context_get_proc_address (ctx, "glEGLImageTargetTexture2DOES");
++  if (!gl->create_image || !gl->destroy_image || !gl->image_target
++      || !f->BlitFramebuffer || !f->GenFramebuffers) {
++    GST_INFO_OBJECT (gl->element,
++        "GL context lacks EGLImage or framebuffer blit support");
++    return;
++  }
++  f->GenFramebuffers (1, &gl->fbo_read);
++  f->GenFramebuffers (1, &gl->fbo_draw);
++  gl->ready = TRUE;
++  GST_INFO_OBJECT (gl->element, "GPU output ready: %s on %s",
++      (const char *) f->GetString (GL_VERSION),
++      (const char *) f->GetString (GL_RENDERER));
++}
++
++static void
++worker_deinit (GstGLContext * ctx, gpointer data)
++{
++  GstCefGl *gl = (GstCefGl *) data;
++  const GstGLFuncs *f = ctx->gl_vtable;
++  if (gl->fbo_read)
++    f->DeleteFramebuffers (1, &gl->fbo_read);
++  if (gl->fbo_draw)
++    f->DeleteFramebuffers (1, &gl->fbo_draw);
++  gl->fbo_read = gl->fbo_draw = 0;
++}
++
++static GLuint
++buffer_texture (GstBuffer * buf)
++{
++  GstMemory *mem = gst_buffer_peek_memory (buf, 0);
++  if (!mem || !gst_is_gl_memory (mem))
++    return 0;
++  return gst_gl_memory_get_texture_id ((GstGLMemory *) mem);
++}
++
++/* The texture was written by GL directly: a CPU map must download it. */
++static void
++mark_written (GstBuffer * buf)
++{
++  GstMemory *mem = gst_buffer_peek_memory (buf, 0);
++  GST_MINI_OBJECT_FLAG_SET (mem, GST_GL_BASE_MEMORY_TRANSFER_NEED_DOWNLOAD);
++  GST_MINI_OBJECT_FLAG_UNSET (mem, GST_GL_BASE_MEMORY_TRANSFER_NEED_UPLOAD);
++}
++
++struct ClearJob { GstCefGl *gl; GLuint tex; };
++
++static void
++worker_clear (GstGLContext * ctx, gpointer data)
++{
++  ClearJob *job = (ClearJob *) data;
++  const GstGLFuncs *f = ctx->gl_vtable;
++  f->BindFramebuffer (GL_FRAMEBUFFER, job->gl->fbo_draw);
++  f->FramebufferTexture2D (GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, job->tex, 0);
++  f->ClearColor (0, 0, 0, 0);
++  f->Clear (GL_COLOR_BUFFER_BIT);
++  f->BindFramebuffer (GL_FRAMEBUFFER, 0);
++  f->Finish ();
++}
++
++struct ImportJob {
++  GstCefGl *gl;
++  const CefAcceleratedPaintInfo *info;
++  GLuint dst_tex;
++  gboolean ok, broken;
++};
++
++static void
++worker_import (GstGLContext * ctx, gpointer data)
++{
++  ImportJob *job = (ImportJob *) data;
++  GstCefGl *gl = job->gl;
++  const CefAcceleratedPaintInfo &info = *job->info;
++  const GstGLFuncs *f = ctx->gl_vtable;
++  int w = GST_VIDEO_INFO_WIDTH (&gl->info), h = GST_VIDEO_INFO_HEIGHT (&gl->info);
++
++  /* The output is BGRA in memory order. Importing the buffer under the
++   * fourcc whose channels are the bytes in memory order makes the copy keep
++   * them as they are: Chromium's BGRA is imported as AB24 (R G B A), so the
++   * texture's "red" holds blue and its bytes match what OnPaint delivers. */
++  EGLint fourcc = info.format == CEF_COLOR_TYPE_BGRA_8888 ?
++      CEF_DRM_FORMAT_ABGR8888 : CEF_DRM_FORMAT_ARGB8888;
++  EGLint a[24];
++  int i = 0;
++  a[i++] = EGL_WIDTH; a[i++] = w;
++  a[i++] = EGL_HEIGHT; a[i++] = h;
++  a[i++] = EGL_LINUX_DRM_FOURCC_EXT; a[i++] = fourcc;
++  a[i++] = EGL_DMA_BUF_PLANE0_FD_EXT; a[i++] = info.planes[0].fd;
++  a[i++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT; a[i++] = (EGLint) info.planes[0].offset;
++  a[i++] = EGL_DMA_BUF_PLANE0_PITCH_EXT; a[i++] = (EGLint) info.planes[0].stride;
++  if (info.modifier != CEF_DRM_FORMAT_MOD_INVALID) {
++    a[i++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT; a[i++] = (EGLint) (info.modifier & 0xffffffff);
++    a[i++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT; a[i++] = (EGLint) (info.modifier >> 32);
++  }
++  a[i++] = EGL_NONE;
++
++  EGLImageKHR img = gl->create_image (eglGetCurrentDisplay (), EGL_NO_CONTEXT,
++      EGL_LINUX_DMA_BUF_EXT, nullptr, a);
++  if (img == EGL_NO_IMAGE_KHR) {
++    GST_WARNING_OBJECT (gl->element, "eglCreateImage of Chromium's frame failed: 0x%x "
++        "(fourcc 0x%x modifier 0x%" G_GINT64_MODIFIER "x planes %d)", eglGetError (),
++        fourcc, (guint64) info.modifier, info.plane_count);
++    job->broken = TRUE;
++    return;
++  }
++
++  GLuint tex;
++  f->GenTextures (1, &tex);
++  f->BindTexture (GL_TEXTURE_2D, tex);
++  gl->image_target (GL_TEXTURE_2D, img);
++  f->BindTexture (GL_TEXTURE_2D, 0);
++  f->BindFramebuffer (GL_READ_FRAMEBUFFER, gl->fbo_read);
++  f->FramebufferTexture2D (GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
++  GLenum st = f->CheckFramebufferStatus (GL_READ_FRAMEBUFFER);
++  if (st != GL_FRAMEBUFFER_COMPLETE) {
++    GST_WARNING_OBJECT (gl->element, "Chromium's frame cannot be read (framebuffer 0x%x)", st);
++    job->broken = TRUE;
++  } else {
++    f->BindFramebuffer (GL_DRAW_FRAMEBUFFER, gl->fbo_draw);
++    f->FramebufferTexture2D (GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, job->dst_tex, 0);
++    f->BlitFramebuffer (0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
++    f->BindFramebuffer (GL_DRAW_FRAMEBUFFER, 0);
++    job->ok = TRUE;
++  }
++  f->BindFramebuffer (GL_READ_FRAMEBUFFER, 0);
++  /* Chromium reuses the buffer once the callback returns, so the copy must
++   * be done before it does. This also means downstream needs no sync. */
++  f->Finish ();
++  f->DeleteTextures (1, &tex);
++  gl->destroy_image (eglGetCurrentDisplay (), img);
++  GLenum err = f->GetError ();
++  if (err != GL_NO_ERROR) {
++    GST_WARNING_OBJECT (gl->element, "GL error 0x%x copying Chromium's frame", err);
++    job->ok = FALSE;
++  }
++}
++
++struct UploadJob { GstCefGl *gl; GLuint tex; const void *data; int w, h; };
++
++static void
++worker_upload (GstGLContext * ctx, gpointer data)
++{
++  UploadJob *job = (UploadJob *) data;
++  const GstGLFuncs *f = ctx->gl_vtable;
++  /* BGRA bytes into the RGBA8 texture as they are: GL memory in format
++   * BGRA is stored that way. */
++  f->BindTexture (GL_TEXTURE_2D, job->tex);
++  f->PixelStorei (GL_UNPACK_ALIGNMENT, 4);
++  f->TexSubImage2D (GL_TEXTURE_2D, 0, 0, 0, job->w, job->h, GL_RGBA, GL_UNSIGNED_BYTE, job->data);
++  f->BindTexture (GL_TEXTURE_2D, 0);
++  f->Finish ();
++}
++
++/* --- setup --- */
++
++static void
++release_worker_locked (GstCefGl * gl)
++{
++  if (gl->sys_pool) {
++    gst_buffer_pool_set_active (gl->sys_pool, FALSE);
++    gst_clear_object (&gl->sys_pool);
++  }
++  if (gl->pool) {
++    gst_buffer_pool_set_active (gl->pool, FALSE);
++    gst_clear_object (&gl->pool);
++  }
++  if (gl->worker) {
++    gst_gl_context_thread_add (gl->worker, worker_deinit, gl);
++    gst_clear_object (&gl->worker);
++  }
++  gl->ready = FALSE;
++}
++
++/* A worker context of our own, in the share group of `share`, so the UI
++ * thread never waits for the flow's GL thread, and the flow's GL elements can
++ * use the textures. */
++static gboolean
++make_worker_locked (GstCefGl * gl, GstGLContext * share)
++{
++  GError *error = NULL;
++  release_worker_locked (gl);
++  gl->worker = gst_gl_context_new (gl->display);
++  if (!gst_gl_context_create (gl->worker, share, &error)) {
++    GST_WARNING_OBJECT (gl->element, "Could not create a GL context: %s",
++        error ? error->message : "unknown");
++    g_clear_error (&error);
++    gst_clear_object (&gl->worker);
++    return FALSE;
++  }
++  gst_gl_context_thread_add (gl->worker, worker_init, gl);
++  return gl->ready;
++}
++
++gboolean
++gst_cef_gl_prepare (GstCefGl * gl)
++{
++  GError *error = NULL;
++
++  g_rec_mutex_lock (&gl->lock);
++  release_worker_locked (gl);
++  if (!gst_gl_ensure_element_data (gl->element, &gl->display, &gl->other_context)) {
++    GST_INFO_OBJECT (gl->element, "No GL display: software output");
++    goto out;
++  }
++  if (!gl->context)
++    gst_gl_query_local_gl_context (gl->element, GST_PAD_SRC, &gl->context);
++  if (!gl->context) {
++    GST_OBJECT_LOCK (gl->display);
++    do {
++      gst_clear_object (&gl->context);
++      gl->context = gst_gl_display_get_gl_context_for_thread (gl->display, NULL);
++      if (!gl->context && !gst_gl_display_create_context (gl->display,
++              gl->other_context, &gl->context, &error)) {
++        GST_OBJECT_UNLOCK (gl->display);
++        GST_INFO_OBJECT (gl->element, "No GL context (%s): software output",
++            error ? error->message : "unknown");
++        g_clear_error (&error);
++        goto out;
++      }
++    } while (!gst_gl_display_add_context (gl->display, gl->context));
++    GST_OBJECT_UNLOCK (gl->display);
++  }
++  make_worker_locked (gl, gl->context);
++  GST_INFO_OBJECT (gl->element, "GL context at start: %" GST_PTR_FORMAT ", worker %" GST_PTR_FORMAT,
++      gl->context, gl->worker);
++  gl->imports = gl->uploads = 0;
++  gl->test_break_after = g_ascii_strtoull (g_getenv ("GST_CEF_GL_TEST_BREAK_IMPORT") ?: "0", NULL, 10);
++
++out:
++  gboolean ready = gl->ready;
++  g_rec_mutex_unlock (&gl->lock);
++  return ready;
++}
++
++gboolean
++gst_cef_gl_ready (GstCefGl * gl)
++{
++  g_rec_mutex_lock (&gl->lock);
++  gboolean ready = gl->ready;
++  g_rec_mutex_unlock (&gl->lock);
++  return ready;
++}
++
++gboolean
++gst_cef_gl_output_is_gl (GstCefGl * gl)
++{
++  g_rec_mutex_lock (&gl->lock);
++  gboolean r = gl->gl_output;
++  g_rec_mutex_unlock (&gl->lock);
++  return r;
++}
++
++gboolean
++gst_cef_gl_decide_allocation (GstCefGl * gl, GstQuery * query)
++{
++  GstCaps *caps;
++  gboolean ret = TRUE;
++
++  gst_query_parse_allocation (query, &caps, NULL);
++  if (!caps)
++    return FALSE;
++
++  g_rec_mutex_lock (&gl->lock);
++  gst_video_info_from_caps (&gl->info, caps);
++  gl->gl_output = gst_caps_features_contains (gst_caps_get_features (caps, 0),
++      GST_CAPS_FEATURE_MEMORY_GL_MEMORY);
++
++  if (gl->pool) {
++    gst_buffer_pool_set_active (gl->pool, FALSE);
++    gst_clear_object (&gl->pool);
++  }
++  if (gl->sys_pool) {
++    gst_buffer_pool_set_active (gl->sys_pool, FALSE);
++    gst_clear_object (&gl->sys_pool);
++  }
++  if (gl->ready && !gl->gl_output) {
++    /* Read-back frames go into recycled buffers, not a fresh allocation each. */
++    gl->sys_pool = gst_buffer_pool_new ();
++    GstStructure *sc = gst_buffer_pool_get_config (gl->sys_pool);
++    gst_buffer_pool_config_set_params (sc, caps, GST_VIDEO_INFO_SIZE (&gl->info), 2, 0);
++    if (!gst_buffer_pool_set_config (gl->sys_pool, sc) || !gst_buffer_pool_set_active (gl->sys_pool, TRUE))
++      gst_clear_object (&gl->sys_pool);
++  }
++  gl->mismatches = 0;
++
++  if (gl->gl_output) {
++    /* The frames must be in the share group of the context that uses them,
++     * or a GL element refuses them as from another context. The consumer's
++     * own context is the one its proposed pool allocates in; failing that,
++     * ask downstream for its local context. Contexts are made as elements
++     * start, in no fixed order, so the one picked at start may not be it. */
++    GstGLContext *consumer = NULL;
++    for (guint i = 0; i < gst_query_get_n_allocation_pools (query) && !consumer; i++) {
++      GstBufferPool *proposed = NULL;
++      gst_query_parse_nth_allocation_pool (query, i, &proposed, NULL, NULL, NULL);
++      if (proposed && GST_IS_GL_BUFFER_POOL (proposed) && GST_GL_BUFFER_POOL (proposed)->context)
++        consumer = (GstGLContext *) gst_object_ref (GST_GL_BUFFER_POOL (proposed)->context);
++      if (proposed)
++        gst_object_unref (proposed);
++    }
++    if (!consumer)
++      gst_gl_query_local_gl_context (gl->element, GST_PAD_SRC, &consumer);
++    GST_INFO_OBJECT (gl->element, "Consumer GL context %" GST_PTR_FORMAT ", worker %" GST_PTR_FORMAT,
++        consumer, gl->worker);
++    if (consumer && consumer != gl->context) {
++      /* The pool must allocate in exactly this context object; the worker
++       * only has to be in its share group. */
++      gst_object_replace ((GstObject **) &gl->context, (GstObject *) consumer);
++      if (!(gl->worker && gst_gl_context_can_share (gl->worker, consumer))) {
++        GST_INFO_OBJECT (gl->element, "Sharing GL context with the consumer's %" GST_PTR_FORMAT, consumer);
++        make_worker_locked (gl, consumer);
++      }
++    }
++    gst_clear_object (&consumer);
++
++    if (!gl->ready) {
++      g_rec_mutex_unlock (&gl->lock);
++      GST_ELEMENT_ERROR (gl->element, CORE, NEGOTIATION, (NULL),
++          ("GL memory was negotiated, but cefsrc has no GL context that can import Chromium's frames"));
++      return FALSE;
++    }
++  }
++
++  if (gl->ready) {
++    /* GL output hands these on; system output reads them back. GL elements
++     * take GL memory only from their own GstGLContext, not merely one that
++     * shares with it ("input memory OpenGL context is different"), so with
++     * GL output the memory belongs to the consumer's context. The worker,
++     * in its share group, still does the copying, so the UI thread does not
++     * wait for the flow's GL thread on every frame. */
++    GstCaps *glcaps = gst_caps_copy (caps);
++    gst_caps_set_features_simple (glcaps, gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_GL_MEMORY, NULL));
++    gl->pool = gst_gl_buffer_pool_new (gl->gl_output && gl->context ? gl->context : gl->worker);
++    GstStructure *config = gst_buffer_pool_get_config (gl->pool);
++    gst_buffer_pool_config_set_params (config, glcaps, GST_VIDEO_INFO_SIZE (&gl->info), 2, 0);
++    gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_VIDEO_META);
++    gst_caps_unref (glcaps);
++    if (!gst_buffer_pool_set_config (gl->pool, config)
++        || !gst_buffer_pool_set_active (gl->pool, TRUE)) {
++      GST_ERROR_OBJECT (gl->element, "Could not set up the GL buffer pool");
++      gst_clear_object (&gl->pool);
++      ret = !gl->gl_output;
++    } else if (gl->gl_output && gst_query_get_n_allocation_pools (query) > 0) {
++      gst_query_set_nth_allocation_pool (query, 0, gl->pool, GST_VIDEO_INFO_SIZE (&gl->info), 2, 0);
++    } else if (gl->gl_output) {
++      gst_query_add_allocation_pool (query, gl->pool, GST_VIDEO_INFO_SIZE (&gl->info), 2, 0);
++    }
++  }
++  GST_INFO_OBJECT (gl->element, "Output in %s memory%s", gl->gl_output ? "GL" : "system",
++      gl->ready ? (gl->gl_output ? ", frames copied on the GPU" : ", frames read back from the GPU") : "");
++  g_rec_mutex_unlock (&gl->lock);
++  return ret;
++}
++
++static GstBuffer *
++acquire_locked (GstCefGl * gl)
++{
++  GstBuffer *buf = NULL;
++  if (!gl->pool || gst_buffer_pool_acquire_buffer (gl->pool, &buf, NULL) != GST_FLOW_OK)
++    return NULL;
++  return buf;
++}
++
++GstBuffer *
++gst_cef_gl_blank (GstCefGl * gl)
++{
++  g_rec_mutex_lock (&gl->lock);
++  GstBuffer *buf = acquire_locked (gl);
++  if (buf) {
++    ClearJob job = { gl, buffer_texture (buf) };
++    gst_gl_context_thread_add (gl->worker, worker_clear, &job);
++    mark_written (buf);
++  }
++  g_rec_mutex_unlock (&gl->lock);
++  return buf;
++}
++
++static void
++note_frame_locked (GstCefGl * gl, gdouble ms, gboolean ok)
++{
++  gl->frames++;
++  if (!ok)
++    gl->failures++;
++  gl->ms_sum += ms;
++  if (ms > gl->ms_max)
++    gl->ms_max = ms;
++  gint64 now = g_get_monotonic_time ();
++  if (!gl->stat_start)
++    gl->stat_start = now;
++  if (now - gl->stat_start >= 10 * G_USEC_PER_SEC) {
++    GST_DEBUG_OBJECT (gl->element, "GPU frames: %.1f/s, copy %.2f ms avg %.2f ms max, %" G_GUINT64_FORMAT " failed",
++        gl->frames * 1e6 / (now - gl->stat_start), gl->ms_sum / gl->frames, gl->ms_max, gl->failures);
++    gl->frames = gl->failures = 0;
++    gl->ms_sum = gl->ms_max = 0;
++    gl->stat_start = now;
++  }
++}
++
++GstBuffer *
++gst_cef_gl_import (GstCefGl * gl, const CefAcceleratedPaintInfo & info,
++    gboolean * broken)
++{
++  GstBuffer *buf = NULL;
++  *broken = FALSE;
++
++  g_rec_mutex_lock (&gl->lock);
++  if (!gl->ready || !GST_VIDEO_INFO_WIDTH (&gl->info)) {
++    /* Not negotiated yet; cefsrc asks for a repaint once it is. */
++    g_rec_mutex_unlock (&gl->lock);
++    return NULL;
++  }
++  if (info.plane_count != 1 || info.extra.coded_size.width != GST_VIDEO_INFO_WIDTH (&gl->info)
++      || info.extra.coded_size.height != GST_VIDEO_INFO_HEIGHT (&gl->info)) {
++    /* A resize in flight, or a layout this code does not handle. A resize
++     * settles within a few frames; one that does not is a layout this code
++     * cannot take, and is treated as a failed import. */
++    GST_LOG_OBJECT (gl->element, "Skipping a %dx%d frame with %d planes",
++        info.extra.coded_size.width, info.extra.coded_size.height, info.plane_count);
++    if (++gl->mismatches == 100) {
++      GST_WARNING_OBJECT (gl->element, "Chromium's GPU frames are %dx%d with %d planes, the output %dx%d",
++          info.extra.coded_size.width, info.extra.coded_size.height, info.plane_count,
++          GST_VIDEO_INFO_WIDTH (&gl->info), GST_VIDEO_INFO_HEIGHT (&gl->info));
++      *broken = TRUE;
++    }
++    g_rec_mutex_unlock (&gl->lock);
++    return NULL;
++  }
++
++  gl->mismatches = 0;
++  ImportJob job = { gl, &info, 0, FALSE, FALSE };
++  if (gl->test_break_after && ++gl->imports >= gl->test_break_after) {
++    /* Test hook: behave as if the import had failed for good. */
++    GST_WARNING_OBJECT (gl->element, "GST_CEF_GL_TEST_BREAK_IMPORT: failing import %" G_GUINT64_FORMAT, gl->imports);
++    *broken = TRUE;
++    g_rec_mutex_unlock (&gl->lock);
++    return NULL;
++  }
++  {
++    gint64 t0 = g_get_monotonic_time ();
++    /* Both outputs copy into GL memory first; system memory then reads it
++     * back through GStreamer's download (glReadPixels straight from here
++     * took ~680 ms a 1080p frame on NVIDIA GLES, gldownload's path ~ms). */
++    buf = acquire_locked (gl);
++    if (!buf)
++      goto out;
++    job.dst_tex = buffer_texture (buf);
++    gst_gl_context_thread_add (gl->worker, worker_import, &job);
++    if (job.ok) {
++      mark_written (buf);
++      if (!gl->gl_output) {
++        GstBuffer *sys = NULL;
++        if (!gl->sys_pool || gst_buffer_pool_acquire_buffer (gl->sys_pool, &sys, NULL) != GST_FLOW_OK)
++          sys = gst_buffer_new_allocate (NULL, GST_VIDEO_INFO_SIZE (&gl->info), NULL);
++        GstMapInfo in, out;
++        if (gst_buffer_map (buf, &in, GST_MAP_READ)) {
++          gst_buffer_map (sys, &out, GST_MAP_WRITE);
++          memcpy (out.data, in.data, MIN (in.size, out.size));
++          gst_buffer_unmap (sys, &out);
++          gst_buffer_unmap (buf, &in);
++        } else {
++          GST_WARNING_OBJECT (gl->element, "Could not read Chromium's frame back from the GPU");
++          job.ok = FALSE;
++        }
++        gst_buffer_unref (buf);
++        buf = sys;
++      }
++    }
++    note_frame_locked (gl, (g_get_monotonic_time () - t0) / 1000.0, job.ok);
++  }
++  if (!job.ok)
++    gst_clear_buffer (&buf);
++  if (job.broken)
++    *broken = TRUE;
++  if (job.ok && !gl->announced) {
++    gl->announced = TRUE;
++    GST_INFO_OBJECT (gl->element, "Chromium hands frames over on the GPU (dma-buf, modifier 0x%"
++        G_GINT64_MODIFIER "x), output in %s memory", (guint64) info.modifier, gl->gl_output ? "GL" : "system");
++  }
++
++out:
++  g_rec_mutex_unlock (&gl->lock);
++  return buf;
++}
++
++GstBuffer *
++gst_cef_gl_upload (GstCefGl * gl, const void *bgra, int width, int height)
++{
++  g_rec_mutex_lock (&gl->lock);
++  GstBuffer *buf = NULL;
++  if (gl->gl_output && width == GST_VIDEO_INFO_WIDTH (&gl->info)
++      && height == GST_VIDEO_INFO_HEIGHT (&gl->info)) {
++    buf = acquire_locked (gl);
++    if (buf) {
++      UploadJob job = { gl, buffer_texture (buf), bgra, width, height };
++      gst_gl_context_thread_add (gl->worker, worker_upload, &job);
++      mark_written (buf);
++      if (gl->uploads++ % 300 == 0)
++        GST_INFO_OBJECT (gl->element, "Chromium painted to CPU memory: %" G_GUINT64_FORMAT
++            " frames uploaded into GL memory", gl->uploads);
++    }
++  }
++  g_rec_mutex_unlock (&gl->lock);
++  return buf;
++}
++
++void
++gst_cef_gl_reset (GstCefGl * gl)
++{
++  g_rec_mutex_lock (&gl->lock);
++  release_worker_locked (gl);
++  gst_clear_object (&gl->context);
++  gl->gl_output = FALSE;
++  gst_video_info_init (&gl->info);
++  gl->announced = FALSE;
++  g_rec_mutex_unlock (&gl->lock);
++}
+diff --git a/gstcefgl.h b/gstcefgl.h
+new file mode 100644
+index 0000000..d8d817d
+--- /dev/null
++++ b/gstcefgl.h
+@@ -0,0 +1,51 @@
++/* GPU output for cefsrc (Linux): frames Chromium hands over as dma-bufs
++ * (OnAcceleratedPaint) are imported into EGL and copied into GL memory, or
++ * read back into system memory when downstream does not take GL memory.
++ * Frames Chromium paints in software (OnPaint) are uploaded into the same GL
++ * memory, so what cefsrc outputs does not depend on how Chromium painted. */
++
++#ifndef __GST_CEF_GL_H__
++#define __GST_CEF_GL_H__
++
++#include <gst/gst.h>
++#include <gst/video/video.h>
++#include <include/cef_render_handler.h>
++
++typedef struct _GstCefGl GstCefGl;
++
++GstCefGl *gst_cef_gl_new (GstElement * element);
++void gst_cef_gl_free (GstCefGl * gl);
++
++/* GstElement::set_context and the CONTEXT query. */
++void gst_cef_gl_set_context (GstCefGl * gl, GstContext * context);
++gboolean gst_cef_gl_handle_query (GstCefGl * gl, GstQuery * query);
++
++/* Called before the browser is created: finds the GL display (the flow's,
++ * through the usual context negotiation), makes a GL context and checks that
++ * it can import Chromium's dma-bufs. Only then is shared_texture_enabled set,
++ * and only then does cefsrc offer GL memory. */
++gboolean gst_cef_gl_prepare (GstCefGl * gl);
++gboolean gst_cef_gl_ready (GstCefGl * gl);
++
++/* Negotiated caps: GL memory or system memory. Sets up the GL buffer pool
++ * in the first case. */
++gboolean gst_cef_gl_decide_allocation (GstCefGl * gl, GstQuery * query);
++gboolean gst_cef_gl_output_is_gl (GstCefGl * gl);
++
++/* A transparent frame in the negotiated memory, shown until the first paint. */
++GstBuffer *gst_cef_gl_blank (GstCefGl * gl);
++
++/* OnAcceleratedPaint: returns the frame in the negotiated memory, or NULL.
++ * Sets *broken when the import failed in a way that will not recover; cefsrc
++ * then recreates the browser without shared textures. */
++GstBuffer *gst_cef_gl_import (GstCefGl * gl,
++    const CefAcceleratedPaintInfo & info, gboolean * broken);
++
++/* OnPaint while GL memory is negotiated: uploads Chromium's BGRA frame. */
++GstBuffer *gst_cef_gl_upload (GstCefGl * gl, const void *bgra, int width,
++    int height);
++
++/* Releases the pool and the contexts (stop). */
++void gst_cef_gl_reset (GstCefGl * gl);
++
++#endif /* __GST_CEF_GL_H__ */
+diff --git a/gstcefsrc.cc b/gstcefsrc.cc
+index e155233..6c1fbbb 100644
+--- a/gstcefsrc.cc
++++ b/gstcefsrc.cc
+@@ -19,6 +19,9 @@
+ 
+ #include "gstcefsrc.h"
+ #include "gstcefaudiometa.h"
++#ifdef GST_CEF_HAVE_GL
++#include "gstcefgl.h"
++#endif
+ #ifdef __APPLE__
+ #include "gstcefloader.h"
+ #include "gstcefnsapplication.h"
+@@ -53,6 +56,10 @@ GST_DEBUG_CATEGORY_STATIC (cef_console_debug);
+ #define DEFAULT_SANDBOX FALSE
+ #endif
+ #define DEFAULT_LISTEN_FOR_JS_SIGNALS FALSE
++#define DEFAULT_FRAME_HANDOVER GST_CEF_FRAME_HANDOVER_AUTO
++/* How long a browser made with shared textures gets to deliver its first
++ * GPU frame before it is reopened without them. */
++#define SHARED_TEXTURE_FIRST_FRAME_MS 5000
+ 
+ using CefStatus = enum : guint8 {
+   // CEF was either unloaded successfully or not yet loaded.
+@@ -84,6 +91,24 @@ static GThread *thread = nullptr;
+   (gst_cef_log_severity_mode_get_type ())
+ 
+ 
++#define GST_TYPE_CEF_FRAME_HANDOVER (gst_cef_frame_handover_get_type ())
++static GType
++gst_cef_frame_handover_get_type (void)
++{
++  static const GEnumValue values[] = {
++    {GST_CEF_FRAME_HANDOVER_AUTO, "GPU buffers when Chromium renders on the GPU and they can be imported, else CPU memory", "auto"},
++    {GST_CEF_FRAME_HANDOVER_GPU, "GPU buffers only: fail instead of falling back", "gpu"},
++    {GST_CEF_FRAME_HANDOVER_CPU, "CPU memory only (Chromium reads its frames back)", "cpu"},
++    {0, NULL, NULL},
++  };
++  static GType type = 0;
++  if (g_once_init_enter (&type)) {
++    GType t = g_enum_register_static ("GstCefFrameHandover", values);
++    g_once_init_leave (&type, t);
++  }
++  return type;
++}
++
+ static const GEnumValue log_severity_values[] = {
+   {LOGSEVERITY_DEBUG, "debug / verbose cef log severity", "debug"},
+   {LOGSEVERITY_INFO, "info cef log severity", "info"},
+@@ -133,19 +158,27 @@ enum
+   PROP_CONTEXT_CACHE_PATH,
+   PROP_PERSIST_SESSION_COOKIES,
+   PROP_STRICT_NETWORK,
++  PROP_FRAME_HANDOVER,
+ };
+ 
+ #define gst_cef_src_parent_class parent_class
+ G_DEFINE_TYPE (GstCefSrc, gst_cef_src, GST_TYPE_PUSH_SRC);
+ 
+ #define CEF_VIDEO_CAPS "video/x-raw, format=BGRA, width=[1, 2147483647], height=[1, 2147483647], framerate=[1/1, 60/1], pixel-aspect-ratio=1/1"
++#ifdef GST_CEF_HAVE_GL
++/* GL memory first: offered only while Chromium's frames can be imported on
++ * the GPU (gst_cef_src_get_caps), and preferred by a consumer that takes it. */
++#define CEF_SRC_CAPS "video/x-raw(memory:GLMemory), format=BGRA, width=[1, 2147483647], height=[1, 2147483647], framerate=[1/1, 60/1], pixel-aspect-ratio=1/1, texture-target=2D; " CEF_VIDEO_CAPS
++#else
++#define CEF_SRC_CAPS CEF_VIDEO_CAPS
++#endif
+ #define CEF_AUDIO_CAPS "audio/x-raw, format=F32LE, rate=[1, 2147483647], channels=[1, 2147483647], layout=interleaved"
+ 
+ static GstStaticPadTemplate gst_cef_src_template =
+ GST_STATIC_PAD_TEMPLATE ("src",
+     GST_PAD_SRC,
+     GST_PAD_ALWAYS,
+-    GST_STATIC_CAPS (CEF_VIDEO_CAPS)
++    GST_STATIC_CAPS (CEF_SRC_CAPS)
+     );
+ 
+ gchar* get_plugin_base_path () {
+@@ -258,6 +291,22 @@ class RenderHandler : public CefRenderHandler
+ 
+       GST_LOG_OBJECT (src, "painting, width / height: %d %d", w, h);
+ 
++#ifdef GST_CEF_HAVE_GL
++      if (type != PET_VIEW) return;
++      if (gst_cef_gl_output_is_gl (src->gl)) {
++        // Chromium painted in software (no GPU, or it gave up on it), but
++        // GL memory is negotiated: upload, so the output stays the same.
++        new_buffer = gst_cef_gl_upload (src->gl, buffer, w, h);
++        if (new_buffer) {
++          GST_OBJECT_LOCK (src);
++          gst_buffer_replace (&(src->current_buffer), new_buffer);
++          gst_buffer_unref (new_buffer);
++          GST_OBJECT_UNLOCK (src);
++        }
++        return;
++      }
++#endif
++
+       new_buffer = gst_buffer_new_allocate (NULL, src->vinfo.width * src->vinfo.height * 4, NULL);
+       gst_buffer_fill (new_buffer, 0, buffer, w * h * 4);
+ 
+@@ -269,6 +318,11 @@ class RenderHandler : public CefRenderHandler
+       GST_LOG_OBJECT (src, "done painting");
+     }
+ 
++#ifdef GST_CEF_HAVE_GL
++    void OnAcceleratedPaint(CefRefPtr<CefBrowser> browser, PaintElementType type,
++        const RectList &dirtyRects, const CefAcceleratedPaintInfo &info) override;
++#endif
++
+   private:
+ 
+     GstCefSrc *src;
+@@ -605,6 +659,9 @@ class BrowserClient :
+       CefBrowserSettings browser_settings;
+ 
+       window_info.SetAsWindowless(0);
++#ifdef GST_CEF_HAVE_GL
++      window_info.shared_texture_enabled = src->use_shared_texture;
++#endif
+       browser = CefBrowserHost::CreateBrowserSync(
+         window_info,
+         this,
+@@ -627,6 +684,13 @@ class BrowserClient :
+       browser->GetHost()->SetAudioMuted(true);
+ 
+       src->browser = browser;
++#ifdef GST_CEF_HAVE_GL
++      if (src->use_shared_texture) {
++        g_atomic_int_set (&src->accel_frames, 0);
++        CefPostDelayedTask(TID_UI, base::BindOnce(&BrowserClient::CheckSharedTextureFrames,
++            CefRefPtr<BrowserClient>(this), browser), SHARED_TEXTURE_FIRST_FRAME_MS);
++      }
++#endif
+ 
+       g_mutex_lock (&src->state_lock);
+       src->state = src->listen_for_js_signals ? CEF_SRC_WAITING_FOR_READY : CEF_SRC_OPEN;
+@@ -634,6 +698,66 @@ class BrowserClient :
+       g_mutex_unlock(&src->state_lock);
+     }
+ 
++#ifdef GST_CEF_HAVE_GL
++    // Chromium's GPU frames could not be imported: carry on with a browser
++    // that paints in software, in the same request context and page. The
++    // output keeps its caps; frames are uploaded instead of copied.
++    // Chromium hands no frames over at all when it cannot allocate GPU
++    // buffers (an X server without DRI3: "gbm device is missing"), and paints
++    // nothing in software either. Give it a few seconds to deliver one.
++    void CheckSharedTextureFrames(CefRefPtr<CefBrowser> browser)
++    {
++      CEF_REQUIRE_UI_THREAD();
++      if (!src->browser || !browser->IsSame(src->browser) || !src->use_shared_texture)
++        return;
++      if (g_atomic_int_get (&src->accel_frames) > 0)
++        return;
++      GST_WARNING_OBJECT (src, "Chromium delivered no GPU frames in %d ms", SHARED_TEXTURE_FIRST_FRAME_MS);
++      RecreateWithoutSharedTexture("Chromium delivered no GPU frames (is the X server missing DRI3?)");
++    }
++
++    void RecreateWithoutSharedTexture(const char *reason)
++    {
++      CEF_REQUIRE_UI_THREAD();
++      if (src->frame_handover == GST_CEF_FRAME_HANDOVER_GPU) {
++        // Asked for GPU frames only: say so rather than fall back.
++        GST_ELEMENT_ERROR (src, RESOURCE, FAILED,
++            ("HTML frames were required on the GPU (frame-handover=gpu), but that failed"),
++            ("%s", reason));
++        return;
++      }
++      if (!src->browser || !src->use_shared_texture)
++        return;
++      src->use_shared_texture = FALSE;
++
++      CefRefPtr<CefBrowser> old = src->browser;
++      std::string url = old->GetMainFrame()->GetURL().ToString();
++      if (url.empty())
++        url = src->url;
++      CefWindowInfo window_info;
++      CefBrowserSettings browser_settings;
++      window_info.SetAsWindowless(0);
++      CefRefPtr<CefBrowser> browser = CefBrowserHost::CreateBrowserSync(window_info, this,
++          url, browser_settings, nullptr, old->GetHost()->GetRequestContext());
++      if (!browser) {
++        GST_ELEMENT_ERROR (src, RESOURCE, FAILED, (NULL),
++            ("CEF could not create a software-painting browser after the GPU path failed"));
++        return;
++      }
++      browser->GetHost()->SetAudioMuted(true);
++      if (src->vinfo.fps_n)
++        browser->GetHost()->SetWindowlessFrameRate(
++            gst_util_uint64_scale (1, src->vinfo.fps_n, src->vinfo.fps_d));
++      // The old browser's OnBeforeClose then no longer matches src->browser
++      // and is taken for a popup closing, which is what it should be.
++      src->browser = browser;
++      old->GetHost()->CloseBrowser(true);
++      GST_ELEMENT_WARNING (src, RESOURCE, FAILED,
++          ("HTML frames no longer come over on the GPU"),
++          ("%s; the page was reopened with frames painted to CPU memory", reason));
++    }
++#endif
++
+   private:
+     // Handles the browser side of query routing.
+     CefRefPtr<CefMessageRouterBrowserSide> browser_msg_router_;
+@@ -650,6 +774,30 @@ class BrowserClient :
+ };
+ 
+ 
++#ifdef GST_CEF_HAVE_GL
++void RenderHandler::OnAcceleratedPaint(CefRefPtr<CefBrowser> browser, PaintElementType type,
++    const RectList &dirtyRects, const CefAcceleratedPaintInfo &info)
++{
++  if (type != PET_VIEW || !src->browser || !browser->IsSame(src->browser))
++    return;
++  g_atomic_int_inc (&src->accel_frames);
++  gboolean broken = FALSE;
++  GstBuffer *buf = gst_cef_gl_import (src->gl, info, &broken);
++  if (buf) {
++    GST_OBJECT_LOCK (src);
++    gst_buffer_replace (&(src->current_buffer), buf);
++    gst_buffer_unref (buf);
++    GST_OBJECT_UNLOCK (src);
++  }
++  if (broken && !src->shared_texture_broken) {
++    src->shared_texture_broken = TRUE;
++    CefRefPtr<BrowserClient> client = static_cast<BrowserClient *>(browser->GetHost()->GetClient().get());
++    CefPostTask(TID_UI, base::BindOnce(&BrowserClient::RecreateWithoutSharedTexture, client,
++        "Chromium's GPU frames could not be imported"));
++  }
++}
++#endif
++
+ /** Browser App methods */
+ 
+ BrowserApp::BrowserApp(GstCefSrc *src) : src(src)
+@@ -776,6 +924,11 @@ static GstFlowReturn gst_cef_src_create(GstPushSrc *push_src, GstBuffer **buf)
+ 
+   g_assert (src->current_buffer);
+   *buf = gst_buffer_copy (src->current_buffer);
++  // The copy shares the frame's memory. A frame from a pool (GPU output)
++  // must not go back to it, and be painted over, while any copy pushed
++  // downstream still reads it: the copy keeps it alive.
++  if (src->current_buffer->pool)
++    gst_buffer_add_parent_buffer_meta (*buf, src->current_buffer);
+ 
+   if (src->audio_buffers) {
+     gst_buffer_add_cef_audio_meta (*buf, src->audio_buffers);
+@@ -1029,6 +1182,41 @@ gst_cef_src_start(GstBaseSrc *base_src)
+   src->n_frames = 0;
+   GST_OBJECT_UNLOCK (src);
+ 
++  g_atomic_int_set (&src->started, 1);
++#ifndef GST_CEF_HAVE_GL
++  if (src->frame_handover == GST_CEF_FRAME_HANDOVER_GPU) {
++    GST_ELEMENT_ERROR (src, RESOURCE, SETTINGS,
++        ("HTML frames were required on the GPU (frame-handover=gpu), but this cefsrc was built without GPU output"),
++        ("GPU frame handover needs Linux, GStreamer GL and EGL at build time"));
++    goto done;
++  }
++#endif
++#ifdef GST_CEF_HAVE_GL
++  src->use_shared_texture = FALSE;
++  src->shared_texture_broken = FALSE;
++  {
++    gboolean gpu_on = src->gpu || g_getenv ("GST_CEF_GPU_ENABLED");
++    // GST_CEF_SHARED_TEXTURE=0 turns auto off for the process: where Chromium
++    // renders on the GPU but cannot allocate buffers to share (no DRI3).
++    gboolean want = src->frame_handover == GST_CEF_FRAME_HANDOVER_GPU
++        || (src->frame_handover == GST_CEF_FRAME_HANDOVER_AUTO
++            && g_strcmp0 (g_getenv ("GST_CEF_SHARED_TEXTURE"), "0") != 0);
++    if (want && gpu_on)
++      src->use_shared_texture = gst_cef_gl_prepare (src->gl);
++    if (src->frame_handover == GST_CEF_FRAME_HANDOVER_GPU && !src->use_shared_texture) {
++      GST_ELEMENT_ERROR (src, RESOURCE, SETTINGS,
++          ("HTML frames were required on the GPU (frame-handover=gpu), but that is not available"),
++          ("%s", gpu_on ? "No GL context can import Chromium's GPU frames (needs EGL with dma-buf import)" :
++              "Chromium does not render on the GPU here (GST_CEF_GPU_ENABLED unset; in strom-full: no NVIDIA GPU, or Xorg did not start)"));
++      goto done;
++    }
++  }
++  GST_INFO_OBJECT (src, "%s", src->use_shared_texture ?
++      "Chromium will hand frames over on the GPU" :
++      "Chromium's frames come over in CPU memory");
++  src->offer_gl = src->use_shared_texture;
++#endif
++
+   GST_ELEMENT_PROGRESS(src, CONTINUE, "open", ("Creating CEF browser ..."));
+ 
+ #ifdef __APPLE__
+@@ -1105,6 +1293,11 @@ gst_cef_src_stop (GstBaseSrc *base_src)
+   }
+ 
+   gst_buffer_replace (&src->current_buffer, NULL);
++  g_atomic_int_set (&src->started, 0);
++#ifdef GST_CEF_HAVE_GL
++  gst_cef_gl_reset (src->gl);
++  src->offer_gl = FALSE;
++#endif
+ 
+   return TRUE;
+ }
+@@ -1141,6 +1334,13 @@ gst_cef_src_query (GstBaseSrc * base_src, GstQuery * query)
+       res = TRUE;
+       break;
+     }
++#ifdef GST_CEF_HAVE_GL
++    case GST_QUERY_CONTEXT:
++      res = gst_cef_gl_handle_query (src->gl, query);
++      if (!res)
++        res = GST_BASE_SRC_CLASS (parent_class)->query (base_src, query);
++      break;
++#endif
+     default:
+       res = GST_BASE_SRC_CLASS (parent_class)->query (base_src, query);
+       break;
+@@ -1187,13 +1387,82 @@ gst_cef_src_set_caps (GstBaseSrc * base_src, GstCaps * caps)
+   new_buffer = gst_buffer_new_allocate (NULL, src->vinfo.width * src->vinfo.height * 4, NULL);
+   gst_buffer_replace (&(src->current_buffer), new_buffer);
+   gst_buffer_unref (new_buffer);
+-  src->browser->GetHost()->SetWindowlessFrameRate(gst_util_uint64_scale (1, src->vinfo.fps_n, src->vinfo.fps_d));
+-  src->browser->GetHost()->WasResized();
++  {
++    // On the UI thread, where src->browser may be swapped (software fallback).
++    int fps = (int) gst_util_uint64_scale (1, src->vinfo.fps_n, src->vinfo.fps_d);
++    CefPostTask(TID_UI, base::BindOnce([](GstCefSrc *s, int fps) {
++      if (!s->browser)
++        return;
++      s->browser->GetHost()->SetWindowlessFrameRate(fps);
++      s->browser->GetHost()->WasResized();
++    }, src, fps));
++  }
+   GST_OBJECT_UNLOCK (src);
+ 
+   return ret;
+ }
+ 
++#ifdef GST_CEF_HAVE_GL
++static GstCaps *
++gst_cef_src_get_caps (GstBaseSrc * base_src, GstCaps * filter)
++{
++  GstCefSrc *src = GST_CEF_SRC (base_src);
++  GstCaps *caps = gst_pad_get_pad_template_caps (GST_BASE_SRC_PAD (base_src));
++
++  // Before start() nothing is known, so both are offered (for link checks).
++  // Once started, GL memory only while Chromium's frames can be imported.
++  if (g_atomic_int_get (&src->started)) {
++    if (!src->offer_gl) {
++      caps = gst_caps_make_writable (caps);
++      for (gint i = gst_caps_get_size (caps) - 1; i >= 0; i--)
++        if (gst_caps_features_contains (gst_caps_get_features (caps, i), "memory:GLMemory"))
++          gst_caps_remove_structure (caps, i);
++    }
++  }
++  if (filter) {
++    GstCaps *tmp = gst_caps_intersect_full (filter, caps, GST_CAPS_INTERSECT_FIRST);
++    gst_caps_unref (caps);
++    caps = tmp;
++  }
++  return caps;
++}
++
++static gboolean
++gst_cef_src_decide_allocation (GstBaseSrc * base_src, GstQuery * query)
++{
++  GstCefSrc *src = GST_CEF_SRC (base_src);
++
++  if (!gst_cef_gl_decide_allocation (src->gl, query))
++    return FALSE;
++  if (gst_cef_gl_output_is_gl (src->gl)) {
++    GstBuffer *blank = gst_cef_gl_blank (src->gl);
++    if (!blank)
++      return FALSE;
++    GST_OBJECT_LOCK (src);
++    gst_buffer_replace (&src->current_buffer, blank);
++    GST_OBJECT_UNLOCK (src);
++    gst_buffer_unref (blank);
++  } else if (!GST_BASE_SRC_CLASS (parent_class)->decide_allocation (base_src, query)) {
++    return FALSE;
++  }
++  // Frames painted before the output was set up were dropped: paint again.
++  // src->browser is swapped on the UI thread (software fallback), so it is
++  // only read there.
++  CefPostTask(TID_UI, base::BindOnce([](GstCefSrc *s) {
++    if (s->browser)
++      s->browser->GetHost()->Invalidate(PET_VIEW);
++  }, src));
++  return TRUE;
++}
++
++static void
++gst_cef_src_set_context (GstElement * element, GstContext * context)
++{
++  gst_cef_gl_set_context (GST_CEF_SRC (element)->gl, context);
++  GST_ELEMENT_CLASS (parent_class)->set_context (element, context);
++}
++#endif
++
+ static void
+ gst_cef_src_set_property (GObject * object, guint prop_id, const GValue * value,
+     GParamSpec * pspec)
+@@ -1307,6 +1576,9 @@ gst_cef_src_set_property (GObject * object, guint prop_id, const GValue * value,
+     case PROP_STRICT_NETWORK:
+       src->strict_network = g_value_get_boolean (value);
+       break;
++    case PROP_FRAME_HANDOVER:
++      src->frame_handover = g_value_get_enum (value);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+@@ -1359,6 +1631,9 @@ gst_cef_src_get_property (GObject * object, guint prop_id, GValue * value,
+     case PROP_STRICT_NETWORK:
+       g_value_set_boolean (value, src->strict_network);
+       break;
++    case PROP_FRAME_HANDOVER:
++      g_value_set_enum (value, src->frame_handover);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+@@ -1384,6 +1659,10 @@ gst_cef_src_finalize (GObject *object)
+ 
+   g_cond_clear(&src->state_cond);
+   g_mutex_clear(&src->state_lock);
++#ifdef GST_CEF_HAVE_GL
++  gst_cef_gl_free (src->gl);
++  src->gl = NULL;
++#endif
+ }
+ 
+ static void
+@@ -1406,6 +1685,14 @@ gst_cef_src_init (GstCefSrc * src)
+   src->context_cache_path = NULL;
+   src->persist_session_cookies = FALSE;
+   src->strict_network = FALSE;
++  src->frame_handover = DEFAULT_FRAME_HANDOVER;
++  src->use_shared_texture = FALSE;
++  src->offer_gl = FALSE;
++  src->shared_texture_broken = FALSE;
++  src->started = 0;
++#ifdef GST_CEF_HAVE_GL
++  src->gl = gst_cef_gl_new (GST_ELEMENT (src));
++#endif
+ 
+   gst_base_src_set_format (base_src, GST_FORMAT_TIME);
+   gst_base_src_set_live (base_src, TRUE);
+@@ -1509,6 +1796,14 @@ gst_cef_src_class_init (GstCefSrcClass * klass)
+           "denying Chromium's Local Network Access prompt.",
+           FALSE, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY)));
+ 
++  g_object_class_install_property (gobject_class, PROP_FRAME_HANDOVER,
++    g_param_spec_enum ("frame-handover", "frame-handover",
++          "How Chromium's frames reach cefsrc when it renders on the GPU: auto (GPU "
++          "buffers, CPU memory if that fails), gpu (GPU buffers or an error), cpu "
++          "(CPU memory). GPU buffers need Linux with EGL dma-buf import.",
++          GST_TYPE_CEF_FRAME_HANDOVER, DEFAULT_FRAME_HANDOVER,
++          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY)));
++
+   gst_element_class_set_static_metadata (gstelement_class,
+       "Chromium Embedded Framework source", "Source/Video",
+       "Creates a video stream from an embedded Chromium browser",
+@@ -1523,6 +1818,11 @@ gst_cef_src_class_init (GstCefSrcClass * klass)
+   base_src_class->stop = GST_DEBUG_FUNCPTR(gst_cef_src_stop);
+   base_src_class->get_times = GST_DEBUG_FUNCPTR(gst_cef_src_get_times);
+   base_src_class->query = GST_DEBUG_FUNCPTR(gst_cef_src_query);
++#ifdef GST_CEF_HAVE_GL
++  base_src_class->get_caps = GST_DEBUG_FUNCPTR(gst_cef_src_get_caps);
++  base_src_class->decide_allocation = GST_DEBUG_FUNCPTR(gst_cef_src_decide_allocation);
++  gstelement_class->set_context = GST_DEBUG_FUNCPTR(gst_cef_src_set_context);
++#endif
+ 
+   gstelement_class->change_state = GST_DEBUG_FUNCPTR(gst_cef_src_change_state);
+ 
+diff --git a/gstcefsrc.h b/gstcefsrc.h
+index e274801..ae72803 100644
+--- a/gstcefsrc.h
++++ b/gstcefsrc.h
+@@ -27,6 +27,12 @@ G_BEGIN_DECLS
+   (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_CEF_SRC))
+ 
+ typedef struct _GstCefSrc GstCefSrc;
++
++typedef enum {
++  GST_CEF_FRAME_HANDOVER_AUTO = 0,
++  GST_CEF_FRAME_HANDOVER_GPU = 1,
++  GST_CEF_FRAME_HANDOVER_CPU = 2,
++} GstCefFrameHandover;
+ typedef struct _GstCefSrcClass GstCefSrcClass;
+ 
+ typedef enum : guint8 {
+@@ -60,6 +66,14 @@ struct _GstCefSrc {
+   gchar *context_cache_path;
+   gboolean persist_session_cookies;
+   gboolean strict_network;
++  /* GPU frame handover (shared textures), see gstcefgl.h */
++  gint frame_handover;            /* property, GstCefFrameHandover */
++  gboolean use_shared_texture;    /* the current browser was made with it */
++  gboolean offer_gl;              /* GL memory may be negotiated */
++  gboolean shared_texture_broken; /* an import failed; software from now on */
++  gint accel_frames;              /* GPU frames from the current browser (atomic) */
++  gint started;                   /* between start() and stop() (atomic) */
++  struct _GstCefGl *gl;
+   gboolean gpu;
+   gboolean sandbox;
+   gboolean listen_for_js_signals;

@@ -138,52 +138,59 @@ The `strom-full` Docker image includes:
 
 The entrypoint script automatically:
 
-- Starts Xvfb on display `:99`
+- With an NVIDIA GPU: starts Xorg on the GPU and renders HTML there (see GPU rendering below)
+- Without one, or if Xorg does not start: starts Xvfb on display `:99` and renders in software
 - Disables CEF sandbox (required for Docker root user)
-- Uses software rendering for CEF by default (see GPU mode below for opt-in)
 - Configures CEF cache and logging (the cache is kept across restarts; mount a
   volume on it to keep it across container replacement)
 
 No manual configuration is needed - just run the container and use `cefsrc` in your pipelines.
 
-### GPU mode (opt-in, experimental)
+### GPU rendering (default with an NVIDIA GPU)
 
-CEF can be routed through the host NVIDIA GPU via ANGLE/Vulkan by setting
-`STROM_CEF_GPU=1`. The software default is kept because:
+When the container sees an NVIDIA GPU, the entrypoint starts a headless Xorg
+on it with the NVIDIA X driver that the NVIDIA container toolkit mounts into
+the container (the display capability; the image sets
+`NVIDIA_DRIVER_CAPABILITIES=all`). Chromium renders each page on the GPU and
+hands every frame to `cefsrc` as a GPU buffer (a dma-buf), which `cefsrc`
+copies into GL memory on the GPU. An HTML source feeding the GPU vision mixer
+or compositor therefore never goes through the CPU. A consumer that needs
+system memory (a software encoder, NDI) gets the frames read back once.
 
-- GPU mode has a roughly 50% CPU floor per `cefsrc` at 1080p30, independent of
-  page content (continuous Vulkan command-buffer submits and compositor work).
-- Software mode is near-zero-cost for idle or static pages — Chromium elides
-  paint when nothing changes, and `cefsrc` emits duplicate buffers cheaply.
-
-GPU mode pays off when the renderer is the bottleneck: canvas-heavy animations,
-WebGL/3D scenes, or very high resolutions. For example, a 1080p30 wind-map
-(canvas + continuous simulation) drops from ~95% CPU to ~57% CPU with GPU mode
-on an RTX 3090; the same simple static page goes from ~1% CPU to ~53%.
-
-**Enabling GPU mode:**
+Nothing needs to be set:
 
 ```bash
-docker run --gpus all \
-  -e STROM_CEF_GPU=1 \
-  -e NVIDIA_DRIVER_CAPABILITIES=all \
-  -v /usr/share/vulkan/icd.d/nvidia_icd.json:/usr/share/vulkan/icd.d/nvidia_icd.json:ro \
-  --network host \
-  eyevinntechnology/strom-full:latest
+docker run --gpus all --network host eyevinntechnology/strom-full:latest
 ```
 
-Requirements:
+On Kubernetes, request `nvidia.com/gpu` on a node with the NVIDIA container
+toolkit or GPU Operator. It mounts the X driver and `/dev/dri` with the GPU.
 
-- NVIDIA driver on the host and `nvidia-container-toolkit` installed
-- `--gpus all` to pass the device into the container
-- `NVIDIA_DRIVER_CAPABILITIES=all` so the toolkit mounts the full lib set
-  (including `libGLX_nvidia.so.0`)
-- Bind-mount of the host's `nvidia_icd.json` — the container toolkit does not
-  mount the Vulkan ICD JSON automatically on all setups
+The output is the same in every case: the same BGRA pixels, transparency
+included, in GL memory when the consumer takes it, otherwise in system memory. `cefsrc` falls back by itself, without stopping the flow:
 
-The entrypoint prints `CEF GPU mode enabled (STROM_CEF_GPU=1) - ANGLE/Vulkan
-on NVIDIA` when the GPU path activates, and warns if `STROM_CEF_GPU=1` is set
-but no GPU is visible in the container.
+- no GPU, `STROM_CEF_GPU=0`, or Xorg cannot start (for example a device plugin
+  that does not mount the X driver): Xvfb and software rendering, as before.
+  The entrypoint logs why.
+- Chromium delivers no GPU frame within 5 s, or one cannot be imported: the
+  page is reopened with frames painted to CPU memory, which `cefsrc` uploads
+  into the same GL memory. It posts a warning naming the reason.
+
+Each HTML Input block has a **Render Mode**: `auto` (the default, as above),
+`gpu` (GPU frames or a flow error, for when a silent fallback would hide a
+capacity problem), or `cpu` (frames always come over in CPU memory). A raw
+`cefsrc` has the same choice in its `frame-handover` property.
+
+The entrypoint prints `GPU detected - HTML renders on the GPU` when the GPU
+path is active. Measured on one Tesla T4 at 1080p50 (CPU of one core, Chromium
+and GStreamer together, one data point): a lower third with a ticker 22% in
+software and 11% on the GPU; a 4000-particle canvas 122% in software (at 45
+fps, it could not keep up) and 74% on the GPU at the full 50 fps.
+
+`STROM_CEF_GPU=1` still allows the older ANGLE/Vulkan path under Xvfb when
+Xorg cannot start. It needs NVIDIA's Vulkan ICD in the container (on nodes
+whose device plugin mounts the driver at `/usr/local/nvidia`, the entrypoint
+adds the ICD from there), and its frames come back through the CPU.
 
 **GPU mode does not give a page hardware video decode or encode.** It moves
 painting and compositing to the GPU, nothing more. Chromium on Linux does
@@ -572,9 +579,9 @@ without isolated contexts, every source shares one login.
 ## Limitations
 
 - **`strom-full` image only**: `cefsrc` comes from the gstcefsrc plugin, which Strom ships only in the `strom-full` image. The plain `strom` image and the native release builds (Linux, macOS, Windows) do not include it.
-- **Linux: X11 required**: CEF needs an X server on Linux, which the strom-full image provides via Xvfb. This is why `strom-full` is the supported way to run HTML sources.
+- **Linux: X11 required**: CEF needs an X server on Linux, which the strom-full image provides (Xorg on an NVIDIA GPU, Xvfb otherwise). This is why `strom-full` is the supported way to run HTML sources.
 - **macOS: no native support yet**: CEF renders offscreen through its own macOS path, so Xvfb is not involved and the X11 requirement above does not apply. Native macOS support is tracked in [centricular/gstcefsrc#110](https://github.com/centricular/gstcefsrc/pull/110) (macOS build fixes) and [Eyevinn/strom#669](https://github.com/Eyevinn/strom/pull/669) (a Cocoa run loop on the main thread, needed in headless mode). CEF on macOS also refuses to initialise unless the host process is inside an `.app` bundle, and the macOS release ships a bare executable rather than a bundle.
-- **Software rendering by default**: CEF uses CPU rendering; opt in to GPU with `STROM_CEF_GPU=1` (see above)
+- **GPU rendering needs NVIDIA and the container toolkit**: other GPUs, or a device plugin that does not mount the NVIDIA X driver, render in software (see above)
 - **No H.264 or AAC in the page**: the CEF build has no proprietary codecs, so Teams shows no video and Spotify does not play (see [Which pages work](#which-pages-work))
 - **No hardware video in the page on Linux**: even in GPU mode, Chromium decodes and encodes a page's video in software, because it needs VA-API and NVIDIA has none in the Docker images
 - **Memory usage**: CEF spawns multiple processes (browser, renderer, GPU process)

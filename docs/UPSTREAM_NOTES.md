@@ -408,3 +408,60 @@ workaround can go once we move past that version.
   (`srt_uri_key_without_value_test`).
 - **Upstream:** not searched.
 - **Found in:** #1257 (capabilities review).
+
+## CEF / Chromium
+
+### CEF 144: shared textures (`OnAcceleratedPaint`) fail on Linux with NVIDIA
+- **Seen on:** CEF 144.0.21 (Chromium 144), Ubuntu 26.04 container, Tesla T4, NVIDIA driver
+  580.178.04, headless Xorg with the NVIDIA driver (DRI3). Not seen on CEF 156.0.31 or 158.0.3.
+- **Symptom:** measured. With `shared_texture_enabled`, Chromium allocates linear GBM buffers
+  and logs "Unable to initialize SkSurface"; `OnAcceleratedPaint` never delivers a usable frame.
+  CEF 156 and 158 deliver one plane BGRA with modifier `0x300000000606014` (NVIDIA block-linear) at the
+  page's rate.
+- **Repro:** gstcefsrc with `window_info.shared_texture_enabled = true` and an
+  `OnAcceleratedPaint` override, `use-gl=angle,use-angle=gl-egl,ozone-platform=x11`.
+- **Hint:** buffer allocation for the OSR video capturer used linear buffers on Linux.
+- **Upstream:** fixed in CEF c5b06184bd (chromiumembedded/cef#4237), in CEF 156 and 158. Strom
+  moved to CEF 158 for the GPU frame handover.
+- **Found in:** the HTML GPU output work (gl-output patch in `docker/gstcefsrc`).
+
+### Chromium shares no frames without DRI3, and paints none either
+- **Seen on:** CEF 156.0.31 and 158.0.3, Xvfb (no DRI3) and `ozone-platform=headless`, NVIDIA T4.
+- **Symptom:** measured. A windowless browser made with `shared_texture_enabled` while the GPU is
+  enabled gets neither `OnAcceleratedPaint` nor `OnPaint`: the output stays blank, with only
+  "Can't create buffer -- gbm device is missing" and "Unable to allocate frame for first frame
+  capture: OOM?" in Chromium's log. `ozone-platform=headless` behaves the same.
+- **Repro:** the same as above under Xvfb.
+- **Hint:** the X11 ozone platform gets its GBM device through DRI3; without one, native pixmaps
+  cannot be allocated, and the capturer gives up instead of falling back to a readback.
+- **Tests:** none in CI (needs an NVIDIA GPU). cefsrc reopens such a browser without shared
+  textures after 5 s without a GPU frame, and logs why.
+- **Upstream:** not searched.
+- **Found in:** the HTML GPU output work.
+
+### NVIDIA GLES: `glReadPixels` of a 1080p frame takes ~680 ms in cefsrc's GL context
+- **Seen on:** NVIDIA 580.178.04, Tesla T4, GStreamer 1.28 GL with `GST_GL_WINDOW=egl-device`
+  (OpenGL ES 3.2), a context cefsrc creates in the flow's share group.
+- **Symptom:** measured. `glReadPixels` (RGBA, unsigned byte) of 1920x1080 took 675-695 ms,
+  whether read straight from the imported dma-buf, from a plain RGBA8 texture, or into a pixel
+  buffer object. `gldownload` in the same image downloads 1080p GL memory in a few ms, and
+  mapping cefsrc's GL memory for reading (GStreamer's own download path) took 8 ms a frame.
+- **Repro:** not reduced to a `gst-launch` line.
+- **Hint:** not understood. A guess: the read takes a slow path for this context's
+  configuration that GStreamer's download avoids. cefsrc reads back through
+  `gst_buffer_map` on GL memory instead.
+- **Upstream:** not searched.
+- **Found in:** the HTML GPU output work.
+
+### NVIDIA container toolkit: the X driver and GBM backend land under the host's paths
+- **Seen on:** NVIDIA container toolkit on the EKS AL2023 NVIDIA AMI (driver 580.178.04),
+  `NVIDIA_DRIVER_CAPABILITIES=all`, Ubuntu 26.04 container.
+- **Symptom:** measured, odd behaviour rather than a bug. The display capability mounts
+  `nvidia_drv.so` at `/usr/lib64/xorg/modules/drivers` and NVIDIA's GBM backend at
+  `/usr/lib64/gbm/nvidia-drm_gbm.so`, the host's (Amazon Linux) paths. Ubuntu's Xorg and libgbm
+  look under `/usr/lib/xorg/modules` and `/usr/lib/x86_64-linux-gnu/gbm`. `libglxserver_nvidia`
+  is not mounted, so Xorg runs without GLX (not needed for EGL/DRI3). `/dev/dri` is injected.
+- **Hint:** the toolkit mirrors host paths. The strom-full entrypoint points Xorg's
+  `ModulePath` and `GBM_BACKENDS_PATH` at whichever directory has the files.
+- **Upstream:** not searched.
+- **Found in:** the HTML GPU output work.

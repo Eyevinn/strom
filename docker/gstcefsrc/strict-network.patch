@@ -1,5 +1,5 @@
 diff --git a/gstcefsrc.cc b/gstcefsrc.cc
-index 8be9339..8f1707b 100644
+index 8be9339..e155233 100644
 --- a/gstcefsrc.cc
 +++ b/gstcefsrc.cc
 @@ -132,6 +132,7 @@ enum
@@ -20,7 +20,7 @@ index 8be9339..8f1707b 100644
  {
    public:
  
-@@ -452,6 +454,32 @@ class BrowserClient :
+@@ -452,6 +454,37 @@ class BrowserClient :
        return display_handler;
      }
  
@@ -40,7 +40,12 @@ index 8be9339..8f1707b 100644
 +        uint32_t requested_permissions,
 +        CefRefPtr<CefPermissionPromptCallback> callback) override
 +    {
-+      if (!(requested_permissions & CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS))
++      // Chromium 145 split Local Network Access into local network and
++      // loopback (this machine); strict refuses both, and the old type.
++      const uint32_t lna = CEF_PERMISSION_TYPE_LOCAL_NETWORK
++          | CEF_PERMISSION_TYPE_LOOPBACK_NETWORK
++          | CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS_DEPRECATED;
++      if (!(requested_permissions & lna))
 +        return false;
 +      GST_INFO_OBJECT (src, "%s local network access for %s",
 +          src->strict_network ? "Refusing" : "Allowing",
@@ -53,7 +58,7 @@ index 8be9339..8f1707b 100644
      bool OnProcessMessageReceived(
        CefRefPtr<CefBrowser> browser,
        CefRefPtr<CefFrame> frame,
-@@ -696,7 +724,18 @@ void BrowserApp::OnBeforeCommandLineProcessing(const CefString &process_type,
+@@ -696,7 +729,18 @@ void BrowserApp::OnBeforeCommandLineProcessing(const CefString &process_type,
        for (i = 0; i < g_strv_length (flags_list); i++) {
          gchar **switch_value = g_strsplit ((const gchar *) flags_list[i], "=", -1);
  
@@ -73,7 +78,7 @@ index 8be9339..8f1707b 100644
            GST_INFO_OBJECT (src, "Adding switch with value %s=%s", switch_value[0], switch_value[1]);
            command_line->AppendSwitchWithValue (switch_value[0], switch_value[1]);
          } else {
-@@ -1260,6 +1299,9 @@ gst_cef_src_set_property (GObject * object, guint prop_id, const GValue * value,
+@@ -1260,6 +1304,9 @@ gst_cef_src_set_property (GObject * object, guint prop_id, const GValue * value,
      case PROP_PERSIST_SESSION_COOKIES:
        src->persist_session_cookies = g_value_get_boolean (value);
        break;
@@ -83,7 +88,7 @@ index 8be9339..8f1707b 100644
      default:
        G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
        break;
-@@ -1309,6 +1351,9 @@ gst_cef_src_get_property (GObject * object, guint prop_id, GValue * value,
+@@ -1309,6 +1356,9 @@ gst_cef_src_get_property (GObject * object, guint prop_id, GValue * value,
      case PROP_PERSIST_SESSION_COOKIES:
        g_value_set_boolean (value, src->persist_session_cookies);
        break;
@@ -93,7 +98,7 @@ index 8be9339..8f1707b 100644
      default:
        G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
        break;
-@@ -1355,6 +1400,7 @@ gst_cef_src_init (GstCefSrc * src)
+@@ -1355,6 +1405,7 @@ gst_cef_src_init (GstCefSrc * src)
    src->isolated_context = FALSE;
    src->context_cache_path = NULL;
    src->persist_session_cookies = FALSE;
@@ -101,7 +106,7 @@ index 8be9339..8f1707b 100644
  
    gst_base_src_set_format (base_src, GST_FORMAT_TIME);
    gst_base_src_set_live (base_src, TRUE);
-@@ -1452,6 +1498,12 @@ gst_cef_src_class_init (GstCefSrcClass * klass)
+@@ -1452,6 +1503,12 @@ gst_cef_src_class_init (GstCefSrcClass * klass)
            "most logins are. Otherwise they are gone when the browser closes.",
            FALSE, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY)));
  
