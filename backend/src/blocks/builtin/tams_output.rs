@@ -21,8 +21,10 @@ use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockB
 use crate::client_auth::AuthMethod;
 use crate::osc::SatProvider;
 use crate::tams::client::{FlowSpec, TamsClient};
+use crate::tams::timeline::{
+    reference_tai_ns, shared_pipeline_mapping, AnchorKind, FragmentTimeline, TaiClock,
+};
 use crate::tams::uploader::{channel, new_tail_slot, spawn_uploader, FragmentReady, TailFragment};
-use gst::glib;
 use gst::glib::prelude::ToValue;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -779,78 +781,78 @@ fn build_flow_chain(
             tail_segment_ns,
         );
 
-        // Per-fragment timeline state: maps GStreamer PTS to an absolute TAI timeline.
-        let state = Arc::new(Mutex::new(FragState::default()));
+        // Per-block timeline: TAI = running time + offset, anchored on the first
+        // fragment. The anchor is the buffer's capture time when it carries a
+        // reference timestamp, otherwise the running time -> TAI mapping shared by
+        // every TAMS Output of this pipeline run, so equal running time gives equal
+        // TAI across blocks (#966). See `crate::tams::timeline`.
+        let timeline = Arc::new(Mutex::new(FragmentTimeline::default()));
+        let tai = Arc::new(TaiClock::new());
         let temp_dir = temp_dir_for_setup;
         let tag = chain_tag;
         let block_id_sig = block_id;
 
-        // A fresh GStreamer TAI clock (CLOCK_TAI on Linux). The kernel maintains the
-        // current TAI-UTC offset when ntp/chrony disciplines it, so we never hardcode
-        // leap seconds. This is independent of the pipeline's own clock (which is
-        // often Monotonic): we only sample TAI once to anchor the timeline, then
-        // advance it by buffer-PTS deltas, so segments stay contiguous.
-        let tai_clock: gst::Clock = glib::Object::builder::<gst::SystemClock>()
-            .property("clock-type", gst::ClockType::Tai)
-            .build()
-            .upcast();
-        let realtime_clock: gst::Clock = glib::Object::builder::<gst::SystemClock>()
-            .property("clock-type", gst::ClockType::Realtime)
-            .build()
-            .upcast();
-
         let _ = splitmuxsink.connect("format-location-full", false, move |args| {
+            let element = args.first().and_then(|v| v.get::<gst::Element>().ok());
             let fragment_id = args.get(1).and_then(|v| v.get::<u32>().ok()).unwrap_or(0);
-            let pts_ns = args
-                .get(2)
-                .and_then(|v| v.get::<gst::Sample>().ok())
-                .and_then(|s| s.buffer().and_then(|b| b.pts()))
-                .map(|t| t.nseconds())
-                .unwrap_or(0);
+            let sample = args.get(2).and_then(|v| v.get::<gst::Sample>().ok());
+            let buffer = sample.as_ref().and_then(|s| s.buffer_owned());
+            let pts = buffer.as_ref().and_then(|b| b.pts());
+            // Running time of the fragment's first buffer. Without a segment the
+            // PTS is used as is (a default segment maps PTS 1:1 to running time).
+            let running_time_ns = match (pts, sample.as_ref().and_then(|s| s.segment())) {
+                (Some(pts), Some(seg)) => seg
+                    .downcast_ref::<gst::format::Time>()
+                    .and_then(|seg| seg.to_running_time(pts))
+                    .unwrap_or(pts)
+                    .nseconds(),
+                (Some(pts), None) => pts.nseconds(),
+                _ => 0,
+            };
 
             let location = temp_dir.join(format!("seg_{:05}.{}", fragment_id, file_ext));
             let location_str = location.to_string_lossy().to_string();
 
-            // Anchor the timeline once, then advance by PTS deltas.
-            let abs_start = {
-                let mut st = state.lock().unwrap();
-                if !st.initialized {
-                    st.initialized = true;
-                    st.pts0_ns = pts_ns;
-                    st.last_pts_ns = pts_ns;
-                    // If CLOCK_TAI has no offset set (ntp/chrony not disciplining it),
-                    // it equals CLOCK_REALTIME — timestamps would be UTC, ~tens of
-                    // seconds off true TAI. Warn rather than silently mislabel.
-                    let tai_now = tai_clock.time().nseconds();
-                    let rt_now = realtime_clock.time().nseconds();
-                    if tai_now.abs_diff(rt_now) < 1_000_000_000 {
-                        warn!(
-                            "TAMS {} ({}): CLOCK_TAI offset appears unset (TAI == UTC); \
-                             segment timestamps will not be true TAI. Ensure ntp/chrony \
-                             sets the system TAI offset.",
-                            block_id_sig, tag
-                        );
-                    }
-                    st.t0_tai_ns = tai_now;
-                }
-                // A backward PTS jump (live-source reconnect, encoder/clock restart)
-                // would make `t0 + (pts - pts0)` move backward and overlap the
-                // previous segment. Detect it and re-anchor the timeline to the
-                // current TAI so segments stay monotonic — the real-time gap maps
-                // to a forward jump on the timeline rather than an overlap.
-                if pts_ns < st.last_pts_ns {
-                    let tai_now = tai_clock.time().nseconds();
-                    warn!(
-                        "TAMS {} ({}): PTS went backward ({} -> {} ns), re-anchoring \
-                         segment timeline to current TAI",
-                        block_id_sig, tag, st.last_pts_ns, pts_ns
-                    );
-                    st.t0_tai_ns = tai_now;
-                    st.pts0_ns = pts_ns;
-                }
-                st.last_pts_ns = pts_ns;
-                st.t0_tai_ns + pts_ns.saturating_sub(st.pts0_ns)
+            let placed = {
+                let mut tl = timeline.lock().unwrap_or_else(|e| e.into_inner());
+                tl.place(
+                    running_time_ns,
+                    || {
+                        let tai_minus_utc = tai.tai_minus_utc_ns();
+                        if let Some(t) = buffer
+                            .as_ref()
+                            .and_then(|b| reference_tai_ns(b.as_ref(), tai_minus_utc))
+                        {
+                            return (t, AnchorKind::Reference);
+                        }
+                        if let Some(el) = element.as_ref() {
+                            if let (Some(clock), Some(base)) = (el.clock(), el.base_time()) {
+                                let m =
+                                    shared_pipeline_mapping(flow_id, &clock, base.nseconds(), &tai);
+                                return (
+                                    m.tai_ns(base.nseconds(), running_time_ns),
+                                    AnchorKind::Pipeline,
+                                );
+                            }
+                        }
+                        (tai.now_ns(), AnchorKind::Arrival)
+                    },
+                    || tai.now_ns(),
+                )
             };
+            if placed.went_backward {
+                warn!(
+                    "TAMS {} ({}): running time went backward (to {} ns), re-anchoring \
+                     segment timeline to current TAI",
+                    block_id_sig, tag, running_time_ns
+                );
+            } else if let Some(kind) = placed.anchored {
+                info!(
+                    "TAMS {} ({}): timeline anchored ({:?}): running time {} ns -> TAI {} ns",
+                    block_id_sig, tag, kind, running_time_ns, placed.start_ns
+                );
+            }
+            let abs_start = placed.start_ns;
 
             // The previously open fragment is now complete: [its start, this start).
             // The just-opened one becomes the new tail (flushed on shutdown).
@@ -985,17 +987,6 @@ fn request_sink_pad(
     Ok(pad.name().to_string())
 }
 
-#[derive(Default)]
-struct FragState {
-    initialized: bool,
-    /// PTS of the very first fragment, used as the timeline origin.
-    pts0_ns: u64,
-    /// Absolute TAI time (ns) corresponding to `pts0_ns`.
-    t0_tai_ns: u64,
-    /// PTS of the previously-opened fragment, to detect a backward PTS jump.
-    last_pts_ns: u64,
-}
-
 /// Get TAMS Output block definitions.
 pub fn get_blocks() -> Vec<BlockDefinition> {
     vec![tams_output_definition()]
@@ -1115,7 +1106,7 @@ fn tams_output_definition() -> BlockDefinition {
             simple_prop(
                 "segment_duration_secs",
                 "Segment Duration (s)",
-                "Target duration of each TAMS segment in seconds.",
+                "Target duration of each TAMS segment in seconds. Segments split on a keyframe (one is requested from upstream encoders at each split), so the GOP should divide it: for replay, 1 s segments with a GOP of 0.5 s or shorter.",
                 PropertyType::Int,
                 PropertyValue::Int(DEFAULT_SEGMENT_SECS as i64),
             ),
