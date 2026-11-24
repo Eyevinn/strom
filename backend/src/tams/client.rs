@@ -11,6 +11,11 @@
 //! - `PUT  <presigned url>`       upload the segment bytes to S3
 //! - `POST /flows/{id}/segments`  register a segment on the flow timeline
 //! - `GET  /flows/{id}/segments?timerange=[..)`  list segments (presigned GET URLs)
+//! - `GET  /flows/{id}`           read a flow (frame rate, container)
+//!
+//! Reading follows the TAMS spec rather than gateway specifics: paging uses the
+//! opaque `X-Paging-NextKey` as the `page` query parameter, falling back to a
+//! `Link: <..>; rel="next"` header.
 
 use crate::client_auth::AuthMethod;
 use anyhow::{anyhow, Context, Result};
@@ -318,9 +323,275 @@ impl TamsClient {
     }
 }
 
+/// One segment as listed by `GET /flows/{id}/segments`. Timeranges and the
+/// `ts_offset` timestamp are kept as the raw TAMS strings; see
+/// `strom_types::tams::parse_timerange`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListedSegment {
+    pub object_id: String,
+    pub timerange: String,
+    #[serde(default)]
+    pub ts_offset: Option<String>,
+    #[serde(default)]
+    pub object_timerange: Option<String>,
+    #[serde(default)]
+    pub get_urls: Vec<GetUrl>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GetUrl {
+    pub url: String,
+}
+
+/// Query for `GET /flows/{id}/segments`.
+#[derive(Debug, Clone, Default)]
+pub struct SegmentQuery {
+    pub timerange: Option<String>,
+    pub limit: Option<u32>,
+    pub reverse_order: bool,
+}
+
+impl SegmentQuery {
+    /// Query parameters, with `page` set when following a paging key.
+    fn params(&self, page: Option<&str>) -> Vec<(&'static str, String)> {
+        let mut p = Vec::new();
+        if let Some(tr) = &self.timerange {
+            p.push(("timerange", tr.clone()));
+        }
+        if let Some(l) = self.limit {
+            p.push(("limit", l.to_string()));
+        }
+        if self.reverse_order {
+            p.push(("reverse_order", "true".to_string()));
+        }
+        // Lets a spec-complete store return object_timerange for partial use;
+        // others ignore it.
+        p.push(("include_object_timerange", "true".to_string()));
+        if let Some(page) = page {
+            p.push(("page", page.to_string()));
+        }
+        p
+    }
+}
+
+/// Where the next page of a paged listing is, from the response headers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NextPage {
+    /// Opaque key for the `page` query parameter (`X-Paging-NextKey`).
+    Key(String),
+    /// A `Link rel="next"` target, absolute or relative to the gateway.
+    Link(String),
+}
+
+fn with_query(base: &str, params: &[(&str, String)]) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(base).with_context(|| format!("url {}", base))?;
+    url.query_pairs_mut()
+        .extend_pairs(params.iter().map(|(k, v)| (*k, v.as_str())));
+    Ok(url)
+}
+
+/// Find the next page from `X-Paging-NextKey` or a `Link` header value.
+pub fn next_page(next_key: Option<&str>, link: Option<&str>) -> Option<NextPage> {
+    if let Some(k) = next_key.map(str::trim).filter(|k| !k.is_empty()) {
+        return Some(NextPage::Key(k.to_string()));
+    }
+    let link = link?;
+    for part in link.split(',') {
+        let mut fields = part.split(';');
+        let target = fields.next()?.trim();
+        let is_next = fields.any(|f| {
+            let f = f.trim().replace(' ', "");
+            f == "rel=\"next\"" || f == "rel=next"
+        });
+        if is_next {
+            let t = target.trim_start_matches('<').trim_end_matches('>');
+            return Some(NextPage::Link(t.to_string()));
+        }
+    }
+    None
+}
+
+impl TamsClient {
+    /// Base URL without trailing slash.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// `GET /flows/{id}` as JSON.
+    pub async fn get_flow(&self, flow_id: &str) -> Result<serde_json::Value> {
+        let url = format!("{}/flows/{}", self.base_url, flow_id);
+        let resp = self
+            .auth
+            .apply(self.http.get(&url))
+            .await?
+            .send()
+            .await
+            .with_context(|| format!("GET {}", url))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(HttpStatusError {
+                status,
+                context: format!("GET {}", url),
+                body,
+            }
+            .into());
+        }
+        resp.json().await.context("parsing flow")
+    }
+
+    /// List segments, following pages until `max_pages` pages or the end.
+    pub async fn list_segments(
+        &self,
+        flow_id: &str,
+        query: &SegmentQuery,
+        max_pages: usize,
+    ) -> Result<Vec<ListedSegment>> {
+        let first = format!("{}/flows/{}/segments", self.base_url, flow_id);
+        let mut out = Vec::new();
+        let mut next: Option<NextPage> = None;
+        for _ in 0..max_pages.max(1) {
+            let url = match &next {
+                None => with_query(&first, &query.params(None))?,
+                Some(NextPage::Key(k)) => with_query(&first, &query.params(Some(k)))?,
+                Some(NextPage::Link(l)) => self.resolve(l)?,
+            };
+            let req = self.http.get(url);
+            let resp = self
+                .auth
+                .apply(req)
+                .await?
+                .send()
+                .await
+                .with_context(|| format!("GET {}", first))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(HttpStatusError {
+                    status,
+                    context: format!("GET {}", first),
+                    body,
+                }
+                .into());
+            }
+            let h = resp.headers();
+            next = next_page(
+                h.get("x-paging-nextkey").and_then(|v| v.to_str().ok()),
+                h.get("link").and_then(|v| v.to_str().ok()),
+            );
+            let page: Vec<ListedSegment> = resp.json().await.context("parsing segments")?;
+            let empty = page.is_empty();
+            out.extend(page);
+            if next.is_none() || empty {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Resolve a `Link` target against the gateway base URL.
+    fn resolve(&self, link: &str) -> Result<reqwest::Url> {
+        if link.starts_with("http://") || link.starts_with("https://") {
+            return reqwest::Url::parse(link).context("next link");
+        }
+        let base = reqwest::Url::parse(&format!("{}/", self.base_url)).context("base url")?;
+        base.join(link).context("next link")
+    }
+
+    /// GET the bytes of a media object from one of its `get_urls`. No auth
+    /// header: TAMS get_urls are presigned or otherwise directly fetchable,
+    /// and an extra Authorization header breaks S3 presigned requests.
+    pub async fn fetch_object(&self, url: &str) -> Result<Vec<u8>> {
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .context("GET media object")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(HttpStatusError {
+                status,
+                context: "GET media object".to_string(),
+                body,
+            }
+            .into());
+        }
+        Ok(resp.bytes().await.context("reading media object")?.to_vec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paging_prefers_next_key() {
+        assert_eq!(
+            next_page(Some("0001"), Some("</x?page=9>; rel=\"next\"")),
+            Some(NextPage::Key("0001".into()))
+        );
+    }
+
+    #[test]
+    fn paging_falls_back_to_link() {
+        let l = "</flows/f/segments?limit=2&page=01800000012000000000>; rel=\"next\"";
+        assert_eq!(
+            next_page(None, Some(l)),
+            Some(NextPage::Link(
+                "/flows/f/segments?limit=2&page=01800000012000000000".into()
+            ))
+        );
+        let l = "<https://a.example.com/p1>; rel=\"prev\", <https://a.example.com/p3>; rel=next";
+        assert_eq!(
+            next_page(Some(""), Some(l)),
+            Some(NextPage::Link("https://a.example.com/p3".into()))
+        );
+        assert_eq!(next_page(None, Some("<x>; rel=\"prev\"")), None);
+        assert_eq!(next_page(None, None), None);
+    }
+
+    #[test]
+    fn segment_query_params() {
+        let q = SegmentQuery {
+            timerange: Some("[1:0_2:0)".into()),
+            limit: Some(10),
+            reverse_order: true,
+        };
+        let p = q.params(Some("k"));
+        assert!(p.contains(&("timerange", "[1:0_2:0)".to_string())));
+        assert!(p.contains(&("limit", "10".to_string())));
+        assert!(p.contains(&("reverse_order", "true".to_string())));
+        assert!(p.contains(&("page", "k".to_string())));
+    }
+
+    #[test]
+    fn link_resolves_against_base_with_prefix() {
+        let c = TamsClient::new("http://gw.example.com/tams", AuthMethod::None).unwrap();
+        assert_eq!(
+            c.resolve("flows/f/segments?page=2").unwrap().as_str(),
+            "http://gw.example.com/tams/flows/f/segments?page=2"
+        );
+        assert_eq!(
+            c.resolve("https://x.example.com/a").unwrap().as_str(),
+            "https://x.example.com/a"
+        );
+    }
+
+    #[test]
+    fn listed_segment_parses_optional_fields() {
+        let s: ListedSegment = serde_json::from_str(
+            r#"{"object_id":"b/o","timerange":"[1:0_2:0)","ts_offset":"0:5",
+                "get_urls":[{"url":"http://s.example.com/o","presigned":true}]}"#,
+        )
+        .unwrap();
+        assert_eq!(s.ts_offset.as_deref(), Some("0:5"));
+        assert_eq!(s.get_urls[0].url, "http://s.example.com/o");
+        let s: ListedSegment =
+            serde_json::from_str(r#"{"object_id":"o","timerange":"[1:0_2:0)"}"#).unwrap();
+        assert!(s.get_urls.is_empty() && s.object_timerange.is_none());
+    }
 
     // Timerange/timestamp formatting is tested in `strom_types::tams`.
 
