@@ -339,6 +339,25 @@ impl FragmentTimeline {
     }
 }
 
+impl FragmentTimeline {
+    /// Running time of the next split point after a fragment that starts at
+    /// `running_time_ns`: the next multiple of `segment_ns` on the TAI timeline.
+    ///
+    /// Splitting on a TAI grid gives every flow written from the same frames the
+    /// same segment boundaries, and puts boundaries of flows on a shared clock at
+    /// the same TAI. `None` until the timeline is anchored or with a zero length.
+    pub fn next_split_running_time(&self, running_time_ns: u64, segment_ns: u64) -> Option<u64> {
+        let offset = self.offset_ns?;
+        if segment_ns == 0 {
+            return None;
+        }
+        let seg = segment_ns as i128;
+        let tai = running_time_ns as i128 + offset;
+        let next_tai = (tai.div_euclid(seg) + 1) * seg;
+        Some(clamp_ns(next_tai - offset))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,6 +519,23 @@ mod tests {
         assert_eq!(s1b.anchored, None);
         assert_eq!(s1b.start_ns, s2b.start_ns);
         assert_eq!(s1b.start_ns - s1.start_ns, 1_000_000_000);
+    }
+
+    #[test]
+    fn splits_fall_on_the_tai_grid() {
+        let mut tl = FragmentTimeline::default();
+        assert_eq!(tl.next_split_running_time(0, 1_000), None);
+        // Running time 100 is TAI 10_350.
+        tl.place(100, || (10_350, AnchorKind::Pipeline), || unreachable!());
+        // Next TAI multiple of 1_000 is 11_000 = running time 750.
+        assert_eq!(tl.next_split_running_time(100, 1_000), Some(750));
+        // A fragment that starts on the grid ends one segment later.
+        tl.place(750, || unreachable!(), || unreachable!());
+        assert_eq!(tl.next_split_running_time(750, 1_000), Some(1_750));
+        // A late keyframe (TAI 12_040) ends at the following grid point.
+        tl.place(1_790, || unreachable!(), || unreachable!());
+        assert_eq!(tl.next_split_running_time(1_790, 1_000), Some(2_750));
+        assert_eq!(tl.next_split_running_time(1_790, 0), None);
     }
 
     #[test]

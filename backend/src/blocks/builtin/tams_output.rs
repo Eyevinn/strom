@@ -517,11 +517,17 @@ fn build_flow_chain(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("splitmuxsink: {}", e)))?;
     splitmuxsink.set_property("muxer", &mux);
-    splitmuxsink.set_property("max-size-time", segment_secs.saturating_mul(1_000_000_000));
+    // No size limit: segments split on a grid of `segment_secs` on the TAI
+    // timeline, scheduled with `split-at-running-time` as each fragment opens (see
+    // the format-location-full handler). A size limit splits wherever the queued
+    // GOPs happen to overrun it, which differs between blocks fed the same input,
+    // so synchronized flows would not share segment boundaries.
+    splitmuxsink.set_property("max-size-time", 0u64);
     // Fallback location template; the format-location-full signal overrides it.
     let fallback = temp_dir.join(format!("seg_%05d.{}", container.file_ext()));
     splitmuxsink.set_property("location", fallback.to_string_lossy().as_ref());
-    // Ask upstream for keyframes at split points so segments are GOP-aligned.
+    // Ask upstream for a keyframe at each scheduled split point, so segments are
+    // GOP-aligned and start on the grid.
     if splitmuxsink.has_property("send-keyframe-requests") {
         splitmuxsink.set_property("send-keyframe-requests", true);
     }
@@ -788,6 +794,9 @@ fn build_flow_chain(
         // TAI across blocks (#966). See `crate::tams::timeline`.
         let timeline = Arc::new(Mutex::new(FragmentTimeline::default()));
         let tai = Arc::new(TaiClock::new());
+        // `split-at-running-time` takes the lock splitmuxsink holds while it emits
+        // format-location-full, so the next split is scheduled from a task.
+        let runtime = tokio::runtime::Handle::current();
         let temp_dir = temp_dir_for_setup;
         let tag = chain_tag;
         let block_id_sig = block_id;
@@ -853,6 +862,23 @@ fn build_flow_chain(
                 );
             }
             let abs_start = placed.start_ns;
+
+            // Schedule the split that ends this fragment on the next grid point.
+            let next_split = timeline
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .next_split_running_time(running_time_ns, tail_segment_ns);
+            if let (Some(next), Some(el)) = (next_split, element.as_ref()) {
+                let weak = el.downgrade();
+                runtime.spawn(async move {
+                    if let Some(el) = weak.upgrade() {
+                        el.emit_by_name::<()>(
+                            "split-at-running-time",
+                            &[&gst::ClockTime::from_nseconds(next)],
+                        );
+                    }
+                });
+            }
 
             // The previously open fragment is now complete: [its start, this start).
             // The just-opened one becomes the new tail (flushed on shutdown).

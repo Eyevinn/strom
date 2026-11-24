@@ -449,7 +449,8 @@ mod shared_timeline {
     use super::*;
 
     /// The same encoded audio goes to two TAMS Outputs, one of them through a
-    /// queue that holds it back 600 ms. Both must register the same timeranges.
+    /// queue that holds it back 600 ms. Both must register the same timeranges,
+    /// split on the TAI grid.
     #[test]
     fn late_arrival_does_not_shift_the_timeline() {
         if !plugins_available() || !common::plugins_available(&["tee", "queue"]) {
@@ -532,5 +533,16 @@ mod shared_timeline {
             timerange_start_ns(&b[0]) as i128 / 1_000_000
                 - timerange_start_ns(&a[0]) as i128 / 1_000_000
         );
+        // After the first, segments start on the 1 s TAI grid: at the first AAC
+        // frame (1024 samples, ~21 ms) at or after a whole second.
+        for tr in &a[1..] {
+            let into_second = timerange_start_ns(tr) % 1_000_000_000;
+            assert!(
+                into_second < 25_000_000,
+                "segment {} starts {} ms past the 1 s TAI grid",
+                tr,
+                into_second / 1_000_000
+            );
+        }
     }
 }
