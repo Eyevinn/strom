@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Replay v10</title>
+<title>Replay v11</title>
 <style>
   :root { --bg:#111; --panel:#1b1b1b; --fg:#ddd; --mut:#888; --acc:#4fa3ff; --red:#e5484d; --grn:#46a758; }
   * { box-sizing: border-box; }
@@ -29,6 +29,15 @@
   td, th { padding:2px 6px; border-bottom:1px solid #2a2a2a; text-align:right; }
   th:first-child, td:first-child { text-align:left; }
   .mut { color:var(--mut); }
+  #clock { position:sticky; top:0; z-index:5; display:flex; gap:18px; align-items:baseline; flex-wrap:wrap;
+           padding:6px 12px; background:#0b0b0b; border-bottom:1px solid #2a2a2a; }
+  #clock .tc { font:700 40px/1.1 ui-monospace, monospace; letter-spacing:1px; }
+  #clock .tc .ms { color:#bbb; }
+  #clock .fr { font:600 20px ui-monospace, monospace; color:var(--acc); }
+  #clock .zone { font:600 14px system-ui; color:var(--mut); }
+  #clock .sub { font:15px ui-monospace, monospace; }
+  #clock .warn { color:#f5a524; }
+  #clock input { background:#222; color:var(--fg); border:1px solid #333; border-radius:4px; padding:4px 6px; width:210px; font:13px ui-monospace, monospace; }
   kbd { background:#2a2a2a; border:1px solid #444; border-radius:3px; padding:0 4px; font-size:11px; }
 </style>
 </head>
@@ -41,6 +50,27 @@
   <button id="connectBtn">Connect video</button>
   <span id="wsState" class="mut">ws: -</span>
 </header>
+<div id="clock" title="Time of the frame the players last pushed, computed by the server">
+  <div>
+    <span class="zone" id="zone">UTC</span>
+    <span class="tc" id="tcTime">--:--:--<span class="ms">.---</span></span>
+    <span class="fr" id="tcFrame">f--</span>
+    <div class="sub mut"><span id="tcDate">----------</span> · frame <span id="tcAbs">-</span> · <span id="tcTai">TAI -</span></div>
+  </div>
+  <div class="sub">
+    <div>live edge <span id="liveUtc">-</span></div>
+    <div>behind live <span id="behindS">-</span> · age <span id="ageS">-</span></div>
+    <div class="mut">server now <span id="nowUtc">-</span></div>
+  </div>
+  <div class="sub">
+    <div><span class="warn" id="domainNote"></span></div>
+    <div>
+      <input id="gotoUtc" placeholder="HH:MM:SS.mmm or ISO UTC" title="seek to a UTC time (date of the current frame if left out)">
+      <button class="b" id="gotoBtn">go to UTC</button>
+      <button class="b" id="taiBtn" title="show TAI instead of UTC">TAI</button>
+    </div>
+  </div>
+</div>
 <main>
   <div class="vid"><video id="mv" autoplay muted playsinline></video><span class="lbl">MULTIVIEW</span></div>
   <div class="vid"><video id="pgm" autoplay muted playsinline></video><span class="lbl">PGM</span></div>
@@ -124,7 +154,7 @@
       <tr><td>browser: receive→decoded (processing) / frame</td><td><span id="proc">-</span> ms</td></tr>
       <tr><td>browser: decoder · fps · dropped</td><td><span id="decimpl">-</span> · <span id="fps">-</span> · <span id="drop">-</span></td></tr>
     </tbody></table>
-    <table id="players"><thead><tr><th>player</th><th>frame</th><th>Δ</th><th>strip</th><th>index</th><th>fetched</th><th>fetch ms</th><th>fetch err</th><th>cached seg</th><th>decodes</th><th>dec ms</th><th>misses</th><th>late</th></tr></thead><tbody></tbody></table>
+    <table id="players"><thead><tr><th>player</th><th>UTC</th><th>frame</th><th>Δ</th><th>strip</th><th>index</th><th>fetched</th><th>fetch ms</th><th>fetch err</th><th>cached seg</th><th>decodes</th><th>dec ms</th><th>misses</th><th>late</th></tr></thead><tbody></tbody></table>
   </section>
 </main>
 
@@ -149,7 +179,7 @@ function connectWs() {
     const m = JSON.parse(ev.data);
     if (m.type === 'state') onState(m);
     else if (m.type === 'ack') onAck(m);
-    else if (m.type === 'error') console.warn(m);
+    else if (m.type === 'error') { console.warn(m); $('wsState').textContent = 'error: ' + m.error; }
   };
 }
 function send(cmd, measure) {
@@ -171,6 +201,7 @@ function onAck(m) {
 }
 let curSpeed = 0;
 function onState(m) {
+  onClock(m);
   frameNs = m.frame_ns; totalFrames = m.total_frames; startFrame = m.start_frame || 0; curSpeed = +m.speed;
   $('tai').textContent = m.tai ?? '-';
   $('behind').textContent = m.behind_live_ms ?? '-';
@@ -180,12 +211,57 @@ function onState(m) {
   $('curSpeed').textContent = (m.speed >= 0 ? '' : '') + (+m.speed).toFixed(2) + '×';
   const tb = document.querySelector('#players tbody');
   const ref = m.players.length ? m.players[0].shown_frame : 0;
-  tb.innerHTML = m.players.map(p => `<tr><td>${p.block}</td><td>${p.shown_frame}</td>
+  tb.innerHTML = m.players.map(p => `<tr><td>${p.block}</td><td>${p.shown ? p.shown.utc.slice(11, 23) : '-'}</td><td>${p.shown_frame}</td>
     <td style="color:${p.shown_frame - ref ? 'var(--red)' : 'var(--grn)'}">${p.shown_frame - ref}</td>
     <td>${p.strip_frame < 0 ? '-' : p.strip_frame}</td><td>${p.index_segments}</td><td>${p.fetched_segments}</td>
     <td>${p.last_fetch_ms}</td><td>${p.fetch_errors}</td><td>${p.cached_segments}</td><td>${p.decodes}</td><td>${p.last_decode_ms}</td><td>${p.misses}</td><td>${p.late_ticks}</td></tr>`).join('');
 }
 connectWs();
+
+// ---- big clock: the frame the players last pushed (server-computed)
+let showTai = false;
+try { showTai = localStorage.getItem('rj_tai') === '1'; } catch (_) {}
+let lastDate = null;
+const fmtS = ms => ms == null ? '-' : (ms / 1000).toFixed(2) + ' s';
+function onClock(m) {
+  const t = m.pushed || m.cursor;
+  const fps = Math.round(1e9 / (m.frame_ns || 20e6));
+  const anchored = m.time_domain === 'tai';
+  $('taiBtn').classList.toggle('on', showTai);
+  $('zone').textContent = showTai ? 'TAI' : 'UTC';
+  $('domainNote').textContent = m.time_domain === 'unanchored'
+    ? 'unanchored: the source has no absolute time (TAI on an arbitrary base)'
+    : m.time_domain === 'unknown' ? 'time domain unknown (index not read yet)' : '';
+  $('clock').style.opacity = anchored ? 1 : 0.75;
+  if (!t) return;
+  // utc "YYYY-MM-DDTHH:MM:SS.mmmZ", tai_clock the same without Z
+  const s = showTai ? t.tai_clock : t.utc;
+  lastDate = t.utc.slice(0, 10);
+  $('tcTime').innerHTML = `${s.slice(11, 19)}<span class="ms">${s.slice(19, 23)}</span>`;
+  $('tcFrame').textContent = `f${String(t.frame_in_second).padStart(2, '0')}/${fps}`;
+  $('tcDate').textContent = s.slice(0, 10);
+  $('tcAbs').textContent = t.frame;
+  $('tcTai').textContent = showTai ? `UTC ${t.utc}` : `TAI ${t.tai}`;
+  const edge = m.live_edge;
+  $('liveUtc').textContent = edge ? (showTai ? edge.tai_clock.slice(11, 23) + ' TAI' : edge.utc.slice(11, 23) + ' UTC') + ` (${edge.utc.slice(0, 10)})` : '-';
+  $('behindS').textContent = fmtS(t.behind_live_ms ?? m.behind_live_ms);
+  $('ageS').textContent = anchored ? fmtS(t.age_ms) : 'n/a';
+  if (anchored && t.age_ms < -1000) $('domainNote').textContent = 'frame time is in the future: the source TAI is not wall-clock time?';
+  $('nowUtc').textContent = m.now_utc || '-';
+}
+$('taiBtn').onclick = () => { showTai = !showTai; try { localStorage.setItem('rj_tai', showTai ? '1' : '0'); } catch (_) {} };
+function gotoUtc() {
+  let v = $('gotoUtc').value.trim();
+  if (!v) return;
+  // A bare time of day: the date of the frame on screen, in UTC.
+  if (/^\d{1,2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(v) && lastDate) {
+    const [h, mi, rest = '00'] = v.split(':');
+    v = `${lastDate}T${h.padStart(2, '0')}:${mi}:${rest.padStart(2, '0')}Z`;
+  } else if (!/(Z|[+-]\d{2}:\d{2})$/i.test(v)) v += 'Z';
+  send({ cmd: 'seek', utc: v }, true);
+}
+$('gotoBtn').onclick = gotoUtc;
+$('gotoUtc').addEventListener('keydown', e => { if (e.key === 'Enter') { gotoUtc(); e.preventDefault(); } });
 
 // ---- controls
 const jog = (frames) => send({ cmd: 'jog', frames }, true);

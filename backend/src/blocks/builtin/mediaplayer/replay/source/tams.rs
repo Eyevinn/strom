@@ -86,6 +86,8 @@ impl SourceIndex for TamsIndex {
         Ok(SourceInfo {
             frame_rate,
             container: flow["container"].as_str().map(str::to_string),
+            // TAMS timeranges are TAI by definition.
+            absolute_time: true,
         })
     }
 

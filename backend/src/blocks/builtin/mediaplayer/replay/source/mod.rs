@@ -97,6 +97,9 @@ pub struct SourceInfo {
     pub frame_rate: Option<(u32, u32)>,
     /// Container MIME type, e.g. `video/mp2t`.
     pub container: Option<String>,
+    /// Whether the index times are real TAI (a clock on the wall), so they
+    /// convert to UTC. False for material on an arbitrary TAI base.
+    pub absolute_time: bool,
 }
 
 /// An index of media on the TAI timeline, and access to its bytes.

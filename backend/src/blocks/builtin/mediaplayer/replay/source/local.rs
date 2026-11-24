@@ -30,6 +30,10 @@ struct RawIndex {
     frame_rate: Option<RawRate>,
     #[serde(default)]
     container: Option<String>,
+    /// The times are real TAI. Defaults to false: test material is cut on an
+    /// arbitrary `tai_base_ns`.
+    #[serde(default)]
+    absolute_time: bool,
     segments: Vec<RawSegment>,
 }
 
@@ -80,6 +84,7 @@ impl LocalIndex {
                     .filter(|r| r.numerator > 0 && r.denominator > 0)
                     .map(|r| (r.numerator, r.denominator)),
                 container: raw.container,
+                absolute_time: raw.absolute_time,
             },
             segments,
         })
@@ -153,6 +158,7 @@ mod tests {
         let info = idx.info().await.unwrap();
         assert_eq!(info.frame_rate, Some((50, 1)));
         assert_eq!(info.container.as_deref(), Some("video/mp2t"));
+        assert!(!info.absolute_time);
         let first = idx.first().await.unwrap().unwrap();
         assert_eq!(first.start_ns, 1_800_000_000_000_000_000);
         assert_eq!(

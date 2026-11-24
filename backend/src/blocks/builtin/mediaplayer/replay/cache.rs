@@ -12,7 +12,7 @@
 //! yet, and the tick repeats its last frame.
 
 use super::source::{Segment, SourceIndex, SourceInfo};
-use super::timeline::{PlayerStats, ReplayTimeline};
+use super::timeline::{PlayerStats, ReplayTimeline, TimeDomain};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -184,6 +184,11 @@ impl Fetcher {
                     if let Some((n, d)) = info.frame_rate {
                         self.timeline.ensure_grid(n, d, first.start_ns);
                     }
+                    self.stats.set_time_domain(if info.absolute_time {
+                        TimeDomain::Tai
+                    } else {
+                        TimeDomain::Unanchored
+                    });
                     *lock(&self.store.info) = Some(info);
                     return Some((first, last));
                 }

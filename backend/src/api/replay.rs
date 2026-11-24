@@ -1,8 +1,11 @@
 //! Replay control: a WebSocket per replay group and the replay control page.
 //!
 //! Commands are JSON objects tagged by `cmd` (see `replay::timeline::Command`),
-//! with an optional `seq` echoed in the ack. The socket also streams the group
-//! state every 50 ms.
+//! with an optional `seq` echoed in the ack. `seek` takes a `frame`, a `utc`
+//! (RFC 3339) or a `tai` (`"<s>:<ns>"`). The ack carries the target frame and
+//! its time. The socket also streams the group state every 50 ms, with the UTC
+//! and TAI of the cursor, of the frame the players last pushed, and of the
+//! live edge (see `replay::timeline::FrameTime`).
 
 use crate::blocks::builtin::mediaplayer::replay::timeline::{self, Command};
 use crate::state::AppState;
@@ -52,12 +55,18 @@ async fn handle(socket: WebSocket, tl: std::sync::Arc<timeline::ReplayTimeline>)
                     Err(_) => continue,
                 };
                 let seq = value.get("seq").cloned().unwrap_or(serde_json::Value::Null);
-                let reply = match serde_json::from_value::<Command>(value) {
-                    Ok(cmd) => {
-                        let (frame, speed) = tl.apply(cmd);
-                        serde_json::json!({"type": "ack", "seq": seq, "frame": frame, "speed": speed})
+                let applied = serde_json::from_value::<Command>(value)
+                    .map_err(|e| e.to_string())
+                    .and_then(|cmd| tl.apply(cmd));
+                let reply = match applied {
+                    Ok((frame, speed)) => {
+                        let mut ack = serde_json::json!({"type": "ack", "seq": seq, "frame": frame, "speed": speed});
+                        if let Some(t) = tl.frame_time(frame) {
+                            ack["time"] = t.to_json();
+                        }
+                        ack
                     }
-                    Err(e) => serde_json::json!({"type": "error", "seq": seq, "error": e.to_string()}),
+                    Err(e) => serde_json::json!({"type": "error", "seq": seq, "error": e}),
                 };
                 if tx.send(Message::Text(reply.to_string().into())).await.is_err() {
                     break;
