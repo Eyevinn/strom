@@ -137,13 +137,25 @@ fn add_tams_output_to(
     gateway_url: &str,
     segment_secs: u64,
 ) -> TamsOutput {
+    add_tams_output_with(pipeline, name, gateway_url, segment_secs, false)
+}
+
+/// As [`add_tams_output_to`], with one video track instead of one audio track
+/// when `video` is set.
+fn add_tams_output_with(
+    pipeline: &gst::Pipeline,
+    name: &str,
+    gateway_url: &str,
+    segment_secs: u64,
+    video: bool,
+) -> TamsOutput {
     let instance_id = format!("{}_{}", name, uuid::Uuid::new_v4().simple());
     let properties: HashMap<String, PropertyValue> = [
         ("gateway_url", PropertyValue::String(gateway_url.into())),
         ("segment_duration_secs", PropertyValue::UInt(segment_secs)),
         ("container", PropertyValue::String("mpegts".into())),
-        ("num_video_tracks", PropertyValue::UInt(0)),
-        ("num_audio_tracks", PropertyValue::UInt(1)),
+        ("num_video_tracks", PropertyValue::UInt(video as u64)),
+        ("num_audio_tracks", PropertyValue::UInt(!video as u64)),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -542,6 +554,93 @@ mod shared_timeline {
                 "segment {} starts {} ms past the 1 s TAI grid",
                 tr,
                 into_second / 1_000_000
+            );
+        }
+    }
+
+    /// With an encoder in front, segments after the first two start on the TAI
+    /// grid, also when the GOP is shorter than a segment and its keyframes are
+    /// off the grid: TAMS Output asks for a keyframe one grid point ahead.
+    /// splitmuxsink's own request comes only when the fragment before the split
+    /// opens, after the encoder has passed the split point, so it forced a
+    /// keyframe at once, off the grid, and every split followed it.
+    #[test]
+    fn encoder_keyframes_follow_the_grid() {
+        if !plugins_available()
+            || !common::plugins_available(&["videotestsrc", "x264enc", "h264parse", "videoconvert"])
+        {
+            return;
+        }
+        let runtime = runtime();
+        let (gateway, registered) = stub_gateway::start(&runtime);
+
+        let pipeline = gst::Pipeline::new();
+        let out = add_tams_output_with(&pipeline, "tams_video", &gateway, 1, true);
+        let src = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .build()
+            .unwrap();
+        let caps = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                gst::Caps::builder("video/x-raw")
+                    .field("width", 320)
+                    .field("height", 180)
+                    .field("framerate", gst::Fraction::new(50, 1))
+                    .build(),
+            )
+            .build()
+            .unwrap();
+        let conv = gst::ElementFactory::make("videoconvert").build().unwrap();
+        // A 0.5 s GOP with B-frames; its natural keyframes fall wherever the
+        // stream started, not on the grid.
+        let enc = gst::ElementFactory::make("x264enc")
+            .property("key-int-max", 25u32)
+            .property("bframes", 2u32)
+            .property_from_str("speed-preset", "veryfast")
+            .build()
+            .unwrap();
+        let parse = gst::ElementFactory::make("h264parse").build().unwrap();
+        pipeline
+            .add_many([&src, &caps, &conv, &enc, &parse])
+            .unwrap();
+        gst::Element::link_many([
+            &src,
+            &caps,
+            &conv,
+            &enc,
+            &parse,
+            &out.input("video_input_0"),
+        ])
+        .unwrap();
+
+        out.run_setups_in_flow(&runtime, uuid::Uuid::new_v4());
+        pipeline.set_state(gst::State::Playing).unwrap();
+        std::thread::sleep(Duration::from_millis(6_500));
+        let error = bus_error(&pipeline);
+        pipeline.set_state(gst::State::Null).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let registered = registered.lock().unwrap().clone();
+        runtime.shutdown_background();
+        assert_eq!(error, None, "the pipeline posted an error");
+
+        let ranges: Vec<String> = registered.into_iter().map(|(_, tr)| tr).collect();
+        assert!(
+            ranges.len() >= 4,
+            "too few segments registered: {:?}",
+            ranges
+        );
+        // The first split is requested too late to be forced and the second may
+        // be; from the third segment on, each starts within a frame (20 ms) of a
+        // whole TAI second.
+        for tr in &ranges[2..] {
+            let into_second = timerange_start_ns(tr) % 1_000_000_000;
+            assert!(
+                into_second < 20_000_000,
+                "segment {} starts {} ms past the 1 s TAI grid (all: {:?})",
+                tr,
+                into_second / 1_000_000,
+                ranges
             );
         }
     }

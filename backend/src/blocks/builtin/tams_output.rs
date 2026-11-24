@@ -532,10 +532,13 @@ fn build_flow_chain(
     // Fallback location template; the format-location-full signal overrides it.
     let fallback = temp_dir.join(format!("seg_%05d.{}", container.file_ext()));
     splitmuxsink.set_property("location", fallback.to_string_lossy().as_ref());
-    // Ask upstream for a keyframe at each scheduled split point, so segments are
-    // GOP-aligned and start on the grid.
+    // No keyframe requests from splitmuxsink: it asks for a keyframe at a split
+    // point only once the fragment before it opens, a GOP or more late, so the
+    // encoder forces one at once, off the grid, and its min-force-key-unit-interval
+    // then holds every later request off the grid too. The format-location-full
+    // handler asks for keyframes one grid point ahead instead.
     if splitmuxsink.has_property("send-keyframe-requests") {
-        splitmuxsink.set_property("send-keyframe-requests", true);
+        splitmuxsink.set_property("send-keyframe-requests", false);
     }
     // A sink completes READY->PAUSED only once it has prerolled a buffer, so an
     // input that carries no data would hold the whole pipeline short of PLAYING.
@@ -881,12 +884,24 @@ fn build_flow_chain(
                 .next_split_running_time(running_time_ns, tail_segment_ns);
             if let (Some(next), Some(el)) = (next_split, element.as_ref()) {
                 let weak = el.downgrade();
+                let segment_ns = tail_segment_ns;
                 runtime.spawn(async move {
                     if let Some(el) = weak.upgrade() {
-                        el.emit_by_name::<()>(
-                            "split-at-running-time",
-                            &[&gst::ClockTime::from_nseconds(next)],
-                        );
+                        let at = gst::ClockTime::from_nseconds(next);
+                        el.emit_by_name::<()>("split-at-running-time", &[&at]);
+                        // Ask upstream for a keyframe at the grid point after `at`.
+                        // This fragment opens a GOP or more after its start, so the
+                        // encoder is often past `at` already; a request for a time
+                        // already passed would force a keyframe off the grid. The
+                        // split at `at` itself was requested one fragment earlier.
+                        let ahead = gst::ClockTime::from_nseconds(next + segment_ns);
+                        for pad in el.sink_pads() {
+                            let event = gstreamer_video::UpstreamForceKeyUnitEvent::builder()
+                                .running_time(ahead)
+                                .all_headers(true)
+                                .build();
+                            pad.push_event(event);
+                        }
                     }
                 });
             }
