@@ -28,6 +28,18 @@ use strom_types::{FlowId, StromEvent};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+/// Flow metadata detected from caps at runtime, read when the flow is created.
+#[derive(Debug, Default, Clone)]
+pub struct DetectedEssence {
+    /// Codec label (e.g. `video/h264`); overrides the spec's fallback when set.
+    pub codec: Option<String>,
+    /// TAMS `essence_parameters`, merged over the spec's.
+    pub essence_parameters: serde_json::Map<String, serde_json::Value>,
+}
+
+/// [`DetectedEssence`] shared between the caps probe and the uploader.
+pub type SharedDetected = Arc<Mutex<DetectedEssence>>;
+
 /// A finished segment file ready to be uploaded and registered.
 #[derive(Debug)]
 pub struct FragmentReady {
@@ -86,7 +98,7 @@ pub fn channel() -> (mpsc::Sender<FragmentReady>, mpsc::Receiver<FragmentReady>)
 /// `temp_dir` is the per-flow directory of segment files, scanned by the recovery
 /// sweep. The TAMS flow is created lazily on the first segment, so an idle block
 /// never touches the gateway. `detected_codec` is filled in by the caps probe once
-/// the encoded format is known (e.g. `video/h264`); by the time the first segment
+/// the encoded format is known (codec, e.g. `video/h264`, and video essence parameters); by the time the first segment
 /// completes, caps have always arrived, so the stored codec reflects the real
 /// essence. `flow_spec.codec` is only a fallback. `tail` is flushed on shutdown,
 /// using `tail_segment_ns` as the (nominal) duration of the final fragment.
@@ -94,7 +106,7 @@ pub fn channel() -> (mpsc::Sender<FragmentReady>, mpsc::Receiver<FragmentReady>)
 pub fn spawn_uploader(
     client: TamsClient,
     mut flow_spec: FlowSpec,
-    detected_codec: Arc<Mutex<Option<String>>>,
+    detected_codec: SharedDetected,
     content_type: String,
     temp_dir: PathBuf,
     strom_flow_id: FlowId,
@@ -175,7 +187,7 @@ struct UploadCtx<'a> {
     client: &'a TamsClient,
     flow_created: &'a mut bool,
     flow_spec: &'a mut FlowSpec,
-    detected_codec: &'a Arc<Mutex<Option<String>>>,
+    detected_codec: &'a SharedDetected,
     content_type: &'a str,
     events: &'a EventBroadcaster,
     strom_flow_id: FlowId,
@@ -189,8 +201,15 @@ async fn ensure_flow(ctx: &mut UploadCtx<'_>) -> bool {
     if *ctx.flow_created {
         return true;
     }
-    if let Some(codec) = ctx.detected_codec.lock().ok().and_then(|c| c.clone()) {
-        ctx.flow_spec.codec = Some(codec);
+    if let Ok(detected) = ctx.detected_codec.lock() {
+        if let Some(codec) = &detected.codec {
+            ctx.flow_spec.codec = Some(codec.clone());
+        }
+        for (k, v) in &detected.essence_parameters {
+            ctx.flow_spec
+                .essence_parameters
+                .insert(k.clone(), v.clone());
+        }
     }
     match retry(MAX_ATTEMPTS, || ctx.client.ensure_flow(ctx.flow_spec)).await {
         Ok(()) => {

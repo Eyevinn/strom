@@ -24,7 +24,9 @@ use crate::tams::client::{FlowSpec, TamsClient};
 use crate::tams::timeline::{
     reference_tai_ns, shared_pipeline_mapping, AnchorKind, FragmentTimeline, TaiClock,
 };
-use crate::tams::uploader::{channel, new_tail_slot, spawn_uploader, FragmentReady, TailFragment};
+use crate::tams::uploader::{
+    channel, new_tail_slot, spawn_uploader, FragmentReady, SharedDetected, TailFragment,
+};
 use gst::glib::prelude::ToValue;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -275,6 +277,7 @@ impl BlockBuilder for TamsOutputBuilder {
                         description: description.clone(),
                         tags: tags.clone(),
                         flow_collection: vec![],
+                        essence_parameters: Default::default(),
                     };
                     build_flow_chain(
                         instance_id,
@@ -306,6 +309,7 @@ impl BlockBuilder for TamsOutputBuilder {
                         description: description.clone(),
                         tags: tags.clone(),
                         flow_collection: vec![],
+                        essence_parameters: Default::default(),
                     };
                     build_flow_chain(
                         instance_id,
@@ -339,6 +343,7 @@ impl BlockBuilder for TamsOutputBuilder {
                         description: description.clone(),
                         tags: tags.clone(),
                         flow_collection: members,
+                        essence_parameters: Default::default(),
                     };
                     register_multiflow(instance_id, multi, gateway_url.clone(), auth_plan, ctx);
                 }
@@ -364,6 +369,7 @@ impl BlockBuilder for TamsOutputBuilder {
                     // The TS is an opaque mux; its inner essences are NOT exposed as
                     // separate flows (per AMWA BCP-006-04), so no flow_collection.
                     flow_collection: vec![],
+                    essence_parameters: Default::default(),
                 };
                 build_flow_chain(
                     instance_id,
@@ -539,7 +545,7 @@ fn build_flow_chain(
 
     // Codec label for the TAMS flow, derived from caps at runtime by the probes and
     // read by the uploader when it creates the flow.
-    let detected_codec: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let detected_codec: SharedDetected = Arc::default();
 
     // One identity input + caps probe per essence, each requesting its own sink pad.
     for &essence in inputs {
@@ -619,10 +625,15 @@ fn build_flow_chain(
                 }
             };
 
-            // For single-essence flows, record the detected codec as the flow's codec.
-            if detect_codec {
-                if let Ok(mut c) = detected_codec_probe.lock() {
-                    *c = Some(codec_label.to_string());
+            if let Ok(mut d) = detected_codec_probe.lock() {
+                // For single-essence flows, record the detected codec as the flow's codec.
+                if detect_codec {
+                    d.codec = Some(codec_label.to_string());
+                }
+                // Video geometry and rate go on the flow (also a muxed TS flow), so
+                // a reader can map frames to the timeline without probing segments.
+                if essence == Essence::Video {
+                    d.essence_parameters = video_essence_parameters(structure);
                 }
             }
 
@@ -992,6 +1003,29 @@ fn register_multiflow(
     }));
 }
 
+/// TAMS video `essence_parameters` from encoded video caps: `frame_rate`
+/// (`{numerator, denominator}`), `frame_width` and `frame_height`, as far as the
+/// caps carry them. A variable frame rate (`0/1`) is left out.
+fn video_essence_parameters(
+    caps: &gst::StructureRef,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut params = serde_json::Map::new();
+    if let Ok(fr) = caps.get::<gst::Fraction>("framerate") {
+        if fr.numer() > 0 && fr.denom() > 0 {
+            params.insert(
+                "frame_rate".into(),
+                serde_json::json!({ "numerator": fr.numer(), "denominator": fr.denom() }),
+            );
+        }
+    }
+    for (field, key) in [("width", "frame_width"), ("height", "frame_height")] {
+        if let Ok(v) = caps.get::<i32>(field) {
+            params.insert(key.into(), v.into());
+        }
+    }
+    params
+}
+
 /// Request the splitmuxsink sink pad for a given essence (`video` or `audio_%u`).
 fn request_sink_pad(
     splitmuxsink: &gst::Element,
@@ -1198,5 +1232,34 @@ fn simple_prop(
         live: false,
         persist: None,
         visible_when: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn video_essence_parameters_from_caps() {
+        gst::init().unwrap();
+        let caps = gst::Caps::builder("video/x-h264")
+            .field("framerate", gst::Fraction::new(50, 1))
+            .field("width", 1920i32)
+            .field("height", 1080i32)
+            .build();
+        let params = video_essence_parameters(caps.structure(0).unwrap());
+        assert_eq!(
+            serde_json::Value::Object(params),
+            serde_json::json!({
+                "frame_rate": { "numerator": 50, "denominator": 1 },
+                "frame_width": 1920,
+                "frame_height": 1080
+            })
+        );
+        // Variable frame rate and missing fields are left out.
+        let caps = gst::Caps::builder("video/x-h264")
+            .field("framerate", gst::Fraction::new(0, 1))
+            .build();
+        assert!(video_essence_parameters(caps.structure(0).unwrap()).is_empty());
     }
 }
