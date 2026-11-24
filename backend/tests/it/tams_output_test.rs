@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use strom::blocks::builtin::tams_output::TamsOutputBuilder;
+use strom::blocks::builtin::videoenc::VideoEncBuilder;
 use strom::blocks::{BlockBuildContext, BlockBuilder};
 use strom::events::EventBroadcaster;
 use strom_types::PropertyValue;
@@ -418,9 +419,12 @@ mod stub_gateway {
                     }]}))
                 }),
             )
+            // Read the whole body before answering. Answering first resets the
+            // connection under a large upload, and the uploader's retry backoff
+            // (1 s and up) then held segments back past the end of the test.
             .route(
                 "/upload/{obj}",
-                put(|| async { axum::http::StatusCode::OK }),
+                put(|_body: axum::body::Bytes| async { axum::http::StatusCode::OK }),
             )
             .route(
                 "/flows/{id}/segments",
@@ -564,10 +568,21 @@ mod shared_timeline {
     /// splitmuxsink's own request comes only when the fragment before the split
     /// opens, after the encoder has passed the split point, so it forced a
     /// keyframe at once, off the grid, and every split followed it.
+    ///
+    /// The encoder is the Video Encoder block with
+    /// `min_keyframe_request_interval_ms` 0. Its 1 s default drops grid
+    /// requests that come sooner than a second after the last forced
+    /// keyframe, and the boundaries leave the grid.
     #[test]
     fn encoder_keyframes_follow_the_grid() {
         if !plugins_available()
-            || !common::plugins_available(&["videotestsrc", "x264enc", "h264parse", "videoconvert"])
+            || !common::plugins_available(&[
+                "videotestsrc",
+                "x264enc",
+                "h264parse",
+                "videoconvert",
+                "capsfilter",
+            ])
         {
             return;
         }
@@ -591,28 +606,37 @@ mod shared_timeline {
             )
             .build()
             .unwrap();
-        let conv = gst::ElementFactory::make("videoconvert").build().unwrap();
-        // A 0.5 s GOP with B-frames; its natural keyframes fall wherever the
-        // stream started, not on the grid.
-        let enc = gst::ElementFactory::make("x264enc")
-            .property("key-int-max", 25u32)
-            .property("bframes", 2u32)
-            .property_from_str("speed-preset", "veryfast")
-            .build()
-            .unwrap();
-        let parse = gst::ElementFactory::make("h264parse").build().unwrap();
-        pipeline
-            .add_many([&src, &caps, &conv, &enc, &parse])
-            .unwrap();
-        gst::Element::link_many([
-            &src,
-            &caps,
-            &conv,
-            &enc,
-            &parse,
-            &out.input("video_input_0"),
-        ])
-        .unwrap();
+        // The Video Encoder block as an ingest flow sets it up: a 0.5 s GOP,
+        // and `min_keyframe_request_interval_ms` 0 so no grid request is
+        // dropped (the 1 s default is for WebRTC PLI storms). Its natural
+        // keyframes fall wherever the stream started, not on the grid.
+        let enc_props: HashMap<String, PropertyValue> = [
+            ("codec", PropertyValue::String("h264".into())),
+            (
+                "encoder_preference",
+                PropertyValue::String("software".into()),
+            ),
+            ("quality_preset", PropertyValue::String("fast".into())),
+            ("tune", PropertyValue::String("fastdecode".into())),
+            ("keyframe_interval", PropertyValue::UInt(25)),
+            ("min_keyframe_request_interval_ms", PropertyValue::UInt(0)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let enc_id = format!("videoenc_{}", uuid::Uuid::new_v4().simple());
+        let enc_built = VideoEncBuilder
+            .build(&enc_id, &enc_props, &common::block::context())
+            .expect("Video Encoder block builds");
+        let enc_elements = common::block::install(&pipeline, &enc_built);
+        // B-frames, which the block does not set: see the repo rule on tests
+        // that read video timestamps.
+        enc_elements[&format!("{}:encoder", enc_id)].set_property("bframes", 2u32);
+        let enc_in = &enc_elements[&format!("{}:input", enc_id)];
+        let enc_out = &enc_elements[&format!("{}:capsfilter", enc_id)];
+        pipeline.add_many([&src, &caps]).unwrap();
+        gst::Element::link_many([&src, &caps, enc_in]).unwrap();
+        enc_out.link(&out.input("video_input_0")).unwrap();
 
         out.run_setups_in_flow(&runtime, uuid::Uuid::new_v4());
         pipeline.set_state(gst::State::Playing).unwrap();
