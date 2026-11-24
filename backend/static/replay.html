@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Replay v9</title>
+<title>Replay v10</title>
 <style>
   :root { --bg:#111; --panel:#1b1b1b; --fg:#ddd; --mut:#888; --acc:#4fa3ff; --red:#e5484d; --grn:#46a758; }
   * { box-sizing: border-box; }
@@ -78,6 +78,8 @@
       <button class="b" data-rel="10000">+10 s</button>
       <button class="b" id="startBtn">⏮ start</button>
       <button class="b" id="endBtn">end ⏭</button>
+      <button class="b" id="liveBtn" title="play 1× from the live edge minus 1.5 s">LIVE</button>
+      <span class="mut">TAI <span id="tai">-</span> · behind live <span id="behind">-</span> ms</span>
       <button class="b" id="randBtn" title="seek to a random frame (latency test)">random seek</button>
     </div>
     <div class="row" id="angles">
@@ -122,7 +124,7 @@
       <tr><td>browser: receive→decoded (processing) / frame</td><td><span id="proc">-</span> ms</td></tr>
       <tr><td>browser: decoder · fps · dropped</td><td><span id="decimpl">-</span> · <span id="fps">-</span> · <span id="drop">-</span></td></tr>
     </tbody></table>
-    <table id="players"><thead><tr><th>player</th><th>frame</th><th>Δ</th><th>cached seg</th><th>decodes</th><th>dec ms</th><th>misses</th><th>late</th></tr></thead><tbody></tbody></table>
+    <table id="players"><thead><tr><th>player</th><th>frame</th><th>Δ</th><th>strip</th><th>index</th><th>fetched</th><th>fetch ms</th><th>fetch err</th><th>cached seg</th><th>decodes</th><th>dec ms</th><th>misses</th><th>late</th></tr></thead><tbody></tbody></table>
   </section>
 </main>
 
@@ -135,7 +137,7 @@ document.getElementById('grp').textContent = `flow ${FLOW.slice(0,8)} · group $
 const $ = id => document.getElementById(id);
 
 // ---- WebSocket control
-let ws, seq = 0, frameNs = 20e6, totalFrames = 0;
+let ws, seq = 0, frameNs = 20e6, totalFrames = 0, startFrame = 0;
 const sentAt = new Map();
 let pending = null; // {target, t0}
 function connectWs() {
@@ -169,7 +171,9 @@ function onAck(m) {
 }
 let curSpeed = 0;
 function onState(m) {
-  frameNs = m.frame_ns; totalFrames = m.total_frames; curSpeed = +m.speed;
+  frameNs = m.frame_ns; totalFrames = m.total_frames; startFrame = m.start_frame || 0; curSpeed = +m.speed;
+  $('tai').textContent = m.tai ?? '-';
+  $('behind').textContent = m.behind_live_ms ?? '-';
   if (m.cmd_to_push_ms != null) $('c2p').textContent = (+m.cmd_to_push_ms).toFixed(1);
   $('curFrame').textContent = m.frame;
   $('total').textContent = m.total_frames;
@@ -178,7 +182,8 @@ function onState(m) {
   const ref = m.players.length ? m.players[0].shown_frame : 0;
   tb.innerHTML = m.players.map(p => `<tr><td>${p.block}</td><td>${p.shown_frame}</td>
     <td style="color:${p.shown_frame - ref ? 'var(--red)' : 'var(--grn)'}">${p.shown_frame - ref}</td>
-    <td>${p.cached_segments}</td><td>${p.decodes}</td><td>${p.last_decode_ms}</td><td>${p.misses}</td><td>${p.late_ticks}</td></tr>`).join('');
+    <td>${p.strip_frame < 0 ? '-' : p.strip_frame}</td><td>${p.index_segments}</td><td>${p.fetched_segments}</td>
+    <td>${p.last_fetch_ms}</td><td>${p.fetch_errors}</td><td>${p.cached_segments}</td><td>${p.decodes}</td><td>${p.last_decode_ms}</td><td>${p.misses}</td><td>${p.late_ticks}</td></tr>`).join('');
 }
 connectWs();
 
@@ -187,9 +192,10 @@ const jog = (frames) => send({ cmd: 'jog', frames }, true);
 const speed = (s) => send({ cmd: 'speed', speed: s }, s === 0);
 document.querySelectorAll('[data-s]').forEach(b => b.onclick = () => speed(+b.dataset.s));
 document.querySelectorAll('[data-rel]').forEach(b => b.onclick = () => send({ cmd: 'seek_rel', ms: +b.dataset.rel }, true));
-$('startBtn').onclick = () => send({ cmd: 'seek', frame: 0 }, true);
+$('startBtn').onclick = () => send({ cmd: 'seek', frame: startFrame }, true);
 $('endBtn').onclick = () => send({ cmd: 'end' }, true);
-$('randBtn').onclick = () => { send({ cmd: 'pause' }); send({ cmd: 'seek', frame: Math.floor(Math.random() * totalFrames) }, true); };
+$('liveBtn').onclick = () => send({ cmd: 'live', margin_ms: 1500 });
+$('randBtn').onclick = () => { send({ cmd: 'pause' }); send({ cmd: 'seek', frame: startFrame + Math.floor(Math.random() * (totalFrames - startFrame)) }, true); };
 
 const jogEl = $('jog');
 let dragX = null, dragAcc = 0;

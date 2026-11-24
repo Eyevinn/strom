@@ -1,0 +1,417 @@
+//! Index window and coded-bytes cache of one replay player.
+//!
+//! A fetcher thread with its own small async runtime keeps, around the
+//! group cursor:
+//! - the index: segments listed from the [`SourceIndex`] in fixed TAI chunks,
+//!   plus the live edge polled at segment cadence when the source can grow;
+//! - the coded bytes of the segments within `[T - behind, T + ahead]`, fetched
+//!   nearest first in the direction of travel, a few at a time.
+//!
+//! The decode side only reads this store, so the output tick never waits on
+//! the network: a segment whose bytes have not arrived is simply not decoded
+//! yet, and the tick repeats its last frame.
+
+use super::source::{Segment, SourceIndex, SourceInfo};
+use super::timeline::{PlayerStats, ReplayTimeline};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::task::JoinSet;
+use tracing::{debug, info, warn};
+
+const S: i64 = 1_000_000_000;
+/// Index listing granularity on the TAI timeline.
+const CHUNK_NS: i64 = 20 * S;
+/// Listed chunks kept either side of the cursor's chunk.
+const KEEP_CHUNKS: i64 = 15;
+/// Concurrent object fetches per player.
+const MAX_INFLIGHT: usize = 4;
+/// Wait before fetching a failed segment again.
+const RETRY_AFTER: Duration = Duration::from_millis(500);
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Segments known around the cursor and the bytes fetched for them. Keyed by
+/// segment start (TAI ns), which stays stable as a live index grows.
+#[derive(Default)]
+pub struct SegmentStore {
+    index: Mutex<BTreeMap<i64, Arc<Segment>>>,
+    bytes: Mutex<HashMap<i64, Arc<Vec<u8>>>>,
+    info: Mutex<Option<SourceInfo>>,
+}
+
+impl SegmentStore {
+    pub fn info(&self) -> Option<SourceInfo> {
+        lock(&self.info).clone()
+    }
+
+    /// Segments overlapping `[start, end)`.
+    pub fn segments_in(&self, start: i64, end: i64) -> Vec<Arc<Segment>> {
+        let index = lock(&self.index);
+        let mut out = Vec::new();
+        // The segment containing `start` begins before it.
+        if let Some((_, s)) = index.range(..start).next_back() {
+            if s.end_ns > start {
+                out.push(Arc::clone(s));
+            }
+        }
+        out.extend(index.range(start..end).map(|(_, s)| Arc::clone(s)));
+        out
+    }
+
+    pub fn bytes(&self, start: i64) -> Option<Arc<Vec<u8>>> {
+        lock(&self.bytes).get(&start).cloned()
+    }
+
+    fn insert(&self, segs: impl IntoIterator<Item = Segment>) {
+        let mut index = lock(&self.index);
+        for s in segs {
+            index.insert(s.start_ns, Arc::new(s));
+        }
+    }
+}
+
+/// Segments ordered by urgency: from the cursor outwards, with distance
+/// against the direction of travel counting double.
+pub fn by_urgency(segs: &[Arc<Segment>], cursor: i64, forward: bool) -> Vec<Arc<Segment>> {
+    let mut v: Vec<Arc<Segment>> = segs.to_vec();
+    v.sort_by_key(|s| {
+        let contains = s.start_ns <= cursor && cursor < s.end_ns;
+        let ahead = if forward {
+            s.start_ns >= cursor
+        } else {
+            s.end_ns <= cursor
+        };
+        let dist = if contains {
+            0
+        } else if s.start_ns > cursor {
+            s.start_ns - cursor
+        } else {
+            cursor - s.end_ns
+        };
+        // Ahead weighs half as much as behind.
+        (if contains || ahead { dist } else { dist * 2 }, s.start_ns)
+    });
+    v
+}
+
+/// Which index chunks have been listed. A chunk at the live edge gets new
+/// segments from the live poll; it is listed again (dirty) only when the poll
+/// skipped segments or a fetch failed (expired URLs).
+#[derive(Default)]
+struct ChunkState {
+    listed: HashSet<i64>,
+    dirty: HashSet<i64>,
+}
+
+fn chunk_of(tai: i64) -> i64 {
+    tai.div_euclid(CHUNK_NS)
+}
+
+pub struct Fetcher {
+    pub store: Arc<SegmentStore>,
+    source: Arc<dyn SourceIndex>,
+    timeline: Arc<ReplayTimeline>,
+    stats: Arc<PlayerStats>,
+    block_id: String,
+    ahead_ns: i64,
+    behind_ns: i64,
+}
+
+impl Fetcher {
+    pub fn new(
+        block_id: &str,
+        source: Arc<dyn SourceIndex>,
+        timeline: Arc<ReplayTimeline>,
+        stats: Arc<PlayerStats>,
+        prefetch_s: u64,
+    ) -> Self {
+        let ahead_ns = prefetch_s.max(2) as i64 * S;
+        Self {
+            store: Arc::new(SegmentStore::default()),
+            source,
+            timeline,
+            stats,
+            block_id: block_id.to_string(),
+            ahead_ns,
+            behind_ns: (ahead_ns / 2).max(2 * S),
+        }
+    }
+
+    /// Run on a dedicated thread until `stop` is set.
+    pub fn spawn(self: Arc<Self>, stop: Arc<AtomicBool>) {
+        let name = format!("replay-fetch-{}", self.block_id);
+        let spawned = std::thread::Builder::new().name(name).spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    warn!("Replay {}: no fetch runtime: {}", self.block_id, e);
+                    return;
+                }
+            };
+            rt.block_on(self.run(stop));
+        });
+        if let Err(e) = spawned {
+            warn!("Replay: cannot start fetch thread: {}", e);
+        }
+    }
+
+    async fn init(&self, stop: &AtomicBool) -> Option<(Segment, Segment)> {
+        let mut backoff = Duration::from_millis(250);
+        while !stop.load(Ordering::Relaxed) {
+            let r = async {
+                let info = self.source.info().await?;
+                let first = self.source.first().await?;
+                let last = self.source.last().await?;
+                anyhow::Ok((info, first, last))
+            }
+            .await;
+            match r {
+                Ok((info, Some(first), Some(last))) => {
+                    info!(
+                        "Replay {}: {} frame rate {:?}, container {:?}",
+                        self.block_id,
+                        self.source.describe(),
+                        info.frame_rate,
+                        info.container
+                    );
+                    if let Some((n, d)) = info.frame_rate {
+                        self.timeline.ensure_grid(n, d, first.start_ns);
+                    }
+                    *lock(&self.store.info) = Some(info);
+                    return Some((first, last));
+                }
+                Ok(_) => debug!("Replay {}: source has no segments yet", self.block_id),
+                Err(e) => warn!(
+                    "Replay {}: index of {} unavailable: {:#}",
+                    self.block_id,
+                    self.source.describe(),
+                    e
+                ),
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(5));
+        }
+        None
+    }
+
+    async fn run(self: Arc<Self>, stop: Arc<AtomicBool>) {
+        let Some((first, last)) = self.init(&stop).await else {
+            return;
+        };
+        let mut start = first.start_ns;
+        let mut end = last.end_ns;
+        let mut seg_ns = last.duration_ns().clamp(S / 5, 5 * S);
+        self.publish_extent(start, end);
+        self.store.insert([first, last]);
+
+        let mut chunks = ChunkState::default();
+        let mut inflight: HashSet<i64> = HashSet::new();
+        let mut failed: HashMap<i64, Instant> = HashMap::new();
+        let mut jobs: JoinSet<(Arc<Segment>, anyhow::Result<Vec<u8>>, Duration)> = JoinSet::new();
+        let mut next_poll = Instant::now() + Duration::from_nanos(seg_ns as u64);
+        let mut next_first = Instant::now() + Duration::from_secs(30);
+
+        while !stop.load(Ordering::Relaxed) {
+            // Where the group is, or this angle's start before it knows.
+            let rt = self.timeline.now_rt();
+            let (cursor, speed) = self.timeline.cursor_tai(rt).unwrap_or((start, 0.0));
+            let forward = speed >= 0.0;
+            let lo = cursor
+                - if forward {
+                    self.behind_ns
+                } else {
+                    self.ahead_ns
+                };
+            let hi = cursor
+                + if forward {
+                    self.ahead_ns
+                } else {
+                    self.behind_ns
+                };
+
+            // Live edge, at segment cadence.
+            if self.source.may_grow() && Instant::now() >= next_poll {
+                next_poll = Instant::now() + Duration::from_nanos(seg_ns as u64);
+                match self.source.last().await {
+                    Ok(Some(l)) if l.end_ns > end => {
+                        if l.start_ns > end {
+                            // Missed segments in between: list them again.
+                            for c in chunk_of(end)..=chunk_of(l.start_ns) {
+                                chunks.dirty.insert(c);
+                            }
+                        }
+                        seg_ns = l.duration_ns().clamp(S / 5, 5 * S);
+                        end = l.end_ns;
+                        self.store.insert([l]);
+                        self.publish_extent(start, end);
+                    }
+                    Ok(_) => {}
+                    Err(e) => debug!("Replay {}: live poll failed: {:#}", self.block_id, e),
+                }
+                if Instant::now() >= next_first {
+                    next_first = Instant::now() + Duration::from_secs(30);
+                    if let Ok(Some(f)) = self.source.first().await {
+                        start = f.start_ns;
+                        self.publish_extent(start, end);
+                    }
+                }
+            }
+
+            // Index chunks covering the window.
+            for c in chunk_of(lo.max(start))..=chunk_of(hi.min(end - 1)) {
+                if chunks.listed.contains(&c) && !chunks.dirty.contains(&c) {
+                    continue;
+                }
+                match self.source.list(c * CHUNK_NS, (c + 1) * CHUNK_NS).await {
+                    Ok(segs) => {
+                        self.store.insert(segs);
+                        chunks.listed.insert(c);
+                        chunks.dirty.remove(&c);
+                    }
+                    Err(e) => {
+                        warn!("Replay {}: listing failed: {:#}", self.block_id, e);
+                        break;
+                    }
+                }
+            }
+
+            // Fetch bytes, most urgent first.
+            let window = self.store.segments_in(lo, hi);
+            for seg in by_urgency(&window, cursor, forward) {
+                if inflight.len() >= MAX_INFLIGHT {
+                    break;
+                }
+                let key = seg.start_ns;
+                if inflight.contains(&key)
+                    || self.store.bytes(key).is_some()
+                    || failed.get(&key).is_some_and(|t| t.elapsed() < RETRY_AFTER)
+                {
+                    continue;
+                }
+                inflight.insert(key);
+                let source = Arc::clone(&self.source);
+                jobs.spawn(async move {
+                    let t0 = Instant::now();
+                    let r = source.fetch(&seg).await;
+                    (seg, r, t0.elapsed())
+                });
+            }
+
+            // Collect finished fetches, or wait a little.
+            let wait = tokio::time::sleep(Duration::from_millis(10));
+            tokio::pin!(wait);
+            loop {
+                tokio::select! {
+                    done = jobs.join_next(), if !jobs.is_empty() => {
+                        let Some(Ok((seg, r, took))) = done else { break };
+                        inflight.remove(&seg.start_ns);
+                        self.stats.fetches.fetch_add(1, Ordering::Relaxed);
+                        match r {
+                            Ok(bytes) => {
+                                self.stats
+                                    .last_fetch_ms
+                                    .store(took.as_millis() as u64, Ordering::Relaxed);
+                                failed.remove(&seg.start_ns);
+                                lock(&self.store.bytes).insert(seg.start_ns, Arc::new(bytes));
+                            }
+                            Err(e) => {
+                                self.stats.fetch_errors.fetch_add(1, Ordering::Relaxed);
+                                warn!(
+                                    "Replay {}: fetch of {} failed: {:#}",
+                                    self.block_id, seg.object_id, e
+                                );
+                                failed.insert(seg.start_ns, Instant::now());
+                                // URLs may have expired: list the chunk again.
+                                chunks.dirty.insert(chunk_of(seg.start_ns));
+                            }
+                        }
+                    }
+                    _ = &mut wait => break,
+                }
+            }
+
+            // Evict what is far from the cursor.
+            let margin = seg_ns;
+            lock(&self.store.bytes).retain(|k, _| *k >= lo - margin && *k < hi + margin);
+            let cc = chunk_of(cursor);
+            let keep = |c: i64| (c - cc).abs() <= KEEP_CHUNKS;
+            chunks.listed.retain(|c| keep(*c));
+            {
+                let mut index = lock(&self.store.index);
+                index.retain(|k, _| keep(chunk_of(*k)) || *k == start);
+                self.stats
+                    .index_segments
+                    .store(index.len() as u64, Ordering::Relaxed);
+            }
+            self.stats
+                .fetched_segments
+                .store(lock(&self.store.bytes).len() as u64, Ordering::Relaxed);
+        }
+        jobs.abort_all();
+    }
+
+    fn publish_extent(&self, start: i64, end: i64) {
+        self.stats.start_tai.store(start, Ordering::Relaxed);
+        self.stats.end_tai.store(end, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blocks::builtin::mediaplayer::replay::source::Location;
+
+    fn seg(i: i64) -> Arc<Segment> {
+        Arc::new(Segment {
+            start_ns: i * S,
+            end_ns: (i + 1) * S,
+            ts_offset_ns: 0,
+            object_start_ns: None,
+            object_id: i.to_string(),
+            location: Location::Urls(vec![]),
+        })
+    }
+
+    #[test]
+    fn urgency_prefers_direction_of_travel() {
+        let segs: Vec<_> = (0..8).map(seg).collect();
+        let cursor = 4 * S + S / 2;
+        let fw: Vec<i64> = by_urgency(&segs, cursor, true)
+            .iter()
+            .map(|s| s.start_ns / S)
+            .collect();
+        assert_eq!(&fw[..4], &[4, 5, 3, 6]);
+        let bw: Vec<i64> = by_urgency(&segs, cursor, false)
+            .iter()
+            .map(|s| s.start_ns / S)
+            .collect();
+        assert_eq!(&bw[..4], &[4, 3, 5, 2]);
+    }
+
+    #[test]
+    fn store_finds_segment_containing_window_start() {
+        let store = SegmentStore::default();
+        store.insert((0..5).map(|i| (*seg(i)).clone()));
+        let hit: Vec<i64> = store
+            .segments_in(2 * S + 1, 3 * S + 1)
+            .iter()
+            .map(|s| s.start_ns / S)
+            .collect();
+        assert_eq!(hit, vec![2, 3]);
+        assert!(store.segments_in(10 * S, 11 * S).is_empty());
+    }
+
+    #[test]
+    fn chunks_are_floor_divided() {
+        assert_eq!(chunk_of(0), 0);
+        assert_eq!(chunk_of(CHUNK_NS - 1), 0);
+        assert_eq!(chunk_of(-1), -1);
+    }
+}

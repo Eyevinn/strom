@@ -1,0 +1,174 @@
+//! TAMS flow as a replay source: `GET /flows/{id}/segments` for the index and
+//! the segments' `get_urls` for the bytes.
+
+use super::{Location, Segment, SourceIndex, SourceInfo};
+use crate::client_auth::AuthMethod;
+use crate::tams::client::{ListedSegment, SegmentQuery, TamsClient};
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use strom_types::tams::format_timestamp;
+use tracing::warn;
+
+/// Pages followed for one window listing. A window is seconds to minutes of
+/// segments, so this only stops a runaway listing.
+const MAX_PAGES: usize = 64;
+
+pub struct TamsIndex {
+    client: TamsClient,
+    flow_id: String,
+}
+
+impl TamsIndex {
+    pub fn new(gateway: &str, flow_id: &str, auth: AuthMethod) -> Result<Self> {
+        Ok(Self {
+            client: TamsClient::new(gateway, auth)?,
+            flow_id: flow_id.to_string(),
+        })
+    }
+
+    async fn query(&self, q: SegmentQuery, max_pages: usize) -> Result<Vec<Segment>> {
+        let listed = self
+            .client
+            .list_segments(&self.flow_id, &q, max_pages)
+            .await?;
+        Ok(listed.iter().filter_map(to_segment).collect())
+    }
+}
+
+/// A TAMS timerange covering `[start_ns, end_ns)`, signed.
+fn timerange(start_ns: i64, end_ns: i64) -> String {
+    format!("[{}_{})", timestamp(start_ns), timestamp(end_ns))
+}
+
+fn timestamp(ns: i64) -> String {
+    if ns < 0 {
+        format!("-{}", format_timestamp(ns.unsigned_abs()))
+    } else {
+        format_timestamp(ns as u64)
+    }
+}
+
+fn to_segment(s: &ListedSegment) -> Option<Segment> {
+    let urls = s.get_urls.iter().map(|u| u.url.clone()).collect();
+    let seg = Segment::from_tams(
+        &s.object_id,
+        &s.timerange,
+        s.ts_offset.as_deref(),
+        s.object_timerange.as_deref(),
+        Location::Urls(urls),
+    );
+    if seg.is_none() {
+        warn!(
+            "TAMS segment {} has an unusable timerange '{}'",
+            s.object_id, s.timerange
+        );
+    }
+    seg
+}
+
+#[async_trait]
+impl SourceIndex for TamsIndex {
+    fn describe(&self) -> String {
+        format!("TAMS {}/flows/{}", self.client.base_url(), self.flow_id)
+    }
+
+    fn may_grow(&self) -> bool {
+        true
+    }
+
+    async fn info(&self) -> Result<SourceInfo> {
+        let flow = self.client.get_flow(&self.flow_id).await?;
+        let rate = &flow["essence_parameters"]["frame_rate"];
+        let frame_rate = match (rate["numerator"].as_u64(), rate["denominator"].as_u64()) {
+            (Some(n), d) if n > 0 => Some((n as u32, d.filter(|d| *d > 0).unwrap_or(1) as u32)),
+            _ => None,
+        };
+        Ok(SourceInfo {
+            frame_rate,
+            container: flow["container"].as_str().map(str::to_string),
+        })
+    }
+
+    async fn list(&self, start_ns: i64, end_ns: i64) -> Result<Vec<Segment>> {
+        let mut segs = self
+            .query(
+                SegmentQuery {
+                    timerange: Some(timerange(start_ns, end_ns)),
+                    limit: None,
+                    reverse_order: false,
+                },
+                MAX_PAGES,
+            )
+            .await?;
+        segs.sort_by_key(|s| s.start_ns);
+        Ok(segs)
+    }
+
+    async fn first(&self) -> Result<Option<Segment>> {
+        let q = SegmentQuery {
+            timerange: None,
+            limit: Some(1),
+            reverse_order: false,
+        };
+        Ok(self.query(q, 1).await?.into_iter().next())
+    }
+
+    async fn last(&self) -> Result<Option<Segment>> {
+        let q = SegmentQuery {
+            timerange: None,
+            limit: Some(1),
+            reverse_order: true,
+        };
+        Ok(self.query(q, 1).await?.into_iter().next())
+    }
+
+    async fn fetch(&self, segment: &Segment) -> Result<Vec<u8>> {
+        let Location::Urls(urls) = &segment.location else {
+            return Err(anyhow!("TAMS segment without get_urls"));
+        };
+        let mut last_err = anyhow!("segment {} has no get_urls", segment.object_id);
+        for url in urls {
+            match self.client.fetch_object(url).await {
+                Ok(b) => return Ok(b),
+                Err(e) => last_err = e,
+            }
+        }
+        Err(last_err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timerange_is_signed_half_open() {
+        assert_eq!(
+            timerange(1_800_000_000_000_000_000, 1_800_000_001_500_000_000),
+            "[1800000000:0_1800000001:500000000)"
+        );
+        assert_eq!(timerange(-1_500_000_000, 0), "[-1:500000000_0:0)");
+    }
+
+    #[test]
+    fn listed_segment_maps_urls_and_offsets() {
+        let l: ListedSegment = serde_json::from_str(
+            r#"{"object_id":"b/o","timerange":"[10:0_11:0)","ts_offset":"-2:0",
+                "get_urls":[{"url":"http://a.example.com/o"},{"url":"http://b.example.com/o"}]}"#,
+        )
+        .unwrap();
+        let s = to_segment(&l).unwrap();
+        assert_eq!(s.start_ns, 10_000_000_000);
+        assert_eq!(s.ts_offset_ns, -2_000_000_000);
+        assert_eq!(
+            s.location,
+            Location::Urls(vec![
+                "http://a.example.com/o".into(),
+                "http://b.example.com/o".into()
+            ])
+        );
+        let bad: ListedSegment =
+            serde_json::from_str(r#"{"object_id":"o","timerange":"[10:0_"}"#).unwrap();
+        assert!(to_segment(&bad).is_none());
+    }
+}

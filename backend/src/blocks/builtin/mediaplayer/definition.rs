@@ -36,7 +36,7 @@ pub fn media_player_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "replay_source".to_string(),
                 label: "Replay Source".to_string(),
-                description: "Replay mode: directory with index.json and MPEG-TS segments (absolute or relative to media path)."
+                description: "Replay mode: where the segments are. A TAMS flow as tams+https://<gateway>/flows/<flow_id> (or tams+http://), or a directory with index.json and MPEG-TS segments (absolute or relative to media path)."
                     .to_string(),
                 property_type: PropertyType::String,
                 default_value: Some(PropertyValue::String(String::new())),
@@ -58,6 +58,79 @@ pub fn media_player_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "replay_cache_s".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
+            ExposedProperty {
+                name: "replay_prefetch_s".to_string(),
+                label: "Replay Prefetch (s)".to_string(),
+                description: "Replay mode: seconds of coded segments fetched ahead of the cursor (half as much behind).".to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(10)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "replay_prefetch_s".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
+            ExposedProperty {
+                name: "replay_auth_mode".to_string(),
+                label: "Replay Authentication".to_string(),
+                description: "Replay mode, TAMS source: Static API Token = a bearer token (or none). OSC PAT/SAT = Service Access Tokens minted from the OSC Personal Access Token configured on this Strom instance.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "static".to_string(),
+                            label: Some("Static API Token".to_string()),
+                            visible_when: None,
+                        },
+                        EnumValue {
+                            value: "osc".to_string(),
+                            label: Some("OSC PAT/SAT".to_string()),
+                            visible_when: None,
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("static".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "replay_auth_mode".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
+            ExposedProperty {
+                name: "replay_api_token".to_string(),
+                label: "Replay API Token".to_string(),
+                description: "Replay mode, TAMS source: static bearer token for the gateway. Empty = STROM_TAMS_API_TOKEN, or no token.".to_string(),
+                property_type: PropertyType::String,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "replay_api_token".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
+            ExposedProperty {
+                name: "replay_osc_service_id".to_string(),
+                label: "Replay OSC Service ID".to_string(),
+                description: "Replay mode, OSC PAT/SAT: the OSC service type the SAT is scoped to. Empty = derived from the gateway URL.".to_string(),
+                property_type: PropertyType::String,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "replay_osc_service_id".to_string(),
                     transform: None,
                 },
                 live: false,
