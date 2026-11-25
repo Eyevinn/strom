@@ -35,12 +35,64 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Default budget for one player's decoded frames (1080p NV12 is about
+/// 3 MB a frame). `STROM_REPLAY_DECODED_MB` overrides it.
+const DEFAULT_DECODED_BUDGET_MB: u64 = 768;
+/// Segments kept decoded whatever the budget: the one under the cursor and
+/// the next.
+const MIN_DECODED_SEGMENTS: usize = 2;
+/// Upper bound of the decoded window ahead of the cursor, seconds.
+const MAX_DECODE_AHEAD_S: u64 = 30;
+
+/// One decoded segment: its first and last frame, and the bytes they hold.
+#[derive(Debug, Clone, Copy)]
+struct DecodedSegment {
+    first: i64,
+    last: i64,
+    bytes: u64,
+}
+
 /// Decoded frames by absolute frame number, and which frames each decoded
 /// segment contributed (for eviction).
 #[derive(Default)]
 struct FrameStore {
     frames: BTreeMap<i64, gst::Buffer>,
-    segments: HashMap<i64, (i64, i64)>,
+    segments: HashMap<i64, DecodedSegment>,
+    /// Decoded bytes per second of media, from the latest decode: the size
+    /// estimate of a segment not decoded yet.
+    bytes_per_s: f64,
+}
+
+impl FrameStore {
+    /// Decoded size of a segment, or an estimate.
+    fn size_of(&self, seg: &Segment) -> u64 {
+        match self.segments.get(&seg.start_ns) {
+            Some(d) => d.bytes,
+            None => (self.bytes_per_s * seg.duration_ns() as f64 / 1e9) as u64,
+        }
+    }
+}
+
+/// The most urgent of `wanted` (ordered by urgency) whose decoded frames fit
+/// in `budget` bytes, counting `size_of` each. The first `min_keep` always
+/// fit. Stops at the first that does not, so what is kept is never less
+/// urgent than what is left out.
+fn within_budget(
+    wanted: &[Arc<Segment>],
+    size_of: impl Fn(&Segment) -> u64,
+    budget: u64,
+    min_keep: usize,
+) -> Vec<Arc<Segment>> {
+    let mut total = 0u64;
+    let mut out = Vec::new();
+    for (i, s) in wanted.iter().enumerate() {
+        total = total.saturating_add(size_of(s));
+        if i >= min_keep && total > budget {
+            break;
+        }
+        out.push(Arc::clone(s));
+    }
+    out
 }
 
 pub struct ReplayPlayer {
@@ -60,6 +112,8 @@ pub struct ReplayPlayer {
     /// Decoded window around the cursor, in its direction of travel.
     decode_behind_ns: i64,
     decode_ahead_ns: i64,
+    /// Most bytes of decoded frames to hold.
+    decoded_budget: u64,
     /// Output frame rate; `None` = the source's own rate.
     output_rate: Option<(u32, u32)>,
     /// Read the bitstrip and burned-in time of pushed frames
@@ -107,7 +161,12 @@ impl ReplayPlayer {
             decoder,
             workers: 2,
             decode_behind_ns: 2 * S,
-            decode_ahead_ns: cache_ahead_s.max(1) as i64 * S,
+            decode_ahead_ns: cache_ahead_s.clamp(1, MAX_DECODE_AHEAD_S) as i64 * S,
+            decoded_budget: strom_types::env::var_opt("STROM_REPLAY_DECODED_MB")
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|mb| *mb > 0)
+                .unwrap_or(DEFAULT_DECODED_BUDGET_MB)
+                .saturating_mul(1 << 20),
             output_rate,
             read_strip: strom_types::env::var_opt("STROM_REPLAY_BITSTRIP")
                 .is_some_and(|v| v == "1" || v == "true"),
@@ -253,8 +312,19 @@ impl ReplayPlayer {
             }
         }
         if let (Some(lo), Some(hi)) = (frames.first().map(|f| f.0), frames.last().map(|f| f.0)) {
+            let bytes: u64 = frames.iter().map(|(_, b)| b.size() as u64).sum();
             let mut store = lock(&self.decoded);
-            store.segments.insert(seg.start_ns, (lo, hi));
+            if seg.duration_ns() > 0 {
+                store.bytes_per_s = bytes as f64 * 1e9 / seg.duration_ns() as f64;
+            }
+            store.segments.insert(
+                seg.start_ns,
+                DecodedSegment {
+                    first: lo,
+                    last: hi,
+                    bytes,
+                },
+            );
             store.frames.extend(frames);
         }
         self.stats.decodes.fetch_add(1, Ordering::Relaxed);
@@ -278,12 +348,22 @@ impl ReplayPlayer {
                         cursor + self.decode_behind_ns,
                     )
                 };
-                let wanted = by_urgency(&self.store.segments_in(lo, hi), cursor, forward);
+                let near = by_urgency(&self.store.segments_in(lo, hi), cursor, forward);
+                // The most urgent segments whose frames fit the memory budget.
+                let wanted = {
+                    let decoded = lock(&self.decoded);
+                    within_budget(
+                        &near,
+                        |s| decoded.size_of(s),
+                        self.decoded_budget,
+                        MIN_DECODED_SEGMENTS,
+                    )
+                };
                 {
                     let decoded = lock(&self.decoded);
                     let mut inflight = lock(&self.inflight);
                     let mut failed = lock(&self.failed);
-                    let keys: HashSet<i64> = wanted.iter().map(|s| s.start_ns).collect();
+                    let keys: HashSet<i64> = near.iter().map(|s| s.start_ns).collect();
                     failed.retain(|k| keys.contains(k));
                     let jobs = pick_decodes(
                         &wanted,
@@ -300,23 +380,31 @@ impl ReplayPlayer {
                     }
                 }
                 let keep: HashSet<i64> = wanted.iter().map(|s| s.start_ns).collect();
-                let mut store = lock(&self.decoded);
-                let evict: Vec<(i64, (i64, i64))> = store
-                    .segments
-                    .iter()
-                    .filter(|(k, _)| !keep.contains(k))
-                    .map(|(k, r)| (*k, *r))
-                    .collect();
-                for (k, (a, b)) in evict {
-                    store.segments.remove(&k);
-                    let doomed: Vec<i64> = store.frames.range(a..=b).map(|(f, _)| *f).collect();
-                    for f in doomed {
-                        store.frames.remove(&f);
+                // Frees the evicted frames after the lock is released, so a
+                // large eviction does not hold up the output tick.
+                let mut doomed: Vec<gst::Buffer> = Vec::new();
+                {
+                    let mut store = lock(&self.decoded);
+                    let evict: Vec<(i64, DecodedSegment)> = store
+                        .segments
+                        .iter()
+                        .filter(|(k, _)| !keep.contains(k))
+                        .map(|(k, d)| (*k, *d))
+                        .collect();
+                    for (k, d) in evict {
+                        store.segments.remove(&k);
+                        let frames: Vec<i64> = store
+                            .frames
+                            .range(d.first..=d.last)
+                            .map(|(f, _)| *f)
+                            .collect();
+                        doomed.extend(frames.iter().filter_map(|f| store.frames.remove(f)));
                     }
+                    self.stats
+                        .cached_segments
+                        .store(store.segments.len() as u64, Ordering::Relaxed);
                 }
-                self.stats
-                    .cached_segments
-                    .store(store.segments.len() as u64, Ordering::Relaxed);
+                drop(doomed);
             }
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -646,6 +734,39 @@ mod tests {
         };
         assert!(same_layout(&caps(1280, 50), &caps(1280, 25)));
         assert!(!same_layout(&caps(1280, 50), &caps(1920, 50)));
+    }
+
+    #[test]
+    fn decoded_window_keeps_to_its_budget() {
+        let wanted: Vec<_> = (0..6).map(seg).collect();
+        let mb = 1u64 << 20;
+        // 155 MB a segment (1 s of 1080p50 NV12), 512 MB budget: three fit.
+        let kept = within_budget(&wanted, |_| 155 * mb, 512 * mb, 2);
+        assert_eq!(kept.len(), 3);
+        // The segment under the cursor and the next are always kept.
+        let kept = within_budget(&wanted, |_| 1000 * mb, 512 * mb, 2);
+        assert_eq!(kept.len(), 2);
+        // Sizes not known yet (nothing decoded) do not hold anything back.
+        let kept = within_budget(&wanted, |_| 0, 512 * mb, 2);
+        assert_eq!(kept.len(), 6);
+    }
+
+    #[test]
+    fn frame_store_estimates_undecoded_segments() {
+        let mut store = FrameStore {
+            bytes_per_s: 100.0,
+            ..Default::default()
+        };
+        store.segments.insert(
+            0,
+            DecodedSegment {
+                first: 0,
+                last: 49,
+                bytes: 70,
+            },
+        );
+        assert_eq!(store.size_of(&seg(0)), 70);
+        assert_eq!(store.size_of(&seg(1)), 100);
     }
 
     #[test]
