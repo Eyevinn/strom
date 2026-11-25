@@ -15,6 +15,16 @@
 //! - any other clock (`Monotonic`, NTP): `offset` is sampled once per pipeline run
 //!   from the system TAI clock and shared by every block in that pipeline.
 //!
+//! The `Other` offset is not re-sampled during a run (review L11). A monotonic
+//! or NTP clock drifts against disciplined TAI by tens of ppm, so over hours the
+//! store's TAI moves away from wall-clock capture time (about 1-2 s over 10 h at
+//! 50 ppm). Angles of one pipeline share the offset and stay aligned with each
+//! other; UTC addressing and joining stores of other pipelines suffer. Re-sampling
+//! per block would break that alignment, since blocks would see different
+//! samples at the same running time. Long recordings that need wall-clock
+//! accuracy should run the pipeline on a TAI, PTP or Realtime clock, which map
+//! by a fixed offset, or carry reference timestamps.
+//!
 //! A buffer that carries a capture time as a `GstReferenceTimestampMeta`
 //! (`timestamp/x-tai`, `x-ptp`, `x-unix` or `x-ntp`) takes precedence: the block
 //! anchors on it instead of the pipeline clock.
@@ -211,6 +221,15 @@ pub fn shared_pipeline_mapping(
         }
     }
     let mapping = PipelineTaiMapping::for_clock(clock, tai);
+    if mapping.domain == ClockDomain::Other {
+        info!(
+            "TAMS: flow {} runs on a {} clock: its TAI offset is sampled once and will \
+             drift with that clock over long runs (use a TAI, PTP or Realtime pipeline \
+             clock, or reference timestamps, for wall-clock accuracy)",
+            flow_id,
+            clock.type_().name()
+        );
+    }
     info!(
         "TAMS: flow {} running time -> TAI mapping: clock {} ({:?}), base_time {} ns, \
          offset {} ns",
