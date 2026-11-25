@@ -207,7 +207,7 @@ impl ReplayPlayer {
         });
         let grid = grid.ok_or("no frame rate known")?;
         let n_decoded = decoded.frames.len();
-        let frames = map_to_grid(seg, &grid, decoded.frames);
+        let frames = map_to_grid(seg, &grid, decoded.frames, decoded.first_pts);
         if frames.is_empty() {
             return Err(format!(
                 "none of {} decoded frames fall inside the segment's timerange",

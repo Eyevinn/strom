@@ -11,6 +11,7 @@ use super::source::Segment;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -51,6 +52,9 @@ fn demux_for(container: Option<&str>) -> (&'static str, &'static str) {
 pub struct Decoded {
     pub frames: Vec<(u64, gst::Buffer)>,
     pub caps: gst::Caps,
+    /// Earliest PTS among the demuxed access units, before decoding: the
+    /// object's first sample, even when the decoder drops leading pictures.
+    pub first_pts: Option<u64>,
 }
 
 /// How long a decode may take before it is given up: five times the
@@ -72,7 +76,7 @@ pub fn decode_bytes(
 ) -> Result<Decoded, String> {
     let (demux, src_caps) = demux_for(container);
     let desc = format!(
-        "appsrc name=src format=bytes is-live=false caps=\"{}\" ! {} ! h264parse ! {} ! \
+        "appsrc name=src format=bytes is-live=false caps=\"{}\" ! {} ! h264parse name=parse ! {} ! \
          videoconvert ! video/x-raw,format=NV12 ! appsink name=sink sync=false",
         src_caps, demux, decoder
     );
@@ -108,6 +112,17 @@ fn run_decode(
         .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
         .ok_or("no appsink")?;
     let bus = pipeline.bus().ok_or("no bus")?;
+    // Earliest PTS the parser passes on (per buffer: an atomic only).
+    let first_pts = Arc::new(AtomicU64::new(u64::MAX));
+    if let Some(pad) = pipeline.by_name("parse").and_then(|p| p.static_pad("src")) {
+        let first = Arc::clone(&first_pts);
+        pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            if let Some(pts) = info.buffer().and_then(|b| b.pts()) {
+                first.fetch_min(pts.nseconds(), Ordering::Relaxed);
+            }
+            gst::PadProbeReturn::Ok
+        });
+    }
     // A pipeline outside a flow: give its pool threads normal scheduling.
     crate::gst::thread_priority::reset_streaming_threads(pipeline);
     // The whole object as one buffer, then end of stream.
@@ -154,18 +169,32 @@ fn run_decode(
         return Err(e);
     }
     let caps = caps.ok_or("no frames decoded")?;
-    Ok(Decoded { frames, caps })
+    let first_pts = Some(first_pts.load(Ordering::Relaxed)).filter(|p| *p != u64::MAX);
+    Ok(Decoded {
+        frames,
+        caps,
+        first_pts,
+    })
 }
 
 /// Place decoded frames on the grid: a frame's TAI is the segment's first
-/// sample TAI plus its PTS distance from the earliest PTS in the object.
-/// Frames outside the segment's timerange (partial use of an object) are
-/// dropped. Container PTS is never taken as TAI: the segment timerange is the
-/// link between the two (TS PTS wraps at 33 bits, demuxers rebase it).
-pub fn map_to_grid<T>(seg: &Segment, grid: &FrameGrid, frames: Vec<(u64, T)>) -> Vec<(i64, T)> {
-    let Some(min_pts) = frames.iter().map(|(p, _)| *p).min() else {
+/// sample TAI plus its PTS distance from the object's first PTS. That is
+/// `first_pts` (the earliest demuxed PTS) when known, so pictures the decoder
+/// drops at the start (open GOP, a segment not starting on a keyframe) do not
+/// shift the rest; else the earliest decoded PTS. Frames outside the
+/// segment's timerange (partial use of an object) are dropped. Container PTS
+/// is never taken as TAI: the segment timerange is the link between the two
+/// (TS PTS wraps at 33 bits, demuxers rebase it).
+pub fn map_to_grid<T>(
+    seg: &Segment,
+    grid: &FrameGrid,
+    frames: Vec<(u64, T)>,
+    first_pts: Option<u64>,
+) -> Vec<(i64, T)> {
+    let Some(decoded_min) = frames.iter().map(|(p, _)| *p).min() else {
         return Vec::new();
     };
+    let min_pts = first_pts.map_or(decoded_min, |p| p.min(decoded_min));
     let half = (grid.frame_ns() / 2.0) as i64;
     let base = seg.first_sample_tai();
     let mut out: Vec<(i64, T)> = frames
@@ -214,7 +243,7 @@ mod tests {
         let pts0 = 3_600_000_000_000u64;
         let frames: Vec<(u64, u32)> = (0..50).map(|i| (pts0 + i * 20_000_000, i as u32)).collect();
         let s = seg(BASE + 1_000_000_000, BASE + 2_000_000_000);
-        let out = map_to_grid(&s, &grid, frames);
+        let out = map_to_grid(&s, &grid, frames, None);
         assert_eq!(out.len(), 50);
         assert_eq!(out[0], (k0 + 50, 0));
         assert_eq!(out[49], (k0 + 99, 49));
@@ -234,7 +263,7 @@ mod tests {
             })
             .collect();
         let s = seg(BASE, BASE + 1_000_000_000);
-        let out = map_to_grid(&s, &grid, frames);
+        let out = map_to_grid(&s, &grid, frames, None);
         let ks: Vec<i64> = out
             .iter()
             .map(|(k, _)| k - grid.floor_frame(BASE))
@@ -252,16 +281,30 @@ mod tests {
         s.ts_offset_ns = BASE - 1_000_000_000;
         s.object_start_ns = Some(0);
         let frames: Vec<(u64, u32)> = (0..100).map(|i| (i * 20_000_000, i as u32)).collect();
-        let out = map_to_grid(&s, &grid, frames);
+        let out = map_to_grid(&s, &grid, frames, None);
         assert_eq!(out.len(), 50);
         assert_eq!(out[0], (k0, 50));
         assert_eq!(out[49], (k0 + 49, 99));
     }
 
     #[test]
+    fn dropped_leading_pictures_do_not_shift_the_segment() {
+        let grid = FrameGrid::new(50, 1, BASE).unwrap();
+        let k0 = grid.floor_frame(BASE);
+        // The object starts at PTS 0, but the decoder dropped its first two
+        // pictures (leading B-frames of an open GOP).
+        let frames: Vec<(u64, u32)> = (2..50).map(|i| (i * 20_000_000, i as u32)).collect();
+        let s = seg(BASE, BASE + 1_000_000_000);
+        let out = map_to_grid(&s, &grid, frames, Some(0));
+        assert_eq!(out.len(), 48);
+        assert_eq!(out[0], (k0 + 2, 2));
+        assert_eq!(out[47], (k0 + 49, 49));
+    }
+
+    #[test]
     fn empty_input() {
         let grid = FrameGrid::new(50, 1, BASE).unwrap();
-        let out = map_to_grid::<u8>(&seg(BASE, BASE + 1), &grid, vec![]);
+        let out = map_to_grid::<u8>(&seg(BASE, BASE + 1), &grid, vec![], None);
         assert!(out.is_empty());
     }
 
@@ -312,6 +355,8 @@ mod tests {
             .expect("decode returned")
             .expect("decode ok");
         assert_eq!(d.frames.len(), 25);
+        let decoded_min = d.frames.iter().map(|f| f.0).min();
+        assert_eq!(d.first_pts, decoded_min);
         assert_eq!(caps_frame_rate(&d.caps), Some((25, 1)));
     }
 
