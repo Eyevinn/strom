@@ -248,7 +248,9 @@ impl Fetcher {
         let mut inflight: HashSet<i64> = HashSet::new();
         let mut list_failed: Backoff<i64> = Backoff::new(LIST_RETRY, LIST_RETRY_MAX);
         let mut failed: Backoff<i64> = Backoff::new(FETCH_RETRY, FETCH_RETRY_MAX);
-        let mut jobs: JoinSet<(Arc<Segment>, anyhow::Result<Vec<u8>>, Duration)> = JoinSet::new();
+        let mut jobs: JoinSet<(anyhow::Result<Vec<u8>>, Duration)> = JoinSet::new();
+        // The segment of each fetch task, also when the task panics.
+        let mut tasks: HashMap<tokio::task::Id, Arc<Segment>> = HashMap::new();
         let mut next_poll = Instant::now() + Duration::from_nanos(seg_ns as u64);
         let mut next_first = Instant::now() + Duration::from_secs(30);
 
@@ -347,11 +349,13 @@ impl Fetcher {
                 }
                 inflight.insert(key);
                 let source = Arc::clone(&self.source);
-                jobs.spawn(async move {
+                let task_seg = Arc::clone(&seg);
+                let handle = jobs.spawn(async move {
                     let t0 = Instant::now();
-                    let r = source.fetch(&seg).await;
-                    (seg, r, t0.elapsed())
+                    let r = source.fetch(&task_seg).await;
+                    (r, t0.elapsed())
                 });
+                tasks.insert(handle.id(), seg);
             }
 
             // Collect finished fetches, or wait a little.
@@ -359,8 +363,16 @@ impl Fetcher {
             tokio::pin!(wait);
             loop {
                 tokio::select! {
-                    done = jobs.join_next(), if !jobs.is_empty() => {
-                        let Some(Ok((seg, r, took))) = done else { break };
+                    done = jobs.join_next_with_id(), if !jobs.is_empty() => {
+                        // A panicked task frees its slot and counts as a failure.
+                        let (id, r, took) = match done {
+                            Some(Ok((id, (r, took)))) => (id, r, took),
+                            Some(Err(e)) => {
+                                (e.id(), Err(anyhow::anyhow!("fetch task: {}", e)), Duration::ZERO)
+                            }
+                            None => break,
+                        };
+                        let Some(seg) = tasks.remove(&id) else { continue };
                         inflight.remove(&seg.start_ns);
                         self.stats.fetches.fetch_add(1, Ordering::Relaxed);
                         match r {
@@ -488,12 +500,17 @@ mod tests {
         segs: Vec<Segment>,
         list_fails: bool,
         fetch_fails: bool,
+        fetch_panics: bool,
         lists: AtomicU64,
         fetches: Mutex<HashMap<i64, u32>>,
     }
 
     impl Mock {
         fn new(n: i64, len_s: i64, list_fails: bool, fetch_fails: bool) -> Arc<Self> {
+            Arc::new(Self::build(n, len_s, list_fails, fetch_fails))
+        }
+
+        fn build(n: i64, len_s: i64, list_fails: bool, fetch_fails: bool) -> Self {
             let segs = (0..n)
                 .map(|i| Segment {
                     start_ns: (100 + i * len_s) * S,
@@ -504,13 +521,14 @@ mod tests {
                     location: Location::Urls(vec![]),
                 })
                 .collect();
-            Arc::new(Self {
+            Self {
                 segs,
                 list_fails,
                 fetch_fails,
+                fetch_panics: false,
                 lists: AtomicU64::new(0),
                 fetches: Mutex::new(HashMap::new()),
-            })
+            }
         }
 
         fn fetches_of(&self, start_s: i64) -> u32 {
@@ -556,6 +574,9 @@ mod tests {
         }
         async fn fetch(&self, seg: &Segment) -> anyhow::Result<Vec<u8>> {
             *lock(&self.fetches).entry(seg.start_ns).or_insert(0) += 1;
+            if self.fetch_panics {
+                panic!("fetch task panics");
+            }
             if self.fetch_fails {
                 anyhow::bail!("404");
             }
@@ -624,6 +645,17 @@ mod tests {
         let mock = Mock::new(3, 10, false, false);
         run_fetcher(Arc::clone(&mock), Some(108), Duration::from_millis(1000));
         assert_eq!(mock.fetches_of(100), 1);
+    }
+
+    #[test]
+    fn panicked_fetch_is_retried() {
+        let mock = Arc::new(Mock {
+            fetch_panics: true,
+            ..Mock::build(10, 1, false, false)
+        });
+        run_fetcher(Arc::clone(&mock), None, Duration::from_millis(1200));
+        // The slot is freed and the segment retried after its backoff.
+        assert!(mock.fetches_of(100) >= 2);
     }
 
     #[test]
