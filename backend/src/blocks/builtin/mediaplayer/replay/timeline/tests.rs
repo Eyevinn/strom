@@ -1029,3 +1029,17 @@ fn state_lists_extents_gaps_and_the_estimate() {
     );
     assert!(v["behind_live_estimate_ms"].is_number());
 }
+
+#[test]
+fn following_live_holds_at_the_common_edge_when_it_stalls() {
+    let (tl, p) = timeline_with(&[(BASE, BASE + 60 * S), (BASE, BASE + 58 * S)]);
+    tl.apply_at(Command::Live { margin_ms: None }, 0).unwrap();
+    // The edge (58 s, where both angles have media) does not grow: hold
+    // there, not at the longer angle's end.
+    assert_eq!(tl.tai_at(5 * S), Some(BASE + 58 * S - 1));
+    // It grows again: play on along the same line.
+    p[1].end_tai.store(BASE + 70 * S, Ordering::Relaxed);
+    assert_eq!(tl.tai_at(5 * S), Some(BASE + 60 * S - 1));
+    p[0].end_tai.store(BASE + 70 * S, Ordering::Relaxed);
+    assert_eq!(tl.tai_at(5 * S), Some(BASE + 61_500 * MS));
+}

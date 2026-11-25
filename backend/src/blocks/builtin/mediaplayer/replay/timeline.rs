@@ -492,6 +492,11 @@ fn eval(a: &Anchor, rt: i64, b: &Bounds, live_from: i64) -> Eval {
     } else if a.catch_up && !a.live && speed > 0.0 && pos >= live_from as i128 {
         hit = Some(Hit::CaughtUp);
     }
+    if a.live {
+        // Following live never runs past the common edge (where an angle
+        // would have no picture): it holds there until the next segment.
+        pos = pos.min(b.live_end as i128 - 1);
+    }
     Eval {
         tai: pos.clamp(b.start as i128, (b.end - 1) as i128) as i64,
         speed,
