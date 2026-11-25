@@ -80,18 +80,18 @@ pub fn clock_domain(clock: &gst::Clock) -> ClockDomain {
 
 /// Reads TAI from the host clocks, with the [`TAI_MINUS_UTC_NS`] fallback when the
 /// kernel has no TAI offset.
-pub struct TaiClock {
+pub struct HostTai {
     tai: gst::Clock,
     realtime: gst::Clock,
 }
 
-impl Default for TaiClock {
+impl Default for HostTai {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl TaiClock {
+impl HostTai {
     pub fn new() -> Self {
         let make = |t: gst::ClockType| -> gst::Clock {
             gst::glib::Object::builder::<gst::SystemClock>()
@@ -172,7 +172,7 @@ impl PipelineTaiMapping {
     /// Build the mapping for `clock`. Only an [`ClockDomain::Other`] clock is
     /// sampled against host TAI; TAI and UTC clocks map by a fixed offset, so every
     /// node on a shared clock computes the same mapping.
-    pub fn for_clock(clock: &gst::Clock, tai: &TaiClock) -> Self {
+    pub fn for_clock(clock: &gst::Clock, tai: &HostTai) -> Self {
         let domain = clock_domain(clock);
         let offset_ns = match domain {
             ClockDomain::Tai => 0,
@@ -211,7 +211,7 @@ pub fn shared_pipeline_mapping(
     flow_id: FlowId,
     clock: &gst::Clock,
     base_time_ns: u64,
-    tai: &TaiClock,
+    tai: &HostTai,
 ) -> PipelineTaiMapping {
     let mut reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(entry) = reg.get(&flow_id) {
@@ -487,7 +487,7 @@ mod tests {
     #[test]
     fn tai_and_utc_clocks_map_by_fixed_offset() {
         gst::init().unwrap();
-        let tai = TaiClock::new();
+        let tai = HostTai::new();
         let m = PipelineTaiMapping {
             offset_ns: 0,
             domain: ClockDomain::Tai,
@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn monotonic_mapping_tracks_host_tai() {
         gst::init().unwrap();
-        let tai = TaiClock::new();
+        let tai = HostTai::new();
         let clock = system_clock(gst::ClockType::Monotonic);
         let m = PipelineTaiMapping::for_clock(&clock, &tai);
         let mapped = m.tai_ns(clock.time().nseconds(), 0);
@@ -520,7 +520,7 @@ mod tests {
     #[test]
     fn mapping_is_shared_per_pipeline_run() {
         gst::init().unwrap();
-        let tai = TaiClock::new();
+        let tai = HostTai::new();
         let clock = system_clock(gst::ClockType::Monotonic);
         let flow = uuid::Uuid::new_v4();
         let a = shared_pipeline_mapping(flow, &clock, 1_000, &tai);

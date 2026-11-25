@@ -1,6 +1,6 @@
 use super::burn_in::{decode_cells, Layout, TimestampBurnIn, CODE_CELLS};
 use super::stamper::{ReferenceTimestamper, Timescale};
-use crate::tams::timeline::{reference_tai_ns, TaiClock};
+use crate::tams::tai_mapping::{reference_tai_ns, HostTai};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -116,7 +116,7 @@ fn metas(buf: &gst::BufferRef) -> Vec<(String, u64)> {
 fn utc_stamp_is_clock_time_of_running_time() {
     let (samples, base) = run(Timescale::Utc, false, None);
     assert_eq!(samples.len(), 5);
-    let off = TaiClock::new().tai_minus_utc_ns();
+    let off = HostTai::new().tai_minus_utc_ns();
     for s in &samples {
         let buf = s.buffer().unwrap();
         let expect = base + running_time(s);
@@ -129,7 +129,7 @@ fn utc_stamp_is_clock_time_of_running_time() {
 #[test]
 fn tai_stamp_is_utc_plus_offset() {
     let (samples, base) = run(Timescale::Tai, false, None);
-    let off = TaiClock::new().tai_minus_utc_ns();
+    let off = HostTai::new().tai_minus_utc_ns();
     for s in &samples {
         let expect = base + running_time(s) + off;
         assert_eq!(

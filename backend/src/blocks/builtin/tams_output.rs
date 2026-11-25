@@ -21,9 +21,9 @@ use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockB
 use crate::client_auth::AuthMethod;
 use crate::osc::SatProvider;
 use crate::tams::client::{FlowSpec, TamsClient};
-use crate::tams::timeline::{
-    grid_miss_ns, reference_tai_ns, shared_pipeline_mapping, AnchorKind, FragmentTimeline,
-    TaiClock, FIRST_ON_GRID_FRAGMENT,
+use crate::tams::tai_mapping::{
+    grid_miss_ns, reference_tai_ns, shared_pipeline_mapping, AnchorKind, FragmentTimeline, HostTai,
+    FIRST_ON_GRID_FRAGMENT,
 };
 use crate::tams::uploader::{
     channel, new_tail_slot, spawn_uploader, FragmentReady, SharedDetected, TailFragment,
@@ -809,9 +809,9 @@ fn build_flow_chain(
         // fragment. The anchor is the buffer's capture time when it carries a
         // reference timestamp, otherwise the running time -> TAI mapping shared by
         // every TAMS Output of this pipeline run, so equal running time gives equal
-        // TAI across blocks (#966). See `crate::tams::timeline`.
+        // TAI across blocks (#966). See `crate::tams::tai_mapping`.
         let timeline = Arc::new(Mutex::new(FragmentTimeline::default()));
-        let tai = Arc::new(TaiClock::new());
+        let tai = Arc::new(HostTai::new());
         // `split-at-running-time` takes the lock splitmuxsink holds while it emits
         // format-location-full, so the next split is scheduled with `call_async`
         // (GStreamer's thread pool: no tokio runtime needed in this callback, and

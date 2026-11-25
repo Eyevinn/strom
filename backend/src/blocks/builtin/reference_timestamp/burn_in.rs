@@ -16,7 +16,7 @@
 //! Only the 8-bit luma plane carries the drawing; the band's chroma is set
 //! neutral. Accepts 8-bit planar and semi-planar YUV.
 
-use crate::tams::timeline::{reference_tai_ns, TaiClock};
+use crate::tams::tai_mapping::{reference_tai_ns, HostTai};
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::subclass::prelude::*;
@@ -297,7 +297,7 @@ mod imp {
 
         fn start(&self) -> Result<(), gst::ErrorMessage> {
             self.tai_minus_utc_ns
-                .store(TaiClock::new().tai_minus_utc_ns(), Ordering::Relaxed);
+                .store(HostTai::new().tai_minus_utc_ns(), Ordering::Relaxed);
             self.warned_missing.store(false, Ordering::Relaxed);
             Ok(())
         }
