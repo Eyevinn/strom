@@ -10336,7 +10336,8 @@
         "description": "What a command did.",
         "required": [
           "speed",
-          "cursor_tai"
+          "cursor_tai",
+          "live"
         ],
         "properties": {
           "cue": {
@@ -10361,6 +10362,10 @@
             ],
             "format": "int64",
             "description": "The reference frame that holds the cursor, once the grid is known."
+          },
+          "live": {
+            "type": "boolean",
+            "description": "Following the live edge (after `live`, or after catching up)."
           },
           "speed": {
             "type": "number",
@@ -10524,7 +10529,8 @@
         "type": "string",
         "description": "Why the group went live.",
         "enum": [
-          "end_action"
+          "end_action",
+          "caught_up"
         ]
       },
       "ReplayTimeRef": {

@@ -370,6 +370,12 @@ struct Anchor {
     /// The bound of play, if a cue is held. Invariant: holds the cursor at
     /// `rt` (commands that leave it drop it).
     region: Option<Region>,
+    /// Following the live edge: playing at 1x behind it (after `live`, or
+    /// after catching up with it).
+    live: bool,
+    /// The cursor was behind the live point at `rt`: forward play that
+    /// reaches it catches up and goes live.
+    catch_up: bool,
 }
 
 const START_ANCHOR: Anchor = Anchor {
@@ -377,6 +383,8 @@ const START_ANCHOR: Anchor = Anchor {
     tai: None,
     speed: 0.0,
     region: None,
+    live: false,
+    catch_up: false,
 };
 
 /// An end of bounded play that changes the motion.
@@ -384,6 +392,8 @@ const START_ANCHOR: Anchor = Anchor {
 enum Hit {
     Freeze,
     Live,
+    /// Unbounded forward play reached the live point.
+    CaughtUp,
 }
 
 /// Where the cursor is at a running time, and what (if anything) it ran
@@ -396,8 +406,9 @@ struct Eval {
     hit: Option<Hit>,
 }
 
-/// The cursor of `a` at `rt`, clamped to the media.
-fn eval(a: &Anchor, rt: i64, b: &Bounds) -> Eval {
+/// The cursor of `a` at `rt`, clamped to the media. `live_from` is where the
+/// group plays from when live (the live edge minus the margin).
+fn eval(a: &Anchor, rt: i64, b: &Bounds, live_from: i64) -> Eval {
     let from = a.tai.unwrap_or(b.start) as i128;
     let moved = (a.speed * (rt - a.rt) as f64).round() as i128;
     let mut pos = from + moved;
@@ -419,6 +430,8 @@ fn eval(a: &Anchor, rt: i64, b: &Bounds) -> Eval {
                 }
             }
         }
+    } else if a.catch_up && !a.live && speed > 0.0 && pos >= live_from as i128 {
+        hit = Some(Hit::CaughtUp);
     }
     Eval {
         tai: pos.clamp(b.start as i128, (b.end - 1) as i128) as i64,
@@ -513,6 +526,8 @@ pub struct Applied {
     pub tai: i64,
     pub speed: f64,
     pub region: Option<Region>,
+    /// Following the live edge.
+    pub live: bool,
 }
 
 pub struct ReplayTimeline {
@@ -683,7 +698,8 @@ impl ReplayTimeline {
     /// the group on. The new line starts where the old one ended, so callers
     /// at nearby running times still agree.
     fn advance(&self, a: &mut Anchor, rt: i64, b: &Bounds) -> (i64, f64) {
-        let e = eval(a, rt, b);
+        let live_from = self.live_target(b);
+        let e = eval(a, rt, b, live_from);
         let Some(hit) = e.hit else {
             return (e.tai, e.speed);
         };
@@ -698,25 +714,43 @@ impl ReplayTimeline {
                     tai: Some(e.tai),
                     speed: 0.0,
                     region: a.region,
+                    live: false,
+                    catch_up: false,
                 };
                 self.emit(ReplayEvent::Ended { at: instant(e.tai) });
                 (e.tai, 0.0)
             }
             Hit::Live => {
-                let to = self.live_target(b);
+                let to = live_from.clamp(b.start, b.end - 1);
                 *a = Anchor {
                     rt,
                     tai: Some(to),
                     speed: 1.0,
                     region: None,
+                    live: true,
+                    catch_up: false,
                 };
-                let to = eval(a, rt, b).tai;
-                a.tai = Some(to);
                 self.emit(ReplayEvent::Live {
                     reason: ReplayLiveReason::EndAction,
                     at: instant(to),
                 });
                 (to, 1.0)
+            }
+            Hit::CaughtUp => {
+                // Go on from where play is, at 1x: no jump back.
+                *a = Anchor {
+                    rt,
+                    tai: Some(e.tai),
+                    speed: 1.0,
+                    region: None,
+                    live: true,
+                    catch_up: false,
+                };
+                self.emit(ReplayEvent::Live {
+                    reason: ReplayLiveReason::CaughtUp,
+                    at: instant(e.tai),
+                });
+                (e.tai, 1.0)
             }
         }
     }
@@ -820,6 +854,11 @@ impl ReplayTimeline {
             || reference.ok_or_else(|| conflict("the group's frame rate is not known yet"));
         let mut a = lock(&self.anchor);
         let (cur, cur_speed) = self.advance(&mut a, now, &b);
+        let live = match cmd {
+            Command::Live { .. } => true,
+            Command::Uncue => a.live,
+            _ => false,
+        };
         // What the cue becomes: kept (if it still holds the cursor), set, or
         // dropped.
         enum Cue {
@@ -970,9 +1009,16 @@ impl ReplayTimeline {
             tai: Some(tai),
             speed,
             region,
+            live,
+            catch_up: tai < self.live_target(&b),
         };
         *lock(&self.last_cmd) = (speed == 0.0).then(|| (Instant::now(), tai));
-        Ok(Applied { tai, speed, region })
+        Ok(Applied {
+            tai,
+            speed,
+            region,
+            live,
+        })
     }
 
     /// The reference frame that holds `tai` (relative to the origin) and its
@@ -992,6 +1038,7 @@ impl ReplayTimeline {
             frame: time.as_ref().map(|t| t.frame),
             time: time.map(|t| t.to_api()),
             cue: a.region.map(Region::to_api),
+            live: a.live,
         }
     }
 
@@ -1098,6 +1145,7 @@ impl ReplayTimeline {
         let time_of = |tai: i64| FrameTime::new(&g, g.floor_frame(tai), origin).to_json();
         let (cursor, speed) = self.advance(&mut lock(&self.anchor), now, &b);
         v["speed"] = speed.into();
+        v["live"] = lock(&self.anchor).live.into();
         v["cue"] = serde_json::to_value(self.cue().map(Region::to_api)).unwrap_or_default();
         let behind_ms = |t: i64| ((b.live_end - t) as f64 / 1e6).round();
         v["reference_fps"] = fps_string(&g).into();

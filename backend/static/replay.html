@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Strom replay page, version 3 -->
+<!-- Strom replay page, version 4 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -435,6 +435,7 @@ function onState(m) {
     players: (m.players || []).length,
   };
   s.cue = m.cue || null;
+  s.following = !!m.live;
   S = s; recvAt = now;
   if (s.live != null) trackLive(s.live, now);
   // The server holds the clip's bounds; when it drops the cue (a seek out of
@@ -446,7 +447,7 @@ function onState(m) {
 // What the server did by itself.
 function onEvent(m) {
   if (m.event === 'ended') toast(activeClip ? `${activeClip.clip.name}: end` : 'End of cue');
-  else if (m.event === 'live') toast('Live');
+  else if (m.event === 'live') toast(m.reason === 'caught_up' ? 'Caught up: live' : 'Live');
 }
 
 // Playhead between state messages: the server's pushed time advanced at the
@@ -458,7 +459,9 @@ function playheadNow() {
   if (S.start != null) t = Math.max(t, S.start);
   return t;
 }
-const isLive = () => S && S.speed === 1 && S.behindMs != null && S.behindMs < 3000;
+// The server says when the group follows the live edge (after LIVE, or after
+// fast play caught up with it).
+const isLive = () => !!(S && S.following);
 
 // ---------------------------------------------------------------------------
 // Header

@@ -114,6 +114,9 @@ pub struct ReplayCue {
 pub enum ReplayLiveReason {
     /// Bounded play reached its end with `end_action: live`.
     EndAction,
+    /// Forward play caught up with the live point (the live edge minus the
+    /// `live` margin) and went on at 1x.
+    CaughtUp,
 }
 
 /// Something the group did by itself, sent on the WebSocket as
@@ -198,4 +201,6 @@ pub struct ReplayCommandResult {
     /// The bound of play the server holds, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cue: Option<ReplayCue>,
+    /// Following the live edge (after `live`, or after catching up).
+    pub live: bool,
 }

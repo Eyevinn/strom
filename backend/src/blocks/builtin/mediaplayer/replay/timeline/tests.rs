@@ -804,3 +804,58 @@ fn leaving_the_cue_drops_it() {
     assert!(a.region.is_none() && tl.cue().is_none());
     assert_eq!(a.tai, BASE + 10 * S);
 }
+
+// --- catching up with the live edge ----------------------------------------
+
+#[test]
+fn fast_play_that_catches_up_goes_live_with_an_event() {
+    let (tl, p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let mut events = tl.subscribe();
+    // 10 s behind the edge at 2x: the live point (1.5 s behind the edge) is
+    // 8.5 s of media ahead, reached after 4.25 s.
+    tl.apply_at(seek_tai(BASE + 50 * S), 0).unwrap();
+    tl.apply_at(Command::Speed { speed: 2.0 }, 0).unwrap();
+    assert_eq!(tl.cursor_tai(4 * S), Some((BASE + 58 * S, 2.0)));
+    assert!(events.try_recv().is_err());
+    // The edge grows meanwhile: a segment arrives.
+    p[0].end_tai.store(BASE + 61 * S, Ordering::Relaxed);
+    let (t, sp) = tl.cursor_tai(5 * S).unwrap();
+    // Caught up: goes on from where it is, at 1x, no jump back.
+    assert_eq!((t, sp), (BASE + 60 * S, 1.0));
+    assert!(matches!(
+        events.try_recv(),
+        Ok(ReplayEvent::Live {
+            reason: ReplayLiveReason::CaughtUp,
+            ..
+        })
+    ));
+    p[0].end_tai.store(BASE + 70 * S, Ordering::Relaxed);
+    assert_eq!(tl.cursor_tai(6 * S), Some((BASE + 61 * S, 1.0)));
+    assert!(tl.telemetry()["live"].as_bool().unwrap());
+    // Following live: no second event.
+    tl.cursor_tai(9 * S);
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn play_inside_the_live_margin_does_not_go_live() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let mut events = tl.subscribe();
+    // Already within the margin when the command comes: slow motion stays
+    // slow motion.
+    let c = parse(r#"{"cmd":"seek","from_live_ms":1000,"speed":0.5}"#).unwrap();
+    tl.apply_at(c, 0).unwrap();
+    assert_eq!(tl.cursor_tai(S).unwrap().1, 0.5);
+    assert!(events.try_recv().is_err());
+    // `live` is live without an event; another command leaves it.
+    let a = tl.apply_at(Command::Live { margin_ms: None }, 0).unwrap();
+    assert!(a.live && tl.result(&a).live);
+    assert!(events.try_recv().is_err());
+    assert!(!tl.apply_at(Command::Pause, 0).unwrap().live);
+    // A cue's bounds win over catching up.
+    tl.apply_at(cue(BASE + 50 * S, BASE + 59 * S, None), 0)
+        .unwrap();
+    tl.apply_at(play(Some(4.0), None, None), 0).unwrap();
+    assert_eq!(tl.cursor_tai(3 * S), Some((BASE + 59 * S - 1, 0.0)));
+    assert!(matches!(events.try_recv(), Ok(ReplayEvent::Ended { .. })));
+}
