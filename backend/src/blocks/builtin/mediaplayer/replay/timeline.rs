@@ -333,6 +333,15 @@ pub fn frame_centre(grid: &FrameGrid, k: i64) -> i64 {
     a + (b - a) / 2
 }
 
+/// The start of the frame of `grid` whose start is nearest `t` (within half
+/// a frame). A UTC from a client names a frame this way: the API gives frame
+/// times in UTC with milliseconds, a frame starts anywhere inside its
+/// millisecond (e.g. 1.164 ms past it), and taking the truncated time as
+/// exact would land in the frame before.
+pub fn nearest_frame_start(grid: &FrameGrid, t: i64) -> i64 {
+    grid.tai_of_frame(grid.nearest_frame(t))
+}
+
 /// Frame `from + by` on `grid`, kept to one frame either side of the group's
 /// range (the cursor is clamped to the range after). Client values can be
 /// anything: this never overflows.
@@ -969,12 +978,13 @@ impl ReplayTimeline {
             ));
         }
         if let Some(u) = &at.utc {
-            return parse_utc(u).map(utc_to_tai_ns).ok_or_else(|| {
+            let t = parse_utc(u).map(utc_to_tai_ns).ok_or_else(|| {
                 invalid(format!(
                     "{}: bad utc '{}', want e.g. 2026-11-24T13:21:56.080Z",
                     what, u
                 ))
-            });
+            })?;
+            return Ok(reference.map_or(t, |g| nearest_frame_start(&g, t)));
         }
         if let Some(t) = &at.tai {
             return parse_timestamp_signed(t).ok_or_else(|| {

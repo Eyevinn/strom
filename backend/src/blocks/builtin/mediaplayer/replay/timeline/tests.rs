@@ -163,23 +163,40 @@ fn frame_time_is_utc_of_the_frame_start() {
 }
 
 #[test]
-fn seek_by_utc_or_tai_is_exact() {
+fn seek_by_utc_names_the_nearest_frame_start() {
     let (tl, _p) = one_player(INGEST, TimeDomain::Tai);
-    // 13:22:00.000 UTC lies in the frame that starts at 13:21:59.980598792.
+    // Frames start at .000598792, .020598792, ... in each second. The frame
+    // that starts at 13:22:00.000598792 is shown in UTC as
+    // 13:22:00.000Z; seeking that text lands on it, not on the frame before.
     let a = tl
         .apply_at(seek_utc("2026-11-24T13:22:00.000Z"), 0)
         .unwrap();
-    assert_eq!(
-        a.tai,
-        utc_to_tai_ns(parse_utc("2026-11-24T13:22:00Z").unwrap())
-    );
+    let start = utc_to_tai_ns(parse_utc("2026-11-24T13:22:00Z").unwrap()) + 598_792;
+    assert_eq!(a.tai, start);
     let t = tl.reference_time(a.tai).unwrap();
-    assert_eq!(t.frame, 195);
-    assert_eq!(format_utc_ms(t.utc_ns), "2026-11-24T13:21:59.980Z");
+    assert_eq!(t.frame, 196);
+    assert_eq!(t.tai_ns, start);
+    assert_eq!(format_utc_ms(t.utc_ns), "2026-11-24T13:22:00.000Z");
+    // Every frame time the API gives in UTC seeks back to its own frame.
+    for k in [0, 1, 195, 196, 1000] {
+        let ft = tl.reference_time(INGEST + k * 20 * MS).unwrap();
+        let a = tl.apply_at(seek_utc(&ft.to_api().utc), 0).unwrap();
+        assert_eq!(tl.reference_time(a.tai).unwrap().frame, k);
+    }
+    // Up to half a frame either side of a start names that frame.
+    let a = tl
+        .apply_at(seek_utc("2026-11-24T13:22:00.010Z"), 0)
+        .unwrap();
+    assert_eq!(a.tai, start);
+    let a = tl
+        .apply_at(seek_utc("2026-11-24T13:22:00.011Z"), 0)
+        .unwrap();
+    assert_eq!(a.tai, start + 20 * MS);
     let a2 = tl
         .apply_at(seek_utc("2026-11-24T14:22:00.000+01:00"), 0)
         .unwrap();
-    assert_eq!(a2.tai, a.tai);
+    assert_eq!(a2.tai, start);
+    // TAI is exact (the API gives it to the nanosecond).
     let a3 = tl
         .apply_at(
             seek_at(ReplayTimeRef {

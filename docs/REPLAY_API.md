@@ -35,8 +35,8 @@ Commands name a point on the timeline in one of four ways. Give exactly one.
 | Field | Meaning | Example |
 |---|---|---|
 | `frame` | Frame of the group's reference grid (its finest source rate), counted from the group origin (frame 0 = the start of the earliest angle). | `{"frame": 1250}` |
-| `utc` | UTC, RFC 3339. Exact. | `{"utc": "2026-11-24T13:21:56.080Z"}` |
-| `tai` | TAI as TAMS `"<seconds>:<nanoseconds>"`. Exact. | `{"tai": "1795526553:80598792"}` |
+| `utc` | UTC, RFC 3339. Names the reference frame whose start is nearest (within half a frame), and goes to that start: frame times come in UTC to the millisecond, while a frame can start anywhere inside its millisecond, so a UTC the API gave seeks back to the same frame. | `{"utc": "2026-11-24T13:21:56.080Z"}` |
+| `tai` | TAI as TAMS `"<seconds>:<nanoseconds>"`. Exact, to the nanosecond. | `{"tai": "1795526553:80598792"}` |
 | `from_live_ms` | Milliseconds before the live edge (the last instant every angle has). | `{"from_live_ms": 8000}` |
 
 `seek` takes these fields directly. `cue` and `play` take them as objects (`"in": {...}`, `"out": {...}`, `"until": {...}`).
