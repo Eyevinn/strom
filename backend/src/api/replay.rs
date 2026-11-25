@@ -1,4 +1,5 @@
-//! Replay control: a WebSocket per replay group and the replay control page.
+//! Replay control: a WebSocket per replay group, the operator page and the
+//! lab page (latency and per-player telemetry, for measuring the engine).
 //!
 //! Commands are JSON objects tagged by `cmd` (see `replay::timeline::Command`),
 //! with an optional `seq` echoed in the ack. `seek` takes a `frame`, a `utc`
@@ -18,10 +19,18 @@ use std::time::Duration;
 use strom_types::FlowId;
 
 const REPLAY_HTML: &str = include_str!("../../static/replay.html");
+const REPLAY_LAB_HTML: &str = include_str!("../../static/replay-lab.html");
 
 /// GET /player/replay/{flow_id}/{group}
 pub async fn replay_page(Path((_flow_id, _group)): Path<(String, String)>) -> Html<&'static str> {
     Html(REPLAY_HTML)
+}
+
+/// GET /player/replay-lab/{flow_id}/{group}
+pub async fn replay_lab_page(
+    Path((_flow_id, _group)): Path<(String, String)>,
+) -> Html<&'static str> {
+    Html(REPLAY_LAB_HTML)
 }
 
 /// GET /api/replay/{flow_id}/{group}/ws
