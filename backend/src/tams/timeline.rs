@@ -27,15 +27,10 @@ use std::sync::{LazyLock, Mutex};
 use strom_types::FlowId;
 use tracing::info;
 
-/// TAI - UTC, in nanoseconds: 37 s, fixed from now on.
-///
-/// The 28th CGPM (Resolution 5, 15 October 2026) ended the insertion of leap
-/// seconds, and IERS Bulletin C 72 announces none for the end of 2026, so the
-/// offset that has held since 1 January 2017 will not change again. Used when the
-/// kernel has no TAI offset set (macOS, or Linux without chrony `leapsectz`), so
-/// that such hosts still write the same timeline as hosts with a correct
-/// `CLOCK_TAI`.
-pub const TAI_MINUS_UTC_NS: u64 = 37_000_000_000;
+/// TAI - UTC (37 s, fixed since the 2026 CGPM decision). Used as the fallback
+/// when the kernel has no TAI offset set (macOS, or Linux without chrony
+/// `leapsectz`).
+pub use strom_types::tai::TAI_MINUS_UTC_NS;
 
 /// Seconds between the NTP epoch (1900-01-01) and the Unix epoch (1970-01-01).
 const NTP_TO_UNIX_NS: u64 = 2_208_988_800 * 1_000_000_000;
