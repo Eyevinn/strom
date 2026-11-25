@@ -110,11 +110,12 @@ pub fn decode_cells(cells: &[bool]) -> Option<u64> {
 
 /// `YYYY-MM-DD HH:MM:SS.mmm UTC` for UTC nanoseconds since 1970.
 pub fn utc_text(utc_ns: u64) -> String {
-    let secs = (utc_ns / 1_000_000_000) as i64;
-    let ms = (utc_ns % 1_000_000_000) / 1_000_000;
-    match chrono::DateTime::from_timestamp(secs, 0) {
-        Some(dt) => format!("{}.{:03} UTC", dt.format("%Y-%m-%d %H:%M:%S"), ms),
-        None => String::from("----------"),
+    match i64::try_from(utc_ns) {
+        Ok(ns) => format!(
+            "{} UTC",
+            strom_types::tai::format_calendar_ms(ns).replacen('T', " ", 1)
+        ),
+        Err(_) => String::from("----------"),
     }
 }
 

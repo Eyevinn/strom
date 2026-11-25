@@ -101,6 +101,14 @@ pub fn parse_timestamp_signed(s: &str) -> Option<i64> {
     Some(if neg { -ns } else { ns })
 }
 
+/// Format signed nanoseconds as a TAMS timestamp `"[-]<seconds>:<nanoseconds>"`,
+/// the inverse of [`parse_timestamp_signed`]: the sign applies to the whole
+/// value, so -1.0000005 s is `"-1:500"`.
+pub fn format_timestamp_signed(ns: i64) -> String {
+    let sign = if ns < 0 { "-" } else { "" };
+    format!("{}{}", sign, format_timestamp(ns.unsigned_abs()))
+}
+
 /// Parse a TAMS timerange string: `"[1:0_2:0)"`, `"(1:0_2:0]"`, `"[1:0_"`,
 /// `"_2:0)"`, `"_"`, a single instant `"[1:0]"`, or the empty range `"()"`.
 /// A missing bracket means inclusive start / exclusive end.
@@ -187,6 +195,29 @@ mod tests {
         );
         // Overflow of u64 seconds.
         assert_eq!(parse_timestamp("18446744073709551615:0"), None);
+    }
+
+    #[test]
+    fn signed_timestamps_round_trip() {
+        for ns in [
+            0,
+            1,
+            -1,
+            -1_000_000_500,
+            1_800_000_000_123_456_789,
+            i64::MIN,
+            i64::MAX,
+        ] {
+            let s = format_timestamp_signed(ns);
+            assert_eq!(
+                parse_timestamp_signed(&s),
+                (ns != i64::MIN).then_some(ns),
+                "{}",
+                s
+            );
+        }
+        assert_eq!(format_timestamp_signed(-1_000_000_500), "-1:500");
+        assert_eq!(format_timestamp_signed(-5), "-0:5");
     }
 
     #[test]
