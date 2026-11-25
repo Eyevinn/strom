@@ -4,9 +4,15 @@
 //! and paces buffers through `clocksync`. An appsink→appsrc bridge feeds the main
 //! pipeline, isolating downstream from seeks, file switches, and EOS.
 //!
-//! Supports two modes:
-//! - **Decode** (`decode=true`): `uridecodebin` → raw video/audio
-//! - **Passthrough** (`decode=false`): `urisourcebin` → encoded elementary streams
+//! The `mode` property ([`strom_types::mediaplayer::PlayerMode`]) selects what
+//! the block does:
+//! - **playlist** (default): files and URLs in order. **Decode**
+//!   (`decode=true`): `uridecodebin` → raw video/audio; **passthrough**
+//!   (`decode=false`): `urisourcebin` → encoded elementary streams.
+//! - **stinger**: the playlist engine parked on a clip's first frame, played
+//!   once per take of a vision mixer's stinger.
+//! - **timeline**: an indexed source on a timeline shared by its group
+//!   (`replay`), a separate engine.
 
 mod bridge;
 mod builder;
@@ -22,7 +28,32 @@ pub use definition::get_blocks;
 pub use state::{MediaPlayerKey, MediaPlayerState, MEDIA_PLAYER_REGISTRY};
 
 use std::path::Path;
-use tracing::debug;
+use strom_types::mediaplayer::{migrate_legacy_properties, MEDIA_PLAYER_BLOCK_ID};
+use strom_types::Flow;
+use tracing::{debug, info};
+
+/// Rewrite the legacy properties of every Media Player in `flow` to the
+/// current names (see [`migrate_legacy_properties`]), logging each block that
+/// changed. Returns whether anything changed.
+pub fn migrate_flow(flow: &mut Flow) -> bool {
+    let mut changed = false;
+    for block in &mut flow.blocks {
+        if block.block_definition_id != MEDIA_PLAYER_BLOCK_ID {
+            continue;
+        }
+        let changes = migrate_legacy_properties(&mut block.properties);
+        if !changes.is_empty() {
+            info!(
+                "Flow '{}', Media Player {}: migrated legacy properties: {}",
+                flow.name,
+                block.id,
+                changes.join("; ")
+            );
+            changed = true;
+        }
+    }
+    changed
+}
 
 /// Normalize a file path to a proper URI.
 ///

@@ -16,6 +16,21 @@ An upload replaces a file with the same name without asking.
 
 The Media Player block plays a playlist of library files, and also any URL GStreamer has a
 source for: `http(s)` (including HLS and DASH), `rtsp://`, `srt://`, `udp://`, `rtmp://`.
+
+**Mode** selects what the block does, and the properties panel shows only the properties of
+that mode:
+
+- **Playlist** (default): plays the playlist in order.
+- **Stinger clip source**: the playlist is a stinger library for a Vision Mixer's stinger
+  input (see [VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md)).
+- **Timeline (replay)**: plays an indexed **Source** (a TAMS flow,
+  `tams+https://<gateway>/flows/<flow_id>`, or a directory with `index.json`) on a timeline
+  you can scrub, jog and play at any speed. Players with the same **Group** share one timeline;
+  an empty group is a group of its own. TAMS sources authenticate as TAMS Output does
+  (**Authentication**, **API Token**, **OSC Service ID**).
+
+Flows saved before **Mode** existed keep working: `stinger_mode` and the `replay_*`
+properties are rewritten to the current names when a flow is loaded or saved.
 **Video Tracks** and **Audio Tracks** (default 1, 0 discards that kind) set how many tracks of a file get an
 output: `video_out`, `video_out_1`, … and `audio_out`, `audio_out_1`, ….
 

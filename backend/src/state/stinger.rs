@@ -13,9 +13,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use strom_types::mediaplayer::PlayerMode;
 use strom_types::stinger::{
     StingerClip, StingerClipSettings, StingerExamplesResponse, StingerState, StingerTakeReport,
-    StingerTakeResponse, STINGER_CLIPS_PROPERTY, STINGER_INPUT_PAD, STINGER_MODE_PROPERTY,
+    StingerTakeResponse, STINGER_CLIPS_PROPERTY, STINGER_INPUT_PAD,
 };
 use strom_types::{FlowId, PropertyValue, StromEvent};
 use tracing::{debug, error, info, warn};
@@ -302,12 +303,9 @@ impl AppState {
             if source_block.block_definition_id != "builtin.media_player" {
                 return Err("the stinger input is not fed by a Media Player".into());
             }
-            if !matches!(
-                source_block.properties.get(STINGER_MODE_PROPERTY),
-                Some(PropertyValue::Bool(true))
-            ) {
+            if PlayerMode::from_properties(&source_block.properties) != Ok(PlayerMode::Stinger) {
                 return Err(format!(
-                    "Media Player {} is not a stinger clip source (turn on Stinger Clip Source)",
+                    "Media Player {} is not a stinger clip source (set its Mode to Stinger)",
                     source
                 ));
             }
