@@ -42,12 +42,17 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// A fetched segment: its end (TAI ns) and its bytes.
+type Fetched = (i64, Arc<Vec<u8>>);
+
 /// Segments known around the cursor and the bytes fetched for them. Keyed by
 /// segment start (TAI ns), which stays stable as a live index grows.
 #[derive(Default)]
 pub struct SegmentStore {
     index: Mutex<BTreeMap<i64, Arc<Segment>>>,
-    bytes: Mutex<HashMap<i64, Arc<Vec<u8>>>>,
+    /// Fetched bytes by segment start, with the segment's end (eviction keeps
+    /// a segment that overlaps the window, however long it is).
+    bytes: Mutex<HashMap<i64, Fetched>>,
     info: Mutex<Option<SourceInfo>>,
 }
 
@@ -71,7 +76,7 @@ impl SegmentStore {
     }
 
     pub fn bytes(&self, start: i64) -> Option<Arc<Vec<u8>>> {
-        lock(&self.bytes).get(&start).cloned()
+        lock(&self.bytes).get(&start).map(|(_, b)| Arc::clone(b))
     }
 
     fn insert(&self, segs: impl IntoIterator<Item = Segment>) {
@@ -364,7 +369,8 @@ impl Fetcher {
                                     .last_fetch_ms
                                     .store(took.as_millis() as u64, Ordering::Relaxed);
                                 failed.succeed(&seg.start_ns);
-                                lock(&self.store.bytes).insert(seg.start_ns, Arc::new(bytes));
+                                lock(&self.store.bytes)
+                                    .insert(seg.start_ns, (seg.end_ns, Arc::new(bytes)));
                             }
                             Err(e) => {
                                 self.stats.fetch_errors.fetch_add(1, Ordering::Relaxed);
@@ -392,9 +398,12 @@ impl Fetcher {
                 }
             }
 
-            // Evict what is far from the cursor.
+            // Evict what is far from the cursor: segments that do not overlap
+            // the window plus a margin. By overlap, not by start: a long
+            // segment holding the cursor started long before the window.
             let margin = seg_ns;
-            lock(&self.store.bytes).retain(|k, _| *k >= lo - margin && *k < hi + margin);
+            lock(&self.store.bytes)
+                .retain(|start, (end, _)| *end > lo - margin && *start < hi + margin);
             let cc = chunk_of(cursor);
             let keep = |c: i64| (c - cc).abs() <= KEEP_CHUNKS;
             chunks.listed.retain(|c| keep(*c));
@@ -606,6 +615,15 @@ mod tests {
         // The chunk is listed once, and at most once more for the failures.
         let lists = mock.lists.load(Ordering::Relaxed);
         assert!(lists <= 2, "{} listings", lists);
+    }
+
+    #[test]
+    fn long_segment_under_the_cursor_is_fetched_once() {
+        // 10 s segments, cursor 8 s into the first: the segment started more
+        // than behind + margin before the cursor, but holds it.
+        let mock = Mock::new(3, 10, false, false);
+        run_fetcher(Arc::clone(&mock), Some(108), Duration::from_millis(1000));
+        assert_eq!(mock.fetches_of(100), 1);
     }
 
     #[test]
