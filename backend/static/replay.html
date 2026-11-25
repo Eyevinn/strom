@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Strom replay page, version 5 -->
+<!-- Strom replay page, version 6 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -428,7 +428,8 @@ function onState(m) {
     speed: +m.speed || 0,
     domain: m.time_domain,
     pushed: ftRel(pushed),
-    behindMs: pushed ? (pushed.behind_live_ms ?? m.behind_live_ms) : null,
+    // Behind the server's smooth live-edge estimate (it does not jump per segment).
+    behindMs: pushed ? (pushed.behind_live_estimate_ms ?? pushed.behind_live_ms ?? m.behind_live_ms) : null,
     start: m.start ? rel(m.start.tai_ns) : null,
     end: m.end ? rel(m.end.tai_ns) : null,
     live: m.live_edge ? rel(m.live_edge.tai_ns) : null,

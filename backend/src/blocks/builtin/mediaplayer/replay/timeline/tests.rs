@@ -972,3 +972,60 @@ fn mark_stamps_the_pushed_frame_not_the_cursor() {
     tl.apply_at(Command::Mark { label: None }, S).unwrap();
     assert_eq!(tl.cursor_tai(2 * S), Some((a.tai + 2 * S, 1.0)));
 }
+
+// --- live edge estimate ----------------------------------------------------
+
+#[test]
+fn live_edge_estimate_runs_smoothly_between_steps() {
+    let mut t = EdgeTracker::default();
+    // Not growing yet: the known edge.
+    t.observe(0, BASE);
+    assert_eq!(t.estimate(500 * MS, BASE), (BASE, false));
+    // 1 s segments, seen 0..60 ms late (polling).
+    for (k, late) in [(1, 40), (2, 0), (3, 60), (4, 20)] {
+        t.observe(k * S + late * MS, BASE + k * S);
+    }
+    let edge = BASE + 4 * S;
+    // The line set by the step seen with no delay (2 s): edge = BASE + m.
+    assert_eq!(
+        t.estimate(4 * S + 300 * MS, edge),
+        (BASE + 4 * S + 300 * MS, true)
+    );
+    // Never behind the known edge, never more than a step ahead of it.
+    assert_eq!(
+        t.estimate(4 * S + 10 * MS, edge).0,
+        edge.max(BASE + 4 * S + 10 * MS)
+    );
+    assert_eq!(t.estimate(5 * S + 500 * MS, edge), (edge + S, true));
+    // No step for over three step lengths: the edge stopped growing.
+    assert_eq!(t.estimate(8 * S, edge), (edge, false));
+    // Repeats change nothing; a jump back starts over.
+    t.observe(9 * S, edge);
+    t.observe(9 * S, BASE);
+    assert_eq!(t.estimate(9 * S + 1, BASE), (BASE, false));
+}
+
+#[test]
+fn state_lists_extents_gaps_and_the_estimate() {
+    let (tl, p) = one_player(INGEST, TimeDomain::Tai);
+    p.set_index_view(IndexView {
+        listed: vec![(INGEST, INGEST + 60 * S)],
+        gaps: vec![(INGEST + 10 * S, INGEST + 12 * S)],
+    });
+    let v = tl.telemetry();
+    let p0 = &v["players"][0];
+    assert_eq!(p0["extent"]["start"]["tai_ns"], INGEST.to_string());
+    assert_eq!(p0["indexed"][0]["duration_ms"], 60_000);
+    assert_eq!(p0["gaps"][0]["duration_ms"], 2000);
+    assert_eq!(
+        p0["gaps"][0]["start"]["tai_ns"],
+        (INGEST + 10 * S).to_string()
+    );
+    // A recording that does not grow: the estimate is the known edge.
+    assert_eq!(v["live_growing"], false);
+    assert_eq!(
+        v["live_edge_estimate"]["tai_ns"],
+        (INGEST + 60 * S).to_string()
+    );
+    assert!(v["behind_live_estimate_ms"].is_number());
+}

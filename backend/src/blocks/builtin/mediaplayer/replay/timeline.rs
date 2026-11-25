@@ -553,6 +553,72 @@ pub fn parse_command(mut value: serde_json::Value) -> Result<Command, CommandErr
     serde_json::from_value(value).map_err(|e| invalid(e.to_string()))
 }
 
+/// Steps of the live edge kept for the estimate.
+const EDGE_STEPS: usize = 16;
+
+/// The live edge between its steps. The index grows one segment at a time,
+/// so the known edge jumps (once a second for 1 s segments) while capture
+/// goes on all the time. Each step tells when (host monotonic time) media up
+/// to which instant was known; the media grows at 1x, so the edge now is at
+/// least `m_now + max(e_k - m_k)` over recent steps (the step seen with the
+/// least delay sets the line). Kept within one step of the known edge, and
+/// only while the edge grows.
+#[derive(Debug, Default)]
+pub struct EdgeTracker {
+    steps: std::collections::VecDeque<(i64, i64)>,
+}
+
+impl EdgeTracker {
+    /// The known edge `edge` at host time `mono` (ns, monotonic).
+    pub fn observe(&mut self, mono: i64, edge: i64) {
+        match self.steps.back() {
+            Some(&(_, last)) if edge == last => return,
+            // Went back: a new run or another source. Start over.
+            Some(&(_, last)) if edge < last => self.steps.clear(),
+            _ => {}
+        }
+        self.steps.push_back((mono, edge));
+        while self.steps.len() > EDGE_STEPS {
+            self.steps.pop_front();
+        }
+    }
+
+    /// Median step of the edge, once it has stepped twice.
+    fn step(&self) -> Option<i64> {
+        let mut d: Vec<i64> = self
+            .steps
+            .iter()
+            .zip(self.steps.iter().skip(1))
+            .map(|(a, b)| b.1 - a.1)
+            .collect();
+        if d.len() < 2 {
+            return None;
+        }
+        d.sort_unstable();
+        Some(d[d.len() / 2])
+    }
+
+    /// The estimated edge at `mono`, and whether the edge is growing. Not
+    /// growing (fewer than three steps, or none for three step lengths): the
+    /// known edge.
+    pub fn estimate(&self, mono: i64, edge: i64) -> (i64, bool) {
+        let (Some(step), Some(&(last_m, _))) = (self.step(), self.steps.back()) else {
+            return (edge, false);
+        };
+        if mono - last_m > 3 * step {
+            return (edge, false);
+        }
+        let offset = self.steps.iter().map(|&(m, e)| e - m).max().unwrap_or(0);
+        ((mono + offset).clamp(edge, edge + step), true)
+    }
+}
+
+/// Host monotonic time, ns since the first call.
+fn mono_ns() -> i64 {
+    static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+    EPOCH.elapsed().as_nanos() as i64
+}
+
 /// The group's playable range, TAI ns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bounds {
@@ -606,6 +672,8 @@ pub struct ReplayTimeline {
     pub cmd_to_push_us: AtomicU64,
     /// Running time and cursor of the latest tick any player pushed.
     last_pushed: Mutex<Option<(i64, i64)>>,
+    /// The live edge's steps, for a smooth estimate.
+    edge: Mutex<EdgeTracker>,
     /// Distance behind the live edge the group plays at when it goes live:
     /// the last `live` command's margin.
     live_margin_ns: AtomicI64,
@@ -652,6 +720,7 @@ impl ReplayTimeline {
             last_cmd: Mutex::new(None),
             cmd_to_push_us: AtomicU64::new(0),
             last_pushed: Mutex::new(None),
+            edge: Mutex::new(EdgeTracker::default()),
             live_margin_ns: AtomicI64::new(DEFAULT_LIVE_MARGIN_MS as i64 * 1_000_000),
             events: tokio::sync::broadcast::channel(64).0,
         }
@@ -732,6 +801,7 @@ impl ReplayTimeline {
     pub fn bounds(&self) -> Option<Bounds> {
         let extents: Vec<(i64, i64)> = self.players().iter().filter_map(|p| p.extent()).collect();
         let b = group_bounds(&extents)?;
+        lock(&self.edge).observe(mono_ns(), b.live_end);
         let _ = self.origin_tai.compare_exchange(
             UNKNOWN,
             b.start,
@@ -1304,11 +1374,17 @@ impl ReplayTimeline {
         v["end"] = time_of(b.end);
         // The live edge is where the last common frame ends.
         v["live_edge"] = time_of(b.live_end);
+        // Between the index's steps: where the edge is now, estimated.
+        let (est, growing) = lock(&self.edge).estimate(mono_ns(), b.live_end);
+        v["live_edge_estimate"] = instant_json(est);
+        v["live_growing"] = growing.into();
+        v["behind_live_estimate_ms"] = ((est - cursor) as f64 / 1e6).round().into();
         // What the players last pushed: the picture going out now.
         if let Some(t) = self.pushed_tai() {
             let mut pushed = time_of(t);
             pushed["cursor_tai"] = tai_string(t).into();
             pushed["behind_live_ms"] = behind_ms(t).into();
+            pushed["behind_live_estimate_ms"] = ((est - t) as f64 / 1e6).round().into();
             if domain == TimeDomain::Tai {
                 // How old the picture is: wall clock minus capture time.
                 pushed["age_ms"] = ((wall_utc_ns() - tai_to_utc_ns(t)) / 1_000_000).into();
