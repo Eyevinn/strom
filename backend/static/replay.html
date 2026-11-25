@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Strom replay page, version 4 -->
+<!-- Strom replay page, version 5 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -561,13 +561,21 @@ let inPt = saved.inPt || null, outPt = saved.outPt || null;   // {tai_ns, utc, f
 let activeClip = null;
 const persist = () => store.set(KEY, { marks, clips, inPt, outPt });
 const tOf = p => p ? rel(p.tai_ns) : null;
+// The frame on screen, stamped by the server (`mark`): the frame the players
+// last pushed, not the state the page last heard (up to 50 ms old).
 function pointNow() {
-  if (!S || !S.pushed || BASE == null) { toast('No picture yet'); return null; }
-  return { tai_ns: absStr(S.pushed.t), utc: S.pushed.utc, frame_in_second: S.pushed.frame_in_second };
+  return new Promise(res => {
+    const ok = send({ cmd: 'mark' }, m => {
+      if (m.type !== 'ack' || !m.mark) { res(null); return; }
+      const t = m.mark.time;
+      res({ tai_ns: t.tai_ns, utc: t.utc, frame_in_second: t.frame_in_second });
+    });
+    if (!ok) res(null);
+  });
 }
 
-function addMark() {
-  const p = pointNow(); if (!p) return;
+async function addMark() {
+  const p = await pointNow(); if (!p) return;
   const n = (marks.reduce((a, m) => Math.max(a, m.n), 0)) + 1;
   marks.push({ n, ...p, name: `Mark ${n}`, live: isLive() });
   persist(); renderMarks(); toast(`Mark ${n} at ${tcOf(p)}`);
@@ -592,8 +600,8 @@ function stepMark(dir) {
   const hit = dir > 0 ? sorted.find(x => x.t > t + eps) : [...sorted].reverse().find(x => x.t < t - eps);
   if (hit) { gotoMark(hit.m); toast(hit.m.name); }
 }
-function setIn() { const p = pointNow(); if (!p) return; inPt = p; if (outPt && tOf(outPt) <= tOf(inPt)) outPt = null; persist(); renderInOut(); }
-function setOut() { const p = pointNow(); if (!p) return; outPt = p; if (inPt && tOf(inPt) >= tOf(outPt)) inPt = null; persist(); renderInOut(); }
+async function setIn() { const p = await pointNow(); if (!p) return; inPt = p; if (outPt && tOf(outPt) <= tOf(inPt)) outPt = null; persist(); renderInOut(); }
+async function setOut() { const p = await pointNow(); if (!p) return; outPt = p; if (inPt && tOf(inPt) >= tOf(outPt)) inPt = null; persist(); renderInOut(); }
 function clearInOut() { inPt = outPt = null; persist(); renderInOut(); }
 function goIn() { if (inPt) { pause(); seekFrame(tOf(inPt)); } }
 function goOut() { if (outPt) { pause(); seekFrame(tOf(outPt)); } }
@@ -613,8 +621,8 @@ function renderInOut() {
 let ctx = { players: [], vm: null, numInputs: 0, labels: [], inputPlayer: [], numPips: 0, swap: false };
 let mixer = { program_input: null, preview_input: null, program_pip: null };
 
-function saveClip() {
-  const now = pointNow(); if (!now) return;
+async function saveClip() {
+  const now = await pointNow(); if (!now) return;
   const DEF = 6e9;
   let a = inPt ? tOf(inPt) : null, b = outPt ? tOf(outPt) : null;
   if (a == null && b == null) { b = tOf(now); a = b - DEF; }

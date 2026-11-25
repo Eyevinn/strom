@@ -74,6 +74,14 @@ pub enum ReplayCommand {
     /// `duration_ms` (at most 60000), run by the server. Keeps the cue; any
     /// other command that sets the speed ends the ramp.
     Ramp { to: f64, duration_ms: u64 },
+    /// Mark the picture going out now: the server stamps the frame the
+    /// players last pushed (not the cursor a client last heard of). Changes
+    /// nothing; the result carries the mark.
+    Mark {
+        /// Echoed in the mark.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
     /// Pause where the cursor is.
     Pause,
     /// Go to the live edge (the last instant every angle has) and pause.
@@ -188,6 +196,30 @@ pub struct ReplayFrameTime {
     pub frame_in_second: i64,
 }
 
+/// One angle's picture in a mark.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ReplayMarkAngle {
+    /// The player block.
+    pub block: String,
+    /// The source frame it last pushed, on its own grid.
+    pub shown: ReplayFrameTime,
+}
+
+/// The picture going out when a `mark` came.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ReplayMark {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The group time of the last pushed tick.
+    pub cursor_tai: ReplayInstant,
+    /// The reference frame that holds it, and its time.
+    pub time: ReplayFrameTime,
+    /// What each angle pushed.
+    pub angles: Vec<ReplayMarkAngle>,
+}
+
 /// What a command did.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
@@ -207,4 +239,7 @@ pub struct ReplayCommandResult {
     pub cue: Option<ReplayCue>,
     /// Following the live edge (after `live`, or after catching up).
     pub live: bool,
+    /// The mark, for `mark`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<ReplayMark>,
 }

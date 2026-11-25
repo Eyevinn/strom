@@ -936,3 +936,39 @@ fn ramp_is_validated_and_keeps_the_cue() {
     assert_eq!(tl.cursor_tai(5 * S), Some((BASE + 11 * S - 1, 0.0)));
     assert!(tl.telemetry().get("ramp").is_none());
 }
+
+// --- marks -----------------------------------------------------------------
+
+#[test]
+fn mark_stamps_the_pushed_frame_not_the_cursor() {
+    let (tl, p) = one_player(INGEST, TimeDomain::Tai);
+    let g = p.grid().unwrap();
+    let a = tl.apply_at(seek(195), 0).unwrap();
+    // Nothing went out yet: a mark does not apply.
+    assert!(matches!(
+        tl.apply_at(Command::Mark { label: None }, 0),
+        Err(CommandError::Conflict(_))
+    ));
+    // The players are 5 frames behind the cursor (a seek in flight).
+    let pushed = a.tai - 5 * 20 * MS;
+    p.shown_frame
+        .store(g.floor_frame(pushed), Ordering::Relaxed);
+    tl.note_pushed(1, pushed);
+    let c = parse(r#"{"cmd":"mark","label":"goal"}"#).unwrap();
+    let m = tl.apply_at(c, 0).unwrap();
+    // The cursor did not move.
+    assert_eq!((m.tai, m.speed), (a.tai, 0.0));
+    let r = tl.result(&m);
+    let mark = r.mark.unwrap();
+    assert_eq!(mark.label.as_deref(), Some("goal"));
+    assert_eq!(mark.time.frame, 190);
+    assert_eq!(mark.time.utc, "2026-11-24T13:21:59.880Z");
+    assert_eq!(mark.cursor_tai.tai_ns, pushed.to_string());
+    assert_eq!(mark.angles.len(), 1);
+    assert_eq!(mark.angles[0].block, "cam1");
+    assert_eq!(mark.angles[0].shown.frame, 190);
+    // A mark leaves the motion alone: play goes on.
+    tl.apply_at(Command::Speed { speed: 1.0 }, 0).unwrap();
+    tl.apply_at(Command::Mark { label: None }, S).unwrap();
+    assert_eq!(tl.cursor_tai(2 * S), Some((a.tai + 2 * S, 1.0)));
+}

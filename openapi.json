@@ -10303,6 +10303,28 @@
           },
           {
             "type": "object",
+            "description": "Mark the picture going out now: the server stamps the frame the\nplayers last pushed (not the cursor a client last heard of). Changes\nnothing; the result carries the mark.",
+            "required": [
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "mark"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Echoed in the mark."
+              }
+            }
+          },
+          {
+            "type": "object",
             "description": "Pause where the cursor is.",
             "required": [
               "cmd"
@@ -10392,6 +10414,17 @@
           "live": {
             "type": "boolean",
             "description": "Following the live edge (after `live`, or after catching up)."
+          },
+          "mark": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayMark",
+                "description": "The mark, for `mark`."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "speed": {
             "type": "number",
@@ -10558,6 +10591,56 @@
           "end_action",
           "caught_up"
         ]
+      },
+      "ReplayMark": {
+        "type": "object",
+        "description": "The picture going out when a `mark` came.",
+        "required": [
+          "cursor_tai",
+          "time",
+          "angles"
+        ],
+        "properties": {
+          "angles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplayMarkAngle"
+            },
+            "description": "What each angle pushed."
+          },
+          "cursor_tai": {
+            "$ref": "#/components/schemas/ReplayInstant",
+            "description": "The group time of the last pushed tick."
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "time": {
+            "$ref": "#/components/schemas/ReplayFrameTime",
+            "description": "The reference frame that holds it, and its time."
+          }
+        }
+      },
+      "ReplayMarkAngle": {
+        "type": "object",
+        "description": "One angle's picture in a mark.",
+        "required": [
+          "block",
+          "shown"
+        ],
+        "properties": {
+          "block": {
+            "type": "string",
+            "description": "The player block."
+          },
+          "shown": {
+            "$ref": "#/components/schemas/ReplayFrameTime",
+            "description": "The source frame it last pushed, on its own grid."
+          }
+        }
       },
       "ReplayTimeRef": {
         "type": "object",

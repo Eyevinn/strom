@@ -33,7 +33,7 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Instant;
 use strom_types::replay::{
     ReplayCommandResult, ReplayCue, ReplayEvent, ReplayFrameTime, ReplayInstant, ReplayLiveReason,
-    ReplayTimeRef,
+    ReplayMark, ReplayMarkAngle, ReplayTimeRef,
 };
 use strom_types::tai::{
     format_calendar_ms, format_utc_ms, parse_utc, tai_to_utc_ns, utc_to_tai_ns,
@@ -553,13 +553,15 @@ pub fn group_bounds(extents: &[(i64, i64)]) -> Option<Bounds> {
 }
 
 /// What a command did: where the cursor is afterwards, and the speed.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Applied {
     pub tai: i64,
     pub speed: f64,
     pub region: Option<Region>,
     /// Following the live edge.
     pub live: bool,
+    /// The mark, for `mark`.
+    pub mark: Option<ReplayMark>,
 }
 
 pub struct ReplayTimeline {
@@ -889,6 +891,16 @@ impl ReplayTimeline {
             || reference.ok_or_else(|| conflict("the group's frame rate is not known yet"));
         let mut a = lock(&self.anchor);
         let (cur, cur_speed) = self.advance(&mut a, now, &b);
+        if let Command::Mark { label } = cmd {
+            let mark = self.mark(label)?;
+            return Ok(Applied {
+                tai: cur,
+                speed: cur_speed,
+                region: a.region,
+                live: a.live,
+                mark: Some(mark),
+            });
+        }
         let mut ramp = None;
         let live = match cmd {
             Command::Live { .. } => true,
@@ -1048,6 +1060,7 @@ impl ReplayTimeline {
                 (r.start, 0.0, Cue::Set(r))
             }
             Command::Uncue => (cur, cur_speed, Cue::Drop),
+            Command::Mark { .. } => unreachable!("handled above"),
         };
         // Clamp to the media, so later moves start from what is shown, then
         // keep the cue only if it holds the cursor.
@@ -1073,6 +1086,7 @@ impl ReplayTimeline {
             speed,
             region,
             live,
+            mark: None,
         })
     }
 
@@ -1094,7 +1108,38 @@ impl ReplayTimeline {
             time: time.map(|t| t.to_api()),
             cue: a.region.map(Region::to_api),
             live: a.live,
+            mark: a.mark.clone(),
         }
+    }
+
+    /// The picture going out now: the group time of the last pushed tick, and
+    /// each angle's last pushed frame.
+    fn mark(&self, label: Option<String>) -> Result<ReplayMark, CommandError> {
+        let t = self
+            .pushed_tai()
+            .ok_or_else(|| conflict("mark: no picture has gone out yet"))?;
+        let time = self
+            .reference_time(t)
+            .ok_or_else(|| conflict("the group's frame rate is not known yet"))?;
+        let angles = self
+            .players()
+            .iter()
+            .filter_map(|p| {
+                let g = p.grid()?;
+                let o = self.origin_on(&g)?;
+                let shown = p.shown_frame.load(Ordering::Relaxed);
+                (shown != UNKNOWN).then(|| ReplayMarkAngle {
+                    block: p.block_id.clone(),
+                    shown: FrameTime::new(&g, shown, o).to_api(),
+                })
+            })
+            .collect();
+        Ok(ReplayMark {
+            label,
+            cursor_tai: instant(t),
+            time: time.to_api(),
+            angles,
+        })
     }
 
     /// The group's time domain: real TAI only when every player says so.

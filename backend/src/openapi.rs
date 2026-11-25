@@ -336,6 +336,8 @@ use utoipa::OpenApi;
             strom_types::replay::ReplayCue,
             strom_types::replay::ReplayEvent,
             strom_types::replay::ReplayLiveReason,
+            strom_types::replay::ReplayMark,
+            strom_types::replay::ReplayMarkAngle,
             OverlayAlphaRequest,
             OverlayAlphaResponse,
             DskToggleRequest,
