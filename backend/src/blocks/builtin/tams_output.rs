@@ -198,15 +198,17 @@ impl BlockBuilder for TamsOutputBuilder {
         let auth_plan = match auth_mode.as_str() {
             "osc" => {
                 let provider = crate::osc::sat_provider();
-                let service_id = prop_str(properties, "osc_service_id")
-                    .or_else(|| crate::osc::derive_service_id(&gateway_url))
-                    .ok_or_else(|| {
-                        BlockBuildError::InvalidProperty(
-                            "TAMS Output: OSC mode could not derive the service id from \
-                             gateway_url — set the OSC Service ID property"
-                                .to_string(),
-                        )
-                    })?;
+                let service_id = crate::tams::client::osc_service_id(
+                    &gateway_url,
+                    prop_str(properties, "osc_service_id").as_deref(),
+                )
+                .map_err(|e| {
+                    BlockBuildError::InvalidProperty(format!(
+                        "TAMS Output: {} (set the OSC Service ID property if it cannot be \
+                         derived from gateway_url)",
+                        e
+                    ))
+                })?;
                 info!(
                     "TAMS Output {}: OSC PAT/SAT auth for service {}",
                     instance_id, service_id
@@ -217,8 +219,9 @@ impl BlockBuilder for TamsOutputBuilder {
                 }
             }
             _ => {
+                // The instance's own token only goes to an allow-listed gateway.
                 let auth = match prop_str(properties, "api_token")
-                    .or_else(|| strom_types::env::var_opt("STROM_TAMS_API_TOKEN"))
+                    .or_else(|| crate::tams::client::env_api_token(&gateway_url))
                 {
                     Some(t) => AuthMethod::Bearer(t),
                     None => AuthMethod::None,
@@ -1185,14 +1188,14 @@ fn tams_output_definition() -> BlockDefinition {
             simple_prop(
                 "api_token",
                 "API Token",
-                "Static bearer token for the gateway (Static API Token mode only). Leave empty when behind an access gate. Ignored in OSC PAT/SAT mode.",
+                "Static bearer token for the gateway (Static API Token mode only). Empty = the instance's STROM_TAMS_API_TOKEN, which is sent only to STROM_TAMS_GATEWAY_URL or a gateway listed in STROM_TAMS_ALLOWED_GATEWAYS; otherwise no token. Ignored in OSC PAT/SAT mode.",
                 PropertyType::String,
                 PropertyValue::String(String::new()),
             ),
             simple_prop(
                 "osc_service_id",
                 "OSC Service ID",
-                "OSC PAT/SAT mode only. The OSC service type the SAT is scoped to. Leave empty to derive it from the gateway URL (the service-type label of an *.osaas.io host).",
+                "OSC PAT/SAT mode only. The OSC service type the SAT is scoped to. Leave empty to derive it from the gateway URL (the service-type label of an *.osaas.io host). A SAT is sent only to an HTTPS OSC host of that service type, or to a gateway listed in STROM_TAMS_ALLOWED_GATEWAYS.",
                 PropertyType::String,
                 PropertyValue::String(String::new()),
             ),

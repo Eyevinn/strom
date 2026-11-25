@@ -16,12 +16,21 @@
 //! Reading follows the TAMS spec rather than gateway specifics: paging uses the
 //! opaque `X-Paging-NextKey` as the `page` query parameter, falling back to a
 //! `Link: <..>; rel="next"` header.
+//!
+//! Credentials stay with the gateway: authenticated requests go only to the
+//! origin of the base URL (a `Link` to another origin is refused, redirects are
+//! followed only within the origin), presigned object URLs are fetched without
+//! credentials on a separate client, and OSC SATs only go to a gateway whose
+//! host names their service (or to an allow-listed gateway). The instance's own
+//! static token (`STROM_TAMS_API_TOKEN`) is handed out by [`env_api_token`] only
+//! for allow-listed gateways.
 
-use crate::client_auth::AuthMethod;
-use anyhow::{anyhow, Context, Result};
-use reqwest::header::CONTENT_TYPE;
+use crate::client_auth::{redact_url, same_origin, same_origin_redirects, AuthMethod};
+use anyhow::{anyhow, bail, Context, Result};
+use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use serde::Deserialize;
 use std::time::Duration;
+use tracing::warn;
 
 // Protocol constants and timerange formatting live in `strom_types::tams` so the
 // frontend can share them. Re-exported here for ergonomic use within the backend.
@@ -44,6 +53,113 @@ impl std::fmt::Display for HttpStatusError {
 }
 
 impl std::error::Error for HttpStatusError {}
+
+/// Longest response body kept in an error. Error bodies are logged, and the
+/// server that sent them is not always trusted.
+const MAX_ERROR_BODY_CHARS: usize = 300;
+
+/// Turn a non-success response into an [`HttpStatusError`] with a bounded body.
+async fn status_error(resp: reqwest::Response, context: String) -> anyhow::Error {
+    let status = resp.status();
+    let mut body = resp.text().await.unwrap_or_default();
+    if let Some((cut, _)) = body.char_indices().nth(MAX_ERROR_BODY_CHARS) {
+        body.truncate(cut);
+        body.push_str("...");
+    }
+    HttpStatusError {
+        status,
+        context,
+        body,
+    }
+    .into()
+}
+
+/// Largest media object [`TamsClient::fetch_object`] reads (256 MiB). A TAMS
+/// segment is seconds of media; anything near this is not one.
+pub const MAX_OBJECT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Env var listing gateways (comma separated URLs) that may receive this
+/// instance's own TAMS credentials, besides `STROM_TAMS_GATEWAY_URL`.
+pub const ALLOWED_GATEWAYS_ENV: &str = "STROM_TAMS_ALLOWED_GATEWAYS";
+
+/// Whether `gateway` has the origin of one of the `allowed` URLs.
+fn is_allow_listed<'a>(gateway: &str, allowed: impl IntoIterator<Item = &'a str>) -> bool {
+    let Ok(gw) = reqwest::Url::parse(gateway) else {
+        return false;
+    };
+    allowed
+        .into_iter()
+        .filter_map(|a| reqwest::Url::parse(a.trim()).ok())
+        .any(|a| same_origin(&a, &gw))
+}
+
+/// Whether `gateway` may receive this instance's own credentials: it has the
+/// origin of `STROM_TAMS_GATEWAY_URL` or of an entry in
+/// [`ALLOWED_GATEWAYS_ENV`]. A flow can name any gateway, so without this check
+/// anyone who can edit a flow could collect the instance's token by pointing a
+/// TAMS block at their own server.
+pub fn gateway_is_allow_listed(gateway: &str) -> bool {
+    let configured = strom_types::env::var_opt("STROM_TAMS_GATEWAY_URL");
+    let listed = strom_types::env::var_opt(ALLOWED_GATEWAYS_ENV).unwrap_or_default();
+    is_allow_listed(
+        gateway,
+        configured.as_deref().into_iter().chain(listed.split(',')),
+    )
+}
+
+/// The instance's static TAMS token (`STROM_TAMS_API_TOKEN`) for `gateway`, the
+/// fallback when a block sets no token of its own. `None`, with a warning, when
+/// the gateway is not allow-listed (see [`gateway_is_allow_listed`]).
+pub fn env_api_token(gateway: &str) -> Option<String> {
+    let token = strom_types::env::var_opt("STROM_TAMS_API_TOKEN")?;
+    if gateway_is_allow_listed(gateway) {
+        return Some(token);
+    }
+    warn!(
+        "TAMS: not sending STROM_TAMS_API_TOKEN to {}: the gateway is neither \
+         STROM_TAMS_GATEWAY_URL nor listed in {}; set a token on the block, or add the \
+         gateway to {}",
+        redact_url(gateway),
+        ALLOWED_GATEWAYS_ENV,
+        ALLOWED_GATEWAYS_ENV
+    );
+    None
+}
+
+/// Check that an OSC SAT for `service_id` may go to `gateway`: the gateway's
+/// host must be an OSC instance of that service type (HTTPS), or the gateway
+/// allow-listed. An explicit service id that differs from the host's would
+/// otherwise mint a SAT for one service and hand it to another host.
+fn check_osc_gateway(gateway: &str, service_id: &str, allow_listed: bool) -> Result<(), String> {
+    if allow_listed {
+        return Ok(());
+    }
+    let https = reqwest::Url::parse(gateway).is_ok_and(|u| u.scheme() == "https");
+    match crate::osc::derive_service_id(gateway) {
+        Some(derived) if derived == service_id && https => Ok(()),
+        _ => Err(format!(
+            "OSC auth: not sending a SAT for service '{}' to {}: the gateway is not an \
+             HTTPS OSC instance of that service; add it to {} to allow it",
+            service_id,
+            redact_url(gateway),
+            ALLOWED_GATEWAYS_ENV
+        )),
+    }
+}
+
+/// The OSC service id to mint SATs for when talking to `gateway`: `explicit`
+/// when set, else derived from the gateway host. Fails when there is none, or
+/// when the SAT may not go to that gateway (see [`TamsClient::new`]).
+pub fn osc_service_id(gateway: &str, explicit: Option<&str>) -> Result<String, String> {
+    let service_id = match explicit {
+        Some(id) => id.to_string(),
+        None => crate::osc::derive_service_id(gateway).ok_or_else(|| {
+            "OSC auth: cannot derive the service id from the gateway URL".to_string()
+        })?,
+    };
+    check_osc_gateway(gateway, &service_id, gateway_is_allow_listed(gateway))?;
+    Ok(service_id)
+}
 
 impl HttpStatusError {
     /// A 4xx (other than 408 Request Timeout and 429 Too Many Requests) means the
@@ -178,46 +294,93 @@ struct PutUrlResp {
 pub struct TamsClient {
     /// Base URL without trailing slash, e.g. `http://localhost:8000`.
     base_url: String,
+    /// The parsed base URL: credentials go only to its origin.
+    base: reqwest::Url,
     auth: AuthMethod,
-    http: reqwest::Client,
+    /// Gateway requests (with credentials): redirects only within the origin.
+    api: reqwest::Client,
+    /// Presigned object URLs (no credentials): any host, normal redirects.
+    objects: reqwest::Client,
 }
 
 impl TamsClient {
+    /// A client for the gateway at `base_url`. Fails for a URL that is not
+    /// http(s), and for OSC auth whose SAT may not go to this gateway (see
+    /// [`osc_service_id`]).
     pub fn new(base_url: impl Into<String>, auth: AuthMethod) -> Result<Self> {
-        let http = reqwest::Client::builder()
+        let base_url = base_url.into().trim_end_matches('/').to_string();
+        let base = reqwest::Url::parse(&base_url)
+            .with_context(|| format!("gateway url {}", redact_url(&base_url)))?;
+        if !matches!(base.scheme(), "http" | "https") {
+            bail!("gateway url must be http(s): {}", redact_url(&base_url));
+        }
+        if let AuthMethod::Osc { service_id, .. } = &auth {
+            check_osc_gateway(&base_url, service_id, gateway_is_allow_listed(&base_url))
+                .map_err(|e| anyhow!(e))?;
+        }
+        let api = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(same_origin_redirects())
             .build()
             .context("building TAMS HTTP client")?;
-        let base_url = base_url.into().trim_end_matches('/').to_string();
+        let objects = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .context("building TAMS object HTTP client")?;
         Ok(Self {
             base_url,
+            base,
             auth,
-            http,
+            api,
+            objects,
         })
+    }
+
+    /// Send a gateway request with credentials. Refuses a URL outside the
+    /// gateway's origin.
+    async fn send_authed(
+        &self,
+        method: reqwest::Method,
+        url: reqwest::Url,
+        body: Option<&serde_json::Value>,
+    ) -> Result<reqwest::Response> {
+        if !same_origin(&url, &self.base) {
+            bail!(
+                "refusing to send gateway credentials to {}: not the gateway origin {}",
+                redact_url(url.as_str()),
+                self.base.origin().ascii_serialization()
+            );
+        }
+        let context = format!("{} {}", method, redact_url(url.as_str()));
+        let mut req = self.api.request(method, url);
+        if let Some(body) = body {
+            req = req.json(body);
+        }
+        self.auth
+            .apply(req)
+            .await?
+            .send()
+            .await
+            .map_err(|e| anyhow::Error::new(e.without_url()))
+            .context(context)
+    }
+
+    /// A gateway URL: the base URL with `path` appended.
+    fn url(&self, path: &str) -> Result<reqwest::Url> {
+        let s = format!("{}{}", self.base_url, path);
+        reqwest::Url::parse(&s).with_context(|| format!("url {}", s))
     }
 
     /// Create or replace a flow (and, gateway-side, its source). Idempotent.
     pub async fn ensure_flow(&self, spec: &FlowSpec) -> Result<()> {
-        let url = format!("{}/flows/{}", self.base_url, spec.flow_id);
+        let url = self.url(&format!("/flows/{}", spec.flow_id))?;
         let body = flow_request_body(spec);
-
+        let context = format!("PUT {}", redact_url(url.as_str()));
         let resp = self
-            .auth
-            .apply(self.http.put(&url))
-            .await?
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("PUT {}", url))?;
+            .send_authed(reqwest::Method::PUT, url, Some(&body))
+            .await?;
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(HttpStatusError {
-                status,
-                context: format!("PUT {}", url),
-                body,
-            }
-            .into());
+            return Err(status_error(resp, context).await);
         }
         Ok(())
     }
@@ -228,25 +391,14 @@ impl TamsClient {
         flow_id: &str,
         content_type: &str,
     ) -> Result<AllocatedObject> {
-        let url = format!("{}/flows/{}/storage", self.base_url, flow_id);
+        let url = self.url(&format!("/flows/{}/storage", flow_id))?;
         let body = serde_json::json!({ "limit": 1, "content_type": content_type });
+        let context = format!("POST {}", redact_url(url.as_str()));
         let resp = self
-            .auth
-            .apply(self.http.post(&url))
-            .await?
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("POST {}", url))?;
+            .send_authed(reqwest::Method::POST, url, Some(&body))
+            .await?;
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(HttpStatusError {
-                status,
-                context: format!("POST {}", url),
-                body,
-            }
-            .into());
+            return Err(status_error(resp, context).await);
         }
         let parsed: StorageResponse = resp.json().await.context("parsing storage response")?;
         let obj = parsed
@@ -268,24 +420,19 @@ impl TamsClient {
         content_type: &str,
         bytes: Vec<u8>,
     ) -> Result<()> {
-        // Note: no auth header here — the URL itself is presigned.
+        // No credentials here: the URL itself is presigned. Errors drop the URL,
+        // which carries the signature.
         let resp = self
-            .http
+            .objects
             .put(put_url)
             .header(CONTENT_TYPE, content_type)
             .body(bytes)
             .send()
             .await
+            .map_err(|e| anyhow::Error::new(e.without_url()))
             .context("PUT presigned S3 url")?;
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(HttpStatusError {
-                status,
-                context: "presigned PUT".to_string(),
-                body,
-            }
-            .into());
+            return Err(status_error(resp, "presigned PUT".to_string()).await);
         }
         Ok(())
     }
@@ -297,16 +444,12 @@ impl TamsClient {
         object_id: &str,
         timerange: &str,
     ) -> Result<()> {
-        let url = format!("{}/flows/{}/segments", self.base_url, flow_id);
+        let url = self.url(&format!("/flows/{}/segments", flow_id))?;
         let body = serde_json::json!({ "object_id": object_id, "timerange": timerange });
+        let context = format!("POST {}", redact_url(url.as_str()));
         let resp = self
-            .auth
-            .apply(self.http.post(&url))
-            .await?
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("POST {}", url))?;
+            .send_authed(reqwest::Method::POST, url, Some(&body))
+            .await?;
         let status = resp.status();
         // 201 = all registered; 200 = partial failure (failed_segments listed).
         if status.as_u16() == 200 {
@@ -314,13 +457,7 @@ impl TamsClient {
             return Err(anyhow!("segment registration partially failed: {}", text));
         }
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(HttpStatusError {
-                status,
-                context: format!("POST {}", url),
-                body,
-            }
-            .into());
+            return Err(status_error(resp, context).await);
         }
         Ok(())
     }
@@ -422,28 +559,17 @@ impl TamsClient {
 
     /// `GET /flows/{id}` as JSON.
     pub async fn get_flow(&self, flow_id: &str) -> Result<serde_json::Value> {
-        let url = format!("{}/flows/{}", self.base_url, flow_id);
-        let resp = self
-            .auth
-            .apply(self.http.get(&url))
-            .await?
-            .send()
-            .await
-            .with_context(|| format!("GET {}", url))?;
+        let url = self.url(&format!("/flows/{}", flow_id))?;
+        let context = format!("GET {}", redact_url(url.as_str()));
+        let resp = self.send_authed(reqwest::Method::GET, url, None).await?;
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(HttpStatusError {
-                status,
-                context: format!("GET {}", url),
-                body,
-            }
-            .into());
+            return Err(status_error(resp, context).await);
         }
         resp.json().await.context("parsing flow")
     }
 
     /// List segments, following pages until `max_pages` pages or the end.
+    /// A `Link` to the next page outside the gateway's origin is an error.
     pub async fn list_segments(
         &self,
         flow_id: &str,
@@ -459,23 +585,9 @@ impl TamsClient {
                 Some(NextPage::Key(k)) => with_query(&first, &query.params(Some(k)))?,
                 Some(NextPage::Link(l)) => self.resolve(l)?,
             };
-            let req = self.http.get(url);
-            let resp = self
-                .auth
-                .apply(req)
-                .await?
-                .send()
-                .await
-                .with_context(|| format!("GET {}", first))?;
+            let resp = self.send_authed(reqwest::Method::GET, url, None).await?;
             if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(HttpStatusError {
-                    status,
-                    context: format!("GET {}", first),
-                    body,
-                }
-                .into());
+                return Err(status_error(resp, format!("GET {}", first)).await);
             }
             let h = resp.headers();
             next = next_page(
@@ -492,36 +604,67 @@ impl TamsClient {
         Ok(out)
     }
 
-    /// Resolve a `Link` target against the gateway base URL.
+    /// Resolve a `Link` target against the gateway base URL. A target outside
+    /// the gateway's origin is refused: following it would send the gateway's
+    /// credentials to whatever host a (misbehaving) gateway names.
     fn resolve(&self, link: &str) -> Result<reqwest::Url> {
-        if link.starts_with("http://") || link.starts_with("https://") {
-            return reqwest::Url::parse(link).context("next link");
-        }
         let base = reqwest::Url::parse(&format!("{}/", self.base_url)).context("base url")?;
-        base.join(link).context("next link")
+        let url = base.join(link).context("next link")?;
+        if !same_origin(&url, &self.base) {
+            bail!(
+                "next-page link to {} leaves the gateway origin {}",
+                redact_url(url.as_str()),
+                self.base.origin().ascii_serialization()
+            );
+        }
+        Ok(url)
     }
 
-    /// GET the bytes of a media object from one of its `get_urls`. No auth
-    /// header: TAMS get_urls are presigned or otherwise directly fetchable,
-    /// and an extra Authorization header breaks S3 presigned requests.
+    /// GET the bytes of a media object from one of its `get_urls`, at most
+    /// [`MAX_OBJECT_BYTES`]. No credentials: TAMS get_urls are presigned or
+    /// otherwise directly fetchable, and an extra Authorization header breaks
+    /// S3 presigned requests. Errors never contain the URL, whose query
+    /// carries the signature.
     pub async fn fetch_object(&self, url: &str) -> Result<Vec<u8>> {
-        let resp = self
-            .http
+        self.fetch_object_limited(url, MAX_OBJECT_BYTES).await
+    }
+
+    async fn fetch_object_limited(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>> {
+        let mut resp = self
+            .objects
             .get(url)
             .send()
             .await
+            .map_err(|e| anyhow::Error::new(e.without_url()))
             .context("GET media object")?;
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(HttpStatusError {
-                status,
-                context: "GET media object".to_string(),
-                body,
-            }
-            .into());
+            return Err(status_error(resp, "GET media object".to_string()).await);
         }
-        Ok(resp.bytes().await.context("reading media object")?.to_vec())
+        let declared = resp
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+        if let Some(len) = declared.filter(|len| *len > max_bytes) {
+            bail!(
+                "media object is {} bytes, over the {} byte limit",
+                len,
+                max_bytes
+            );
+        }
+        let mut bytes = Vec::with_capacity(declared.unwrap_or(0) as usize);
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| anyhow::Error::new(e.without_url()))
+            .context("reading media object")?
+        {
+            if bytes.len() as u64 + chunk.len() as u64 > max_bytes {
+                bail!("media object exceeds the {} byte limit", max_bytes);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
     }
 }
 
@@ -576,10 +719,20 @@ mod tests {
             c.resolve("flows/f/segments?page=2").unwrap().as_str(),
             "http://gw.example.com/tams/flows/f/segments?page=2"
         );
+        // Absolute links: same origin is followed, any other origin refused.
         assert_eq!(
-            c.resolve("https://x.example.com/a").unwrap().as_str(),
-            "https://x.example.com/a"
+            c.resolve("http://gw.example.com/tams/flows/f/segments?page=3")
+                .unwrap()
+                .as_str(),
+            "http://gw.example.com/tams/flows/f/segments?page=3"
         );
+        assert!(c.resolve("https://x.example.com/a").is_err());
+        assert!(
+            c.resolve("https://gw.example.com/tams/a").is_err(),
+            "scheme"
+        );
+        assert!(c.resolve("http://gw.example.com:81/a").is_err(), "port");
+        assert!(c.resolve("//x.example.com/a").is_err(), "scheme-relative");
     }
 
     #[test]
@@ -688,5 +841,322 @@ mod tests {
         s.tags = vec![("prod".into(), "Studio A".into())];
         let body = flow_request_body(&s);
         assert_eq!(body["tags"]["prod"], "Studio A");
+    }
+
+    #[test]
+    fn allow_list_matches_by_origin() {
+        let allowed = ["https://gw.example.com/tams", " http://192.0.2.10:8000 "];
+        assert!(is_allow_listed("https://gw.example.com/other", allowed));
+        assert!(is_allow_listed("http://192.0.2.10:8000/flows", allowed));
+        assert!(!is_allow_listed("http://gw.example.com", allowed), "scheme");
+        assert!(!is_allow_listed("http://192.0.2.10:8001", allowed), "port");
+        assert!(!is_allow_listed(
+            "https://gw.example.com.evil.example.net",
+            allowed
+        ));
+        assert!(!is_allow_listed("not a url", allowed));
+        assert!(!is_allow_listed("https://gw.example.com", []));
+    }
+
+    #[test]
+    fn osc_sat_goes_only_to_hosts_of_its_service() {
+        let gw = "https://t-i.eyevinn-tams-gateway.auto.prod.osaas.io";
+        assert!(check_osc_gateway(gw, "eyevinn-tams-gateway", false).is_ok());
+        // An explicit service id for another service, or a host that is not
+        // OSC, or plain HTTP: no SAT unless the gateway is allow-listed.
+        assert!(check_osc_gateway(gw, "eyevinn-intercom-manager", false).is_err());
+        assert!(
+            check_osc_gateway("https://evil.example.net", "eyevinn-tams-gateway", false).is_err()
+        );
+        assert!(check_osc_gateway(
+            "http://t-i.eyevinn-tams-gateway.auto.prod.osaas.io",
+            "eyevinn-tams-gateway",
+            false
+        )
+        .is_err());
+        assert!(
+            check_osc_gateway("https://tams.example.com", "eyevinn-tams-gateway", true).is_ok()
+        );
+    }
+
+    #[test]
+    fn osc_client_refuses_a_foreign_gateway() {
+        let osc = |gw: &str, service: &str| {
+            TamsClient::new(
+                gw,
+                AuthMethod::Osc {
+                    provider: std::sync::Arc::new(
+                        crate::osc::SatProvider::new(None, None).unwrap(),
+                    ),
+                    service_id: service.into(),
+                    credential_key: "k".into(),
+                },
+            )
+        };
+        assert!(osc(
+            "https://t-i.eyevinn-tams-gateway.auto.prod.osaas.io",
+            "eyevinn-tams-gateway"
+        )
+        .is_ok());
+        assert!(osc("https://evil.example.net/flows", "eyevinn-tams-gateway").is_err());
+    }
+
+    /// HTTP-level tests of the request loop against local stub servers.
+    mod http {
+        use super::*;
+        use axum::extract::{Query, State};
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::response::IntoResponse;
+        use axum::routing::get;
+        use axum::Router;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        /// Authorization headers seen by a stub, per path and query.
+        type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+        async fn serve(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+            base
+        }
+
+        fn seg(n: u32) -> serde_json::Value {
+            serde_json::json!({"object_id": format!("o{}", n), "timerange": format!("[{}:0_{}:0)", n, n + 1)})
+        }
+
+        fn record(seen: &Seen, what: String, h: &HeaderMap) {
+            let auth = h
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            seen.lock().unwrap().push((what, auth));
+        }
+
+        /// A stub that hands out 3 pages, with `X-Paging-NextKey` or `Link`,
+        /// and a `Link` to `foreign` when asked to.
+        async fn gateway(seen: Seen, mode: &'static str, foreign: String) -> String {
+            let app = Router::new()
+                .route(
+                    "/flows/f/segments",
+                    get(
+                        move |State(seen): State<Seen>,
+                              Query(q): Query<HashMap<String, String>>,
+                              h: HeaderMap| {
+                            let foreign = foreign.clone();
+                            async move {
+                                let page: u32 =
+                                    q.get("page").and_then(|p| p.parse().ok()).unwrap_or(0);
+                                record(&seen, format!("page {}", page), &h);
+                                let mut headers = HeaderMap::new();
+                                if page < 2 {
+                                    let next = page + 1;
+                                    match mode {
+                                        "key" => {
+                                            headers.insert(
+                                                "x-paging-nextkey",
+                                                next.to_string().parse().unwrap(),
+                                            );
+                                        }
+                                        "link" => {
+                                            headers.insert(
+                                                "link",
+                                                format!(
+                                                    "</flows/f/segments?page={}>; rel=\"next\"",
+                                                    next
+                                                )
+                                                .parse()
+                                                .unwrap(),
+                                            );
+                                        }
+                                        _ => {
+                                            headers.insert(
+                                                "link",
+                                                format!(
+                                                    "<{}/steal?page={}>; rel=\"next\"",
+                                                    foreign, next
+                                                )
+                                                .parse()
+                                                .unwrap(),
+                                            );
+                                        }
+                                    }
+                                }
+                                (headers, axum::Json(vec![seg(page)])).into_response()
+                            }
+                        },
+                    ),
+                )
+                .route(
+                    "/flows/bad/segments",
+                    get(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "x".repeat(10_000)) }),
+                )
+                .route(
+                    "/flows/moved/segments",
+                    get(move |State(seen): State<Seen>, h: HeaderMap| async move {
+                        record(&seen, "moved".into(), &h);
+                        (
+                            StatusCode::TEMPORARY_REDIRECT,
+                            [("location", "/flows/f/segments")],
+                        )
+                    }),
+                )
+                .route(
+                    "/flows/away/segments",
+                    get(|State(_): State<Seen>, Query(q): Query<HashMap<String, String>>| async move {
+                        let to = q.get("to").cloned().unwrap_or_default();
+                        (StatusCode::TEMPORARY_REDIRECT, [("location", to)])
+                    }),
+                )
+                .with_state(seen);
+            serve(app).await
+        }
+
+        /// Another origin that records whatever reaches it.
+        async fn foreign(seen: Seen) -> String {
+            let app = Router::new().fallback(move |h: HeaderMap, uri: axum::http::Uri| {
+                let seen = seen.clone();
+                async move {
+                    record(&seen, uri.to_string(), &h);
+                    axum::Json(Vec::<serde_json::Value>::new())
+                }
+            });
+            serve(app).await
+        }
+
+        fn client(base: &str) -> TamsClient {
+            TamsClient::new(base, AuthMethod::Bearer("secret".into())).unwrap()
+        }
+
+        #[tokio::test]
+        async fn pages_by_next_key_and_link_with_auth() {
+            for mode in ["key", "link"] {
+                let seen = Seen::default();
+                let gw = gateway(seen.clone(), mode, String::new()).await;
+                let got = client(&gw)
+                    .list_segments("f", &SegmentQuery::default(), 10)
+                    .await
+                    .unwrap();
+                let ids: Vec<_> = got.iter().map(|s| s.object_id.as_str()).collect();
+                assert_eq!(ids, ["o0", "o1", "o2"], "{}", mode);
+                let seen = seen.lock().unwrap();
+                assert_eq!(seen.len(), 3);
+                assert!(seen
+                    .iter()
+                    .all(|(_, a)| a.as_deref() == Some("Bearer secret")));
+            }
+        }
+
+        #[tokio::test]
+        async fn max_pages_truncates() {
+            let gw = gateway(Seen::default(), "key", String::new()).await;
+            let got = client(&gw)
+                .list_segments("f", &SegmentQuery::default(), 2)
+                .await
+                .unwrap();
+            assert_eq!(got.len(), 2);
+        }
+
+        /// A `Link` to another origin is refused: the request (and the token)
+        /// never reaches that host (review M5).
+        #[tokio::test]
+        async fn cross_origin_link_is_refused() {
+            let stolen = Seen::default();
+            let other = foreign(stolen.clone()).await;
+            let gw = gateway(Seen::default(), "foreign", other).await;
+            let err = client(&gw)
+                .list_segments("f", &SegmentQuery::default(), 10)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{:#}", err).contains("leaves the gateway origin"),
+                "{:#}",
+                err
+            );
+            assert!(stolen.lock().unwrap().is_empty());
+        }
+
+        /// Redirects with credentials are followed within the gateway's
+        /// origin, and not to another one.
+        #[tokio::test]
+        async fn redirects_stay_on_the_gateway_origin() {
+            let seen = Seen::default();
+            let gw = gateway(seen.clone(), "key", String::new()).await;
+            let got = client(&gw)
+                .list_segments("moved", &SegmentQuery::default(), 1)
+                .await
+                .unwrap();
+            assert_eq!(got.len(), 1, "same-origin redirect followed");
+            let auth: Vec<_> = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, a)| a.clone())
+                .collect();
+            assert_eq!(auth, vec![Some("Bearer secret".to_string()); 2]);
+
+            let stolen = Seen::default();
+            let other = foreign(stolen.clone()).await;
+            let c = TamsClient::new(&gw, AuthMethod::Bearer("secret".into())).unwrap();
+            let url = with_query(
+                &format!("{}/flows/away/segments", gw),
+                &[("to", format!("{}/steal", other))],
+            )
+            .unwrap();
+            let resp = c
+                .send_authed(reqwest::Method::GET, url, None)
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+            assert!(
+                stolen.lock().unwrap().is_empty(),
+                "redirect left the origin"
+            );
+        }
+
+        #[tokio::test]
+        async fn error_bodies_are_bounded() {
+            let gw = gateway(Seen::default(), "key", String::new()).await;
+            let err = client(&gw)
+                .list_segments("bad", &SegmentQuery::default(), 1)
+                .await
+                .unwrap_err();
+            let e = err.downcast_ref::<HttpStatusError>().expect("status error");
+            assert_eq!(e.status.as_u16(), 500);
+            assert!(e.body.len() <= MAX_ERROR_BODY_CHARS + 3, "{}", e.body.len());
+        }
+
+        /// Objects are fetched without credentials, within a size limit, and
+        /// errors do not carry the presigned URL.
+        #[tokio::test]
+        async fn objects_are_fetched_without_auth_and_bounded() {
+            let seen = Seen::default();
+            let store = {
+                let seen = seen.clone();
+                serve(Router::new().fallback(move |h: HeaderMap| {
+                    let seen = seen.clone();
+                    async move {
+                        record(&seen, "object".into(), &h);
+                        vec![7u8; 1000]
+                    }
+                }))
+                .await
+            };
+            let c = client("http://gw.example.com");
+            let url = format!("{}/b/o.ts?X-Amz-Signature=topsecret", store);
+            assert_eq!(c.fetch_object(&url).await.unwrap().len(), 1000);
+            assert_eq!(seen.lock().unwrap()[0].1, None, "no credentials on objects");
+            let err = c.fetch_object_limited(&url, 999).await.unwrap_err();
+            assert!(format!("{:#}", err).contains("limit"), "{:#}", err);
+            // A connection error does not print the signed URL.
+            let err = c
+                .fetch_object("http://127.0.0.1:1/b/o.ts?X-Amz-Signature=topsecret")
+                .await
+                .unwrap_err();
+            assert!(!format!("{:#}", err).contains("topsecret"), "{:#}", err);
+        }
     }
 }
