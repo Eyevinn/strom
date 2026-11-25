@@ -232,6 +232,8 @@ pub struct PlayerStats {
     pub shown_tai: AtomicI64,
     /// The last tick found the frame that holds its time.
     pub in_sync: std::sync::atomic::AtomicBool,
+    /// The hole of the recording the last tick's time was in, `[start, end)`.
+    gap_now: Mutex<Option<(i64, i64)>>,
     /// Absolute frame (own grid) the last tick asked for.
     pub wanted_frame: AtomicI64,
     /// Frame number read from the pushed picture's bitstrip (diagnostics).
@@ -274,6 +276,7 @@ impl PlayerStats {
             shown_frame: AtomicI64::new(UNKNOWN),
             shown_tai: AtomicI64::new(UNKNOWN),
             in_sync: std::sync::atomic::AtomicBool::new(false),
+            gap_now: Mutex::new(None),
             wanted_frame: AtomicI64::new(UNKNOWN),
             strip_frame: AtomicI64::new(-1),
             strip_mismatches: AtomicU64::new(0),
@@ -332,6 +335,14 @@ impl PlayerStats {
 
     pub fn index_view(&self) -> IndexView {
         lock(&self.index_view).clone()
+    }
+
+    pub fn set_gap(&self, gap: Option<(i64, i64)>) {
+        *lock(&self.gap_now) = gap;
+    }
+
+    pub fn gap(&self) -> Option<(i64, i64)> {
+        *lock(&self.gap_now)
     }
 
     pub fn set_output_rate(&self, fps_n: u32, fps_d: u32) {
@@ -1390,6 +1401,7 @@ impl ReplayTimeline {
             "shown_frame": rel(shown),
             "wanted_frame": rel(wanted),
             "in_sync": p.in_sync.load(Ordering::Relaxed),
+            "in_gap": p.gap().map(|(s, e)| range_json(s, e)),
             "strip_frame": p.strip_frame.load(Ordering::Relaxed),
             "strip_mismatches": p.strip_mismatches.load(Ordering::Relaxed),
             "code_utc_us": p.code_utc_us.load(Ordering::Relaxed),

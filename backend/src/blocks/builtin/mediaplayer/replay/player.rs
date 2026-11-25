@@ -14,6 +14,8 @@
 //!   flushes or seeks, and never waits on the network.
 
 use super::backoff::{worth_warning, Backoff};
+#[cfg(test)]
+use super::cache::Hold;
 use super::cache::{by_urgency, Fetcher, SegmentStore};
 use super::decode::{caps_frame_rate, decode_bytes, decode_timeout, map_to_grid, pick_decoder};
 use super::source::{Segment, SourceIndex};
@@ -81,6 +83,15 @@ impl FrameStore {
 fn frame_holding<B: Clone>(frames: &BTreeMap<i64, B>, t: i64, period_ns: i64) -> Option<(i64, B)> {
     let (&ft, b) = frames.range(..=t).next_back()?;
     (t - ft < period_ns).then(|| (ft, b.clone()))
+}
+
+/// A decoded frame and its own TAI.
+type TaiFrame = (i64, gst::Buffer);
+
+/// The last decoded frame of `seg`, if it is decoded.
+fn held_in(store: &FrameStore, seg: &Segment) -> Option<TaiFrame> {
+    let last = store.segments.get(&seg.start_ns)?.last;
+    store.frames.get(&last).map(|b| (last, b.clone()))
 }
 
 /// The most urgent of `wanted` (ordered by urgency) whose decoded frames fit
@@ -367,7 +378,13 @@ impl ReplayPlayer {
                         cursor + self.decode_behind_ns,
                     )
                 };
-                let near = by_urgency(&self.store.segments_in(lo, hi), cursor, forward);
+                let mut near = by_urgency(&self.store.segments_in(lo, hi), cursor, forward);
+                // In a hole, the segment before it holds the picture: most
+                // urgent, however far behind it ends.
+                if let Some(h) = self.store.hold().filter(|h| h.holds(cursor)) {
+                    near.retain(|s| s.start_ns != h.seg.start_ns);
+                    near.insert(0, h.seg);
+                }
                 // The most urgent segments whose frames fit the memory budget.
                 let wanted = {
                     let decoded = lock(&self.decoded);
@@ -431,6 +448,15 @@ impl ReplayPlayer {
 
     fn frame_holding(&self, t: i64, period_ns: i64) -> Option<(i64, gst::Buffer)> {
         frame_holding(&lock(&self.decoded).frames, t, period_ns)
+    }
+
+    /// In a hole of the recording at `t`: the hole and the last frame before
+    /// it (once its segment is decoded), as when play runs into the hole.
+    fn held_frame(&self, t: i64) -> Option<((i64, i64), Option<TaiFrame>)> {
+        let h = self.store.hold().filter(|h| h.holds(t))?;
+        let decoded = lock(&self.decoded);
+        let frame = held_in(&decoded, &h.seg);
+        Some((h.hole, frame))
     }
 
     // --- output -------------------------------------------------------------
@@ -512,12 +538,24 @@ impl ReplayPlayer {
                     .wanted_frame
                     .store(grid.floor_frame(t), Ordering::Relaxed);
             }
-            let hit = want.and_then(|t| self.frame_holding(t, period_ns).map(|(ft, b)| (ft, t, b)));
+            let mut hit =
+                want.and_then(|t| self.frame_holding(t, period_ns).map(|(ft, b)| (ft, t, b)));
+            // No frame holds the time: in a hole of the recording, the last
+            // frame before it (also right after a seek into the hole).
+            let mut gap = None;
+            if let (None, Some(t)) = (&hit, want) {
+                if let Some((hole, frame)) = self.held_frame(t) {
+                    gap = Some(hole);
+                    hit = frame.map(|(ft, b)| (ft, t, b));
+                }
+            }
+            self.stats.set_gap(gap);
             self.stats.in_sync.store(hit.is_some(), Ordering::Relaxed);
             let hit = match hit {
                 Some((ft, t, b)) => {
                     let new_picture = last.as_ref().is_none_or(|(lt, _)| *lt != ft);
-                    if self.read_strip && new_picture {
+                    // A held frame is from before the hole, not of the time.
+                    if self.read_strip && new_picture && gap.is_none() {
                         if let Some(info) = &video_info {
                             self.check_picture(&b, info, &grid, ft, t);
                         }
@@ -855,6 +893,40 @@ mod tests {
         // A frame not decoded is a miss, not the frame before it.
         frames.remove(&(3 * p));
         assert_eq!(frame_holding(&frames, 3 * p + 1, p), None);
+    }
+
+    #[test]
+    fn a_hole_shows_the_last_frame_before_it() {
+        gst::init().unwrap();
+        let p = 20_000_000;
+        let mut store = FrameStore::default();
+        // Segment 0..1 s decoded; the cursor was at 50 s and showed a frame
+        // there; segment 1 s.. is a hole.
+        for i in 0..50 {
+            store.frames.insert(i * p, gst::Buffer::new());
+        }
+        store.segments.insert(
+            0,
+            DecodedSegment {
+                first: 0,
+                last: 49 * p,
+                bytes: 0,
+            },
+        );
+        store.frames.insert(50 * S, gst::Buffer::new());
+        let h = Hold {
+            seg: seg(0),
+            hole: (S, 93 * S),
+        };
+        // A seek to 20 s: no frame holds it, and the frame before 20 s in the
+        // store would be far off; the hold is the last frame of segment 0.
+        assert!(frame_holding(&store.frames, 20 * S, p).is_none());
+        assert!(h.holds(20 * S));
+        assert_eq!(held_in(&store, &h.seg).map(|(t, _)| t), Some(49 * p));
+        assert!(!h.holds(93 * S));
+        // Not decoded yet: nothing to hold.
+        store.segments.clear();
+        assert!(held_in(&store, &h.seg).is_none());
     }
 
     #[test]

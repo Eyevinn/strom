@@ -54,9 +54,31 @@ pub struct SegmentStore {
     /// a segment that overlaps the window, however long it is).
     bytes: Mutex<HashMap<i64, Fetched>>,
     info: Mutex<Option<SourceInfo>>,
+    hold: Mutex<Option<Hold>>,
+}
+
+/// The cursor is in a hole of the recording: the picture to hold is the last
+/// frame of `seg`, the segment that ends where the hole starts. `hole` is
+/// `[start, end)`, its end the media after it, or as far as the index has
+/// listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hold {
+    pub seg: Arc<Segment>,
+    pub hole: (i64, i64),
+}
+
+impl Hold {
+    pub fn holds(&self, t: i64) -> bool {
+        self.hole.0 <= t && t < self.hole.1
+    }
 }
 
 impl SegmentStore {
+    /// The hole the cursor is in, if any, and what to show there.
+    pub fn hold(&self) -> Option<Hold> {
+        lock(&self.hold).clone()
+    }
+
     pub fn info(&self) -> Option<SourceInfo> {
         lock(&self.info).clone()
     }
@@ -498,9 +520,27 @@ impl Fetcher {
                 }
             }
 
+            // In a hole: the segment before it holds the picture.
+            let hold = coverage.hole_at(cursor, (start, end)).and_then(|h| {
+                let a = h.start?;
+                let tol = self.tolerance();
+                let seg = lock(&self.store.index)
+                    .range(..a)
+                    .next_back()
+                    .map(|(_, s)| Arc::clone(s))
+                    .filter(|s| s.end_ns + tol >= a)?;
+                Some(Hold {
+                    seg,
+                    hole: (a, h.end.unwrap_or(h.listed.1)),
+                })
+            });
+            let hold_key = hold.as_ref().map(|h| h.seg.start_ns);
+            *lock(&self.store.hold) = hold.clone();
+
             // Fetch bytes, most urgent first.
             let window = self.store.segments_in(lo, hi);
-            for seg in by_urgency(&window, cursor, forward) {
+            let held = hold.map(|h| h.seg);
+            for seg in held.into_iter().chain(by_urgency(&window, cursor, forward)) {
                 if inflight.len() >= MAX_INFLIGHT {
                     break;
                 }
@@ -578,8 +618,9 @@ impl Fetcher {
             // the window plus a margin. By overlap, not by start: a long
             // segment holding the cursor started long before the window.
             let margin = seg_ns;
-            lock(&self.store.bytes)
-                .retain(|start, (end, _)| *end > lo - margin && *start < hi + margin);
+            lock(&self.store.bytes).retain(|start, (end, _)| {
+                (*end > lo - margin && *start < hi + margin) || Some(*start) == hold_key
+            });
             let cc = chunk_of(cursor);
             let keep = |c: i64| (c - cc).abs() <= KEEP_CHUNKS;
             chunks.listed.retain(|c| keep(*c));
@@ -594,7 +635,7 @@ impl Fetcher {
             failed.retain(|k| near.contains(k));
             {
                 let mut index = lock(&self.store.index);
-                index.retain(|k, _| keep(chunk_of(*k)) || *k == start);
+                index.retain(|k, _| keep(chunk_of(*k)) || *k == start || Some(*k) == hold_key);
                 self.stats
                     .index_segments
                     .store(index.len() as u64, Ordering::Relaxed);
@@ -924,6 +965,52 @@ mod tests {
         }
         stop.store(true, Ordering::Relaxed);
         assert_eq!(stats.index_view().gaps, vec![(110 * S, 203 * S)]);
+    }
+
+    #[test]
+    fn a_seek_into_a_hole_fetches_the_segment_before_it() {
+        // 1 s segments 100..110 s and 203..220 s; seek to 150 s, 40 s into
+        // the hole: far behind the fetch window.
+        let mut mock = Mock::build(120, 1, false, false);
+        mock.segs
+            .retain(|s| s.start_ns < 110 * S || s.start_ns >= 203 * S);
+        let mock = Arc::new(mock);
+        let timeline = super::super::timeline::get_or_create(uuid::Uuid::new_v4(), "g");
+        let stats = Arc::new(PlayerStats::new("p"));
+        timeline.register_player(&stats);
+        let fetcher = Arc::new(Fetcher::new(
+            "p",
+            mock.clone(),
+            Arc::clone(&timeline),
+            Arc::clone(&stats),
+            2,
+        ));
+        let stop = Arc::new(AtomicBool::new(false));
+        Arc::clone(&fetcher).spawn(Arc::clone(&stop));
+        let t0 = Instant::now();
+        while stats.extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        timeline
+            .apply(super::super::timeline::Command::Seek {
+                frame: None,
+                utc: None,
+                tai: Some("150:0".into()),
+                from_live_ms: None,
+                speed: None,
+            })
+            .unwrap();
+        let t0 = Instant::now();
+        // The hole's end comes as the listing reaches it.
+        let closed = || fetcher.store.hold().is_some_and(|h| h.hole.1 == 203 * S);
+        while (!closed() || mock.fetches_of(109) == 0) && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let h = fetcher.store.hold().expect("in a hole");
+        assert_eq!(h.seg.start_ns, 109 * S);
+        assert_eq!(h.hole, (110 * S, 203 * S));
+        assert!(fetcher.store.bytes(109 * S).is_some());
     }
 
     #[test]
