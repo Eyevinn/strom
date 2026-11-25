@@ -87,6 +87,12 @@ impl TamsOutput {
         std::env::temp_dir().join(format!("strom-tams-{}-mux", safe_id))
     }
 
+    /// Drop the block's elements but keep its segment directory, so the
+    /// pipeline can be finalized and the uploader flushes the last segment.
+    fn release_elements(&mut self) {
+        self.elements.clear();
+    }
+
     /// The segment files written so far.
     fn segments(&self) -> Vec<PathBuf> {
         segment_files(&self.segment_dir())
@@ -683,5 +689,104 @@ mod shared_timeline {
                 ranges
             );
         }
+    }
+}
+
+/// The last segment of a run, which no next segment closes, must register the
+/// duration it holds, not a full segment length.
+mod last_segment {
+    use super::*;
+
+    /// End of a TAMS timerange `[s:ns_s:ns)` in nanoseconds.
+    fn timerange_end_ns(tr: &str) -> u64 {
+        let end = tr
+            .trim_end_matches([']', ')'])
+            .rsplit('_')
+            .next()
+            .unwrap_or("");
+        let (s, ns) = end.split_once(':').unwrap_or((end, "0"));
+        s.parse::<u64>().unwrap() * 1_000_000_000 + ns.parse::<u64>().unwrap()
+    }
+
+    #[test]
+    fn last_segment_before_eos_ends_at_its_last_frame() {
+        if !plugins_available()
+            || !common::plugins_available(&["videotestsrc", "x264enc", "capsfilter"])
+        {
+            return;
+        }
+        const FRAME_NS: u64 = 20_000_000;
+        const FRAMES: u64 = 80; // 1.6 s at 50 fps
+        let runtime = runtime();
+        let (gateway, registered) = stub_gateway::start(&runtime);
+
+        let pipeline = gst::Pipeline::new();
+        let mut out = add_tams_output_with(&pipeline, "tams_tail", &gateway, 1, true);
+        let src = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .property("num-buffers", FRAMES as i32)
+            .build()
+            .unwrap();
+        let caps = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                gst::Caps::builder("video/x-raw")
+                    .field("width", 160)
+                    .field("height", 90)
+                    .field("framerate", gst::Fraction::new(50, 1))
+                    .build(),
+            )
+            .build()
+            .unwrap();
+        let enc = gst::ElementFactory::make("x264enc")
+            .property("key-int-max", 25u32)
+            .property_from_str("tune", "zerolatency")
+            .build()
+            .unwrap();
+        pipeline.add_many([&src, &caps, &enc]).unwrap();
+        gst::Element::link_many([&src, &caps, &enc]).unwrap();
+        enc.link(&out.input("video_input_0")).unwrap();
+
+        out.run_setups_in_flow(&runtime, uuid::Uuid::new_v4());
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let reached_eos = wait_for_eos(&pipeline, Duration::from_secs(30));
+        pipeline.set_state(gst::State::Null).unwrap();
+        // Finalize the pipeline as stopping a flow does: the uploader's channel
+        // closes and it flushes the last segment.
+        out.release_elements();
+        drop(enc);
+        drop(caps);
+        drop(src);
+        drop(pipeline);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while registered.lock().unwrap().len() < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        let mut ranges: Vec<String> = registered
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, tr)| tr.clone())
+            .collect();
+        runtime.shutdown_background();
+        assert!(reached_eos, "pipeline never reached EOS");
+        ranges.sort_by_key(|tr| timerange_start_ns(tr));
+        assert!(ranges.len() >= 2, "too few segments: {:?}", ranges);
+        // The segments cover the frames exactly: from the first frame to the
+        // end of the last one, with the last segment shorter than 1 s.
+        let first = timerange_start_ns(&ranges[0]);
+        let last = ranges.last().unwrap();
+        assert_eq!(
+            timerange_end_ns(last) - first,
+            FRAMES * FRAME_NS,
+            "segments: {:?}",
+            ranges
+        );
+        assert!(
+            timerange_end_ns(last) - timerange_start_ns(last) < 1_000_000_000,
+            "last segment claims a full second: {}",
+            last
+        );
     }
 }

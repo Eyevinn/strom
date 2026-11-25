@@ -26,7 +26,8 @@ use crate::tams::tai_mapping::{
     FIRST_ON_GRID_FRAGMENT,
 };
 use crate::tams::uploader::{
-    channel, new_tail_slot, spawn_uploader, FragmentReady, SharedDetected, TailFragment,
+    channel, new_tail_slot, spawn_uploader, FragmentReady, MediaEnd, PadMediaEnd, SharedDetected,
+    TailFragment,
 };
 use gst::glib::prelude::ToValue;
 use gstreamer as gst;
@@ -540,6 +541,9 @@ fn build_flow_chain(
     // Codec label for the TAMS flow, derived from caps at runtime by the probes and
     // read by the uploader when it creates the flow.
     let detected_codec: SharedDetected = Arc::default();
+    // Where the media written to the open fragment ends, for the timerange of
+    // the last fragment of a run (no next fragment closes it).
+    let media_end = track_media_end(&mux);
 
     // One identity input + caps probe per essence, each requesting its own sink pad.
     for &essence in inputs {
@@ -789,6 +793,7 @@ fn build_flow_chain(
             events,
             rx,
             tail.clone(),
+            media_end,
             segment_ns,
         );
 
@@ -941,6 +946,7 @@ fn build_flow_chain(
                 *tail = Some(TailFragment {
                     path: location.clone(),
                     start_ns: abs_start,
+                    start_running_time_ns: running_time_ns,
                 });
             }
 
@@ -1083,6 +1089,58 @@ fn video_essence_parameters(
 }
 
 /// Request the splitmuxsink sink pad for a given essence (`video` or `audio_%u`).
+/// Track where the media written by `mux` ends, on each of its sink pads.
+///
+/// What the muxer consumed, not what reached splitmuxsink: splitmuxsink queues
+/// a GOP or more before it writes, and buffers still queued, in splitmuxsink or
+/// in the muxer's pad queue, are dropped when the pipeline stops without EOS.
+/// A probe sees each buffer enter the muxer's pad, and an aggregator muxer
+/// (mpegtsmux, mp4mux) reports each one it consumed with the pad's
+/// `buffer-consumed` signal; another muxer counts every buffer that entered.
+/// splitmuxsink requests the muxer's pads itself, so tracking starts on each as
+/// it is added. Per buffer only atomics are updated (see [`PadMediaEnd`]).
+fn track_media_end(mux: &gst::Element) -> MediaEnd {
+    let media_end = MediaEnd::default();
+    let pads = media_end.clone();
+    mux.connect_pad_added(move |_mux, pad| {
+        if pad.direction() != gst::PadDirection::Sink {
+            return;
+        }
+        let end = Arc::new(PadMediaEnd::default());
+        if let Ok(mut pads) = pads.lock() {
+            pads.push(end.clone());
+        }
+        if pad.has_property("emit-signals") {
+            end.count_consumed();
+            pad.set_property("emit-signals", true);
+            let consumed = end.clone();
+            pad.connect("buffer-consumed", false, move |_| {
+                consumed.consume();
+                None
+            });
+        }
+        pad.add_probe(
+            gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+            move |_pad, info| {
+                match info.data.as_ref() {
+                    Some(gst::PadProbeData::Buffer(buf)) => {
+                        let dur = buf.duration().map_or(0, |d| d.nseconds());
+                        end.add_buffer(buf.pts().map(|p| p.nseconds()), dur);
+                    }
+                    Some(gst::PadProbeData::Event(ev)) => {
+                        if let gst::EventView::Segment(seg) = ev.view() {
+                            end.set_segment(seg.segment());
+                        }
+                    }
+                    _ => {}
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
+    });
+    media_end
+}
+
 fn request_sink_pad(
     splitmuxsink: &gst::Element,
     essence: Essence,
