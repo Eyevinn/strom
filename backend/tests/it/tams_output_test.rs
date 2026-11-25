@@ -570,11 +570,23 @@ mod shared_timeline {
     /// keyframe at once, off the grid, and every split followed it.
     ///
     /// The encoder is the Video Encoder block with
-    /// `min_keyframe_request_interval_ms` 0. Its 1 s default drops grid
-    /// requests that come sooner than a second after the last forced
-    /// keyframe, and the boundaries leave the grid.
+    /// `min_keyframe_request_interval_ms` 0.
     #[test]
     fn encoder_keyframes_follow_the_grid() {
+        keyframes_follow_the_grid(Some(0));
+    }
+
+    /// The same with the Video Encoder block's default 1 s keyframe-request
+    /// floor (kept for WebRTC PLI storms). The base-class floor it used to set
+    /// dropped grid requests that came sooner than a second after the last
+    /// forced keyframe, so boundaries left the grid with nothing in the log
+    /// (review M3). The block now limits only immediate requests.
+    #[test]
+    fn encoder_keyframes_follow_the_grid_with_default_floor() {
+        keyframes_follow_the_grid(None);
+    }
+
+    fn keyframes_follow_the_grid(min_keyframe_request_interval_ms: Option<u64>) {
         if !plugins_available()
             || !common::plugins_available(&[
                 "videotestsrc",
@@ -606,11 +618,10 @@ mod shared_timeline {
             )
             .build()
             .unwrap();
-        // The Video Encoder block as an ingest flow sets it up: a 0.5 s GOP,
-        // and `min_keyframe_request_interval_ms` 0 so no grid request is
-        // dropped (the 1 s default is for WebRTC PLI storms). Its natural
-        // keyframes fall wherever the stream started, not on the grid.
-        let enc_props: HashMap<String, PropertyValue> = [
+        // The Video Encoder block as an ingest flow sets it up: a 0.5 s GOP.
+        // Its natural keyframes fall wherever the stream started, not on the
+        // grid.
+        let mut enc_props: HashMap<String, PropertyValue> = [
             ("codec", PropertyValue::String("h264".into())),
             (
                 "encoder_preference",
@@ -619,11 +630,16 @@ mod shared_timeline {
             ("quality_preset", PropertyValue::String("fast".into())),
             ("tune", PropertyValue::String("fastdecode".into())),
             ("keyframe_interval", PropertyValue::UInt(25)),
-            ("min_keyframe_request_interval_ms", PropertyValue::UInt(0)),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
+        if let Some(ms) = min_keyframe_request_interval_ms {
+            enc_props.insert(
+                "min_keyframe_request_interval_ms".to_string(),
+                PropertyValue::UInt(ms),
+            );
+        }
         let enc_id = format!("videoenc_{}", uuid::Uuid::new_v4().simple());
         let enc_built = VideoEncBuilder
             .build(&enc_id, &enc_props, &common::block::context())
