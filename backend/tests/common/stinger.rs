@@ -317,7 +317,7 @@ pub fn build_flow(tag: &str, backend: &str, clips: &[std::path::PathBuf]) -> Flo
         block_definition_id: "builtin.media_player".to_string(),
         name: None,
         properties: props(vec![
-            ("stinger_mode", PV::Bool(true)),
+            ("mode", PV::String("stinger".to_string())),
             (
                 "playlist",
                 PV::String(serde_json::to_string(&playlist).unwrap()),

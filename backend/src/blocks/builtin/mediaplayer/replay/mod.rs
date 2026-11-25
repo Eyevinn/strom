@@ -1,6 +1,6 @@
-//! Replay mode of the media player.
+//! Timeline mode of the media player (`mode=timeline`), used for replay.
 //!
-//! With `replay_group` set, the block does not play a playlist. It holds
+//! In this mode the block does not play a playlist. It holds
 //! decoded frames of a segmented recording around a cursor shared by every
 //! player of the group, and outputs the frame under the cursor on every tick
 //! of the flow clock. Jog, scrub, slow motion and reverse move the cursor.
@@ -22,28 +22,26 @@ pub mod player;
 pub mod source;
 pub mod timeline;
 
+use super::bridge::NetworkBuffer;
+use super::definition::DEFAULT_DECODED_AHEAD_S;
 use crate::blocks::{
     live_bridge_appsrc, BlockBuildError, BlockBuildResult, BusMessageConnectFn,
     APPSRC_MAX_BYTES_VIDEO,
 };
 use crate::client_auth::AuthMethod;
+use crate::tams::auth::TamsAuth;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
 use strom_types::element::ElementPadRef;
+use strom_types::mediaplayer::{
+    timeline_group, DECODED_AHEAD_PROPERTY, GROUP_PROPERTY, OUTPUT_FRAMERATE_PROPERTY,
+    PRIVATE_GROUP_PREFIX, READ_AHEAD_PROPERTY, SOURCE_PROPERTY,
+};
 use strom_types::{FlowId, PropertyValue};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
-
-pub const REPLAY_GROUP_PROPERTY: &str = "replay_group";
-pub const REPLAY_SOURCE_PROPERTY: &str = "replay_source";
-pub const REPLAY_CACHE_PROPERTY: &str = "replay_cache_s";
-pub const REPLAY_PREFETCH_PROPERTY: &str = "replay_prefetch_s";
-pub const REPLAY_AUTH_MODE_PROPERTY: &str = "replay_auth_mode";
-pub const REPLAY_API_TOKEN_PROPERTY: &str = "replay_api_token";
-pub const REPLAY_OSC_SERVICE_PROPERTY: &str = "replay_osc_service_id";
-pub const REPLAY_OUTPUT_FRAMERATE_PROPERTY: &str = "replay_output_framerate";
 
 /// Parse a frame rate: `N/D`, or a whole number. Empty = `None`.
 pub fn parse_frame_rate(s: &str) -> Result<Option<(u32, u32)>, String> {
@@ -69,57 +67,64 @@ fn prop_str(properties: &HashMap<String, PropertyValue>, key: &str) -> Option<St
     }
 }
 
-/// The replay group, when the block is in replay mode.
-pub fn replay_group(properties: &HashMap<String, PropertyValue>) -> Option<String> {
-    prop_str(properties, REPLAY_GROUP_PROPERTY)
-}
-
+/// Build a timeline player. `properties` are current names (migrated).
 pub fn build(
     instance_id: &str,
-    group: &str,
     properties: &HashMap<String, PropertyValue>,
 ) -> Result<BlockBuildResult, BlockBuildError> {
     let flow_id: FlowId = prop_str(properties, "_flow_id")
         .and_then(|s| Uuid::parse_str(&s).ok())
         .unwrap_or_else(Uuid::nil);
     let media_path = prop_str(properties, "_media_path").unwrap_or_else(|| "./media".to_string());
-    let source = prop_str(properties, REPLAY_SOURCE_PROPERTY).ok_or_else(|| {
-        BlockBuildError::InvalidProperty(
-            "Media Player replay mode: replay_source is required (a segment directory or \
+    let invalid =
+        |e: String| BlockBuildError::InvalidProperty(format!("Media Player timeline mode: {}", e));
+    let source = prop_str(properties, SOURCE_PROPERTY).ok_or_else(|| {
+        invalid(
+            "source is required (a segment directory or \
              tams+https://<gateway>/flows/<flow_id>)"
                 .to_string(),
         )
     })?;
-    let invalid =
-        |e: String| BlockBuildError::InvalidProperty(format!("Media Player replay mode: {}", e));
+    if prop_str(properties, GROUP_PROPERTY).is_some_and(|g| g.starts_with(PRIVATE_GROUP_PREFIX)) {
+        return Err(invalid(format!(
+            "group may not start with '{}' (reserved for a player's own group)",
+            PRIVATE_GROUP_PREFIX
+        )));
+    }
+    let group = timeline_group(properties, instance_id);
     let uint = |key: &str, default: u64| match properties.get(key) {
         Some(PropertyValue::UInt(u)) => *u,
-        Some(PropertyValue::Int(i)) if *i > 0 => *i as u64,
+        Some(PropertyValue::Int(i)) if *i >= 0 => *i as u64,
         _ => default,
     };
-    let cache_ahead_s = uint(REPLAY_CACHE_PROPERTY, 3);
-    let prefetch_s = uint(REPLAY_PREFETCH_PROPERTY, 10);
-    let auth = match prop_str(properties, REPLAY_AUTH_MODE_PROPERTY).as_deref() {
-        Some("osc") => source::AuthConfig::Osc {
-            service_id: prop_str(properties, REPLAY_OSC_SERVICE_PROPERTY),
-        },
-        _ => source::AuthConfig::Fixed(
-            match prop_str(properties, REPLAY_API_TOKEN_PROPERTY)
-                .or_else(|| strom_types::env::var_opt("STROM_TAMS_API_TOKEN"))
-            {
-                Some(t) => AuthMethod::Bearer(t),
-                None => AuthMethod::None,
-            },
-        ),
-    };
-    let output_rate = parse_frame_rate(
-        &prop_str(properties, REPLAY_OUTPUT_FRAMERATE_PROPERTY).unwrap_or_default(),
-    )
-    .map_err(invalid)?;
+    let decoded_ahead_s = uint(DECODED_AHEAD_PROPERTY, DEFAULT_DECODED_AHEAD_S);
+    let read_ahead_s = uint(READ_AHEAD_PROPERTY, NetworkBuffer::DEFAULT_READ_AHEAD_S)
+        .min(NetworkBuffer::MAX_READ_AHEAD_S);
+    // The fetcher must hold what the decoder reads ahead.
+    if read_ahead_s < decoded_ahead_s + 2 {
+        warn!(
+            "Media Player {}: read_ahead_s {} is less than decoded_ahead_s + 2; \
+             fetching {} s ahead",
+            instance_id,
+            read_ahead_s,
+            decoded_ahead_s + 2
+        );
+    }
+    let output_rate =
+        parse_frame_rate(&prop_str(properties, OUTPUT_FRAMERATE_PROPERTY).unwrap_or_default())
+            .map_err(invalid)?;
     let spec = source::parse_source(&source, &media_path).map_err(invalid)?;
-    let index = source::open(&spec, &auth, &flow_id.to_string()).map_err(invalid)?;
+    // Gateway auth is checked against the gateway it goes to (env token and
+    // OSC SAT only to allowed gateways).
+    let auth = match &spec {
+        source::SourceSpec::Tams { gateway, .. } => TamsAuth::from_properties(properties, gateway)
+            .map_err(invalid)?
+            .method(&flow_id.to_string()),
+        source::SourceSpec::Local(_) => AuthMethod::None,
+    };
+    let index = source::open(&spec, auth).map_err(invalid)?;
     info!(
-        "Media Player {}: replay mode, group '{}', source {}",
+        "Media Player {}: timeline mode, group '{}', source {}",
         instance_id,
         group,
         index.describe()
@@ -141,14 +146,14 @@ pub fn build(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", out_id, e)))?;
 
-    let timeline = timeline::get_or_create(flow_id, group);
+    let timeline = timeline::get_or_create(flow_id, &group);
     let player = player::ReplayPlayer::new(
         instance_id,
         index,
         timeline,
         &appsrc,
-        cache_ahead_s,
-        prefetch_s,
+        decoded_ahead_s,
+        read_ahead_s,
         output_rate,
     );
 

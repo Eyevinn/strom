@@ -3,6 +3,7 @@
 //! Talks to an Eyevinn TAMS Gateway (CouchDB index + S3 essence, presigned URLs).
 //! See `docs/archive/TAMS_INTEGRATION_PLAN.md` for the design and phasing.
 
+pub mod auth;
 pub mod client;
 pub mod tai_mapping;
 pub mod uploader;

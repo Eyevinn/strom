@@ -512,3 +512,13 @@ fn huge_client_values_clamp_instead_of_overflowing() {
     assert_eq!(rel(i64::MAX), end);
     assert_eq!(rel(i64::MIN), BASE);
 }
+
+#[test]
+fn a_timeline_nobody_holds_is_dropped() {
+    let flow = uuid::Uuid::new_v4();
+    let tl = get_or_create(flow, "prune-test");
+    assert!(get(flow, "prune-test").is_some());
+    assert!(Arc::ptr_eq(&tl, &get_or_create(flow, "prune-test")));
+    drop(tl);
+    assert!(get(flow, "prune-test").is_none());
+}

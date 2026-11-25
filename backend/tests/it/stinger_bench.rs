@@ -141,7 +141,7 @@ fn flow_for(clips: &[PathBuf], preroll_ms: u64) -> Flow {
         block_definition_id: "builtin.media_player".to_string(),
         name: None,
         properties: props(vec![
-            ("stinger_mode", PV::Bool(true)),
+            ("mode", PV::String("stinger".to_string())),
             (
                 "playlist",
                 PV::String(serde_json::to_string(&playlist).unwrap()),

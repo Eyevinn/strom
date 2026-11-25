@@ -9,7 +9,7 @@
 //! Each player has its own [`FrameGrid`] (its source's rate and phase) and
 //! shows, at group time `T`, **its latest frame that starts at or before `T`**
 //! (sample and hold: the picture that camera had at `T`). Each player outputs
-//! at its own output rate (`replay_output_framerate`, by default the source's
+//! at its own output rate (`output_framerate`, by default the source's
 //! rate), so a 100p angle played at 50 % on a 50p output shows every source
 //! frame, and a 25p angle on a 50p output shows each frame twice.
 //!
@@ -407,20 +407,32 @@ pub struct ReplayTimeline {
     last_pushed: Mutex<Option<(i64, i64)>>,
 }
 
-/// Timelines keyed by (flow, replay group).
+/// Timelines keyed by (flow, group).
 type TimelineMap = HashMap<(FlowId, String), Arc<ReplayTimeline>>;
 
 static TIMELINES: LazyLock<Mutex<TimelineMap>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Drop the timelines nothing else holds: their players (which hold an `Arc`
+/// each) are gone, and no client is connected. Without this a stopped or
+/// deleted flow's groups stayed in the map for the life of the process.
+fn prune(map: &mut TimelineMap) {
+    map.retain(|_, tl| Arc::strong_count(tl) > 1);
+}
+
 pub fn get_or_create(flow_id: FlowId, group: &str) -> Arc<ReplayTimeline> {
     let mut map = lock(&TIMELINES);
+    prune(&mut map);
     map.entry((flow_id, group.to_string()))
         .or_insert_with(|| Arc::new(ReplayTimeline::new()))
         .clone()
 }
 
+/// The group's timeline, while a player of the group is alive (or a client
+/// still holds it).
 pub fn get(flow_id: FlowId, group: &str) -> Option<Arc<ReplayTimeline>> {
-    lock(&TIMELINES).get(&(flow_id, group.to_string())).cloned()
+    let mut map = lock(&TIMELINES);
+    prune(&mut map);
+    map.get(&(flow_id, group.to_string())).cloned()
 }
 
 impl ReplayTimeline {

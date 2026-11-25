@@ -973,8 +973,10 @@ const prop = (b, k) => { const v = (b.properties || {})[k]; return v && typeof v
 async function loadFlow() {
   const j = await api(`/api/flows/${FLOW}`);
   const flow = j.flow || j;
-  const players = flow.blocks.filter(b => b.block_definition_id === 'builtin.media_player' && String(prop(b, 'replay_group') ?? '') === GROUP);
-  ctx.players = players.map(b => ({ id: b.id, source: safeSource(prop(b, 'replay_source')), whep: whepDownstream(flow, `${b.id}:video_out`) }));
+  // A timeline player's group: `group`, or its own group `@<block id>` when empty.
+  const groupOf = b => prop(b, 'mode') === 'timeline' ? (String(prop(b, 'group') ?? '').trim() || '@' + b.id) : null;
+  const players = flow.blocks.filter(b => b.block_definition_id === 'builtin.media_player' && groupOf(b) === GROUP);
+  ctx.players = players.map(b => ({ id: b.id, source: safeSource(prop(b, 'source')), whep: whepDownstream(flow, `${b.id}:video_out`) }));
   const ids = new Set(players.map(p => p.id));
   // The mixer that takes the group's players as inputs.
   const vms = flow.blocks.filter(b => b.block_definition_id === 'builtin.vision_mixer');

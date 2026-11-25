@@ -120,17 +120,7 @@ pub trait SourceIndex: Send + Sync {
     async fn fetch(&self, segment: &Segment) -> Result<Vec<u8>>;
 }
 
-/// How a TAMS gateway is authenticated (block properties).
-#[derive(Clone)]
-pub enum AuthConfig {
-    Fixed(AuthMethod),
-    /// OSC PAT/SAT; the PAT is looked up under the flow id.
-    Osc {
-        service_id: Option<String>,
-    },
-}
-
-/// A parsed `replay_source`.
+/// A parsed `source`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceSpec {
     /// Directory with `index.json`.
@@ -139,7 +129,7 @@ pub enum SourceSpec {
     Tams { gateway: String, flow_id: String },
 }
 
-/// Parse `replay_source`: `tams+https://host[/prefix]/flows/<id>`,
+/// Parse `source`: `tams+https://host[/prefix]/flows/<id>`,
 /// `tams+http://...`, `file:///dir`, or a plain directory path (absolute, or
 /// relative to `media_path`).
 pub fn parse_source(source: &str, media_path: &str) -> Result<SourceSpec, String> {
@@ -169,33 +159,14 @@ pub fn parse_source(source: &str, media_path: &str) -> Result<SourceSpec, String
     }))
 }
 
-/// Open the index for a source.
-pub fn open(
-    spec: &SourceSpec,
-    auth: &AuthConfig,
-    credential_key: &str,
-) -> Result<Arc<dyn SourceIndex>, String> {
+/// Open the index for a source. `auth` is used for a TAMS gateway, already
+/// checked against it (see [`crate::tams::auth::TamsAuth`]).
+pub fn open(spec: &SourceSpec, auth: AuthMethod) -> Result<Arc<dyn SourceIndex>, String> {
     match spec {
         SourceSpec::Local(dir) => Ok(Arc::new(local::LocalIndex::load(dir)?)),
-        SourceSpec::Tams { gateway, flow_id } => {
-            let auth = match auth {
-                AuthConfig::Fixed(a) => a.clone(),
-                AuthConfig::Osc { service_id } => AuthMethod::Osc {
-                    provider: crate::osc::sat_provider(),
-                    service_id: service_id
-                        .clone()
-                        .or_else(|| crate::osc::derive_service_id(gateway))
-                        .ok_or_else(|| {
-                            "OSC auth: cannot derive the service id from the gateway URL"
-                                .to_string()
-                        })?,
-                    credential_key: credential_key.to_string(),
-                },
-            };
-            Ok(Arc::new(
-                tams::TamsIndex::new(gateway, flow_id, auth).map_err(|e| e.to_string())?,
-            ))
-        }
+        SourceSpec::Tams { gateway, flow_id } => Ok(Arc::new(
+            tams::TamsIndex::new(gateway, flow_id, auth).map_err(|e| e.to_string())?,
+        )),
     }
 }
 

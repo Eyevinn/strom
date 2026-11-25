@@ -194,40 +194,27 @@ impl BlockBuilder for TamsOutputBuilder {
         // a long-lived bearer token (for TAMS gateways run outside OSC); "osc" mints
         // short-lived Service Access Tokens from the OSC PAT configured on this Strom
         // instance (STROM_OSC_PAT / OSC_ACCESS_TOKEN).
-        let auth_mode = prop_str(properties, "auth_mode").unwrap_or_else(|| "static".to_string());
-        let auth_plan = match auth_mode.as_str() {
-            "osc" => {
-                let provider = crate::osc::sat_provider();
-                let service_id = crate::tams::client::osc_service_id(
-                    &gateway_url,
-                    prop_str(properties, "osc_service_id").as_deref(),
-                )
-                .map_err(|e| {
-                    BlockBuildError::InvalidProperty(format!(
-                        "TAMS Output: {} (set the OSC Service ID property if it cannot be \
-                         derived from gateway_url)",
-                        e
-                    ))
-                })?;
+        let auth = crate::tams::auth::TamsAuth::from_properties(properties, &gateway_url).map_err(
+            |e| {
+                BlockBuildError::InvalidProperty(format!(
+                    "TAMS Output: {} (set the OSC Service ID property if it cannot be \
+                     derived from gateway_url)",
+                    e
+                ))
+            },
+        )?;
+        let auth_plan = match auth {
+            crate::tams::auth::TamsAuth::Osc { service_id } => {
                 info!(
                     "TAMS Output {}: OSC PAT/SAT auth for service {}",
                     instance_id, service_id
                 );
                 AuthPlan::Osc {
-                    provider,
+                    provider: crate::osc::sat_provider(),
                     service_id,
                 }
             }
-            _ => {
-                // The instance's own token only goes to an allow-listed gateway.
-                let auth = match prop_str(properties, "api_token")
-                    .or_else(|| crate::tams::client::env_api_token(&gateway_url))
-                {
-                    Some(t) => AuthMethod::Bearer(t),
-                    None => AuthMethod::None,
-                };
-                AuthPlan::Fixed(auth)
-            }
+            crate::tams::auth::TamsAuth::Static(auth) => AuthPlan::Fixed(auth),
         };
 
         let segment_secs =
@@ -1127,7 +1114,8 @@ fn tams_output_definition() -> BlockDefinition {
         name: BLOCK_NAME.to_string(),
         description: "Records pre-encoded video/audio into a TAMS store (Time-Addressable Media Store) via an Eyevinn TAMS Gateway. Either separate single-essence MP4 flows or one muxed MPEG-TS flow.".to_string(),
         category: "Outputs".to_string(),
-        exposed_properties: vec![
+        exposed_properties: [
+            vec![
             simple_prop(
                 "gateway_url",
                 "Gateway URL",
@@ -1159,44 +1147,10 @@ fn tams_output_definition() -> BlockDefinition {
                 persist: None,
                 visible_when: None,
             },
-            ExposedProperty {
-                name: "auth_mode".to_string(),
-                label: "Authentication".to_string(),
-                description: "How to authenticate to the gateway. Static API Token = a bearer token. OSC PAT/SAT = mint short-lived Service Access Tokens from the OSC Personal Access Token configured on this Strom instance (STROM_OSC_PAT / OSC_ACCESS_TOKEN).".to_string(),
-                property_type: PropertyType::Enum {
-                    values: vec![
-                        EnumValue {
-                            value: "static".to_string(),
-                            label: Some("Static API Token".to_string()),
-                            visible_when: None,
-                        },
-                        EnumValue {
-                            value: "osc".to_string(),
-                            label: Some("OSC PAT/SAT".to_string()),
-                            visible_when: None,
-                        },
-                    ],
-                },
-                default_value: Some(PropertyValue::String("static".to_string())),
-                mapping: block_mapping("auth_mode"),
-                live: false,
-                persist: None,
-                visible_when: None,
-            },
-            simple_prop(
-                "api_token",
-                "API Token",
-                "Static bearer token for the gateway (Static API Token mode only). Empty = the instance's STROM_TAMS_API_TOKEN, which is sent only to STROM_TAMS_GATEWAY_URL or a gateway listed in STROM_TAMS_ALLOWED_GATEWAYS; otherwise no token. Ignored in OSC PAT/SAT mode.",
-                PropertyType::String,
-                PropertyValue::String(String::new()),
-            ),
-            simple_prop(
-                "osc_service_id",
-                "OSC Service ID",
-                "OSC PAT/SAT mode only. The OSC service type the SAT is scoped to. Leave empty to derive it from the gateway URL (the service-type label of an *.osaas.io host). A SAT is sent only to an HTTPS OSC host of that service type, or to a gateway listed in STROM_TAMS_ALLOWED_GATEWAYS.",
-                PropertyType::String,
-                PropertyValue::String(String::new()),
-            ),
+            ],
+            // Shared with the Media Player's timeline mode.
+            crate::tams::auth::auth_properties(None),
+            vec![
             simple_prop(
                 "label",
                 "Title",
@@ -1246,7 +1200,9 @@ fn tams_output_definition() -> BlockDefinition {
                 PropertyType::String,
                 PropertyValue::String(String::new()),
             ),
-        ],
+            ],
+        ]
+        .concat(),
         external_pads: ExternalPads {
             inputs: vec![
                 ExternalPad {
