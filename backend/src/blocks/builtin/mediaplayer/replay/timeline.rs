@@ -385,7 +385,9 @@ pub struct ReplayTimeline {
     /// TAI that frame 0 holds: the group's start when first known.
     origin_tai: AtomicI64,
     clock_source: Mutex<Option<gst::glib::WeakRef<gst::Element>>>,
-    created: Instant,
+    /// Start of the stand-in running time before the flow plays; reset with
+    /// the group, so it is on the same footing as the new run's running time.
+    created: Mutex<Instant>,
     players: Mutex<Vec<Weak<PlayerStats>>>,
     /// Last paused-position command: when it was applied and its cursor, so a
     /// player can report how long until it pushed that instant.
@@ -417,7 +419,7 @@ impl ReplayTimeline {
             anchor: Mutex::new(START_ANCHOR),
             origin_tai: AtomicI64::new(UNKNOWN),
             clock_source: Mutex::new(None),
-            created: Instant::now(),
+            created: Mutex::new(Instant::now()),
             players: Mutex::new(Vec::new()),
             last_cmd: Mutex::new(None),
             cmd_to_push_us: AtomicU64::new(0),
@@ -425,8 +427,9 @@ impl ReplayTimeline {
         }
     }
 
-    /// Called by each player at build. The first player of a new run resets
-    /// the group, so a rebuilt flow can change sources.
+    /// Called by each player at build. The first player of a new run (no
+    /// player registered, the previous run's having unregistered) resets the
+    /// group, so a rebuilt flow can change sources, rates and range.
     pub fn register_player(&self, stats: &Arc<PlayerStats>) {
         let mut players = lock(&self.players);
         players.retain(|w| w.strong_count() > 0);
@@ -434,8 +437,19 @@ impl ReplayTimeline {
             self.origin_tai.store(UNKNOWN, Ordering::Relaxed);
             *lock(&self.anchor) = START_ANCHOR;
             *lock(&self.last_pushed) = None;
+            *lock(&self.last_cmd) = None;
+            *lock(&self.clock_source) = None;
+            *lock(&self.created) = Instant::now();
         }
         players.push(Arc::downgrade(stats));
+    }
+
+    /// Called when a player shuts down (its flow stops). Its stats may live
+    /// on a little in threads that are winding down; they no longer count
+    /// for the group's range, grids or reset.
+    pub fn unregister_player(&self, stats: &Arc<PlayerStats>) {
+        let target = Arc::downgrade(stats);
+        lock(&self.players).retain(|w| w.strong_count() > 0 && !w.ptr_eq(&target));
     }
 
     fn players(&self) -> Vec<Arc<PlayerStats>> {
@@ -471,7 +485,7 @@ impl ReplayTimeline {
                 return clock.time().nseconds() as i64 - base.nseconds() as i64;
             }
         }
-        self.created.elapsed().as_nanos() as i64
+        lock(&self.created).elapsed().as_nanos() as i64
     }
 
     /// The group's range, once some angle has reported its extent.

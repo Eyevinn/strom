@@ -477,3 +477,24 @@ fn group_start_is_frame_zero_on_every_grid() {
         assert_eq!(tl.origin_on(&g), Some(g.floor_frame(BASE + 15 * MS)));
     }
 }
+
+#[test]
+fn a_new_run_resets_the_group_even_while_old_stats_live_on() {
+    let old = player("cam0", BASE, BASE + 60 * S, Some((50, 1)));
+    let tl = timeline_of(std::slice::from_ref(&old));
+    tl.apply_at(seek_tai(BASE + 30 * S), 0).unwrap();
+    assert_eq!(tl.origin_tai(), BASE);
+    // The flow stops: the player unregisters, but its stats are still held
+    // (a fetch thread winding down).
+    tl.unregister_player(&old);
+    // The rebuilt flow's player has another source.
+    let new = player("cam0", BASE + 100 * S, BASE + 160 * S, Some((25, 1)));
+    tl.register_player(&new);
+    assert_eq!(tl.origin_tai(), UNKNOWN);
+    let b = tl.bounds().unwrap();
+    assert_eq!(b.start, BASE + 100 * S, "the old extent no longer counts");
+    assert_eq!(tl.reference().map(|g| g.fps_n), Some(25));
+    // The cursor starts over at the new start.
+    assert_eq!(tl.tai_at(0), Some(BASE + 100 * S));
+    drop(old);
+}

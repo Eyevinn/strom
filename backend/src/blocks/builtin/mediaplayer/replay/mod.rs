@@ -31,7 +31,6 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
-use std::sync::Arc;
 use strom_types::element::ElementPadRef;
 use strom_types::{FlowId, PropertyValue};
 use tracing::info;
@@ -153,11 +152,15 @@ pub fn build(
         output_rate,
     );
 
+    // The bus handler owns the player for the flow's run: when the flow
+    // stops, the handler is disconnected and dropped, and the guard shuts the
+    // player down. A flow built but never started drops the guard with the
+    // unused handler.
+    let guard = player::PlayerGuard(player);
     let bus_message_handler: BusMessageConnectFn = Box::new(move |bus: &gst::Bus, _, _| {
-        player.start();
-        let keep = Arc::clone(&player);
+        guard.0.start();
         bus.connect_message(None, move |_, _| {
-            let _ = &keep;
+            let _ = &guard;
         })
     });
 

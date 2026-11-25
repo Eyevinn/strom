@@ -170,7 +170,7 @@ impl Fetcher {
     }
 
     /// Run on a dedicated thread until `stop` is set.
-    pub fn spawn(self: Arc<Self>, stop: Arc<AtomicBool>) {
+    pub fn spawn(self: Arc<Self>, stop: Arc<AtomicBool>) -> Option<std::thread::JoinHandle<()>> {
         let name = format!("replay-fetch-{}", self.block_id);
         let spawned = std::thread::Builder::new().name(name).spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
@@ -183,10 +183,26 @@ impl Fetcher {
                     return;
                 }
             };
-            rt.block_on(self.run(stop));
+            // Leave at once on stop, also from a request that is waiting on
+            // the network (dropping the future cancels it).
+            let watch = Arc::clone(&stop);
+            rt.block_on(async move {
+                tokio::select! {
+                    _ = self.run(stop) => {}
+                    _ = async {
+                        while !watch.load(Ordering::Relaxed) {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                    } => {}
+                }
+            });
         });
-        if let Err(e) = spawned {
-            warn!("Replay: cannot start fetch thread: {}", e);
+        match spawned {
+            Ok(h) => Some(h),
+            Err(e) => {
+                warn!("Replay: cannot start fetch thread: {}", e);
+                None
+            }
         }
     }
 
@@ -501,6 +517,7 @@ mod tests {
         list_fails: bool,
         fetch_fails: bool,
         fetch_panics: bool,
+        fetch_hangs: bool,
         lists: AtomicU64,
         fetches: Mutex<HashMap<i64, u32>>,
     }
@@ -526,6 +543,7 @@ mod tests {
                 list_fails,
                 fetch_fails,
                 fetch_panics: false,
+                fetch_hangs: false,
                 lists: AtomicU64::new(0),
                 fetches: Mutex::new(HashMap::new()),
             }
@@ -576,6 +594,9 @@ mod tests {
             *lock(&self.fetches).entry(seg.start_ns).or_insert(0) += 1;
             if self.fetch_panics {
                 panic!("fetch task panics");
+            }
+            if self.fetch_hangs {
+                tokio::time::sleep(Duration::from_secs(30)).await;
             }
             if self.fetch_fails {
                 anyhow::bail!("404");
@@ -656,6 +677,31 @@ mod tests {
         run_fetcher(Arc::clone(&mock), None, Duration::from_millis(1200));
         // The slot is freed and the segment retried after its backoff.
         assert!(mock.fetches_of(100) >= 2);
+    }
+
+    #[test]
+    fn stop_ends_the_fetcher_during_a_slow_request() {
+        let mock = Arc::new(Mock {
+            fetch_hangs: true,
+            ..Mock::build(10, 1, false, false)
+        });
+        let timeline = super::super::timeline::get_or_create(uuid::Uuid::new_v4(), "g");
+        let stats = Arc::new(PlayerStats::new("p"));
+        timeline.register_player(&stats);
+        let fetcher = Arc::new(Fetcher::new("p", mock.clone(), timeline, stats, 2));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = Arc::clone(&fetcher).spawn(Arc::clone(&stop)).unwrap();
+        let t0 = Instant::now();
+        while mock.fetches_of(100) == 0 && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let t1 = Instant::now();
+        while !handle.is_finished() && t1.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(handle.is_finished());
+        assert!(t1.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

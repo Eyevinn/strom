@@ -211,6 +211,17 @@ impl ReplayPlayer {
         self.stop.store(true, Ordering::Relaxed);
     }
 
+    /// Stop the player for good (its flow stopped or was torn down): every
+    /// thread winds down on its own (a decode within its timeout, the fetcher
+    /// at once, the others within one loop), and the player leaves its
+    /// group, so the group's next run starts from a clean state.
+    pub fn shutdown(&self) {
+        if !self.stop.swap(true, Ordering::SeqCst) {
+            debug!("Replay {}: shutting down", self.block_id);
+        }
+        self.timeline.unregister_player(&self.stats);
+    }
+
     // --- decoding -----------------------------------------------------------
 
     fn decode_worker(self: Arc<Self>, rx: Arc<Mutex<mpsc::Receiver<Arc<Segment>>>>) {
@@ -639,7 +650,18 @@ fn holds(captured: i64, period: i64, t: i64) -> bool {
 
 impl Drop for ReplayPlayer {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.shutdown();
+    }
+}
+
+/// Owner of a player for its flow's lifetime: shuts the player down when
+/// dropped. The player's own threads hold it too, so its `Drop` alone would
+/// not run while they live.
+pub struct PlayerGuard(pub Arc<ReplayPlayer>);
+
+impl Drop for PlayerGuard {
+    fn drop(&mut self) {
+        self.0.shutdown();
     }
 }
 
