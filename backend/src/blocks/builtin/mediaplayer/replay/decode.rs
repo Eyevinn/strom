@@ -11,6 +11,7 @@ use super::source::Segment;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
+use std::time::{Duration, Instant};
 
 /// Pick the best available H.264 decoder. `STROM_REPLAY_DECODER` overrides
 /// the choice (diagnostics), when that element exists.
@@ -49,11 +50,22 @@ pub struct Decoded {
     pub caps: gst::Caps,
 }
 
-/// Decode one segment held in memory.
+/// How long a decode may take before it is given up: five times the
+/// segment's duration, at least 5 s and at most 60 s.
+pub fn decode_timeout(segment_ns: i64) -> Duration {
+    Duration::from_nanos((segment_ns.max(0) as u64).saturating_mul(5))
+        .clamp(Duration::from_secs(5), Duration::from_secs(60))
+}
+
+/// Decode one segment held in memory. Fails on a pipeline error, or when the
+/// stream has not ended within `timeout`: a stream that errors before its end
+/// (an unlinkable codec, no video stream, garbage) never reaches the appsink
+/// as end of stream, so waiting for it alone would block for ever.
 pub fn decode_bytes(
     bytes: &[u8],
     container: Option<&str>,
     decoder: &str,
+    timeout: Duration,
 ) -> Result<Decoded, String> {
     let (demux, src_caps) = demux_for(container);
     let desc = format!(
@@ -65,6 +77,16 @@ pub fn decode_bytes(
         .map_err(|e| e.to_string())?
         .downcast::<gst::Pipeline>()
         .map_err(|_| "not a pipeline".to_string())?;
+    let result = run_decode(&pipeline, bytes, timeout);
+    let _ = pipeline.set_state(gst::State::Null);
+    result
+}
+
+fn run_decode(
+    pipeline: &gst::Pipeline,
+    bytes: &[u8],
+    timeout: Duration,
+) -> Result<Decoded, String> {
     let src = pipeline
         .by_name("src")
         .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
@@ -73,8 +95,9 @@ pub fn decode_bytes(
         .by_name("sink")
         .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
         .ok_or("no appsink")?;
+    let bus = pipeline.bus().ok_or("no bus")?;
     // A pipeline outside a flow: give its pool threads normal scheduling.
-    crate::gst::thread_priority::reset_streaming_threads(&pipeline);
+    crate::gst::thread_priority::reset_streaming_threads(pipeline);
     // The whole object as one buffer, then end of stream.
     src.set_max_bytes(bytes.len() as u64 + 1);
     src.push_buffer(gst::Buffer::from_slice(bytes.to_vec()))
@@ -83,27 +106,39 @@ pub fn decode_bytes(
     pipeline
         .set_state(gst::State::Playing)
         .map_err(|e| e.to_string())?;
-    let mut frames = Vec::with_capacity(64);
-    let mut caps = None;
-    while let Ok(sample) = sink.pull_sample() {
-        if caps.is_none() {
-            caps = sample.caps_owned();
-        }
-        if let Some(b) = sample.buffer_owned() {
-            if let Some(pts) = b.pts() {
-                frames.push((pts.nseconds(), b));
-            }
-        }
-    }
-    let err = pipeline.bus().and_then(|bus| {
+    let bus_error = || {
         bus.pop_filtered(&[gst::MessageType::Error])
             .map(|m| match m.view() {
                 gst::MessageView::Error(e) => e.error().to_string(),
                 _ => String::new(),
             })
-    });
-    let _ = pipeline.set_state(gst::State::Null);
-    if let Some(e) = err {
+    };
+    let deadline = Instant::now() + timeout;
+    let mut frames = Vec::with_capacity(64);
+    let mut caps = None;
+    loop {
+        if let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(50)) {
+            if caps.is_none() {
+                caps = sample.caps_owned();
+            }
+            if let Some(b) = sample.buffer_owned() {
+                if let Some(pts) = b.pts() {
+                    frames.push((pts.nseconds(), b));
+                }
+            }
+            continue;
+        }
+        if sink.is_eos() {
+            break;
+        }
+        if let Some(e) = bus_error() {
+            return Err(e);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("no end of stream within {:?}", timeout));
+        }
+    }
+    if let Some(e) = bus_error() {
         return Err(e);
     }
     let caps = caps.ok_or("no frames decoded")?;
@@ -216,5 +251,85 @@ mod tests {
         let grid = FrameGrid::new(50, 1, BASE).unwrap();
         let out = map_to_grid::<u8>(&seg(BASE, BASE + 1), &grid, vec![]);
         assert!(out.is_empty());
+    }
+
+    /// MPEG-TS of `frames` frames of 320x240 at 25 fps, encoded with
+    /// `encoder` (with B-frames for H.264).
+    pub(super) fn test_ts(encoder: &str, frames: u32) -> Vec<u8> {
+        gst::init().unwrap();
+        let (enc, parse) = match encoder {
+            "x265enc" => ("x265enc key-int-max=25", "h265parse"),
+            _ => ("x264enc bframes=2 key-int-max=25", "h264parse"),
+        };
+        let desc = format!(
+            "videotestsrc num-buffers={} ! video/x-raw,width=320,height=240,framerate=25/1 ! \
+             {} ! {} ! mpegtsmux ! appsink name=sink sync=false",
+            frames, enc, parse
+        );
+        let p = gst::parse::launch(&desc)
+            .unwrap()
+            .downcast::<gst::Pipeline>()
+            .unwrap();
+        let sink = p
+            .by_name("sink")
+            .unwrap()
+            .downcast::<gst_app::AppSink>()
+            .unwrap();
+        p.set_state(gst::State::Playing).unwrap();
+        let mut out = Vec::new();
+        while let Ok(s) = sink.pull_sample() {
+            out.extend_from_slice(&s.buffer().unwrap().map_readable().unwrap());
+        }
+        p.set_state(gst::State::Null).unwrap();
+        out
+    }
+
+    /// Run a decode on another thread; `None` if it has not returned in 30 s.
+    fn decode_in_thread(bytes: Vec<u8>, timeout: Duration) -> Option<Result<Decoded, String>> {
+        gst::init().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(decode_bytes(&bytes, None, pick_decoder(), timeout));
+        });
+        rx.recv_timeout(Duration::from_secs(30)).ok()
+    }
+
+    #[test]
+    fn h264_ts_decodes() {
+        let d = decode_in_thread(test_ts("x264enc", 25), Duration::from_secs(10))
+            .expect("decode returned")
+            .expect("decode ok");
+        assert_eq!(d.frames.len(), 25);
+        assert_eq!(caps_frame_rate(&d.caps), Some((25, 1)));
+    }
+
+    #[test]
+    fn garbage_fails_instead_of_hanging() {
+        let bytes: Vec<u8> = (0..188 * 200u32).map(|i| (i * 7919 % 251) as u8).collect();
+        let r = decode_in_thread(bytes, Duration::from_secs(5)).expect("decode returned");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn empty_input_fails_instead_of_hanging() {
+        let r = decode_in_thread(Vec::new(), Duration::from_secs(5)).expect("decode returned");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn h265_ts_fails_instead_of_hanging() {
+        // tsdemux's H.265 pad cannot link to h264parse: the stream stops
+        // before its end of stream reaches the appsink.
+        let r = decode_in_thread(test_ts("x265enc", 25), Duration::from_secs(5))
+            .expect("decode returned");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn timeout_scales_with_segment_length() {
+        assert_eq!(decode_timeout(1_000_000_000), Duration::from_secs(5));
+        assert_eq!(decode_timeout(10_000_000_000), Duration::from_secs(50));
+        assert_eq!(decode_timeout(i64::MAX), Duration::from_secs(60));
+        assert_eq!(decode_timeout(-1), Duration::from_secs(5));
     }
 }

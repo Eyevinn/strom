@@ -14,7 +14,7 @@
 //!   flushes or seeks, and never waits on the network.
 
 use super::cache::{by_urgency, Fetcher, SegmentStore};
-use super::decode::{caps_frame_rate, decode_bytes, map_to_grid, pick_decoder};
+use super::decode::{caps_frame_rate, decode_bytes, decode_timeout, map_to_grid, pick_decoder};
 use super::source::{Segment, SourceIndex};
 use super::timeline::{PlayerStats, ReplayTimeline};
 use gstreamer as gst;
@@ -166,7 +166,12 @@ impl ReplayPlayer {
         };
         let container = self.store.info().and_then(|i| i.container);
         let started = Instant::now();
-        let result = decode_bytes(&bytes, container.as_deref(), self.decoder);
+        let result = decode_bytes(
+            &bytes,
+            container.as_deref(),
+            self.decoder,
+            decode_timeout(seg.duration_ns()),
+        );
         let ms = started.elapsed().as_millis() as u64;
         let decoded = match result {
             Ok(d) => d,
