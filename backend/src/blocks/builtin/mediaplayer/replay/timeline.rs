@@ -27,11 +27,11 @@
 use super::grid::FrameGrid;
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Instant;
+use strom_types::replay::{ReplayCommandResult, ReplayFrameTime, ReplayInstant};
 use strom_types::tai::{
     format_calendar_ms, format_utc_ms, parse_utc, tai_to_utc_ns, utc_to_tai_ns,
 };
@@ -129,24 +129,33 @@ impl FrameTime {
     /// JSON for the control API. `tai_ns` is a string: it does not fit in a
     /// JavaScript number.
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "frame": self.frame,
-            "utc": format_utc_ms(self.utc_ns),
-            "tai": tai_string(self.tai_ns),
-            "tai_ns": self.tai_ns.to_string(),
-            "tai_clock": format_calendar_ms(self.tai_ns),
-            "frame_in_second": self.frame_in_second,
-        })
+        serde_json::to_value(self.to_api()).unwrap_or_default()
+    }
+
+    pub fn to_api(&self) -> ReplayFrameTime {
+        ReplayFrameTime {
+            frame: self.frame,
+            utc: format_utc_ms(self.utc_ns),
+            tai: tai_string(self.tai_ns),
+            tai_ns: self.tai_ns.to_string(),
+            tai_clock: format_calendar_ms(self.tai_ns),
+            frame_in_second: self.frame_in_second,
+        }
     }
 }
 
-/// An instant (not a frame) as JSON: UTC, TAI, and the TAI ns as a string.
+/// An instant (not a frame): UTC, TAI, and the TAI ns as a string.
+pub fn instant(tai_ns: i64) -> ReplayInstant {
+    ReplayInstant {
+        utc: format_utc_ms(tai_to_utc_ns(tai_ns)),
+        tai: tai_string(tai_ns),
+        tai_ns: tai_ns.to_string(),
+    }
+}
+
+/// [`instant`] as JSON.
 pub fn instant_json(tai_ns: i64) -> serde_json::Value {
-    serde_json::json!({
-        "utc": format_utc_ms(tai_to_utc_ns(tai_ns)),
-        "tai": tai_string(tai_ns),
-        "tai_ns": tai_ns.to_string(),
-    })
+    serde_json::to_value(instant(tai_ns)).unwrap_or_default()
 }
 
 /// UTC ns now, from the host's wall clock.
@@ -319,42 +328,58 @@ const START_ANCHOR: Anchor = Anchor {
     speed: 0.0,
 };
 
-/// Operator commands.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "cmd", rename_all = "snake_case")]
-pub enum Command {
-    /// Pause and move by a number of reference-grid frames.
-    Jog {
-        frames: i64,
-    },
-    /// Go to a reference frame (relative to the group origin), or to an
-    /// instant given as UTC (RFC 3339, e.g. `2026-11-24T13:21:56.080Z`) or TAI
-    /// (TAMS `"<s>:<ns>"`), keeping the speed. Exactly one of the three.
-    Seek {
-        #[serde(default)]
-        frame: Option<i64>,
-        #[serde(default)]
-        utc: Option<String>,
-        #[serde(default)]
-        tai: Option<String>,
-    },
-    /// Move by milliseconds, keeping the speed.
-    SeekRel {
-        ms: i64,
-    },
-    /// Play at a speed (negative = reverse, 0 = pause).
-    Speed {
-        speed: f64,
-    },
-    Play,
-    Pause,
-    /// Go to the live edge (the last instant every angle has) and pause.
-    End,
-    /// Play at 1x from the live edge minus a margin (default 1.5 s).
-    Live {
-        #[serde(default)]
-        margin_ms: Option<u64>,
-    },
+pub use strom_types::replay::ReplayCommand as Command;
+
+/// Why a command was refused. Nothing changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandError {
+    /// The command is malformed or a value is out of range (HTTP 400).
+    Invalid(String),
+    /// The command is valid but does not apply to the group's state now,
+    /// e.g. no media yet (HTTP 409).
+    Conflict(String),
+}
+
+impl CommandError {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Invalid(m) | Self::Conflict(m) => m,
+        }
+    }
+
+    /// `"invalid"` or `"conflict"`, for the WebSocket error.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Invalid(_) => "invalid",
+            Self::Conflict(_) => "conflict",
+        }
+    }
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+fn invalid(m: impl Into<String>) -> CommandError {
+    CommandError::Invalid(m.into())
+}
+
+fn conflict(m: impl Into<String>) -> CommandError {
+    CommandError::Conflict(m.into())
+}
+
+/// Parse a command from JSON. A `seq` field (the WebSocket's correlation id)
+/// is ignored; any other unknown field is an error, so a typo is not
+/// silently dropped.
+pub fn parse_command(mut value: serde_json::Value) -> Result<Command, CommandError> {
+    if let Some(o) = value.as_object_mut() {
+        o.remove("seq");
+    } else {
+        return Err(invalid("a command is a JSON object with a \"cmd\" field"));
+    }
+    serde_json::from_value(value).map_err(|e| invalid(e.to_string()))
 }
 
 /// The group's playable range, TAI ns.
@@ -566,19 +591,19 @@ impl ReplayTimeline {
     }
 
     /// Apply a command at "now".
-    pub fn apply(&self, cmd: Command) -> Result<Applied, String> {
+    pub fn apply(&self, cmd: Command) -> Result<Applied, CommandError> {
         self.apply_at(cmd, self.now_rt())
     }
 
     /// Apply a command at running time `now`. Fails, changing nothing, on a
     /// target that does not parse or a group that has no media yet.
-    pub fn apply_at(&self, cmd: Command, now: i64) -> Result<Applied, String> {
+    pub fn apply_at(&self, cmd: Command, now: i64) -> Result<Applied, CommandError> {
         let b = self
             .bounds()
-            .ok_or_else(|| "the group has no media yet".to_string())?;
+            .ok_or_else(|| conflict("the group has no media yet"))?;
         let reference = self.reference();
         let need_ref =
-            || reference.ok_or_else(|| "the group's frame rate is not known yet".to_string());
+            || reference.ok_or_else(|| conflict("the group's frame rate is not known yet"));
         let mut a = lock(&self.anchor);
         let cur = Self::eval(&a, now, &b);
         let (tai, speed) = match cmd {
@@ -596,22 +621,28 @@ impl ReplayTimeline {
                         frame_centre(&g, frame_in(&g, &b, g.floor_frame(self.origin_tai()), f))
                     }
                     (None, Some(u), None) => parse_utc(&u).map(utc_to_tai_ns).ok_or_else(|| {
-                        format!("seek: bad utc '{}', want e.g. 2026-11-24T13:21:56.080Z", u)
+                        invalid(format!(
+                            "seek: bad utc '{}', want e.g. 2026-11-24T13:21:56.080Z",
+                            u
+                        ))
                     })?,
                     (None, None, Some(t)) => parse_timestamp_signed(&t).ok_or_else(|| {
-                        format!("seek: bad tai '{}', want \"<seconds>:<nanoseconds>\"", t)
+                        invalid(format!(
+                            "seek: bad tai '{}', want \"<seconds>:<nanoseconds>\"",
+                            t
+                        ))
                     })?,
-                    _ => return Err("seek: give exactly one of frame, utc, tai".to_string()),
+                    _ => return Err(invalid("seek: give exactly one of frame, utc, tai")),
                 };
                 (to, a.speed)
             }
             Command::SeekRel { ms } => (cur.saturating_add(ms.saturating_mul(1_000_000)), a.speed),
             Command::Speed { speed } => {
                 if !speed.is_finite() || speed.abs() > MAX_SPEED {
-                    return Err(format!(
+                    return Err(invalid(format!(
                         "speed: {} is outside -{} .. {}",
                         speed, MAX_SPEED, MAX_SPEED
-                    ));
+                    )));
                 }
                 (cur, speed)
             }
@@ -644,6 +675,17 @@ impl ReplayTimeline {
         let g = self.reference()?;
         let origin = self.origin_on(&g)?;
         Some(FrameTime::new(&g, g.floor_frame(tai), origin))
+    }
+
+    /// What a command did, for the API.
+    pub fn result(&self, a: &Applied) -> ReplayCommandResult {
+        let time = self.reference_time(a.tai);
+        ReplayCommandResult {
+            speed: a.speed,
+            cursor_tai: instant(a.tai),
+            frame: time.as_ref().map(|t| t.frame),
+            time: time.map(|t| t.to_api()),
+        }
     }
 
     /// The group's time domain: real TAI only when every player says so.

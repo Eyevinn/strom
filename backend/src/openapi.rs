@@ -191,6 +191,8 @@ use utoipa::OpenApi;
         crate::api::mediaplayer::get_player_state,
         crate::api::mediaplayer::set_playlist,
         crate::api::mediaplayer::control_player,
+        crate::api::replay::replay_command,
+        crate::api::replay::replay_state,
         crate::api::mediaplayer::seek_player,
         crate::api::mediaplayer::goto_file,
         // Probe endpoints
@@ -325,6 +327,10 @@ use utoipa::OpenApi;
             strom_types::vision_mixer::Zone,
             strom_types::vision_mixer::ZoneBorder,
             strom_types::api::MultiviewEndpointResponse,
+            strom_types::replay::ReplayCommand,
+            strom_types::replay::ReplayCommandResult,
+            strom_types::replay::ReplayInstant,
+            strom_types::replay::ReplayFrameTime,
             OverlayAlphaRequest,
             OverlayAlphaResponse,
             DskToggleRequest,
@@ -401,6 +407,7 @@ use utoipa::OpenApi;
         (name = "mcp", description = "Model Context Protocol (MCP) endpoints"),
         (name = "discovery", description = "AES67 stream and device discovery endpoints"),
         (name = "media_player", description = "Media player control endpoints"),
+        (name = "replay", description = "Replay group control: commands and state"),
         (name = "probes", description = "Buffer age probe endpoints"),
         (name = "websocket", description = "WebSocket real-time communication"),
         (name = "devtools", description = "Remote control of the browsers behind HTML sources")

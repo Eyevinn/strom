@@ -522,3 +522,74 @@ fn a_timeline_nobody_holds_is_dropped() {
     drop(tl);
     assert!(get(flow, "prune-test").is_none());
 }
+
+// --- command schema ------------------------------------------------------
+
+fn parse(s: &str) -> Result<Command, CommandError> {
+    parse_command(serde_json::from_str(s).unwrap())
+}
+
+#[test]
+fn commands_parse_with_seq_and_refuse_unknown_fields() {
+    assert_eq!(
+        parse(r#"{"cmd":"jog","frames":-2,"seq":7}"#).unwrap(),
+        Command::Jog { frames: -2 }
+    );
+    // A typo is an error, not a silently ignored field.
+    let e = parse(r#"{"cmd":"seek","frmae":3}"#).unwrap_err();
+    assert!(matches!(e, CommandError::Invalid(_)), "{:?}", e);
+    assert!(e.message().contains("frmae"), "{}", e);
+    assert!(matches!(
+        parse(r#"{"cmd":"fly"}"#),
+        Err(CommandError::Invalid(_))
+    ));
+    assert!(matches!(
+        parse(r#"{"cmd":"jog"}"#),
+        Err(CommandError::Invalid(_))
+    ));
+    assert!(matches!(parse(r#"[1]"#), Err(CommandError::Invalid(_))));
+    // The schema round-trips.
+    let c = Command::Live {
+        margin_ms: Some(500),
+    };
+    let v = serde_json::to_value(&c).unwrap();
+    assert_eq!(v, serde_json::json!({"cmd": "live", "margin_ms": 500}));
+    assert_eq!(parse_command(v).unwrap(), c);
+}
+
+#[test]
+fn errors_tell_invalid_from_conflict() {
+    // No media yet: valid commands do not apply.
+    let tl = ReplayTimeline::new();
+    assert!(matches!(
+        tl.apply_at(Command::Play, 0),
+        Err(CommandError::Conflict(_))
+    ));
+    // Media but no frame rate yet: frame addressing does not apply.
+    let p = player("cam1", BASE, BASE + 10 * S, None);
+    let tl = timeline_of(std::slice::from_ref(&p));
+    assert!(matches!(
+        tl.apply_at(seek(5), 0),
+        Err(CommandError::Conflict(_))
+    ));
+    assert!(tl.apply_at(seek_tai(BASE + S), 0).is_ok());
+    // Bad values are invalid whatever the state.
+    assert!(matches!(
+        tl.apply_at(Command::Speed { speed: 20.0 }, 0),
+        Err(CommandError::Invalid(_))
+    ));
+    assert!(matches!(
+        tl.apply_at(seek_utc("yesterday"), 0),
+        Err(CommandError::Invalid(_))
+    ));
+}
+
+#[test]
+fn result_names_the_cursor_frame() {
+    let (tl, _p) = one_player(INGEST, TimeDomain::Tai);
+    let a = tl.apply_at(seek(195), 0).unwrap();
+    let r = tl.result(&a);
+    assert_eq!(r.frame, Some(195));
+    assert_eq!(r.time.unwrap().utc, "2026-11-24T13:21:59.980Z");
+    assert_eq!(r.cursor_tai.tai_ns, a.tai.to_string());
+}
