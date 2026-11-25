@@ -237,7 +237,21 @@ impl ReplayPlayer {
             "Replay {}: segment {} decoded in {} ms",
             self.block_id, seg.object_id, ms
         );
-        lock(&self.caps).get_or_insert(decoded.caps);
+        {
+            // The output caps are those of the first decoded segment; a
+            // segment in another layout would go out under the wrong caps.
+            let mut caps = lock(&self.caps);
+            match caps.as_ref() {
+                Some(out) if !same_layout(out, &decoded.caps) => {
+                    return Err(format!(
+                        "decoded as {}, the output is {}; not shown",
+                        decoded.caps, out
+                    ));
+                }
+                Some(_) => {}
+                None => *caps = Some(decoded.caps),
+            }
+        }
         if let (Some(lo), Some(hi)) = (frames.first().map(|f| f.0), frames.last().map(|f| f.0)) {
             let mut store = lock(&self.decoded);
             store.segments.insert(seg.start_ns, (lo, hi));
@@ -510,6 +524,23 @@ fn pick_decodes(
     out
 }
 
+/// Whether frames in caps `b` can go out under caps `a`: same format, size
+/// and interlacing (frame rate and colorimetry aside).
+fn same_layout(a: &gst::Caps, b: &gst::Caps) -> bool {
+    match (
+        gst_video::VideoInfo::from_caps(a),
+        gst_video::VideoInfo::from_caps(b),
+    ) {
+        (Ok(a), Ok(b)) => {
+            a.format() == b.format()
+                && a.width() == b.width()
+                && a.height() == b.height()
+                && a.interlace_mode() == b.interlace_mode()
+        }
+        _ => a == b,
+    }
+}
+
 /// Whether a frame captured at `captured` (TAI) with period `period` is the
 /// one on screen at group time `t`: it started at or before `t` and the next
 /// had not started. 1 ms of slack for timestamp rounding in the store.
@@ -600,6 +631,21 @@ mod tests {
         let later = t0 + Duration::from_millis(250);
         let retry = pick_decodes(&wanted, |_| false, &mut inflight, &failed, 2, later);
         assert_eq!(keys(retry), vec![0, 1]);
+    }
+
+    #[test]
+    fn segments_in_another_layout_are_told_apart() {
+        gst::init().unwrap();
+        let caps = |w: i32, rate: i32| {
+            gst::Caps::builder("video/x-raw")
+                .field("format", "NV12")
+                .field("width", w)
+                .field("height", 720)
+                .field("framerate", gst::Fraction::new(rate, 1))
+                .build()
+        };
+        assert!(same_layout(&caps(1280, 50), &caps(1280, 25)));
+        assert!(!same_layout(&caps(1280, 50), &caps(1920, 50)));
     }
 
     #[test]
