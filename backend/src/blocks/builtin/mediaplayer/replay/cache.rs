@@ -93,8 +93,9 @@ const MIN_GAP_NS: i64 = 1_000_000;
 const INDEX_VIEW_EVERY: Duration = Duration::from_millis(500);
 
 /// What the index knows: the ranges of listed chunks within the extent, and
-/// the holes between consecutive segments inside them. A hole that touches
-/// an unlisted chunk is not reported: there the index just has not looked.
+/// the stretches inside them that no segment covers (gaps). Outside the
+/// listed ranges the index has not looked, so nothing is said there; a gap
+/// that runs on past a listed range is cut at its edge.
 pub fn index_view(
     segs: &BTreeMap<i64, Arc<Segment>>,
     listed: &HashSet<i64>,
@@ -116,16 +117,21 @@ pub fn index_view(
             _ => ranges.push((s, e)),
         }
     }
-    let all_listed = |a: i64, b: i64| (chunk_of(a)..=chunk_of(b - 1)).all(|c| listed.contains(&c));
     let mut gaps = Vec::new();
-    let mut prev: Option<i64> = None;
-    for seg in segs.values() {
-        if let Some(end) = prev {
-            if seg.start_ns - end > MIN_GAP_NS && all_listed(end, seg.start_ns) {
-                gaps.push((end, seg.start_ns));
+    for &(ls, le) in &ranges {
+        // Walk the segments that overlap [ls, le); `covered` is how far
+        // media reaches so far.
+        let mut covered = ls;
+        let first = segs.range(..ls).next_back().map(|(_, s)| s);
+        for seg in first.into_iter().chain(segs.range(ls..le).map(|(_, s)| s)) {
+            if seg.start_ns - covered > MIN_GAP_NS {
+                gaps.push((covered, seg.start_ns));
             }
+            covered = covered.max(seg.end_ns);
         }
-        prev = Some(prev.map_or(seg.end_ns, |p| p.max(seg.end_ns)));
+        if le - covered > MIN_GAP_NS {
+            gaps.push((covered, le));
+        }
     }
     IndexView {
         listed: ranges,
@@ -701,8 +707,8 @@ mod tests {
 
     #[test]
     fn index_view_reports_holes_only_where_it_listed() {
-        // Segments of 1 s at 0..10 s, a hole 4..6 s, and one at 45 s (in a
-        // chunk of its own; 20..40 s was never listed).
+        // Segments of 1 s at 0..10 s, a hole 4..6 s, and one at 45..46 s.
+        // Chunk 1 (20..40 s) was never listed.
         let mut index = BTreeMap::new();
         for i in (0..4).chain(6..10) {
             index.insert(i * S, Arc::new(seg_at(i * S, (i + 1) * S)));
@@ -711,18 +717,24 @@ mod tests {
         let listed: HashSet<i64> = [0, 2].into_iter().collect();
         let v = index_view(&index, &listed, (0, 46 * S));
         assert_eq!(v.listed, vec![(0, 20 * S), (40 * S, 46 * S)]);
-        // 10..45 s crosses the unlisted chunk 1: not known to be a gap.
-        assert_eq!(v.gaps, vec![(4 * S, 6 * S)]);
-        // With every chunk listed, it is a gap.
+        // Holes are cut at the listed ranges: nothing is said about 20..40 s.
+        assert_eq!(
+            v.gaps,
+            vec![(4 * S, 6 * S), (10 * S, 20 * S), (40 * S, 45 * S)]
+        );
+        // With every chunk listed, 10..45 s is one gap, even though the
+        // chunk in the middle holds no segment at all.
         let listed: HashSet<i64> = [0, 1, 2].into_iter().collect();
         let v = index_view(&index, &listed, (0, 46 * S));
         assert_eq!(v.listed, vec![(0, 46 * S)]);
         assert_eq!(v.gaps, vec![(4 * S, 6 * S), (10 * S, 45 * S)]);
-        // Sub-millisecond seams are not gaps.
+        // A segment that starts before a listed range covers its start, and
+        // sub-millisecond seams are not gaps.
         let mut index = BTreeMap::new();
-        index.insert(0, Arc::new(seg_at(0, S)));
+        index.insert(-5 * S, Arc::new(seg_at(-5 * S, S)));
         index.insert(S + 500, Arc::new(seg_at(S + 500, 2 * S)));
-        assert!(index_view(&index, &listed, (0, 2 * S)).gaps.is_empty());
+        let v = index_view(&index, &[0].into_iter().collect(), (-5 * S, 2 * S));
+        assert!(v.gaps.is_empty(), "{:?}", v.gaps);
     }
 
     #[test]
