@@ -121,7 +121,12 @@ Things the group does by itself, as `{"type": "event", "event": ..., ...}`:
 | `start`, `end`, `live_edge` | The group's range. The live edge is where every angle has media. |
 | `live_edge_estimate`, `live_growing`, `behind_live_estimate_ms` | The live edge between index steps, estimated from when the steps arrived. It equals `live_edge` when the media does not grow. |
 | `reference_fps`, `frame_ns`, `time_domain` | Grid and time base (`tai`, `unanchored`, `unknown`). |
-| `players[]` | Per angle: `block`, `fps`, `output_fps`, `extent`, `indexed` (ranges its index has listed), `gaps` (holes inside them, with `duration_ms`), `shown` (the source frame going out, at its own capture time: a source that restarts can change its frame phase, and each frame keeps its own time), `in_sync` (the last tick found the frame that holds the group time), and counters. |
+| `players[]` | Per angle: `block`, `fps`, `output_fps`, `extent`, `indexed`, `gaps`, `shown` (the source frame going out, at its own capture time: a source that restarts can change its frame phase, and each frame keeps its own time), `in_sync` (the last tick found the frame that holds the group time), and counters. |
+
+`indexed` and `gaps` describe the recording as far as the player's index has seen it:
+
+- `indexed`: the stretches of the source the index has listed so far. It lists around the cursor (and follows a hole to its other end), so this grows as the cursor moves. It says what the player knows, not where the media is.
+- `gaps`: holes in the recording, between two pieces of media, each with `duration_ms`. A hole is reported once the index has listed it from the media before it to the media after it, however many listings that took, so a long hole is one gap, never pieces of it. Seams shorter than one frame period are not gaps; a single missing frame is.
 
 ## Examples
 

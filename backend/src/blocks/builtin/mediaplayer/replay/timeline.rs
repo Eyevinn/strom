@@ -207,8 +207,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// What a player's index knows (see `cache::index_view`): the TAI ranges it
-/// has listed, and the holes between segments inside them.
+/// What a player's index knows (see `cache::Coverage`): the TAI ranges it
+/// has listed, and the holes in the source it has listed from end to end.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IndexView {
     pub listed: Vec<(i64, i64)>,
