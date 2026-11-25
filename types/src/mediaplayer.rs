@@ -105,6 +105,8 @@ pub const SOURCE_PROPERTY: &str = "source";
 pub const GROUP_PROPERTY: &str = "group";
 /// Timeline mode: seconds of decoded frames kept ahead of the playhead.
 pub const DECODED_AHEAD_PROPERTY: &str = "decoded_ahead_s";
+/// Timeline mode: output frame rate (empty = the source's rate).
+pub const OUTPUT_FRAMERATE_PROPERTY: &str = "output_framerate";
 /// Playlist and timeline mode: seconds of coded media fetched ahead.
 pub const READ_AHEAD_PROPERTY: &str = "read_ahead_s";
 /// TAMS source auth, named as on TAMS Output.
@@ -176,6 +178,7 @@ pub mod legacy {
     pub const REPLAY_AUTH_MODE: &str = "replay_auth_mode";
     pub const REPLAY_API_TOKEN: &str = "replay_api_token";
     pub const REPLAY_OSC_SERVICE_ID: &str = "replay_osc_service_id";
+    pub const REPLAY_OUTPUT_FRAMERATE: &str = "replay_output_framerate";
 }
 
 fn non_empty_str<'a>(properties: &'a HashMap<String, PropertyValue>, key: &str) -> Option<&'a str> {
@@ -206,8 +209,9 @@ fn legacy_mode(properties: &HashMap<String, PropertyValue>) -> Option<PlayerMode
 /// - `replay_group` non-empty: `mode=timeline`, `group`;
 /// - `stinger_mode=true`: `mode=stinger` (a `replay_group` wins, as before);
 /// - `replay_source`, `replay_cache_s`, `replay_auth_mode`,
-///   `replay_api_token`, `replay_osc_service_id`: `source`,
-///   `decoded_ahead_s`, `auth_mode`, `api_token`, `osc_service_id`;
+///   `replay_api_token`, `replay_osc_service_id`, `replay_output_framerate`:
+///   `source`, `decoded_ahead_s`, `auth_mode`, `api_token`,
+///   `osc_service_id`, `output_framerate`;
 /// - `replay_prefetch_s`: `read_ahead_s`, the one read-ahead of both modes.
 ///   A replay block ignored `read_ahead_s`, so its old value is replaced.
 ///
@@ -285,6 +289,7 @@ pub fn migrate_legacy_properties(properties: &mut HashMap<String, PropertyValue>
         (legacy::REPLAY_AUTH_MODE, AUTH_MODE_PROPERTY),
         (legacy::REPLAY_API_TOKEN, API_TOKEN_PROPERTY),
         (legacy::REPLAY_OSC_SERVICE_ID, OSC_SERVICE_ID_PROPERTY),
+        (legacy::REPLAY_OUTPUT_FRAMERATE, OUTPUT_FRAMERATE_PROPERTY),
     ] {
         if let Some(v) = properties.remove(old) {
             if properties.contains_key(new) {
@@ -409,6 +414,7 @@ mod tests {
             (legacy::REPLAY_AUTH_MODE, s("osc")),
             (legacy::REPLAY_API_TOKEN, s("t")),
             (legacy::REPLAY_OSC_SERVICE_ID, s("svc")),
+            (legacy::REPLAY_OUTPUT_FRAMERATE, s("50/1")),
             (READ_AHEAD_PROPERTY, PropertyValue::UInt(60)),
         ]);
         let changes = migrate_legacy_properties(&mut p);
@@ -423,6 +429,7 @@ mod tests {
             (AUTH_MODE_PROPERTY, s("osc")),
             (API_TOKEN_PROPERTY, s("t")),
             (OSC_SERVICE_ID_PROPERTY, s("svc")),
+            (OUTPUT_FRAMERATE_PROPERTY, s("50/1")),
         ]);
         assert_eq!(json(&p), json(&want));
         // Idempotent.
