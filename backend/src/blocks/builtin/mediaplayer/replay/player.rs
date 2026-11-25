@@ -13,8 +13,9 @@
 //!   motion repeats frames, reverse walks backwards: the output never stops,
 //!   flushes or seeks, and never waits on the network.
 
+use super::backoff::{worth_warning, Backoff};
 use super::cache::{by_urgency, Fetcher, SegmentStore};
-use super::decode::{caps_frame_rate, decode_bytes, map_to_grid, pick_decoder};
+use super::decode::{caps_frame_rate, decode_bytes, decode_timeout, map_to_grid, pick_decoder};
 use super::source::{Segment, SourceIndex};
 use super::timeline::{PlayerStats, ReplayTimeline};
 use gstreamer as gst;
@@ -34,12 +35,64 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Default budget for one player's decoded frames (1080p NV12 is about
+/// 3 MB a frame). `STROM_REPLAY_DECODED_MB` overrides it.
+const DEFAULT_DECODED_BUDGET_MB: u64 = 768;
+/// Segments kept decoded whatever the budget: the one under the cursor and
+/// the next.
+const MIN_DECODED_SEGMENTS: usize = 2;
+/// Upper bound of the decoded window ahead of the cursor, seconds.
+const MAX_DECODE_AHEAD_S: u64 = 30;
+
+/// One decoded segment: its first and last frame, and the bytes they hold.
+#[derive(Debug, Clone, Copy)]
+struct DecodedSegment {
+    first: i64,
+    last: i64,
+    bytes: u64,
+}
+
 /// Decoded frames by absolute frame number, and which frames each decoded
 /// segment contributed (for eviction).
 #[derive(Default)]
 struct FrameStore {
     frames: BTreeMap<i64, gst::Buffer>,
-    segments: HashMap<i64, (i64, i64)>,
+    segments: HashMap<i64, DecodedSegment>,
+    /// Decoded bytes per second of media, from the latest decode: the size
+    /// estimate of a segment not decoded yet.
+    bytes_per_s: f64,
+}
+
+impl FrameStore {
+    /// Decoded size of a segment, or an estimate.
+    fn size_of(&self, seg: &Segment) -> u64 {
+        match self.segments.get(&seg.start_ns) {
+            Some(d) => d.bytes,
+            None => (self.bytes_per_s * seg.duration_ns() as f64 / 1e9) as u64,
+        }
+    }
+}
+
+/// The most urgent of `wanted` (ordered by urgency) whose decoded frames fit
+/// in `budget` bytes, counting `size_of` each. The first `min_keep` always
+/// fit. Stops at the first that does not, so what is kept is never less
+/// urgent than what is left out.
+fn within_budget(
+    wanted: &[Arc<Segment>],
+    size_of: impl Fn(&Segment) -> u64,
+    budget: u64,
+    min_keep: usize,
+) -> Vec<Arc<Segment>> {
+    let mut total = 0u64;
+    let mut out = Vec::new();
+    for (i, s) in wanted.iter().enumerate() {
+        total = total.saturating_add(size_of(s));
+        if i >= min_keep && total > budget {
+            break;
+        }
+        out.push(Arc::clone(s));
+    }
+    out
 }
 
 pub struct ReplayPlayer {
@@ -51,13 +104,20 @@ pub struct ReplayPlayer {
     appsrc: gst::glib::WeakRef<gst_app::AppSrc>,
     decoded: Mutex<FrameStore>,
     inflight: Mutex<HashSet<i64>>,
+    /// Segments whose decode failed (or gave no frames), retried with backoff.
+    failed: Mutex<Backoff<i64>>,
     caps: Mutex<Option<gst::Caps>>,
     decoder: &'static str,
     workers: usize,
     /// Decoded window around the cursor, in its direction of travel.
     decode_behind_ns: i64,
     decode_ahead_ns: i64,
-    /// Read the bitstrip of pushed frames (STROM_REPLAY_BITSTRIP=1).
+    /// Most bytes of decoded frames to hold.
+    decoded_budget: u64,
+    /// Output frame rate; `None` = the source's own rate.
+    output_rate: Option<(u32, u32)>,
+    /// Read the bitstrip and burned-in time of pushed frames
+    /// (STROM_REPLAY_BITSTRIP=1).
     read_strip: bool,
     started: AtomicBool,
     stop: Arc<AtomicBool>,
@@ -71,6 +131,7 @@ impl ReplayPlayer {
         appsrc: &gst_app::AppSrc,
         cache_ahead_s: u64,
         prefetch_s: u64,
+        output_rate: Option<(u32, u32)>,
     ) -> Arc<Self> {
         let stats = Arc::new(PlayerStats::new(block_id));
         timeline.register_player(&stats);
@@ -92,11 +153,21 @@ impl ReplayPlayer {
             appsrc: appsrc.downgrade(),
             decoded: Mutex::new(FrameStore::default()),
             inflight: Mutex::new(HashSet::new()),
+            failed: Mutex::new(Backoff::new(
+                Duration::from_millis(250),
+                Duration::from_secs(10),
+            )),
             caps: Mutex::new(None),
             decoder,
             workers: 2,
             decode_behind_ns: 2 * S,
-            decode_ahead_ns: cache_ahead_s.max(1) as i64 * S,
+            decode_ahead_ns: cache_ahead_s.clamp(1, MAX_DECODE_AHEAD_S) as i64 * S,
+            decoded_budget: strom_types::env::var_opt("STROM_REPLAY_DECODED_MB")
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|mb| *mb > 0)
+                .unwrap_or(DEFAULT_DECODED_BUDGET_MB)
+                .saturating_mul(1 << 20),
+            output_rate,
             read_strip: strom_types::env::var_opt("STROM_REPLAY_BITSTRIP")
                 .is_some_and(|v| v == "1" || v == "true"),
             started: AtomicBool::new(false),
@@ -140,6 +211,17 @@ impl ReplayPlayer {
         self.stop.store(true, Ordering::Relaxed);
     }
 
+    /// Stop the player for good (its flow stopped or was torn down): every
+    /// thread winds down on its own (a decode within its timeout, the fetcher
+    /// at once, the others within one loop), and the player leaves its
+    /// group, so the group's next run starts from a clean state.
+    pub fn shutdown(&self) {
+        if !self.stop.swap(true, Ordering::SeqCst) {
+            debug!("Replay {}: shutting down", self.block_id);
+        }
+        self.timeline.unregister_player(&self.stats);
+    }
+
     // --- decoding -----------------------------------------------------------
 
     fn decode_worker(self: Arc<Self>, rx: Arc<Mutex<mpsc::Receiver<Arc<Segment>>>>) {
@@ -150,40 +232,58 @@ impl ReplayPlayer {
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
-            self.decode_one(&seg);
+            match self.decode_one(&seg) {
+                Ok(()) => lock(&self.failed).succeed(&seg.start_ns),
+                Err(e) => {
+                    let attempts = lock(&self.failed).fail(seg.start_ns, Instant::now());
+                    if worth_warning(attempts) {
+                        warn!(
+                            "Replay {}: segment {} not decoded (attempt {}): {}",
+                            self.block_id, seg.object_id, attempts, e
+                        );
+                    } else {
+                        debug!(
+                            "Replay {}: segment {} not decoded (attempt {}): {}",
+                            self.block_id, seg.object_id, attempts, e
+                        );
+                    }
+                }
+            }
             lock(&self.inflight).remove(&seg.start_ns);
         }
     }
 
-    fn decode_one(&self, seg: &Segment) {
+    /// Decode one segment into the frame store. An error means the segment
+    /// gave no usable frames; it is retried later with backoff.
+    fn decode_one(&self, seg: &Segment) -> Result<(), String> {
+        // Evicted meanwhile: nothing to do, it is sent again when refetched.
         let Some(bytes) = self.store.bytes(seg.start_ns) else {
-            return;
+            return Ok(());
         };
         let container = self.store.info().and_then(|i| i.container);
         let started = Instant::now();
-        let result = decode_bytes(&bytes, container.as_deref(), self.decoder);
+        let result = decode_bytes(
+            bytes,
+            container.as_deref(),
+            self.decoder,
+            decode_timeout(seg.duration_ns()),
+        );
         let ms = started.elapsed().as_millis() as u64;
-        let decoded = match result {
-            Ok(d) => d,
-            Err(e) => {
-                warn!(
-                    "Replay {}: segment {} failed: {}",
-                    self.block_id, seg.object_id, e
-                );
-                return;
-            }
-        };
+        let decoded = result?;
         // No frame rate from the index: take it from the stream.
-        let grid = self.timeline.grid().or_else(|| {
+        let grid = self.stats.grid().or_else(|| {
             let (n, d) = caps_frame_rate(&decoded.caps)?;
-            self.timeline.ensure_grid(n, d, seg.first_sample_tai())
+            self.stats.init_grid(n, d, seg.first_sample_tai())
         });
-        let Some(grid) = grid else {
-            warn!("Replay {}: no frame rate known", self.block_id);
-            return;
-        };
+        let grid = grid.ok_or("no frame rate known")?;
         let n_decoded = decoded.frames.len();
-        let frames = map_to_grid(seg, &grid, decoded.frames);
+        let frames = map_to_grid(seg, &grid, decoded.frames, decoded.first_pts);
+        if frames.is_empty() {
+            return Err(format!(
+                "none of {} decoded frames fall inside the segment's timerange",
+                n_decoded
+            ));
+        }
         let expected = ((seg.end_ns - seg.start_ns) as f64 / grid.frame_ns()).round() as usize;
         if frames.len() != expected {
             let first = grid.ceil_frame(seg.start_ns);
@@ -207,14 +307,40 @@ impl ReplayPlayer {
             "Replay {}: segment {} decoded in {} ms",
             self.block_id, seg.object_id, ms
         );
-        lock(&self.caps).get_or_insert(decoded.caps);
+        {
+            // The output caps are those of the first decoded segment; a
+            // segment in another layout would go out under the wrong caps.
+            let mut caps = lock(&self.caps);
+            match caps.as_ref() {
+                Some(out) if !same_layout(out, &decoded.caps) => {
+                    return Err(format!(
+                        "decoded as {}, the output is {}; not shown",
+                        decoded.caps, out
+                    ));
+                }
+                Some(_) => {}
+                None => *caps = Some(decoded.caps),
+            }
+        }
         if let (Some(lo), Some(hi)) = (frames.first().map(|f| f.0), frames.last().map(|f| f.0)) {
+            let bytes: u64 = frames.iter().map(|(_, b)| b.size() as u64).sum();
             let mut store = lock(&self.decoded);
-            store.segments.insert(seg.start_ns, (lo, hi));
+            if seg.duration_ns() > 0 {
+                store.bytes_per_s = bytes as f64 * 1e9 / seg.duration_ns() as f64;
+            }
+            store.segments.insert(
+                seg.start_ns,
+                DecodedSegment {
+                    first: lo,
+                    last: hi,
+                    bytes,
+                },
+            );
             store.frames.extend(frames);
         }
         self.stats.decodes.fetch_add(1, Ordering::Relaxed);
         self.stats.last_decode_ms.store(ms, Ordering::Relaxed);
+        Ok(())
     }
 
     fn scheduler(self: Arc<Self>, tx: mpsc::Sender<Arc<Segment>>) {
@@ -233,55 +359,63 @@ impl ReplayPlayer {
                         cursor + self.decode_behind_ns,
                     )
                 };
-                let wanted = by_urgency(&self.store.segments_in(lo, hi), cursor, forward);
+                let near = by_urgency(&self.store.segments_in(lo, hi), cursor, forward);
+                // The most urgent segments whose frames fit the memory budget.
+                let wanted = {
+                    let decoded = lock(&self.decoded);
+                    within_budget(
+                        &near,
+                        |s| decoded.size_of(s),
+                        self.decoded_budget,
+                        MIN_DECODED_SEGMENTS,
+                    )
+                };
                 {
                     let decoded = lock(&self.decoded);
                     let mut inflight = lock(&self.inflight);
-                    for s in &wanted {
-                        if inflight.len() >= self.workers {
-                            break;
-                        }
-                        let key = s.start_ns;
-                        if decoded.segments.contains_key(&key)
-                            || inflight.contains(&key)
-                            || self.store.bytes(key).is_none()
-                        {
-                            continue;
-                        }
-                        inflight.insert(key);
-                        if tx.send(Arc::clone(s)).is_err() {
+                    let mut failed = lock(&self.failed);
+                    let keys: HashSet<i64> = near.iter().map(|s| s.start_ns).collect();
+                    failed.retain(|k| keys.contains(k));
+                    let jobs = pick_decodes(
+                        &wanted,
+                        |k| decoded.segments.contains_key(&k) || self.store.bytes(k).is_none(),
+                        &mut inflight,
+                        &failed,
+                        self.workers,
+                        Instant::now(),
+                    );
+                    for s in jobs {
+                        if tx.send(s).is_err() {
                             return;
                         }
                     }
                 }
                 let keep: HashSet<i64> = wanted.iter().map(|s| s.start_ns).collect();
-                let mut store = lock(&self.decoded);
-                let evict: Vec<(i64, (i64, i64))> = store
-                    .segments
-                    .iter()
-                    .filter(|(k, _)| !keep.contains(k))
-                    .map(|(k, r)| (*k, *r))
-                    .collect();
-                for (k, (a, b)) in evict {
-                    store.segments.remove(&k);
-                    let doomed: Vec<i64> = store.frames.range(a..=b).map(|(f, _)| *f).collect();
-                    for f in doomed {
-                        store.frames.remove(&f);
+                // Frees the evicted frames after the lock is released, so a
+                // large eviction does not hold up the output tick.
+                let mut doomed: Vec<gst::Buffer> = Vec::new();
+                {
+                    let mut store = lock(&self.decoded);
+                    let evict: Vec<(i64, DecodedSegment)> = store
+                        .segments
+                        .iter()
+                        .filter(|(k, _)| !keep.contains(k))
+                        .map(|(k, d)| (*k, *d))
+                        .collect();
+                    for (k, d) in evict {
+                        store.segments.remove(&k);
+                        let frames: Vec<i64> = store
+                            .frames
+                            .range(d.first..=d.last)
+                            .map(|(f, _)| *f)
+                            .collect();
+                        doomed.extend(frames.iter().filter_map(|f| store.frames.remove(f)));
                     }
+                    self.stats
+                        .cached_segments
+                        .store(store.segments.len() as u64, Ordering::Relaxed);
                 }
-                self.stats
-                    .cached_segments
-                    .store(store.segments.len() as u64, Ordering::Relaxed);
-            } else if self.timeline.grid().is_none() {
-                // The index gave no frame rate: decode the first segment to
-                // learn it from the stream.
-                if let Some(first) = self.store.segments_in(i64::MIN / 2, i64::MAX / 2).first() {
-                    let key = first.start_ns;
-                    let mut inflight = lock(&self.inflight);
-                    if self.store.bytes(key).is_some() && inflight.insert(key) {
-                        let _ = tx.send(Arc::clone(first));
-                    }
-                }
+                drop(doomed);
             }
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -295,7 +429,7 @@ impl ReplayPlayer {
 
     fn tick_loop(self: Arc<Self>) {
         // Wait for the flow to play and for the first frames to exist.
-        let (appsrc, clock, base) = loop {
+        let (appsrc, clock, base, grid) = loop {
             if !self.alive() {
                 return;
             }
@@ -309,34 +443,37 @@ impl ReplayPlayer {
                     // The group's "now" exists as soon as the flow plays, so
                     // the cursor (and prefetch) can start before any decode.
                     self.timeline.set_clock_source(appsrc.upcast_ref());
-                    if has_caps && self.timeline.grid().is_some() {
-                        break (appsrc, clock, base);
+                    if let (true, Some(grid)) = (has_caps, self.stats.grid()) {
+                        break (appsrc, clock, base, grid);
                     }
                 }
             }
             drop(appsrc);
             std::thread::sleep(Duration::from_millis(10));
         };
-        let Some(grid) = self.timeline.grid() else {
-            return;
-        };
 
+        // Output rate: as configured, else the source's own rate.
+        let (on, od_) = self.output_rate.unwrap_or((grid.fps_n, grid.fps_d));
+        self.stats.set_output_rate(on, od_);
         let mut caps = lock(&self.caps).clone().expect("caps checked above");
-        caps.make_mut().set(
-            "framerate",
-            gst::Fraction::new(grid.fps_n as i32, grid.fps_d as i32),
-        );
+        caps.make_mut()
+            .set("framerate", gst::Fraction::new(on as i32, od_ as i32));
         let video_info = gst_video::VideoInfo::from_caps(&caps).ok();
         appsrc.set_caps(Some(&caps));
-        info!("Replay {}: output running, caps {}", self.block_id, caps);
+        info!(
+            "Replay {}: output running, source {}/{} fps, caps {}",
+            self.block_id, grid.fps_n, grid.fps_d, caps
+        );
         let weak = appsrc.downgrade();
         drop(appsrc);
         let tai_caps = gst::Caps::builder("timestamp/x-tai").build();
 
-        let fd = grid.frame_ns();
+        // Output tick period.
+        let fd = 1e9 * od_ as f64 / on as f64;
         let now_rt = || clock.time().nseconds() as i64 - base.nseconds() as i64;
         let mut k = (now_rt() as f64 / fd).ceil() as i64;
         let mut last: Option<(i64, gst::Buffer)> = None;
+        let mut last_hit: Option<i64> = None;
 
         while self.alive() {
             let rt = (k as f64 * fd) as i64;
@@ -358,23 +495,34 @@ impl ReplayPlayer {
                 continue;
             }
 
-            let frame = self.timeline.frame_at(rt);
-            let hit = match frame.and_then(|f| self.frame_at(f).map(|b| (f, b))) {
-                Some((f, b)) => {
-                    if self.read_strip && last.as_ref().is_none_or(|(lf, _)| *lf != f) {
+            // The group's time at this tick, and this angle's frame for it.
+            let want = self.timeline.frame_on(&grid, rt);
+            if let Some((f, _)) = want {
+                self.stats.wanted_frame.store(f, Ordering::Relaxed);
+            }
+            let hit = want.and_then(|(f, t)| self.frame_at(f).map(|b| (f, t, b)));
+            let hit = match hit {
+                Some((f, t, b)) => {
+                    let new_picture = last.as_ref().is_none_or(|(lf, _)| *lf != f);
+                    if self.read_strip && new_picture {
                         if let Some(info) = &video_info {
-                            let n = read_bitstrip(&b, info).map_or(-1, i64::from);
-                            self.stats.strip_frame.store(n, Ordering::Relaxed);
-                            // The test material numbers frames from the
-                            // group origin.
-                            if n != f - self.timeline.origin() {
-                                self.stats.strip_mismatches.fetch_add(1, Ordering::Relaxed);
-                            }
+                            self.check_picture(&b, info, &grid, f, t);
                         }
                     }
+                    if let Some(lf) = last_hit {
+                        let d = (f - lf).abs();
+                        if d == 0 {
+                            self.stats.repeated_ticks.fetch_add(1, Ordering::Relaxed);
+                        } else if d > 1 {
+                            self.stats
+                                .skipped_frames
+                                .fetch_add(d as u64 - 1, Ordering::Relaxed);
+                        }
+                    }
+                    last_hit = Some(f);
                     last = Some((f, b));
                     self.stats.shown_frame.store(f, Ordering::Relaxed);
-                    Some(f)
+                    Some(t)
                 }
                 None => {
                     self.stats.misses.fetch_add(1, Ordering::Relaxed);
@@ -387,19 +535,20 @@ impl ReplayPlayer {
                     o.set_pts(gst::ClockTime::from_nseconds(rt as u64));
                     o.set_dts(gst::ClockTime::NONE);
                     o.set_duration(gst::ClockTime::from_nseconds(fd as u64));
+                    // The capture time of the source frame shown.
                     let tai = grid.tai_of_frame(*f);
                     if tai >= 0 {
                         gst::ReferenceTimestampMeta::add(
                             o,
                             &tai_caps,
                             gst::ClockTime::from_nseconds(tai as u64),
-                            gst::ClockTime::from_nseconds(fd as u64),
+                            gst::ClockTime::from_nseconds(grid.frame_ns() as u64),
                         );
                     }
                 }
                 let pushed = appsrc.push_buffer(out);
-                if let Some(f) = hit {
-                    self.timeline.note_pushed(f);
+                if let Some(t) = hit {
+                    self.timeline.note_pushed(rt, t);
                 }
                 if let Err(e) = pushed {
                     debug!("Replay {}: push stopped: {:?}", self.block_id, e);
@@ -411,11 +560,108 @@ impl ReplayPlayer {
         info!("Replay {}: output stopped", self.block_id);
         self.halt();
     }
+
+    /// Diagnostics on a new pushed picture of the test material: the bitstrip
+    /// (frame number from the group origin, same-rate material) and the
+    /// burned-in capture time, which must hold the group time `t` of the tick.
+    fn check_picture(
+        &self,
+        b: &gst::Buffer,
+        info: &gst_video::VideoInfo,
+        grid: &super::grid::FrameGrid,
+        f: i64,
+        t: i64,
+    ) {
+        let n = read_bitstrip(b, info).map_or(-1, i64::from);
+        self.stats.strip_frame.store(n, Ordering::Relaxed);
+        if let Some(origin) = self.timeline.origin_on(grid) {
+            if n != f - origin {
+                self.stats.strip_mismatches.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if let Some(us) = read_code_utc_us(b, info) {
+            self.stats.code_utc_us.store(us as i64, Ordering::Relaxed);
+            self.stats.time_checked.fetch_add(1, Ordering::Relaxed);
+            let captured = us as i64 * 1000 + strom_types::tai::TAI_MINUS_UTC_NS as i64;
+            if !holds(captured, grid.frame_ns() as i64, t) {
+                self.stats.time_errors.fetch_add(1, Ordering::Relaxed);
+                debug!(
+                    "Replay {}: picture captured at {} does not hold group time {} ({} ns)",
+                    self.block_id,
+                    captured,
+                    t,
+                    t - captured
+                );
+            }
+        }
+    }
+}
+
+/// The segments to send to the decode workers, most urgent first: not done
+/// (decoded, or no bytes yet), not in flight, and not waiting out a failure.
+/// Marks them in flight; at most `workers` are in flight at once.
+fn pick_decodes(
+    wanted: &[Arc<Segment>],
+    done: impl Fn(i64) -> bool,
+    inflight: &mut HashSet<i64>,
+    failed: &Backoff<i64>,
+    workers: usize,
+    now: Instant,
+) -> Vec<Arc<Segment>> {
+    let mut out = Vec::new();
+    for s in wanted {
+        if inflight.len() >= workers {
+            break;
+        }
+        let key = s.start_ns;
+        if inflight.contains(&key) || !failed.ready(&key, now) || done(key) {
+            continue;
+        }
+        inflight.insert(key);
+        out.push(Arc::clone(s));
+    }
+    out
+}
+
+/// Whether frames in caps `b` can go out under caps `a`: same format, size
+/// and interlacing (frame rate and colorimetry aside).
+fn same_layout(a: &gst::Caps, b: &gst::Caps) -> bool {
+    match (
+        gst_video::VideoInfo::from_caps(a),
+        gst_video::VideoInfo::from_caps(b),
+    ) {
+        (Ok(a), Ok(b)) => {
+            a.format() == b.format()
+                && a.width() == b.width()
+                && a.height() == b.height()
+                && a.interlace_mode() == b.interlace_mode()
+        }
+        _ => a == b,
+    }
+}
+
+/// Whether a frame captured at `captured` (TAI) with period `period` is the
+/// one on screen at group time `t`: it started at or before `t` and the next
+/// had not started. 1 ms of slack for timestamp rounding in the store.
+fn holds(captured: i64, period: i64, t: i64) -> bool {
+    const SLACK: i64 = 1_000_000;
+    captured <= t + SLACK && t < captured + period + SLACK
 }
 
 impl Drop for ReplayPlayer {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.shutdown();
+    }
+}
+
+/// Owner of a player for its flow's lifetime: shuts the player down when
+/// dropped. The player's own threads hold it too, so its `Drop` alone would
+/// not run while they live.
+pub struct PlayerGuard(pub Arc<ReplayPlayer>);
+
+impl Drop for PlayerGuard {
+    fn drop(&mut self) {
+        self.0.shutdown();
     }
 }
 
@@ -435,4 +681,141 @@ fn read_bitstrip(buf: &gst::Buffer, info: &gst_video::VideoInfo) -> Option<u32> 
         }
     }
     Some(n)
+}
+
+/// Read the burned-in UTC code row of the Reference Timestamp block
+/// (`burn_in`), in microseconds. `None` when the picture has none.
+/// Diagnostics only.
+fn read_code_utc_us(buf: &gst::Buffer, info: &gst_video::VideoInfo) -> Option<u64> {
+    use crate::blocks::builtin::reference_timestamp::burn_in::{decode_cells, Layout, CODE_CELLS};
+    let frame = gst_video::VideoFrameRef::from_buffer_ref_readable(buf.as_ref(), info).ok()?;
+    let y = frame.plane_data(0).ok()?;
+    let stride = info.stride()[0] as usize;
+    let l = Layout::for_frame(info.width(), info.height());
+    let row = (l.code_y + l.cell_h / 2) as usize;
+    let cells: Vec<bool> = (0..CODE_CELLS)
+        .map(|c| {
+            let x = (c * l.cell_w + l.cell_w / 2) as usize;
+            y.get(row * stride + x).is_some_and(|v| *v > 128)
+        })
+        .collect();
+    decode_cells(&cells)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blocks::builtin::mediaplayer::replay::source::Location;
+
+    fn seg(i: i64) -> Arc<Segment> {
+        Arc::new(Segment {
+            start_ns: i * S,
+            end_ns: (i + 1) * S,
+            ts_offset_ns: 0,
+            object_start_ns: None,
+            object_id: i.to_string(),
+            location: Location::Urls(vec![]),
+        })
+    }
+
+    #[test]
+    fn a_failed_decode_waits_before_it_is_sent_again() {
+        let wanted: Vec<_> = (0..3).map(seg).collect();
+        let mut failed = Backoff::new(Duration::from_millis(250), Duration::from_secs(10));
+        let t0 = Instant::now();
+        let mut inflight = HashSet::new();
+        let keys = |v: Vec<Arc<Segment>>| v.iter().map(|s| s.start_ns / S).collect::<Vec<_>>();
+
+        let first = pick_decodes(&wanted, |_| false, &mut inflight, &failed, 2, t0);
+        assert_eq!(keys(first), vec![0, 1]);
+        // Segment 0 fails and leaves flight; 1 is still in flight.
+        inflight.remove(&0);
+        failed.fail(0, t0);
+        let next = pick_decodes(&wanted, |_| false, &mut inflight, &failed, 2, t0);
+        assert_eq!(
+            keys(next),
+            vec![2],
+            "the failed segment is not retried at once"
+        );
+        inflight.clear();
+        let later = t0 + Duration::from_millis(250);
+        let retry = pick_decodes(&wanted, |_| false, &mut inflight, &failed, 2, later);
+        assert_eq!(keys(retry), vec![0, 1]);
+    }
+
+    #[test]
+    fn segments_in_another_layout_are_told_apart() {
+        gst::init().unwrap();
+        let caps = |w: i32, rate: i32| {
+            gst::Caps::builder("video/x-raw")
+                .field("format", "NV12")
+                .field("width", w)
+                .field("height", 720)
+                .field("framerate", gst::Fraction::new(rate, 1))
+                .build()
+        };
+        assert!(same_layout(&caps(1280, 50), &caps(1280, 25)));
+        assert!(!same_layout(&caps(1280, 50), &caps(1920, 50)));
+    }
+
+    #[test]
+    fn decoded_window_keeps_to_its_budget() {
+        let wanted: Vec<_> = (0..6).map(seg).collect();
+        let mb = 1u64 << 20;
+        // 155 MB a segment (1 s of 1080p50 NV12), 512 MB budget: three fit.
+        let kept = within_budget(&wanted, |_| 155 * mb, 512 * mb, 2);
+        assert_eq!(kept.len(), 3);
+        // The segment under the cursor and the next are always kept.
+        let kept = within_budget(&wanted, |_| 1000 * mb, 512 * mb, 2);
+        assert_eq!(kept.len(), 2);
+        // Sizes not known yet (nothing decoded) do not hold anything back.
+        let kept = within_budget(&wanted, |_| 0, 512 * mb, 2);
+        assert_eq!(kept.len(), 6);
+    }
+
+    #[test]
+    fn frame_store_estimates_undecoded_segments() {
+        let mut store = FrameStore {
+            bytes_per_s: 100.0,
+            ..Default::default()
+        };
+        store.segments.insert(
+            0,
+            DecodedSegment {
+                first: 0,
+                last: 49,
+                bytes: 70,
+            },
+        );
+        assert_eq!(store.size_of(&seg(0)), 70);
+        assert_eq!(store.size_of(&seg(1)), 100);
+    }
+
+    #[test]
+    fn done_segments_are_not_sent() {
+        let wanted: Vec<_> = (0..3).map(seg).collect();
+        let failed = Backoff::new(Duration::from_millis(250), Duration::from_secs(10));
+        let mut inflight = HashSet::new();
+        let got = pick_decodes(
+            &wanted,
+            |k| k != S,
+            &mut inflight,
+            &failed,
+            2,
+            Instant::now(),
+        );
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].start_ns, S);
+    }
+
+    #[test]
+    fn a_frame_holds_the_instants_of_its_period() {
+        let p = 20_000_000;
+        assert!(holds(1_000, p, 1_000));
+        assert!(holds(1_000, p, 1_000 + p - 1));
+        // The next frame has started (beyond the slack).
+        assert!(!holds(1_000, p, 1_000 + p + 2_000_000));
+        // Captured after the group time: a frame from the future.
+        assert!(!holds(1_000 + 5_000_000, p, 1_000));
+    }
 }

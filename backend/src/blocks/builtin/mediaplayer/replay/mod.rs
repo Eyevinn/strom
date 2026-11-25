@@ -8,10 +8,13 @@
 //! Modules, from source to output:
 //! - `source`: a `SourceIndex` per protocol (local `index.json`, TAMS);
 //! - `cache`: index window and coded bytes around the cursor, fetched async;
-//! - `decode`: segment bytes to frames on the group's TAI frame grid (`grid`);
-//! - `timeline`: the group's shared cursor, range and live edge;
+//! - `decode`: segment bytes to frames on the player's own TAI frame grid
+//!   (`grid`, the source's rate);
+//! - `timeline`: the group's shared cursor (a TAI instant), range and live
+//!   edge; each player shows its latest frame at or before the cursor;
 //! - `player`: decode scheduling, frame store and the output tick.
 
+pub mod backoff;
 pub mod cache;
 pub mod decode;
 pub mod grid;
@@ -28,7 +31,6 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
-use std::sync::Arc;
 use strom_types::element::ElementPadRef;
 use strom_types::{FlowId, PropertyValue};
 use tracing::info;
@@ -41,6 +43,24 @@ pub const REPLAY_PREFETCH_PROPERTY: &str = "replay_prefetch_s";
 pub const REPLAY_AUTH_MODE_PROPERTY: &str = "replay_auth_mode";
 pub const REPLAY_API_TOKEN_PROPERTY: &str = "replay_api_token";
 pub const REPLAY_OSC_SERVICE_PROPERTY: &str = "replay_osc_service_id";
+pub const REPLAY_OUTPUT_FRAMERATE_PROPERTY: &str = "replay_output_framerate";
+
+/// Parse a frame rate: `N/D`, or a whole number. Empty = `None`.
+pub fn parse_frame_rate(s: &str) -> Result<Option<(u32, u32)>, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let bad = || format!("bad frame rate '{}', want e.g. 50/1 or 30000/1001", s);
+    let (n, d) = match s.split_once('/') {
+        Some((n, d)) => (n.trim().parse::<u32>(), d.trim().parse::<u32>()),
+        None => (s.parse::<u32>(), Ok(1)),
+    };
+    match (n, d) {
+        (Ok(n), Ok(d)) if n > 0 && d > 0 => Ok(Some((n, d))),
+        _ => Err(bad()),
+    }
+}
 
 fn prop_str(properties: &HashMap<String, PropertyValue>, key: &str) -> Option<String> {
     match properties.get(key) {
@@ -92,6 +112,10 @@ pub fn build(
             },
         ),
     };
+    let output_rate = parse_frame_rate(
+        &prop_str(properties, REPLAY_OUTPUT_FRAMERATE_PROPERTY).unwrap_or_default(),
+    )
+    .map_err(invalid)?;
     let spec = source::parse_source(&source, &media_path).map_err(invalid)?;
     let index = source::open(&spec, &auth, &flow_id.to_string()).map_err(invalid)?;
     info!(
@@ -125,13 +149,18 @@ pub fn build(
         &appsrc,
         cache_ahead_s,
         prefetch_s,
+        output_rate,
     );
 
+    // The bus handler owns the player for the flow's run: when the flow
+    // stops, the handler is disconnected and dropped, and the guard shuts the
+    // player down. A flow built but never started drops the guard with the
+    // unused handler.
+    let guard = player::PlayerGuard(player);
     let bus_message_handler: BusMessageConnectFn = Box::new(move |bus: &gst::Bus, _, _| {
-        player.start();
-        let keep = Arc::clone(&player);
+        guard.0.start();
         bus.connect_message(None, move |_, _| {
-            let _ = &keep;
+            let _ = &guard;
         })
     });
 
@@ -154,4 +183,20 @@ pub fn build(
         bus_message_handler: Some(bus_message_handler),
         pad_properties: HashMap::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_frame_rate;
+
+    #[test]
+    fn frame_rates_parse() {
+        assert_eq!(parse_frame_rate(""), Ok(None));
+        assert_eq!(parse_frame_rate("50/1"), Ok(Some((50, 1))));
+        assert_eq!(parse_frame_rate(" 30000/1001 "), Ok(Some((30000, 1001))));
+        assert_eq!(parse_frame_rate("100"), Ok(Some((100, 1))));
+        assert!(parse_frame_rate("0/1").is_err());
+        assert!(parse_frame_rate("29.97").is_err());
+        assert!(parse_frame_rate("50/").is_err());
+    }
 }

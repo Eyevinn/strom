@@ -11,6 +11,7 @@
 //! the network: a segment whose bytes have not arrived is simply not decoded
 //! yet, and the tick repeats its last frame.
 
+use super::backoff::{worth_warning, Backoff};
 use super::source::{Segment, SourceIndex, SourceInfo};
 use super::timeline::{PlayerStats, ReplayTimeline, TimeDomain};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -27,19 +28,31 @@ const CHUNK_NS: i64 = 20 * S;
 const KEEP_CHUNKS: i64 = 15;
 /// Concurrent object fetches per player.
 const MAX_INFLIGHT: usize = 4;
-/// Wait before fetching a failed segment again.
-const RETRY_AFTER: Duration = Duration::from_millis(500);
+/// Wait before listing a failed chunk again: doubling up to the max.
+const LIST_RETRY: Duration = Duration::from_millis(250);
+const LIST_RETRY_MAX: Duration = Duration::from_secs(5);
+/// Wait before fetching a failed segment again: doubling up to the max.
+const FETCH_RETRY: Duration = Duration::from_millis(500);
+const FETCH_RETRY_MAX: Duration = Duration::from_secs(30);
+/// A failed fetch re-lists its chunk (URLs may have expired), but not more
+/// often than this.
+const RELIST_MIN: Duration = Duration::from_secs(5);
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
+
+/// A fetched segment: its end (TAI ns) and its bytes.
+type Fetched = (i64, Arc<Vec<u8>>);
 
 /// Segments known around the cursor and the bytes fetched for them. Keyed by
 /// segment start (TAI ns), which stays stable as a live index grows.
 #[derive(Default)]
 pub struct SegmentStore {
     index: Mutex<BTreeMap<i64, Arc<Segment>>>,
-    bytes: Mutex<HashMap<i64, Arc<Vec<u8>>>>,
+    /// Fetched bytes by segment start, with the segment's end (eviction keeps
+    /// a segment that overlaps the window, however long it is).
+    bytes: Mutex<HashMap<i64, Fetched>>,
     info: Mutex<Option<SourceInfo>>,
 }
 
@@ -63,7 +76,7 @@ impl SegmentStore {
     }
 
     pub fn bytes(&self, start: i64) -> Option<Arc<Vec<u8>>> {
-        lock(&self.bytes).get(&start).cloned()
+        lock(&self.bytes).get(&start).map(|(_, b)| Arc::clone(b))
     }
 
     fn insert(&self, segs: impl IntoIterator<Item = Segment>) {
@@ -105,6 +118,21 @@ pub fn by_urgency(segs: &[Arc<Segment>], cursor: i64, forward: bool) -> Vec<Arc<
 struct ChunkState {
     listed: HashSet<i64>,
     dirty: HashSet<i64>,
+    /// When each chunk was last listed successfully.
+    listed_at: HashMap<i64, Instant>,
+}
+
+impl ChunkState {
+    /// List `c` again after a failed fetch, unless it was listed recently.
+    fn relist_after_fetch_error(&mut self, c: i64, now: Instant) {
+        if self
+            .listed_at
+            .get(&c)
+            .is_none_or(|t| now.duration_since(*t) >= RELIST_MIN)
+        {
+            self.dirty.insert(c);
+        }
+    }
 }
 
 fn chunk_of(tai: i64) -> i64 {
@@ -142,7 +170,7 @@ impl Fetcher {
     }
 
     /// Run on a dedicated thread until `stop` is set.
-    pub fn spawn(self: Arc<Self>, stop: Arc<AtomicBool>) {
+    pub fn spawn(self: Arc<Self>, stop: Arc<AtomicBool>) -> Option<std::thread::JoinHandle<()>> {
         let name = format!("replay-fetch-{}", self.block_id);
         let spawned = std::thread::Builder::new().name(name).spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
@@ -155,10 +183,26 @@ impl Fetcher {
                     return;
                 }
             };
-            rt.block_on(self.run(stop));
+            // Leave at once on stop, also from a request that is waiting on
+            // the network (dropping the future cancels it).
+            let watch = Arc::clone(&stop);
+            rt.block_on(async move {
+                tokio::select! {
+                    _ = self.run(stop) => {}
+                    _ = async {
+                        while !watch.load(Ordering::Relaxed) {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                    } => {}
+                }
+            });
         });
-        if let Err(e) = spawned {
-            warn!("Replay: cannot start fetch thread: {}", e);
+        match spawned {
+            Ok(h) => Some(h),
+            Err(e) => {
+                warn!("Replay: cannot start fetch thread: {}", e);
+                None
+            }
         }
     }
 
@@ -182,7 +226,7 @@ impl Fetcher {
                         info.container
                     );
                     if let Some((n, d)) = info.frame_rate {
-                        self.timeline.ensure_grid(n, d, first.start_ns);
+                        self.stats.init_grid(n, d, first.start_ns);
                     }
                     self.stats.set_time_domain(if info.absolute_time {
                         TimeDomain::Tai
@@ -218,8 +262,11 @@ impl Fetcher {
 
         let mut chunks = ChunkState::default();
         let mut inflight: HashSet<i64> = HashSet::new();
-        let mut failed: HashMap<i64, Instant> = HashMap::new();
-        let mut jobs: JoinSet<(Arc<Segment>, anyhow::Result<Vec<u8>>, Duration)> = JoinSet::new();
+        let mut list_failed: Backoff<i64> = Backoff::new(LIST_RETRY, LIST_RETRY_MAX);
+        let mut failed: Backoff<i64> = Backoff::new(FETCH_RETRY, FETCH_RETRY_MAX);
+        let mut jobs: JoinSet<(anyhow::Result<Vec<u8>>, Duration)> = JoinSet::new();
+        // The segment of each fetch task, also when the task panics.
+        let mut tasks: HashMap<tokio::task::Id, Arc<Segment>> = HashMap::new();
         let mut next_poll = Instant::now() + Duration::from_nanos(seg_ns as u64);
         let mut next_first = Instant::now() + Duration::from_secs(30);
 
@@ -274,14 +321,30 @@ impl Fetcher {
                 if chunks.listed.contains(&c) && !chunks.dirty.contains(&c) {
                     continue;
                 }
+                if !list_failed.ready(&c, Instant::now()) {
+                    continue;
+                }
                 match self.source.list(c * CHUNK_NS, (c + 1) * CHUNK_NS).await {
                     Ok(segs) => {
                         self.store.insert(segs);
                         chunks.listed.insert(c);
                         chunks.dirty.remove(&c);
+                        chunks.listed_at.insert(c, Instant::now());
+                        list_failed.succeed(&c);
                     }
                     Err(e) => {
-                        warn!("Replay {}: listing failed: {:#}", self.block_id, e);
+                        let attempts = list_failed.fail(c, Instant::now());
+                        if worth_warning(attempts) {
+                            warn!(
+                                "Replay {}: listing failed (attempt {}): {:#}",
+                                self.block_id, attempts, e
+                            );
+                        } else {
+                            debug!(
+                                "Replay {}: listing failed (attempt {}): {:#}",
+                                self.block_id, attempts, e
+                            );
+                        }
                         break;
                     }
                 }
@@ -296,17 +359,19 @@ impl Fetcher {
                 let key = seg.start_ns;
                 if inflight.contains(&key)
                     || self.store.bytes(key).is_some()
-                    || failed.get(&key).is_some_and(|t| t.elapsed() < RETRY_AFTER)
+                    || !failed.ready(&key, Instant::now())
                 {
                     continue;
                 }
                 inflight.insert(key);
                 let source = Arc::clone(&self.source);
-                jobs.spawn(async move {
+                let task_seg = Arc::clone(&seg);
+                let handle = jobs.spawn(async move {
                     let t0 = Instant::now();
-                    let r = source.fetch(&seg).await;
-                    (seg, r, t0.elapsed())
+                    let r = source.fetch(&task_seg).await;
+                    (r, t0.elapsed())
                 });
+                tasks.insert(handle.id(), seg);
             }
 
             // Collect finished fetches, or wait a little.
@@ -314,8 +379,16 @@ impl Fetcher {
             tokio::pin!(wait);
             loop {
                 tokio::select! {
-                    done = jobs.join_next(), if !jobs.is_empty() => {
-                        let Some(Ok((seg, r, took))) = done else { break };
+                    done = jobs.join_next_with_id(), if !jobs.is_empty() => {
+                        // A panicked task frees its slot and counts as a failure.
+                        let (id, r, took) = match done {
+                            Some(Ok((id, (r, took)))) => (id, r, took),
+                            Some(Err(e)) => {
+                                (e.id(), Err(anyhow::anyhow!("fetch task: {}", e)), Duration::ZERO)
+                            }
+                            None => break,
+                        };
+                        let Some(seg) = tasks.remove(&id) else { continue };
                         inflight.remove(&seg.start_ns);
                         self.stats.fetches.fetch_add(1, Ordering::Relaxed);
                         match r {
@@ -323,18 +396,29 @@ impl Fetcher {
                                 self.stats
                                     .last_fetch_ms
                                     .store(took.as_millis() as u64, Ordering::Relaxed);
-                                failed.remove(&seg.start_ns);
-                                lock(&self.store.bytes).insert(seg.start_ns, Arc::new(bytes));
+                                failed.succeed(&seg.start_ns);
+                                lock(&self.store.bytes)
+                                    .insert(seg.start_ns, (seg.end_ns, Arc::new(bytes)));
                             }
                             Err(e) => {
                                 self.stats.fetch_errors.fetch_add(1, Ordering::Relaxed);
-                                warn!(
-                                    "Replay {}: fetch of {} failed: {:#}",
-                                    self.block_id, seg.object_id, e
-                                );
-                                failed.insert(seg.start_ns, Instant::now());
+                                let attempts = failed.fail(seg.start_ns, Instant::now());
+                                if worth_warning(attempts) {
+                                    warn!(
+                                        "Replay {}: fetch of {} failed (attempt {}): {:#}",
+                                        self.block_id, seg.object_id, attempts, e
+                                    );
+                                } else {
+                                    debug!(
+                                        "Replay {}: fetch of {} failed (attempt {}): {:#}",
+                                        self.block_id, seg.object_id, attempts, e
+                                    );
+                                }
                                 // URLs may have expired: list the chunk again.
-                                chunks.dirty.insert(chunk_of(seg.start_ns));
+                                chunks.relist_after_fetch_error(
+                                    chunk_of(seg.start_ns),
+                                    Instant::now(),
+                                );
                             }
                         }
                     }
@@ -342,12 +426,24 @@ impl Fetcher {
                 }
             }
 
-            // Evict what is far from the cursor.
+            // Evict what is far from the cursor: segments that do not overlap
+            // the window plus a margin. By overlap, not by start: a long
+            // segment holding the cursor started long before the window.
             let margin = seg_ns;
-            lock(&self.store.bytes).retain(|k, _| *k >= lo - margin && *k < hi + margin);
+            lock(&self.store.bytes)
+                .retain(|start, (end, _)| *end > lo - margin && *start < hi + margin);
             let cc = chunk_of(cursor);
             let keep = |c: i64| (c - cc).abs() <= KEEP_CHUNKS;
             chunks.listed.retain(|c| keep(*c));
+            chunks.listed_at.retain(|c, _| keep(*c));
+            list_failed.retain(|c| keep(*c));
+            let near: HashSet<i64> = self
+                .store
+                .segments_in(lo - margin, hi + margin)
+                .iter()
+                .map(|s| s.start_ns)
+                .collect();
+            failed.retain(|k| near.contains(k));
             {
                 let mut index = lock(&self.store.index);
                 index.retain(|k, _| keep(chunk_of(*k)) || *k == start);
@@ -372,6 +468,7 @@ impl Fetcher {
 mod tests {
     use super::*;
     use crate::blocks::builtin::mediaplayer::replay::source::Location;
+    use std::sync::atomic::AtomicU64;
 
     fn seg(i: i64) -> Arc<Segment> {
         Arc::new(Segment {
@@ -411,6 +508,200 @@ mod tests {
             .collect();
         assert_eq!(hit, vec![2, 3]);
         assert!(store.segments_in(10 * S, 11 * S).is_empty());
+    }
+
+    /// A source of `n` segments of `len_s` seconds from TAI 100 s, whose
+    /// listings and fetches can be made to fail. Counts the calls.
+    struct Mock {
+        segs: Vec<Segment>,
+        list_fails: bool,
+        fetch_fails: bool,
+        fetch_panics: bool,
+        fetch_hangs: bool,
+        lists: AtomicU64,
+        fetches: Mutex<HashMap<i64, u32>>,
+    }
+
+    impl Mock {
+        fn new(n: i64, len_s: i64, list_fails: bool, fetch_fails: bool) -> Arc<Self> {
+            Arc::new(Self::build(n, len_s, list_fails, fetch_fails))
+        }
+
+        fn build(n: i64, len_s: i64, list_fails: bool, fetch_fails: bool) -> Self {
+            let segs = (0..n)
+                .map(|i| Segment {
+                    start_ns: (100 + i * len_s) * S,
+                    end_ns: (100 + (i + 1) * len_s) * S,
+                    ts_offset_ns: 0,
+                    object_start_ns: None,
+                    object_id: i.to_string(),
+                    location: Location::Urls(vec![]),
+                })
+                .collect();
+            Self {
+                segs,
+                list_fails,
+                fetch_fails,
+                fetch_panics: false,
+                fetch_hangs: false,
+                lists: AtomicU64::new(0),
+                fetches: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn fetches_of(&self, start_s: i64) -> u32 {
+            lock(&self.fetches)
+                .get(&(start_s * S))
+                .copied()
+                .unwrap_or(0)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SourceIndex for Mock {
+        fn describe(&self) -> String {
+            "mock".into()
+        }
+        fn may_grow(&self) -> bool {
+            false
+        }
+        async fn info(&self) -> anyhow::Result<SourceInfo> {
+            Ok(SourceInfo {
+                frame_rate: Some((25, 1)),
+                container: None,
+                absolute_time: true,
+            })
+        }
+        async fn list(&self, start: i64, end: i64) -> anyhow::Result<Vec<Segment>> {
+            self.lists.fetch_add(1, Ordering::Relaxed);
+            if self.list_fails {
+                anyhow::bail!("gateway down");
+            }
+            Ok(self
+                .segs
+                .iter()
+                .filter(|s| s.end_ns > start && s.start_ns < end)
+                .cloned()
+                .collect())
+        }
+        async fn first(&self) -> anyhow::Result<Option<Segment>> {
+            Ok(self.segs.first().cloned())
+        }
+        async fn last(&self) -> anyhow::Result<Option<Segment>> {
+            Ok(self.segs.last().cloned())
+        }
+        async fn fetch(&self, seg: &Segment) -> anyhow::Result<Vec<u8>> {
+            *lock(&self.fetches).entry(seg.start_ns).or_insert(0) += 1;
+            if self.fetch_panics {
+                panic!("fetch task panics");
+            }
+            if self.fetch_hangs {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+            if self.fetch_fails {
+                anyhow::bail!("404");
+            }
+            Ok(vec![0; 16])
+        }
+    }
+
+    /// Run a fetcher on `mock` (prefetch 2 s) for `run`, after seeking the
+    /// group to `seek_s` seconds TAI once the source is known.
+    fn run_fetcher(mock: Arc<Mock>, seek_s: Option<i64>, run: Duration) {
+        let timeline = super::super::timeline::get_or_create(uuid::Uuid::new_v4(), "g");
+        let stats = Arc::new(PlayerStats::new("p"));
+        timeline.register_player(&stats);
+        let fetcher = Arc::new(Fetcher::new(
+            "p",
+            mock,
+            Arc::clone(&timeline),
+            Arc::clone(&stats),
+            2,
+        ));
+        let stop = Arc::new(AtomicBool::new(false));
+        Arc::clone(&fetcher).spawn(Arc::clone(&stop));
+        let t0 = Instant::now();
+        while stats.extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if let Some(t) = seek_s {
+            timeline
+                .apply(super::super::timeline::Command::Seek {
+                    frame: None,
+                    utc: None,
+                    tai: Some(format!("{}:0", t)),
+                })
+                .unwrap();
+        }
+        std::thread::sleep(run);
+        stop.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn failing_listing_backs_off() {
+        let mock = Mock::new(10, 1, true, false);
+        run_fetcher(Arc::clone(&mock), None, Duration::from_millis(1500));
+        // 250 + 500 + 1000 ms: a handful, not one per 10 ms loop.
+        let lists = mock.lists.load(Ordering::Relaxed);
+        assert!((1..=5).contains(&lists), "{} listings", lists);
+    }
+
+    #[test]
+    fn failing_fetch_backs_off_and_relists_rarely() {
+        let mock = Mock::new(10, 1, false, true);
+        run_fetcher(Arc::clone(&mock), None, Duration::from_millis(2000));
+        // 500 + 1000 ms: three attempts at most in 2 s (a fixed 500 ms retry
+        // makes four or five).
+        let n = mock.fetches_of(100);
+        assert!((1..=3).contains(&n), "{} fetches", n);
+        // The chunk is listed once, and at most once more for the failures.
+        let lists = mock.lists.load(Ordering::Relaxed);
+        assert!(lists <= 2, "{} listings", lists);
+    }
+
+    #[test]
+    fn long_segment_under_the_cursor_is_fetched_once() {
+        // 10 s segments, cursor 8 s into the first: the segment started more
+        // than behind + margin before the cursor, but holds it.
+        let mock = Mock::new(3, 10, false, false);
+        run_fetcher(Arc::clone(&mock), Some(108), Duration::from_millis(1000));
+        assert_eq!(mock.fetches_of(100), 1);
+    }
+
+    #[test]
+    fn panicked_fetch_is_retried() {
+        let mock = Arc::new(Mock {
+            fetch_panics: true,
+            ..Mock::build(10, 1, false, false)
+        });
+        run_fetcher(Arc::clone(&mock), None, Duration::from_millis(1200));
+        // The slot is freed and the segment retried after its backoff.
+        assert!(mock.fetches_of(100) >= 2);
+    }
+
+    #[test]
+    fn stop_ends_the_fetcher_during_a_slow_request() {
+        let mock = Arc::new(Mock {
+            fetch_hangs: true,
+            ..Mock::build(10, 1, false, false)
+        });
+        let timeline = super::super::timeline::get_or_create(uuid::Uuid::new_v4(), "g");
+        let stats = Arc::new(PlayerStats::new("p"));
+        timeline.register_player(&stats);
+        let fetcher = Arc::new(Fetcher::new("p", mock.clone(), timeline, stats, 2));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = Arc::clone(&fetcher).spawn(Arc::clone(&stop)).unwrap();
+        let t0 = Instant::now();
+        while mock.fetches_of(100) == 0 && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let t1 = Instant::now();
+        while !handle.is_finished() && t1.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(handle.is_finished());
+        assert!(t1.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

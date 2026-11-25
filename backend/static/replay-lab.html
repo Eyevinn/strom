@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Replay lab v12</title>
+<title>Replay lab v13</title>
 <style>
   :root { --bg:#111; --panel:#1b1b1b; --fg:#ddd; --mut:#888; --acc:#4fa3ff; --red:#e5484d; --grn:#46a758; }
   * { box-sizing: border-box; }
@@ -161,6 +161,8 @@
 
 <script>
 'use strict';
+// Strings from the server or the flow go into innerHTML escaped.
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 // ---- group from URL: /player/replay-lab/{flow_id}/{group}
 const parts = location.pathname.split('/').filter(Boolean);
 const FLOW = parts[2], GROUP = decodeURIComponent(parts[3] || '');
@@ -213,7 +215,7 @@ function onState(m) {
   $('curSpeed').textContent = (m.speed >= 0 ? '' : '') + (+m.speed).toFixed(2) + '×';
   const tb = document.querySelector('#players tbody');
   const ref = m.players.length ? m.players[0].shown_frame : 0;
-  tb.innerHTML = m.players.map(p => `<tr><td>${p.block}</td><td>${p.shown ? p.shown.utc.slice(11, 23) : '-'}</td><td>${p.shown_frame}</td>
+  tb.innerHTML = m.players.map(p => `<tr><td>${esc(p.block)}</td><td>${p.shown ? esc(p.shown.utc.slice(11, 23)) : '-'}</td><td>${p.shown_frame}</td>
     <td style="color:${p.shown_frame - ref ? 'var(--red)' : 'var(--grn)'}">${p.shown_frame - ref}</td>
     <td>${p.strip_frame < 0 ? '-' : p.strip_frame}</td><td>${p.index_segments}</td><td>${p.fetched_segments}</td>
     <td>${p.last_fetch_ms}</td><td>${p.fetch_errors}</td><td>${p.cached_segments}</td><td>${p.decodes}</td><td>${p.last_decode_ms}</td><td>${p.misses}</td><td>${p.late_ticks}</td></tr>`).join('');
@@ -239,7 +241,7 @@ function onClock(m) {
   // utc "YYYY-MM-DDTHH:MM:SS.mmmZ", tai_clock the same without Z
   const s = showTai ? t.tai_clock : t.utc;
   lastDate = t.utc.slice(0, 10);
-  $('tcTime').innerHTML = `${s.slice(11, 19)}<span class="ms">${s.slice(19, 23)}</span>`;
+  $('tcTime').innerHTML = `${esc(s.slice(11, 19))}<span class="ms">${esc(s.slice(19, 23))}</span>`;
   $('tcFrame').textContent = `f${String(t.frame_in_second).padStart(2, '0')}/${fps}`;
   $('tcDate').textContent = s.slice(0, 10);
   $('tcAbs').textContent = t.frame;
@@ -375,7 +377,7 @@ async function loadStreams() {
   streams = (await r.json()).streams || [];
   for (const sel of [$('pgmSel'), $('mvSel')]) {
     const keep = sel.value;
-    sel.innerHTML = '<option value="">(none)</option>' + streams.map(s => `<option value="${s.endpoint_id}">${epName[s.endpoint_id] || s.endpoint_id.slice(0,8)}</option>`).join('');
+    sel.innerHTML = '<option value="">(none)</option>' + streams.map(s => `<option value="${esc(s.endpoint_id)}">${esc(epName[s.endpoint_id] || s.endpoint_id.slice(0,8))}</option>`).join('');
     sel.value = keep || localStorage.getItem('rj_' + sel.id) || '';
   }
 }

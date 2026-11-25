@@ -138,6 +138,24 @@ pub fn media_player_definition() -> BlockDefinition {
                 visible_when: None,
             },
             ExposedProperty {
+                name: "replay_output_framerate".to_string(),
+                label: "Replay Output Framerate".to_string(),
+                description: "Replay mode: frame rate of the output. Empty = the source's own rate. Set it to the rate of what follows (e.g. the vision mixer) for slow motion from high-frame-rate sources: a 100p source at 50 % on a 50p output shows every source frame."
+                    .to_string(),
+                property_type: PropertyType::Enum {
+                    values: common_video_framerate_enum_values(true),
+                },
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "replay_output_framerate".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
+            ExposedProperty {
                 name: "decode".to_string(),
                 label: "Decode".to_string(),
                 description: "Decode to raw video/audio (true) or pass through encoded streams (false). Passthrough is more efficient for transcoding."

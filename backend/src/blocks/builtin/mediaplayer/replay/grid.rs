@@ -1,11 +1,11 @@
-//! The frame grid of a replay group, anchored on TAI.
+//! The frame grid of a replay player's source, anchored on TAI.
 //!
 //! Frame `k` is the instant `phase + k * fps_d / fps_n` seconds TAI. The phase
-//! is taken from the first segment the group sees, so material whose segments
+//! is taken from the first segment the player sees, so material whose segments
 //! do not start on a whole multiple of the frame period still lands exactly on
-//! the grid. Frame numbers are absolute (counted from TAI 0 + phase), so every
-//! angle maps the same instant to the same frame no matter where its own
-//! recording starts or ends.
+//! the grid. Frame numbers are absolute (counted from TAI 0 + phase). Each
+//! player has its own grid; the group shares time, not frame numbers (see
+//! `timeline`).
 
 const NS: i128 = 1_000_000_000;
 

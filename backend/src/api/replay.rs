@@ -68,9 +68,13 @@ async fn handle(socket: WebSocket, tl: std::sync::Arc<timeline::ReplayTimeline>)
                     .map_err(|e| e.to_string())
                     .and_then(|cmd| tl.apply(cmd));
                 let reply = match applied {
-                    Ok((frame, speed)) => {
-                        let mut ack = serde_json::json!({"type": "ack", "seq": seq, "frame": frame, "speed": speed});
-                        if let Some(t) = tl.frame_time(frame) {
+                    Ok(a) => {
+                        let mut ack = serde_json::json!({
+                            "type": "ack", "seq": seq, "speed": a.speed,
+                            "cursor_tai": timeline::instant_json(a.tai),
+                        });
+                        if let Some(t) = tl.reference_time(a.tai) {
+                            ack["frame"] = t.frame.into();
                             ack["time"] = t.to_json();
                         }
                         ack
