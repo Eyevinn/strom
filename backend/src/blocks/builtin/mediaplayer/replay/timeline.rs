@@ -294,6 +294,16 @@ pub fn frame_centre(grid: &FrameGrid, k: i64) -> i64 {
     a + (b - a) / 2
 }
 
+/// Frame `from + by` on `grid`, kept to one frame either side of the group's
+/// range (the cursor is clamped to the range after). Client values can be
+/// anything: this never overflows.
+fn frame_in(grid: &FrameGrid, b: &Bounds, from: i64, by: i64) -> i64 {
+    from.saturating_add(by).clamp(
+        grid.floor_frame(b.start) - 1,
+        grid.floor_frame(b.end - 1) + 1,
+    )
+}
+
 /// Where the cursor line starts: a TAI instant, or the group's start.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Anchor {
@@ -562,13 +572,16 @@ impl ReplayTimeline {
         let (tai, speed) = match cmd {
             Command::Jog { frames } => {
                 let g = need_ref()?;
-                (frame_centre(&g, g.floor_frame(cur) + frames), 0.0)
+                (
+                    frame_centre(&g, frame_in(&g, &b, g.floor_frame(cur), frames)),
+                    0.0,
+                )
             }
             Command::Seek { frame, utc, tai } => {
                 let to = match (frame, utc, tai) {
                     (Some(f), None, None) => {
                         let g = need_ref()?;
-                        frame_centre(&g, g.floor_frame(self.origin_tai()) + f)
+                        frame_centre(&g, frame_in(&g, &b, g.floor_frame(self.origin_tai()), f))
                     }
                     (None, Some(u), None) => parse_utc(&u).map(utc_to_tai_ns).ok_or_else(|| {
                         format!("seek: bad utc '{}', want e.g. 2026-11-24T13:21:56.080Z", u)
@@ -580,7 +593,7 @@ impl ReplayTimeline {
                 };
                 (to, a.speed)
             }
-            Command::SeekRel { ms } => (cur.saturating_add(ms * 1_000_000), a.speed),
+            Command::SeekRel { ms } => (cur.saturating_add(ms.saturating_mul(1_000_000)), a.speed),
             Command::Speed { speed } => {
                 if !speed.is_finite() || speed.abs() > MAX_SPEED {
                     return Err(format!(

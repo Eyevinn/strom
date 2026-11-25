@@ -498,3 +498,17 @@ fn a_new_run_resets_the_group_even_while_old_stats_live_on() {
     assert_eq!(tl.tai_at(0), Some(BASE + 100 * S));
     drop(old);
 }
+
+#[test]
+fn huge_client_values_clamp_instead_of_overflowing() {
+    let (tl, _keep) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let end = BASE + 60 * S - 1;
+    let jog = |frames| tl.apply_at(Command::Jog { frames }, 0).unwrap().tai;
+    assert_eq!(jog(i64::MAX), end);
+    assert_eq!(jog(i64::MIN), BASE);
+    assert_eq!(tl.apply_at(seek(i64::MAX), 0).unwrap().tai, end);
+    assert_eq!(tl.apply_at(seek(i64::MIN), 0).unwrap().tai, BASE);
+    let rel = |ms| tl.apply_at(Command::SeekRel { ms }, 0).unwrap().tai;
+    assert_eq!(rel(i64::MAX), end);
+    assert_eq!(rel(i64::MIN), BASE);
+}
