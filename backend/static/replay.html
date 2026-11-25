@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Strom replay page, version 1 -->
+<!-- Strom replay page, version 2 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -667,7 +667,7 @@ function renderClips() {
   ul.innerHTML = clips.map(c => {
     const dur = rel(c.out_tai) - rel(c.in_tai);
     const act = activeClip && activeClip.clip.id === c.id;
-    return `<li data-id="${c.id}" class="${act ? 'active' : ''}" title="Click to cue at IN">
+    return `<li data-id="${esc(c.id)}" class="${act ? 'active' : ''}" title="Click to cue at IN">
       <span class="nm">${esc(c.name)}</span>
       <span class="acts"><button data-act="play" title="Play from IN to OUT">▶</button><button data-act="del" title="Delete">✕</button></span>
       <span class="meta">${esc(c.in_tc || '')} · ${durOf(dur)} · ${esc(c.angle_label || 'angle ?')} · ${Math.round((c.speed || 1) * 100)}%</span>
@@ -689,7 +689,7 @@ function renderMarks() {
   ul.innerHTML = [...marks].reverse().map(m => `<li data-n="${m.n}" title="Click to go to the mark">
       <span class="nm"><span class="mark-n ${m.live ? '' : 'ph'}">${m.n}</span>${esc(m.name)}</span>
       <span class="acts"><button data-act="in" title="Use as IN">IN</button><button data-act="ren" title="Rename">✎</button><button data-act="del" title="Delete">✕</button></span>
-      <span class="meta">${tcOf(m)}${m.live ? ' · live' : ''}</span></li>`).join('');
+      <span class="meta">${esc(tcOf(m))}${m.live ? ' · live' : ''}</span></li>`).join('');
 }
 $('markList').addEventListener('click', e => {
   const li = e.target.closest('li[data-n]'); if (!li) return;
@@ -722,16 +722,25 @@ $('exportBtn').onclick = () => {
   a.click();
 };
 $('importBtn').onclick = () => $('importFile').click();
+// An imported file is untrusted: check the types of what the page uses.
+const isTai = v => typeof v === 'string' && /^-?\d{1,25}$/.test(v);
+const optStr = v => v == null || typeof v === 'string';
+const optNum = v => v == null || (typeof v === 'number' && Number.isFinite(v));
+const validClip = c => c && typeof c === 'object' && typeof c.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(c.id)
+  && isTai(c.in_tai) && isTai(c.out_tai) && optStr(c.name) && optStr(c.in_tc) && optStr(c.angle_label) && optNum(c.speed)
+  && (c.tags == null || (Array.isArray(c.tags) && c.tags.every(t => typeof t === 'string')));
+const validMark = m => m && typeof m === 'object' && isTai(m.tai_ns) && optStr(m.name) && optStr(m.utc)
+  && optNum(m.frame_in_second);
 $('importFile').onchange = async e => {
   const f = e.target.files[0]; e.target.value = '';
   if (!f) return;
   try {
     const d = JSON.parse(await f.text());
     const ids = new Set(clips.map(c => c.id));
-    const add = (d.clips || []).filter(c => c && c.in_tai && c.out_tai && !ids.has(c.id));
+    const add = (Array.isArray(d.clips) ? d.clips : []).filter(c => validClip(c) && !ids.has(c.id));
     clips = [...add, ...clips];
     const mn = marks.reduce((a, m) => Math.max(a, m.n), 0);
-    const addM = (d.marks || []).filter(m => m && m.tai_ns && !marks.some(x => x.tai_ns === m.tai_ns)).map((m, i) => ({ ...m, n: mn + i + 1 }));
+    const addM = (Array.isArray(d.marks) ? d.marks : []).filter(m => validMark(m) && !marks.some(x => x.tai_ns === m.tai_ns)).map((m, i) => ({ ...m, n: mn + i + 1 }));
     marks = [...marks, ...addM];
     persist(); renderClips(); renderMarks();
     toast(`Imported ${add.length} clips, ${addM.length} marks`);
