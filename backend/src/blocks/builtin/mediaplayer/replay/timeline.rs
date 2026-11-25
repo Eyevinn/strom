@@ -161,6 +161,15 @@ pub fn instant_json(tai_ns: i64) -> serde_json::Value {
     serde_json::to_value(instant(tai_ns)).unwrap_or_default()
 }
 
+/// A TAI range `[start, end)` as JSON, with its length.
+fn range_json(start: i64, end: i64) -> serde_json::Value {
+    serde_json::json!({
+        "start": instant_json(start),
+        "end": instant_json(end),
+        "duration_ms": (end - start) / 1_000_000,
+    })
+}
+
 /// UTC ns now, from the host's wall clock.
 fn wall_utc_ns() -> i64 {
     std::time::SystemTime::now()
@@ -174,6 +183,14 @@ fn fps_string(g: &FrameGrid) -> String {
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// What a player's index knows (see `cache::index_view`): the TAI ranges it
+/// has listed, and the holes between segments inside them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexView {
+    pub listed: Vec<(i64, i64)>,
+    pub gaps: Vec<(i64, i64)>,
 }
 
 /// State and telemetry of one player in the group.
@@ -216,6 +233,7 @@ pub struct PlayerStats {
     pub last_decode_ms: AtomicU64,
     /// [`TimeDomain`] of the source, as u8.
     time_domain: AtomicU8,
+    index_view: Mutex<IndexView>,
 }
 
 impl PlayerStats {
@@ -246,6 +264,7 @@ impl PlayerStats {
             decodes: AtomicU64::new(0),
             last_decode_ms: AtomicU64::new(0),
             time_domain: AtomicU8::new(TimeDomain::Unknown as u8),
+            index_view: Mutex::new(IndexView::default()),
         }
     }
 
@@ -276,6 +295,14 @@ impl PlayerStats {
             *g = FrameGrid::new(fps_n, fps_d, anchor_tai_ns);
         }
         *g
+    }
+
+    pub fn set_index_view(&self, v: IndexView) {
+        *lock(&self.index_view) = v;
+    }
+
+    pub fn index_view(&self) -> IndexView {
+        lock(&self.index_view).clone()
     }
 
     pub fn set_output_rate(&self, fps_n: u32, fps_d: u32) {
@@ -1182,6 +1209,7 @@ impl ReplayTimeline {
         };
         let shown = p.shown_frame.load(Ordering::Relaxed);
         let wanted = p.wanted_frame.load(Ordering::Relaxed);
+        let view = p.index_view();
         let shown_time = match (grid, origin) {
             (Some(g), Some(o)) if shown != UNKNOWN => FrameTime::new(&g, shown, o).to_json(),
             _ => serde_json::Value::Null,
@@ -1195,6 +1223,8 @@ impl ReplayTimeline {
                 "start": instant_json(s),
                 "end": instant_json(e),
             })),
+            "indexed": view.listed.iter().map(|&(s, e)| range_json(s, e)).collect::<Vec<_>>(),
+            "gaps": view.gaps.iter().map(|&(s, e)| range_json(s, e)).collect::<Vec<_>>(),
             "shown": shown_time,
             "shown_frame": rel(shown),
             "wanted_frame": rel(wanted),

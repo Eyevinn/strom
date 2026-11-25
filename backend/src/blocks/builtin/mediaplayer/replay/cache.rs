@@ -13,7 +13,7 @@
 
 use super::backoff::{worth_warning, Backoff};
 use super::source::{Segment, SourceIndex, SourceInfo};
-use super::timeline::{PlayerStats, ReplayTimeline, TimeDomain};
+use super::timeline::{IndexView, PlayerStats, ReplayTimeline, TimeDomain};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -84,6 +84,52 @@ impl SegmentStore {
         for s in segs {
             index.insert(s.start_ns, Arc::new(s));
         }
+    }
+}
+
+/// A hole shorter than this between two segments is rounding, not a gap.
+const MIN_GAP_NS: i64 = 1_000_000;
+/// How often a player recomputes what it publishes about its index.
+const INDEX_VIEW_EVERY: Duration = Duration::from_millis(500);
+
+/// What the index knows: the ranges of listed chunks within the extent, and
+/// the holes between consecutive segments inside them. A hole that touches
+/// an unlisted chunk is not reported: there the index just has not looked.
+pub fn index_view(
+    segs: &BTreeMap<i64, Arc<Segment>>,
+    listed: &HashSet<i64>,
+    extent: (i64, i64),
+) -> IndexView {
+    let mut chunks: Vec<i64> = listed.iter().copied().collect();
+    chunks.sort_unstable();
+    let mut ranges: Vec<(i64, i64)> = Vec::new();
+    for c in chunks {
+        let (s, e) = (
+            (c * CHUNK_NS).max(extent.0),
+            ((c + 1) * CHUNK_NS).min(extent.1),
+        );
+        if e <= s {
+            continue;
+        }
+        match ranges.last_mut() {
+            Some(last) if last.1 >= s => last.1 = last.1.max(e),
+            _ => ranges.push((s, e)),
+        }
+    }
+    let all_listed = |a: i64, b: i64| (chunk_of(a)..=chunk_of(b - 1)).all(|c| listed.contains(&c));
+    let mut gaps = Vec::new();
+    let mut prev: Option<i64> = None;
+    for seg in segs.values() {
+        if let Some(end) = prev {
+            if seg.start_ns - end > MIN_GAP_NS && all_listed(end, seg.start_ns) {
+                gaps.push((end, seg.start_ns));
+            }
+        }
+        prev = Some(prev.map_or(seg.end_ns, |p| p.max(seg.end_ns)));
+    }
+    IndexView {
+        listed: ranges,
+        gaps,
     }
 }
 
@@ -269,6 +315,7 @@ impl Fetcher {
         let mut tasks: HashMap<tokio::task::Id, Arc<Segment>> = HashMap::new();
         let mut next_poll = Instant::now() + Duration::from_nanos(seg_ns as u64);
         let mut next_first = Instant::now() + Duration::from_secs(30);
+        let mut next_view = Instant::now();
 
         while !stop.load(Ordering::Relaxed) {
             // Where the group is, or this angle's start before it knows.
@@ -450,6 +497,11 @@ impl Fetcher {
                 self.stats
                     .index_segments
                     .store(index.len() as u64, Ordering::Relaxed);
+                if Instant::now() >= next_view {
+                    next_view = Instant::now() + INDEX_VIEW_EVERY;
+                    self.stats
+                        .set_index_view(index_view(&index, &chunks.listed, (start, end)));
+                }
             }
             self.stats
                 .fetched_segments
@@ -637,6 +689,40 @@ mod tests {
         }
         std::thread::sleep(run);
         stop.store(true, Ordering::Relaxed);
+    }
+
+    fn seg_at(start: i64, end: i64) -> Segment {
+        Segment {
+            start_ns: start,
+            end_ns: end,
+            ..(*seg(0)).clone()
+        }
+    }
+
+    #[test]
+    fn index_view_reports_holes_only_where_it_listed() {
+        // Segments of 1 s at 0..10 s, a hole 4..6 s, and one at 45 s (in a
+        // chunk of its own; 20..40 s was never listed).
+        let mut index = BTreeMap::new();
+        for i in (0..4).chain(6..10) {
+            index.insert(i * S, Arc::new(seg_at(i * S, (i + 1) * S)));
+        }
+        index.insert(45 * S, Arc::new(seg_at(45 * S, 46 * S)));
+        let listed: HashSet<i64> = [0, 2].into_iter().collect();
+        let v = index_view(&index, &listed, (0, 46 * S));
+        assert_eq!(v.listed, vec![(0, 20 * S), (40 * S, 46 * S)]);
+        // 10..45 s crosses the unlisted chunk 1: not known to be a gap.
+        assert_eq!(v.gaps, vec![(4 * S, 6 * S)]);
+        // With every chunk listed, it is a gap.
+        let listed: HashSet<i64> = [0, 1, 2].into_iter().collect();
+        let v = index_view(&index, &listed, (0, 46 * S));
+        assert_eq!(v.listed, vec![(0, 46 * S)]);
+        assert_eq!(v.gaps, vec![(4 * S, 6 * S), (10 * S, 45 * S)]);
+        // Sub-millisecond seams are not gaps.
+        let mut index = BTreeMap::new();
+        index.insert(0, Arc::new(seg_at(0, S)));
+        index.insert(S + 500, Arc::new(seg_at(S + 500, 2 * S)));
+        assert!(index_view(&index, &listed, (0, 2 * S)).gaps.is_empty());
     }
 
     #[test]
