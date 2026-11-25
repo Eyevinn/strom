@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
 
+// Commands without fields are empty struct variants, not unit variants:
+// serde lets an internally tagged unit variant ignore extra fields even under
+// `deny_unknown_fields`, so `{"cmd":"pause","x":1}` would pass.
 /// A command for a replay group. JSON objects tagged by `cmd`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
@@ -69,7 +72,7 @@ pub enum ReplayCommand {
         end_action: Option<ReplayEndAction>,
     },
     /// Drop the cue; the cursor and speed stay.
-    Uncue,
+    Uncue {},
     /// Change speed smoothly: linearly from the speed now to `to` over
     /// `duration_ms` (at most 60000), run by the server. Keeps the cue; any
     /// other command that sets the speed ends the ramp.
@@ -83,9 +86,9 @@ pub enum ReplayCommand {
         label: Option<String>,
     },
     /// Pause where the cursor is.
-    Pause,
+    Pause {},
     /// Go to the live edge (the last instant every angle has) and pause.
-    End,
+    End {},
     /// Play at 1x from the live edge minus a margin (default 1500 ms).
     Live {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -242,4 +245,30 @@ pub struct ReplayCommandResult {
     /// The mark, for `mark`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark: Option<ReplayMark>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commands_without_fields_refuse_unknown_fields() {
+        for cmd in ["pause", "uncue", "end"] {
+            let ok: ReplayCommand =
+                serde_json::from_value(serde_json::json!({ "cmd": cmd })).unwrap();
+            assert_eq!(
+                serde_json::to_value(&ok).unwrap(),
+                serde_json::json!({ "cmd": cmd })
+            );
+            let bad = serde_json::from_value::<ReplayCommand>(
+                serde_json::json!({ "cmd": cmd, "frames": 3 }),
+            );
+            assert!(bad.is_err(), "{} took an unknown field", cmd);
+        }
+        // Commands with fields refuse them too.
+        assert!(serde_json::from_value::<ReplayCommand>(
+            serde_json::json!({ "cmd": "jog", "frames": 1, "x": 1 })
+        )
+        .is_err());
+    }
 }

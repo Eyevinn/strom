@@ -1017,7 +1017,7 @@ impl ReplayTimeline {
         let mut ramp = None;
         let live = match cmd {
             Command::Live { .. } => true,
-            Command::Uncue => a.live,
+            Command::Uncue {} => a.live,
             _ => false,
         };
         // What the cue becomes: kept (if it still holds the cursor), set, or
@@ -1145,8 +1145,8 @@ impl ReplayTimeline {
                     },
                 }
             }
-            Command::Pause => (cur, 0.0, Cue::Keep),
-            Command::End => (b.live_end - 1, 0.0, Cue::Drop),
+            Command::Pause {} => (cur, 0.0, Cue::Keep),
+            Command::End {} => (b.live_end - 1, 0.0, Cue::Drop),
             Command::Live { margin_ms } => {
                 let margin = ms_to_ns(margin_ms.unwrap_or(DEFAULT_LIVE_MARGIN_MS));
                 self.live_margin_ns.store(margin, Ordering::Relaxed);
@@ -1172,7 +1172,7 @@ impl ReplayTimeline {
                 };
                 (r.start, 0.0, Cue::Set(r))
             }
-            Command::Uncue => (cur, cur_speed, Cue::Drop),
+            Command::Uncue {} => (cur, cur_speed, Cue::Drop),
             Command::Mark { .. } => unreachable!("handled above"),
         };
         // Clamp to the media, so later moves start from what is shown, then

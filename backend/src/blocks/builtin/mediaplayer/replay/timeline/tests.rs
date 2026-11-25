@@ -86,14 +86,14 @@ fn commands_use_origin_relative_frames() {
     let a = tl.apply_at(seek(-50), rt).unwrap();
     assert_eq!(a.tai, BASE);
     // `end` goes to the live edge (the last instant every angle has).
-    let a = tl.apply_at(Command::End, rt).unwrap();
+    let a = tl.apply_at(Command::End {}, rt).unwrap();
     assert_eq!(tl.reference_time(a.tai).unwrap().frame, 499);
 }
 
 #[test]
 fn end_is_the_common_edge_not_the_longest_angle() {
     let (tl, _p) = timeline_with(&[(BASE, BASE + 10 * S), (BASE, BASE + 8 * S)]);
-    let a = tl.apply_at(Command::End, 0).unwrap();
+    let a = tl.apply_at(Command::End {}, 0).unwrap();
     assert_eq!(a.tai, BASE + 8 * S - 1);
 }
 
@@ -596,7 +596,7 @@ fn result_names_the_cursor_frame() {
 #[test]
 fn seek_from_live_with_speed_is_one_step() {
     let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S), (BASE, BASE + 50 * S)]);
-    tl.apply_at(Command::Pause, 0).unwrap();
+    tl.apply_at(Command::Pause {}, 0).unwrap();
     let c = parse(r#"{"cmd":"seek","from_live_ms":8000,"speed":0.5}"#).unwrap();
     let a = tl.apply_at(c, 0).unwrap();
     // 8 s before the common edge (50 s), already at 50 %.
@@ -789,7 +789,7 @@ fn leaving_the_cue_drops_it() {
     // Moves inside keep it, speed and pause keep it.
     tl.apply_at(Command::Jog { frames: 3 }, 0).unwrap();
     tl.apply_at(Command::Speed { speed: 0.5 }, 0).unwrap();
-    tl.apply_at(Command::Pause, 0).unwrap();
+    tl.apply_at(Command::Pause {}, 0).unwrap();
     assert!(tl.cue().is_some());
     // A seek outside drops it, and play runs on unbounded.
     tl.apply_at(seek_tai(BASE + 30 * S), 0).unwrap();
@@ -800,7 +800,7 @@ fn leaving_the_cue_drops_it() {
     assert!(tl.cue().is_none());
     tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, None), 0)
         .unwrap();
-    let a = tl.apply_at(Command::Uncue, 0).unwrap();
+    let a = tl.apply_at(Command::Uncue {}, 0).unwrap();
     assert!(a.region.is_none() && tl.cue().is_none());
     assert_eq!(a.tai, BASE + 10 * S);
 }
@@ -851,7 +851,7 @@ fn play_inside_the_live_margin_does_not_go_live() {
     let a = tl.apply_at(Command::Live { margin_ms: None }, 0).unwrap();
     assert!(a.live && tl.result(&a).live);
     assert!(events.try_recv().is_err());
-    assert!(!tl.apply_at(Command::Pause, 0).unwrap().live);
+    assert!(!tl.apply_at(Command::Pause {}, 0).unwrap().live);
     // A cue's bounds win over catching up.
     tl.apply_at(cue(BASE + 50 * S, BASE + 59 * S, None), 0)
         .unwrap();
