@@ -756,11 +756,12 @@ fn min_keyframe_request_interval_defaults_to_one_second() {
     );
 }
 
-/// The block puts `min_keyframe_request_interval_ms` on the encoder's
-/// `min-force-key-unit-interval`: 1 s by default (WebRTC PLI storms), and 0
-/// when asked, so a scheduled request (TAMS Output's TAI grid) is never dropped.
+/// The block clears the encoder's `min-force-key-unit-interval`: that
+/// base-class floor also drops scheduled requests (TAMS Output's TAI grid). The
+/// block applies `min_keyframe_request_interval_ms` itself, to "now" requests
+/// only (see `keyframe_requests`).
 #[test]
-fn block_sets_min_force_key_unit_interval_from_property() {
+fn block_clears_base_class_keyframe_floor() {
     if !require_element("x264enc") || !require_element("h264parse") {
         return;
     }
@@ -794,9 +795,9 @@ fn block_sets_min_force_key_unit_interval_from_property() {
         encoder.property::<u64>("min-force-key-unit-interval")
     };
 
-    assert_eq!(build(None), 1_000_000_000, "default is a 1 s floor");
-    assert_eq!(build(Some(0)), 0, "0 honours every request");
-    assert_eq!(build(Some(250)), 250_000_000);
+    assert_eq!(build(None), 0);
+    assert_eq!(build(Some(0)), 0);
+    assert_eq!(build(Some(250)), 0);
 }
 
 /// #1163: on Windows with a Core Ultra GPU and an Intel driver older than

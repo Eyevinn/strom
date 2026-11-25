@@ -21,8 +21,9 @@ use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockB
 use crate::client_auth::AuthMethod;
 use crate::osc::SatProvider;
 use crate::tams::client::{FlowSpec, TamsClient};
-use crate::tams::timeline::{
-    reference_tai_ns, shared_pipeline_mapping, AnchorKind, FragmentTimeline, TaiClock,
+use crate::tams::tai_mapping::{
+    grid_miss_ns, reference_tai_ns, shared_pipeline_mapping, AnchorKind, FragmentTimeline, HostTai,
+    FIRST_ON_GRID_FRAGMENT,
 };
 use crate::tams::uploader::{
     channel, new_tail_slot, spawn_uploader, FragmentReady, SharedDetected, TailFragment,
@@ -31,7 +32,7 @@ use gst::glib::prelude::ToValue;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use strom_types::tams::{
     CONTENT_TYPE_MP4, CONTENT_TYPE_MPEGTS, FORMAT_AUDIO, FORMAT_MULTI, FORMAT_VIDEO,
@@ -197,15 +198,17 @@ impl BlockBuilder for TamsOutputBuilder {
         let auth_plan = match auth_mode.as_str() {
             "osc" => {
                 let provider = crate::osc::sat_provider();
-                let service_id = prop_str(properties, "osc_service_id")
-                    .or_else(|| crate::osc::derive_service_id(&gateway_url))
-                    .ok_or_else(|| {
-                        BlockBuildError::InvalidProperty(
-                            "TAMS Output: OSC mode could not derive the service id from \
-                             gateway_url — set the OSC Service ID property"
-                                .to_string(),
-                        )
-                    })?;
+                let service_id = crate::tams::client::osc_service_id(
+                    &gateway_url,
+                    prop_str(properties, "osc_service_id").as_deref(),
+                )
+                .map_err(|e| {
+                    BlockBuildError::InvalidProperty(format!(
+                        "TAMS Output: {} (set the OSC Service ID property if it cannot be \
+                         derived from gateway_url)",
+                        e
+                    ))
+                })?;
                 info!(
                     "TAMS Output {}: OSC PAT/SAT auth for service {}",
                     instance_id, service_id
@@ -216,8 +219,9 @@ impl BlockBuilder for TamsOutputBuilder {
                 }
             }
             _ => {
+                // The instance's own token only goes to an allow-listed gateway.
                 let auth = match prop_str(properties, "api_token")
-                    .or_else(|| strom_types::env::var_opt("STROM_TAMS_API_TOKEN"))
+                    .or_else(|| crate::tams::client::env_api_token(&gateway_url))
                 {
                     Some(t) => AuthMethod::Bearer(t),
                     None => AuthMethod::None,
@@ -726,7 +730,7 @@ fn build_flow_chain(
     let chain_tag = suffix.to_string();
     let content_type = container.content_type().to_string();
     let file_ext = container.file_ext().to_string();
-    let tail_segment_ns = segment_secs.saturating_mul(1_000_000_000);
+    let segment_ns = segment_secs.saturating_mul(1_000_000_000);
     ctx.register_element_setup(Box::new(move |flow_id, events| {
         // Remove only orphan segment files left by a previous run — plain `seg_*`
         // files with no `.meta` sidecar. Their timerange is lost so they cannot be
@@ -798,22 +802,27 @@ fn build_flow_chain(
             events,
             rx,
             tail.clone(),
-            tail_segment_ns,
+            segment_ns,
         );
 
         // Per-block timeline: TAI = running time + offset, anchored on the first
         // fragment. The anchor is the buffer's capture time when it carries a
         // reference timestamp, otherwise the running time -> TAI mapping shared by
         // every TAMS Output of this pipeline run, so equal running time gives equal
-        // TAI across blocks (#966). See `crate::tams::timeline`.
+        // TAI across blocks (#966). See `crate::tams::tai_mapping`.
         let timeline = Arc::new(Mutex::new(FragmentTimeline::default()));
-        let tai = Arc::new(TaiClock::new());
+        let tai = Arc::new(HostTai::new());
         // `split-at-running-time` takes the lock splitmuxsink holds while it emits
-        // format-location-full, so the next split is scheduled from a task.
-        let runtime = tokio::runtime::Handle::current();
+        // format-location-full, so the next split is scheduled with `call_async`
+        // (GStreamer's thread pool: no tokio runtime needed in this callback, and
+        // it runs right after the signal returns). A split that still lands late
+        // shows up as a segment off the grid (`warn_off_grid`).
         let temp_dir = temp_dir_for_setup;
         let tag = chain_tag;
         let block_id_sig = block_id;
+        // Fragments that started off the grid although their keyframe was
+        // requested in time (see `warn_off_grid`).
+        let off_grid = AtomicU64::new(0);
 
         let _ = splitmuxsink.connect("format-location-full", false, move |args| {
             let element = args.first().and_then(|v| v.get::<gst::Element>().ok());
@@ -838,37 +847,45 @@ fn build_flow_chain(
 
             let placed = {
                 let mut tl = timeline.lock().unwrap_or_else(|e| e.into_inner());
-                tl.place(
-                    running_time_ns,
-                    || {
-                        let tai_minus_utc = tai.tai_minus_utc_ns();
-                        if let Some(t) = buffer
-                            .as_ref()
-                            .and_then(|b| reference_tai_ns(b.as_ref(), tai_minus_utc))
-                        {
-                            return (t, AnchorKind::Reference);
+                tl.place(running_time_ns, segment_ns, || {
+                    let tai_minus_utc = tai.tai_minus_utc_ns();
+                    if let Some(t) = buffer
+                        .as_ref()
+                        .and_then(|b| reference_tai_ns(b.as_ref(), tai_minus_utc))
+                    {
+                        return (t, AnchorKind::Reference);
+                    }
+                    if let Some(el) = element.as_ref() {
+                        if let (Some(clock), Some(base)) = (el.clock(), el.base_time()) {
+                            let m = shared_pipeline_mapping(flow_id, &clock, base.nseconds(), &tai);
+                            return (
+                                m.tai_ns(base.nseconds(), running_time_ns),
+                                AnchorKind::Pipeline,
+                            );
                         }
-                        if let Some(el) = element.as_ref() {
-                            if let (Some(clock), Some(base)) = (el.clock(), el.base_time()) {
-                                let m =
-                                    shared_pipeline_mapping(flow_id, &clock, base.nseconds(), &tai);
-                                return (
-                                    m.tai_ns(base.nseconds(), running_time_ns),
-                                    AnchorKind::Pipeline,
-                                );
-                            }
-                        }
-                        (tai.now_ns(), AnchorKind::Arrival)
-                    },
-                    || tai.now_ns(),
-                )
+                    }
+                    (tai.now_ns(), AnchorKind::Arrival)
+                })
             };
             if placed.went_backward {
                 warn!(
-                    "TAMS {} ({}): running time went backward (to {} ns), re-anchoring \
-                     segment timeline to current TAI",
-                    block_id_sig, tag, running_time_ns
+                    "TAMS {} ({}): running time went backward (to {} ns), re-anchored \
+                     ({:?}) at TAI {} ns",
+                    block_id_sig,
+                    tag,
+                    running_time_ns,
+                    placed.anchored.unwrap_or(AnchorKind::Arrival),
+                    placed.start_ns
                 );
+                if let Some(by) = placed.clamped_by_ns {
+                    warn!(
+                        "TAMS {} ({}): moved the segment start {} ms later so it does not \
+                         overlap the previous segment's planned end",
+                        block_id_sig,
+                        tag,
+                        by / 1_000_000
+                    );
+                }
             } else if let Some(kind) = placed.anchored {
                 info!(
                     "TAMS {} ({}): timeline anchored ({:?}): running time {} ns -> TAI {} ns",
@@ -876,44 +893,52 @@ fn build_flow_chain(
                 );
             }
             let abs_start = placed.start_ns;
+            if placed.since_anchor >= FIRST_ON_GRID_FRAGMENT {
+                // Splits land on the first keyframe at or after the grid point,
+                // so up to one frame past it is on the grid.
+                let tolerance_ns = buffer
+                    .as_ref()
+                    .and_then(|b| b.duration())
+                    .map_or(50_000_000, |d| d.nseconds() + 1_000_000);
+                if let Some(miss) = grid_miss_ns(abs_start, segment_ns, tolerance_ns) {
+                    warn_off_grid(&block_id_sig, &tag, &off_grid, miss);
+                }
+            }
 
             // Schedule the split that ends this fragment on the next grid point.
             let next_split = timeline
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .next_split_running_time(running_time_ns, tail_segment_ns);
+                .next_split_running_time(running_time_ns, segment_ns);
             if let (Some(next), Some(el)) = (next_split, element.as_ref()) {
-                let weak = el.downgrade();
-                let segment_ns = tail_segment_ns;
-                runtime.spawn(async move {
-                    if let Some(el) = weak.upgrade() {
-                        let at = gst::ClockTime::from_nseconds(next);
-                        el.emit_by_name::<()>("split-at-running-time", &[&at]);
-                        // Ask upstream for a keyframe at the grid point after `at`.
-                        // This fragment opens a GOP or more after its start, so the
-                        // encoder is often past `at` already; a request for a time
-                        // already passed would force a keyframe off the grid. The
-                        // split at `at` itself was requested one fragment earlier.
-                        let ahead = gst::ClockTime::from_nseconds(next + segment_ns);
-                        for pad in el.sink_pads() {
-                            let event = gstreamer_video::UpstreamForceKeyUnitEvent::builder()
-                                .running_time(ahead)
-                                .all_headers(true)
-                                .build();
-                            pad.push_event(event);
-                        }
+                el.call_async(move |el| {
+                    let at = gst::ClockTime::from_nseconds(next);
+                    el.emit_by_name::<()>("split-at-running-time", &[&at]);
+                    // Ask upstream for a keyframe at the grid point after `at`.
+                    // This fragment opens a GOP or more after its start, so the
+                    // encoder is often past `at` already; a request for a time
+                    // already passed would force a keyframe off the grid. The
+                    // split at `at` itself was requested one fragment earlier.
+                    let ahead = gst::ClockTime::from_nseconds(next + segment_ns);
+                    for pad in el.sink_pads() {
+                        let event = gstreamer_video::UpstreamForceKeyUnitEvent::builder()
+                            .running_time(ahead)
+                            .all_headers(true)
+                            .build();
+                        pad.push_event(event);
                     }
                 });
             }
 
-            // The previously open fragment is now complete: [its start, this start).
+            // The previously open fragment is now complete: [its start, this start),
+            // or [its start, its planned end) after a backward jump.
             // The just-opened one becomes the new tail (flushed on shutdown).
             if let Ok(mut tail) = tail.lock() {
                 if let Some(prev) = tail.take() {
                     let ready = FragmentReady {
                         path: prev.path,
                         start_ns: prev.start_ns,
-                        end_ns: abs_start,
+                        end_ns: placed.prev_end_ns.max(prev.start_ns + 1),
                     };
                     if let Err(e) = tx.try_send(ready) {
                         warn!(
@@ -941,6 +966,35 @@ fn build_flow_chain(
     }));
 
     Ok(())
+}
+
+/// Report a segment that started `miss_ns` past its TAI grid point although its
+/// keyframe was requested one fragment ahead: the encoder did not honour the
+/// request. Boundaries then follow the encoder's own keyframes, off the grid and
+/// differently on each angle. Logged on the first miss and every 30th after.
+fn warn_off_grid(block_id: &str, tag: &str, count: &AtomicU64, miss_ns: u64) {
+    let n = count.fetch_add(1, Ordering::Relaxed) + 1;
+    if n == 1 || n.is_multiple_of(30) {
+        warn!(
+            "TAMS {} ({}): segment boundary {} ms past the TAI grid ({} so far): the \
+             upstream encoder did not make the keyframe requested for it. Check that it \
+             honours force-keyunit requests on time: a Video Encoder block applies \
+             min_keyframe_request_interval_ms only to immediate requests, but other \
+             encoders may drop requests (e.g. min-force-key-unit-interval) or need a GOP \
+             that divides the segment duration.",
+            block_id,
+            tag,
+            miss_ns / 1_000_000,
+            n
+        );
+    } else {
+        debug!(
+            "TAMS {} ({}): segment boundary {} ms past the TAI grid",
+            block_id,
+            tag,
+            miss_ns / 1_000_000
+        );
+    }
 }
 
 /// Register a metadata-only Multi-Flow that groups the per-essence flows via
@@ -1132,14 +1186,14 @@ fn tams_output_definition() -> BlockDefinition {
             simple_prop(
                 "api_token",
                 "API Token",
-                "Static bearer token for the gateway (Static API Token mode only). Leave empty when behind an access gate. Ignored in OSC PAT/SAT mode.",
+                "Static bearer token for the gateway (Static API Token mode only). Empty = the instance's STROM_TAMS_API_TOKEN, which is sent only to STROM_TAMS_GATEWAY_URL or a gateway listed in STROM_TAMS_ALLOWED_GATEWAYS; otherwise no token. Ignored in OSC PAT/SAT mode.",
                 PropertyType::String,
                 PropertyValue::String(String::new()),
             ),
             simple_prop(
                 "osc_service_id",
                 "OSC Service ID",
-                "OSC PAT/SAT mode only. The OSC service type the SAT is scoped to. Leave empty to derive it from the gateway URL (the service-type label of an *.osaas.io host).",
+                "OSC PAT/SAT mode only. The OSC service type the SAT is scoped to. Leave empty to derive it from the gateway URL (the service-type label of an *.osaas.io host). A SAT is sent only to an HTTPS OSC host of that service type, or to a gateway listed in STROM_TAMS_ALLOWED_GATEWAYS.",
                 PropertyType::String,
                 PropertyValue::String(String::new()),
             ),

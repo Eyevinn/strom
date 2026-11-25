@@ -612,9 +612,7 @@ fn parse_min_keyframe_request_interval_ms(properties: &HashMap<String, PropertyV
         .unwrap_or(DEFAULT_MIN_KEYFRAME_REQUEST_INTERVAL_MS)
 }
 
-/// Rate-limit force-keyunit requests (GstVideoEncoder base-class property
-/// `min-force-key-unit-interval`, present on all encoders built on that base
-/// class; GStreamer's default 0 = honor every request). WebRTC viewers send a
+/// Rate-limit keyframes forced by downstream requests. WebRTC viewers send a
 /// PLI on picture loss and webrtcsink converts each one into a force-keyunit
 /// event. With no floor, a burst-induced loss spiral (big frame -> loss ->
 /// PLI -> outsized IDR -> more loss -> more PLIs) makes the encoder emit
@@ -623,15 +621,13 @@ fn parse_min_keyframe_request_interval_ms(properties: &HashMap<String, PropertyV
 /// viewers and genuine recoveries still get their keyframe quickly, but a PLI
 /// storm can no longer drive the output to many times the target bitrate.
 ///
-/// The floor also drops scheduled requests: TAMS Output asks for a keyframe
-/// on every point of its TAI segment grid, and with segments of about a
-/// second or a GOP under one, a 1 s floor drops some of them and the segment
-/// boundaries leave the grid. Recording and ingest flows set it to 0.
+/// Only requests without a running time ("now") are limited. Scheduled
+/// requests, such as TAMS Output's keyframe on every point of its TAI
+/// segment grid, always pass: the base-class `min-force-key-unit-interval`
+/// dropped them too and moved segment boundaries off the grid. See
+/// `keyframe_requests`.
 fn set_min_keyframe_request_interval(encoder: &gst::Element, interval_ms: u64) {
-    if encoder.has_property("min-force-key-unit-interval") {
-        let interval_ns = interval_ms.saturating_mul(1_000_000);
-        encoder.set_property("min-force-key-unit-interval", interval_ns);
-    }
+    keyframe_requests::install(encoder, interval_ms);
 }
 
 /// Set encoder properties based on the encoder type.
@@ -1575,7 +1571,7 @@ fn videoenc_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "min_keyframe_request_interval_ms".to_string(),
                 label: "Min Keyframe Request Interval (ms)".to_string(),
-                description: "Shortest time between keyframes forced by downstream requests, in milliseconds. Requests that come sooner are dropped. The default 1000 protects WebRTC/WHEP output from PLI storms, where each viewer's picture-loss report would force another large keyframe. 0 = honour every request: use it for recording and ingest (e.g. TAMS Output), which request keyframes on a time grid and need each one.".to_string(),
+                description: "Shortest time between keyframes forced by downstream requests, in milliseconds. Requests that come sooner are dropped. The default 1000 protects WebRTC/WHEP output from PLI storms, where each viewer's picture-loss report would force another large keyframe. Only immediate requests are limited: requests for a keyframe at a given time (TAMS Output's segment grid, segmenting recorders) always pass. 0 = honour every request.".to_string(),
                 property_type: PropertyType::UInt,
                 default_value: Some(PropertyValue::UInt(DEFAULT_MIN_KEYFRAME_REQUEST_INTERVAL_MS)),
                 mapping: PropertyMapping {
@@ -1615,6 +1611,7 @@ fn videoenc_definition() -> BlockDefinition {
 }
 
 mod av1;
+mod keyframe_requests;
 mod level;
 mod mediafoundation;
 mod selection;

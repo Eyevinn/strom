@@ -3,7 +3,7 @@
 //!
 //! The stamp is the pipeline clock's time for the buffer (`base_time + running
 //! time`), mapped to TAI by the running time -> TAI mapping shared by the flow
-//! (`crate::tams::timeline`), and written as UTC (`timestamp/x-unix`) or TAI
+//! (`crate::tams::tai_mapping`), and written as UTC (`timestamp/x-unix`) or TAI
 //! (`timestamp/x-tai`). For a live source, or a stream synchronized to the clock
 //! (`clocksync`), that is the time the buffer was captured or released. It is a
 //! function of running time, so equal running times get equal stamps in every
@@ -12,7 +12,7 @@
 //! A buffer that already carries a reference timestamp in the same domain keeps
 //! it: upstream capture time wins.
 
-use crate::tams::timeline::{shared_pipeline_mapping, PipelineTaiMapping, TaiClock};
+use crate::tams::tai_mapping::{shared_pipeline_mapping, HostTai, PipelineTaiMapping};
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
@@ -86,7 +86,7 @@ mod imp {
     }
 
     struct State {
-        tai: TaiClock,
+        tai: HostTai,
         tai_minus_utc_ns: u64,
         caps: gst::Caps,
         timescale: Timescale,
@@ -143,7 +143,7 @@ mod imp {
 
         fn start(&self) -> Result<(), gst::ErrorMessage> {
             let settings = self.settings.lock().unwrap();
-            let tai = TaiClock::new();
+            let tai = HostTai::new();
             let tai_minus_utc_ns = tai.tai_minus_utc_ns();
             *self.state.lock().unwrap() = Some(State {
                 tai,

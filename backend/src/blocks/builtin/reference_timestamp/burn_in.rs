@@ -16,7 +16,7 @@
 //! Only the 8-bit luma plane carries the drawing; the band's chroma is set
 //! neutral. Accepts 8-bit planar and semi-planar YUV.
 
-use crate::tams::timeline::{reference_tai_ns, TaiClock};
+use crate::tams::tai_mapping::{reference_tai_ns, HostTai};
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::subclass::prelude::*;
@@ -110,11 +110,12 @@ pub fn decode_cells(cells: &[bool]) -> Option<u64> {
 
 /// `YYYY-MM-DD HH:MM:SS.mmm UTC` for UTC nanoseconds since 1970.
 pub fn utc_text(utc_ns: u64) -> String {
-    let secs = (utc_ns / 1_000_000_000) as i64;
-    let ms = (utc_ns % 1_000_000_000) / 1_000_000;
-    match chrono::DateTime::from_timestamp(secs, 0) {
-        Some(dt) => format!("{}.{:03} UTC", dt.format("%Y-%m-%d %H:%M:%S"), ms),
-        None => String::from("----------"),
+    match i64::try_from(utc_ns) {
+        Ok(ns) => format!(
+            "{} UTC",
+            strom_types::tai::format_calendar_ms(ns).replacen('T', " ", 1)
+        ),
+        Err(_) => String::from("----------"),
     }
 }
 
@@ -296,7 +297,7 @@ mod imp {
 
         fn start(&self) -> Result<(), gst::ErrorMessage> {
             self.tai_minus_utc_ns
-                .store(TaiClock::new().tai_minus_utc_ns(), Ordering::Relaxed);
+                .store(HostTai::new().tai_minus_utc_ns(), Ordering::Relaxed);
             self.warned_missing.store(false, Ordering::Relaxed);
             Ok(())
         }
