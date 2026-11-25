@@ -193,7 +193,7 @@ impl ReplayPlayer {
         let container = self.store.info().and_then(|i| i.container);
         let started = Instant::now();
         let result = decode_bytes(
-            &bytes,
+            bytes,
             container.as_deref(),
             self.decoder,
             decode_timeout(seg.duration_ns()),

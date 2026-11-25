@@ -11,14 +11,17 @@ use super::source::Segment;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Pick the best available H.264 decoder. `STROM_REPLAY_DECODER` overrides
 /// the choice (diagnostics), when that element exists.
 pub fn pick_decoder() -> &'static str {
-    if let Some(name) = strom_types::env::var_opt("STROM_REPLAY_DECODER") {
-        if gst::ElementFactory::find(&name).is_some() {
-            return Box::leak(name.into_boxed_str());
+    static OVERRIDE: OnceLock<Option<String>> = OnceLock::new();
+    let wanted = OVERRIDE.get_or_init(|| strom_types::env::var_opt("STROM_REPLAY_DECODER"));
+    if let Some(name) = wanted {
+        if gst::ElementFactory::find(name).is_some() {
+            return name;
         }
     }
     // vtdec_hw comes after avdec_h264: in replay it sometimes drops the
@@ -62,7 +65,7 @@ pub fn decode_timeout(segment_ns: i64) -> Duration {
 /// (an unlinkable codec, no video stream, garbage) never reaches the appsink
 /// as end of stream, so waiting for it alone would block for ever.
 pub fn decode_bytes(
-    bytes: &[u8],
+    bytes: Arc<Vec<u8>>,
     container: Option<&str>,
     decoder: &str,
     timeout: Duration,
@@ -82,9 +85,18 @@ pub fn decode_bytes(
     result
 }
 
+/// Segment bytes shared with the cache, handed to GStreamer without a copy.
+struct SharedBytes(Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for SharedBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 fn run_decode(
     pipeline: &gst::Pipeline,
-    bytes: &[u8],
+    bytes: Arc<Vec<u8>>,
     timeout: Duration,
 ) -> Result<Decoded, String> {
     let src = pipeline
@@ -100,7 +112,7 @@ fn run_decode(
     crate::gst::thread_priority::reset_streaming_threads(pipeline);
     // The whole object as one buffer, then end of stream.
     src.set_max_bytes(bytes.len() as u64 + 1);
-    src.push_buffer(gst::Buffer::from_slice(bytes.to_vec()))
+    src.push_buffer(gst::Buffer::from_slice(SharedBytes(bytes)))
         .map_err(|e| format!("push: {:?}", e))?;
     let _ = src.end_of_stream();
     pipeline
@@ -289,7 +301,7 @@ mod tests {
         gst::init().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(decode_bytes(&bytes, None, pick_decoder(), timeout));
+            let _ = tx.send(decode_bytes(Arc::new(bytes), None, pick_decoder(), timeout));
         });
         rx.recv_timeout(Duration::from_secs(30)).ok()
     }
