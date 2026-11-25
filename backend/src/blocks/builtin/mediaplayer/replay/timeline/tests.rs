@@ -1043,3 +1043,25 @@ fn following_live_holds_at_the_common_edge_when_it_stalls() {
     p[0].end_tai.store(BASE + 70 * S, Ordering::Relaxed);
     assert_eq!(tl.tai_at(5 * S), Some(BASE + 61_500 * MS));
 }
+
+#[test]
+fn live_edge_steps_of_several_angles_count_as_one() {
+    // Four angles whose segments end 1 ms apart, stepping 100 ms apart:
+    // each second the common edge moves 1 ms three times, then to the
+    // first angle's new end. (Seen live with the split ingest; the median
+    // step was then 1 ms and the estimate fell back to the known edge.)
+    let mut t = EdgeTracker::default();
+    t.observe(0, BASE);
+    for k in 1..5 {
+        for j in 1..=3 {
+            t.observe(k * S - (4 - j) * 100 * MS, BASE + (k - 1) * S + j * MS);
+        }
+        t.observe(k * S, BASE + k * S);
+    }
+    let edge = BASE + 4 * S;
+    // Still growing 1 s per second, and smooth between steps.
+    let (e1, g1) = t.estimate(4 * S + 100 * MS, edge);
+    let (e2, g2) = t.estimate(4 * S + 850 * MS, edge);
+    assert!(g1 && g2);
+    assert_eq!(e2 - e1, 750 * MS);
+}

@@ -560,6 +560,8 @@ pub fn parse_command(mut value: serde_json::Value) -> Result<Command, CommandErr
 
 /// Steps of the live edge kept for the estimate.
 const EDGE_STEPS: usize = 16;
+/// Edge steps closer together than this (host time) count as one.
+const EDGE_COALESCE_NS: i64 = 250_000_000;
 
 /// The live edge between its steps. The index grows one segment at a time,
 /// so the known edge jumps (once a second for 1 s segments) while capture
@@ -581,6 +583,15 @@ impl EdgeTracker {
             // Went back: a new run or another source. Start over.
             Some(&(_, last)) if edge < last => self.steps.clear(),
             _ => {}
+        }
+        // Angles step one after the other: the common edge moves a few ms
+        // when the first does, the rest when the last does. Steps that close
+        // in time are one step, seen when it completed.
+        if let Some(last) = self.steps.back_mut() {
+            if mono - last.0 < EDGE_COALESCE_NS {
+                *last = (mono, edge);
+                return;
+            }
         }
         self.steps.push_back((mono, edge));
         while self.steps.len() > EDGE_STEPS {
