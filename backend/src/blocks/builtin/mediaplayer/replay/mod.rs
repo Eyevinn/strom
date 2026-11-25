@@ -14,6 +14,7 @@
 //!   edge; each player shows its latest frame at or before the cursor;
 //! - `player`: decode scheduling, frame store and the output tick.
 
+pub mod backoff;
 pub mod cache;
 pub mod decode;
 pub mod grid;

@@ -13,6 +13,7 @@
 //!   motion repeats frames, reverse walks backwards: the output never stops,
 //!   flushes or seeks, and never waits on the network.
 
+use super::backoff::{worth_warning, Backoff};
 use super::cache::{by_urgency, Fetcher, SegmentStore};
 use super::decode::{caps_frame_rate, decode_bytes, decode_timeout, map_to_grid, pick_decoder};
 use super::source::{Segment, SourceIndex};
@@ -51,6 +52,8 @@ pub struct ReplayPlayer {
     appsrc: gst::glib::WeakRef<gst_app::AppSrc>,
     decoded: Mutex<FrameStore>,
     inflight: Mutex<HashSet<i64>>,
+    /// Segments whose decode failed (or gave no frames), retried with backoff.
+    failed: Mutex<Backoff<i64>>,
     caps: Mutex<Option<gst::Caps>>,
     decoder: &'static str,
     workers: usize,
@@ -96,6 +99,10 @@ impl ReplayPlayer {
             appsrc: appsrc.downgrade(),
             decoded: Mutex::new(FrameStore::default()),
             inflight: Mutex::new(HashSet::new()),
+            failed: Mutex::new(Backoff::new(
+                Duration::from_millis(250),
+                Duration::from_secs(10),
+            )),
             caps: Mutex::new(None),
             decoder,
             workers: 2,
@@ -155,14 +162,33 @@ impl ReplayPlayer {
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
-            self.decode_one(&seg);
+            match self.decode_one(&seg) {
+                Ok(()) => lock(&self.failed).succeed(&seg.start_ns),
+                Err(e) => {
+                    let attempts = lock(&self.failed).fail(seg.start_ns, Instant::now());
+                    if worth_warning(attempts) {
+                        warn!(
+                            "Replay {}: segment {} not decoded (attempt {}): {}",
+                            self.block_id, seg.object_id, attempts, e
+                        );
+                    } else {
+                        debug!(
+                            "Replay {}: segment {} not decoded (attempt {}): {}",
+                            self.block_id, seg.object_id, attempts, e
+                        );
+                    }
+                }
+            }
             lock(&self.inflight).remove(&seg.start_ns);
         }
     }
 
-    fn decode_one(&self, seg: &Segment) {
+    /// Decode one segment into the frame store. An error means the segment
+    /// gave no usable frames; it is retried later with backoff.
+    fn decode_one(&self, seg: &Segment) -> Result<(), String> {
+        // Evicted meanwhile: nothing to do, it is sent again when refetched.
         let Some(bytes) = self.store.bytes(seg.start_ns) else {
-            return;
+            return Ok(());
         };
         let container = self.store.info().and_then(|i| i.container);
         let started = Instant::now();
@@ -173,27 +199,21 @@ impl ReplayPlayer {
             decode_timeout(seg.duration_ns()),
         );
         let ms = started.elapsed().as_millis() as u64;
-        let decoded = match result {
-            Ok(d) => d,
-            Err(e) => {
-                warn!(
-                    "Replay {}: segment {} failed: {}",
-                    self.block_id, seg.object_id, e
-                );
-                return;
-            }
-        };
+        let decoded = result?;
         // No frame rate from the index: take it from the stream.
         let grid = self.stats.grid().or_else(|| {
             let (n, d) = caps_frame_rate(&decoded.caps)?;
             self.stats.init_grid(n, d, seg.first_sample_tai())
         });
-        let Some(grid) = grid else {
-            warn!("Replay {}: no frame rate known", self.block_id);
-            return;
-        };
+        let grid = grid.ok_or("no frame rate known")?;
         let n_decoded = decoded.frames.len();
         let frames = map_to_grid(seg, &grid, decoded.frames);
+        if frames.is_empty() {
+            return Err(format!(
+                "none of {} decoded frames fall inside the segment's timerange",
+                n_decoded
+            ));
+        }
         let expected = ((seg.end_ns - seg.start_ns) as f64 / grid.frame_ns()).round() as usize;
         if frames.len() != expected {
             let first = grid.ceil_frame(seg.start_ns);
@@ -225,6 +245,7 @@ impl ReplayPlayer {
         }
         self.stats.decodes.fetch_add(1, Ordering::Relaxed);
         self.stats.last_decode_ms.store(ms, Ordering::Relaxed);
+        Ok(())
     }
 
     fn scheduler(self: Arc<Self>, tx: mpsc::Sender<Arc<Segment>>) {
@@ -247,19 +268,19 @@ impl ReplayPlayer {
                 {
                     let decoded = lock(&self.decoded);
                     let mut inflight = lock(&self.inflight);
-                    for s in &wanted {
-                        if inflight.len() >= self.workers {
-                            break;
-                        }
-                        let key = s.start_ns;
-                        if decoded.segments.contains_key(&key)
-                            || inflight.contains(&key)
-                            || self.store.bytes(key).is_none()
-                        {
-                            continue;
-                        }
-                        inflight.insert(key);
-                        if tx.send(Arc::clone(s)).is_err() {
+                    let mut failed = lock(&self.failed);
+                    let keys: HashSet<i64> = wanted.iter().map(|s| s.start_ns).collect();
+                    failed.retain(|k| keys.contains(k));
+                    let jobs = pick_decodes(
+                        &wanted,
+                        |k| decoded.segments.contains_key(&k) || self.store.bytes(k).is_none(),
+                        &mut inflight,
+                        &failed,
+                        self.workers,
+                        Instant::now(),
+                    );
+                    for s in jobs {
+                        if tx.send(s).is_err() {
                             return;
                         }
                     }
@@ -463,6 +484,32 @@ impl ReplayPlayer {
     }
 }
 
+/// The segments to send to the decode workers, most urgent first: not done
+/// (decoded, or no bytes yet), not in flight, and not waiting out a failure.
+/// Marks them in flight; at most `workers` are in flight at once.
+fn pick_decodes(
+    wanted: &[Arc<Segment>],
+    done: impl Fn(i64) -> bool,
+    inflight: &mut HashSet<i64>,
+    failed: &Backoff<i64>,
+    workers: usize,
+    now: Instant,
+) -> Vec<Arc<Segment>> {
+    let mut out = Vec::new();
+    for s in wanted {
+        if inflight.len() >= workers {
+            break;
+        }
+        let key = s.start_ns;
+        if inflight.contains(&key) || !failed.ready(&key, now) || done(key) {
+            continue;
+        }
+        inflight.insert(key);
+        out.push(Arc::clone(s));
+    }
+    out
+}
+
 /// Whether a frame captured at `captured` (TAI) with period `period` is the
 /// one on screen at group time `t`: it started at or before `t` and the next
 /// had not started. 1 ms of slack for timestamp rounding in the store.
@@ -516,7 +563,61 @@ fn read_code_utc_us(buf: &gst::Buffer, info: &gst_video::VideoInfo) -> Option<u6
 
 #[cfg(test)]
 mod tests {
-    use super::holds;
+    use super::*;
+    use crate::blocks::builtin::mediaplayer::replay::source::Location;
+
+    fn seg(i: i64) -> Arc<Segment> {
+        Arc::new(Segment {
+            start_ns: i * S,
+            end_ns: (i + 1) * S,
+            ts_offset_ns: 0,
+            object_start_ns: None,
+            object_id: i.to_string(),
+            location: Location::Urls(vec![]),
+        })
+    }
+
+    #[test]
+    fn a_failed_decode_waits_before_it_is_sent_again() {
+        let wanted: Vec<_> = (0..3).map(seg).collect();
+        let mut failed = Backoff::new(Duration::from_millis(250), Duration::from_secs(10));
+        let t0 = Instant::now();
+        let mut inflight = HashSet::new();
+        let keys = |v: Vec<Arc<Segment>>| v.iter().map(|s| s.start_ns / S).collect::<Vec<_>>();
+
+        let first = pick_decodes(&wanted, |_| false, &mut inflight, &failed, 2, t0);
+        assert_eq!(keys(first), vec![0, 1]);
+        // Segment 0 fails and leaves flight; 1 is still in flight.
+        inflight.remove(&0);
+        failed.fail(0, t0);
+        let next = pick_decodes(&wanted, |_| false, &mut inflight, &failed, 2, t0);
+        assert_eq!(
+            keys(next),
+            vec![2],
+            "the failed segment is not retried at once"
+        );
+        inflight.clear();
+        let later = t0 + Duration::from_millis(250);
+        let retry = pick_decodes(&wanted, |_| false, &mut inflight, &failed, 2, later);
+        assert_eq!(keys(retry), vec![0, 1]);
+    }
+
+    #[test]
+    fn done_segments_are_not_sent() {
+        let wanted: Vec<_> = (0..3).map(seg).collect();
+        let failed = Backoff::new(Duration::from_millis(250), Duration::from_secs(10));
+        let mut inflight = HashSet::new();
+        let got = pick_decodes(
+            &wanted,
+            |k| k != S,
+            &mut inflight,
+            &failed,
+            2,
+            Instant::now(),
+        );
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].start_ns, S);
+    }
 
     #[test]
     fn a_frame_holds_the_instants_of_its_period() {
