@@ -730,7 +730,7 @@ fn build_flow_chain(
     let chain_tag = suffix.to_string();
     let content_type = container.content_type().to_string();
     let file_ext = container.file_ext().to_string();
-    let tail_segment_ns = segment_secs.saturating_mul(1_000_000_000);
+    let segment_ns = segment_secs.saturating_mul(1_000_000_000);
     ctx.register_element_setup(Box::new(move |flow_id, events| {
         // Remove only orphan segment files left by a previous run — plain `seg_*`
         // files with no `.meta` sidecar. Their timerange is lost so they cannot be
@@ -802,7 +802,7 @@ fn build_flow_chain(
             events,
             rx,
             tail.clone(),
-            tail_segment_ns,
+            segment_ns,
         );
 
         // Per-block timeline: TAI = running time + offset, anchored on the first
@@ -813,8 +813,10 @@ fn build_flow_chain(
         let timeline = Arc::new(Mutex::new(FragmentTimeline::default()));
         let tai = Arc::new(TaiClock::new());
         // `split-at-running-time` takes the lock splitmuxsink holds while it emits
-        // format-location-full, so the next split is scheduled from a task.
-        let runtime = tokio::runtime::Handle::current();
+        // format-location-full, so the next split is scheduled with `call_async`
+        // (GStreamer's thread pool: no tokio runtime needed in this callback, and
+        // it runs right after the signal returns). A split that still lands late
+        // shows up as a segment off the grid (`warn_off_grid`).
         let temp_dir = temp_dir_for_setup;
         let tag = chain_tag;
         let block_id_sig = block_id;
@@ -845,7 +847,7 @@ fn build_flow_chain(
 
             let placed = {
                 let mut tl = timeline.lock().unwrap_or_else(|e| e.into_inner());
-                tl.place(running_time_ns, tail_segment_ns, || {
+                tl.place(running_time_ns, segment_ns, || {
                     let tai_minus_utc = tai.tai_minus_utc_ns();
                     if let Some(t) = buffer
                         .as_ref()
@@ -898,7 +900,7 @@ fn build_flow_chain(
                     .as_ref()
                     .and_then(|b| b.duration())
                     .map_or(50_000_000, |d| d.nseconds() + 1_000_000);
-                if let Some(miss) = grid_miss_ns(abs_start, tail_segment_ns, tolerance_ns) {
+                if let Some(miss) = grid_miss_ns(abs_start, segment_ns, tolerance_ns) {
                     warn_off_grid(&block_id_sig, &tag, &off_grid, miss);
                 }
             }
@@ -907,27 +909,23 @@ fn build_flow_chain(
             let next_split = timeline
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .next_split_running_time(running_time_ns, tail_segment_ns);
+                .next_split_running_time(running_time_ns, segment_ns);
             if let (Some(next), Some(el)) = (next_split, element.as_ref()) {
-                let weak = el.downgrade();
-                let segment_ns = tail_segment_ns;
-                runtime.spawn(async move {
-                    if let Some(el) = weak.upgrade() {
-                        let at = gst::ClockTime::from_nseconds(next);
-                        el.emit_by_name::<()>("split-at-running-time", &[&at]);
-                        // Ask upstream for a keyframe at the grid point after `at`.
-                        // This fragment opens a GOP or more after its start, so the
-                        // encoder is often past `at` already; a request for a time
-                        // already passed would force a keyframe off the grid. The
-                        // split at `at` itself was requested one fragment earlier.
-                        let ahead = gst::ClockTime::from_nseconds(next + segment_ns);
-                        for pad in el.sink_pads() {
-                            let event = gstreamer_video::UpstreamForceKeyUnitEvent::builder()
-                                .running_time(ahead)
-                                .all_headers(true)
-                                .build();
-                            pad.push_event(event);
-                        }
+                el.call_async(move |el| {
+                    let at = gst::ClockTime::from_nseconds(next);
+                    el.emit_by_name::<()>("split-at-running-time", &[&at]);
+                    // Ask upstream for a keyframe at the grid point after `at`.
+                    // This fragment opens a GOP or more after its start, so the
+                    // encoder is often past `at` already; a request for a time
+                    // already passed would force a keyframe off the grid. The
+                    // split at `at` itself was requested one fragment earlier.
+                    let ahead = gst::ClockTime::from_nseconds(next + segment_ns);
+                    for pad in el.sink_pads() {
+                        let event = gstreamer_video::UpstreamForceKeyUnitEvent::builder()
+                            .running_time(ahead)
+                            .all_headers(true)
+                            .build();
+                        pad.push_event(event);
                     }
                 });
             }
