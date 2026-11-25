@@ -18,8 +18,9 @@ use utoipa::ToSchema;
 pub enum ReplayCommand {
     /// Pause and move by a number of reference-grid frames.
     Jog { frames: i64 },
-    /// Go to an instant, keeping the speed. Give exactly one of `frame`,
-    /// `utc`, `tai`.
+    /// Go to an instant: exactly one of `frame`, `utc`, `tai`,
+    /// `from_live_ms`. Keeps the speed unless `speed` is given, in which case
+    /// the seek and the speed change are one step (no frame in between).
     Seek {
         /// Reference frame, relative to the group origin.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -30,6 +31,13 @@ pub enum ReplayCommand {
         /// TAI as TAMS `"<seconds>:<nanoseconds>"`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tai: Option<String>,
+        /// Milliseconds before the live edge (the last instant every angle
+        /// has), e.g. 8000 to replay the last 8 s.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_live_ms: Option<u64>,
+        /// Speed from the new position, -8 .. 8; omitted keeps the speed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        speed: Option<f64>,
     },
     /// Move by milliseconds, keeping the speed.
     SeekRel { ms: i64 },
@@ -46,6 +54,26 @@ pub enum ReplayCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         margin_ms: Option<u64>,
     },
+}
+
+/// A point on the group's timeline, as a command gives it: exactly one
+/// field.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ReplayTimeRef {
+    /// Reference frame, relative to the group origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<i64>,
+    /// UTC, RFC 3339.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utc: Option<String>,
+    /// TAI as TAMS `"<seconds>:<nanoseconds>"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tai: Option<String>,
+    /// Milliseconds before the live edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_live_ms: Option<u64>,
 }
 
 /// An instant on the group's timeline.

@@ -10088,7 +10088,7 @@
           },
           {
             "type": "object",
-            "description": "Go to an instant, keeping the speed. Give exactly one of `frame`,\n`utc`, `tai`.",
+            "description": "Go to an instant: exactly one of `frame`, `utc`, `tai`,\n`from_live_ms`. Keeps the speed unless `speed` is given, in which case\nthe seek and the speed change are one step (no frame in between).",
             "required": [
               "cmd"
             ],
@@ -10106,6 +10106,23 @@
                 ],
                 "format": "int64",
                 "description": "Reference frame, relative to the group origin."
+              },
+              "from_live_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Milliseconds before the live edge (the last instant every angle\nhas), e.g. 8000 to replay the last 8 s.",
+                "minimum": 0
+              },
+              "speed": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "description": "Speed from the new position, -8 .. 8; omitted keeps the speed."
               },
               "tai": {
                 "type": [

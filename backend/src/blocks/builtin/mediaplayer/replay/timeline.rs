@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Instant;
-use strom_types::replay::{ReplayCommandResult, ReplayFrameTime, ReplayInstant};
+use strom_types::replay::{ReplayCommandResult, ReplayFrameTime, ReplayInstant, ReplayTimeRef};
 use strom_types::tai::{
     format_calendar_ms, format_utc_ms, parse_utc, tai_to_utc_ns, utc_to_tai_ns,
 };
@@ -313,6 +313,24 @@ fn frame_in(grid: &FrameGrid, b: &Bounds, from: i64, by: i64) -> i64 {
     )
 }
 
+/// Milliseconds from a client as ns, saturating.
+fn ms_to_ns(ms: u64) -> i64 {
+    i64::try_from(ms)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1_000_000)
+}
+
+/// A speed from a client, checked against the range.
+fn check_speed(speed: f64) -> Result<f64, CommandError> {
+    if !speed.is_finite() || speed.abs() > MAX_SPEED {
+        return Err(invalid(format!(
+            "speed: {} is outside -{} .. {}",
+            speed, MAX_SPEED, MAX_SPEED
+        )));
+    }
+    Ok(speed)
+}
+
 /// Where the cursor line starts: a TAI instant, or the group's start.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Anchor {
@@ -590,6 +608,54 @@ impl ReplayTimeline {
         lock(&self.anchor).speed
     }
 
+    /// The instant a command names. Exactly one field of `at`; frames need
+    /// the reference grid.
+    fn resolve(
+        &self,
+        at: &ReplayTimeRef,
+        b: &Bounds,
+        reference: Option<FrameGrid>,
+        what: &str,
+    ) -> Result<i64, CommandError> {
+        let given = [
+            at.frame.is_some(),
+            at.utc.is_some(),
+            at.tai.is_some(),
+            at.from_live_ms.is_some(),
+        ];
+        if given.iter().filter(|g| **g).count() != 1 {
+            return Err(invalid(format!(
+                "{}: give exactly one of frame, utc, tai, from_live_ms",
+                what
+            )));
+        }
+        if let Some(f) = at.frame {
+            let g = reference.ok_or_else(|| conflict("the group's frame rate is not known yet"))?;
+            return Ok(frame_centre(
+                &g,
+                frame_in(&g, b, g.floor_frame(self.origin_tai()), f),
+            ));
+        }
+        if let Some(u) = &at.utc {
+            return parse_utc(u).map(utc_to_tai_ns).ok_or_else(|| {
+                invalid(format!(
+                    "{}: bad utc '{}', want e.g. 2026-11-24T13:21:56.080Z",
+                    what, u
+                ))
+            });
+        }
+        if let Some(t) = &at.tai {
+            return parse_timestamp_signed(t).ok_or_else(|| {
+                invalid(format!(
+                    "{}: bad tai '{}', want \"<seconds>:<nanoseconds>\"",
+                    what, t
+                ))
+            });
+        }
+        let ms = at.from_live_ms.unwrap_or(0);
+        Ok(b.live_end.saturating_sub(ms_to_ns(ms)))
+    }
+
     /// Apply a command at "now".
     pub fn apply(&self, cmd: Command) -> Result<Applied, CommandError> {
         self.apply_at(cmd, self.now_rt())
@@ -614,44 +680,34 @@ impl ReplayTimeline {
                     0.0,
                 )
             }
-            Command::Seek { frame, utc, tai } => {
-                let to = match (frame, utc, tai) {
-                    (Some(f), None, None) => {
-                        let g = need_ref()?;
-                        frame_centre(&g, frame_in(&g, &b, g.floor_frame(self.origin_tai()), f))
-                    }
-                    (None, Some(u), None) => parse_utc(&u).map(utc_to_tai_ns).ok_or_else(|| {
-                        invalid(format!(
-                            "seek: bad utc '{}', want e.g. 2026-11-24T13:21:56.080Z",
-                            u
-                        ))
-                    })?,
-                    (None, None, Some(t)) => parse_timestamp_signed(&t).ok_or_else(|| {
-                        invalid(format!(
-                            "seek: bad tai '{}', want \"<seconds>:<nanoseconds>\"",
-                            t
-                        ))
-                    })?,
-                    _ => return Err(invalid("seek: give exactly one of frame, utc, tai")),
+            Command::Seek {
+                frame,
+                utc,
+                tai,
+                from_live_ms,
+                speed,
+            } => {
+                let at = ReplayTimeRef {
+                    frame,
+                    utc,
+                    tai,
+                    from_live_ms,
                 };
-                (to, a.speed)
+                let to = self.resolve(&at, &b, reference, "seek")?;
+                let speed = match speed {
+                    Some(s) => check_speed(s)?,
+                    None => a.speed,
+                };
+                (to, speed)
             }
             Command::SeekRel { ms } => (cur.saturating_add(ms.saturating_mul(1_000_000)), a.speed),
-            Command::Speed { speed } => {
-                if !speed.is_finite() || speed.abs() > MAX_SPEED {
-                    return Err(invalid(format!(
-                        "speed: {} is outside -{} .. {}",
-                        speed, MAX_SPEED, MAX_SPEED
-                    )));
-                }
-                (cur, speed)
-            }
+            Command::Speed { speed } => (cur, check_speed(speed)?),
             Command::Play => (cur, 1.0),
             Command::Pause => (cur, 0.0),
             Command::End => (b.live_end - 1, 0.0),
             Command::Live { margin_ms } => {
-                let margin = margin_ms.unwrap_or(DEFAULT_LIVE_MARGIN_MS) as i64 * 1_000_000;
-                (b.live_end - margin, 1.0)
+                let margin = ms_to_ns(margin_ms.unwrap_or(DEFAULT_LIVE_MARGIN_MS));
+                (b.live_end.saturating_sub(margin), 1.0)
             }
         };
         let anchored = Anchor {

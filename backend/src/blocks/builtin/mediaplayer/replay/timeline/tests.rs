@@ -5,19 +5,27 @@ const S: i64 = 1_000_000_000;
 const MS: i64 = 1_000_000;
 
 fn seek(frame: i64) -> Command {
-    Command::Seek {
+    seek_at(ReplayTimeRef {
         frame: Some(frame),
-        utc: None,
-        tai: None,
+        ..Default::default()
+    })
+}
+
+fn seek_at(at: ReplayTimeRef) -> Command {
+    Command::Seek {
+        frame: at.frame,
+        utc: at.utc,
+        tai: at.tai,
+        from_live_ms: at.from_live_ms,
+        speed: None,
     }
 }
 
 fn seek_tai(tai: i64) -> Command {
-    Command::Seek {
-        frame: None,
-        utc: None,
+    seek_at(ReplayTimeRef {
         tai: Some(tai_string(tai)),
-    }
+        ..Default::default()
+    })
 }
 
 /// A player with an extent and, if given, a frame rate anchored at its start.
@@ -115,14 +123,7 @@ fn command_parses_live() {
     let c: Command = serde_json::from_str(r#"{"cmd":"live"}"#).unwrap();
     assert!(matches!(c, Command::Live { margin_ms: None }));
     let c: Command = serde_json::from_str(r#"{"cmd":"seek","frame":-5}"#).unwrap();
-    assert!(matches!(
-        c,
-        Command::Seek {
-            frame: Some(-5),
-            utc: None,
-            tai: None
-        }
-    ));
+    assert_eq!(c, seek(-5));
 }
 
 /// TAI start of the spike's live ingest (off the 50 fps second grid).
@@ -135,11 +136,10 @@ fn one_player(base: i64, domain: TimeDomain) -> (ReplayTimeline, Arc<PlayerStats
 }
 
 fn seek_utc(utc: &str) -> Command {
-    Command::Seek {
-        frame: None,
+    seek_at(ReplayTimeRef {
         utc: Some(utc.to_string()),
-        tai: None,
-    }
+        ..Default::default()
+    })
 }
 
 #[test]
@@ -182,22 +182,21 @@ fn seek_by_utc_or_tai_is_exact() {
     assert_eq!(a2.tai, a.tai);
     let a3 = tl
         .apply_at(
-            Command::Seek {
-                frame: None,
-                utc: None,
+            seek_at(ReplayTimeRef {
                 tai: Some("1795526557:0".to_string()),
-            },
+                ..Default::default()
+            }),
             0,
         )
         .unwrap();
     assert_eq!(a3.tai, 1_795_526_557 * S);
     // Bad input changes nothing.
     assert!(tl.apply_at(seek_utc("13:22:00"), 0).is_err());
-    let both = Command::Seek {
+    let both = seek_at(ReplayTimeRef {
         frame: Some(1),
         utc: Some("2026-11-24T13:22:00Z".to_string()),
-        tai: None,
-    };
+        ..Default::default()
+    });
     assert!(tl.apply_at(both, 0).is_err());
     assert_eq!(tl.tai_at(0), Some(1_795_526_557 * S));
 }
@@ -592,4 +591,34 @@ fn result_names_the_cursor_frame() {
     assert_eq!(r.frame, Some(195));
     assert_eq!(r.time.unwrap().utc, "2026-11-24T13:21:59.980Z");
     assert_eq!(r.cursor_tai.tai_ns, a.tai.to_string());
+}
+
+#[test]
+fn seek_from_live_with_speed_is_one_step() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S), (BASE, BASE + 50 * S)]);
+    tl.apply_at(Command::Pause, 0).unwrap();
+    let c = parse(r#"{"cmd":"seek","from_live_ms":8000,"speed":0.5}"#).unwrap();
+    let a = tl.apply_at(c, 0).unwrap();
+    // 8 s before the common edge (50 s), already at 50 %.
+    assert_eq!(a.tai, BASE + 42 * S);
+    assert_eq!(a.speed, 0.5);
+    assert_eq!(tl.tai_at(S), Some(BASE + 42 * S + S / 2));
+    // Without speed the speed is kept.
+    let a = tl
+        .apply_at(parse(r#"{"cmd":"seek","from_live_ms":1000}"#).unwrap(), 0)
+        .unwrap();
+    assert_eq!((a.tai, a.speed), (BASE + 49 * S, 0.5));
+    // A bad speed refuses the whole command: the cursor does not move.
+    let bad = parse(r#"{"cmd":"seek","from_live_ms":0,"speed":12}"#).unwrap();
+    assert!(matches!(tl.apply_at(bad, 0), Err(CommandError::Invalid(_))));
+    assert_eq!(tl.tai_at(0), Some(BASE + 49 * S));
+    // Two targets, or a negative distance, are invalid.
+    assert!(matches!(
+        parse(r#"{"cmd":"seek","from_live_ms":10,"frame":1}"#).map(|c| tl.apply_at(c, 0)),
+        Ok(Err(CommandError::Invalid(_)))
+    ));
+    assert!(parse(r#"{"cmd":"seek","from_live_ms":-5}"#).is_err());
+    // Further back than the media: clamped to the start.
+    let far = parse(r#"{"cmd":"seek","from_live_ms":18446744073709551615}"#).unwrap();
+    assert_eq!(tl.apply_at(far, 0).unwrap().tai, BASE);
 }

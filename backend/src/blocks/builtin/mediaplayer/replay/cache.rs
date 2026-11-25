@@ -630,6 +630,8 @@ mod tests {
                     frame: None,
                     utc: None,
                     tai: Some(format!("{}:0", t)),
+                    from_live_ms: None,
+                    speed: None,
                 })
                 .unwrap();
         }
