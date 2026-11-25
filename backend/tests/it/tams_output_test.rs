@@ -386,69 +386,97 @@ mod stub_gateway {
     use axum::extract::{Path, State};
     use axum::routing::{post, put};
     use axum::{Json, Router};
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     pub type Registered = Arc<Mutex<Vec<(String, String)>>>;
+    /// Each registered segment's timerange and the bytes uploaded for it.
+    pub type Segments = Arc<Mutex<Vec<(String, axum::body::Bytes)>>>;
 
     #[derive(Clone)]
     struct Stub {
         base: String,
         registered: Registered,
+        uploads: Arc<Mutex<HashMap<String, axum::body::Bytes>>>,
+        segments: Segments,
     }
 
     /// Start the stub on a free local port; returns its base URL.
     pub fn start(runtime: &tokio::runtime::Runtime) -> (String, Registered) {
+        let (base, registered, _) = start_keeping_bytes(runtime);
+        (base, registered)
+    }
+
+    /// As [`start`], also keeping each registered segment's bytes.
+    pub fn start_keeping_bytes(
+        runtime: &tokio::runtime::Runtime,
+    ) -> (String, Registered, Segments) {
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
             .expect("bind stub gateway");
         let base = format!("http://{}", listener.local_addr().unwrap());
         let registered: Registered = Arc::default();
+        let segments: Segments = Arc::default();
         let stub = Stub {
             base: base.clone(),
             registered: registered.clone(),
+            uploads: Arc::default(),
+            segments: segments.clone(),
         };
-        let app = Router::new()
-            .route(
-                "/flows/{id}",
-                put(|| async { axum::http::StatusCode::CREATED }),
-            )
-            .route(
-                "/flows/{id}/storage",
-                post(|State(s): State<Stub>, Path(id): Path<String>| async move {
-                    let object_id = format!("{}-{}", id, uuid::Uuid::new_v4());
-                    Json(serde_json::json!({ "media_objects": [{
-                        "object_id": object_id,
-                        "put_url": {
-                            "url": format!("{}/upload/{}", s.base, object_id),
-                            "content-type": "video/mp2t"
-                        }
-                    }]}))
-                }),
-            )
-            // Read the whole body before answering. Answering first resets the
-            // connection under a large upload, and the uploader's retry backoff
-            // (1 s and up) then held segments back past the end of the test.
-            .route(
-                "/upload/{obj}",
-                put(|_body: axum::body::Bytes| async { axum::http::StatusCode::OK }),
-            )
-            .route(
-                "/flows/{id}/segments",
-                post(
-                    |State(s): State<Stub>,
-                     Path(id): Path<String>,
-                     Json(body): Json<serde_json::Value>| async move {
-                        let tr = body["timerange"].as_str().unwrap_or_default().to_string();
-                        s.registered.lock().unwrap().push((id, tr));
-                        axum::http::StatusCode::CREATED
-                    },
-                ),
-            )
-            .with_state(stub);
+        let app =
+            Router::new()
+                .route(
+                    "/flows/{id}",
+                    put(|| async { axum::http::StatusCode::CREATED }),
+                )
+                .route(
+                    "/flows/{id}/storage",
+                    post(|State(s): State<Stub>, Path(id): Path<String>| async move {
+                        let object_id = format!("{}-{}", id, uuid::Uuid::new_v4());
+                        Json(serde_json::json!({ "media_objects": [{
+                            "object_id": object_id,
+                            "put_url": {
+                                "url": format!("{}/upload/{}", s.base, object_id),
+                                "content-type": "video/mp2t"
+                            }
+                        }]}))
+                    }),
+                )
+                // Read the whole body before answering. Answering first resets the
+                // connection under a large upload, and the uploader's retry backoff
+                // (1 s and up) then held segments back past the end of the test.
+                .route(
+                    "/upload/{obj}",
+                    put(
+                        |State(s): State<Stub>,
+                         Path(obj): Path<String>,
+                         body: axum::body::Bytes| async move {
+                            s.uploads.lock().unwrap().insert(obj, body);
+                            axum::http::StatusCode::OK
+                        },
+                    ),
+                )
+                .route(
+                    "/flows/{id}/segments",
+                    post(
+                        |State(s): State<Stub>,
+                         Path(id): Path<String>,
+                         Json(body): Json<serde_json::Value>| async move {
+                            let tr = body["timerange"].as_str().unwrap_or_default().to_string();
+                            let obj = body["object_id"].as_str().unwrap_or_default();
+                            if let Some(bytes) = s.uploads.lock().unwrap().remove(obj) {
+                                s.segments.lock().unwrap().push((tr.clone(), bytes));
+                            }
+                            s.registered.lock().unwrap().push((id, tr));
+                            axum::http::StatusCode::CREATED
+                        },
+                    ),
+                )
+                .with_state(stub);
         runtime.spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        (base, registered)
+        (base, registered, segments)
     }
 }
 
@@ -788,5 +816,133 @@ mod last_segment {
             "last segment claims a full second: {}",
             last
         );
+    }
+
+    /// Frames a decoder gets out of an MPEG-TS segment.
+    fn decoded_frames(ts: &[u8]) -> u64 {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), ts).unwrap();
+        let pipeline = gst::parse::launch(&format!(
+            "filesrc location=\"{}\" ! tsdemux ! h264parse ! avdec_h264 ! fakesink name=out",
+            file.path().display()
+        ))
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let frames = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counted = frames.clone();
+        let sink = pipeline.by_name("out").unwrap();
+        sink.static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            });
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let ended = wait_for_eos(&pipeline, Duration::from_secs(10));
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert!(ended, "decoding a segment never reached EOS");
+        frames.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// One run of live video into a TAMS Output, stopped as stopping a flow
+    /// does (stop drains, then NULL, no EOS from upstream) `run_ms` in.
+    /// Returns the last segment's timerange and decoded frame count.
+    fn last_segment_after_stop(run_ms: u64) -> (String, u64) {
+        let runtime = runtime();
+        let (gateway, registered, segments) = stub_gateway::start_keeping_bytes(&runtime);
+
+        let pipeline = gst::Pipeline::new();
+        let mut out = add_tams_output_with(&pipeline, "tams_stop", &gateway, 1, true);
+        let src = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .build()
+            .unwrap();
+        let caps = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                gst::Caps::builder("video/x-raw")
+                    .field("width", 160)
+                    .field("height", 90)
+                    .field("framerate", gst::Fraction::new(50, 1))
+                    .build(),
+            )
+            .build()
+            .unwrap();
+        let enc = gst::ElementFactory::make("x264enc")
+            .property("key-int-max", 25u32)
+            .property_from_str("tune", "zerolatency")
+            .build()
+            .unwrap();
+        pipeline.add_many([&src, &caps, &enc]).unwrap();
+        gst::Element::link_many([&src, &caps, &enc]).unwrap();
+        enc.link(&out.input("video_input_0")).unwrap();
+
+        out.run_setups_in_flow(&runtime, uuid::Uuid::new_v4());
+        pipeline.set_state(gst::State::Playing).unwrap();
+        std::thread::sleep(Duration::from_millis(run_ms));
+        // As `PipelineManager::stop`: the stop drains, then NULL.
+        for drain in out.ctx.take_stop_drains() {
+            drain();
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        out.release_elements();
+        drop(enc);
+        drop(caps);
+        drop(src);
+        drop(pipeline);
+
+        let mut last_len = 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(300));
+            let len = registered.lock().unwrap().len();
+            if len >= 2 && len == last_len {
+                break;
+            }
+            last_len = len;
+        }
+        let mut segs = segments.lock().unwrap().clone();
+        runtime.shutdown_background();
+        segs.sort_by_key(|(tr, _)| timerange_start_ns(tr));
+        assert!(segs.len() >= 2, "too few segments: {}", segs.len());
+        let (tr, bytes) = segs.pop().unwrap();
+        (tr, decoded_frames(&bytes))
+    }
+
+    /// A stopped flow sends no EOS. The muxer still holds the tail of the
+    /// last frame it took in (mpegtsmux packs 7 TS packets per buffer), so
+    /// without draining it the last segment claims a frame it does not hold.
+    #[test]
+    fn last_segment_after_stop_holds_what_its_timerange_claims() {
+        if !plugins_available()
+            || !common::plugins_available(&[
+                "videotestsrc",
+                "x264enc",
+                "capsfilter",
+                "tsdemux",
+                "h264parse",
+                "avdec_h264",
+            ])
+        {
+            return;
+        }
+        const FRAME_NS: u64 = 20_000_000;
+        let mut results = Vec::new();
+        for run_ms in [1_330, 1_570, 1_810, 2_250] {
+            let (tr, frames) = last_segment_after_stop(run_ms);
+            let claimed = timerange_end_ns(&tr) - timerange_start_ns(&tr);
+            results.push((tr, frames, claimed));
+        }
+        for (tr, frames, claimed) in &results {
+            assert_eq!(
+                frames * FRAME_NS,
+                *claimed,
+                "last segment {} holds {} frames; all runs: {:?}",
+                tr,
+                frames,
+                results
+            );
+        }
     }
 }
