@@ -21,8 +21,12 @@ use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockB
 use crate::client_auth::AuthMethod;
 use crate::osc::SatProvider;
 use crate::tams::client::{FlowSpec, TamsClient};
-use crate::tams::uploader::{channel, new_tail_slot, spawn_uploader, FragmentReady, TailFragment};
-use gst::glib;
+use crate::tams::timeline::{
+    reference_tai_ns, shared_pipeline_mapping, AnchorKind, FragmentTimeline, TaiClock,
+};
+use crate::tams::uploader::{
+    channel, new_tail_slot, spawn_uploader, FragmentReady, SharedDetected, TailFragment,
+};
 use gst::glib::prelude::ToValue;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -273,6 +277,7 @@ impl BlockBuilder for TamsOutputBuilder {
                         description: description.clone(),
                         tags: tags.clone(),
                         flow_collection: vec![],
+                        essence_parameters: Default::default(),
                     };
                     build_flow_chain(
                         instance_id,
@@ -304,6 +309,7 @@ impl BlockBuilder for TamsOutputBuilder {
                         description: description.clone(),
                         tags: tags.clone(),
                         flow_collection: vec![],
+                        essence_parameters: Default::default(),
                     };
                     build_flow_chain(
                         instance_id,
@@ -337,6 +343,7 @@ impl BlockBuilder for TamsOutputBuilder {
                         description: description.clone(),
                         tags: tags.clone(),
                         flow_collection: members,
+                        essence_parameters: Default::default(),
                     };
                     register_multiflow(instance_id, multi, gateway_url.clone(), auth_plan, ctx);
                 }
@@ -362,6 +369,7 @@ impl BlockBuilder for TamsOutputBuilder {
                     // The TS is an opaque mux; its inner essences are NOT exposed as
                     // separate flows (per AMWA BCP-006-04), so no flow_collection.
                     flow_collection: vec![],
+                    essence_parameters: Default::default(),
                 };
                 build_flow_chain(
                     instance_id,
@@ -515,13 +523,22 @@ fn build_flow_chain(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("splitmuxsink: {}", e)))?;
     splitmuxsink.set_property("muxer", &mux);
-    splitmuxsink.set_property("max-size-time", segment_secs.saturating_mul(1_000_000_000));
+    // No size limit: segments split on a grid of `segment_secs` on the TAI
+    // timeline, scheduled with `split-at-running-time` as each fragment opens (see
+    // the format-location-full handler). A size limit splits wherever the queued
+    // GOPs happen to overrun it, which differs between blocks fed the same input,
+    // so synchronized flows would not share segment boundaries.
+    splitmuxsink.set_property("max-size-time", 0u64);
     // Fallback location template; the format-location-full signal overrides it.
     let fallback = temp_dir.join(format!("seg_%05d.{}", container.file_ext()));
     splitmuxsink.set_property("location", fallback.to_string_lossy().as_ref());
-    // Ask upstream for keyframes at split points so segments are GOP-aligned.
+    // No keyframe requests from splitmuxsink: it asks for a keyframe at a split
+    // point only once the fragment before it opens, a GOP or more late, so the
+    // encoder forces one at once, off the grid, and its min-force-key-unit-interval
+    // then holds every later request off the grid too. The format-location-full
+    // handler asks for keyframes one grid point ahead instead.
     if splitmuxsink.has_property("send-keyframe-requests") {
-        splitmuxsink.set_property("send-keyframe-requests", true);
+        splitmuxsink.set_property("send-keyframe-requests", false);
     }
     // A sink completes READY->PAUSED only once it has prerolled a buffer, so an
     // input that carries no data would hold the whole pipeline short of PLAYING.
@@ -531,7 +548,7 @@ fn build_flow_chain(
 
     // Codec label for the TAMS flow, derived from caps at runtime by the probes and
     // read by the uploader when it creates the flow.
-    let detected_codec: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let detected_codec: SharedDetected = Arc::default();
 
     // One identity input + caps probe per essence, each requesting its own sink pad.
     for &essence in inputs {
@@ -611,10 +628,15 @@ fn build_flow_chain(
                 }
             };
 
-            // For single-essence flows, record the detected codec as the flow's codec.
-            if detect_codec {
-                if let Ok(mut c) = detected_codec_probe.lock() {
-                    *c = Some(codec_label.to_string());
+            if let Ok(mut d) = detected_codec_probe.lock() {
+                // For single-essence flows, record the detected codec as the flow's codec.
+                if detect_codec {
+                    d.codec = Some(codec_label.to_string());
+                }
+                // Video geometry and rate go on the flow (also a muxed TS flow), so
+                // a reader can map frames to the timeline without probing segments.
+                if essence == Essence::Video {
+                    d.essence_parameters = video_essence_parameters(structure);
                 }
             }
 
@@ -779,78 +801,110 @@ fn build_flow_chain(
             tail_segment_ns,
         );
 
-        // Per-fragment timeline state: maps GStreamer PTS to an absolute TAI timeline.
-        let state = Arc::new(Mutex::new(FragState::default()));
+        // Per-block timeline: TAI = running time + offset, anchored on the first
+        // fragment. The anchor is the buffer's capture time when it carries a
+        // reference timestamp, otherwise the running time -> TAI mapping shared by
+        // every TAMS Output of this pipeline run, so equal running time gives equal
+        // TAI across blocks (#966). See `crate::tams::timeline`.
+        let timeline = Arc::new(Mutex::new(FragmentTimeline::default()));
+        let tai = Arc::new(TaiClock::new());
+        // `split-at-running-time` takes the lock splitmuxsink holds while it emits
+        // format-location-full, so the next split is scheduled from a task.
+        let runtime = tokio::runtime::Handle::current();
         let temp_dir = temp_dir_for_setup;
         let tag = chain_tag;
         let block_id_sig = block_id;
 
-        // A fresh GStreamer TAI clock (CLOCK_TAI on Linux). The kernel maintains the
-        // current TAI-UTC offset when ntp/chrony disciplines it, so we never hardcode
-        // leap seconds. This is independent of the pipeline's own clock (which is
-        // often Monotonic): we only sample TAI once to anchor the timeline, then
-        // advance it by buffer-PTS deltas, so segments stay contiguous.
-        let tai_clock: gst::Clock = glib::Object::builder::<gst::SystemClock>()
-            .property("clock-type", gst::ClockType::Tai)
-            .build()
-            .upcast();
-        let realtime_clock: gst::Clock = glib::Object::builder::<gst::SystemClock>()
-            .property("clock-type", gst::ClockType::Realtime)
-            .build()
-            .upcast();
-
         let _ = splitmuxsink.connect("format-location-full", false, move |args| {
+            let element = args.first().and_then(|v| v.get::<gst::Element>().ok());
             let fragment_id = args.get(1).and_then(|v| v.get::<u32>().ok()).unwrap_or(0);
-            let pts_ns = args
-                .get(2)
-                .and_then(|v| v.get::<gst::Sample>().ok())
-                .and_then(|s| s.buffer().and_then(|b| b.pts()))
-                .map(|t| t.nseconds())
-                .unwrap_or(0);
+            let sample = args.get(2).and_then(|v| v.get::<gst::Sample>().ok());
+            let buffer = sample.as_ref().and_then(|s| s.buffer_owned());
+            let pts = buffer.as_ref().and_then(|b| b.pts());
+            // Running time of the fragment's first buffer. Without a segment the
+            // PTS is used as is (a default segment maps PTS 1:1 to running time).
+            let running_time_ns = match (pts, sample.as_ref().and_then(|s| s.segment())) {
+                (Some(pts), Some(seg)) => seg
+                    .downcast_ref::<gst::format::Time>()
+                    .and_then(|seg| seg.to_running_time(pts))
+                    .unwrap_or(pts)
+                    .nseconds(),
+                (Some(pts), None) => pts.nseconds(),
+                _ => 0,
+            };
 
             let location = temp_dir.join(format!("seg_{:05}.{}", fragment_id, file_ext));
             let location_str = location.to_string_lossy().to_string();
 
-            // Anchor the timeline once, then advance by PTS deltas.
-            let abs_start = {
-                let mut st = state.lock().unwrap();
-                if !st.initialized {
-                    st.initialized = true;
-                    st.pts0_ns = pts_ns;
-                    st.last_pts_ns = pts_ns;
-                    // If CLOCK_TAI has no offset set (ntp/chrony not disciplining it),
-                    // it equals CLOCK_REALTIME — timestamps would be UTC, ~tens of
-                    // seconds off true TAI. Warn rather than silently mislabel.
-                    let tai_now = tai_clock.time().nseconds();
-                    let rt_now = realtime_clock.time().nseconds();
-                    if tai_now.abs_diff(rt_now) < 1_000_000_000 {
-                        warn!(
-                            "TAMS {} ({}): CLOCK_TAI offset appears unset (TAI == UTC); \
-                             segment timestamps will not be true TAI. Ensure ntp/chrony \
-                             sets the system TAI offset.",
-                            block_id_sig, tag
-                        );
-                    }
-                    st.t0_tai_ns = tai_now;
-                }
-                // A backward PTS jump (live-source reconnect, encoder/clock restart)
-                // would make `t0 + (pts - pts0)` move backward and overlap the
-                // previous segment. Detect it and re-anchor the timeline to the
-                // current TAI so segments stay monotonic — the real-time gap maps
-                // to a forward jump on the timeline rather than an overlap.
-                if pts_ns < st.last_pts_ns {
-                    let tai_now = tai_clock.time().nseconds();
-                    warn!(
-                        "TAMS {} ({}): PTS went backward ({} -> {} ns), re-anchoring \
-                         segment timeline to current TAI",
-                        block_id_sig, tag, st.last_pts_ns, pts_ns
-                    );
-                    st.t0_tai_ns = tai_now;
-                    st.pts0_ns = pts_ns;
-                }
-                st.last_pts_ns = pts_ns;
-                st.t0_tai_ns + pts_ns.saturating_sub(st.pts0_ns)
+            let placed = {
+                let mut tl = timeline.lock().unwrap_or_else(|e| e.into_inner());
+                tl.place(
+                    running_time_ns,
+                    || {
+                        let tai_minus_utc = tai.tai_minus_utc_ns();
+                        if let Some(t) = buffer
+                            .as_ref()
+                            .and_then(|b| reference_tai_ns(b.as_ref(), tai_minus_utc))
+                        {
+                            return (t, AnchorKind::Reference);
+                        }
+                        if let Some(el) = element.as_ref() {
+                            if let (Some(clock), Some(base)) = (el.clock(), el.base_time()) {
+                                let m =
+                                    shared_pipeline_mapping(flow_id, &clock, base.nseconds(), &tai);
+                                return (
+                                    m.tai_ns(base.nseconds(), running_time_ns),
+                                    AnchorKind::Pipeline,
+                                );
+                            }
+                        }
+                        (tai.now_ns(), AnchorKind::Arrival)
+                    },
+                    || tai.now_ns(),
+                )
             };
+            if placed.went_backward {
+                warn!(
+                    "TAMS {} ({}): running time went backward (to {} ns), re-anchoring \
+                     segment timeline to current TAI",
+                    block_id_sig, tag, running_time_ns
+                );
+            } else if let Some(kind) = placed.anchored {
+                info!(
+                    "TAMS {} ({}): timeline anchored ({:?}): running time {} ns -> TAI {} ns",
+                    block_id_sig, tag, kind, running_time_ns, placed.start_ns
+                );
+            }
+            let abs_start = placed.start_ns;
+
+            // Schedule the split that ends this fragment on the next grid point.
+            let next_split = timeline
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .next_split_running_time(running_time_ns, tail_segment_ns);
+            if let (Some(next), Some(el)) = (next_split, element.as_ref()) {
+                let weak = el.downgrade();
+                let segment_ns = tail_segment_ns;
+                runtime.spawn(async move {
+                    if let Some(el) = weak.upgrade() {
+                        let at = gst::ClockTime::from_nseconds(next);
+                        el.emit_by_name::<()>("split-at-running-time", &[&at]);
+                        // Ask upstream for a keyframe at the grid point after `at`.
+                        // This fragment opens a GOP or more after its start, so the
+                        // encoder is often past `at` already; a request for a time
+                        // already passed would force a keyframe off the grid. The
+                        // split at `at` itself was requested one fragment earlier.
+                        let ahead = gst::ClockTime::from_nseconds(next + segment_ns);
+                        for pad in el.sink_pads() {
+                            let event = gstreamer_video::UpstreamForceKeyUnitEvent::builder()
+                                .running_time(ahead)
+                                .all_headers(true)
+                                .build();
+                            pad.push_event(event);
+                        }
+                    }
+                });
+            }
 
             // The previously open fragment is now complete: [its start, this start).
             // The just-opened one becomes the new tail (flushed on shutdown).
@@ -964,6 +1018,29 @@ fn register_multiflow(
     }));
 }
 
+/// TAMS video `essence_parameters` from encoded video caps: `frame_rate`
+/// (`{numerator, denominator}`), `frame_width` and `frame_height`, as far as the
+/// caps carry them. A variable frame rate (`0/1`) is left out.
+fn video_essence_parameters(
+    caps: &gst::StructureRef,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut params = serde_json::Map::new();
+    if let Ok(fr) = caps.get::<gst::Fraction>("framerate") {
+        if fr.numer() > 0 && fr.denom() > 0 {
+            params.insert(
+                "frame_rate".into(),
+                serde_json::json!({ "numerator": fr.numer(), "denominator": fr.denom() }),
+            );
+        }
+    }
+    for (field, key) in [("width", "frame_width"), ("height", "frame_height")] {
+        if let Ok(v) = caps.get::<i32>(field) {
+            params.insert(key.into(), v.into());
+        }
+    }
+    params
+}
+
 /// Request the splitmuxsink sink pad for a given essence (`video` or `audio_%u`).
 fn request_sink_pad(
     splitmuxsink: &gst::Element,
@@ -983,17 +1060,6 @@ fn request_sink_pad(
         }
     };
     Ok(pad.name().to_string())
-}
-
-#[derive(Default)]
-struct FragState {
-    initialized: bool,
-    /// PTS of the very first fragment, used as the timeline origin.
-    pts0_ns: u64,
-    /// Absolute TAI time (ns) corresponding to `pts0_ns`.
-    t0_tai_ns: u64,
-    /// PTS of the previously-opened fragment, to detect a backward PTS jump.
-    last_pts_ns: u64,
 }
 
 /// Get TAMS Output block definitions.
@@ -1115,7 +1181,7 @@ fn tams_output_definition() -> BlockDefinition {
             simple_prop(
                 "segment_duration_secs",
                 "Segment Duration (s)",
-                "Target duration of each TAMS segment in seconds.",
+                "Target duration of each TAMS segment in seconds. Segments split on a keyframe (one is requested from upstream encoders at each split), so the GOP should divide it: for replay, 1 s segments with a GOP of 0.5 s or shorter.",
                 PropertyType::Int,
                 PropertyValue::Int(DEFAULT_SEGMENT_SECS as i64),
             ),
@@ -1181,5 +1247,34 @@ fn simple_prop(
         live: false,
         persist: None,
         visible_when: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn video_essence_parameters_from_caps() {
+        gst::init().unwrap();
+        let caps = gst::Caps::builder("video/x-h264")
+            .field("framerate", gst::Fraction::new(50, 1))
+            .field("width", 1920i32)
+            .field("height", 1080i32)
+            .build();
+        let params = video_essence_parameters(caps.structure(0).unwrap());
+        assert_eq!(
+            serde_json::Value::Object(params),
+            serde_json::json!({
+                "frame_rate": { "numerator": 50, "denominator": 1 },
+                "frame_width": 1920,
+                "frame_height": 1080
+            })
+        );
+        // Variable frame rate and missing fields are left out.
+        let caps = gst::Caps::builder("video/x-h264")
+            .field("framerate", gst::Fraction::new(0, 1))
+            .build();
+        assert!(video_essence_parameters(caps.structure(0).unwrap()).is_empty());
     }
 }

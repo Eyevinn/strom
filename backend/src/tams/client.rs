@@ -79,6 +79,9 @@ pub struct FlowSpec {
     /// `format:multi` flow (the canonical TAMS multi-essence model). Serialized as
     /// the TAMS `flow_collection` array of `{ id, role }` objects.
     pub flow_collection: Vec<(String, String)>,
+    /// TAMS `essence_parameters` (e.g. `frame_rate`, `frame_width`), filled in from
+    /// caps by the uploader before the flow is created. Empty when unknown.
+    pub essence_parameters: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Build the JSON body for `PUT /flows/{id}` from a [`FlowSpec`]. Pure (no I/O) so
@@ -95,7 +98,7 @@ fn flow_request_body(spec: &FlowSpec) -> serde_json::Value {
         "id": spec.flow_id,
         "source_id": spec.source_id,
         "format": spec.format,
-        "essence_parameters": {},
+        "essence_parameters": spec.essence_parameters,
     });
     // codec/container apply to flows that carry essence; a grouping Multi-Flow
     // omits them and instead lists its members in flow_collection.
@@ -612,6 +615,7 @@ mod tests {
             description: None,
             tags: vec![],
             flow_collection: vec![],
+            essence_parameters: Default::default(),
         }
     }
 
@@ -661,6 +665,21 @@ mod tests {
         assert_eq!(coll[1]["id"], "audio-flow");
         assert_eq!(coll[1]["role"], "audio");
         assert_eq!(coll[1]["container_mapping"]["track_index"], 1);
+    }
+
+    #[test]
+    fn essence_parameters_serialized() {
+        let mut s = spec();
+        s.essence_parameters.insert(
+            "frame_rate".into(),
+            serde_json::json!({"numerator": 50, "denominator": 1}),
+        );
+        let body = flow_request_body(&s);
+        assert_eq!(body["essence_parameters"]["frame_rate"]["numerator"], 50);
+        assert_eq!(
+            flow_request_body(&spec())["essence_parameters"],
+            serde_json::json!({})
+        );
     }
 
     #[test]

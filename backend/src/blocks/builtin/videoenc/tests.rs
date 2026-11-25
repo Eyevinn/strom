@@ -721,6 +721,84 @@ fn test_block_encoder_preference() {
     }
 }
 
+#[test]
+fn min_keyframe_request_interval_defaults_to_one_second() {
+    assert_eq!(
+        parse_min_keyframe_request_interval_ms(&HashMap::new()),
+        1000
+    );
+
+    let with = |v: PropertyValue| {
+        let mut properties = HashMap::new();
+        properties.insert("min_keyframe_request_interval_ms".to_string(), v);
+        parse_min_keyframe_request_interval_ms(&properties)
+    };
+    assert_eq!(with(PropertyValue::UInt(0)), 0);
+    assert_eq!(with(PropertyValue::UInt(250)), 250);
+    assert_eq!(with(PropertyValue::Int(500)), 500);
+    assert_eq!(with(PropertyValue::Int(-1)), 1000, "negative falls back");
+    assert_eq!(
+        with(PropertyValue::String("x".to_string())),
+        1000,
+        "wrong type falls back"
+    );
+
+    let definition = videoenc_definition();
+    let exposed = definition
+        .exposed_properties
+        .iter()
+        .find(|p| p.name == "min_keyframe_request_interval_ms")
+        .expect("the block exposes min_keyframe_request_interval_ms");
+    assert!(
+        matches!(exposed.default_value, Some(PropertyValue::UInt(1000))),
+        "default is 1000 ms, got {:?}",
+        exposed.default_value
+    );
+}
+
+/// The block puts `min_keyframe_request_interval_ms` on the encoder's
+/// `min-force-key-unit-interval`: 1 s by default (WebRTC PLI storms), and 0
+/// when asked, so a scheduled request (TAMS Output's TAI grid) is never dropped.
+#[test]
+fn block_sets_min_force_key_unit_interval_from_property() {
+    if !require_element("x264enc") || !require_element("h264parse") {
+        return;
+    }
+
+    let build = |interval: Option<u64>| -> u64 {
+        let mut properties = HashMap::new();
+        properties.insert(
+            "codec".to_string(),
+            PropertyValue::String("h264".to_string()),
+        );
+        properties.insert(
+            "encoder_preference".to_string(),
+            PropertyValue::String("software".to_string()),
+        );
+        if let Some(ms) = interval {
+            properties.insert(
+                "min_keyframe_request_interval_ms".to_string(),
+                PropertyValue::UInt(ms),
+            );
+        }
+        let ctx = BlockBuildContext::new(vec![], "all".to_string());
+        let built = VideoEncBuilder
+            .build("kf_interval", &properties, &ctx)
+            .expect("videoenc block builds");
+        let encoder = built
+            .elements
+            .iter()
+            .find(|(id, _)| id == "kf_interval:encoder")
+            .map(|(_, e)| e.clone())
+            .expect("block builds an encoder");
+        encoder.property::<u64>("min-force-key-unit-interval")
+    };
+
+    assert_eq!(build(None), 1_000_000_000, "default is a 1 s floor");
+    assert_eq!(build(Some(0)), 0, "0 honours every request");
+    assert_eq!(build(Some(250)), 250_000_000);
+}
+
 /// #1163: on Windows with a Core Ultra GPU and an Intel driver older than
 /// 32.0.101.9150, the QSV encoders corrupt the process heap, so once
 /// `demote_qsv_plugin` has run the block never selects one. With 9150 or

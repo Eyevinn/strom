@@ -2,6 +2,16 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.8.4] - 2026-11-18
+
+### Fixed
+- MPEG-TS/SRT Input: with `ignore_pcr` (the default since 0.4.10), tsdemux anchored every stream once, on the first PES it parsed. A sender that sends video further ahead of its PTS than audio could have its audio stamped hundreds of milliseconds before it arrived, for the whole connection, and a mixer dropped that input without a word (#1265). The block now retimes its output from when the SRT data arrives: the stream that arrives latest sets one shared offset, so A/V sync is kept, and it lands `arrival_margin_ms` (100 ms) inside the configured SRT latency. Video with B-frames keeps its timing. New block properties `arrival_retiming` (default on; off restores the old behaviour) and `arrival_margin_ms`. Streams the old anchor placed too early now get some extra delay (#1272)
+
+### Documentation
+- UPSTREAM_NOTES.md: tsdemux `ignore-pcr` anchoring, `srtsrc` timestamps and reported latency, and a `srtsrc` stop that can hang with `keep-listening` (#1272)
+
+---
+
 ## [0.8.3] - 2026-11-16
 
 ### Fixed
