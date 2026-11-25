@@ -1082,3 +1082,40 @@ fn live_edge_steps_of_several_angles_count_as_one() {
     assert!(g1 && g2);
     assert_eq!(e2 - e1, 750 * MS);
 }
+
+#[test]
+fn frame_zero_waits_for_every_angle_whatever_answers_first() {
+    // cam1 starts 9.26 s before cam0, but its index answers later.
+    let cam0 = player("cam0", BASE + 9260 * MS, BASE + 60 * S, Some((50, 1)));
+    let cam1 = player("cam1", UNKNOWN, UNKNOWN, Some((50, 1)));
+    let tl = timeline_of(&[cam0.clone(), cam1.clone()]);
+    let b = tl.bounds().unwrap();
+    assert_eq!(b.start, BASE + 9260 * MS);
+    assert_eq!(tl.origin_tai(), UNKNOWN, "cam1 has not reported");
+    // Frame-addressed commands wait; time-addressed ones work.
+    assert!(matches!(
+        tl.apply_at(seek(10), 0),
+        Err(CommandError::Conflict(_))
+    ));
+    tl.apply_at(seek_tai(BASE + 20 * S), 0).unwrap();
+    assert!(tl.telemetry().get("start_frame").is_none());
+    cam1.start_tai.store(BASE, Ordering::Relaxed);
+    cam1.end_tai.store(BASE + 60 * S, Ordering::Relaxed);
+    tl.bounds();
+    assert_eq!(tl.origin_tai(), BASE);
+    let v = tl.telemetry();
+    assert_eq!(v["start_frame"], 0);
+    assert_eq!(v["frame"], 1000);
+}
+
+#[test]
+fn frame_zero_is_fixed_without_an_angle_that_never_answers() {
+    let cam0 = player("cam0", BASE, BASE + 60 * S, Some((50, 1)));
+    let dead = player("dead", UNKNOWN, UNKNOWN, None);
+    let tl = timeline_of(&[cam0.clone(), dead.clone()]);
+    let t0 = Instant::now();
+    tl.bounds_at(t0);
+    assert_eq!(tl.origin_tai(), UNKNOWN);
+    tl.bounds_at(t0 + ORIGIN_WAIT);
+    assert_eq!(tl.origin_tai(), BASE);
+}

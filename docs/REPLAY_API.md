@@ -24,7 +24,7 @@ REST and the WebSocket take the same commands and return the same result. On the
 |---|---|---|
 | 400 | `invalid` | Malformed command, unknown `cmd` or field, a value out of range (speed outside ±8, bad UTC/TAI text, more than one target, `out` before `in`). |
 | 404 | | No replay group with that name in that flow (the flow is not running). |
-| 409 | `conflict` | The command is valid but does not apply now: no media yet, frame numbers before the frame rate is known, `until` behind the cursor, a cue outside the media, a mark before any picture has gone out. |
+| 409 | `conflict` | The command is valid but does not apply now: no media yet, frame numbers before the frame rate is known or frame 0 is fixed, `until` behind the cursor, a cue outside the media, a mark before any picture has gone out. |
 
 A refused command changes nothing.
 
@@ -34,7 +34,7 @@ Commands name a point on the timeline in one of four ways. Give exactly one.
 
 | Field | Meaning | Example |
 |---|---|---|
-| `frame` | Frame of the group's reference grid (its finest source rate), counted from the group origin (frame 0 = the start of the earliest angle). | `{"frame": 1250}` |
+| `frame` | Frame of the group's reference grid (its finest source rate), counted from the group origin: frame 0 holds the start of the earliest angle, fixed once every angle has reported its range (or after 10 s, without an angle whose source has not answered). It then stays put for the run, so frame numbers do not depend on which source answered first. | `{"frame": 1250}` |
 | `utc` | UTC, RFC 3339. Names the reference frame whose start is nearest (within half a frame), and goes to that start: frame times come in UTC to the millisecond, while a frame can start anywhere inside its millisecond, so a UTC the API gave seeks back to the same frame. | `{"utc": "2026-11-24T13:21:56.080Z"}` |
 | `tai` | TAI as TAMS `"<seconds>:<nanoseconds>"`. Exact, to the nanosecond. | `{"tai": "1795526553:80598792"}` |
 | `from_live_ms` | Milliseconds before the live edge (the last instant every angle has). | `{"from_live_ms": 8000}` |

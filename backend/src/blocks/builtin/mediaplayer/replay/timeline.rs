@@ -18,7 +18,7 @@
 //! tie the smallest phase, so the choice does not depend on which angle
 //! reported first). A jog of one reference frame therefore never skips a frame
 //! of any angle. Frame 0 is the reference frame that holds the group's origin,
-//! the start of the earliest angle when the group first saw its sources.
+//! the start of the earliest angle once every angle has reported its extent.
 //! Commands can also address an instant as UTC or TAI, which is exact; and
 //! telemetry gives the UTC and TAI of the frames it names (see [`FrameTime`]).
 //! Times are only wall-clock times when every source says its index is real
@@ -40,9 +40,14 @@ use strom_types::tai::{
 };
 use strom_types::tams::parse_timestamp_signed;
 use strom_types::FlowId;
+use tracing::warn;
 
 /// Unknown value for the i64 atomics below.
 pub const UNKNOWN: i64 = i64::MIN;
+
+/// Longest wait for every angle's extent before frame 0 is fixed without
+/// the angles that have none.
+pub const ORIGIN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Default distance behind the live edge for the `live` command.
 pub const DEFAULT_LIVE_MARGIN_MS: u64 = 1500;
@@ -684,8 +689,11 @@ pub struct Applied {
 
 pub struct ReplayTimeline {
     anchor: Mutex<Anchor>,
-    /// TAI that frame 0 holds: the group's start when first known.
+    /// TAI that frame 0 holds: the group's start once every angle has
+    /// reported its extent (see [`ReplayTimeline::bounds`]).
     origin_tai: AtomicI64,
+    /// When the group first had an extent, for the origin's fallback.
+    first_extent_at: Mutex<Option<Instant>>,
     clock_source: Mutex<Option<gst::glib::WeakRef<gst::Element>>>,
     /// Start of the stand-in running time before the flow plays; reset with
     /// the group, so it is on the same footing as the new run's running time.
@@ -739,6 +747,7 @@ impl ReplayTimeline {
         Self {
             anchor: Mutex::new(START_ANCHOR),
             origin_tai: AtomicI64::new(UNKNOWN),
+            first_extent_at: Mutex::new(None),
             clock_source: Mutex::new(None),
             created: Mutex::new(Instant::now()),
             players: Mutex::new(Vec::new()),
@@ -769,6 +778,7 @@ impl ReplayTimeline {
         players.retain(|w| w.strong_count() > 0);
         if players.is_empty() {
             self.origin_tai.store(UNKNOWN, Ordering::Relaxed);
+            *lock(&self.first_extent_at) = None;
             *lock(&self.anchor) = START_ANCHOR;
             *lock(&self.last_pushed) = None;
             *lock(&self.last_cmd) = None;
@@ -823,21 +833,48 @@ impl ReplayTimeline {
     }
 
     /// The group's range, once some angle has reported its extent.
+    ///
+    /// Also fixes the origin (frame 0) at the group's start, once every
+    /// registered angle has reported its extent: fixed at the first extent,
+    /// frame 0 depended on which angle's index answered first (frame numbers
+    /// moved by hundreds between runs). An angle whose source never answers
+    /// does not hold frame numbers back for ever: after [`ORIGIN_WAIT`] the
+    /// origin is fixed from the angles that have.
     pub fn bounds(&self) -> Option<Bounds> {
-        let extents: Vec<(i64, i64)> = self.players().iter().filter_map(|p| p.extent()).collect();
+        self.bounds_at(Instant::now())
+    }
+
+    fn bounds_at(&self, now: Instant) -> Option<Bounds> {
+        let players = self.players();
+        let extents: Vec<(i64, i64)> = players.iter().filter_map(|p| p.extent()).collect();
         let b = group_bounds(&extents)?;
         lock(&self.edge).observe(mono_ns(), b.live_end);
-        let _ = self.origin_tai.compare_exchange(
-            UNKNOWN,
-            b.start,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        );
+        if self.origin_tai.load(Ordering::Relaxed) == UNKNOWN {
+            let first = *lock(&self.first_extent_at).get_or_insert(now);
+            let all = extents.len() == players.len();
+            if all || now.duration_since(first) >= ORIGIN_WAIT {
+                if !all {
+                    warn!(
+                        "Replay: {} of {} angles have no range after {:?}; frame 0 is \
+                         fixed without them",
+                        players.len() - extents.len(),
+                        players.len(),
+                        ORIGIN_WAIT
+                    );
+                }
+                let _ = self.origin_tai.compare_exchange(
+                    UNKNOWN,
+                    b.start,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+            }
+        }
         Some(b)
     }
 
-    /// TAI of the group's frame 0 (start of the earliest angle when the group
-    /// first saw its sources), or [`UNKNOWN`].
+    /// TAI of the group's frame 0 (start of the earliest angle once every
+    /// angle had reported its extent), or [`UNKNOWN`].
     pub fn origin_tai(&self) -> i64 {
         self.origin_tai.load(Ordering::Relaxed)
     }
@@ -972,10 +1009,10 @@ impl ReplayTimeline {
         }
         if let Some(f) = at.frame {
             let g = reference.ok_or_else(|| conflict("the group's frame rate is not known yet"))?;
-            return Ok(frame_centre(
-                &g,
-                frame_in(&g, b, g.floor_frame(self.origin_tai()), f),
-            ));
+            let origin = self
+                .origin_on(&g)
+                .ok_or_else(|| conflict("the group's frame 0 is not fixed yet"))?;
+            return Ok(frame_centre(&g, frame_in(&g, b, origin, f)));
         }
         if let Some(u) = &at.utc {
             let t = parse_utc(u).map(utc_to_tai_ns).ok_or_else(|| {
@@ -1361,13 +1398,13 @@ impl ReplayTimeline {
             "time_domain": domain.as_str(),
             "now_utc": format_utc_ms(wall_utc_ns()),
         });
-        let (Some(b), Some(g)) = (bounds, reference) else {
+        let origin = reference.and_then(|g| self.origin_on(&g));
+        let (Some(b), Some(g), Some(origin)) = (bounds, reference, origin) else {
             v["frame"] = 0.into();
             v["total_frames"] = 0.into();
             v["frame_ns"] = 20e6.into();
             return v;
         };
-        let origin = g.floor_frame(self.origin_tai());
         let time_of = |tai: i64| FrameTime::new(&g, g.floor_frame(tai), origin).to_json();
         let (cursor, speed) = self.advance(&mut lock(&self.anchor), now, &b);
         v["speed"] = speed.into();
