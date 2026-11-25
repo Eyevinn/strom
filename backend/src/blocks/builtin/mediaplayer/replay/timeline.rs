@@ -1,19 +1,28 @@
 //! Shared replay timeline.
 //!
-//! One timeline per (flow, replay group) owns the cursor and the speed. The
-//! cursor is a position on the group's [`FrameGrid`], which is anchored on
-//! TAI, so frame `k` is the same instant on every angle however their
-//! recordings start, end or are segmented. The cursor is a function of the
-//! flow's running time, `f(rt) = f0 + speed * (rt - rt0) / frame_period`, so
-//! every player that asks for the same output tick gets the same frame and the
-//! angles cannot drift apart. A command re-anchors the line at "now".
+//! One timeline per (flow, replay group) owns the cursor and the speed. **The
+//! group shares time, not frame numbers**: the cursor is a TAI instant, a
+//! function of the flow's running time, `T(rt) = T0 + speed * (rt - rt0)`, so
+//! every player that asks for the same running time gets the same instant and
+//! the angles cannot drift apart. A command re-anchors the line at "now".
 //!
-//! Frame numbers in commands and telemetry are relative to the group's origin:
-//! the first frame of the earliest angle when the group first saw its sources.
-//! Commands can also address an instant as UTC or TAI, and telemetry gives the
-//! UTC and TAI of the frames it names (see [`FrameTime`]). Times are only
-//! wall-clock times when every source says its index is real TAI
-//! ([`TimeDomain`]).
+//! Each player has its own [`FrameGrid`] (its source's rate and phase) and
+//! shows, at group time `T`, **its latest frame that starts at or before `T`**
+//! (sample and hold: the picture that camera had at `T`). Each player outputs
+//! at its own output rate (`replay_output_framerate`, by default the source's
+//! rate), so a 100p angle played at 50 % on a 50p output shows every source
+//! frame, and a 25p angle on a 50p output shows each frame twice.
+//!
+//! Frame numbers in commands and telemetry count frames of the group's
+//! **reference grid**: the finest source grid in the group (highest rate; on a
+//! tie the smallest phase, so the choice does not depend on which angle
+//! reported first). A jog of one reference frame therefore never skips a frame
+//! of any angle. Frame 0 is the reference frame that holds the group's origin,
+//! the start of the earliest angle when the group first saw its sources.
+//! Commands can also address an instant as UTC or TAI, which is exact; and
+//! telemetry gives the UTC and TAI of the frames it names (see [`FrameTime`]).
+//! Times are only wall-clock times when every source says its index is real
+//! TAI ([`TimeDomain`]).
 
 use super::grid::FrameGrid;
 use gstreamer as gst;
@@ -28,13 +37,15 @@ use strom_types::tai::{
 };
 use strom_types::tams::parse_timestamp_signed;
 use strom_types::FlowId;
-use tracing::warn;
 
 /// Unknown value for the i64 atomics below.
 pub const UNKNOWN: i64 = i64::MIN;
 
 /// Default distance behind the live edge for the `live` command.
 pub const DEFAULT_LIVE_MARGIN_MS: u64 = 1500;
+
+/// Fastest shuttle, either direction.
+pub const MAX_SPEED: f64 = 8.0;
 
 /// What the TAI of a source's index means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,13 +90,22 @@ impl TimeDomain {
     }
 }
 
-/// The time of a frame on the group's grid, for telemetry and acks: where
-/// frame `k` starts, as TAI and as UTC (TAI - [`TAI_MINUS_UTC_NS`]).
+/// `"<s>:<ns>"`, the TAMS timestamp form.
+pub fn tai_string(tai_ns: i64) -> String {
+    format!(
+        "{}:{}",
+        tai_ns.div_euclid(1_000_000_000),
+        tai_ns.rem_euclid(1_000_000_000)
+    )
+}
+
+/// The time of a frame on a grid, for telemetry and acks: where frame `k`
+/// starts, as TAI and as UTC (TAI - [`TAI_MINUS_UTC_NS`]).
 ///
 /// [`TAI_MINUS_UTC_NS`]: strom_types::tai::TAI_MINUS_UTC_NS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameTime {
-    /// Frame relative to the group origin.
+    /// Frame relative to the origin frame on the same grid.
     pub frame: i64,
     pub tai_ns: i64,
     pub utc_ns: i64,
@@ -106,22 +126,27 @@ impl FrameTime {
         }
     }
 
-    /// JSON for the control socket. `tai_ns` is a string: it does not fit in
-    /// a JavaScript number.
+    /// JSON for the control API. `tai_ns` is a string: it does not fit in a
+    /// JavaScript number.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "frame": self.frame,
             "utc": format_utc_ms(self.utc_ns),
-            "tai": format!(
-                "{}:{}",
-                self.tai_ns.div_euclid(1_000_000_000),
-                self.tai_ns.rem_euclid(1_000_000_000)
-            ),
+            "tai": tai_string(self.tai_ns),
             "tai_ns": self.tai_ns.to_string(),
             "tai_clock": format_calendar_ms(self.tai_ns),
             "frame_in_second": self.frame_in_second,
         })
     }
+}
+
+/// An instant (not a frame) as JSON: UTC, TAI, and the TAI ns as a string.
+pub fn instant_json(tai_ns: i64) -> serde_json::Value {
+    serde_json::json!({
+        "utc": format_utc_ms(tai_to_utc_ns(tai_ns)),
+        "tai": tai_string(tai_ns),
+        "tai_ns": tai_ns.to_string(),
+    })
 }
 
 /// UTC ns now, from the host's wall clock.
@@ -131,18 +156,12 @@ fn wall_utc_ns() -> i64 {
         .map_or(0, |d| d.as_nanos() as i64)
 }
 
-/// The frame most players pushed last (ties: the earliest). Players report
-/// at their own ticks, so they can be a frame apart in one sample.
-fn consensus_frame(frames: &[i64]) -> Option<i64> {
-    let mut sorted: Vec<i64> = frames.iter().copied().filter(|f| *f != UNKNOWN).collect();
-    sorted.sort_unstable();
-    let mut best: Option<(i64, usize)> = None;
-    for run in sorted.chunk_by(|a, b| a == b) {
-        if best.is_none_or(|(_, n)| run.len() > n) {
-            best = Some((run[0], run.len()));
-        }
-    }
-    best.map(|(f, _)| f)
+fn fps_string(g: &FrameGrid) -> String {
+    format!("{}/{}", g.fps_n, g.fps_d)
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 /// State and telemetry of one player in the group.
@@ -151,12 +170,28 @@ pub struct PlayerStats {
     /// TAI extent of the player's source, `[start, end)`.
     pub start_tai: AtomicI64,
     pub end_tai: AtomicI64,
-    /// Absolute frame last pushed.
+    /// The player's own frame grid (its source's rate, anchored on its media).
+    grid: Mutex<Option<FrameGrid>>,
+    /// Output rate as `(n, d)`, once the output runs.
+    output_rate: Mutex<Option<(u32, u32)>>,
+    /// Absolute frame (own grid) last pushed.
     pub shown_frame: AtomicI64,
+    /// Absolute frame (own grid) the last tick asked for.
+    pub wanted_frame: AtomicI64,
     /// Frame number read from the pushed picture's bitstrip (diagnostics).
     pub strip_frame: AtomicI64,
     /// Pushed pictures whose bitstrip differs from their timeline frame.
     pub strip_mismatches: AtomicU64,
+    /// Burned-in UTC (µs) read from the last new pushed picture (diagnostics).
+    pub code_utc_us: AtomicI64,
+    /// New pushed pictures whose burned-in time was read, and those whose time
+    /// does not hold the group time of their tick (a wrong source frame).
+    pub time_checked: AtomicU64,
+    pub time_errors: AtomicU64,
+    /// Ticks that pushed the same source frame as the tick before, and source
+    /// frames jumped over between consecutive ticks (speed vs output rate).
+    pub repeated_ticks: AtomicU64,
+    pub skipped_frames: AtomicU64,
     pub misses: AtomicU64,
     pub late_ticks: AtomicU64,
     pub index_segments: AtomicU64,
@@ -177,9 +212,17 @@ impl PlayerStats {
             block_id: block_id.to_string(),
             start_tai: AtomicI64::new(UNKNOWN),
             end_tai: AtomicI64::new(UNKNOWN),
+            grid: Mutex::new(None),
+            output_rate: Mutex::new(None),
             shown_frame: AtomicI64::new(UNKNOWN),
+            wanted_frame: AtomicI64::new(UNKNOWN),
             strip_frame: AtomicI64::new(-1),
             strip_mismatches: AtomicU64::new(0),
+            code_utc_us: AtomicI64::new(-1),
+            time_checked: AtomicU64::new(0),
+            time_errors: AtomicU64::new(0),
+            repeated_ticks: AtomicU64::new(0),
+            skipped_frames: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             late_ticks: AtomicU64::new(0),
             index_segments: AtomicU64::new(0),
@@ -207,28 +250,76 @@ impl PlayerStats {
         let e = self.end_tai.load(Ordering::Relaxed);
         (s != UNKNOWN && e != UNKNOWN && e > s).then_some((s, e))
     }
+
+    /// The player's frame grid, once its frame rate is known.
+    pub fn grid(&self) -> Option<FrameGrid> {
+        *lock(&self.grid)
+    }
+
+    /// Set the player's grid from its source's frame rate, anchored at an
+    /// instant of its media, unless already set. Returns the grid in use.
+    pub fn init_grid(&self, fps_n: u32, fps_d: u32, anchor_tai_ns: i64) -> Option<FrameGrid> {
+        let mut g = lock(&self.grid);
+        if g.is_none() {
+            *g = FrameGrid::new(fps_n, fps_d, anchor_tai_ns);
+        }
+        *g
+    }
+
+    pub fn set_output_rate(&self, fps_n: u32, fps_d: u32) {
+        *lock(&self.output_rate) = Some((fps_n, fps_d));
+    }
+
+    pub fn output_rate(&self) -> Option<(u32, u32)> {
+        *lock(&self.output_rate)
+    }
 }
 
-#[derive(Clone, Copy)]
+/// The group's finest grid: highest rate, then smallest phase. Deterministic
+/// whatever order the players reported in.
+pub fn reference_grid(grids: impl IntoIterator<Item = FrameGrid>) -> Option<FrameGrid> {
+    grids.into_iter().min_by(|a, b| {
+        // a/b > c/d  <=>  a*d > c*b; the higher rate sorts first.
+        let ra = a.fps_n as u64 * b.fps_d as u64;
+        let rb = b.fps_n as u64 * a.fps_d as u64;
+        rb.cmp(&ra).then(a.phase_ns.cmp(&b.phase_ns))
+    })
+}
+
+/// The middle of frame `k`: where the cursor rests after a frame-addressed
+/// command, so rounding never lands it on a neighbour.
+pub fn frame_centre(grid: &FrameGrid, k: i64) -> i64 {
+    let a = grid.tai_of_frame(k);
+    let b = grid.tai_of_frame(k + 1);
+    a + (b - a) / 2
+}
+
+/// Where the cursor line starts: a TAI instant, or the group's start.
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct Anchor {
     rt: i64,
-    /// Cursor in absolute frames on the grid; -inf = "at the start".
-    f: f64,
+    /// Cursor TAI at `rt`; `None` = at the start of the group's range.
+    tai: Option<i64>,
     speed: f64,
 }
+
+const START_ANCHOR: Anchor = Anchor {
+    rt: 0,
+    tai: None,
+    speed: 0.0,
+};
 
 /// Operator commands.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Command {
-    /// Pause and move by a number of frames.
+    /// Pause and move by a number of reference-grid frames.
     Jog {
         frames: i64,
     },
-    /// Go to a frame (relative to the group origin), or to the frame that
-    /// holds an instant given as UTC (RFC 3339, e.g.
-    /// `2026-11-24T13:21:56.080Z`) or TAI (TAMS `"<s>:<ns>"`), keeping the
-    /// speed. Exactly one of the three.
+    /// Go to a reference frame (relative to the group origin), or to an
+    /// instant given as UTC (RFC 3339, e.g. `2026-11-24T13:21:56.080Z`) or TAI
+    /// (TAMS `"<s>:<ns>"`), keeping the speed. Exactly one of the three.
     Seek {
         #[serde(default)]
         frame: Option<i64>,
@@ -247,7 +338,7 @@ pub enum Command {
     },
     Play,
     Pause,
-    /// Go to the last frame and pause.
+    /// Go to the live edge (the last instant every angle has) and pause.
     End,
     /// Play at 1x from the live edge minus a margin (default 1.5 s).
     Live {
@@ -256,23 +347,21 @@ pub enum Command {
     },
 }
 
-/// The group's playable range in absolute frames.
+/// The group's playable range, TAI ns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bounds {
-    /// First frame of the earliest angle.
+    /// Start of the earliest angle.
     pub start: i64,
-    /// One past the last frame of the latest angle.
+    /// End of the latest angle.
     pub end: i64,
-    /// One past the last frame every angle has: the live edge.
+    /// End of the angle that ends first: the live edge, where all have media.
     pub live_end: i64,
 }
 
 /// Bounds from each player's TAI extent. Angles are aligned on TAI: the range
 /// is the union of what the angles cover, the live edge where all have media.
-pub fn group_bounds(grid: &FrameGrid, extents: &[(i64, i64)]) -> Option<Bounds> {
-    let mut it = extents
-        .iter()
-        .map(|(s, e)| (grid.nearest_frame(*s), grid.nearest_frame(*e)));
+pub fn group_bounds(extents: &[(i64, i64)]) -> Option<Bounds> {
+    let mut it = extents.iter().copied();
     let first = it.next()?;
     let (start, end, live_end) = it.fold((first.0, first.1, first.1), |(s, e, l), (ps, pe)| {
         (s.min(ps), e.max(pe), l.min(pe))
@@ -284,18 +373,26 @@ pub fn group_bounds(grid: &FrameGrid, extents: &[(i64, i64)]) -> Option<Bounds> 
     })
 }
 
+/// What a command did: where the cursor is afterwards, and the speed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Applied {
+    pub tai: i64,
+    pub speed: f64,
+}
+
 pub struct ReplayTimeline {
     anchor: Mutex<Anchor>,
-    grid: Mutex<Option<FrameGrid>>,
-    /// Absolute frame shown as 0 in commands and telemetry.
-    origin: AtomicI64,
+    /// TAI that frame 0 holds: the group's start when first known.
+    origin_tai: AtomicI64,
     clock_source: Mutex<Option<gst::glib::WeakRef<gst::Element>>>,
     created: Instant,
     players: Mutex<Vec<Weak<PlayerStats>>>,
-    /// Last paused-position command: when it was applied and its frame, so a
-    /// player can report how long until it pushed that frame.
+    /// Last paused-position command: when it was applied and its cursor, so a
+    /// player can report how long until it pushed that instant.
     last_cmd: Mutex<Option<(Instant, i64)>>,
     pub cmd_to_push_us: AtomicU64,
+    /// Running time and cursor of the latest tick any player pushed.
+    last_pushed: Mutex<Option<(i64, i64)>>,
 }
 
 /// Timelines keyed by (flow, replay group).
@@ -304,79 +401,54 @@ type TimelineMap = HashMap<(FlowId, String), Arc<ReplayTimeline>>;
 static TIMELINES: LazyLock<Mutex<TimelineMap>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn get_or_create(flow_id: FlowId, group: &str) -> Arc<ReplayTimeline> {
-    let mut map = TIMELINES.lock().unwrap_or_else(|p| p.into_inner());
+    let mut map = lock(&TIMELINES);
     map.entry((flow_id, group.to_string()))
         .or_insert_with(|| Arc::new(ReplayTimeline::new()))
         .clone()
 }
 
 pub fn get(flow_id: FlowId, group: &str) -> Option<Arc<ReplayTimeline>> {
-    TIMELINES
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .get(&(flow_id, group.to_string()))
-        .cloned()
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|p| p.into_inner())
+    lock(&TIMELINES).get(&(flow_id, group.to_string())).cloned()
 }
 
 impl ReplayTimeline {
     fn new() -> Self {
         Self {
-            anchor: Mutex::new(Anchor {
-                rt: 0,
-                f: f64::NEG_INFINITY,
-                speed: 0.0,
-            }),
-            grid: Mutex::new(None),
-            origin: AtomicI64::new(UNKNOWN),
+            anchor: Mutex::new(START_ANCHOR),
+            origin_tai: AtomicI64::new(UNKNOWN),
             clock_source: Mutex::new(None),
             created: Instant::now(),
             players: Mutex::new(Vec::new()),
             last_cmd: Mutex::new(None),
             cmd_to_push_us: AtomicU64::new(0),
+            last_pushed: Mutex::new(None),
         }
     }
 
     /// Called by each player at build. The first player of a new run resets
-    /// the grid, so a rebuilt flow can change source or frame rate.
+    /// the group, so a rebuilt flow can change sources.
     pub fn register_player(&self, stats: &Arc<PlayerStats>) {
         let mut players = lock(&self.players);
         players.retain(|w| w.strong_count() > 0);
         if players.is_empty() {
-            *lock(&self.grid) = None;
-            self.origin.store(UNKNOWN, Ordering::Relaxed);
-            *lock(&self.anchor) = Anchor {
-                rt: 0,
-                f: f64::NEG_INFINITY,
-                speed: 0.0,
-            };
+            self.origin_tai.store(UNKNOWN, Ordering::Relaxed);
+            *lock(&self.anchor) = START_ANCHOR;
+            *lock(&self.last_pushed) = None;
         }
         players.push(Arc::downgrade(stats));
     }
 
-    /// Set the group's grid from the first source that knows its frame rate,
-    /// anchored at `anchor_tai_ns`. Returns the group's grid, which may differ
-    /// from the asked rate if another angle came first.
-    pub fn ensure_grid(&self, fps_n: u32, fps_d: u32, anchor_tai_ns: i64) -> Option<FrameGrid> {
-        let mut g = lock(&self.grid);
-        if let Some(grid) = *g {
-            if (grid.fps_n as u64) * (fps_d as u64) != (fps_n as u64) * (grid.fps_d as u64) {
-                warn!(
-                    "Replay group: source at {}/{} fps in a {}/{} fps group",
-                    fps_n, fps_d, grid.fps_n, grid.fps_d
-                );
-            }
-            return Some(grid);
-        }
-        *g = FrameGrid::new(fps_n, fps_d, anchor_tai_ns);
-        *g
+    fn players(&self) -> Vec<Arc<PlayerStats>> {
+        lock(&self.players)
+            .iter()
+            .filter_map(|w| w.upgrade())
+            .collect()
     }
 
-    pub fn grid(&self) -> Option<FrameGrid> {
-        *lock(&self.grid)
+    /// The group's reference grid (see the module docs), once a player knows
+    /// its frame rate.
+    pub fn reference(&self) -> Option<FrameGrid> {
+        reference_grid(self.players().iter().filter_map(|p| p.grid()))
     }
 
     /// An element in the flow whose clock and base time define "now".
@@ -402,129 +474,158 @@ impl ReplayTimeline {
         self.created.elapsed().as_nanos() as i64
     }
 
-    fn extents(&self) -> Vec<(i64, i64)> {
-        lock(&self.players)
-            .iter()
-            .filter_map(|w| w.upgrade())
-            .filter_map(|p| p.extent())
-            .collect()
+    /// The group's range, once some angle has reported its extent.
+    pub fn bounds(&self) -> Option<Bounds> {
+        let extents: Vec<(i64, i64)> = self.players().iter().filter_map(|p| p.extent()).collect();
+        let b = group_bounds(&extents)?;
+        let _ = self.origin_tai.compare_exchange(
+            UNKNOWN,
+            b.start,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        Some(b)
     }
 
-    /// The group's grid and range, once some angle has reported its extent.
-    pub fn bounds(&self) -> Option<(FrameGrid, Bounds)> {
-        let grid = self.grid()?;
-        let b = group_bounds(&grid, &self.extents())?;
-        let _ =
-            self.origin
-                .compare_exchange(UNKNOWN, b.start, Ordering::Relaxed, Ordering::Relaxed);
-        Some((grid, b))
+    /// TAI of the group's frame 0 (start of the earliest angle when the group
+    /// first saw its sources), or [`UNKNOWN`].
+    pub fn origin_tai(&self) -> i64 {
+        self.origin_tai.load(Ordering::Relaxed)
     }
 
-    pub fn origin(&self) -> i64 {
-        self.origin.load(Ordering::Relaxed)
+    /// The absolute frame on `grid` that holds the group origin.
+    pub fn origin_on(&self, grid: &FrameGrid) -> Option<i64> {
+        let o = self.origin_tai();
+        (o != UNKNOWN).then(|| grid.floor_frame(o))
     }
 
-    fn eval(a: &Anchor, rt: i64, grid: &FrameGrid, b: &Bounds) -> f64 {
-        let f = a.f + a.speed * (rt - a.rt) as f64 / grid.frame_ns();
-        // Frame centres, so float error never floors to a neighbour.
-        f.clamp(
-            b.start as f64 + 0.5,
-            (b.end as f64 - 0.5).max(b.start as f64 + 0.5),
-        )
+    fn eval(a: &Anchor, rt: i64, b: &Bounds) -> i64 {
+        let from = a.tai.unwrap_or(b.start) as i128;
+        let moved = (a.speed * (rt - a.rt) as f64).round() as i128;
+        (from + moved).clamp(b.start as i128, (b.end - 1) as i128) as i64
     }
 
-    /// The absolute frame under the cursor at a running time.
-    pub fn frame_at(&self, rt: i64) -> Option<i64> {
-        let (grid, b) = self.bounds()?;
-        let a = *lock(&self.anchor);
-        Some(Self::eval(&a, rt, &grid, &b).floor() as i64)
+    /// The cursor's TAI at a running time.
+    pub fn tai_at(&self, rt: i64) -> Option<i64> {
+        let b = self.bounds()?;
+        Some(Self::eval(&lock(&self.anchor), rt, &b))
+    }
+
+    /// The frame of `grid` a player shows at a running time, and the cursor:
+    /// the player's latest frame that starts at or before the cursor.
+    pub fn frame_on(&self, grid: &FrameGrid, rt: i64) -> Option<(i64, i64)> {
+        let t = self.tai_at(rt)?;
+        Some((grid.floor_frame(t), t))
     }
 
     /// The cursor's TAI at a running time, and the speed.
     pub fn cursor_tai(&self, rt: i64) -> Option<(i64, f64)> {
-        let (grid, b) = self.bounds()?;
+        let b = self.bounds()?;
         let a = *lock(&self.anchor);
-        let f = Self::eval(&a, rt, &grid, &b);
-        let k = f.floor() as i64;
-        let tai = grid.tai_of_frame(k) + ((f - k as f64) * grid.frame_ns()) as i64;
-        Some((tai, a.speed))
+        Some((Self::eval(&a, rt, &b), a.speed))
     }
 
     pub fn speed(&self) -> f64 {
         lock(&self.anchor).speed
     }
 
-    /// Apply a command at "now". Returns the frame (relative to the origin)
-    /// the cursor is on afterwards, and the speed. Fails, changing nothing,
-    /// on a seek target that does not parse.
-    pub fn apply(&self, cmd: Command) -> Result<(i64, f64), String> {
-        let now = self.now_rt();
-        let Some((grid, b)) = self.bounds() else {
-            return Ok((0, self.speed()));
-        };
-        let origin = self.origin();
-        let seek_to = match &cmd {
-            Command::Seek { frame, utc, tai } => {
-                Some(seek_target(&grid, origin, *frame, utc, tai)?)
-            }
-            _ => None,
-        };
-        let fd = grid.frame_ns();
-        let centre = |k: i64| k as f64 + 0.5;
-        let mut a = lock(&self.anchor);
-        let cur = Self::eval(&a, now, &grid, &b);
-        let cur_frame = cur.floor() as i64;
-        let (f, speed) = match cmd {
-            Command::Jog { frames } => (centre(cur_frame + frames), 0.0),
-            Command::Seek { .. } => (centre(seek_to.unwrap_or(cur_frame)), a.speed),
-            Command::SeekRel { ms } => (cur + ms as f64 * 1e6 / fd, a.speed),
-            Command::Speed { speed } => {
-                if speed == 0.0 {
-                    (centre(cur_frame), 0.0)
-                } else {
-                    (cur, speed.clamp(-8.0, 8.0))
-                }
-            }
-            Command::Play => (cur, 1.0),
-            Command::Pause => (centre(cur_frame), 0.0),
-            Command::End => (b.end as f64 - 0.5, 0.0),
-            Command::Live { margin_ms } => {
-                let margin = margin_ms.unwrap_or(DEFAULT_LIVE_MARGIN_MS) as f64 * 1e6 / fd;
-                (b.live_end as f64 - margin, 1.0)
-            }
-        };
-        let anchored = Anchor { rt: now, f, speed };
-        // Store the clamped position so later moves start from what is shown.
-        let f = Self::eval(&anchored, now, &grid, &b);
-        *a = Anchor { f, ..anchored };
-        let frame = f.floor() as i64;
-        *lock(&self.last_cmd) = (speed == 0.0).then(|| (Instant::now(), frame));
-        Ok((frame - origin, speed))
+    /// Apply a command at "now".
+    pub fn apply(&self, cmd: Command) -> Result<Applied, String> {
+        self.apply_at(cmd, self.now_rt())
     }
 
-    /// UTC/TAI of a frame relative to the origin, once the grid is known.
-    pub fn frame_time(&self, rel_frame: i64) -> Option<FrameTime> {
-        let (grid, _) = self.bounds()?;
-        let origin = self.origin();
-        Some(FrameTime::new(&grid, origin + rel_frame, origin))
+    /// Apply a command at running time `now`. Fails, changing nothing, on a
+    /// target that does not parse or a group that has no media yet.
+    pub fn apply_at(&self, cmd: Command, now: i64) -> Result<Applied, String> {
+        let b = self
+            .bounds()
+            .ok_or_else(|| "the group has no media yet".to_string())?;
+        let reference = self.reference();
+        let need_ref =
+            || reference.ok_or_else(|| "the group's frame rate is not known yet".to_string());
+        let mut a = lock(&self.anchor);
+        let cur = Self::eval(&a, now, &b);
+        let (tai, speed) = match cmd {
+            Command::Jog { frames } => {
+                let g = need_ref()?;
+                (frame_centre(&g, g.floor_frame(cur) + frames), 0.0)
+            }
+            Command::Seek { frame, utc, tai } => {
+                let to = match (frame, utc, tai) {
+                    (Some(f), None, None) => {
+                        let g = need_ref()?;
+                        frame_centre(&g, g.floor_frame(self.origin_tai()) + f)
+                    }
+                    (None, Some(u), None) => parse_utc(&u).map(utc_to_tai_ns).ok_or_else(|| {
+                        format!("seek: bad utc '{}', want e.g. 2026-11-24T13:21:56.080Z", u)
+                    })?,
+                    (None, None, Some(t)) => parse_timestamp_signed(&t).ok_or_else(|| {
+                        format!("seek: bad tai '{}', want \"<seconds>:<nanoseconds>\"", t)
+                    })?,
+                    _ => return Err("seek: give exactly one of frame, utc, tai".to_string()),
+                };
+                (to, a.speed)
+            }
+            Command::SeekRel { ms } => (cur.saturating_add(ms * 1_000_000), a.speed),
+            Command::Speed { speed } => {
+                if !speed.is_finite() || speed.abs() > MAX_SPEED {
+                    return Err(format!(
+                        "speed: {} is outside -{} .. {}",
+                        speed, MAX_SPEED, MAX_SPEED
+                    ));
+                }
+                (cur, speed)
+            }
+            Command::Play => (cur, 1.0),
+            Command::Pause => (cur, 0.0),
+            Command::End => (b.live_end - 1, 0.0),
+            Command::Live { margin_ms } => {
+                let margin = margin_ms.unwrap_or(DEFAULT_LIVE_MARGIN_MS) as i64 * 1_000_000;
+                (b.live_end - margin, 1.0)
+            }
+        };
+        let anchored = Anchor {
+            rt: now,
+            tai: Some(tai),
+            speed,
+        };
+        // Store the clamped position so later moves start from what is shown.
+        let tai = Self::eval(&anchored, now, &b);
+        *a = Anchor {
+            tai: Some(tai),
+            ..anchored
+        };
+        *lock(&self.last_cmd) = (speed == 0.0).then(|| (Instant::now(), tai));
+        Ok(Applied { tai, speed })
+    }
+
+    /// The reference frame that holds `tai` (relative to the origin) and its
+    /// time, once the reference grid is known.
+    pub fn reference_time(&self, tai: i64) -> Option<FrameTime> {
+        let g = self.reference()?;
+        let origin = self.origin_on(&g)?;
+        Some(FrameTime::new(&g, g.floor_frame(tai), origin))
     }
 
     /// The group's time domain: real TAI only when every player says so.
     pub fn time_domain(&self) -> TimeDomain {
-        TimeDomain::combine(
-            lock(&self.players)
-                .iter()
-                .filter_map(|w| w.upgrade())
-                .map(|p| p.time_domain()),
-        )
+        TimeDomain::combine(self.players().iter().map(|p| p.time_domain()))
     }
 
-    /// A player pushed absolute `frame`: if it is the target of the last
-    /// command, record how long that took (first player wins).
-    pub fn note_pushed(&self, frame: i64) {
+    /// A player pushed the picture for the cursor at `tai`, on the tick at
+    /// running time `rt`: remember the group's latest pushed time, and if it is
+    /// the target of the last paused command, how long that took (first player
+    /// wins).
+    pub fn note_pushed(&self, rt: i64, tai: i64) {
+        {
+            let mut p = lock(&self.last_pushed);
+            if p.is_none_or(|(prt, _)| rt >= prt) {
+                *p = Some((rt, tai));
+            }
+        }
         let mut last = lock(&self.last_cmd);
         if let Some((at, target)) = *last {
-            if target == frame {
+            if target == tai {
                 self.cmd_to_push_us
                     .store(at.elapsed().as_micros() as u64, Ordering::Relaxed);
                 *last = None;
@@ -532,351 +633,111 @@ impl ReplayTimeline {
         }
     }
 
+    /// The group time of the latest pushed tick.
+    pub fn pushed_tai(&self) -> Option<i64> {
+        lock(&self.last_pushed).map(|(_, t)| t)
+    }
+
+    fn player_json(&self, p: &PlayerStats) -> serde_json::Value {
+        let grid = p.grid();
+        let origin = grid.and_then(|g| self.origin_on(&g));
+        let rel = |k: i64| match origin {
+            Some(o) if k != UNKNOWN => k - o,
+            _ => -1,
+        };
+        let shown = p.shown_frame.load(Ordering::Relaxed);
+        let wanted = p.wanted_frame.load(Ordering::Relaxed);
+        let shown_time = match (grid, origin) {
+            (Some(g), Some(o)) if shown != UNKNOWN => FrameTime::new(&g, shown, o).to_json(),
+            _ => serde_json::Value::Null,
+        };
+        serde_json::json!({
+            "block": p.block_id,
+            "fps": grid.map(|g| fps_string(&g)),
+            "frame_ns": grid.map(|g| g.frame_ns()),
+            "output_fps": p.output_rate().map(|(n, d)| format!("{}/{}", n, d)),
+            "extent": p.extent().map(|(s, e)| serde_json::json!({
+                "start": instant_json(s),
+                "end": instant_json(e),
+            })),
+            "shown": shown_time,
+            "shown_frame": rel(shown),
+            "wanted_frame": rel(wanted),
+            "in_sync": shown != UNKNOWN && shown == wanted,
+            "strip_frame": p.strip_frame.load(Ordering::Relaxed),
+            "strip_mismatches": p.strip_mismatches.load(Ordering::Relaxed),
+            "code_utc_us": p.code_utc_us.load(Ordering::Relaxed),
+            "time_checked": p.time_checked.load(Ordering::Relaxed),
+            "time_errors": p.time_errors.load(Ordering::Relaxed),
+            "repeated_ticks": p.repeated_ticks.load(Ordering::Relaxed),
+            "skipped_frames": p.skipped_frames.load(Ordering::Relaxed),
+            "misses": p.misses.load(Ordering::Relaxed),
+            "late_ticks": p.late_ticks.load(Ordering::Relaxed),
+            "index_segments": p.index_segments.load(Ordering::Relaxed),
+            "fetched_segments": p.fetched_segments.load(Ordering::Relaxed),
+            "fetches": p.fetches.load(Ordering::Relaxed),
+            "fetch_errors": p.fetch_errors.load(Ordering::Relaxed),
+            "last_fetch_ms": p.last_fetch_ms.load(Ordering::Relaxed),
+            "cached_segments": p.cached_segments.load(Ordering::Relaxed),
+            "decodes": p.decodes.load(Ordering::Relaxed),
+            "last_decode_ms": p.last_decode_ms.load(Ordering::Relaxed),
+        })
+    }
+
     pub fn telemetry(&self) -> serde_json::Value {
         let now = self.now_rt();
         let bounds = self.bounds();
-        let origin = self.origin();
-        let rel = |k: i64| if k == UNKNOWN { -1 } else { k - origin };
-        let grid = bounds.map(|(g, _)| g);
-        let time_of = |k: i64| match grid {
-            Some(g) if k != UNKNOWN && origin != UNKNOWN => FrameTime::new(&g, k, origin).to_json(),
-            _ => serde_json::Value::Null,
-        };
-        let players = lock(&self.players)
-            .iter()
-            .filter_map(|w| w.upgrade())
-            .collect::<Vec<_>>();
-        let shown: Vec<i64> = players
-            .iter()
-            .map(|p| p.shown_frame.load(Ordering::Relaxed))
-            .collect();
+        let reference = self.reference();
+        let players = self.players();
         let domain = TimeDomain::combine(players.iter().map(|p| p.time_domain()));
-        let players: Vec<serde_json::Value> = players
-            .iter()
-            .zip(&shown)
-            .map(|(p, &shown)| {
-                serde_json::json!({
-                    "shown": time_of(shown),
-                    "block": p.block_id,
-                    "shown_frame": rel(p.shown_frame.load(Ordering::Relaxed)),
-                    "strip_frame": p.strip_frame.load(Ordering::Relaxed),
-                    "strip_mismatches": p.strip_mismatches.load(Ordering::Relaxed),
-                    "misses": p.misses.load(Ordering::Relaxed),
-                    "late_ticks": p.late_ticks.load(Ordering::Relaxed),
-                    "index_segments": p.index_segments.load(Ordering::Relaxed),
-                    "fetched_segments": p.fetched_segments.load(Ordering::Relaxed),
-                    "fetches": p.fetches.load(Ordering::Relaxed),
-                    "fetch_errors": p.fetch_errors.load(Ordering::Relaxed),
-                    "last_fetch_ms": p.last_fetch_ms.load(Ordering::Relaxed),
-                    "cached_segments": p.cached_segments.load(Ordering::Relaxed),
-                    "decodes": p.decodes.load(Ordering::Relaxed),
-                    "last_decode_ms": p.last_decode_ms.load(Ordering::Relaxed),
-                })
-            })
-            .collect();
+        let players_json: Vec<serde_json::Value> =
+            players.iter().map(|p| self.player_json(p)).collect();
         let mut v = serde_json::json!({
             "type": "state",
             "speed": self.speed(),
             "cmd_to_push_ms": self.cmd_to_push_us.load(Ordering::Relaxed) as f64 / 1000.0,
-            "players": players,
+            "players": players_json,
             "time_domain": domain.as_str(),
             "now_utc": format_utc_ms(wall_utc_ns()),
         });
-        if let Some((grid, b)) = bounds {
-            let a = *lock(&self.anchor);
-            let f = Self::eval(&a, now, &grid, &b).floor() as i64;
-            let tai = grid.tai_of_frame(f);
-            v["frame"] = (f - origin).into();
-            v["start_frame"] = (b.start - origin).into();
-            v["total_frames"] = (b.end - origin).into();
-            v["live_frame"] = (b.live_end - origin).into();
-            v["frame_ns"] = grid.frame_ns().into();
-            v["tai"] = format!(
-                "{}:{}",
-                tai.div_euclid(1_000_000_000),
-                tai.rem_euclid(1_000_000_000)
-            )
-            .into();
-            let behind_ms = |k: i64| (((b.live_end - k) as f64 * grid.frame_ns()) / 1e6).round();
-            v["behind_live_ms"] = behind_ms(f).into();
-            v["cursor"] = time_of(f);
-            v["start"] = time_of(b.start);
-            v["end"] = time_of(b.end);
-            // The live edge is where the last common frame ends.
-            v["live_edge"] = time_of(b.live_end);
-            // What the players last pushed: the picture going out now.
-            if let Some(k) = consensus_frame(&shown) {
-                let mut pushed = time_of(k);
-                pushed["behind_live_ms"] = behind_ms(k).into();
-                if domain == TimeDomain::Tai {
-                    // How old the picture is: wall clock minus capture time.
-                    let utc = tai_to_utc_ns(grid.tai_of_frame(k));
-                    pushed["age_ms"] = ((wall_utc_ns() - utc) / 1_000_000).into();
-                }
-                v["pushed"] = pushed;
-            }
-        } else {
+        let (Some(b), Some(g)) = (bounds, reference) else {
             v["frame"] = 0.into();
             v["total_frames"] = 0.into();
             v["frame_ns"] = 20e6.into();
+            return v;
+        };
+        let origin = g.floor_frame(self.origin_tai());
+        let time_of = |tai: i64| FrameTime::new(&g, g.floor_frame(tai), origin).to_json();
+        let cursor = Self::eval(&lock(&self.anchor), now, &b);
+        let behind_ms = |t: i64| ((b.live_end - t) as f64 / 1e6).round();
+        v["reference_fps"] = fps_string(&g).into();
+        v["frame_ns"] = g.frame_ns().into();
+        v["frame"] = (g.floor_frame(cursor) - origin).into();
+        v["start_frame"] = (g.floor_frame(b.start) - origin).into();
+        v["total_frames"] = (g.floor_frame(b.end - 1) + 1 - origin).into();
+        v["live_frame"] = (g.floor_frame(b.live_end - 1) + 1 - origin).into();
+        v["tai"] = tai_string(cursor).into();
+        v["cursor_tai"] = instant_json(cursor);
+        v["behind_live_ms"] = behind_ms(cursor).into();
+        v["cursor"] = time_of(cursor);
+        v["start"] = time_of(b.start);
+        v["end"] = time_of(b.end);
+        // The live edge is where the last common frame ends.
+        v["live_edge"] = time_of(b.live_end);
+        // What the players last pushed: the picture going out now.
+        if let Some(t) = self.pushed_tai() {
+            let mut pushed = time_of(t);
+            pushed["cursor_tai"] = tai_string(t).into();
+            pushed["behind_live_ms"] = behind_ms(t).into();
+            if domain == TimeDomain::Tai {
+                // How old the picture is: wall clock minus capture time.
+                pushed["age_ms"] = ((wall_utc_ns() - tai_to_utc_ns(t)) / 1_000_000).into();
+            }
+            v["pushed"] = pushed;
         }
         v
     }
 }
 
-/// The absolute frame a seek addresses.
-fn seek_target(
-    grid: &FrameGrid,
-    origin: i64,
-    frame: Option<i64>,
-    utc: &Option<String>,
-    tai: &Option<String>,
-) -> Result<i64, String> {
-    match (frame, utc, tai) {
-        (Some(f), None, None) => Ok(origin + f),
-        (None, Some(u), None) => parse_utc(u)
-            .map(|ns| grid.floor_frame(utc_to_tai_ns(ns)))
-            .ok_or_else(|| format!("seek: bad utc '{}', want e.g. 2026-11-24T13:21:56.080Z", u)),
-        (None, None, Some(t)) => parse_timestamp_signed(t)
-            .map(|ns| grid.floor_frame(ns))
-            .ok_or_else(|| format!("seek: bad tai '{}', want \"<seconds>:<nanoseconds>\"", t)),
-        _ => Err("seek: give exactly one of frame, utc, tai".to_string()),
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const BASE: i64 = 1_800_000_000_000_000_000;
-    const S: i64 = 1_000_000_000;
-
-    fn seek(frame: i64) -> Command {
-        Command::Seek {
-            frame: Some(frame),
-            utc: None,
-            tai: None,
-        }
-    }
-
-    #[test]
-    fn angles_align_on_tai_not_on_segments() {
-        let grid = FrameGrid::new(50, 1, BASE).unwrap();
-        let k0 = grid.floor_frame(BASE);
-        // cam1 covers 0..300 s, cam2 starts 2 s later and ends 1 s earlier.
-        let b = group_bounds(
-            &grid,
-            &[(BASE, BASE + 300 * S), (BASE + 2 * S, BASE + 299 * S)],
-        )
-        .unwrap();
-        assert_eq!(b.start, k0);
-        assert_eq!(b.end, k0 + 300 * 50);
-        assert_eq!(b.live_end, k0 + 299 * 50);
-        assert!(group_bounds(&grid, &[]).is_none());
-    }
-
-    fn timeline_with(extents: &[(i64, i64)]) -> (ReplayTimeline, Vec<Arc<PlayerStats>>) {
-        let tl = ReplayTimeline::new();
-        let mut keep = Vec::new();
-        for (i, (s, e)) in extents.iter().enumerate() {
-            let p = Arc::new(PlayerStats::new(&format!("cam{}", i)));
-            p.start_tai.store(*s, Ordering::Relaxed);
-            p.end_tai.store(*e, Ordering::Relaxed);
-            tl.register_player(&p);
-            keep.push(p);
-        }
-        tl.ensure_grid(50, 1, BASE).unwrap();
-        (tl, keep)
-    }
-
-    #[test]
-    fn commands_use_origin_relative_frames() {
-        let (tl, _p) = timeline_with(&[(BASE, BASE + 10 * S), (BASE + S, BASE + 10 * S)]);
-        let k0 = tl.grid().unwrap().floor_frame(BASE);
-        let rt = tl.now_rt();
-        // Starts at the first frame.
-        assert_eq!(tl.frame_at(rt), Some(k0));
-        assert_eq!(tl.origin(), k0);
-        assert_eq!(tl.apply(seek(123)).unwrap(), (123, 0.0));
-        assert_eq!(tl.apply(Command::Jog { frames: -3 }).unwrap(), (120, 0.0));
-        let (tai, _) = tl.cursor_tai(tl.now_rt()).unwrap();
-        // The cursor rests at the centre of the frame.
-        assert_eq!(tai, BASE + 120 * 20_000_000 + 10_000_000);
-        // Clamped to the range.
-        assert_eq!(tl.apply(seek(-50)).unwrap().0, 0);
-        assert_eq!(tl.apply(Command::End).unwrap().0, 499);
-    }
-
-    #[test]
-    fn live_goes_behind_the_common_edge() {
-        let (tl, p) = timeline_with(&[(BASE, BASE + 10 * S), (BASE, BASE + 8 * S)]);
-        let (frame, speed) = tl
-            .apply(Command::Live {
-                margin_ms: Some(1000),
-            })
-            .unwrap();
-        assert_eq!(speed, 1.0);
-        assert_eq!(frame, 8 * 50 - 50);
-        // The index grows: the edge follows.
-        p[1].end_tai.store(BASE + 12 * S, Ordering::Relaxed);
-        p[0].end_tai.store(BASE + 12 * S, Ordering::Relaxed);
-        assert_eq!(tl.bounds().unwrap().1.live_end - tl.origin(), 12 * 50);
-        let (frame, _) = tl.apply(Command::Live { margin_ms: None }).unwrap();
-        assert_eq!(frame, 12 * 50 - 75);
-    }
-
-    #[test]
-    fn command_parses_live() {
-        let c: Command = serde_json::from_str(r#"{"cmd":"live"}"#).unwrap();
-        assert!(matches!(c, Command::Live { margin_ms: None }));
-        let c: Command = serde_json::from_str(r#"{"cmd":"seek","frame":-5}"#).unwrap();
-        assert!(matches!(
-            c,
-            Command::Seek {
-                frame: Some(-5),
-                utc: None,
-                tai: None
-            }
-        ));
-    }
-
-    /// TAI start of the spike's live ingest (off the 50 fps second grid).
-    const INGEST: i64 = 1_795_526_553_080_598_792;
-
-    fn one_player(base: i64, domain: TimeDomain) -> (ReplayTimeline, Arc<PlayerStats>) {
-        let tl = ReplayTimeline::new();
-        let p = Arc::new(PlayerStats::new("cam1"));
-        p.start_tai.store(base, Ordering::Relaxed);
-        p.end_tai.store(base + 60 * S, Ordering::Relaxed);
-        p.set_time_domain(domain);
-        tl.register_player(&p);
-        tl.ensure_grid(50, 1, base).unwrap();
-        (tl, p)
-    }
-
-    fn seek_utc(utc: &str) -> Command {
-        Command::Seek {
-            frame: None,
-            utc: Some(utc.to_string()),
-            tai: None,
-        }
-    }
-
-    #[test]
-    fn frame_time_is_utc_of_the_frame_start() {
-        let (tl, _p) = one_player(INGEST, TimeDomain::Tai);
-        let t = tl.frame_time(0).unwrap();
-        assert_eq!(t.tai_ns, INGEST);
-        assert_eq!(t.utc_ns, INGEST - 37 * S);
-        assert_eq!(format_utc_ms(t.utc_ns), "2026-11-24T13:21:56.080Z");
-        // Frames start at .000598792, .020598792, ... in each second.
-        assert_eq!(t.frame_in_second, 4);
-        let j = t.to_json();
-        assert_eq!(j["tai"], "1795526553:80598792");
-        assert_eq!(j["tai_ns"], "1795526553080598792");
-        assert_eq!(j["tai_clock"], "2026-11-24T13:22:33.080");
-        assert_eq!(tl.frame_time(45).unwrap().frame_in_second, 49);
-        assert_eq!(tl.frame_time(46).unwrap().frame_in_second, 0);
-    }
-
-    #[test]
-    fn seek_by_utc_or_tai() {
-        let (tl, _p) = one_player(INGEST, TimeDomain::Tai);
-        // 13:22:00.000 UTC lies in the frame that starts at 13:21:59.980598792.
-        assert_eq!(
-            tl.apply(seek_utc("2026-11-24T13:22:00.000Z")).unwrap(),
-            (195, 0.0)
-        );
-        assert_eq!(
-            format_utc_ms(tl.frame_time(195).unwrap().utc_ns),
-            "2026-11-24T13:21:59.980Z"
-        );
-        assert_eq!(tl.apply(seek(0)).unwrap().0, 0);
-        assert_eq!(
-            tl.apply(seek_utc("2026-11-24T14:22:00.000+01:00"))
-                .unwrap()
-                .0,
-            195
-        );
-        let by_tai = Command::Seek {
-            frame: None,
-            utc: None,
-            tai: Some("1795526557:0".to_string()),
-        };
-        assert_eq!(tl.apply(by_tai).unwrap().0, 195);
-        // Bad input changes nothing.
-        assert!(tl.apply(seek_utc("13:22:00")).is_err());
-        let both = Command::Seek {
-            frame: Some(1),
-            utc: Some("2026-11-24T13:22:00Z".to_string()),
-            tai: None,
-        };
-        assert!(tl.apply(both).is_err());
-        assert_eq!(tl.frame_at(tl.now_rt()), Some(tl.origin() + 195));
-        let c: Command =
-            serde_json::from_str(r#"{"cmd":"seek","utc":"2026-11-24T13:22:00Z"}"#).unwrap();
-        assert!(matches!(
-            c,
-            Command::Seek {
-                frame: None,
-                utc: Some(_),
-                tai: None
-            }
-        ));
-    }
-
-    #[test]
-    fn telemetry_gives_utc_of_the_pushed_frame() {
-        let (tl, p) = one_player(INGEST, TimeDomain::Tai);
-        tl.apply(seek(195)).unwrap();
-        // Nothing pushed yet: no "pushed" time.
-        assert!(tl.telemetry().get("pushed").is_none());
-        // The player pushed a different frame from the cursor: "pushed" is
-        // what went out, not what was asked for.
-        p.shown_frame.store(tl.origin() + 190, Ordering::Relaxed);
-        let v = tl.telemetry();
-        assert_eq!(v["time_domain"], "tai");
-        assert_eq!(v["cursor"]["frame"], 195);
-        assert_eq!(v["cursor"]["utc"], "2026-11-24T13:21:59.980Z");
-        assert_eq!(v["pushed"]["frame"], 190);
-        assert_eq!(v["pushed"]["utc"], "2026-11-24T13:21:59.880Z");
-        assert_eq!(v["pushed"]["frame_in_second"], 44);
-        assert_eq!(v["pushed"]["behind_live_ms"], (3000 - 190) as f64 * 20.0);
-        // Captured in the past, so the picture's age is positive.
-        assert!(v["pushed"]["age_ms"].as_i64().unwrap() > 0);
-        assert_eq!(v["players"][0]["shown"]["utc"], "2026-11-24T13:21:59.880Z");
-        assert_eq!(v["start"]["utc"], "2026-11-24T13:21:56.080Z");
-        assert_eq!(v["live_edge"]["utc"], "2026-11-24T13:22:56.080Z");
-        assert_eq!(v["live_edge"]["frame"], 3000);
-        assert!(v["now_utc"].as_str().unwrap().ends_with('Z'));
-    }
-
-    #[test]
-    fn unanchored_source_still_shows_its_times() {
-        let (tl, p) = one_player(BASE, TimeDomain::Unanchored);
-        p.shown_frame
-            .store(tl.bounds().unwrap().1.start, Ordering::Relaxed);
-        let v = tl.telemetry();
-        assert_eq!(v["time_domain"], "unanchored");
-        assert_eq!(v["pushed"]["utc"], format_utc_ms(BASE - 37 * S));
-        // No wall clock to compare with.
-        assert!(v["pushed"].get("age_ms").is_none());
-    }
-
-    #[test]
-    fn group_domain_needs_every_angle() {
-        use TimeDomain::*;
-        assert_eq!(TimeDomain::combine([Tai, Tai]), Tai);
-        assert_eq!(TimeDomain::combine([Tai, Unknown]), Unknown);
-        assert_eq!(TimeDomain::combine([Tai, Unanchored, Unknown]), Unanchored);
-        assert_eq!(TimeDomain::combine([]), Unknown);
-    }
-
-    #[test]
-    fn pushed_frame_is_the_majority() {
-        assert_eq!(consensus_frame(&[7, 8, 8, 7, 8]), Some(8));
-        assert_eq!(consensus_frame(&[8, 7]), Some(7));
-        assert_eq!(consensus_frame(&[UNKNOWN, 5]), Some(5));
-        assert_eq!(consensus_frame(&[UNKNOWN]), None);
-    }
-}
+mod tests;

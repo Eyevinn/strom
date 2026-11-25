@@ -182,7 +182,7 @@ impl Fetcher {
                         info.container
                     );
                     if let Some((n, d)) = info.frame_rate {
-                        self.timeline.ensure_grid(n, d, first.start_ns);
+                        self.stats.init_grid(n, d, first.start_ns);
                     }
                     self.stats.set_time_domain(if info.absolute_time {
                         TimeDomain::Tai

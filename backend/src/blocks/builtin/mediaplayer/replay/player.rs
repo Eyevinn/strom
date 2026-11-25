@@ -57,7 +57,10 @@ pub struct ReplayPlayer {
     /// Decoded window around the cursor, in its direction of travel.
     decode_behind_ns: i64,
     decode_ahead_ns: i64,
-    /// Read the bitstrip of pushed frames (STROM_REPLAY_BITSTRIP=1).
+    /// Output frame rate; `None` = the source's own rate.
+    output_rate: Option<(u32, u32)>,
+    /// Read the bitstrip and burned-in time of pushed frames
+    /// (STROM_REPLAY_BITSTRIP=1).
     read_strip: bool,
     started: AtomicBool,
     stop: Arc<AtomicBool>,
@@ -71,6 +74,7 @@ impl ReplayPlayer {
         appsrc: &gst_app::AppSrc,
         cache_ahead_s: u64,
         prefetch_s: u64,
+        output_rate: Option<(u32, u32)>,
     ) -> Arc<Self> {
         let stats = Arc::new(PlayerStats::new(block_id));
         timeline.register_player(&stats);
@@ -97,6 +101,7 @@ impl ReplayPlayer {
             workers: 2,
             decode_behind_ns: 2 * S,
             decode_ahead_ns: cache_ahead_s.max(1) as i64 * S,
+            output_rate,
             read_strip: strom_types::env::var_opt("STROM_REPLAY_BITSTRIP")
                 .is_some_and(|v| v == "1" || v == "true"),
             started: AtomicBool::new(false),
@@ -174,9 +179,9 @@ impl ReplayPlayer {
             }
         };
         // No frame rate from the index: take it from the stream.
-        let grid = self.timeline.grid().or_else(|| {
+        let grid = self.stats.grid().or_else(|| {
             let (n, d) = caps_frame_rate(&decoded.caps)?;
-            self.timeline.ensure_grid(n, d, seg.first_sample_tai())
+            self.stats.init_grid(n, d, seg.first_sample_tai())
         });
         let Some(grid) = grid else {
             warn!("Replay {}: no frame rate known", self.block_id);
@@ -272,16 +277,6 @@ impl ReplayPlayer {
                 self.stats
                     .cached_segments
                     .store(store.segments.len() as u64, Ordering::Relaxed);
-            } else if self.timeline.grid().is_none() {
-                // The index gave no frame rate: decode the first segment to
-                // learn it from the stream.
-                if let Some(first) = self.store.segments_in(i64::MIN / 2, i64::MAX / 2).first() {
-                    let key = first.start_ns;
-                    let mut inflight = lock(&self.inflight);
-                    if self.store.bytes(key).is_some() && inflight.insert(key) {
-                        let _ = tx.send(Arc::clone(first));
-                    }
-                }
             }
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -295,7 +290,7 @@ impl ReplayPlayer {
 
     fn tick_loop(self: Arc<Self>) {
         // Wait for the flow to play and for the first frames to exist.
-        let (appsrc, clock, base) = loop {
+        let (appsrc, clock, base, grid) = loop {
             if !self.alive() {
                 return;
             }
@@ -309,34 +304,37 @@ impl ReplayPlayer {
                     // The group's "now" exists as soon as the flow plays, so
                     // the cursor (and prefetch) can start before any decode.
                     self.timeline.set_clock_source(appsrc.upcast_ref());
-                    if has_caps && self.timeline.grid().is_some() {
-                        break (appsrc, clock, base);
+                    if let (true, Some(grid)) = (has_caps, self.stats.grid()) {
+                        break (appsrc, clock, base, grid);
                     }
                 }
             }
             drop(appsrc);
             std::thread::sleep(Duration::from_millis(10));
         };
-        let Some(grid) = self.timeline.grid() else {
-            return;
-        };
 
+        // Output rate: as configured, else the source's own rate.
+        let (on, od_) = self.output_rate.unwrap_or((grid.fps_n, grid.fps_d));
+        self.stats.set_output_rate(on, od_);
         let mut caps = lock(&self.caps).clone().expect("caps checked above");
-        caps.make_mut().set(
-            "framerate",
-            gst::Fraction::new(grid.fps_n as i32, grid.fps_d as i32),
-        );
+        caps.make_mut()
+            .set("framerate", gst::Fraction::new(on as i32, od_ as i32));
         let video_info = gst_video::VideoInfo::from_caps(&caps).ok();
         appsrc.set_caps(Some(&caps));
-        info!("Replay {}: output running, caps {}", self.block_id, caps);
+        info!(
+            "Replay {}: output running, source {}/{} fps, caps {}",
+            self.block_id, grid.fps_n, grid.fps_d, caps
+        );
         let weak = appsrc.downgrade();
         drop(appsrc);
         let tai_caps = gst::Caps::builder("timestamp/x-tai").build();
 
-        let fd = grid.frame_ns();
+        // Output tick period.
+        let fd = 1e9 * od_ as f64 / on as f64;
         let now_rt = || clock.time().nseconds() as i64 - base.nseconds() as i64;
         let mut k = (now_rt() as f64 / fd).ceil() as i64;
         let mut last: Option<(i64, gst::Buffer)> = None;
+        let mut last_hit: Option<i64> = None;
 
         while self.alive() {
             let rt = (k as f64 * fd) as i64;
@@ -358,23 +356,34 @@ impl ReplayPlayer {
                 continue;
             }
 
-            let frame = self.timeline.frame_at(rt);
-            let hit = match frame.and_then(|f| self.frame_at(f).map(|b| (f, b))) {
-                Some((f, b)) => {
-                    if self.read_strip && last.as_ref().is_none_or(|(lf, _)| *lf != f) {
+            // The group's time at this tick, and this angle's frame for it.
+            let want = self.timeline.frame_on(&grid, rt);
+            if let Some((f, _)) = want {
+                self.stats.wanted_frame.store(f, Ordering::Relaxed);
+            }
+            let hit = want.and_then(|(f, t)| self.frame_at(f).map(|b| (f, t, b)));
+            let hit = match hit {
+                Some((f, t, b)) => {
+                    let new_picture = last.as_ref().is_none_or(|(lf, _)| *lf != f);
+                    if self.read_strip && new_picture {
                         if let Some(info) = &video_info {
-                            let n = read_bitstrip(&b, info).map_or(-1, i64::from);
-                            self.stats.strip_frame.store(n, Ordering::Relaxed);
-                            // The test material numbers frames from the
-                            // group origin.
-                            if n != f - self.timeline.origin() {
-                                self.stats.strip_mismatches.fetch_add(1, Ordering::Relaxed);
-                            }
+                            self.check_picture(&b, info, &grid, f, t);
                         }
                     }
+                    if let Some(lf) = last_hit {
+                        let d = (f - lf).abs();
+                        if d == 0 {
+                            self.stats.repeated_ticks.fetch_add(1, Ordering::Relaxed);
+                        } else if d > 1 {
+                            self.stats
+                                .skipped_frames
+                                .fetch_add(d as u64 - 1, Ordering::Relaxed);
+                        }
+                    }
+                    last_hit = Some(f);
                     last = Some((f, b));
                     self.stats.shown_frame.store(f, Ordering::Relaxed);
-                    Some(f)
+                    Some(t)
                 }
                 None => {
                     self.stats.misses.fetch_add(1, Ordering::Relaxed);
@@ -387,19 +396,20 @@ impl ReplayPlayer {
                     o.set_pts(gst::ClockTime::from_nseconds(rt as u64));
                     o.set_dts(gst::ClockTime::NONE);
                     o.set_duration(gst::ClockTime::from_nseconds(fd as u64));
+                    // The capture time of the source frame shown.
                     let tai = grid.tai_of_frame(*f);
                     if tai >= 0 {
                         gst::ReferenceTimestampMeta::add(
                             o,
                             &tai_caps,
                             gst::ClockTime::from_nseconds(tai as u64),
-                            gst::ClockTime::from_nseconds(fd as u64),
+                            gst::ClockTime::from_nseconds(grid.frame_ns() as u64),
                         );
                     }
                 }
                 let pushed = appsrc.push_buffer(out);
-                if let Some(f) = hit {
-                    self.timeline.note_pushed(f);
+                if let Some(t) = hit {
+                    self.timeline.note_pushed(rt, t);
                 }
                 if let Err(e) = pushed {
                     debug!("Replay {}: push stopped: {:?}", self.block_id, e);
@@ -411,6 +421,49 @@ impl ReplayPlayer {
         info!("Replay {}: output stopped", self.block_id);
         self.halt();
     }
+
+    /// Diagnostics on a new pushed picture of the test material: the bitstrip
+    /// (frame number from the group origin, same-rate material) and the
+    /// burned-in capture time, which must hold the group time `t` of the tick.
+    fn check_picture(
+        &self,
+        b: &gst::Buffer,
+        info: &gst_video::VideoInfo,
+        grid: &super::grid::FrameGrid,
+        f: i64,
+        t: i64,
+    ) {
+        let n = read_bitstrip(b, info).map_or(-1, i64::from);
+        self.stats.strip_frame.store(n, Ordering::Relaxed);
+        if let Some(origin) = self.timeline.origin_on(grid) {
+            if n != f - origin {
+                self.stats.strip_mismatches.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if let Some(us) = read_code_utc_us(b, info) {
+            self.stats.code_utc_us.store(us as i64, Ordering::Relaxed);
+            self.stats.time_checked.fetch_add(1, Ordering::Relaxed);
+            let captured = us as i64 * 1000 + strom_types::tai::TAI_MINUS_UTC_NS as i64;
+            if !holds(captured, grid.frame_ns() as i64, t) {
+                self.stats.time_errors.fetch_add(1, Ordering::Relaxed);
+                debug!(
+                    "Replay {}: picture captured at {} does not hold group time {} ({} ns)",
+                    self.block_id,
+                    captured,
+                    t,
+                    t - captured
+                );
+            }
+        }
+    }
+}
+
+/// Whether a frame captured at `captured` (TAI) with period `period` is the
+/// one on screen at group time `t`: it started at or before `t` and the next
+/// had not started. 1 ms of slack for timestamp rounding in the store.
+fn holds(captured: i64, period: i64, t: i64) -> bool {
+    const SLACK: i64 = 1_000_000;
+    captured <= t + SLACK && t < captured + period + SLACK
 }
 
 impl Drop for ReplayPlayer {
@@ -435,4 +488,39 @@ fn read_bitstrip(buf: &gst::Buffer, info: &gst_video::VideoInfo) -> Option<u32> 
         }
     }
     Some(n)
+}
+
+/// Read the burned-in UTC code row of the Reference Timestamp block
+/// (`burn_in`), in microseconds. `None` when the picture has none.
+/// Diagnostics only.
+fn read_code_utc_us(buf: &gst::Buffer, info: &gst_video::VideoInfo) -> Option<u64> {
+    use crate::blocks::builtin::reference_timestamp::burn_in::{decode_cells, Layout, CODE_CELLS};
+    let frame = gst_video::VideoFrameRef::from_buffer_ref_readable(buf.as_ref(), info).ok()?;
+    let y = frame.plane_data(0).ok()?;
+    let stride = info.stride()[0] as usize;
+    let l = Layout::for_frame(info.width(), info.height());
+    let row = (l.code_y + l.cell_h / 2) as usize;
+    let cells: Vec<bool> = (0..CODE_CELLS)
+        .map(|c| {
+            let x = (c * l.cell_w + l.cell_w / 2) as usize;
+            y.get(row * stride + x).is_some_and(|v| *v > 128)
+        })
+        .collect();
+    decode_cells(&cells)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::holds;
+
+    #[test]
+    fn a_frame_holds_the_instants_of_its_period() {
+        let p = 20_000_000;
+        assert!(holds(1_000, p, 1_000));
+        assert!(holds(1_000, p, 1_000 + p - 1));
+        // The next frame has started (beyond the slack).
+        assert!(!holds(1_000, p, 1_000 + p + 2_000_000));
+        // Captured after the group time: a frame from the future.
+        assert!(!holds(1_000 + 5_000_000, p, 1_000));
+    }
 }
