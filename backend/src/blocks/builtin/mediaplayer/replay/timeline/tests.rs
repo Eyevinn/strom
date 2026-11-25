@@ -239,6 +239,8 @@ fn telemetry_gives_utc_of_the_pushed_frame() {
     let pushed = a.tai - 5 * 20 * MS;
     p.shown_frame
         .store(g.floor_frame(pushed), Ordering::Relaxed);
+    p.shown_tai
+        .store(g.tai_of_frame(g.floor_frame(pushed)), Ordering::Relaxed);
     tl.note_pushed(1, pushed);
     let v = tl.telemetry();
     assert_eq!(v["time_domain"], "tai");
@@ -970,6 +972,8 @@ fn mark_stamps_the_pushed_frame_not_the_cursor() {
     let pushed = a.tai - 5 * 20 * MS;
     p.shown_frame
         .store(g.floor_frame(pushed), Ordering::Relaxed);
+    p.shown_tai
+        .store(g.tai_of_frame(g.floor_frame(pushed)), Ordering::Relaxed);
     tl.note_pushed(1, pushed);
     let c = parse(r#"{"cmd":"mark","label":"goal"}"#).unwrap();
     let m = tl.apply_at(c, 0).unwrap();
@@ -1118,4 +1122,22 @@ fn frame_zero_is_fixed_without_an_angle_that_never_answers() {
     assert_eq!(tl.origin_tai(), UNKNOWN);
     tl.bounds_at(t0 + ORIGIN_WAIT);
     assert_eq!(tl.origin_tai(), BASE);
+}
+
+#[test]
+fn shown_time_is_the_frame_own_time_after_a_phase_change() {
+    let (tl, p) = one_player(INGEST, TimeDomain::Tai);
+    let g = p.grid().unwrap();
+    tl.bounds();
+    // After a restart the source's frames start 8.8 ms later in their
+    // period than the player's grid (anchored on the first run).
+    let own = g.tai_of_frame(g.floor_frame(INGEST) + 190) + 8_800_000;
+    p.shown_frame.store(g.nearest_frame(own), Ordering::Relaxed);
+    p.shown_tai.store(own, Ordering::Relaxed);
+    let v = tl.telemetry();
+    let shown = &v["players"][0]["shown"];
+    assert_eq!(shown["tai_ns"], own.to_string());
+    assert_eq!(shown["utc"], "2026-11-24T13:21:59.889Z");
+    assert_eq!(shown["frame"], 190);
+    assert_eq!(shown["frame_in_second"], 44);
 }

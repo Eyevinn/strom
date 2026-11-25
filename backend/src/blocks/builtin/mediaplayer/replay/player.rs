@@ -44,7 +44,8 @@ const MIN_DECODED_SEGMENTS: usize = 2;
 /// Upper bound of the decoded window ahead of the cursor, seconds.
 const MAX_DECODE_AHEAD_S: u64 = 30;
 
-/// One decoded segment: its first and last frame, and the bytes they hold.
+/// One decoded segment: the TAI of its first and last frame, and the bytes
+/// they hold.
 #[derive(Debug, Clone, Copy)]
 struct DecodedSegment {
     first: i64,
@@ -52,8 +53,8 @@ struct DecodedSegment {
     bytes: u64,
 }
 
-/// Decoded frames by absolute frame number, and which frames each decoded
-/// segment contributed (for eviction).
+/// Decoded frames by their own TAI (see `map_to_grid`), and which frames
+/// each decoded segment contributed (for eviction).
 #[derive(Default)]
 struct FrameStore {
     frames: BTreeMap<i64, gst::Buffer>,
@@ -71,6 +72,15 @@ impl FrameStore {
             None => (self.bytes_per_s * seg.duration_ns() as f64 / 1e9) as u64,
         }
     }
+}
+
+/// The frame that holds `t`: the latest that starts at or before it, if the
+/// next frame would not have started yet (`period_ns`, rounded up). By its
+/// own start, not by a frame number on the player's grid: a source that
+/// changed its frame phase (a restart) is shown at its real times.
+fn frame_holding<B: Clone>(frames: &BTreeMap<i64, B>, t: i64, period_ns: i64) -> Option<(i64, B)> {
+    let (&ft, b) = frames.range(..=t).next_back()?;
+    (t - ft < period_ns).then(|| (ft, b.clone()))
 }
 
 /// The most urgent of `wanted` (ordered by urgency) whose decoded frames fit
@@ -286,12 +296,10 @@ impl ReplayPlayer {
         }
         let expected = ((seg.end_ns - seg.start_ns) as f64 / grid.frame_ns()).round() as usize;
         if frames.len() != expected {
-            let first = grid.ceil_frame(seg.start_ns);
-            let have: HashSet<i64> = frames.iter().map(|f| f.0).collect();
-            let missing: Vec<i64> = (first..first + expected as i64)
-                .filter(|k| !have.contains(k))
-                .map(|k| k - first)
-                .collect();
+            let first = frames[0].0;
+            let offset = |t: i64| ((t - first) as f64 / grid.frame_ns()).round() as i64;
+            let have: HashSet<i64> = frames.iter().map(|f| offset(f.0)).collect();
+            let missing: Vec<i64> = (0..expected as i64).filter(|k| !have.contains(k)).collect();
             warn!(
                 "Replay {}: segment {} gave {} frames ({} decoded), timerange holds {}, \
                  missing offsets {:?}",
@@ -421,8 +429,8 @@ impl ReplayPlayer {
         }
     }
 
-    fn frame_at(&self, frame: i64) -> Option<gst::Buffer> {
-        lock(&self.decoded).frames.get(&frame).cloned()
+    fn frame_holding(&self, t: i64, period_ns: i64) -> Option<(i64, gst::Buffer)> {
+        frame_holding(&lock(&self.decoded).frames, t, period_ns)
     }
 
     // --- output -------------------------------------------------------------
@@ -472,8 +480,10 @@ impl ReplayPlayer {
         let fd = 1e9 * od_ as f64 / on as f64;
         let now_rt = || clock.time().nseconds() as i64 - base.nseconds() as i64;
         let mut k = (now_rt() as f64 / fd).ceil() as i64;
+        // Shown TAI and buffer of the last picture.
         let mut last: Option<(i64, gst::Buffer)> = None;
         let mut last_hit: Option<i64> = None;
+        let period_ns = grid.frame_ns().ceil() as i64;
 
         while self.alive() {
             let rt = (k as f64 * fd) as i64;
@@ -496,19 +506,23 @@ impl ReplayPlayer {
             }
 
             // The group's time at this tick, and this angle's frame for it.
-            let want = self.timeline.frame_on(&grid, rt);
-            if let Some((f, _)) = want {
-                self.stats.wanted_frame.store(f, Ordering::Relaxed);
+            let want = self.timeline.tai_at(rt);
+            if let Some(t) = want {
+                self.stats
+                    .wanted_frame
+                    .store(grid.floor_frame(t), Ordering::Relaxed);
             }
-            let hit = want.and_then(|(f, t)| self.frame_at(f).map(|b| (f, t, b)));
+            let hit = want.and_then(|t| self.frame_holding(t, period_ns).map(|(ft, b)| (ft, t, b)));
+            self.stats.in_sync.store(hit.is_some(), Ordering::Relaxed);
             let hit = match hit {
-                Some((f, t, b)) => {
-                    let new_picture = last.as_ref().is_none_or(|(lf, _)| *lf != f);
+                Some((ft, t, b)) => {
+                    let new_picture = last.as_ref().is_none_or(|(lt, _)| *lt != ft);
                     if self.read_strip && new_picture {
                         if let Some(info) = &video_info {
-                            self.check_picture(&b, info, &grid, f, t);
+                            self.check_picture(&b, info, &grid, ft, t);
                         }
                     }
+                    let f = grid.nearest_frame(ft);
                     if let Some(lf) = last_hit {
                         let d = (f - lf).abs();
                         if d == 0 {
@@ -520,8 +534,9 @@ impl ReplayPlayer {
                         }
                     }
                     last_hit = Some(f);
-                    last = Some((f, b));
+                    last = Some((ft, b));
                     self.stats.shown_frame.store(f, Ordering::Relaxed);
+                    self.stats.shown_tai.store(ft, Ordering::Relaxed);
                     Some(t)
                 }
                 None => {
@@ -529,14 +544,14 @@ impl ReplayPlayer {
                     None
                 }
             };
-            if let Some((f, b)) = &last {
+            if let Some((shown_tai, b)) = &last {
                 let mut out = b.copy();
                 if let Some(o) = out.get_mut() {
                     o.set_pts(gst::ClockTime::from_nseconds(rt as u64));
                     o.set_dts(gst::ClockTime::NONE);
                     o.set_duration(gst::ClockTime::from_nseconds(fd as u64));
                     // The capture time of the source frame shown.
-                    let tai = grid.tai_of_frame(*f);
+                    let tai = *shown_tai;
                     if tai >= 0 {
                         gst::ReferenceTimestampMeta::add(
                             o,
@@ -564,18 +579,19 @@ impl ReplayPlayer {
     /// Diagnostics on a new pushed picture of the test material: the bitstrip
     /// (frame number from the group origin, same-rate material) and the
     /// burned-in capture time, which must hold the group time `t` of the tick.
+    /// `shown_tai` is the frame's own TAI.
     fn check_picture(
         &self,
         b: &gst::Buffer,
         info: &gst_video::VideoInfo,
         grid: &super::grid::FrameGrid,
-        f: i64,
+        shown_tai: i64,
         t: i64,
     ) {
         let n = read_bitstrip(b, info).map_or(-1, i64::from);
         self.stats.strip_frame.store(n, Ordering::Relaxed);
         if let Some(origin) = self.timeline.origin_on(grid) {
-            if n != f - origin {
+            if n != grid.nearest_frame(shown_tai) - origin {
                 self.stats.strip_mismatches.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -806,6 +822,39 @@ mod tests {
         );
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].start_ns, S);
+    }
+
+    #[test]
+    fn a_frame_is_found_by_its_own_start_after_a_phase_change() {
+        // The first run's frames start on the 20 ms grid; after a restart
+        // (and a gap) the source's frames start 8.8 ms later in the period.
+        let p = 20_000_000;
+        let shift = 8_800_000;
+        let mut frames = BTreeMap::new();
+        for i in 0..10 {
+            frames.insert(i * p, i);
+        }
+        let run2 = 100 * p + shift;
+        for i in 0..10 {
+            frames.insert(run2 + i * p, 100 + i);
+        }
+        // Inside the second run, the frame shown is the one captured last
+        // at or before the group time.
+        assert_eq!(
+            frame_holding(&frames, run2 + p + 5_000_000, p),
+            Some((run2 + p, 101))
+        );
+        // Just before a frame of the second run starts: the one before it,
+        // not the frame the first run's grid would name.
+        assert_eq!(
+            frame_holding(&frames, run2 + 2 * p - 1, p),
+            Some((run2 + p, 101))
+        );
+        assert_eq!(frame_holding(&frames, run2 - 1, p), None);
+        assert_eq!(frame_holding(&frames, 5 * p + 1, p), Some((5 * p, 5)));
+        // A frame not decoded is a miss, not the frame before it.
+        frames.remove(&(3 * p));
+        assert_eq!(frame_holding(&frames, 3 * p + 1, p), None);
     }
 
     #[test]

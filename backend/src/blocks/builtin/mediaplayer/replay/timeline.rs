@@ -136,6 +136,23 @@ impl FrameTime {
 
     /// JSON for the control API. `tai_ns` is a string: it does not fit in a
     /// JavaScript number.
+    /// The time of a source frame that starts at `tai`, its own time (which
+    /// can sit off `grid` when the source changed its frame phase). Numbered
+    /// by the nearest frame of `grid`.
+    pub fn of_frame_at(grid: &FrameGrid, tai: i64, origin: i64) -> Self {
+        let utc_ns = tai_to_utc_ns(tai);
+        let second_tai = utc_to_tai_ns(utc_ns.div_euclid(1_000_000_000) * 1_000_000_000);
+        // Frames of this run that start in the second before this one.
+        let before = ((tai - second_tai) as i128 * grid.fps_n as i128)
+            .div_euclid(grid.fps_d as i128 * 1_000_000_000) as i64;
+        Self {
+            frame: grid.nearest_frame(tai) - origin,
+            tai_ns: tai,
+            utc_ns,
+            frame_in_second: before,
+        }
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self.to_api()).unwrap_or_default()
     }
@@ -208,8 +225,13 @@ pub struct PlayerStats {
     grid: Mutex<Option<FrameGrid>>,
     /// Output rate as `(n, d)`, once the output runs.
     output_rate: Mutex<Option<(u32, u32)>>,
-    /// Absolute frame (own grid) last pushed.
+    /// Absolute frame (own grid, nearest) last pushed.
     pub shown_frame: AtomicI64,
+    /// The own TAI of the frame last pushed (see `decode::map_to_grid`): it
+    /// can sit off the player's grid when the source changed its phase.
+    pub shown_tai: AtomicI64,
+    /// The last tick found the frame that holds its time.
+    pub in_sync: std::sync::atomic::AtomicBool,
     /// Absolute frame (own grid) the last tick asked for.
     pub wanted_frame: AtomicI64,
     /// Frame number read from the pushed picture's bitstrip (diagnostics).
@@ -250,6 +272,8 @@ impl PlayerStats {
             grid: Mutex::new(None),
             output_rate: Mutex::new(None),
             shown_frame: AtomicI64::new(UNKNOWN),
+            shown_tai: AtomicI64::new(UNKNOWN),
+            in_sync: std::sync::atomic::AtomicBool::new(false),
             wanted_frame: AtomicI64::new(UNKNOWN),
             strip_frame: AtomicI64::new(-1),
             strip_mismatches: AtomicU64::new(0),
@@ -964,6 +988,7 @@ impl ReplayTimeline {
 
     /// The frame of `grid` a player shows at a running time, and the cursor:
     /// the player's latest frame that starts at or before the cursor.
+    #[cfg(test)]
     pub fn frame_on(&self, grid: &FrameGrid, rt: i64) -> Option<(i64, i64)> {
         let t = self.tai_at(rt)?;
         Some((grid.floor_frame(t), t))
@@ -1287,10 +1312,10 @@ impl ReplayTimeline {
             .filter_map(|p| {
                 let g = p.grid()?;
                 let o = self.origin_on(&g)?;
-                let shown = p.shown_frame.load(Ordering::Relaxed);
+                let shown = p.shown_tai.load(Ordering::Relaxed);
                 (shown != UNKNOWN).then(|| ReplayMarkAngle {
                     block: p.block_id.clone(),
-                    shown: FrameTime::new(&g, shown, o).to_api(),
+                    shown: FrameTime::of_frame_at(&g, shown, o).to_api(),
                 })
             })
             .collect();
@@ -1343,8 +1368,11 @@ impl ReplayTimeline {
         let shown = p.shown_frame.load(Ordering::Relaxed);
         let wanted = p.wanted_frame.load(Ordering::Relaxed);
         let view = p.index_view();
+        let shown_tai = p.shown_tai.load(Ordering::Relaxed);
         let shown_time = match (grid, origin) {
-            (Some(g), Some(o)) if shown != UNKNOWN => FrameTime::new(&g, shown, o).to_json(),
+            (Some(g), Some(o)) if shown_tai != UNKNOWN => {
+                FrameTime::of_frame_at(&g, shown_tai, o).to_json()
+            }
             _ => serde_json::Value::Null,
         };
         serde_json::json!({
@@ -1361,7 +1389,7 @@ impl ReplayTimeline {
             "shown": shown_time,
             "shown_frame": rel(shown),
             "wanted_frame": rel(wanted),
-            "in_sync": shown != UNKNOWN && shown == wanted,
+            "in_sync": p.in_sync.load(Ordering::Relaxed),
             "strip_frame": p.strip_frame.load(Ordering::Relaxed),
             "strip_mismatches": p.strip_mismatches.load(Ordering::Relaxed),
             "code_utc_us": p.code_utc_us.load(Ordering::Relaxed),
