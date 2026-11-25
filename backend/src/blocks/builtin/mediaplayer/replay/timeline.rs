@@ -18,7 +18,7 @@
 //! tie the smallest phase, so the choice does not depend on which angle
 //! reported first). A jog of one reference frame therefore never skips a frame
 //! of any angle. Frame 0 is the reference frame that holds the group's origin,
-//! the start of the earliest angle when the group first saw its sources.
+//! the start of the earliest angle once every angle has reported its extent.
 //! Commands can also address an instant as UTC or TAI, which is exact; and
 //! telemetry gives the UTC and TAI of the frames it names (see [`FrameTime`]).
 //! Times are only wall-clock times when every source says its index is real
@@ -40,9 +40,14 @@ use strom_types::tai::{
 };
 use strom_types::tams::parse_timestamp_signed;
 use strom_types::FlowId;
+use tracing::warn;
 
 /// Unknown value for the i64 atomics below.
 pub const UNKNOWN: i64 = i64::MIN;
+
+/// Longest wait for every angle's extent before frame 0 is fixed without
+/// the angles that have none.
+pub const ORIGIN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Default distance behind the live edge for the `live` command.
 pub const DEFAULT_LIVE_MARGIN_MS: u64 = 1500;
@@ -131,6 +136,23 @@ impl FrameTime {
 
     /// JSON for the control API. `tai_ns` is a string: it does not fit in a
     /// JavaScript number.
+    /// The time of a source frame that starts at `tai`, its own time (which
+    /// can sit off `grid` when the source changed its frame phase). Numbered
+    /// by the nearest frame of `grid`.
+    pub fn of_frame_at(grid: &FrameGrid, tai: i64, origin: i64) -> Self {
+        let utc_ns = tai_to_utc_ns(tai);
+        let second_tai = utc_to_tai_ns(utc_ns.div_euclid(1_000_000_000) * 1_000_000_000);
+        // Frames of this run that start in the second before this one.
+        let before = ((tai - second_tai) as i128 * grid.fps_n as i128)
+            .div_euclid(grid.fps_d as i128 * 1_000_000_000) as i64;
+        Self {
+            frame: grid.nearest_frame(tai) - origin,
+            tai_ns: tai,
+            utc_ns,
+            frame_in_second: before,
+        }
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self.to_api()).unwrap_or_default()
     }
@@ -185,8 +207,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// What a player's index knows (see `cache::index_view`): the TAI ranges it
-/// has listed, and the holes between segments inside them.
+/// What a player's index knows (see `cache::Coverage`): the TAI ranges it
+/// has listed, and the holes in the source it has listed from end to end.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IndexView {
     pub listed: Vec<(i64, i64)>,
@@ -203,8 +225,15 @@ pub struct PlayerStats {
     grid: Mutex<Option<FrameGrid>>,
     /// Output rate as `(n, d)`, once the output runs.
     output_rate: Mutex<Option<(u32, u32)>>,
-    /// Absolute frame (own grid) last pushed.
+    /// Absolute frame (own grid, nearest) last pushed.
     pub shown_frame: AtomicI64,
+    /// The own TAI of the frame last pushed (see `decode::map_to_grid`): it
+    /// can sit off the player's grid when the source changed its phase.
+    pub shown_tai: AtomicI64,
+    /// The last tick found the frame that holds its time.
+    pub in_sync: std::sync::atomic::AtomicBool,
+    /// The hole of the recording the last tick's time was in, `[start, end)`.
+    gap_now: Mutex<Option<(i64, i64)>>,
     /// Absolute frame (own grid) the last tick asked for.
     pub wanted_frame: AtomicI64,
     /// Frame number read from the pushed picture's bitstrip (diagnostics).
@@ -245,6 +274,9 @@ impl PlayerStats {
             grid: Mutex::new(None),
             output_rate: Mutex::new(None),
             shown_frame: AtomicI64::new(UNKNOWN),
+            shown_tai: AtomicI64::new(UNKNOWN),
+            in_sync: std::sync::atomic::AtomicBool::new(false),
+            gap_now: Mutex::new(None),
             wanted_frame: AtomicI64::new(UNKNOWN),
             strip_frame: AtomicI64::new(-1),
             strip_mismatches: AtomicU64::new(0),
@@ -305,6 +337,14 @@ impl PlayerStats {
         lock(&self.index_view).clone()
     }
 
+    pub fn set_gap(&self, gap: Option<(i64, i64)>) {
+        *lock(&self.gap_now) = gap;
+    }
+
+    pub fn gap(&self) -> Option<(i64, i64)> {
+        *lock(&self.gap_now)
+    }
+
     pub fn set_output_rate(&self, fps_n: u32, fps_d: u32) {
         *lock(&self.output_rate) = Some((fps_n, fps_d));
     }
@@ -331,6 +371,15 @@ pub fn frame_centre(grid: &FrameGrid, k: i64) -> i64 {
     let a = grid.tai_of_frame(k);
     let b = grid.tai_of_frame(k + 1);
     a + (b - a) / 2
+}
+
+/// The start of the frame of `grid` whose start is nearest `t` (within half
+/// a frame). A UTC from a client names a frame this way: the API gives frame
+/// times in UTC with milliseconds, a frame starts anywhere inside its
+/// millisecond (e.g. 1.164 ms past it), and taking the truncated time as
+/// exact would land in the frame before.
+pub fn nearest_frame_start(grid: &FrameGrid, t: i64) -> i64 {
+    grid.tai_of_frame(grid.nearest_frame(t))
 }
 
 /// Frame `from + by` on `grid`, kept to one frame either side of the group's
@@ -675,8 +724,11 @@ pub struct Applied {
 
 pub struct ReplayTimeline {
     anchor: Mutex<Anchor>,
-    /// TAI that frame 0 holds: the group's start when first known.
+    /// TAI that frame 0 holds: the group's start once every angle has
+    /// reported its extent (see [`ReplayTimeline::bounds`]).
     origin_tai: AtomicI64,
+    /// When the group first had an extent, for the origin's fallback.
+    first_extent_at: Mutex<Option<Instant>>,
     clock_source: Mutex<Option<gst::glib::WeakRef<gst::Element>>>,
     /// Start of the stand-in running time before the flow plays; reset with
     /// the group, so it is on the same footing as the new run's running time.
@@ -730,6 +782,7 @@ impl ReplayTimeline {
         Self {
             anchor: Mutex::new(START_ANCHOR),
             origin_tai: AtomicI64::new(UNKNOWN),
+            first_extent_at: Mutex::new(None),
             clock_source: Mutex::new(None),
             created: Mutex::new(Instant::now()),
             players: Mutex::new(Vec::new()),
@@ -760,6 +813,7 @@ impl ReplayTimeline {
         players.retain(|w| w.strong_count() > 0);
         if players.is_empty() {
             self.origin_tai.store(UNKNOWN, Ordering::Relaxed);
+            *lock(&self.first_extent_at) = None;
             *lock(&self.anchor) = START_ANCHOR;
             *lock(&self.last_pushed) = None;
             *lock(&self.last_cmd) = None;
@@ -814,21 +868,48 @@ impl ReplayTimeline {
     }
 
     /// The group's range, once some angle has reported its extent.
+    ///
+    /// Also fixes the origin (frame 0) at the group's start, once every
+    /// registered angle has reported its extent: fixed at the first extent,
+    /// frame 0 depended on which angle's index answered first (frame numbers
+    /// moved by hundreds between runs). An angle whose source never answers
+    /// does not hold frame numbers back for ever: after [`ORIGIN_WAIT`] the
+    /// origin is fixed from the angles that have.
     pub fn bounds(&self) -> Option<Bounds> {
-        let extents: Vec<(i64, i64)> = self.players().iter().filter_map(|p| p.extent()).collect();
+        self.bounds_at(Instant::now())
+    }
+
+    fn bounds_at(&self, now: Instant) -> Option<Bounds> {
+        let players = self.players();
+        let extents: Vec<(i64, i64)> = players.iter().filter_map(|p| p.extent()).collect();
         let b = group_bounds(&extents)?;
         lock(&self.edge).observe(mono_ns(), b.live_end);
-        let _ = self.origin_tai.compare_exchange(
-            UNKNOWN,
-            b.start,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        );
+        if self.origin_tai.load(Ordering::Relaxed) == UNKNOWN {
+            let first = *lock(&self.first_extent_at).get_or_insert(now);
+            let all = extents.len() == players.len();
+            if all || now.duration_since(first) >= ORIGIN_WAIT {
+                if !all {
+                    warn!(
+                        "Replay: {} of {} angles have no range after {:?}; frame 0 is \
+                         fixed without them",
+                        players.len() - extents.len(),
+                        players.len(),
+                        ORIGIN_WAIT
+                    );
+                }
+                let _ = self.origin_tai.compare_exchange(
+                    UNKNOWN,
+                    b.start,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+            }
+        }
         Some(b)
     }
 
-    /// TAI of the group's frame 0 (start of the earliest angle when the group
-    /// first saw its sources), or [`UNKNOWN`].
+    /// TAI of the group's frame 0 (start of the earliest angle once every
+    /// angle had reported its extent), or [`UNKNOWN`].
     pub fn origin_tai(&self) -> i64 {
         self.origin_tai.load(Ordering::Relaxed)
     }
@@ -918,6 +999,7 @@ impl ReplayTimeline {
 
     /// The frame of `grid` a player shows at a running time, and the cursor:
     /// the player's latest frame that starts at or before the cursor.
+    #[cfg(test)]
     pub fn frame_on(&self, grid: &FrameGrid, rt: i64) -> Option<(i64, i64)> {
         let t = self.tai_at(rt)?;
         Some((grid.floor_frame(t), t))
@@ -963,18 +1045,19 @@ impl ReplayTimeline {
         }
         if let Some(f) = at.frame {
             let g = reference.ok_or_else(|| conflict("the group's frame rate is not known yet"))?;
-            return Ok(frame_centre(
-                &g,
-                frame_in(&g, b, g.floor_frame(self.origin_tai()), f),
-            ));
+            let origin = self
+                .origin_on(&g)
+                .ok_or_else(|| conflict("the group's frame 0 is not fixed yet"))?;
+            return Ok(frame_centre(&g, frame_in(&g, b, origin, f)));
         }
         if let Some(u) = &at.utc {
-            return parse_utc(u).map(utc_to_tai_ns).ok_or_else(|| {
+            let t = parse_utc(u).map(utc_to_tai_ns).ok_or_else(|| {
                 invalid(format!(
                     "{}: bad utc '{}', want e.g. 2026-11-24T13:21:56.080Z",
                     what, u
                 ))
-            });
+            })?;
+            return Ok(reference.map_or(t, |g| nearest_frame_start(&g, t)));
         }
         if let Some(t) = &at.tai {
             return parse_timestamp_signed(t).ok_or_else(|| {
@@ -1017,7 +1100,7 @@ impl ReplayTimeline {
         let mut ramp = None;
         let live = match cmd {
             Command::Live { .. } => true,
-            Command::Uncue => a.live,
+            Command::Uncue {} => a.live,
             _ => false,
         };
         // What the cue becomes: kept (if it still holds the cursor), set, or
@@ -1145,8 +1228,8 @@ impl ReplayTimeline {
                     },
                 }
             }
-            Command::Pause => (cur, 0.0, Cue::Keep),
-            Command::End => (b.live_end - 1, 0.0, Cue::Drop),
+            Command::Pause {} => (cur, 0.0, Cue::Keep),
+            Command::End {} => (b.live_end - 1, 0.0, Cue::Drop),
             Command::Live { margin_ms } => {
                 let margin = ms_to_ns(margin_ms.unwrap_or(DEFAULT_LIVE_MARGIN_MS));
                 self.live_margin_ns.store(margin, Ordering::Relaxed);
@@ -1172,7 +1255,7 @@ impl ReplayTimeline {
                 };
                 (r.start, 0.0, Cue::Set(r))
             }
-            Command::Uncue => (cur, cur_speed, Cue::Drop),
+            Command::Uncue {} => (cur, cur_speed, Cue::Drop),
             Command::Mark { .. } => unreachable!("handled above"),
         };
         // Clamp to the media, so later moves start from what is shown, then
@@ -1240,10 +1323,10 @@ impl ReplayTimeline {
             .filter_map(|p| {
                 let g = p.grid()?;
                 let o = self.origin_on(&g)?;
-                let shown = p.shown_frame.load(Ordering::Relaxed);
+                let shown = p.shown_tai.load(Ordering::Relaxed);
                 (shown != UNKNOWN).then(|| ReplayMarkAngle {
                     block: p.block_id.clone(),
-                    shown: FrameTime::new(&g, shown, o).to_api(),
+                    shown: FrameTime::of_frame_at(&g, shown, o).to_api(),
                 })
             })
             .collect();
@@ -1296,8 +1379,11 @@ impl ReplayTimeline {
         let shown = p.shown_frame.load(Ordering::Relaxed);
         let wanted = p.wanted_frame.load(Ordering::Relaxed);
         let view = p.index_view();
+        let shown_tai = p.shown_tai.load(Ordering::Relaxed);
         let shown_time = match (grid, origin) {
-            (Some(g), Some(o)) if shown != UNKNOWN => FrameTime::new(&g, shown, o).to_json(),
+            (Some(g), Some(o)) if shown_tai != UNKNOWN => {
+                FrameTime::of_frame_at(&g, shown_tai, o).to_json()
+            }
             _ => serde_json::Value::Null,
         };
         serde_json::json!({
@@ -1314,7 +1400,8 @@ impl ReplayTimeline {
             "shown": shown_time,
             "shown_frame": rel(shown),
             "wanted_frame": rel(wanted),
-            "in_sync": shown != UNKNOWN && shown == wanted,
+            "in_sync": p.in_sync.load(Ordering::Relaxed),
+            "in_gap": p.gap().map(|(s, e)| range_json(s, e)),
             "strip_frame": p.strip_frame.load(Ordering::Relaxed),
             "strip_mismatches": p.strip_mismatches.load(Ordering::Relaxed),
             "code_utc_us": p.code_utc_us.load(Ordering::Relaxed),
@@ -1351,13 +1438,13 @@ impl ReplayTimeline {
             "time_domain": domain.as_str(),
             "now_utc": format_utc_ms(wall_utc_ns()),
         });
-        let (Some(b), Some(g)) = (bounds, reference) else {
+        let origin = reference.and_then(|g| self.origin_on(&g));
+        let (Some(b), Some(g), Some(origin)) = (bounds, reference, origin) else {
             v["frame"] = 0.into();
             v["total_frames"] = 0.into();
             v["frame_ns"] = 20e6.into();
             return v;
         };
-        let origin = g.floor_frame(self.origin_tai());
         let time_of = |tai: i64| FrameTime::new(&g, g.floor_frame(tai), origin).to_json();
         let (cursor, speed) = self.advance(&mut lock(&self.anchor), now, &b);
         v["speed"] = speed.into();

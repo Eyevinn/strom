@@ -24,7 +24,7 @@ REST and the WebSocket take the same commands and return the same result. On the
 |---|---|---|
 | 400 | `invalid` | Malformed command, unknown `cmd` or field, a value out of range (speed outside ±8, bad UTC/TAI text, more than one target, `out` before `in`). |
 | 404 | | No replay group with that name in that flow (the flow is not running). |
-| 409 | `conflict` | The command is valid but does not apply now: no media yet, frame numbers before the frame rate is known, `until` behind the cursor, a cue outside the media, a mark before any picture has gone out. |
+| 409 | `conflict` | The command is valid but does not apply now: no media yet, frame numbers before the frame rate is known or frame 0 is fixed, `until` behind the cursor, a cue outside the media, a mark before any picture has gone out. |
 
 A refused command changes nothing.
 
@@ -34,9 +34,9 @@ Commands name a point on the timeline in one of four ways. Give exactly one.
 
 | Field | Meaning | Example |
 |---|---|---|
-| `frame` | Frame of the group's reference grid (its finest source rate), counted from the group origin (frame 0 = the start of the earliest angle). | `{"frame": 1250}` |
-| `utc` | UTC, RFC 3339. Exact. | `{"utc": "2026-11-24T13:21:56.080Z"}` |
-| `tai` | TAI as TAMS `"<seconds>:<nanoseconds>"`. Exact. | `{"tai": "1795526553:80598792"}` |
+| `frame` | Frame of the group's reference grid (its finest source rate), counted from the group origin: frame 0 holds the start of the earliest angle, fixed once every angle has reported its range (or after 10 s, without an angle whose source has not answered). It then stays put for the run, so frame numbers do not depend on which source answered first. | `{"frame": 1250}` |
+| `utc` | UTC, RFC 3339. Names the reference frame whose start is nearest (within half a frame), and goes to that start: frame times come in UTC to the millisecond, while a frame can start anywhere inside its millisecond, so a UTC the API gave seeks back to the same frame. | `{"utc": "2026-11-24T13:21:56.080Z"}` |
+| `tai` | TAI as TAMS `"<seconds>:<nanoseconds>"`. Exact, to the nanosecond. | `{"tai": "1795526553:80598792"}` |
 | `from_live_ms` | Milliseconds before the live edge (the last instant every angle has). | `{"from_live_ms": 8000}` |
 
 `seek` takes these fields directly. `cue` and `play` take them as objects (`"in": {...}`, `"out": {...}`, `"until": {...}`).
@@ -121,7 +121,13 @@ Things the group does by itself, as `{"type": "event", "event": ..., ...}`:
 | `start`, `end`, `live_edge` | The group's range. The live edge is where every angle has media. |
 | `live_edge_estimate`, `live_growing`, `behind_live_estimate_ms` | The live edge between index steps, estimated from when the steps arrived. It equals `live_edge` when the media does not grow. |
 | `reference_fps`, `frame_ns`, `time_domain` | Grid and time base (`tai`, `unanchored`, `unknown`). |
-| `players[]` | Per angle: `block`, `fps`, `output_fps`, `extent`, `indexed` (ranges its index has listed), `gaps` (holes inside them, with `duration_ms`), `shown`, `in_sync`, and counters. |
+| `players[]` | Per angle: `block`, `fps`, `output_fps`, `extent`, `indexed`, `gaps`, `shown` (the source frame going out, at its own capture time: a source that restarts can change its frame phase, and each frame keeps its own time), `in_sync` (the last tick found the frame that holds the group time), `in_gap` (see below), and counters. |
+
+`indexed` and `gaps` describe the recording as far as the player's index has seen it:
+
+- `indexed`: the stretches of the source the index has listed so far. It lists around the cursor (and follows a hole to its other end), so this grows as the cursor moves. It says what the player knows, not where the media is.
+- `gaps`: holes in the recording, between two pieces of media, each with `duration_ms`. A hole is reported once the index has listed it from the media before it to the media after it, however many listings that took, so a long hole is one gap, never pieces of it. Seams shorter than one frame period are not gaps; a single missing frame is.
+- `in_gap`: the hole the group time is in, if any (`start`, `end`, `duration_ms`). An angle shows the last frame before the hole there, whether play ran into it or a seek landed in it; `shown` is that frame. Until the hole's end has been listed, `end` is as far as the index has looked.
 
 ## Examples
 

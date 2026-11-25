@@ -54,9 +54,31 @@ pub struct SegmentStore {
     /// a segment that overlaps the window, however long it is).
     bytes: Mutex<HashMap<i64, Fetched>>,
     info: Mutex<Option<SourceInfo>>,
+    hold: Mutex<Option<Hold>>,
+}
+
+/// The cursor is in a hole of the recording: the picture to hold is the last
+/// frame of `seg`, the segment that ends where the hole starts. `hole` is
+/// `[start, end)`, its end the media after it, or as far as the index has
+/// listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hold {
+    pub seg: Arc<Segment>,
+    pub hole: (i64, i64),
+}
+
+impl Hold {
+    pub fn holds(&self, t: i64) -> bool {
+        self.hole.0 <= t && t < self.hole.1
+    }
 }
 
 impl SegmentStore {
+    /// The hole the cursor is in, if any, and what to show there.
+    pub fn hold(&self) -> Option<Hold> {
+        lock(&self.hold).clone()
+    }
+
     pub fn info(&self) -> Option<SourceInfo> {
         lock(&self.info).clone()
     }
@@ -87,55 +109,148 @@ impl SegmentStore {
     }
 }
 
-/// A hole shorter than this between two segments is rounding, not a gap.
+/// A hole shorter than this between two segments is rounding, not a gap,
+/// when the frame rate is not known (else see [`seam_tolerance`]).
 const MIN_GAP_NS: i64 = 1_000_000;
 /// How often a player recomputes what it publishes about its index.
 const INDEX_VIEW_EVERY: Duration = Duration::from_millis(500);
+/// How far from the cursor's window an open hole is followed: chunks are
+/// listed outwards from it until media closes it, up to this far.
+const RESOLVE_REACH_NS: i64 = 600 * S;
 
-/// What the index knows: the ranges of listed chunks within the extent, and
-/// the stretches inside them that no segment covers (gaps). Outside the
-/// listed ranges the index has not looked, so nothing is said there; a gap
-/// that runs on past a listed range is cut at its edge.
-pub fn index_view(
-    segs: &BTreeMap<i64, Arc<Segment>>,
-    listed: &HashSet<i64>,
-    extent: (i64, i64),
-) -> IndexView {
-    let mut chunks: Vec<i64> = listed.iter().copied().collect();
-    chunks.sort_unstable();
-    let mut ranges: Vec<(i64, i64)> = Vec::new();
-    for c in chunks {
-        let (s, e) = (
-            (c * CHUNK_NS).max(extent.0),
-            ((c + 1) * CHUNK_NS).min(extent.1),
-        );
-        if e <= s {
-            continue;
-        }
-        match ranges.last_mut() {
-            Some(last) if last.1 >= s => last.1 = last.1.max(e),
-            _ => ranges.push((s, e)),
-        }
+/// The longest hole between two segments that is a seam, not a gap: just
+/// under one frame period (timestamp rounding, writer jitter), so that a
+/// single missing frame still counts as a gap.
+pub fn seam_tolerance(frame_ns: Option<f64>) -> i64 {
+    frame_ns.map_or(MIN_GAP_NS, |f| (f as i64 - MIN_GAP_NS).max(MIN_GAP_NS))
+}
+
+/// Insert `[s, e)` into sorted, disjoint intervals, merging those that
+/// overlap or are at most `tol` apart.
+fn insert_interval(v: &mut Vec<(i64, i64)>, s: i64, e: i64, tol: i64) {
+    if e <= s {
+        return;
     }
-    let mut gaps = Vec::new();
-    for &(ls, le) in &ranges {
-        // Walk the segments that overlap [ls, le); `covered` is how far
-        // media reaches so far.
-        let mut covered = ls;
-        let first = segs.range(..ls).next_back().map(|(_, s)| s);
-        for seg in first.into_iter().chain(segs.range(ls..le).map(|(_, s)| s)) {
-            if seg.start_ns - covered > MIN_GAP_NS {
-                gaps.push((covered, seg.start_ns));
+    let (mut ns, mut ne) = (s, e);
+    let mut out = Vec::with_capacity(v.len() + 1);
+    let mut placed = false;
+    for &(a, b) in v.iter() {
+        if b.saturating_add(tol) < ns {
+            out.push((a, b));
+        } else if a > ne.saturating_add(tol) {
+            if !placed {
+                out.push((ns, ne));
+                placed = true;
             }
-            covered = covered.max(seg.end_ns);
-        }
-        if le - covered > MIN_GAP_NS {
-            gaps.push((covered, le));
+            out.push((a, b));
+        } else {
+            ns = ns.min(a);
+            ne = ne.max(b);
         }
     }
-    IndexView {
-        listed: ranges,
-        gaps,
+    if !placed {
+        out.push((ns, ne));
+    }
+    *v = out;
+}
+
+/// What a player's index has learned about its source, kept for the
+/// player's life: the stretches it has listed, and the stretches media
+/// covers. A few intervals, not the segments, so it survives the eviction of
+/// the index around the cursor; a hole is known once it has been listed from
+/// the media before it to the media after it, however many listings that
+/// took.
+#[derive(Debug, Default)]
+pub struct Coverage {
+    /// Listed stretches, merged where they touch.
+    listed: Vec<(i64, i64)>,
+    /// Media, merged across seams of up to the tolerance.
+    media: Vec<(i64, i64)>,
+}
+
+/// The hole a point is in: where the media before it ends and the media
+/// after it starts, each `None` while the index has not listed that far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HoleAt {
+    pub start: Option<i64>,
+    pub end: Option<i64>,
+    /// The listed stretch around the point.
+    pub listed: (i64, i64),
+}
+
+impl Coverage {
+    pub fn add_listed(&mut self, s: i64, e: i64) {
+        insert_interval(&mut self.listed, s, e, 0);
+    }
+
+    pub fn add_media(&mut self, s: i64, e: i64, tol: i64) {
+        insert_interval(&mut self.media, s, e, tol);
+    }
+
+    /// The listed stretch that holds `[a, b]`.
+    fn listed_around(&self, a: i64, b: i64) -> Option<(i64, i64)> {
+        self.listed.iter().copied().find(|&(s, e)| s <= a && b <= e)
+    }
+
+    /// Holes in the source: stretches of at least `tol` between two pieces
+    /// of media that the index has listed from end to end, within `extent`.
+    pub fn view(&self, extent: (i64, i64), tol: i64) -> IndexView {
+        let clip = |(s, e): (i64, i64)| {
+            let (s, e) = (s.max(extent.0), e.min(extent.1));
+            (e > s).then_some((s, e))
+        };
+        let gaps = self
+            .media
+            .windows(2)
+            .map(|w| (w[0].1, w[1].0))
+            .filter(|&(a, b)| b - a >= tol && self.listed_around(a, b).is_some())
+            .filter_map(clip)
+            .collect();
+        IndexView {
+            listed: self.listed.iter().copied().filter_map(clip).collect(),
+            gaps,
+        }
+    }
+
+    /// The hole `t` is in, if the index has listed `t` and no media covers
+    /// it. Outside `extent` (before the first or after the last segment) is
+    /// not a hole.
+    pub fn hole_at(&self, t: i64, extent: (i64, i64)) -> Option<HoleAt> {
+        if t < extent.0 || t >= extent.1 || self.media.iter().any(|&(s, e)| s <= t && t < e) {
+            return None;
+        }
+        let listed = self.listed_around(t, t)?;
+        let before = self.media.iter().rev().find(|m| m.1 <= t).map(|m| m.1);
+        let after = self.media.iter().find(|m| m.0 > t).map(|m| m.0);
+        Some(HoleAt {
+            start: before.filter(|&a| listed.0 <= a),
+            end: after.filter(|&b| b <= listed.1),
+            listed,
+        })
+    }
+
+    /// A point to list next, to close a hole whose end the index has not
+    /// reached: an edge of a listed stretch, inside `extent`, that no media
+    /// crosses, within [`RESOLVE_REACH_NS`] of `[lo, hi]`. The nearest to
+    /// `cursor` first.
+    pub fn to_resolve(&self, cursor: i64, lo: i64, hi: i64, extent: (i64, i64)) -> Option<i64> {
+        // Media at an edge (touching it counts: a listing does not return
+        // the segment that ends where it starts) means the stretch beyond
+        // it is not a hole the index is inside of.
+        let at_start = |p: i64| self.media.iter().any(|&(s, e)| s <= p && p < e);
+        let at_end = |p: i64| self.media.iter().any(|&(s, e)| s < p && p <= e);
+        let near = |p: i64| p >= lo - RESOLVE_REACH_NS && p <= hi + RESOLVE_REACH_NS;
+        let mut edges = Vec::new();
+        for &(ls, le) in &self.listed {
+            // Open on the left: list what is before `ls`.
+            if ls > extent.0 && near(ls) && !at_start(ls) {
+                edges.push(ls - 1);
+            }
+            if le < extent.1 && near(le) && !at_end(le) {
+                edges.push(le);
+            }
+        }
+        edges.into_iter().min_by_key(|p| (p - cursor).abs())
     }
 }
 
@@ -310,6 +425,11 @@ impl Fetcher {
         let mut end = last.end_ns;
         let mut seg_ns = last.duration_ns().clamp(S / 5, 5 * S);
         self.publish_extent(start, end);
+        let mut coverage = Coverage::default();
+        for seg in [&first, &last] {
+            coverage.add_listed(seg.start_ns, seg.end_ns);
+            coverage.add_media(seg.start_ns, seg.end_ns, self.tolerance());
+        }
         self.store.insert([first, last]);
 
         let mut chunks = ChunkState::default();
@@ -354,6 +474,8 @@ impl Fetcher {
                         }
                         seg_ns = l.duration_ns().clamp(S / 5, 5 * S);
                         end = l.end_ns;
+                        coverage.add_listed(l.start_ns, l.end_ns);
+                        coverage.add_media(l.start_ns, l.end_ns, self.tolerance());
                         self.store.insert([l]);
                         self.publish_extent(start, end);
                     }
@@ -370,6 +492,7 @@ impl Fetcher {
             }
 
             // Index chunks covering the window.
+            let mut listing_ok = true;
             for c in chunk_of(lo.max(start))..=chunk_of(hi.min(end - 1)) {
                 if chunks.listed.contains(&c) && !chunks.dirty.contains(&c) {
                     continue;
@@ -377,35 +500,47 @@ impl Fetcher {
                 if !list_failed.ready(&c, Instant::now()) {
                     continue;
                 }
-                match self.source.list(c * CHUNK_NS, (c + 1) * CHUNK_NS).await {
-                    Ok(segs) => {
-                        self.store.insert(segs);
-                        chunks.listed.insert(c);
-                        chunks.dirty.remove(&c);
-                        chunks.listed_at.insert(c, Instant::now());
-                        list_failed.succeed(&c);
-                    }
-                    Err(e) => {
-                        let attempts = list_failed.fail(c, Instant::now());
-                        if worth_warning(attempts) {
-                            warn!(
-                                "Replay {}: listing failed (attempt {}): {:#}",
-                                self.block_id, attempts, e
-                            );
-                        } else {
-                            debug!(
-                                "Replay {}: listing failed (attempt {}): {:#}",
-                                self.block_id, attempts, e
-                            );
-                        }
-                        break;
+                if !self
+                    .list_chunk(c, end, &mut chunks, &mut list_failed, &mut coverage)
+                    .await
+                {
+                    listing_ok = false;
+                    break;
+                }
+            }
+            // A hole near the window whose other end the index has not
+            // reached: list one more chunk towards it.
+            if listing_ok {
+                if let Some(p) = coverage.to_resolve(cursor, lo, hi, (start, end)) {
+                    let c = chunk_of(p);
+                    if list_failed.ready(&c, Instant::now()) {
+                        self.list_chunk(c, end, &mut chunks, &mut list_failed, &mut coverage)
+                            .await;
                     }
                 }
             }
 
+            // In a hole: the segment before it holds the picture.
+            let hold = coverage.hole_at(cursor, (start, end)).and_then(|h| {
+                let a = h.start?;
+                let tol = self.tolerance();
+                let seg = lock(&self.store.index)
+                    .range(..a)
+                    .next_back()
+                    .map(|(_, s)| Arc::clone(s))
+                    .filter(|s| s.end_ns + tol >= a)?;
+                Some(Hold {
+                    seg,
+                    hole: (a, h.end.unwrap_or(h.listed.1)),
+                })
+            });
+            let hold_key = hold.as_ref().map(|h| h.seg.start_ns);
+            *lock(&self.store.hold) = hold.clone();
+
             // Fetch bytes, most urgent first.
             let window = self.store.segments_in(lo, hi);
-            for seg in by_urgency(&window, cursor, forward) {
+            let held = hold.map(|h| h.seg);
+            for seg in held.into_iter().chain(by_urgency(&window, cursor, forward)) {
                 if inflight.len() >= MAX_INFLIGHT {
                     break;
                 }
@@ -483,8 +618,9 @@ impl Fetcher {
             // the window plus a margin. By overlap, not by start: a long
             // segment holding the cursor started long before the window.
             let margin = seg_ns;
-            lock(&self.store.bytes)
-                .retain(|start, (end, _)| *end > lo - margin && *start < hi + margin);
+            lock(&self.store.bytes).retain(|start, (end, _)| {
+                (*end > lo - margin && *start < hi + margin) || Some(*start) == hold_key
+            });
             let cc = chunk_of(cursor);
             let keep = |c: i64| (c - cc).abs() <= KEEP_CHUNKS;
             chunks.listed.retain(|c| keep(*c));
@@ -499,14 +635,14 @@ impl Fetcher {
             failed.retain(|k| near.contains(k));
             {
                 let mut index = lock(&self.store.index);
-                index.retain(|k, _| keep(chunk_of(*k)) || *k == start);
+                index.retain(|k, _| keep(chunk_of(*k)) || *k == start || Some(*k) == hold_key);
                 self.stats
                     .index_segments
                     .store(index.len() as u64, Ordering::Relaxed);
                 if Instant::now() >= next_view {
                     next_view = Instant::now() + INDEX_VIEW_EVERY;
                     self.stats
-                        .set_index_view(index_view(&index, &chunks.listed, (start, end)));
+                        .set_index_view(coverage.view((start, end), self.tolerance()));
                 }
             }
             self.stats
@@ -514,6 +650,56 @@ impl Fetcher {
                 .store(lock(&self.store.bytes).len() as u64, Ordering::Relaxed);
         }
         jobs.abort_all();
+    }
+
+    /// The longest seam that is not a gap, for this source's frame rate.
+    fn tolerance(&self) -> i64 {
+        seam_tolerance(self.stats.grid().map(|g| g.frame_ns()))
+    }
+
+    /// List index chunk `c` (the source's end is `end`): its segments go
+    /// into the index and the coverage. False if the listing failed.
+    async fn list_chunk(
+        &self,
+        c: i64,
+        end: i64,
+        chunks: &mut ChunkState,
+        list_failed: &mut Backoff<i64>,
+        coverage: &mut Coverage,
+    ) -> bool {
+        match self.source.list(c * CHUNK_NS, (c + 1) * CHUNK_NS).await {
+            Ok(segs) => {
+                // The listing knows the source up to its end then, not the
+                // rest of the chunk: media written there later is not a hole.
+                let known_end = segs.iter().map(|s| s.end_ns).fold(end, i64::max);
+                coverage.add_listed(c * CHUNK_NS, ((c + 1) * CHUNK_NS).min(known_end));
+                let tol = self.tolerance();
+                for seg in &segs {
+                    coverage.add_media(seg.start_ns, seg.end_ns, tol);
+                }
+                self.store.insert(segs);
+                chunks.listed.insert(c);
+                chunks.dirty.remove(&c);
+                chunks.listed_at.insert(c, Instant::now());
+                list_failed.succeed(&c);
+                true
+            }
+            Err(e) => {
+                let attempts = list_failed.fail(c, Instant::now());
+                if worth_warning(attempts) {
+                    warn!(
+                        "Replay {}: listing failed (attempt {}): {:#}",
+                        self.block_id, attempts, e
+                    );
+                } else {
+                    debug!(
+                        "Replay {}: listing failed (attempt {}): {:#}",
+                        self.block_id, attempts, e
+                    );
+                }
+                false
+            }
+        }
     }
 
     fn publish_extent(&self, start: i64, end: i64) {
@@ -697,44 +883,143 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
     }
 
-    fn seg_at(start: i64, end: i64) -> Segment {
-        Segment {
-            start_ns: start,
-            end_ns: end,
-            ..(*seg(0)).clone()
+    #[test]
+    fn gaps_are_holes_in_the_source_not_in_the_listing() {
+        let tol = seam_tolerance(Some(20e6));
+        let ms = 1_000_000;
+        // 1 s segments 0..30 s, a 93 s hole, then 123..140 s. Segments
+        // meet with seams of up to 18 ms (writer jitter): not gaps.
+        let mut segs: Vec<(i64, i64)> = (0..30).map(|i| (i * S, (i + 1) * S)).collect();
+        segs[5].1 -= 18 * ms;
+        segs.extend((123..140).map(|i| (i * S, (i + 1) * S)));
+        let list = |cov: &mut Coverage, c: i64| {
+            let (cs, ce) = (c * CHUNK_NS, (c + 1) * CHUNK_NS);
+            cov.add_listed(cs, ce.min(140 * S));
+            for &(s, e) in segs.iter().filter(|(s, e)| *e > cs && *s < ce) {
+                cov.add_media(s, e, tol);
+            }
+        };
+        let extent = (0, 140 * S);
+        let mut cov = Coverage::default();
+        // Listed around the start and the end only: the hole is not known
+        // from end to end, so nothing is said about it (no clipped pieces,
+        // no false gaps at the listing's edges).
+        list(&mut cov, 0);
+        list(&mut cov, 6);
+        let v = cov.view(extent, tol);
+        assert_eq!(v.listed, vec![(0, 20 * S), (120 * S, 140 * S)]);
+        assert!(v.gaps.is_empty(), "{:?}", v.gaps);
+        // The edges inside the hole are open: listing goes on towards them,
+        // nearest the cursor first.
+        assert_eq!(
+            cov.to_resolve(10 * S, 9 * S, 12 * S, extent),
+            Some(120 * S - 1)
+        );
+        list(&mut cov, 1);
+        // The cursor in the hole: its start is known, its end not yet.
+        let h = cov.hole_at(35 * S, extent).unwrap();
+        assert_eq!((h.start, h.end), (Some(30 * S), None));
+        for c in 2..6 {
+            list(&mut cov, c);
         }
+        // Listed from end to end in six listings: one gap of 93 s.
+        let v = cov.view(extent, tol);
+        assert_eq!(v.listed, vec![extent]);
+        assert_eq!(v.gaps, vec![(30 * S, 123 * S)]);
+        assert_eq!(cov.to_resolve(10 * S, 9 * S, 12 * S, extent), None);
+        let h = cov.hole_at(35 * S, extent).unwrap();
+        assert_eq!((h.start, h.end), (Some(30 * S), Some(123 * S)));
+        assert_eq!(cov.hole_at(10 * S, extent), None);
+        assert_eq!(cov.hole_at(5 * S + 990 * ms, extent), None, "a seam");
+        assert_eq!(cov.hole_at(141 * S, extent), None, "past the end");
+        // A single missing frame is a gap.
+        let mut cov = Coverage::default();
+        cov.add_listed(0, 2 * S);
+        cov.add_media(0, S, tol);
+        cov.add_media(S + 20 * ms, 2 * S, tol);
+        assert_eq!(cov.view((0, 2 * S), tol).gaps, vec![(S, S + 20 * ms)]);
     }
 
     #[test]
-    fn index_view_reports_holes_only_where_it_listed() {
-        // Segments of 1 s at 0..10 s, a hole 4..6 s, and one at 45..46 s.
-        // Chunk 1 (20..40 s) was never listed.
-        let mut index = BTreeMap::new();
-        for i in (0..4).chain(6..10) {
-            index.insert(i * S, Arc::new(seg_at(i * S, (i + 1) * S)));
+    fn fetcher_reports_a_long_hole_whole() {
+        // 1 s segments 100..110 s and 203..220 s TAI: a 93 s hole across
+        // five index chunks, the cursor at the start (2 s window).
+        let mut mock = Mock::build(120, 1, false, false);
+        mock.segs
+            .retain(|s| s.start_ns < 110 * S || s.start_ns >= 203 * S);
+        let timeline = super::super::timeline::get_or_create(uuid::Uuid::new_v4(), "g");
+        let stats = Arc::new(PlayerStats::new("p"));
+        timeline.register_player(&stats);
+        let fetcher = Arc::new(Fetcher::new(
+            "p",
+            Arc::new(mock),
+            timeline,
+            Arc::clone(&stats),
+            2,
+        ));
+        let stop = Arc::new(AtomicBool::new(false));
+        Arc::clone(&fetcher).spawn(Arc::clone(&stop));
+        let t0 = Instant::now();
+        while stats.index_view().gaps.is_empty() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
         }
-        index.insert(45 * S, Arc::new(seg_at(45 * S, 46 * S)));
-        let listed: HashSet<i64> = [0, 2].into_iter().collect();
-        let v = index_view(&index, &listed, (0, 46 * S));
-        assert_eq!(v.listed, vec![(0, 20 * S), (40 * S, 46 * S)]);
-        // Holes are cut at the listed ranges: nothing is said about 20..40 s.
-        assert_eq!(
-            v.gaps,
-            vec![(4 * S, 6 * S), (10 * S, 20 * S), (40 * S, 45 * S)]
-        );
-        // With every chunk listed, 10..45 s is one gap, even though the
-        // chunk in the middle holds no segment at all.
-        let listed: HashSet<i64> = [0, 1, 2].into_iter().collect();
-        let v = index_view(&index, &listed, (0, 46 * S));
-        assert_eq!(v.listed, vec![(0, 46 * S)]);
-        assert_eq!(v.gaps, vec![(4 * S, 6 * S), (10 * S, 45 * S)]);
-        // A segment that starts before a listed range covers its start, and
-        // sub-millisecond seams are not gaps.
-        let mut index = BTreeMap::new();
-        index.insert(-5 * S, Arc::new(seg_at(-5 * S, S)));
-        index.insert(S + 500, Arc::new(seg_at(S + 500, 2 * S)));
-        let v = index_view(&index, &[0].into_iter().collect(), (-5 * S, 2 * S));
-        assert!(v.gaps.is_empty(), "{:?}", v.gaps);
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(stats.index_view().gaps, vec![(110 * S, 203 * S)]);
+    }
+
+    #[test]
+    fn a_seek_into_a_hole_fetches_the_segment_before_it() {
+        // 1 s segments 100..110 s and 203..220 s; seek to 150 s, 40 s into
+        // the hole: far behind the fetch window.
+        let mut mock = Mock::build(120, 1, false, false);
+        mock.segs
+            .retain(|s| s.start_ns < 110 * S || s.start_ns >= 203 * S);
+        let mock = Arc::new(mock);
+        let timeline = super::super::timeline::get_or_create(uuid::Uuid::new_v4(), "g");
+        let stats = Arc::new(PlayerStats::new("p"));
+        timeline.register_player(&stats);
+        let fetcher = Arc::new(Fetcher::new(
+            "p",
+            mock.clone(),
+            Arc::clone(&timeline),
+            Arc::clone(&stats),
+            2,
+        ));
+        let stop = Arc::new(AtomicBool::new(false));
+        Arc::clone(&fetcher).spawn(Arc::clone(&stop));
+        let t0 = Instant::now();
+        while stats.extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        timeline
+            .apply(super::super::timeline::Command::Seek {
+                frame: None,
+                utc: None,
+                tai: Some("150:0".into()),
+                from_live_ms: None,
+                speed: None,
+            })
+            .unwrap();
+        let t0 = Instant::now();
+        // The hole's end comes as the listing reaches it.
+        let closed = || fetcher.store.hold().is_some_and(|h| h.hole.1 == 203 * S);
+        while (!closed() || mock.fetches_of(109) == 0) && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let h = fetcher.store.hold().expect("in a hole");
+        assert_eq!(h.seg.start_ns, 109 * S);
+        assert_eq!(h.hole, (110 * S, 203 * S));
+        assert!(fetcher.store.bytes(109 * S).is_some());
+    }
+
+    #[test]
+    fn a_listed_edge_on_a_segment_boundary_is_not_followed() {
+        // Segments that start or end on a chunk edge: nothing to resolve.
+        let mut cov = Coverage::default();
+        cov.add_listed(20 * S, 40 * S);
+        cov.add_media(20 * S, 40 * S, MIN_GAP_NS);
+        assert_eq!(cov.to_resolve(30 * S, 29 * S, 32 * S, (0, 100 * S)), None);
     }
 
     #[test]

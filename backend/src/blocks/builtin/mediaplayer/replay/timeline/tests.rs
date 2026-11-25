@@ -86,14 +86,14 @@ fn commands_use_origin_relative_frames() {
     let a = tl.apply_at(seek(-50), rt).unwrap();
     assert_eq!(a.tai, BASE);
     // `end` goes to the live edge (the last instant every angle has).
-    let a = tl.apply_at(Command::End, rt).unwrap();
+    let a = tl.apply_at(Command::End {}, rt).unwrap();
     assert_eq!(tl.reference_time(a.tai).unwrap().frame, 499);
 }
 
 #[test]
 fn end_is_the_common_edge_not_the_longest_angle() {
     let (tl, _p) = timeline_with(&[(BASE, BASE + 10 * S), (BASE, BASE + 8 * S)]);
-    let a = tl.apply_at(Command::End, 0).unwrap();
+    let a = tl.apply_at(Command::End {}, 0).unwrap();
     assert_eq!(a.tai, BASE + 8 * S - 1);
 }
 
@@ -163,23 +163,40 @@ fn frame_time_is_utc_of_the_frame_start() {
 }
 
 #[test]
-fn seek_by_utc_or_tai_is_exact() {
+fn seek_by_utc_names_the_nearest_frame_start() {
     let (tl, _p) = one_player(INGEST, TimeDomain::Tai);
-    // 13:22:00.000 UTC lies in the frame that starts at 13:21:59.980598792.
+    // Frames start at .000598792, .020598792, ... in each second. The frame
+    // that starts at 13:22:00.000598792 is shown in UTC as
+    // 13:22:00.000Z; seeking that text lands on it, not on the frame before.
     let a = tl
         .apply_at(seek_utc("2026-11-24T13:22:00.000Z"), 0)
         .unwrap();
-    assert_eq!(
-        a.tai,
-        utc_to_tai_ns(parse_utc("2026-11-24T13:22:00Z").unwrap())
-    );
+    let start = utc_to_tai_ns(parse_utc("2026-11-24T13:22:00Z").unwrap()) + 598_792;
+    assert_eq!(a.tai, start);
     let t = tl.reference_time(a.tai).unwrap();
-    assert_eq!(t.frame, 195);
-    assert_eq!(format_utc_ms(t.utc_ns), "2026-11-24T13:21:59.980Z");
+    assert_eq!(t.frame, 196);
+    assert_eq!(t.tai_ns, start);
+    assert_eq!(format_utc_ms(t.utc_ns), "2026-11-24T13:22:00.000Z");
+    // Every frame time the API gives in UTC seeks back to its own frame.
+    for k in [0, 1, 195, 196, 1000] {
+        let ft = tl.reference_time(INGEST + k * 20 * MS).unwrap();
+        let a = tl.apply_at(seek_utc(&ft.to_api().utc), 0).unwrap();
+        assert_eq!(tl.reference_time(a.tai).unwrap().frame, k);
+    }
+    // Up to half a frame either side of a start names that frame.
+    let a = tl
+        .apply_at(seek_utc("2026-11-24T13:22:00.010Z"), 0)
+        .unwrap();
+    assert_eq!(a.tai, start);
+    let a = tl
+        .apply_at(seek_utc("2026-11-24T13:22:00.011Z"), 0)
+        .unwrap();
+    assert_eq!(a.tai, start + 20 * MS);
     let a2 = tl
         .apply_at(seek_utc("2026-11-24T14:22:00.000+01:00"), 0)
         .unwrap();
-    assert_eq!(a2.tai, a.tai);
+    assert_eq!(a2.tai, start);
+    // TAI is exact (the API gives it to the nanosecond).
     let a3 = tl
         .apply_at(
             seek_at(ReplayTimeRef {
@@ -222,6 +239,8 @@ fn telemetry_gives_utc_of_the_pushed_frame() {
     let pushed = a.tai - 5 * 20 * MS;
     p.shown_frame
         .store(g.floor_frame(pushed), Ordering::Relaxed);
+    p.shown_tai
+        .store(g.tai_of_frame(g.floor_frame(pushed)), Ordering::Relaxed);
     tl.note_pushed(1, pushed);
     let v = tl.telemetry();
     assert_eq!(v["time_domain"], "tai");
@@ -596,7 +615,7 @@ fn result_names_the_cursor_frame() {
 #[test]
 fn seek_from_live_with_speed_is_one_step() {
     let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S), (BASE, BASE + 50 * S)]);
-    tl.apply_at(Command::Pause, 0).unwrap();
+    tl.apply_at(Command::Pause {}, 0).unwrap();
     let c = parse(r#"{"cmd":"seek","from_live_ms":8000,"speed":0.5}"#).unwrap();
     let a = tl.apply_at(c, 0).unwrap();
     // 8 s before the common edge (50 s), already at 50 %.
@@ -789,7 +808,7 @@ fn leaving_the_cue_drops_it() {
     // Moves inside keep it, speed and pause keep it.
     tl.apply_at(Command::Jog { frames: 3 }, 0).unwrap();
     tl.apply_at(Command::Speed { speed: 0.5 }, 0).unwrap();
-    tl.apply_at(Command::Pause, 0).unwrap();
+    tl.apply_at(Command::Pause {}, 0).unwrap();
     assert!(tl.cue().is_some());
     // A seek outside drops it, and play runs on unbounded.
     tl.apply_at(seek_tai(BASE + 30 * S), 0).unwrap();
@@ -800,7 +819,7 @@ fn leaving_the_cue_drops_it() {
     assert!(tl.cue().is_none());
     tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, None), 0)
         .unwrap();
-    let a = tl.apply_at(Command::Uncue, 0).unwrap();
+    let a = tl.apply_at(Command::Uncue {}, 0).unwrap();
     assert!(a.region.is_none() && tl.cue().is_none());
     assert_eq!(a.tai, BASE + 10 * S);
 }
@@ -851,7 +870,7 @@ fn play_inside_the_live_margin_does_not_go_live() {
     let a = tl.apply_at(Command::Live { margin_ms: None }, 0).unwrap();
     assert!(a.live && tl.result(&a).live);
     assert!(events.try_recv().is_err());
-    assert!(!tl.apply_at(Command::Pause, 0).unwrap().live);
+    assert!(!tl.apply_at(Command::Pause {}, 0).unwrap().live);
     // A cue's bounds win over catching up.
     tl.apply_at(cue(BASE + 50 * S, BASE + 59 * S, None), 0)
         .unwrap();
@@ -953,6 +972,8 @@ fn mark_stamps_the_pushed_frame_not_the_cursor() {
     let pushed = a.tai - 5 * 20 * MS;
     p.shown_frame
         .store(g.floor_frame(pushed), Ordering::Relaxed);
+    p.shown_tai
+        .store(g.tai_of_frame(g.floor_frame(pushed)), Ordering::Relaxed);
     tl.note_pushed(1, pushed);
     let c = parse(r#"{"cmd":"mark","label":"goal"}"#).unwrap();
     let m = tl.apply_at(c, 0).unwrap();
@@ -1064,4 +1085,59 @@ fn live_edge_steps_of_several_angles_count_as_one() {
     let (e2, g2) = t.estimate(4 * S + 850 * MS, edge);
     assert!(g1 && g2);
     assert_eq!(e2 - e1, 750 * MS);
+}
+
+#[test]
+fn frame_zero_waits_for_every_angle_whatever_answers_first() {
+    // cam1 starts 9.26 s before cam0, but its index answers later.
+    let cam0 = player("cam0", BASE + 9260 * MS, BASE + 60 * S, Some((50, 1)));
+    let cam1 = player("cam1", UNKNOWN, UNKNOWN, Some((50, 1)));
+    let tl = timeline_of(&[cam0.clone(), cam1.clone()]);
+    let b = tl.bounds().unwrap();
+    assert_eq!(b.start, BASE + 9260 * MS);
+    assert_eq!(tl.origin_tai(), UNKNOWN, "cam1 has not reported");
+    // Frame-addressed commands wait; time-addressed ones work.
+    assert!(matches!(
+        tl.apply_at(seek(10), 0),
+        Err(CommandError::Conflict(_))
+    ));
+    tl.apply_at(seek_tai(BASE + 20 * S), 0).unwrap();
+    assert!(tl.telemetry().get("start_frame").is_none());
+    cam1.start_tai.store(BASE, Ordering::Relaxed);
+    cam1.end_tai.store(BASE + 60 * S, Ordering::Relaxed);
+    tl.bounds();
+    assert_eq!(tl.origin_tai(), BASE);
+    let v = tl.telemetry();
+    assert_eq!(v["start_frame"], 0);
+    assert_eq!(v["frame"], 1000);
+}
+
+#[test]
+fn frame_zero_is_fixed_without_an_angle_that_never_answers() {
+    let cam0 = player("cam0", BASE, BASE + 60 * S, Some((50, 1)));
+    let dead = player("dead", UNKNOWN, UNKNOWN, None);
+    let tl = timeline_of(&[cam0.clone(), dead.clone()]);
+    let t0 = Instant::now();
+    tl.bounds_at(t0);
+    assert_eq!(tl.origin_tai(), UNKNOWN);
+    tl.bounds_at(t0 + ORIGIN_WAIT);
+    assert_eq!(tl.origin_tai(), BASE);
+}
+
+#[test]
+fn shown_time_is_the_frame_own_time_after_a_phase_change() {
+    let (tl, p) = one_player(INGEST, TimeDomain::Tai);
+    let g = p.grid().unwrap();
+    tl.bounds();
+    // After a restart the source's frames start 8.8 ms later in their
+    // period than the player's grid (anchored on the first run).
+    let own = g.tai_of_frame(g.floor_frame(INGEST) + 190) + 8_800_000;
+    p.shown_frame.store(g.nearest_frame(own), Ordering::Relaxed);
+    p.shown_tai.store(own, Ordering::Relaxed);
+    let v = tl.telemetry();
+    let shown = &v["players"][0]["shown"];
+    assert_eq!(shown["tai_ns"], own.to_string());
+    assert_eq!(shown["utc"], "2026-11-24T13:21:59.889Z");
+    assert_eq!(shown["frame"], 190);
+    assert_eq!(shown["frame_in_second"], 44);
 }

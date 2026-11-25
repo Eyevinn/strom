@@ -177,7 +177,7 @@ fn run_decode(
     })
 }
 
-/// Place decoded frames on the grid: a frame's TAI is the segment's first
+/// Place decoded frames on the TAI timeline: a frame's TAI is the segment's first
 /// sample TAI plus its PTS distance from the object's first PTS. That is
 /// `first_pts` (the earliest demuxed PTS) when known, so pictures the decoder
 /// drops at the start (open GOP, a segment not starting on a keyframe) do not
@@ -185,6 +185,13 @@ fn run_decode(
 /// segment's timerange (partial use of an object) are dropped. Container PTS
 /// is never taken as TAI: the segment timerange is the link between the two
 /// (TS PTS wraps at 33 bits, demuxers rebase it).
+///
+/// Each frame gets its own TAI, snapped to the segment's grid: the source's
+/// rate (from `grid`) through the segment's first sample. Not to the
+/// player's grid: a source can change its frame phase at a restart (a new
+/// run, after a gap), and frames placed on the first run's phase were shown
+/// up to a frame off their capture time. The snap only takes out PTS
+/// jitter (90 kHz rounding, writer drift).
 pub fn map_to_grid<T>(
     seg: &Segment,
     grid: &FrameGrid,
@@ -197,12 +204,15 @@ pub fn map_to_grid<T>(
     let min_pts = first_pts.map_or(decoded_min, |p| p.min(decoded_min));
     let half = (grid.frame_ns() / 2.0) as i64;
     let base = seg.first_sample_tai();
+    let Some(run) = FrameGrid::new(grid.fps_n, grid.fps_d, base) else {
+        return Vec::new();
+    };
     let mut out: Vec<(i64, T)> = frames
         .into_iter()
         .filter_map(|(pts, f)| {
             let tai = base + (pts - min_pts) as i64;
             (tai >= seg.start_ns - half && tai < seg.end_ns - half)
-                .then(|| (grid.nearest_frame(tai), f))
+                .then(|| (run.tai_of_frame(run.nearest_frame(tai)), f))
         })
         .collect();
     out.sort_by_key(|(k, _)| *k);
@@ -245,8 +255,8 @@ mod tests {
         let s = seg(BASE + 1_000_000_000, BASE + 2_000_000_000);
         let out = map_to_grid(&s, &grid, frames, None);
         assert_eq!(out.len(), 50);
-        assert_eq!(out[0], (k0 + 50, 0));
-        assert_eq!(out[49], (k0 + 99, 49));
+        assert_eq!(out[0], (grid.tai_of_frame(k0 + 50), 0));
+        assert_eq!(out[49], (grid.tai_of_frame(k0 + 99), 49));
     }
 
     #[test]
@@ -266,8 +276,9 @@ mod tests {
         let out = map_to_grid(&s, &grid, frames, None);
         let ks: Vec<i64> = out
             .iter()
-            .map(|(k, _)| k - grid.floor_frame(BASE))
+            .map(|(t, _)| grid.floor_frame(*t) - grid.floor_frame(BASE))
             .collect();
+        assert!(out.iter().all(|(t, _)| (t - BASE) % 20_000_000 == 0));
         assert_eq!(ks, (0..50).collect::<Vec<i64>>());
     }
 
@@ -283,8 +294,8 @@ mod tests {
         let frames: Vec<(u64, u32)> = (0..100).map(|i| (i * 20_000_000, i as u32)).collect();
         let out = map_to_grid(&s, &grid, frames, None);
         assert_eq!(out.len(), 50);
-        assert_eq!(out[0], (k0, 50));
-        assert_eq!(out[49], (k0 + 49, 99));
+        assert_eq!(out[0], (grid.tai_of_frame(k0), 50));
+        assert_eq!(out[49], (grid.tai_of_frame(k0 + 49), 99));
     }
 
     #[test]
@@ -297,8 +308,31 @@ mod tests {
         let s = seg(BASE, BASE + 1_000_000_000);
         let out = map_to_grid(&s, &grid, frames, Some(0));
         assert_eq!(out.len(), 48);
-        assert_eq!(out[0], (k0 + 2, 2));
-        assert_eq!(out[47], (k0 + 49, 49));
+        assert_eq!(out[0], (grid.tai_of_frame(k0 + 2), 2));
+        assert_eq!(out[47], (grid.tai_of_frame(k0 + 49), 49));
+    }
+
+    #[test]
+    fn frames_follow_the_phase_of_their_own_segment() {
+        // The player's grid has the first run's phase. After an ingest
+        // restart the source's frames start 8.8 ms later in their 20 ms
+        // period: they keep their own times, not the first run's.
+        let grid = FrameGrid::new(50, 1, BASE).unwrap();
+        let shift = 8_800_000;
+        let start = BASE + 100_000_000_000 + shift;
+        let frames: Vec<(u64, u32)> = (0..50)
+            .map(|i| {
+                (
+                    i * 20_000_000 + if i % 3 == 0 { 11_111 } else { 0 },
+                    i as u32,
+                )
+            })
+            .collect();
+        let out = map_to_grid(&seg(start, start + 1_000_000_000), &grid, frames, None);
+        assert_eq!(out.len(), 50);
+        for (i, (t, f)) in out.iter().enumerate() {
+            assert_eq!(*t, start + i as i64 * 20_000_000, "frame {}", f);
+        }
     }
 
     #[test]
