@@ -15,9 +15,10 @@
 //! - a successfully registered segment (and its sidecar) is deleted;
 //! - a definitively rejected segment (non-retryable 4xx) is dropped with an error,
 //!   since retrying identical bytes can never succeed;
-//! - when the pipeline stops, `splitmuxsink` finalizes the current file but Strom
-//!   sends no EOS, so the last (not-yet-rotated) fragment is flushed here when the
-//!   channel closes — see [`TailSlot`].
+//! - when the flow stops, a stop drain sends EOS through the muxer so the current
+//!   file is complete (see [`crate::tams::stop_drain`]), but no next fragment
+//!   rotates it into a `FragmentReady`, so the last fragment is flushed here when
+//!   the channel closes — see [`TailSlot`].
 
 use crate::events::EventBroadcaster;
 use crate::tams::client::{FlowSpec, TamsClient};

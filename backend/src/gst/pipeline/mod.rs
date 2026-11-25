@@ -195,6 +195,8 @@ pub struct PipelineManager {
     block_message_connect_fns: Vec<crate::blocks::BusMessageConnectFn>,
     /// Element signal setup functions from blocks (called when pipeline starts)
     element_setup_fns: Vec<crate::blocks::ElementSetupFn>,
+    /// Stop drain functions from blocks (run when the pipeline is stopped)
+    stop_drain_fns: Vec<crate::blocks::StopDrainFn>,
     /// Thread priority state tracker (tracks whether priority was successfully set)
     thread_priority_state: Option<ThreadPriorityState>,
     /// Thread registry for tracking streaming threads (optional, for CPU monitoring)

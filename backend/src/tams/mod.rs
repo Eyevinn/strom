@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod client;
+pub mod stop_drain;
 pub mod tai_mapping;
 pub mod uploader;
 

@@ -21,6 +21,7 @@ use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockB
 use crate::client_auth::AuthMethod;
 use crate::osc::SatProvider;
 use crate::tams::client::{FlowSpec, TamsClient};
+use crate::tams::stop_drain::MuxDrain;
 use crate::tams::tai_mapping::{
     grid_miss_ns, reference_tai_ns, shared_pipeline_mapping, AnchorKind, FragmentTimeline, HostTai,
     FIRST_ON_GRID_FRAGMENT,
@@ -544,6 +545,19 @@ fn build_flow_chain(
     // Where the media written to the open fragment ends, for the timerange of
     // the last fragment of a run (no next fragment closes it).
     let media_end = track_media_end(&mux);
+    // On a stop, EOS through the muxer completes the open fragment.
+    let mux_drain = Arc::new(MuxDrain::default());
+    mux_drain.watch_muxer(&mux);
+    {
+        let splitmuxsink = splitmuxsink.downgrade();
+        let mux_drain = mux_drain.clone();
+        let label = format!("{} ({})", instance_id, suffix);
+        ctx.register_stop_drain(Box::new(move || {
+            if let Some(splitmuxsink) = splitmuxsink.upgrade() {
+                mux_drain.drain(&splitmuxsink, &label);
+            }
+        }));
+    }
 
     // One identity input + caps probe per essence, each requesting its own sink pad.
     for &essence in inputs {
@@ -950,6 +964,7 @@ fn build_flow_chain(
                 });
             }
 
+            mux_drain.fragment_opened();
             debug!(
                 "TAMS {} ({}): opening segment {}",
                 block_id_sig, tag, location_str
