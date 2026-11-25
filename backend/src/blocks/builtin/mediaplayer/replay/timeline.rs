@@ -298,24 +298,32 @@ pub struct ReplayTimeline {
     pub cmd_to_push_us: AtomicU64,
 }
 
-/// Timelines keyed by (flow, replay group).
+/// Timelines keyed by (flow, group).
 type TimelineMap = HashMap<(FlowId, String), Arc<ReplayTimeline>>;
 
 static TIMELINES: LazyLock<Mutex<TimelineMap>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Drop the timelines nothing else holds: their players (which hold an `Arc`
+/// each) are gone, and no client is connected. Without this a stopped or
+/// deleted flow's groups stayed in the map for the life of the process.
+fn prune(map: &mut TimelineMap) {
+    map.retain(|_, tl| Arc::strong_count(tl) > 1);
+}
+
 pub fn get_or_create(flow_id: FlowId, group: &str) -> Arc<ReplayTimeline> {
     let mut map = TIMELINES.lock().unwrap_or_else(|p| p.into_inner());
+    prune(&mut map);
     map.entry((flow_id, group.to_string()))
         .or_insert_with(|| Arc::new(ReplayTimeline::new()))
         .clone()
 }
 
+/// The group's timeline, while a player of the group is alive (or a client
+/// still holds it).
 pub fn get(flow_id: FlowId, group: &str) -> Option<Arc<ReplayTimeline>> {
-    TIMELINES
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .get(&(flow_id, group.to_string()))
-        .cloned()
+    let mut map = TIMELINES.lock().unwrap_or_else(|p| p.into_inner());
+    prune(&mut map);
+    map.get(&(flow_id, group.to_string())).cloned()
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -878,5 +886,15 @@ mod tests {
         assert_eq!(consensus_frame(&[8, 7]), Some(7));
         assert_eq!(consensus_frame(&[UNKNOWN, 5]), Some(5));
         assert_eq!(consensus_frame(&[UNKNOWN]), None);
+    }
+
+    #[test]
+    fn a_timeline_nobody_holds_is_dropped() {
+        let flow = uuid::Uuid::new_v4();
+        let tl = get_or_create(flow, "prune-test");
+        assert!(get(flow, "prune-test").is_some());
+        assert!(Arc::ptr_eq(&tl, &get_or_create(flow, "prune-test")));
+        drop(tl);
+        assert!(get(flow, "prune-test").is_none());
     }
 }
