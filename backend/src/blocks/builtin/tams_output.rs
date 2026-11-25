@@ -26,7 +26,8 @@ use crate::tams::tai_mapping::{
     FIRST_ON_GRID_FRAGMENT,
 };
 use crate::tams::uploader::{
-    channel, new_tail_slot, spawn_uploader, FragmentReady, SharedDetected, TailFragment,
+    channel, new_tail_slot, spawn_uploader, FragmentReady, MediaEnd, PadMediaEnd, SharedDetected,
+    TailFragment,
 };
 use gst::glib::prelude::ToValue;
 use gstreamer as gst;
@@ -540,6 +541,9 @@ fn build_flow_chain(
     // Codec label for the TAMS flow, derived from caps at runtime by the probes and
     // read by the uploader when it creates the flow.
     let detected_codec: SharedDetected = Arc::default();
+    // Where the media written to the open fragment ends, for the timerange of
+    // the last fragment of a run (no next fragment closes it).
+    let media_end = track_media_end(&mux);
 
     // One identity input + caps probe per essence, each requesting its own sink pad.
     for &essence in inputs {
@@ -789,12 +793,14 @@ fn build_flow_chain(
             events,
             rx,
             tail.clone(),
+            media_end,
             segment_ns,
         );
 
-        // Per-block timeline: TAI = running time + offset, anchored on the first
-        // fragment. The anchor is the buffer's capture time when it carries a
-        // reference timestamp, otherwise the running time -> TAI mapping shared by
+        // Per-block timeline: TAI = running time + offset. A fragment whose first
+        // buffer carries a reference timestamp starts at that capture time and
+        // re-anchors the timeline on it. Otherwise the timeline is anchored on the
+        // first fragment by the running time -> TAI mapping shared by
         // every TAMS Output of this pipeline run, so equal running time gives equal
         // TAI across blocks (#966). See `crate::tams::tai_mapping`.
         let timeline = Arc::new(Mutex::new(FragmentTimeline::default()));
@@ -832,16 +838,19 @@ fn build_flow_chain(
             let location = temp_dir.join(format!("seg_{:05}.{}", fragment_id, file_ext));
             let location_str = location.to_string_lossy().to_string();
 
+            // Capture time of the fragment's first buffer, when it carries one.
+            let reference_ns = buffer
+                .as_ref()
+                .and_then(|b| reference_tai_ns(b.as_ref(), tai.tai_minus_utc_ns()));
+            // One frame: a capture time this close to where running time puts
+            // the buffer continues the previous fragment.
+            let frame_ns = buffer
+                .as_ref()
+                .and_then(|b| b.duration())
+                .map_or(50_000_000, |d| d.nseconds() + 1_000_000);
             let placed = {
                 let mut tl = timeline.lock().unwrap_or_else(|e| e.into_inner());
-                tl.place(running_time_ns, segment_ns, || {
-                    let tai_minus_utc = tai.tai_minus_utc_ns();
-                    if let Some(t) = buffer
-                        .as_ref()
-                        .and_then(|b| reference_tai_ns(b.as_ref(), tai_minus_utc))
-                    {
-                        return (t, AnchorKind::Reference);
-                    }
+                tl.place(running_time_ns, segment_ns, reference_ns, frame_ns, || {
                     if let Some(el) = element.as_ref() {
                         if let (Some(clock), Some(base)) = (el.clock(), el.base_time()) {
                             let m = shared_pipeline_mapping(flow_id, &clock, base.nseconds(), &tai);
@@ -883,11 +892,7 @@ fn build_flow_chain(
             if placed.since_anchor >= FIRST_ON_GRID_FRAGMENT {
                 // Splits land on the first keyframe at or after the grid point,
                 // so up to one frame past it is on the grid.
-                let tolerance_ns = buffer
-                    .as_ref()
-                    .and_then(|b| b.duration())
-                    .map_or(50_000_000, |d| d.nseconds() + 1_000_000);
-                if let Some(miss) = grid_miss_ns(abs_start, segment_ns, tolerance_ns) {
+                if let Some(miss) = grid_miss_ns(abs_start, segment_ns, frame_ns) {
                     warn_off_grid(&block_id_sig, &tag, &off_grid, miss);
                 }
             }
@@ -941,6 +946,7 @@ fn build_flow_chain(
                 *tail = Some(TailFragment {
                     path: location.clone(),
                     start_ns: abs_start,
+                    start_running_time_ns: running_time_ns,
                 });
             }
 
@@ -1083,6 +1089,58 @@ fn video_essence_parameters(
 }
 
 /// Request the splitmuxsink sink pad for a given essence (`video` or `audio_%u`).
+/// Track where the media written by `mux` ends, on each of its sink pads.
+///
+/// What the muxer consumed, not what reached splitmuxsink: splitmuxsink queues
+/// a GOP or more before it writes, and buffers still queued, in splitmuxsink or
+/// in the muxer's pad queue, are dropped when the pipeline stops without EOS.
+/// A probe sees each buffer enter the muxer's pad, and an aggregator muxer
+/// (mpegtsmux, mp4mux) reports each one it consumed with the pad's
+/// `buffer-consumed` signal; another muxer counts every buffer that entered.
+/// splitmuxsink requests the muxer's pads itself, so tracking starts on each as
+/// it is added. Per buffer only atomics are updated (see [`PadMediaEnd`]).
+fn track_media_end(mux: &gst::Element) -> MediaEnd {
+    let media_end = MediaEnd::default();
+    let pads = media_end.clone();
+    mux.connect_pad_added(move |_mux, pad| {
+        if pad.direction() != gst::PadDirection::Sink {
+            return;
+        }
+        let end = Arc::new(PadMediaEnd::default());
+        if let Ok(mut pads) = pads.lock() {
+            pads.push(end.clone());
+        }
+        if pad.has_property("emit-signals") {
+            end.count_consumed();
+            pad.set_property("emit-signals", true);
+            let consumed = end.clone();
+            pad.connect("buffer-consumed", false, move |_| {
+                consumed.consume();
+                None
+            });
+        }
+        pad.add_probe(
+            gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+            move |_pad, info| {
+                match info.data.as_ref() {
+                    Some(gst::PadProbeData::Buffer(buf)) => {
+                        let dur = buf.duration().map_or(0, |d| d.nseconds());
+                        end.add_buffer(buf.pts().map(|p| p.nseconds()), dur);
+                    }
+                    Some(gst::PadProbeData::Event(ev)) => {
+                        if let gst::EventView::Segment(seg) = ev.view() {
+                            end.set_segment(seg.segment());
+                        }
+                    }
+                    _ => {}
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
+    });
+    media_end
+}
+
 fn request_sink_pad(
     splitmuxsink: &gst::Element,
     essence: Essence,

@@ -21,7 +21,9 @@
 
 use crate::events::EventBroadcaster;
 use crate::tams::client::{FlowSpec, TamsClient};
+use gstreamer as gst;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use strom_types::{FlowId, StromEvent};
@@ -58,6 +60,140 @@ pub struct FragmentReady {
 pub struct TailFragment {
     pub path: PathBuf,
     pub start_ns: u64,
+    /// Running time of the fragment's first buffer (`start_ns` on the timeline).
+    pub start_running_time_ns: u64,
+}
+
+/// Buffers a [`PadMediaEnd`] remembers between entering the muxer's pad and
+/// being consumed by it. An aggregator muxer queues far fewer.
+const PAD_RING: usize = 64;
+
+/// Where the media written by a muxer through one sink pad ends, as running
+/// time.
+///
+/// A buffer probe on the pad reports each buffer as it enters
+/// ([`Self::add_buffer`]), with the running time from the pad's segment
+/// ([`Self::set_segment`]). When the muxer also reports each buffer it consumed
+/// ([`Self::consume`], from an aggregator pad's `buffer-consumed` signal; its
+/// queue is first in, first out), only consumed buffers count: what is still
+/// queued when the pipeline stops is never written. The consumed buffer's own
+/// timestamps are not used, since some muxers (mpegtsmux) rewrite them to
+/// running time first.
+///
+/// Updated per buffer, so it holds only atomics. The uploader reads it after
+/// the pipeline has stopped.
+#[derive(Debug)]
+pub struct PadMediaEnd {
+    seg_start_ns: AtomicU64,
+    seg_base_ns: AtomicU64,
+    /// The pad's segment is a forward TIME segment at rate 1.0.
+    seg_ok: AtomicBool,
+    /// End running time of entered buffer `n` at `ring[n % PAD_RING]`; 0 = not
+    /// tracked (untracked segment).
+    ring: [AtomicU64; PAD_RING],
+    entered: AtomicU64,
+    consumed: AtomicU64,
+    counts_consumed: AtomicBool,
+}
+
+impl Default for PadMediaEnd {
+    fn default() -> Self {
+        Self {
+            seg_start_ns: AtomicU64::new(0),
+            seg_base_ns: AtomicU64::new(0),
+            seg_ok: AtomicBool::new(false),
+            ring: std::array::from_fn(|_| AtomicU64::new(0)),
+            entered: AtomicU64::new(0),
+            consumed: AtomicU64::new(0),
+            counts_consumed: AtomicBool::new(false),
+        }
+    }
+}
+
+impl PadMediaEnd {
+    /// Count only buffers reported by [`Self::consume`].
+    pub fn count_consumed(&self) {
+        self.counts_consumed.store(true, Ordering::Relaxed);
+    }
+
+    /// A new segment event on the pad. Running time of a buffer in a forward,
+    /// rate 1.0 segment is `pts - start + base`; any other segment is not tracked.
+    pub fn set_segment(&self, segment: &gst::Segment) {
+        let ok = segment
+            .downcast_ref::<gst::format::Time>()
+            .filter(|seg| seg.rate() == 1.0)
+            .map(|seg| {
+                let start = seg.start().map_or(0, |t| t.nseconds());
+                let base = seg.base().map_or(0, |t| t.nseconds());
+                self.seg_start_ns.store(start, Ordering::Relaxed);
+                self.seg_base_ns.store(base, Ordering::Relaxed);
+            })
+            .is_some();
+        self.seg_ok.store(ok, Ordering::Relaxed);
+    }
+
+    /// A buffer with this PTS (`None`: none) and duration entered the pad.
+    pub fn add_buffer(&self, pts_ns: Option<u64>, duration_ns: u64) {
+        let start = self.seg_start_ns.load(Ordering::Relaxed);
+        let end = match pts_ns {
+            Some(pts) if self.seg_ok.load(Ordering::Relaxed) && pts >= start => {
+                pts - start + self.seg_base_ns.load(Ordering::Relaxed) + duration_ns
+            }
+            _ => 0,
+        };
+        let n = self.entered.load(Ordering::Relaxed);
+        self.ring[n as usize % PAD_RING].store(end, Ordering::Relaxed);
+        self.entered.store(n + 1, Ordering::Release);
+    }
+
+    /// The muxer consumed the oldest buffer still queued on the pad.
+    pub fn consume(&self) {
+        self.consumed.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Latest end of the buffers written (consumed, or entered when the muxer
+    /// does not report consumption) that are still in the ring.
+    fn end_running_time_ns(&self) -> Option<u64> {
+        let entered = self.entered.load(Ordering::Acquire);
+        let upto = if self.counts_consumed.load(Ordering::Relaxed) {
+            self.consumed.load(Ordering::Acquire).min(entered)
+        } else {
+            entered
+        };
+        // Ring slots still hold entries from `entered - PAD_RING` on; with more
+        // than that queued, the written end is unknown.
+        let from = entered.saturating_sub(PAD_RING as u64);
+        (from..upto)
+            .map(|n| self.ring[n as usize % PAD_RING].load(Ordering::Relaxed))
+            .max()
+            .filter(|&end| end > 0)
+    }
+}
+
+/// The [`PadMediaEnd`] of every sink pad of one fragment muxer. Locked only
+/// when a pad is added and when the uploader reads it.
+pub type MediaEnd = Arc<Mutex<Vec<Arc<PadMediaEnd>>>>;
+
+/// Latest end running time over all pads, `None` when no pad saw a buffer.
+fn media_end_running_time_ns(end: &MediaEnd) -> Option<u64> {
+    let pads = end.lock().unwrap_or_else(|e| e.into_inner());
+    pads.iter().filter_map(|p| p.end_running_time_ns()).max()
+}
+
+/// Timerange end of the last fragment of a run, which no next fragment closes:
+/// where its media ends, or `start + nominal_ns` when that is unknown (no buffer
+/// seen, or an untracked segment).
+fn tail_end_ns(
+    tail: &TailFragment,
+    media_end_running_time_ns: Option<u64>,
+    nominal_ns: u64,
+) -> u64 {
+    match media_end_running_time_ns {
+        Some(end) if end > tail.start_running_time_ns => tail
+            .start_ns
+            .saturating_add(end - tail.start_running_time_ns),
+        _ => tail.start_ns.saturating_add(nominal_ns.max(1)),
+    }
 }
 
 /// Shared slot holding the current [`TailFragment`], written by the location signal
@@ -100,8 +236,9 @@ pub fn channel() -> (mpsc::Sender<FragmentReady>, mpsc::Receiver<FragmentReady>)
 /// never touches the gateway. `detected_codec` is filled in by the caps probe once
 /// the encoded format is known (codec, e.g. `video/h264`, and video essence parameters); by the time the first segment
 /// completes, caps have always arrived, so the stored codec reflects the real
-/// essence. `flow_spec.codec` is only a fallback. `tail` is flushed on shutdown,
-/// using `tail_segment_ns` as the (nominal) duration of the final fragment.
+/// essence. `flow_spec.codec` is only a fallback. `tail` is flushed on shutdown
+/// with a timerange that ends where its media ends (`media_end`), or one
+/// `tail_segment_ns` after its start when that is unknown.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_uploader(
     client: TamsClient,
@@ -114,6 +251,7 @@ pub fn spawn_uploader(
     events: EventBroadcaster,
     mut rx: mpsc::Receiver<FragmentReady>,
     tail: TailSlot,
+    media_end: MediaEnd,
     tail_segment_ns: u64,
 ) {
     tokio::spawn(async move {
@@ -161,10 +299,12 @@ pub fn spawn_uploader(
         if let Some(tf) = tail.lock().ok().and_then(|mut t| t.take()) {
             if tf.path.exists() {
                 debug!("TAMS {}: flushing final segment on shutdown", block_id);
+                let end_ns =
+                    tail_end_ns(&tf, media_end_running_time_ns(&media_end), tail_segment_ns);
                 let frag = FragmentReady {
                     path: tf.path,
                     start_ns: tf.start_ns,
-                    end_ns: tf.start_ns.saturating_add(tail_segment_ns),
+                    end_ns,
                 };
                 process_fragment(&mut ctx, frag).await;
             }
@@ -586,6 +726,95 @@ fn discard_segment(segment: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn time_segment(start_ns: u64, base_ns: u64) -> gst::Segment {
+        let mut seg = gst::FormattedSegment::<gst::ClockTime>::new();
+        seg.set_start(gst::ClockTime::from_nseconds(start_ns));
+        seg.set_base(gst::ClockTime::from_nseconds(base_ns));
+        seg.upcast()
+    }
+
+    /// The last fragment of a run ends where its last frame ends, not one full
+    /// segment after its start.
+    #[test]
+    fn tail_ends_at_the_last_frame() {
+        gst::init().unwrap();
+        const FRAME: u64 = 20_000_000;
+        let pad = Arc::new(PadMediaEnd::default());
+        // PTS 1000 s + running time, as after an encoder with a PTS offset.
+        pad.set_segment(&time_segment(1_000_000_000_000, 0));
+        let first_rt = 40 * 1_000_000_000;
+        for n in 0..7 {
+            pad.add_buffer(Some(1_000_000_000_000 + first_rt + n * FRAME), FRAME);
+        }
+        let end: MediaEnd = Arc::new(Mutex::new(vec![pad]));
+        let tail = TailFragment {
+            path: PathBuf::new(),
+            start_ns: 1_800_000_000_000_000_000,
+            start_running_time_ns: first_rt,
+        };
+        let rt = media_end_running_time_ns(&end);
+        assert_eq!(rt, Some(first_rt + 7 * FRAME));
+        assert_eq!(
+            tail_end_ns(&tail, rt, 1_000_000_000),
+            tail.start_ns + 7 * FRAME
+        );
+    }
+
+    /// With a muxer that reports consumed buffers, buffers still queued in it
+    /// when the pipeline stops are not counted: they are never written.
+    #[test]
+    fn only_consumed_buffers_count() {
+        gst::init().unwrap();
+        let pad = PadMediaEnd::default();
+        pad.count_consumed();
+        pad.set_segment(&time_segment(1_000, 0));
+        assert_eq!(pad.end_running_time_ns(), None);
+        for n in 0..5 {
+            pad.add_buffer(Some(1_000 + n * 20), 20);
+        }
+        assert_eq!(pad.end_running_time_ns(), None, "nothing consumed yet");
+        for _ in 0..4 {
+            pad.consume();
+        }
+        // Buffers 0..=3 written, buffer 4 still queued.
+        assert_eq!(pad.end_running_time_ns(), Some(80));
+        // More queued than the ring holds: unknown.
+        for n in 5..(5 + PAD_RING as u64) {
+            pad.add_buffer(Some(1_000 + n * 20), 20);
+        }
+        assert_eq!(pad.end_running_time_ns(), None);
+    }
+
+    #[test]
+    fn tail_without_media_end_falls_back_to_nominal() {
+        gst::init().unwrap();
+        let tail = TailFragment {
+            path: PathBuf::new(),
+            start_ns: 5_000,
+            start_running_time_ns: 100,
+        };
+        assert_eq!(tail_end_ns(&tail, None, 1_000), 6_000);
+        // Media that ends at or before the start (stale) is not trusted.
+        assert_eq!(tail_end_ns(&tail, Some(100), 1_000), 6_000);
+        // A pad that saw no buffer reports nothing.
+        let pad = PadMediaEnd::default();
+        pad.set_segment(&time_segment(0, 0));
+        assert_eq!(pad.end_running_time_ns(), None);
+        pad.add_buffer(Some(500), 20);
+        assert_eq!(pad.end_running_time_ns(), Some(520));
+        // Several pads: the latest end wins.
+        let a = Arc::new(PadMediaEnd::default());
+        let b = Arc::new(PadMediaEnd::default());
+        a.set_segment(&time_segment(0, 0));
+        b.set_segment(&time_segment(0, 1_000));
+        a.add_buffer(Some(300), 20);
+        b.add_buffer(Some(10), 10);
+        assert_eq!(
+            media_end_running_time_ns(&Arc::new(Mutex::new(vec![a, b]))),
+            Some(1_020)
+        );
+    }
 
     #[test]
     fn sidecar_path_appends_meta() {
