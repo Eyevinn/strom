@@ -561,7 +561,7 @@ fn errors_tell_invalid_from_conflict() {
     // No media yet: valid commands do not apply.
     let tl = ReplayTimeline::new();
     assert!(matches!(
-        tl.apply_at(Command::Play, 0),
+        tl.apply_at(parse(r#"{"cmd":"play"}"#).unwrap(), 0),
         Err(CommandError::Conflict(_))
     ));
     // Media but no frame rate yet: frame addressing does not apply.
@@ -621,4 +621,186 @@ fn seek_from_live_with_speed_is_one_step() {
     // Further back than the media: clamped to the start.
     let far = parse(r#"{"cmd":"seek","from_live_ms":18446744073709551615}"#).unwrap();
     assert_eq!(tl.apply_at(far, 0).unwrap().tai, BASE);
+}
+
+// --- cue and bounded play -------------------------------------------------
+
+fn at_tai(t: i64) -> ReplayTimeRef {
+    ReplayTimeRef {
+        tai: Some(tai_string(t)),
+        ..Default::default()
+    }
+}
+
+fn cue(start: i64, end: i64, end_action: Option<EndAction>) -> Command {
+    Command::Cue {
+        in_point: at_tai(start),
+        out: at_tai(end),
+        end_action,
+    }
+}
+
+fn play(speed: Option<f64>, until: Option<i64>, end_action: Option<EndAction>) -> Command {
+    Command::Play {
+        speed,
+        until: until.map(at_tai),
+        end_action,
+    }
+}
+
+#[test]
+fn cue_parks_paused_at_in_and_parses_in_and_out() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let c = parse(&format!(
+        r#"{{"cmd":"cue","in":{{"tai":"{}"}},"out":{{"tai":"{}"}}}}"#,
+        tai_string(BASE + 10 * S),
+        tai_string(BASE + 12 * S)
+    ))
+    .unwrap();
+    assert_eq!(c, cue(BASE + 10 * S, BASE + 12 * S, None));
+    let a = tl.apply_at(c, 0).unwrap();
+    assert_eq!((a.tai, a.speed), (BASE + 10 * S, 0.0));
+    let r = tl.result(&a).cue.unwrap();
+    assert_eq!(r.end_action, EndAction::Freeze);
+    assert_eq!(r.out.tai_ns, (BASE + 12 * S).to_string());
+    // out before in, or a cue outside the media, change nothing.
+    let bad = cue(BASE + 12 * S, BASE + 10 * S, None);
+    assert!(matches!(tl.apply_at(bad, 0), Err(CommandError::Invalid(_))));
+    let outside = cue(BASE + 70 * S, BASE + 80 * S, None);
+    assert!(matches!(
+        tl.apply_at(outside, 0),
+        Err(CommandError::Conflict(_))
+    ));
+    assert_eq!(tl.cue().map(|r| r.start), Some(BASE + 10 * S));
+}
+
+#[test]
+fn play_freezes_on_the_last_frame_before_out() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let mut events = tl.subscribe();
+    tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, None), 0)
+        .unwrap();
+    tl.apply_at(play(Some(0.5), None, None), 0).unwrap();
+    assert_eq!(tl.cursor_tai(2 * S), Some((BASE + 11 * S, 0.5)));
+    // 2 s of clip at 50 % take 4 s; after that the cursor holds out - 1.
+    let (t, sp) = tl.cursor_tai(5 * S).unwrap();
+    assert_eq!((t, sp), (BASE + 12 * S - 1, 0.0));
+    let g = tl.reference().unwrap();
+    assert_eq!(g.tai_of_frame(g.floor_frame(t)), BASE + 12 * S - 20 * MS);
+    assert!(matches!(
+        events.try_recv(),
+        Ok(ReplayEvent::Ended { at }) if at.tai_ns == (BASE + 12 * S - 1).to_string()
+    ));
+    // Frozen for good: paused, one event, the cue still held.
+    assert_eq!(tl.cursor_tai(9 * S), Some((BASE + 12 * S - 1, 0.0)));
+    assert!(events.try_recv().is_err());
+    assert!(tl.cue().is_some());
+    // Play again at the end: from in.
+    let a = tl.apply_at(play(None, None, None), 9 * S).unwrap();
+    assert_eq!((a.tai, a.speed), (BASE + 10 * S, 1.0));
+}
+
+#[test]
+fn reverse_play_freezes_at_in() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, None), 0)
+        .unwrap();
+    tl.apply_at(seek_tai(BASE + 11 * S), 0).unwrap();
+    tl.apply_at(play(Some(-1.0), None, None), 0).unwrap();
+    assert_eq!(tl.cursor_tai(3 * S), Some((BASE + 10 * S, 0.0)));
+    // At in, reverse play starts again from out.
+    let a = tl.apply_at(play(Some(-1.0), None, None), 3 * S).unwrap();
+    assert_eq!(a.tai, BASE + 12 * S - 1);
+}
+
+#[test]
+fn loop_wraps_inside_the_cue() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let mut events = tl.subscribe();
+    tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, Some(EndAction::Loop)), 0)
+        .unwrap();
+    tl.apply_at(play(None, None, None), 0).unwrap();
+    assert_eq!(tl.tai_at(3 * S), Some(BASE + 11 * S));
+    assert_eq!(tl.tai_at(4 * S + 500 * MS), Some(BASE + 10 * S + 500 * MS));
+    assert_eq!(tl.cursor_tai(4 * S).unwrap().1, 1.0);
+    // Reverse at in starts from out, and wraps to out again.
+    let a = tl.apply_at(play(Some(-2.0), None, None), 10 * S).unwrap();
+    assert_eq!(a.tai, BASE + 12 * S - 1);
+    assert_eq!(tl.tai_at(10 * S + 500 * MS), Some(BASE + 11 * S - 1));
+    assert_eq!(
+        tl.tai_at(11 * S + 250 * MS),
+        Some(BASE + 11 * S + 500 * MS - 1)
+    );
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn end_action_live_goes_live_with_an_event() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let mut events = tl.subscribe();
+    tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, Some(EndAction::Live)), 0)
+        .unwrap();
+    tl.apply_at(play(Some(2.0), None, None), 0).unwrap();
+    // Reaches out after 1 s: live, 1.5 s behind the edge, at 1x, no cue.
+    let (t, sp) = tl.cursor_tai(S + 1).unwrap();
+    assert_eq!((t, sp), (BASE + 60 * S - 1500 * MS, 1.0));
+    assert!(tl.cue().is_none());
+    assert!(matches!(
+        events.try_recv(),
+        Ok(ReplayEvent::Live {
+            reason: ReplayLiveReason::EndAction,
+            ..
+        })
+    ));
+    assert_eq!(tl.tai_at(2 * S + 1), Some(BASE + 60 * S - 500 * MS));
+}
+
+#[test]
+fn play_until_bounds_without_a_cue() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    tl.apply_at(seek_tai(BASE + 20 * S), 0).unwrap();
+    // until behind the cursor does not apply.
+    assert!(matches!(
+        tl.apply_at(play(None, Some(BASE + 19 * S), None), 0),
+        Err(CommandError::Conflict(_))
+    ));
+    // end_action without until or cue is invalid.
+    assert!(matches!(
+        tl.apply_at(play(None, None, Some(EndAction::Loop)), 0),
+        Err(CommandError::Invalid(_))
+    ));
+    assert!(matches!(
+        tl.apply_at(play(Some(0.0), None, None), 0),
+        Err(CommandError::Invalid(_))
+    ));
+    let a = tl
+        .apply_at(play(None, Some(BASE + 21 * S), Some(EndAction::Loop)), 0)
+        .unwrap();
+    let r = a.region.unwrap();
+    assert_eq!((r.start, r.end), (BASE + 20 * S, BASE + 21 * S));
+    assert_eq!(tl.tai_at(S + 250 * MS), Some(BASE + 20 * S + 250 * MS));
+}
+
+#[test]
+fn leaving_the_cue_drops_it() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, None), 0)
+        .unwrap();
+    // Moves inside keep it, speed and pause keep it.
+    tl.apply_at(Command::Jog { frames: 3 }, 0).unwrap();
+    tl.apply_at(Command::Speed { speed: 0.5 }, 0).unwrap();
+    tl.apply_at(Command::Pause, 0).unwrap();
+    assert!(tl.cue().is_some());
+    // A seek outside drops it, and play runs on unbounded.
+    tl.apply_at(seek_tai(BASE + 30 * S), 0).unwrap();
+    assert!(tl.cue().is_none());
+    tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, None), 0)
+        .unwrap();
+    tl.apply_at(Command::Live { margin_ms: None }, 0).unwrap();
+    assert!(tl.cue().is_none());
+    tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, None), 0)
+        .unwrap();
+    let a = tl.apply_at(Command::Uncue, 0).unwrap();
+    assert!(a.region.is_none() && tl.cue().is_none());
+    assert_eq!(a.tai, BASE + 10 * S);
 }

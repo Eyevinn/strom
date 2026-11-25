@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Strom replay page, version 2 -->
+<!-- Strom replay page, version 3 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -291,7 +291,7 @@
 <div id="help"><div class="box">
   <h2>Keyboard</h2>
   <table id="helpTable"></table>
-  <p class="note">Everything on screen comes from the server's replay engine: the page only sends commands. Stopping at a clip's OUT point is done by this page for now (the server has no bounded play yet).</p>
+  <p class="note">Everything on screen comes from the server's replay engine: the page only sends commands. A clip's IN and OUT are held by the server (cue and play), so it stops at OUT however the page is doing.</p>
 </div></div>
 <div id="toast"></div>
 
@@ -322,6 +322,7 @@ function toast(msg) {
 let BASE = null;                       // BigInt TAI ns
 const rel = s => { const b = BigInt(s); if (BASE == null) BASE = b; return Number(b - BASE); };
 const absStr = n => (BASE + BigInt(Math.round(n))).toString();
+const taiOfNs = ns => { const a = BigInt(ns); return `${a / 1000000000n}:${a % 1000000000n}`; };
 const taiArg = n => { const a = BASE + BigInt(Math.round(n)); return `${a / 1000000000n}:${a % 1000000000n}`; };
 let utcMinusTaiMs = null;              // from the server's own (UTC, TAI) pairs
 let fps = 50, frameNs = 20e6;
@@ -372,6 +373,7 @@ function connectWs() {
     lastMsgAt = performance.now();
     const m = JSON.parse(ev.data);
     if (m.type === 'state') onState(m);
+    else if (m.type === 'event') onEvent(m);
     else if (m.type === 'ack' || m.type === 'error') {
       const cb = acks.get(m.seq); acks.delete(m.seq);
       if (m.type === 'error') toast('Server: ' + m.error);
@@ -432,10 +434,19 @@ function onState(m) {
     live: m.live_edge ? rel(m.live_edge.tai_ns) : null,
     players: (m.players || []).length,
   };
+  s.cue = m.cue || null;
   S = s; recvAt = now;
   if (s.live != null) trackLive(s.live, now);
-  watchClip();
+  // The server holds the clip's bounds; when it drops the cue (a seek out of
+  // it, live, end), the page's clip is no longer active.
+  if (activeClip && !s.cue && !activeClip.pending) { activeClip = null; renderClips(); }
   renderHeader();
+}
+
+// What the server did by itself.
+function onEvent(m) {
+  if (m.event === 'ended') toast(activeClip ? `${activeClip.clip.name}: end` : 'End of cue');
+  else if (m.event === 'live') toast('Live');
 }
 
 // Playhead between state messages: the server's pushed time advanced at the
@@ -479,7 +490,7 @@ function renderHeader() {
     $('infBuf').textContent = s.start != null && s.live != null ? `${clockOf(s.start)} → ${clockOf(s.live)} (${durOf(s.live - s.start).slice(0, -3)})` : 'no media yet';
     $('infLive').textContent = live.grow ? 'growing (live ingest)' : s.live != null ? 'not growing (recording)' : '-';
     $('infAngles').textContent = `${s.players} player(s) · ${fps} fps · time ${s.domain || '?'}`;
-    $('infClip').textContent = activeClip ? `${activeClip.clip.name} (stop at OUT in this page)` : '-';
+    $('infClip').textContent = activeClip ? `${activeClip.clip.name} (${s.cue ? s.cue.end_action : 'cueing'})` : s.cue ? `cue (${s.cue.end_action})` : '-';
   }
 }
 
@@ -506,12 +517,10 @@ function shuttle(dir) {
   else next = v >= 0 ? (v > 0 ? 0 : -1) : Math.max(v <= -1 ? v * 2 : -1, -4);
   if (next === 0) pause(); else setSpeed(next);
 }
-// Replay the last 8 s at 50 %: seek to the live edge minus 8 s, then 50 %.
-// Two commands; the server has no seek relative to live yet.
+// Replay the last 8 s at 50 %: one seek relative to the live edge, with speed.
 function replayLast(sec = 8, speed = 0.5) {
-  if (!S || S.live == null) return;
   activeClip = null; renderClips();
-  seekTo(S.live - sec * 1e9, () => setSpeed(speed));
+  send({ cmd: 'seek', from_live_ms: sec * 1000, speed });
 }
 
 $('liveBtn').onclick = goLive;
@@ -631,26 +640,17 @@ function saveClip() {
   persist(); renderClips(); renderInOut();
   toast(`Saved "${name}" (${durOf(b - a)})`);
 }
+// The server holds the clip's bounds: cue parks at IN, play runs to OUT and
+// freezes on the last frame before it (OUT is exclusive).
 async function cueClip(c, play) {
   if (c.angle != null) await cutTo({ input: c.angle });
-  activeClip = { clip: c, start: rel(c.in_tai), stopAt: rel(c.out_tai), armed: false, stopping: false };
-  if (!play) pause();
-  seekFrame(activeClip.start, () => { if (play) setSpeed(c.speed || 1); });
+  activeClip = { clip: c, pending: true };
   renderClips();
-}
-// Stop at OUT is done here until the server has bounded play (cue/play until).
-// It arms once the picture is inside the clip, so a state from before the seek
-// does not stop it.
-function watchClip() {
-  const a = activeClip;
-  if (!a || a.stopping || !S || !S.pushed) return;
-  const t = S.pushed.t;
-  if (!a.armed) { a.armed = t >= a.start - frameNs && t < a.stopAt; return; }
-  if (S.speed > 0 && t >= a.stopAt - frameNs / 2) {
-    a.stopping = true;
-    pause();
-    seekTo(a.stopAt - frameNs / 2, () => { a.stopping = false; });
-  }
+  send({ cmd: 'cue', in: { tai: taiOfNs(c.in_tai) }, out: { tai: taiOfNs(c.out_tai) }, end_action: 'freeze' }, m => {
+    if (m.type !== 'ack') { activeClip = null; renderClips(); return; }
+    activeClip = { clip: c };
+    if (play) send({ cmd: 'play', speed: c.speed || 1 });
+  });
 }
 function deleteClip(id) {
   const c = clips.find(x => x.id === id);

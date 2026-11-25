@@ -31,7 +31,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Instant;
-use strom_types::replay::{ReplayCommandResult, ReplayFrameTime, ReplayInstant, ReplayTimeRef};
+use strom_types::replay::{
+    ReplayCommandResult, ReplayCue, ReplayEvent, ReplayFrameTime, ReplayInstant, ReplayLiveReason,
+    ReplayTimeRef,
+};
 use strom_types::tai::{
     format_calendar_ms, format_utc_ms, parse_utc, tai_to_utc_ns, utc_to_tai_ns,
 };
@@ -331,20 +334,98 @@ fn check_speed(speed: f64) -> Result<f64, CommandError> {
     Ok(speed)
 }
 
-/// Where the cursor line starts: a TAI instant, or the group's start.
+pub use strom_types::replay::ReplayEndAction as EndAction;
+
+/// The bound of play the server holds (a cue): `[start, end)`, and what
+/// happens when play reaches either end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    pub start: i64,
+    pub end: i64,
+    pub end_action: EndAction,
+}
+
+impl Region {
+    fn contains(&self, tai: i64) -> bool {
+        self.start <= tai && tai < self.end
+    }
+
+    fn to_api(self) -> ReplayCue {
+        ReplayCue {
+            in_point: instant(self.start),
+            out: instant(self.end),
+            end_action: self.end_action,
+        }
+    }
+}
+
+/// Where the cursor line starts: a TAI instant, or the group's start, and
+/// how it moves from there.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Anchor {
     rt: i64,
     /// Cursor TAI at `rt`; `None` = at the start of the group's range.
     tai: Option<i64>,
     speed: f64,
+    /// The bound of play, if a cue is held. Invariant: holds the cursor at
+    /// `rt` (commands that leave it drop it).
+    region: Option<Region>,
 }
 
 const START_ANCHOR: Anchor = Anchor {
     rt: 0,
     tai: None,
     speed: 0.0,
+    region: None,
 };
+
+/// An end of bounded play that changes the motion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hit {
+    Freeze,
+    Live,
+}
+
+/// Where the cursor is at a running time, and what (if anything) it ran
+/// into: the pure part of the motion, the same for every caller.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Eval {
+    tai: i64,
+    speed: f64,
+    /// Play reached an end of the region whose action changes the anchor.
+    hit: Option<Hit>,
+}
+
+/// The cursor of `a` at `rt`, clamped to the media.
+fn eval(a: &Anchor, rt: i64, b: &Bounds) -> Eval {
+    let from = a.tai.unwrap_or(b.start) as i128;
+    let moved = (a.speed * (rt - a.rt) as f64).round() as i128;
+    let mut pos = from + moved;
+    let mut speed = a.speed;
+    let mut hit = None;
+    if let Some(r) = a.region {
+        let (start, end) = (r.start as i128, r.end as i128);
+        if pos >= end || pos < start {
+            match r.end_action {
+                EndAction::Loop => pos = start + (pos - start).rem_euclid(end - start),
+                EndAction::Freeze | EndAction::Live => {
+                    pos = if pos >= end { end - 1 } else { start };
+                    speed = 0.0;
+                    hit = Some(if r.end_action == EndAction::Live {
+                        Hit::Live
+                    } else {
+                        Hit::Freeze
+                    });
+                }
+            }
+        }
+    }
+    Eval {
+        tai: pos.clamp(b.start as i128, (b.end - 1) as i128) as i64,
+        speed,
+        hit,
+    }
+}
 
 pub use strom_types::replay::ReplayCommand as Command;
 
@@ -431,6 +512,7 @@ pub fn group_bounds(extents: &[(i64, i64)]) -> Option<Bounds> {
 pub struct Applied {
     pub tai: i64,
     pub speed: f64,
+    pub region: Option<Region>,
 }
 
 pub struct ReplayTimeline {
@@ -448,6 +530,11 @@ pub struct ReplayTimeline {
     pub cmd_to_push_us: AtomicU64,
     /// Running time and cursor of the latest tick any player pushed.
     last_pushed: Mutex<Option<(i64, i64)>>,
+    /// Distance behind the live edge the group plays at when it goes live:
+    /// the last `live` command's margin.
+    live_margin_ns: AtomicI64,
+    /// What the group does by itself (a bounded play ends, it goes live).
+    events: tokio::sync::broadcast::Sender<ReplayEvent>,
 }
 
 /// Timelines keyed by (flow, group).
@@ -489,7 +576,19 @@ impl ReplayTimeline {
             last_cmd: Mutex::new(None),
             cmd_to_push_us: AtomicU64::new(0),
             last_pushed: Mutex::new(None),
+            live_margin_ns: AtomicI64::new(DEFAULT_LIVE_MARGIN_MS as i64 * 1_000_000),
+            events: tokio::sync::broadcast::channel(64).0,
         }
+    }
+
+    /// Events from now on.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ReplayEvent> {
+        self.events.subscribe()
+    }
+
+    fn emit(&self, e: ReplayEvent) {
+        // No subscriber is fine.
+        let _ = self.events.send(e);
     }
 
     /// Called by each player at build. The first player of a new run (no
@@ -578,16 +677,59 @@ impl ReplayTimeline {
         (o != UNKNOWN).then(|| grid.floor_frame(o))
     }
 
-    fn eval(a: &Anchor, rt: i64, b: &Bounds) -> i64 {
-        let from = a.tai.unwrap_or(b.start) as i128;
-        let moved = (a.speed * (rt - a.rt) as f64).round() as i128;
-        (from + moved).clamp(b.start as i128, (b.end - 1) as i128) as i64
+    /// The cursor at `rt`. When the motion ran into something that changes
+    /// it (the end of a bounded play), the change is made here, at `rt`, and
+    /// an event sent: whoever looks first (a player's tick, the state) moves
+    /// the group on. The new line starts where the old one ended, so callers
+    /// at nearby running times still agree.
+    fn advance(&self, a: &mut Anchor, rt: i64, b: &Bounds) -> (i64, f64) {
+        let e = eval(a, rt, b);
+        let Some(hit) = e.hit else {
+            return (e.tai, e.speed);
+        };
+        if rt < a.rt {
+            // A tick from before the last command: report, do not commit.
+            return (e.tai, e.speed);
+        }
+        match hit {
+            Hit::Freeze => {
+                *a = Anchor {
+                    rt,
+                    tai: Some(e.tai),
+                    speed: 0.0,
+                    region: a.region,
+                };
+                self.emit(ReplayEvent::Ended { at: instant(e.tai) });
+                (e.tai, 0.0)
+            }
+            Hit::Live => {
+                let to = self.live_target(b);
+                *a = Anchor {
+                    rt,
+                    tai: Some(to),
+                    speed: 1.0,
+                    region: None,
+                };
+                let to = eval(a, rt, b).tai;
+                a.tai = Some(to);
+                self.emit(ReplayEvent::Live {
+                    reason: ReplayLiveReason::EndAction,
+                    at: instant(to),
+                });
+                (to, 1.0)
+            }
+        }
+    }
+
+    /// Where `live` plays from: the live edge minus the margin.
+    fn live_target(&self, b: &Bounds) -> i64 {
+        b.live_end
+            .saturating_sub(self.live_margin_ns.load(Ordering::Relaxed))
     }
 
     /// The cursor's TAI at a running time.
     pub fn tai_at(&self, rt: i64) -> Option<i64> {
-        let b = self.bounds()?;
-        Some(Self::eval(&lock(&self.anchor), rt, &b))
+        self.cursor_tai(rt).map(|(t, _)| t)
     }
 
     /// The frame of `grid` a player shows at a running time, and the cursor:
@@ -600,12 +742,18 @@ impl ReplayTimeline {
     /// The cursor's TAI at a running time, and the speed.
     pub fn cursor_tai(&self, rt: i64) -> Option<(i64, f64)> {
         let b = self.bounds()?;
-        let a = *lock(&self.anchor);
-        Some((Self::eval(&a, rt, &b), a.speed))
+        Some(self.advance(&mut lock(&self.anchor), rt, &b))
     }
 
+    /// The speed now.
     pub fn speed(&self) -> f64 {
-        lock(&self.anchor).speed
+        self.cursor_tai(self.now_rt())
+            .map_or(lock(&self.anchor).speed, |(_, s)| s)
+    }
+
+    /// The cue the group holds, if any.
+    pub fn cue(&self) -> Option<Region> {
+        lock(&self.anchor).region
     }
 
     /// The instant a command names. Exactly one field of `at`; frames need
@@ -671,13 +819,21 @@ impl ReplayTimeline {
         let need_ref =
             || reference.ok_or_else(|| conflict("the group's frame rate is not known yet"));
         let mut a = lock(&self.anchor);
-        let cur = Self::eval(&a, now, &b);
-        let (tai, speed) = match cmd {
+        let (cur, cur_speed) = self.advance(&mut a, now, &b);
+        // What the cue becomes: kept (if it still holds the cursor), set, or
+        // dropped.
+        enum Cue {
+            Keep,
+            Set(Region),
+            Drop,
+        }
+        let (tai, speed, cue) = match cmd {
             Command::Jog { frames } => {
                 let g = need_ref()?;
                 (
                     frame_centre(&g, frame_in(&g, &b, g.floor_frame(cur), frames)),
                     0.0,
+                    Cue::Keep,
                 )
             }
             Command::Seek {
@@ -696,33 +852,127 @@ impl ReplayTimeline {
                 let to = self.resolve(&at, &b, reference, "seek")?;
                 let speed = match speed {
                     Some(s) => check_speed(s)?,
-                    None => a.speed,
+                    None => cur_speed,
                 };
-                (to, speed)
+                (to, speed, Cue::Keep)
             }
-            Command::SeekRel { ms } => (cur.saturating_add(ms.saturating_mul(1_000_000)), a.speed),
-            Command::Speed { speed } => (cur, check_speed(speed)?),
-            Command::Play => (cur, 1.0),
-            Command::Pause => (cur, 0.0),
-            Command::End => (b.live_end - 1, 0.0),
+            Command::SeekRel { ms } => (
+                cur.saturating_add(ms.saturating_mul(1_000_000)),
+                cur_speed,
+                Cue::Keep,
+            ),
+            Command::Speed { speed } => (cur, check_speed(speed)?, Cue::Keep),
+            Command::Play {
+                speed,
+                until,
+                end_action,
+            } => {
+                let speed = check_speed(speed.unwrap_or(1.0))?;
+                if speed == 0.0 {
+                    return Err(invalid("play: speed 0 is a pause"));
+                }
+                let forward = speed > 0.0;
+                let held = a.region;
+                match until {
+                    Some(u) => {
+                        let until = self.resolve(&u, &b, reference, "play until")?;
+                        let r = if forward {
+                            if until <= cur {
+                                return Err(conflict("play: until is not ahead of the cursor"));
+                            }
+                            let start = held.map_or(cur, |r| r.start.min(cur));
+                            Region {
+                                start,
+                                end: until,
+                                end_action: EndAction::Freeze,
+                            }
+                        } else {
+                            if until > cur {
+                                return Err(conflict("play: until is not behind the cursor"));
+                            }
+                            let end = held.map_or(cur + 1, |r| r.end.max(cur + 1));
+                            Region {
+                                start: until,
+                                end,
+                                end_action: EndAction::Freeze,
+                            }
+                        };
+                        let end_action = end_action
+                            .or(held.map(|h| h.end_action))
+                            .unwrap_or_default();
+                        (cur, speed, Cue::Set(Region { end_action, ..r }))
+                    }
+                    None => match held {
+                        Some(r) => {
+                            let r = Region {
+                                end_action: end_action.unwrap_or(r.end_action),
+                                ..r
+                            };
+                            // At the end the play runs to: start again from
+                            // the other end.
+                            let half = reference.map_or(1, |g| (g.frame_ns() / 2.0) as i64).max(1);
+                            let from = if forward && cur >= r.end - half {
+                                r.start
+                            } else if !forward && cur < r.start + half {
+                                r.end - 1
+                            } else {
+                                cur
+                            };
+                            (from, speed, Cue::Set(r))
+                        }
+                        None if end_action.is_some() => {
+                            return Err(invalid("play: end_action needs until or a cue"))
+                        }
+                        None => (cur, speed, Cue::Keep),
+                    },
+                }
+            }
+            Command::Pause => (cur, 0.0, Cue::Keep),
+            Command::End => (b.live_end - 1, 0.0, Cue::Drop),
             Command::Live { margin_ms } => {
                 let margin = ms_to_ns(margin_ms.unwrap_or(DEFAULT_LIVE_MARGIN_MS));
-                (b.live_end.saturating_sub(margin), 1.0)
+                self.live_margin_ns.store(margin, Ordering::Relaxed);
+                (self.live_target(&b), 1.0, Cue::Drop)
             }
+            Command::Cue {
+                in_point,
+                out,
+                end_action,
+            } => {
+                let start = self.resolve(&in_point, &b, reference, "cue in")?;
+                let end = self.resolve(&out, &b, reference, "cue out")?;
+                if end <= start {
+                    return Err(invalid("cue: out must be after in"));
+                }
+                if start >= b.end || end <= b.start {
+                    return Err(conflict("cue: the range is outside the media"));
+                }
+                let r = Region {
+                    start: start.max(b.start),
+                    end,
+                    end_action: end_action.unwrap_or_default(),
+                };
+                (r.start, 0.0, Cue::Set(r))
+            }
+            Command::Uncue => (cur, cur_speed, Cue::Drop),
         };
-        let anchored = Anchor {
+        // Clamp to the media, so later moves start from what is shown, then
+        // keep the cue only if it holds the cursor.
+        let tai = tai.clamp(b.start, b.end - 1);
+        let region = match cue {
+            Cue::Keep => a.region,
+            Cue::Set(r) => Some(r),
+            Cue::Drop => None,
+        }
+        .filter(|r| r.contains(tai));
+        *a = Anchor {
             rt: now,
             tai: Some(tai),
             speed,
-        };
-        // Store the clamped position so later moves start from what is shown.
-        let tai = Self::eval(&anchored, now, &b);
-        *a = Anchor {
-            tai: Some(tai),
-            ..anchored
+            region,
         };
         *lock(&self.last_cmd) = (speed == 0.0).then(|| (Instant::now(), tai));
-        Ok(Applied { tai, speed })
+        Ok(Applied { tai, speed, region })
     }
 
     /// The reference frame that holds `tai` (relative to the origin) and its
@@ -741,6 +991,7 @@ impl ReplayTimeline {
             cursor_tai: instant(a.tai),
             frame: time.as_ref().map(|t| t.frame),
             time: time.map(|t| t.to_api()),
+            cue: a.region.map(Region::to_api),
         }
     }
 
@@ -845,7 +1096,9 @@ impl ReplayTimeline {
         };
         let origin = g.floor_frame(self.origin_tai());
         let time_of = |tai: i64| FrameTime::new(&g, g.floor_frame(tai), origin).to_json();
-        let cursor = Self::eval(&lock(&self.anchor), now, &b);
+        let (cursor, speed) = self.advance(&mut lock(&self.anchor), now, &b);
+        v["speed"] = speed.into();
+        v["cue"] = serde_json::to_value(self.cue().map(Region::to_api)).unwrap_or_default();
         let behind_ms = |t: i64| ((b.live_end - t) as f64 / 1e6).round();
         v["reference_fps"] = fps_string(&g).into();
         v["frame_ns"] = g.frame_ns().into();

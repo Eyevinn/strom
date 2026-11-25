@@ -43,8 +43,33 @@ pub enum ReplayCommand {
     SeekRel { ms: i64 },
     /// Play at a speed (negative = reverse, 0 = pause), -8 .. 8.
     Speed { speed: f64 },
-    /// Play at 1x.
-    Play,
+    /// Play. Without `until`, a cue bounds the play (and a play at the cue's
+    /// end starts again from its other end); with `until`, play runs to that
+    /// instant (from the cue's start, if a cue holds the cursor).
+    Play {
+        /// Speed, -8 .. 8 except 0; default 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        speed: Option<f64>,
+        /// Where the play ends: ahead of the cursor in the direction of play.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until: Option<ReplayTimeRef>,
+        /// What happens at the end; default the cue's, else `freeze`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_action: Option<ReplayEndAction>,
+    },
+    /// Cue a clip: hold `[in, out)` as the bound of play and park, paused, at
+    /// `in`. Seeking or jogging outside the cue, `live` and `end` drop it.
+    Cue {
+        #[serde(rename = "in")]
+        in_point: ReplayTimeRef,
+        /// Exclusive: a freeze holds the last frame that starts before it.
+        out: ReplayTimeRef,
+        /// What happens when play reaches either end; default `freeze`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_action: Option<ReplayEndAction>,
+    },
+    /// Drop the cue; the cursor and speed stay.
+    Uncue,
     /// Pause where the cursor is.
     Pause,
     /// Go to the live edge (the last instant every angle has) and pause.
@@ -53,6 +78,56 @@ pub enum ReplayCommand {
     Live {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         margin_ms: Option<u64>,
+    },
+}
+
+/// What bounded play does when it reaches the end of its range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayEndAction {
+    /// Pause on the last frame of the range.
+    #[default]
+    Freeze,
+    /// Start again from the other end of the range.
+    Loop,
+    /// Go live: play at 1x behind the live edge (the `live` command's
+    /// margin) and drop the cue.
+    Live,
+}
+
+/// The bound of play the server holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ReplayCue {
+    #[serde(rename = "in")]
+    pub in_point: ReplayInstant,
+    /// Exclusive.
+    pub out: ReplayInstant,
+    pub end_action: ReplayEndAction,
+}
+
+/// Why the group went live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayLiveReason {
+    /// Bounded play reached its end with `end_action: live`.
+    EndAction,
+}
+
+/// Something the group did by itself, sent on the WebSocket as
+/// `{"type": "event", "event": ..., ...}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum ReplayEvent {
+    /// Bounded play reached the end of its range and froze there.
+    Ended { at: ReplayInstant },
+    /// The group went live: playing at 1x behind the live edge.
+    Live {
+        reason: ReplayLiveReason,
+        at: ReplayInstant,
     },
 }
 
@@ -120,4 +195,7 @@ pub struct ReplayCommandResult {
     /// That frame's time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time: Option<ReplayFrameTime>,
+    /// The bound of play the server holds, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cue: Option<ReplayCue>,
 }

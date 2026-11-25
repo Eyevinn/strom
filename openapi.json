@@ -10182,7 +10182,7 @@
           },
           {
             "type": "object",
-            "description": "Play at 1x.",
+            "description": "Play. Without `until`, a cue bounds the play (and a play at the cue's\nend starts again from its other end); with `until`, play runs to that\ninstant (from the cue's start, if a cue holds the cursor).",
             "required": [
               "cmd"
             ],
@@ -10191,6 +10191,86 @@
                 "type": "string",
                 "enum": [
                   "play"
+                ]
+              },
+              "end_action": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ReplayEndAction",
+                    "description": "What happens at the end; default the cue's, else `freeze`."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "speed": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "description": "Speed, -8 .. 8 except 0; default 1."
+              },
+              "until": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ReplayTimeRef",
+                    "description": "Where the play ends: ahead of the cursor in the direction of play."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Cue a clip: hold `[in, out)` as the bound of play and park, paused, at\n`in`. Seeking or jogging outside the cue, `live` and `end` drop it.",
+            "required": [
+              "in",
+              "out",
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "cue"
+                ]
+              },
+              "end_action": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ReplayEndAction",
+                    "description": "What happens when play reaches either end; default `freeze`."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "in": {
+                "$ref": "#/components/schemas/ReplayTimeRef"
+              },
+              "out": {
+                "$ref": "#/components/schemas/ReplayTimeRef",
+                "description": "Exclusive: a freeze holds the last frame that starts before it."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Drop the cue; the cursor and speed stay.",
+            "required": [
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "uncue"
                 ]
               }
             }
@@ -10259,6 +10339,17 @@
           "cursor_tai"
         ],
         "properties": {
+          "cue": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayCue",
+                "description": "The bound of play the server holds, if any."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "cursor_tai": {
             "$ref": "#/components/schemas/ReplayInstant",
             "description": "The cursor after the command."
@@ -10288,6 +10379,83 @@
             ]
           }
         }
+      },
+      "ReplayCue": {
+        "type": "object",
+        "description": "The bound of play the server holds.",
+        "required": [
+          "in",
+          "out",
+          "end_action"
+        ],
+        "properties": {
+          "end_action": {
+            "$ref": "#/components/schemas/ReplayEndAction"
+          },
+          "in": {
+            "$ref": "#/components/schemas/ReplayInstant"
+          },
+          "out": {
+            "$ref": "#/components/schemas/ReplayInstant",
+            "description": "Exclusive."
+          }
+        }
+      },
+      "ReplayEndAction": {
+        "type": "string",
+        "description": "What bounded play does when it reaches the end of its range.",
+        "enum": [
+          "freeze",
+          "loop",
+          "live"
+        ]
+      },
+      "ReplayEvent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Bounded play reached the end of its range and froze there.",
+            "required": [
+              "at",
+              "event"
+            ],
+            "properties": {
+              "at": {
+                "$ref": "#/components/schemas/ReplayInstant"
+              },
+              "event": {
+                "type": "string",
+                "enum": [
+                  "ended"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The group went live: playing at 1x behind the live edge.",
+            "required": [
+              "reason",
+              "at",
+              "event"
+            ],
+            "properties": {
+              "at": {
+                "$ref": "#/components/schemas/ReplayInstant"
+              },
+              "event": {
+                "type": "string",
+                "enum": [
+                  "live"
+                ]
+              },
+              "reason": {
+                "$ref": "#/components/schemas/ReplayLiveReason"
+              }
+            }
+          }
+        ],
+        "description": "Something the group did by itself, sent on the WebSocket as\n`{\"type\": \"event\", \"event\": ..., ...}`."
       },
       "ReplayFrameTime": {
         "type": "object",
@@ -10351,6 +10519,51 @@
             "description": "UTC, RFC 3339 with milliseconds."
           }
         }
+      },
+      "ReplayLiveReason": {
+        "type": "string",
+        "description": "Why the group went live.",
+        "enum": [
+          "end_action"
+        ]
+      },
+      "ReplayTimeRef": {
+        "type": "object",
+        "description": "A point on the group's timeline, as a command gives it: exactly one\nfield.",
+        "properties": {
+          "frame": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Reference frame, relative to the group origin."
+          },
+          "from_live_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Milliseconds before the live edge.",
+            "minimum": 0
+          },
+          "tai": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "TAI as TAMS `\"<seconds>:<nanoseconds>\"`."
+          },
+          "utc": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "UTC, RFC 3339."
+          }
+        },
+        "additionalProperties": false
       },
       "RtpStreamStats": {
         "type": "object",

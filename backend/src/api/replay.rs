@@ -8,7 +8,8 @@
 //! command that does not apply to the group now as a conflict (HTTP 409).
 //! On the WebSocket a command may carry a `seq`, echoed in its `ack` or
 //! `error`; the socket also streams the group state every 50 ms (the same
-//! object as `GET .../state`).
+//! object as `GET .../state`) and sends what the group does by itself as
+//! `{"type": "event", ...}` ([`strom_types::replay::ReplayEvent`]).
 
 use crate::blocks::builtin::mediaplayer::replay::timeline::{self, CommandError};
 use crate::json_rejection::JsonBody;
@@ -156,8 +157,21 @@ fn ws_reply(tl: &timeline::ReplayTimeline, text: &str) -> serde_json::Value {
 async fn handle(socket: WebSocket, tl: Arc<timeline::ReplayTimeline>) {
     let (mut tx, mut rx) = socket.split();
     let mut tick = tokio::time::interval(Duration::from_millis(50));
+    let mut events = tl.subscribe();
     loop {
         tokio::select! {
+            ev = events.recv() => {
+                let ev = match ev {
+                    Ok(ev) => ev,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+                let mut msg = serde_json::to_value(ev).unwrap_or_default();
+                msg["type"] = "event".into();
+                if tx.send(Message::Text(msg.to_string().into())).await.is_err() {
+                    break;
+                }
+            }
             _ = tick.tick() => {
                 let msg = tl.telemetry().to_string();
                 if tx.send(Message::Text(msg.into())).await.is_err() {
