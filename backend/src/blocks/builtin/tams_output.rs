@@ -792,9 +792,10 @@ fn build_flow_chain(
             segment_ns,
         );
 
-        // Per-block timeline: TAI = running time + offset, anchored on the first
-        // fragment. The anchor is the buffer's capture time when it carries a
-        // reference timestamp, otherwise the running time -> TAI mapping shared by
+        // Per-block timeline: TAI = running time + offset. A fragment whose first
+        // buffer carries a reference timestamp starts at that capture time and
+        // re-anchors the timeline on it. Otherwise the timeline is anchored on the
+        // first fragment by the running time -> TAI mapping shared by
         // every TAMS Output of this pipeline run, so equal running time gives equal
         // TAI across blocks (#966). See `crate::tams::tai_mapping`.
         let timeline = Arc::new(Mutex::new(FragmentTimeline::default()));
@@ -832,16 +833,19 @@ fn build_flow_chain(
             let location = temp_dir.join(format!("seg_{:05}.{}", fragment_id, file_ext));
             let location_str = location.to_string_lossy().to_string();
 
+            // Capture time of the fragment's first buffer, when it carries one.
+            let reference_ns = buffer
+                .as_ref()
+                .and_then(|b| reference_tai_ns(b.as_ref(), tai.tai_minus_utc_ns()));
+            // One frame: a capture time this close to where running time puts
+            // the buffer continues the previous fragment.
+            let frame_ns = buffer
+                .as_ref()
+                .and_then(|b| b.duration())
+                .map_or(50_000_000, |d| d.nseconds() + 1_000_000);
             let placed = {
                 let mut tl = timeline.lock().unwrap_or_else(|e| e.into_inner());
-                tl.place(running_time_ns, segment_ns, || {
-                    let tai_minus_utc = tai.tai_minus_utc_ns();
-                    if let Some(t) = buffer
-                        .as_ref()
-                        .and_then(|b| reference_tai_ns(b.as_ref(), tai_minus_utc))
-                    {
-                        return (t, AnchorKind::Reference);
-                    }
+                tl.place(running_time_ns, segment_ns, reference_ns, frame_ns, || {
                     if let Some(el) = element.as_ref() {
                         if let (Some(clock), Some(base)) = (el.clock(), el.base_time()) {
                             let m = shared_pipeline_mapping(flow_id, &clock, base.nseconds(), &tai);
@@ -883,11 +887,7 @@ fn build_flow_chain(
             if placed.since_anchor >= FIRST_ON_GRID_FRAGMENT {
                 // Splits land on the first keyframe at or after the grid point,
                 // so up to one frame past it is on the grid.
-                let tolerance_ns = buffer
-                    .as_ref()
-                    .and_then(|b| b.duration())
-                    .map_or(50_000_000, |d| d.nseconds() + 1_000_000);
-                if let Some(miss) = grid_miss_ns(abs_start, segment_ns, tolerance_ns) {
+                if let Some(miss) = grid_miss_ns(abs_start, segment_ns, frame_ns) {
                     warn_off_grid(&block_id_sig, &tag, &off_grid, miss);
                 }
             }
