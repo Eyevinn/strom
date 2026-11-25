@@ -268,7 +268,7 @@ pub enum AnchorKind {
     Reference,
     /// The shared pipeline mapping.
     Pipeline,
-    /// Host TAI "now" (no clock, or recovery from a backward running time).
+    /// Host TAI "now": the block has no pipeline clock yet.
     Arrival,
 }
 
@@ -281,33 +281,59 @@ pub struct FragmentTimeline {
     offset_ns: Option<i128>,
     last_running_time_ns: u64,
     last_start_ns: u64,
+    /// TAI of the grid point the last fragment was planned to end on.
+    planned_end_ns: Option<u64>,
 }
 
 /// Outcome of placing one fragment on the timeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FragmentStart {
     pub start_ns: u64,
+    /// Where the previous fragment ends: this fragment's start, except after a
+    /// backward jump, where it is the grid point the previous fragment was
+    /// planned to end on.
+    pub prev_end_ns: u64,
     /// Set when this fragment (re)anchored the timeline.
     pub anchored: Option<AnchorKind>,
     /// Set when running time went backward and the timeline was re-anchored.
     pub went_backward: bool,
+    /// After a backward jump: how far the start was moved forward so it does
+    /// not overlap the previous fragment.
+    pub clamped_by_ns: Option<u64>,
+}
+
+/// First multiple of `segment_ns` strictly after `tai_ns`.
+fn next_grid_point(tai_ns: i128, segment_ns: u64) -> i128 {
+    let seg = segment_ns as i128;
+    (tai_ns.div_euclid(seg) + 1) * seg
 }
 
 impl FragmentTimeline {
-    /// Place a fragment whose first buffer has `running_time_ns`.
+    /// Place a fragment whose first buffer has `running_time_ns`, on a grid of
+    /// `segment_ns` (0 = no grid).
     ///
-    /// `anchor` is asked for `(TAI of this buffer, kind)` only when the timeline is
-    /// not anchored yet. `now_tai_ns` is asked only when running time went
-    /// backward: the timeline then re-anchors at host TAI now (but never before
-    /// the previous fragment's start), so segments never overlap.
+    /// `anchor` gives the TAI of this buffer and how it was found: the buffer's
+    /// reference timestamp, else the mapping shared by every block of the
+    /// pipeline run, else host TAI now. It is asked when the timeline is not
+    /// anchored yet, and again when running time went backward. Within one
+    /// pipeline run the shared mapping stays valid across such a jump, so
+    /// every block that sees it re-anchors on the same TAI and the angles stay
+    /// aligned (host "now" would differ per block).
+    ///
+    /// After a backward jump the start is never earlier than the grid point the
+    /// previous fragment was planned to end on, so that fragment keeps its full
+    /// timerange rather than being cut to where the new one begins. Blocks on
+    /// one grid clamp to the same point.
     pub fn place(
         &mut self,
         running_time_ns: u64,
+        segment_ns: u64,
         anchor: impl FnOnce() -> (u64, AnchorKind),
-        now_tai_ns: impl FnOnce() -> u64,
     ) -> FragmentStart {
         let mut anchored = None;
         let mut went_backward = false;
+        let mut clamped_by_ns = None;
+        let mut prev_end_ns = None;
         match self.offset_ns {
             None => {
                 let (tai, kind) = anchor();
@@ -315,9 +341,17 @@ impl FragmentTimeline {
                 anchored = Some(kind);
             }
             Some(_) if running_time_ns < self.last_running_time_ns => {
-                let tai = now_tai_ns().max(self.last_start_ns + 1);
-                self.offset_ns = Some(tai as i128 - running_time_ns as i128);
-                anchored = Some(AnchorKind::Arrival);
+                let (tai, kind) = anchor();
+                let floor = self
+                    .planned_end_ns
+                    .unwrap_or(self.last_start_ns.saturating_add(1));
+                let start = tai.max(floor);
+                if start > tai {
+                    clamped_by_ns = Some(start - tai);
+                }
+                self.offset_ns = Some(start as i128 - running_time_ns as i128);
+                prev_end_ns = Some(floor.min(start));
+                anchored = Some(kind);
                 went_backward = true;
             }
             Some(_) => {}
@@ -326,15 +360,17 @@ impl FragmentTimeline {
         let start_ns = clamp_ns(running_time_ns as i128 + offset);
         self.last_running_time_ns = running_time_ns;
         self.last_start_ns = start_ns;
+        self.planned_end_ns =
+            (segment_ns > 0).then(|| clamp_ns(next_grid_point(start_ns as i128, segment_ns)));
         FragmentStart {
             start_ns,
+            prev_end_ns: prev_end_ns.unwrap_or(start_ns),
             anchored,
             went_backward,
+            clamped_by_ns,
         }
     }
-}
 
-impl FragmentTimeline {
     /// Running time of the next split point after a fragment that starts at
     /// `running_time_ns`: the next multiple of `segment_ns` on the TAI timeline.
     ///
@@ -346,10 +382,8 @@ impl FragmentTimeline {
         if segment_ns == 0 {
             return None;
         }
-        let seg = segment_ns as i128;
         let tai = running_time_ns as i128 + offset;
-        let next_tai = (tai.div_euclid(seg) + 1) * seg;
-        Some(clamp_ns(next_tai - offset))
+        Some(clamp_ns(next_grid_point(tai, segment_ns) - offset))
     }
 }
 
@@ -507,9 +541,9 @@ mod tests {
         let mut cam2 = FragmentTimeline::default();
         let anchor = |rt| move || (mapping.tai_ns(base, rt), AnchorKind::Pipeline);
         // cam2's first fragment opens one segment later than cam1's.
-        let s1 = cam1.place(0, anchor(0), || unreachable!());
-        let s1b = cam1.place(1_000_000_000, anchor(1_000_000_000), || unreachable!());
-        let s2b = cam2.place(1_000_000_000, anchor(1_000_000_000), || unreachable!());
+        let s1 = cam1.place(0, 0, anchor(0));
+        let s1b = cam1.place(1_000_000_000, 0, anchor(1_000_000_000));
+        let s2b = cam2.place(1_000_000_000, 0, anchor(1_000_000_000));
         assert_eq!(s1.anchored, Some(AnchorKind::Pipeline));
         assert_eq!(s1b.anchored, None);
         assert_eq!(s1b.start_ns, s2b.start_ns);
@@ -521,34 +555,86 @@ mod tests {
         let mut tl = FragmentTimeline::default();
         assert_eq!(tl.next_split_running_time(0, 1_000), None);
         // Running time 100 is TAI 10_350.
-        tl.place(100, || (10_350, AnchorKind::Pipeline), || unreachable!());
+        tl.place(100, 1_000, || (10_350, AnchorKind::Pipeline));
         // Next TAI multiple of 1_000 is 11_000 = running time 750.
         assert_eq!(tl.next_split_running_time(100, 1_000), Some(750));
         // A fragment that starts on the grid ends one segment later.
-        tl.place(750, || unreachable!(), || unreachable!());
+        tl.place(750, 1_000, || unreachable!());
         assert_eq!(tl.next_split_running_time(750, 1_000), Some(1_750));
         // A late keyframe (TAI 12_040) ends at the following grid point.
-        tl.place(1_790, || unreachable!(), || unreachable!());
+        tl.place(1_790, 1_000, || unreachable!());
         assert_eq!(tl.next_split_running_time(1_790, 1_000), Some(2_750));
         assert_eq!(tl.next_split_running_time(1_790, 0), None);
     }
 
     #[test]
-    fn fragments_are_contiguous_and_reanchor_on_backward_running_time() {
+    fn fragments_are_contiguous() {
         let mut tl = FragmentTimeline::default();
-        let a = tl.place(500, || (10_000, AnchorKind::Reference), || unreachable!());
+        let a = tl.place(500, 1_000, || (10_000, AnchorKind::Reference));
         assert_eq!(a.start_ns, 10_000);
         assert_eq!(a.anchored, Some(AnchorKind::Reference));
-        let b = tl.place(1_500, || unreachable!(), || unreachable!());
-        assert_eq!(b.start_ns, 11_000);
-        // Running time steps back: re-anchor at "now", never before the last start.
-        let c = tl.place(100, || unreachable!(), || 5);
-        assert!(c.went_backward);
-        assert_eq!(c.anchored, Some(AnchorKind::Arrival));
-        assert_eq!(c.start_ns, 11_001);
-        let d = tl.place(1_100, || unreachable!(), || unreachable!());
-        assert_eq!(d.start_ns, 12_001);
-        let e = tl.place(200, || unreachable!(), || 50_000);
-        assert_eq!(e.start_ns, 50_000);
+        let b = tl.place(1_500, 1_000, || unreachable!());
+        assert_eq!((b.start_ns, b.prev_end_ns), (11_000, 11_000));
+        assert!(!b.went_backward && b.anchored.is_none());
+    }
+
+    /// Running time steps back inside one pipeline run (review M2). The shared
+    /// mapping still holds, so the block re-anchors on it, not on host "now":
+    /// two blocks that see the jump at different moments stay aligned, and the
+    /// fragment before the jump keeps its planned timerange.
+    #[test]
+    fn backward_running_time_reanchors_on_the_shared_mapping() {
+        const SEG: u64 = 1_000_000_000;
+        let mapping = PipelineTaiMapping {
+            offset_ns: 1_800_000_000_000_000_000,
+            domain: ClockDomain::Other,
+        };
+        let base = 0;
+        let anchor = |rt| move || (mapping.tai_ns(base, rt), AnchorKind::Pipeline);
+        let mut cam1 = FragmentTimeline::default();
+        let mut cam2 = FragmentTimeline::default();
+        for tl in [&mut cam1, &mut cam2] {
+            tl.place(10 * SEG, SEG, anchor(10 * SEG));
+            tl.place(11 * SEG, SEG, anchor(11 * SEG));
+        }
+        // The source restarts: running time is back at 2 s. The mapping places
+        // it before the open fragment, so the start is clamped to the grid
+        // point that fragment was planned to end on.
+        let c1 = cam1.place(2 * SEG, SEG, anchor(2 * SEG));
+        let c2 = cam2.place(2 * SEG, SEG, anchor(2 * SEG));
+        assert!(c1.went_backward);
+        assert_eq!(c1.anchored, Some(AnchorKind::Pipeline));
+        assert_eq!(c1, c2, "both blocks re-anchor on the same TAI");
+        let planned_end = mapping.tai_ns(base, 12 * SEG);
+        assert_eq!(c1.start_ns, planned_end);
+        assert_eq!(
+            c1.prev_end_ns, planned_end,
+            "previous fragment not cut short"
+        );
+        assert_eq!(c1.clamped_by_ns, Some(10 * SEG));
+        // Later fragments follow the new offset on both blocks.
+        let d1 = cam1.place(3 * SEG, SEG, || unreachable!());
+        let d2 = cam2.place(3 * SEG, SEG, || unreachable!());
+        assert_eq!(d1.start_ns, planned_end + SEG);
+        assert_eq!(d1, d2);
+    }
+
+    /// A backward jump whose anchor is already past the planned end (the source
+    /// was away for a while) is not clamped: the store gets a gap, and the
+    /// previous fragment ends at its planned grid point, not at the new start.
+    #[test]
+    fn backward_running_time_after_a_gap_leaves_a_gap() {
+        let mut tl = FragmentTimeline::default();
+        tl.place(5_000, 1_000, || (100_000, AnchorKind::Reference));
+        let b = tl.place(100, 1_000, || (250_000, AnchorKind::Reference));
+        assert!(b.went_backward);
+        assert_eq!(b.start_ns, 250_000);
+        assert_eq!(b.prev_end_ns, 101_000);
+        assert_eq!(b.clamped_by_ns, None);
+        // Without a grid, the floor is one ns after the previous start.
+        let mut tl = FragmentTimeline::default();
+        tl.place(5_000, 0, || (100_000, AnchorKind::Arrival));
+        let b = tl.place(100, 0, || (5, AnchorKind::Arrival));
+        assert_eq!((b.start_ns, b.prev_end_ns), (100_001, 100_001));
     }
 }

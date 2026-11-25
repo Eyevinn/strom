@@ -838,37 +838,45 @@ fn build_flow_chain(
 
             let placed = {
                 let mut tl = timeline.lock().unwrap_or_else(|e| e.into_inner());
-                tl.place(
-                    running_time_ns,
-                    || {
-                        let tai_minus_utc = tai.tai_minus_utc_ns();
-                        if let Some(t) = buffer
-                            .as_ref()
-                            .and_then(|b| reference_tai_ns(b.as_ref(), tai_minus_utc))
-                        {
-                            return (t, AnchorKind::Reference);
+                tl.place(running_time_ns, tail_segment_ns, || {
+                    let tai_minus_utc = tai.tai_minus_utc_ns();
+                    if let Some(t) = buffer
+                        .as_ref()
+                        .and_then(|b| reference_tai_ns(b.as_ref(), tai_minus_utc))
+                    {
+                        return (t, AnchorKind::Reference);
+                    }
+                    if let Some(el) = element.as_ref() {
+                        if let (Some(clock), Some(base)) = (el.clock(), el.base_time()) {
+                            let m = shared_pipeline_mapping(flow_id, &clock, base.nseconds(), &tai);
+                            return (
+                                m.tai_ns(base.nseconds(), running_time_ns),
+                                AnchorKind::Pipeline,
+                            );
                         }
-                        if let Some(el) = element.as_ref() {
-                            if let (Some(clock), Some(base)) = (el.clock(), el.base_time()) {
-                                let m =
-                                    shared_pipeline_mapping(flow_id, &clock, base.nseconds(), &tai);
-                                return (
-                                    m.tai_ns(base.nseconds(), running_time_ns),
-                                    AnchorKind::Pipeline,
-                                );
-                            }
-                        }
-                        (tai.now_ns(), AnchorKind::Arrival)
-                    },
-                    || tai.now_ns(),
-                )
+                    }
+                    (tai.now_ns(), AnchorKind::Arrival)
+                })
             };
             if placed.went_backward {
                 warn!(
-                    "TAMS {} ({}): running time went backward (to {} ns), re-anchoring \
-                     segment timeline to current TAI",
-                    block_id_sig, tag, running_time_ns
+                    "TAMS {} ({}): running time went backward (to {} ns), re-anchored \
+                     ({:?}) at TAI {} ns",
+                    block_id_sig,
+                    tag,
+                    running_time_ns,
+                    placed.anchored.unwrap_or(AnchorKind::Arrival),
+                    placed.start_ns
                 );
+                if let Some(by) = placed.clamped_by_ns {
+                    warn!(
+                        "TAMS {} ({}): moved the segment start {} ms later so it does not \
+                         overlap the previous segment's planned end",
+                        block_id_sig,
+                        tag,
+                        by / 1_000_000
+                    );
+                }
             } else if let Some(kind) = placed.anchored {
                 info!(
                     "TAMS {} ({}): timeline anchored ({:?}): running time {} ns -> TAI {} ns",
@@ -906,14 +914,15 @@ fn build_flow_chain(
                 });
             }
 
-            // The previously open fragment is now complete: [its start, this start).
+            // The previously open fragment is now complete: [its start, this start),
+            // or [its start, its planned end) after a backward jump.
             // The just-opened one becomes the new tail (flushed on shutdown).
             if let Ok(mut tail) = tail.lock() {
                 if let Some(prev) = tail.take() {
                     let ready = FragmentReady {
                         path: prev.path,
                         start_ns: prev.start_ns,
-                        end_ns: abs_start,
+                        end_ns: placed.prev_end_ns.max(prev.start_ns + 1),
                     };
                     if let Err(e) = tx.try_send(ready) {
                         warn!(
