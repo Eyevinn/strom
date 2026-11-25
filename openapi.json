@@ -10277,6 +10277,32 @@
           },
           {
             "type": "object",
+            "description": "Change speed smoothly: linearly from the speed now to `to` over\n`duration_ms` (at most 60000), run by the server. Keeps the cue; any\nother command that sets the speed ends the ramp.",
+            "required": [
+              "to",
+              "duration_ms",
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "ramp"
+                ]
+              },
+              "duration_ms": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "to": {
+                "type": "number",
+                "format": "double"
+              }
+            }
+          },
+          {
+            "type": "object",
             "description": "Pause where the cursor is.",
             "required": [
               "cmd"

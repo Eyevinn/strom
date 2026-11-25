@@ -359,6 +359,35 @@ impl Region {
     }
 }
 
+/// Longest speed ramp a client may ask for.
+pub const MAX_RAMP_MS: u64 = 60_000;
+
+/// A linear change of speed from the anchor's speed to `to` over
+/// `duration_ns` of running time, then on at `to`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Ramp {
+    to: f64,
+    duration_ns: i64,
+}
+
+/// Distance moved (ns of media) and the speed, `dt` after an anchor at
+/// `speed`, ramping or not.
+fn travel(speed: f64, ramp: Option<Ramp>, dt: i64) -> (f64, f64) {
+    let t = dt as f64;
+    match ramp {
+        Some(r) if dt > 0 => {
+            let d = r.duration_ns as f64;
+            if t < d {
+                let v = speed + (r.to - speed) * t / d;
+                (speed * t + (r.to - speed) * t * t / (2.0 * d), v)
+            } else {
+                ((speed + r.to) / 2.0 * d + r.to * (t - d), r.to)
+            }
+        }
+        _ => (speed * t, speed),
+    }
+}
+
 /// Where the cursor line starts: a TAI instant, or the group's start, and
 /// how it moves from there.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -366,7 +395,10 @@ struct Anchor {
     rt: i64,
     /// Cursor TAI at `rt`; `None` = at the start of the group's range.
     tai: Option<i64>,
+    /// Speed at `rt`.
     speed: f64,
+    /// A speed ramp that starts at `rt`.
+    ramp: Option<Ramp>,
     /// The bound of play, if a cue is held. Invariant: holds the cursor at
     /// `rt` (commands that leave it drop it).
     region: Option<Region>,
@@ -382,6 +414,7 @@ const START_ANCHOR: Anchor = Anchor {
     rt: 0,
     tai: None,
     speed: 0.0,
+    ramp: None,
     region: None,
     live: false,
     catch_up: false,
@@ -410,9 +443,8 @@ struct Eval {
 /// group plays from when live (the live edge minus the margin).
 fn eval(a: &Anchor, rt: i64, b: &Bounds, live_from: i64) -> Eval {
     let from = a.tai.unwrap_or(b.start) as i128;
-    let moved = (a.speed * (rt - a.rt) as f64).round() as i128;
-    let mut pos = from + moved;
-    let mut speed = a.speed;
+    let (moved, mut speed) = travel(a.speed, a.ramp, rt - a.rt);
+    let mut pos = from + moved.round() as i128;
     let mut hit = None;
     if let Some(r) = a.region {
         let (start, end) = (r.start as i128, r.end as i128);
@@ -713,6 +745,7 @@ impl ReplayTimeline {
                     rt,
                     tai: Some(e.tai),
                     speed: 0.0,
+                    ramp: None,
                     region: a.region,
                     live: false,
                     catch_up: false,
@@ -726,6 +759,7 @@ impl ReplayTimeline {
                     rt,
                     tai: Some(to),
                     speed: 1.0,
+                    ramp: None,
                     region: None,
                     live: true,
                     catch_up: false,
@@ -742,6 +776,7 @@ impl ReplayTimeline {
                     rt,
                     tai: Some(e.tai),
                     speed: 1.0,
+                    ramp: None,
                     region: None,
                     live: true,
                     catch_up: false,
@@ -854,6 +889,7 @@ impl ReplayTimeline {
             || reference.ok_or_else(|| conflict("the group's frame rate is not known yet"));
         let mut a = lock(&self.anchor);
         let (cur, cur_speed) = self.advance(&mut a, now, &b);
+        let mut ramp = None;
         let live = match cmd {
             Command::Live { .. } => true,
             Command::Uncue => a.live,
@@ -901,6 +937,24 @@ impl ReplayTimeline {
                 Cue::Keep,
             ),
             Command::Speed { speed } => (cur, check_speed(speed)?, Cue::Keep),
+            Command::Ramp { to, duration_ms } => {
+                let to = check_speed(to)?;
+                if duration_ms > MAX_RAMP_MS {
+                    return Err(invalid(format!(
+                        "ramp: duration_ms {} is over {}",
+                        duration_ms, MAX_RAMP_MS
+                    )));
+                }
+                if duration_ms > 0 {
+                    ramp = Some(Ramp {
+                        to,
+                        duration_ns: duration_ms as i64 * 1_000_000,
+                    });
+                    (cur, cur_speed, Cue::Keep)
+                } else {
+                    (cur, to, Cue::Keep)
+                }
+            }
             Command::Play {
                 speed,
                 until,
@@ -1008,11 +1062,12 @@ impl ReplayTimeline {
             rt: now,
             tai: Some(tai),
             speed,
+            ramp,
             region,
             live,
             catch_up: tai < self.live_target(&b),
         };
-        *lock(&self.last_cmd) = (speed == 0.0).then(|| (Instant::now(), tai));
+        *lock(&self.last_cmd) = (speed == 0.0 && ramp.is_none()).then(|| (Instant::now(), tai));
         Ok(Applied {
             tai,
             speed,
@@ -1145,7 +1200,19 @@ impl ReplayTimeline {
         let time_of = |tai: i64| FrameTime::new(&g, g.floor_frame(tai), origin).to_json();
         let (cursor, speed) = self.advance(&mut lock(&self.anchor), now, &b);
         v["speed"] = speed.into();
-        v["live"] = lock(&self.anchor).live.into();
+        let a = *lock(&self.anchor);
+        v["live"] = a.live.into();
+        if let Some(r) = a.ramp {
+            let left = r.duration_ns - (now - a.rt);
+            if left > 0 {
+                v["ramp"] = serde_json::json!({
+                    "from": a.speed,
+                    "to": r.to,
+                    "duration_ms": r.duration_ns / 1_000_000,
+                    "remaining_ms": left / 1_000_000,
+                });
+            }
+        }
         v["cue"] = serde_json::to_value(self.cue().map(Region::to_api)).unwrap_or_default();
         let behind_ms = |t: i64| ((b.live_end - t) as f64 / 1e6).round();
         v["reference_fps"] = fps_string(&g).into();

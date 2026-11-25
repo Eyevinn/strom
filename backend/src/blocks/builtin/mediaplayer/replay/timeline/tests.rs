@@ -859,3 +859,80 @@ fn play_inside_the_live_margin_does_not_go_live() {
     assert_eq!(tl.cursor_tai(3 * S), Some((BASE + 59 * S - 1, 0.0)));
     assert!(matches!(events.try_recv(), Ok(ReplayEvent::Ended { .. })));
 }
+
+// --- speed ramps -----------------------------------------------------------
+
+#[test]
+fn ramp_changes_speed_linearly_on_the_server() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let from = BASE + 10 * S;
+    tl.apply_at(seek_tai(from), 0).unwrap();
+    let c = parse(r#"{"cmd":"ramp","to":1.0,"duration_ms":1000}"#).unwrap();
+    assert_eq!(
+        c,
+        Command::Ramp {
+            to: 1.0,
+            duration_ms: 1000
+        }
+    );
+    tl.apply_at(c, 0).unwrap();
+    // Halfway: half speed, a quarter of the way (v t / 2).
+    assert_eq!(tl.cursor_tai(S / 2), Some((from + 125 * MS, 0.5)));
+    assert_eq!(tl.cursor_tai(S), Some((from + S / 2, 1.0)));
+    assert_eq!(tl.cursor_tai(2 * S), Some((from + 3 * S / 2, 1.0)));
+    // A ramp from the speed it is at: 1x down to 0.25x.
+    tl.apply_at(
+        Command::Ramp {
+            to: 0.25,
+            duration_ms: 2000,
+        },
+        2 * S,
+    )
+    .unwrap();
+    let (t, v) = tl.cursor_tai(3 * S).unwrap();
+    assert_eq!(v, 0.625);
+    assert_eq!(t, from + 3 * S / 2 + 812_500_000);
+    // A speed command ends the ramp where it is.
+    let a = tl.apply_at(Command::Speed { speed: 2.0 }, 3 * S).unwrap();
+    assert_eq!(a.tai, t);
+    assert_eq!(tl.cursor_tai(4 * S), Some((t + 2 * S, 2.0)));
+}
+
+#[test]
+fn ramp_is_validated_and_keeps_the_cue() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let bad = |to, duration_ms| {
+        matches!(
+            tl.apply_at(Command::Ramp { to, duration_ms }, 0),
+            Err(CommandError::Invalid(_))
+        )
+    };
+    assert!(bad(9.0, 100));
+    assert!(bad(f64::NAN, 100));
+    assert!(bad(1.0, MAX_RAMP_MS + 1));
+    // Zero duration is a plain speed change.
+    let a = tl
+        .apply_at(
+            Command::Ramp {
+                to: 0.5,
+                duration_ms: 0,
+            },
+            0,
+        )
+        .unwrap();
+    assert_eq!(a.speed, 0.5);
+    // Ramping up inside a cue still freezes at out.
+    tl.apply_at(cue(BASE + 10 * S, BASE + 11 * S, None), 0)
+        .unwrap();
+    tl.apply_at(
+        Command::Ramp {
+            to: 4.0,
+            duration_ms: 1000,
+        },
+        0,
+    )
+    .unwrap();
+    assert!(tl.cue().is_some());
+    assert_eq!(tl.cursor_tai(5 * S), Some((BASE + 11 * S - 1, 0.0)));
+    assert!(tl.telemetry().get("ramp").is_none());
+}

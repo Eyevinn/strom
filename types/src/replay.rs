@@ -70,6 +70,10 @@ pub enum ReplayCommand {
     },
     /// Drop the cue; the cursor and speed stay.
     Uncue,
+    /// Change speed smoothly: linearly from the speed now to `to` over
+    /// `duration_ms` (at most 60000), run by the server. Keeps the cue; any
+    /// other command that sets the speed ends the ramp.
+    Ramp { to: f64, duration_ms: u64 },
     /// Pause where the cursor is.
     Pause,
     /// Go to the live edge (the last instant every angle has) and pause.
