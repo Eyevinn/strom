@@ -418,9 +418,17 @@ pub async fn create_app_with_config(
         .route("/devtools/links", get(api::devtools::list_links))
         .route("/devtools/links", delete(api::devtools::revoke_all_links))
         .route("/devtools/links/{id}", delete(api::devtools::revoke_link))
-        // Logging
-        // Replay control (jog, speed, cue) per replay group
+        // Replay control per replay group: commands and state, REST and WS
+        .route(
+            "/replay/{flow_id}/{group}/command",
+            post(api::replay::replay_command),
+        )
+        .route(
+            "/replay/{flow_id}/{group}/state",
+            get(api::replay::replay_state),
+        )
         .route("/replay/{flow_id}/{group}/ws", get(api::replay::replay_ws))
+        // Logging
         .route("/log-level", get(api::logging::get_log_level))
         .route("/log-level", put(api::logging::set_log_level))
         .route("/gst-log-level", get(api::logging::get_gst_log_level))

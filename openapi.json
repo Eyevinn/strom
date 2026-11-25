@@ -1406,6 +1406,50 @@
         }
       }
     },
+    "/api/flows/{flow_id}/blocks/{block_id}/pgm-endpoint": {
+      "get": {
+        "tags": [
+          "vision-mixer"
+        ],
+        "summary": "Get the WHEP endpoint fed by a vision mixer's PGM output (followed through\nintermediate blocks such as an encoder).",
+        "operationId": "get_pgm_endpoint",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PGM endpoint info",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MultiviewEndpointResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Flow or block not found"
+          }
+        }
+      }
+    },
     "/api/flows/{flow_id}/blocks/{block_id}/pip/{pip_idx}": {
       "get": {
         "tags": [
@@ -5618,6 +5662,138 @@
           },
           "503": {
             "description": "No port pool is configured on this server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/replay/{flow_id}/{group}/command": {
+      "post": {
+        "tags": [
+          "replay"
+        ],
+        "summary": "Send a command to a replay group.",
+        "operationId": "replay_command",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group",
+            "in": "path",
+            "description": "Replay group",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplayCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Command applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayCommandResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed command or value out of range",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Replay group not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The command does not apply to the group now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/replay/{flow_id}/{group}/state": {
+      "get": {
+        "tags": [
+          "replay"
+        ],
+        "summary": "The state of a replay group (the object the WebSocket streams).",
+        "operationId": "replay_state",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group",
+            "in": "path",
+            "description": "Replay group",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Group state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Replay group not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -9887,6 +10063,622 @@
             "minimum": 0
           }
         }
+      },
+      "ReplayCommand": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Pause and move by a number of reference-grid frames.",
+            "required": [
+              "frames",
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "jog"
+                ]
+              },
+              "frames": {
+                "type": "integer",
+                "format": "int64"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Go to an instant: exactly one of `frame`, `utc`, `tai`,\n`from_live_ms`. Keeps the speed unless `speed` is given, in which case\nthe seek and the speed change are one step (no frame in between).",
+            "required": [
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "seek"
+                ]
+              },
+              "frame": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Reference frame, relative to the group origin."
+              },
+              "from_live_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Milliseconds before the live edge (the last instant every angle\nhas), e.g. 8000 to replay the last 8 s.",
+                "minimum": 0
+              },
+              "speed": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "description": "Speed from the new position, -8 .. 8; omitted keeps the speed."
+              },
+              "tai": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "TAI as TAMS `\"<seconds>:<nanoseconds>\"`."
+              },
+              "utc": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "UTC, RFC 3339, e.g. `2026-11-24T13:21:56.080Z`."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Move by milliseconds, keeping the speed.",
+            "required": [
+              "ms",
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "seek_rel"
+                ]
+              },
+              "ms": {
+                "type": "integer",
+                "format": "int64"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Play at a speed (negative = reverse, 0 = pause), -8 .. 8.",
+            "required": [
+              "speed",
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "speed"
+                ]
+              },
+              "speed": {
+                "type": "number",
+                "format": "double"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Play. Without `until`, a cue bounds the play (and a play at the cue's\nend starts again from its other end); with `until`, play runs to that\ninstant (from the cue's start, if a cue holds the cursor).",
+            "required": [
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "play"
+                ]
+              },
+              "end_action": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ReplayEndAction",
+                    "description": "What happens at the end; default the cue's, else `freeze`."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "speed": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "description": "Speed, -8 .. 8 except 0; default 1."
+              },
+              "until": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ReplayTimeRef",
+                    "description": "Where the play ends: ahead of the cursor in the direction of play."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Cue a clip: hold `[in, out)` as the bound of play and park, paused, at\n`in`. Seeking or jogging outside the cue, `live` and `end` drop it.",
+            "required": [
+              "in",
+              "out",
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "cue"
+                ]
+              },
+              "end_action": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ReplayEndAction",
+                    "description": "What happens when play reaches either end; default `freeze`."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "in": {
+                "$ref": "#/components/schemas/ReplayTimeRef"
+              },
+              "out": {
+                "$ref": "#/components/schemas/ReplayTimeRef",
+                "description": "Exclusive: a freeze holds the last frame that starts before it."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Drop the cue; the cursor and speed stay.",
+            "required": [
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "uncue"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Change speed smoothly: linearly from the speed now to `to` over\n`duration_ms` (at most 60000), run by the server. Keeps the cue; any\nother command that sets the speed ends the ramp.",
+            "required": [
+              "to",
+              "duration_ms",
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "ramp"
+                ]
+              },
+              "duration_ms": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "to": {
+                "type": "number",
+                "format": "double"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Mark the picture going out now: the server stamps the frame the\nplayers last pushed (not the cursor a client last heard of). Changes\nnothing; the result carries the mark.",
+            "required": [
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "mark"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Echoed in the mark."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Pause where the cursor is.",
+            "required": [
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "pause"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Go to the live edge (the last instant every angle has) and pause.",
+            "required": [
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "end"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Play at 1x from the live edge minus a margin (default 1500 ms).",
+            "required": [
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "live"
+                ]
+              },
+              "margin_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "A command for a replay group. JSON objects tagged by `cmd`."
+      },
+      "ReplayCommandResult": {
+        "type": "object",
+        "description": "What a command did.",
+        "required": [
+          "speed",
+          "cursor_tai",
+          "live"
+        ],
+        "properties": {
+          "cue": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayCue",
+                "description": "The bound of play the server holds, if any."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cursor_tai": {
+            "$ref": "#/components/schemas/ReplayInstant",
+            "description": "The cursor after the command."
+          },
+          "frame": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The reference frame that holds the cursor, once the grid is known."
+          },
+          "live": {
+            "type": "boolean",
+            "description": "Following the live edge (after `live`, or after catching up)."
+          },
+          "mark": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayMark",
+                "description": "The mark, for `mark`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "speed": {
+            "type": "number",
+            "format": "double",
+            "description": "The speed after the command."
+          },
+          "time": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayFrameTime",
+                "description": "That frame's time."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ReplayCue": {
+        "type": "object",
+        "description": "The bound of play the server holds.",
+        "required": [
+          "in",
+          "out",
+          "end_action"
+        ],
+        "properties": {
+          "end_action": {
+            "$ref": "#/components/schemas/ReplayEndAction"
+          },
+          "in": {
+            "$ref": "#/components/schemas/ReplayInstant"
+          },
+          "out": {
+            "$ref": "#/components/schemas/ReplayInstant",
+            "description": "Exclusive."
+          }
+        }
+      },
+      "ReplayEndAction": {
+        "type": "string",
+        "description": "What bounded play does when it reaches the end of its range.",
+        "enum": [
+          "freeze",
+          "loop",
+          "live"
+        ]
+      },
+      "ReplayEvent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Bounded play reached the end of its range and froze there.",
+            "required": [
+              "at",
+              "event"
+            ],
+            "properties": {
+              "at": {
+                "$ref": "#/components/schemas/ReplayInstant"
+              },
+              "event": {
+                "type": "string",
+                "enum": [
+                  "ended"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The group went live: playing at 1x behind the live edge.",
+            "required": [
+              "reason",
+              "at",
+              "event"
+            ],
+            "properties": {
+              "at": {
+                "$ref": "#/components/schemas/ReplayInstant"
+              },
+              "event": {
+                "type": "string",
+                "enum": [
+                  "live"
+                ]
+              },
+              "reason": {
+                "$ref": "#/components/schemas/ReplayLiveReason"
+              }
+            }
+          }
+        ],
+        "description": "Something the group did by itself, sent on the WebSocket as\n`{\"type\": \"event\", \"event\": ..., ...}`."
+      },
+      "ReplayFrameTime": {
+        "type": "object",
+        "description": "A frame on a grid: where it starts.",
+        "required": [
+          "frame",
+          "utc",
+          "tai",
+          "tai_ns",
+          "tai_clock",
+          "frame_in_second"
+        ],
+        "properties": {
+          "frame": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Frame relative to the group origin, on the same grid."
+          },
+          "frame_in_second": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Index of the frame among the frames that start in its UTC second."
+          },
+          "tai": {
+            "type": "string",
+            "description": "TAI of the frame start, `\"<seconds>:<nanoseconds>\"`."
+          },
+          "tai_clock": {
+            "type": "string",
+            "description": "The TAI as a calendar time (no zone), for display."
+          },
+          "tai_ns": {
+            "type": "string",
+            "description": "TAI nanoseconds of the frame start, as a string."
+          },
+          "utc": {
+            "type": "string",
+            "description": "UTC of the frame start, RFC 3339 with milliseconds."
+          }
+        }
+      },
+      "ReplayInstant": {
+        "type": "object",
+        "description": "An instant on the group's timeline.",
+        "required": [
+          "utc",
+          "tai",
+          "tai_ns"
+        ],
+        "properties": {
+          "tai": {
+            "type": "string",
+            "description": "TAI as TAMS `\"<seconds>:<nanoseconds>\"`."
+          },
+          "tai_ns": {
+            "type": "string",
+            "description": "TAI nanoseconds as a string (does not fit in a JavaScript number)."
+          },
+          "utc": {
+            "type": "string",
+            "description": "UTC, RFC 3339 with milliseconds."
+          }
+        }
+      },
+      "ReplayLiveReason": {
+        "type": "string",
+        "description": "Why the group went live.",
+        "enum": [
+          "end_action",
+          "caught_up"
+        ]
+      },
+      "ReplayMark": {
+        "type": "object",
+        "description": "The picture going out when a `mark` came.",
+        "required": [
+          "cursor_tai",
+          "time",
+          "angles"
+        ],
+        "properties": {
+          "angles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplayMarkAngle"
+            },
+            "description": "What each angle pushed."
+          },
+          "cursor_tai": {
+            "$ref": "#/components/schemas/ReplayInstant",
+            "description": "The group time of the last pushed tick."
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "time": {
+            "$ref": "#/components/schemas/ReplayFrameTime",
+            "description": "The reference frame that holds it, and its time."
+          }
+        }
+      },
+      "ReplayMarkAngle": {
+        "type": "object",
+        "description": "One angle's picture in a mark.",
+        "required": [
+          "block",
+          "shown"
+        ],
+        "properties": {
+          "block": {
+            "type": "string",
+            "description": "The player block."
+          },
+          "shown": {
+            "$ref": "#/components/schemas/ReplayFrameTime",
+            "description": "The source frame it last pushed, on its own grid."
+          }
+        }
+      },
+      "ReplayTimeRef": {
+        "type": "object",
+        "description": "A point on the group's timeline, as a command gives it: exactly one\nfield.",
+        "properties": {
+          "frame": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Reference frame, relative to the group origin."
+          },
+          "from_live_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Milliseconds before the live edge.",
+            "minimum": 0
+          },
+          "tai": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "TAI as TAMS `\"<seconds>:<nanoseconds>\"`."
+          },
+          "utc": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "UTC, RFC 3339."
+          }
+        },
+        "additionalProperties": false
       },
       "RtpStreamStats": {
         "type": "object",
@@ -15022,6 +15814,10 @@
     {
       "name": "media_player",
       "description": "Media player control endpoints"
+    },
+    {
+      "name": "replay",
+      "description": "Replay group control: commands and state"
     },
     {
       "name": "probes",

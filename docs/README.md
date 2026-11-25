@@ -21,6 +21,7 @@ Common questions are answered in the [FAQ](FAQ.md).
 - [VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md) — broadcast PVW/PGM switcher: transitions, stingers, DSK, PiP, multiview.
 - [PRODUCER_SWITCHING_API_GUIDE.md](PRODUCER_SWITCHING_API_GUIDE.md) — driving the vision mixer over HTTP: PiP layout recipes, on-air edits, failure modes.
 - [AUDIO_MIXER_OPERATOR_GUIDE.md](AUDIO_MIXER_OPERATOR_GUIDE.md) — audio mixing console signal flow and operation.
+- [REPLAY_API.md](REPLAY_API.md) — driving a replay group (media players in timeline mode) over HTTP or WebSocket: seek, cue, bounded play, ramps, marks, state.
 - [MEDIA_LIBRARY.md](MEDIA_LIBRARY.md) — the media library: upload, download from a URL, and the Media Player.
 - [HTML_RENDER.md](HTML_RENDER.md) — render web pages as video sources (CEF / `strom-full`).
 - [STREAM_SYNCHRONIZATION.md](STREAM_SYNCHRONIZATION.md) — aligning multiple inputs with PTP/NTP clocks.

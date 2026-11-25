@@ -5,19 +5,27 @@ const S: i64 = 1_000_000_000;
 const MS: i64 = 1_000_000;
 
 fn seek(frame: i64) -> Command {
-    Command::Seek {
+    seek_at(ReplayTimeRef {
         frame: Some(frame),
-        utc: None,
-        tai: None,
+        ..Default::default()
+    })
+}
+
+fn seek_at(at: ReplayTimeRef) -> Command {
+    Command::Seek {
+        frame: at.frame,
+        utc: at.utc,
+        tai: at.tai,
+        from_live_ms: at.from_live_ms,
+        speed: None,
     }
 }
 
 fn seek_tai(tai: i64) -> Command {
-    Command::Seek {
-        frame: None,
-        utc: None,
+    seek_at(ReplayTimeRef {
         tai: Some(tai_string(tai)),
-    }
+        ..Default::default()
+    })
 }
 
 /// A player with an extent and, if given, a frame rate anchored at its start.
@@ -115,14 +123,7 @@ fn command_parses_live() {
     let c: Command = serde_json::from_str(r#"{"cmd":"live"}"#).unwrap();
     assert!(matches!(c, Command::Live { margin_ms: None }));
     let c: Command = serde_json::from_str(r#"{"cmd":"seek","frame":-5}"#).unwrap();
-    assert!(matches!(
-        c,
-        Command::Seek {
-            frame: Some(-5),
-            utc: None,
-            tai: None
-        }
-    ));
+    assert_eq!(c, seek(-5));
 }
 
 /// TAI start of the spike's live ingest (off the 50 fps second grid).
@@ -135,11 +136,10 @@ fn one_player(base: i64, domain: TimeDomain) -> (ReplayTimeline, Arc<PlayerStats
 }
 
 fn seek_utc(utc: &str) -> Command {
-    Command::Seek {
-        frame: None,
+    seek_at(ReplayTimeRef {
         utc: Some(utc.to_string()),
-        tai: None,
-    }
+        ..Default::default()
+    })
 }
 
 #[test]
@@ -182,22 +182,21 @@ fn seek_by_utc_or_tai_is_exact() {
     assert_eq!(a2.tai, a.tai);
     let a3 = tl
         .apply_at(
-            Command::Seek {
-                frame: None,
-                utc: None,
+            seek_at(ReplayTimeRef {
                 tai: Some("1795526557:0".to_string()),
-            },
+                ..Default::default()
+            }),
             0,
         )
         .unwrap();
     assert_eq!(a3.tai, 1_795_526_557 * S);
     // Bad input changes nothing.
     assert!(tl.apply_at(seek_utc("13:22:00"), 0).is_err());
-    let both = Command::Seek {
+    let both = seek_at(ReplayTimeRef {
         frame: Some(1),
         utc: Some("2026-11-24T13:22:00Z".to_string()),
-        tai: None,
-    };
+        ..Default::default()
+    });
     assert!(tl.apply_at(both, 0).is_err());
     assert_eq!(tl.tai_at(0), Some(1_795_526_557 * S));
 }
@@ -521,4 +520,548 @@ fn a_timeline_nobody_holds_is_dropped() {
     assert!(Arc::ptr_eq(&tl, &get_or_create(flow, "prune-test")));
     drop(tl);
     assert!(get(flow, "prune-test").is_none());
+}
+
+// --- command schema ------------------------------------------------------
+
+fn parse(s: &str) -> Result<Command, CommandError> {
+    parse_command(serde_json::from_str(s).unwrap())
+}
+
+#[test]
+fn commands_parse_with_seq_and_refuse_unknown_fields() {
+    assert_eq!(
+        parse(r#"{"cmd":"jog","frames":-2,"seq":7}"#).unwrap(),
+        Command::Jog { frames: -2 }
+    );
+    // A typo is an error, not a silently ignored field.
+    let e = parse(r#"{"cmd":"seek","frmae":3}"#).unwrap_err();
+    assert!(matches!(e, CommandError::Invalid(_)), "{:?}", e);
+    assert!(e.message().contains("frmae"), "{}", e);
+    assert!(matches!(
+        parse(r#"{"cmd":"fly"}"#),
+        Err(CommandError::Invalid(_))
+    ));
+    assert!(matches!(
+        parse(r#"{"cmd":"jog"}"#),
+        Err(CommandError::Invalid(_))
+    ));
+    assert!(matches!(parse(r#"[1]"#), Err(CommandError::Invalid(_))));
+    // The schema round-trips.
+    let c = Command::Live {
+        margin_ms: Some(500),
+    };
+    let v = serde_json::to_value(&c).unwrap();
+    assert_eq!(v, serde_json::json!({"cmd": "live", "margin_ms": 500}));
+    assert_eq!(parse_command(v).unwrap(), c);
+}
+
+#[test]
+fn errors_tell_invalid_from_conflict() {
+    // No media yet: valid commands do not apply.
+    let tl = ReplayTimeline::new();
+    assert!(matches!(
+        tl.apply_at(parse(r#"{"cmd":"play"}"#).unwrap(), 0),
+        Err(CommandError::Conflict(_))
+    ));
+    // Media but no frame rate yet: frame addressing does not apply.
+    let p = player("cam1", BASE, BASE + 10 * S, None);
+    let tl = timeline_of(std::slice::from_ref(&p));
+    assert!(matches!(
+        tl.apply_at(seek(5), 0),
+        Err(CommandError::Conflict(_))
+    ));
+    assert!(tl.apply_at(seek_tai(BASE + S), 0).is_ok());
+    // Bad values are invalid whatever the state.
+    assert!(matches!(
+        tl.apply_at(Command::Speed { speed: 20.0 }, 0),
+        Err(CommandError::Invalid(_))
+    ));
+    assert!(matches!(
+        tl.apply_at(seek_utc("yesterday"), 0),
+        Err(CommandError::Invalid(_))
+    ));
+}
+
+#[test]
+fn result_names_the_cursor_frame() {
+    let (tl, _p) = one_player(INGEST, TimeDomain::Tai);
+    let a = tl.apply_at(seek(195), 0).unwrap();
+    let r = tl.result(&a);
+    assert_eq!(r.frame, Some(195));
+    assert_eq!(r.time.unwrap().utc, "2026-11-24T13:21:59.980Z");
+    assert_eq!(r.cursor_tai.tai_ns, a.tai.to_string());
+}
+
+#[test]
+fn seek_from_live_with_speed_is_one_step() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S), (BASE, BASE + 50 * S)]);
+    tl.apply_at(Command::Pause, 0).unwrap();
+    let c = parse(r#"{"cmd":"seek","from_live_ms":8000,"speed":0.5}"#).unwrap();
+    let a = tl.apply_at(c, 0).unwrap();
+    // 8 s before the common edge (50 s), already at 50 %.
+    assert_eq!(a.tai, BASE + 42 * S);
+    assert_eq!(a.speed, 0.5);
+    assert_eq!(tl.tai_at(S), Some(BASE + 42 * S + S / 2));
+    // Without speed the speed is kept.
+    let a = tl
+        .apply_at(parse(r#"{"cmd":"seek","from_live_ms":1000}"#).unwrap(), 0)
+        .unwrap();
+    assert_eq!((a.tai, a.speed), (BASE + 49 * S, 0.5));
+    // A bad speed refuses the whole command: the cursor does not move.
+    let bad = parse(r#"{"cmd":"seek","from_live_ms":0,"speed":12}"#).unwrap();
+    assert!(matches!(tl.apply_at(bad, 0), Err(CommandError::Invalid(_))));
+    assert_eq!(tl.tai_at(0), Some(BASE + 49 * S));
+    // Two targets, or a negative distance, are invalid.
+    assert!(matches!(
+        parse(r#"{"cmd":"seek","from_live_ms":10,"frame":1}"#).map(|c| tl.apply_at(c, 0)),
+        Ok(Err(CommandError::Invalid(_)))
+    ));
+    assert!(parse(r#"{"cmd":"seek","from_live_ms":-5}"#).is_err());
+    // Further back than the media: clamped to the start.
+    let far = parse(r#"{"cmd":"seek","from_live_ms":18446744073709551615}"#).unwrap();
+    assert_eq!(tl.apply_at(far, 0).unwrap().tai, BASE);
+}
+
+// --- cue and bounded play -------------------------------------------------
+
+fn at_tai(t: i64) -> ReplayTimeRef {
+    ReplayTimeRef {
+        tai: Some(tai_string(t)),
+        ..Default::default()
+    }
+}
+
+fn cue(start: i64, end: i64, end_action: Option<EndAction>) -> Command {
+    Command::Cue {
+        in_point: at_tai(start),
+        out: at_tai(end),
+        end_action,
+    }
+}
+
+fn play(speed: Option<f64>, until: Option<i64>, end_action: Option<EndAction>) -> Command {
+    Command::Play {
+        speed,
+        until: until.map(at_tai),
+        end_action,
+    }
+}
+
+#[test]
+fn cue_parks_paused_at_in_and_parses_in_and_out() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let c = parse(&format!(
+        r#"{{"cmd":"cue","in":{{"tai":"{}"}},"out":{{"tai":"{}"}}}}"#,
+        tai_string(BASE + 10 * S),
+        tai_string(BASE + 12 * S)
+    ))
+    .unwrap();
+    assert_eq!(c, cue(BASE + 10 * S, BASE + 12 * S, None));
+    let a = tl.apply_at(c, 0).unwrap();
+    assert_eq!((a.tai, a.speed), (BASE + 10 * S, 0.0));
+    let r = tl.result(&a).cue.unwrap();
+    assert_eq!(r.end_action, EndAction::Freeze);
+    assert_eq!(r.out.tai_ns, (BASE + 12 * S).to_string());
+    // out before in, or a cue outside the media, change nothing.
+    let bad = cue(BASE + 12 * S, BASE + 10 * S, None);
+    assert!(matches!(tl.apply_at(bad, 0), Err(CommandError::Invalid(_))));
+    let outside = cue(BASE + 70 * S, BASE + 80 * S, None);
+    assert!(matches!(
+        tl.apply_at(outside, 0),
+        Err(CommandError::Conflict(_))
+    ));
+    assert_eq!(tl.cue().map(|r| r.start), Some(BASE + 10 * S));
+}
+
+#[test]
+fn play_freezes_on_the_last_frame_before_out() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let mut events = tl.subscribe();
+    tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, None), 0)
+        .unwrap();
+    tl.apply_at(play(Some(0.5), None, None), 0).unwrap();
+    assert_eq!(tl.cursor_tai(2 * S), Some((BASE + 11 * S, 0.5)));
+    // 2 s of clip at 50 % take 4 s; after that the cursor holds out - 1.
+    let (t, sp) = tl.cursor_tai(5 * S).unwrap();
+    assert_eq!((t, sp), (BASE + 12 * S - 1, 0.0));
+    let g = tl.reference().unwrap();
+    assert_eq!(g.tai_of_frame(g.floor_frame(t)), BASE + 12 * S - 20 * MS);
+    assert!(matches!(
+        events.try_recv(),
+        Ok(ReplayEvent::Ended { at }) if at.tai_ns == (BASE + 12 * S - 1).to_string()
+    ));
+    // Frozen for good: paused, one event, the cue still held.
+    assert_eq!(tl.cursor_tai(9 * S), Some((BASE + 12 * S - 1, 0.0)));
+    assert!(events.try_recv().is_err());
+    assert!(tl.cue().is_some());
+    // Play again at the end: from in.
+    let a = tl.apply_at(play(None, None, None), 9 * S).unwrap();
+    assert_eq!((a.tai, a.speed), (BASE + 10 * S, 1.0));
+}
+
+#[test]
+fn reverse_play_freezes_at_in() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, None), 0)
+        .unwrap();
+    tl.apply_at(seek_tai(BASE + 11 * S), 0).unwrap();
+    tl.apply_at(play(Some(-1.0), None, None), 0).unwrap();
+    assert_eq!(tl.cursor_tai(3 * S), Some((BASE + 10 * S, 0.0)));
+    // At in, reverse play starts again from out.
+    let a = tl.apply_at(play(Some(-1.0), None, None), 3 * S).unwrap();
+    assert_eq!(a.tai, BASE + 12 * S - 1);
+}
+
+#[test]
+fn loop_wraps_inside_the_cue() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let mut events = tl.subscribe();
+    tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, Some(EndAction::Loop)), 0)
+        .unwrap();
+    tl.apply_at(play(None, None, None), 0).unwrap();
+    assert_eq!(tl.tai_at(3 * S), Some(BASE + 11 * S));
+    assert_eq!(tl.tai_at(4 * S + 500 * MS), Some(BASE + 10 * S + 500 * MS));
+    assert_eq!(tl.cursor_tai(4 * S).unwrap().1, 1.0);
+    // Reverse at in starts from out, and wraps to out again.
+    let a = tl.apply_at(play(Some(-2.0), None, None), 10 * S).unwrap();
+    assert_eq!(a.tai, BASE + 12 * S - 1);
+    assert_eq!(tl.tai_at(10 * S + 500 * MS), Some(BASE + 11 * S - 1));
+    assert_eq!(
+        tl.tai_at(11 * S + 250 * MS),
+        Some(BASE + 11 * S + 500 * MS - 1)
+    );
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn end_action_live_goes_live_with_an_event() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let mut events = tl.subscribe();
+    tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, Some(EndAction::Live)), 0)
+        .unwrap();
+    tl.apply_at(play(Some(2.0), None, None), 0).unwrap();
+    // Reaches out after 1 s: live, 1.5 s behind the edge, at 1x, no cue.
+    let (t, sp) = tl.cursor_tai(S + 1).unwrap();
+    assert_eq!((t, sp), (BASE + 60 * S - 1500 * MS, 1.0));
+    assert!(tl.cue().is_none());
+    assert!(matches!(
+        events.try_recv(),
+        Ok(ReplayEvent::Live {
+            reason: ReplayLiveReason::EndAction,
+            ..
+        })
+    ));
+    assert_eq!(tl.tai_at(2 * S + 1), Some(BASE + 60 * S - 500 * MS));
+}
+
+#[test]
+fn play_until_bounds_without_a_cue() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    tl.apply_at(seek_tai(BASE + 20 * S), 0).unwrap();
+    // until behind the cursor does not apply.
+    assert!(matches!(
+        tl.apply_at(play(None, Some(BASE + 19 * S), None), 0),
+        Err(CommandError::Conflict(_))
+    ));
+    // end_action without until or cue is invalid.
+    assert!(matches!(
+        tl.apply_at(play(None, None, Some(EndAction::Loop)), 0),
+        Err(CommandError::Invalid(_))
+    ));
+    assert!(matches!(
+        tl.apply_at(play(Some(0.0), None, None), 0),
+        Err(CommandError::Invalid(_))
+    ));
+    let a = tl
+        .apply_at(play(None, Some(BASE + 21 * S), Some(EndAction::Loop)), 0)
+        .unwrap();
+    let r = a.region.unwrap();
+    assert_eq!((r.start, r.end), (BASE + 20 * S, BASE + 21 * S));
+    assert_eq!(tl.tai_at(S + 250 * MS), Some(BASE + 20 * S + 250 * MS));
+}
+
+#[test]
+fn leaving_the_cue_drops_it() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, None), 0)
+        .unwrap();
+    // Moves inside keep it, speed and pause keep it.
+    tl.apply_at(Command::Jog { frames: 3 }, 0).unwrap();
+    tl.apply_at(Command::Speed { speed: 0.5 }, 0).unwrap();
+    tl.apply_at(Command::Pause, 0).unwrap();
+    assert!(tl.cue().is_some());
+    // A seek outside drops it, and play runs on unbounded.
+    tl.apply_at(seek_tai(BASE + 30 * S), 0).unwrap();
+    assert!(tl.cue().is_none());
+    tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, None), 0)
+        .unwrap();
+    tl.apply_at(Command::Live { margin_ms: None }, 0).unwrap();
+    assert!(tl.cue().is_none());
+    tl.apply_at(cue(BASE + 10 * S, BASE + 12 * S, None), 0)
+        .unwrap();
+    let a = tl.apply_at(Command::Uncue, 0).unwrap();
+    assert!(a.region.is_none() && tl.cue().is_none());
+    assert_eq!(a.tai, BASE + 10 * S);
+}
+
+// --- catching up with the live edge ----------------------------------------
+
+#[test]
+fn fast_play_that_catches_up_goes_live_with_an_event() {
+    let (tl, p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let mut events = tl.subscribe();
+    // 10 s behind the edge at 2x: the live point (1.5 s behind the edge) is
+    // 8.5 s of media ahead, reached after 4.25 s.
+    tl.apply_at(seek_tai(BASE + 50 * S), 0).unwrap();
+    tl.apply_at(Command::Speed { speed: 2.0 }, 0).unwrap();
+    assert_eq!(tl.cursor_tai(4 * S), Some((BASE + 58 * S, 2.0)));
+    assert!(events.try_recv().is_err());
+    // The edge grows meanwhile: a segment arrives.
+    p[0].end_tai.store(BASE + 61 * S, Ordering::Relaxed);
+    let (t, sp) = tl.cursor_tai(5 * S).unwrap();
+    // Caught up: goes on from where it is, at 1x, no jump back.
+    assert_eq!((t, sp), (BASE + 60 * S, 1.0));
+    assert!(matches!(
+        events.try_recv(),
+        Ok(ReplayEvent::Live {
+            reason: ReplayLiveReason::CaughtUp,
+            ..
+        })
+    ));
+    p[0].end_tai.store(BASE + 70 * S, Ordering::Relaxed);
+    assert_eq!(tl.cursor_tai(6 * S), Some((BASE + 61 * S, 1.0)));
+    assert!(tl.telemetry()["live"].as_bool().unwrap());
+    // Following live: no second event.
+    tl.cursor_tai(9 * S);
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn play_inside_the_live_margin_does_not_go_live() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let mut events = tl.subscribe();
+    // Already within the margin when the command comes: slow motion stays
+    // slow motion.
+    let c = parse(r#"{"cmd":"seek","from_live_ms":1000,"speed":0.5}"#).unwrap();
+    tl.apply_at(c, 0).unwrap();
+    assert_eq!(tl.cursor_tai(S).unwrap().1, 0.5);
+    assert!(events.try_recv().is_err());
+    // `live` is live without an event; another command leaves it.
+    let a = tl.apply_at(Command::Live { margin_ms: None }, 0).unwrap();
+    assert!(a.live && tl.result(&a).live);
+    assert!(events.try_recv().is_err());
+    assert!(!tl.apply_at(Command::Pause, 0).unwrap().live);
+    // A cue's bounds win over catching up.
+    tl.apply_at(cue(BASE + 50 * S, BASE + 59 * S, None), 0)
+        .unwrap();
+    tl.apply_at(play(Some(4.0), None, None), 0).unwrap();
+    assert_eq!(tl.cursor_tai(3 * S), Some((BASE + 59 * S - 1, 0.0)));
+    assert!(matches!(events.try_recv(), Ok(ReplayEvent::Ended { .. })));
+}
+
+// --- speed ramps -----------------------------------------------------------
+
+#[test]
+fn ramp_changes_speed_linearly_on_the_server() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let from = BASE + 10 * S;
+    tl.apply_at(seek_tai(from), 0).unwrap();
+    let c = parse(r#"{"cmd":"ramp","to":1.0,"duration_ms":1000}"#).unwrap();
+    assert_eq!(
+        c,
+        Command::Ramp {
+            to: 1.0,
+            duration_ms: 1000
+        }
+    );
+    tl.apply_at(c, 0).unwrap();
+    // Halfway: half speed, a quarter of the way (v t / 2).
+    assert_eq!(tl.cursor_tai(S / 2), Some((from + 125 * MS, 0.5)));
+    assert_eq!(tl.cursor_tai(S), Some((from + S / 2, 1.0)));
+    assert_eq!(tl.cursor_tai(2 * S), Some((from + 3 * S / 2, 1.0)));
+    // A ramp from the speed it is at: 1x down to 0.25x.
+    tl.apply_at(
+        Command::Ramp {
+            to: 0.25,
+            duration_ms: 2000,
+        },
+        2 * S,
+    )
+    .unwrap();
+    let (t, v) = tl.cursor_tai(3 * S).unwrap();
+    assert_eq!(v, 0.625);
+    assert_eq!(t, from + 3 * S / 2 + 812_500_000);
+    // A speed command ends the ramp where it is.
+    let a = tl.apply_at(Command::Speed { speed: 2.0 }, 3 * S).unwrap();
+    assert_eq!(a.tai, t);
+    assert_eq!(tl.cursor_tai(4 * S), Some((t + 2 * S, 2.0)));
+}
+
+#[test]
+fn ramp_is_validated_and_keeps_the_cue() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let bad = |to, duration_ms| {
+        matches!(
+            tl.apply_at(Command::Ramp { to, duration_ms }, 0),
+            Err(CommandError::Invalid(_))
+        )
+    };
+    assert!(bad(9.0, 100));
+    assert!(bad(f64::NAN, 100));
+    assert!(bad(1.0, MAX_RAMP_MS + 1));
+    // Zero duration is a plain speed change.
+    let a = tl
+        .apply_at(
+            Command::Ramp {
+                to: 0.5,
+                duration_ms: 0,
+            },
+            0,
+        )
+        .unwrap();
+    assert_eq!(a.speed, 0.5);
+    // Ramping up inside a cue still freezes at out.
+    tl.apply_at(cue(BASE + 10 * S, BASE + 11 * S, None), 0)
+        .unwrap();
+    tl.apply_at(
+        Command::Ramp {
+            to: 4.0,
+            duration_ms: 1000,
+        },
+        0,
+    )
+    .unwrap();
+    assert!(tl.cue().is_some());
+    assert_eq!(tl.cursor_tai(5 * S), Some((BASE + 11 * S - 1, 0.0)));
+    assert!(tl.telemetry().get("ramp").is_none());
+}
+
+// --- marks -----------------------------------------------------------------
+
+#[test]
+fn mark_stamps_the_pushed_frame_not_the_cursor() {
+    let (tl, p) = one_player(INGEST, TimeDomain::Tai);
+    let g = p.grid().unwrap();
+    let a = tl.apply_at(seek(195), 0).unwrap();
+    // Nothing went out yet: a mark does not apply.
+    assert!(matches!(
+        tl.apply_at(Command::Mark { label: None }, 0),
+        Err(CommandError::Conflict(_))
+    ));
+    // The players are 5 frames behind the cursor (a seek in flight).
+    let pushed = a.tai - 5 * 20 * MS;
+    p.shown_frame
+        .store(g.floor_frame(pushed), Ordering::Relaxed);
+    tl.note_pushed(1, pushed);
+    let c = parse(r#"{"cmd":"mark","label":"goal"}"#).unwrap();
+    let m = tl.apply_at(c, 0).unwrap();
+    // The cursor did not move.
+    assert_eq!((m.tai, m.speed), (a.tai, 0.0));
+    let r = tl.result(&m);
+    let mark = r.mark.unwrap();
+    assert_eq!(mark.label.as_deref(), Some("goal"));
+    assert_eq!(mark.time.frame, 190);
+    assert_eq!(mark.time.utc, "2026-11-24T13:21:59.880Z");
+    assert_eq!(mark.cursor_tai.tai_ns, pushed.to_string());
+    assert_eq!(mark.angles.len(), 1);
+    assert_eq!(mark.angles[0].block, "cam1");
+    assert_eq!(mark.angles[0].shown.frame, 190);
+    // A mark leaves the motion alone: play goes on.
+    tl.apply_at(Command::Speed { speed: 1.0 }, 0).unwrap();
+    tl.apply_at(Command::Mark { label: None }, S).unwrap();
+    assert_eq!(tl.cursor_tai(2 * S), Some((a.tai + 2 * S, 1.0)));
+}
+
+// --- live edge estimate ----------------------------------------------------
+
+#[test]
+fn live_edge_estimate_runs_smoothly_between_steps() {
+    let mut t = EdgeTracker::default();
+    // Not growing yet: the known edge.
+    t.observe(0, BASE);
+    assert_eq!(t.estimate(500 * MS, BASE), (BASE, false));
+    // 1 s segments, seen 0..60 ms late (polling).
+    for (k, late) in [(1, 40), (2, 0), (3, 60), (4, 20)] {
+        t.observe(k * S + late * MS, BASE + k * S);
+    }
+    let edge = BASE + 4 * S;
+    // The line set by the step seen with no delay (2 s): edge = BASE + m.
+    assert_eq!(
+        t.estimate(4 * S + 300 * MS, edge),
+        (BASE + 4 * S + 300 * MS, true)
+    );
+    // Never behind the known edge, never more than a step ahead of it.
+    assert_eq!(
+        t.estimate(4 * S + 10 * MS, edge).0,
+        edge.max(BASE + 4 * S + 10 * MS)
+    );
+    assert_eq!(t.estimate(5 * S + 500 * MS, edge), (edge + S, true));
+    // No step for over three step lengths: the edge stopped growing.
+    assert_eq!(t.estimate(8 * S, edge), (edge, false));
+    // Repeats change nothing; a jump back starts over.
+    t.observe(9 * S, edge);
+    t.observe(9 * S, BASE);
+    assert_eq!(t.estimate(9 * S + 1, BASE), (BASE, false));
+}
+
+#[test]
+fn state_lists_extents_gaps_and_the_estimate() {
+    let (tl, p) = one_player(INGEST, TimeDomain::Tai);
+    p.set_index_view(IndexView {
+        listed: vec![(INGEST, INGEST + 60 * S)],
+        gaps: vec![(INGEST + 10 * S, INGEST + 12 * S)],
+    });
+    let v = tl.telemetry();
+    let p0 = &v["players"][0];
+    assert_eq!(p0["extent"]["start"]["tai_ns"], INGEST.to_string());
+    assert_eq!(p0["indexed"][0]["duration_ms"], 60_000);
+    assert_eq!(p0["gaps"][0]["duration_ms"], 2000);
+    assert_eq!(
+        p0["gaps"][0]["start"]["tai_ns"],
+        (INGEST + 10 * S).to_string()
+    );
+    // A recording that does not grow: the estimate is the known edge.
+    assert_eq!(v["live_growing"], false);
+    assert_eq!(
+        v["live_edge_estimate"]["tai_ns"],
+        (INGEST + 60 * S).to_string()
+    );
+    assert!(v["behind_live_estimate_ms"].is_number());
+}
+
+#[test]
+fn following_live_holds_at_the_common_edge_when_it_stalls() {
+    let (tl, p) = timeline_with(&[(BASE, BASE + 60 * S), (BASE, BASE + 58 * S)]);
+    tl.apply_at(Command::Live { margin_ms: None }, 0).unwrap();
+    // The edge (58 s, where both angles have media) does not grow: hold
+    // there, not at the longer angle's end.
+    assert_eq!(tl.tai_at(5 * S), Some(BASE + 58 * S - 1));
+    // It grows again: play on along the same line.
+    p[1].end_tai.store(BASE + 70 * S, Ordering::Relaxed);
+    assert_eq!(tl.tai_at(5 * S), Some(BASE + 60 * S - 1));
+    p[0].end_tai.store(BASE + 70 * S, Ordering::Relaxed);
+    assert_eq!(tl.tai_at(5 * S), Some(BASE + 61_500 * MS));
+}
+
+#[test]
+fn live_edge_steps_of_several_angles_count_as_one() {
+    // Four angles whose segments end 1 ms apart, stepping 100 ms apart:
+    // each second the common edge moves 1 ms three times, then to the
+    // first angle's new end. (Seen live with the split ingest; the median
+    // step was then 1 ms and the estimate fell back to the known edge.)
+    let mut t = EdgeTracker::default();
+    t.observe(0, BASE);
+    for k in 1..5 {
+        for j in 1..=3 {
+            t.observe(k * S - (4 - j) * 100 * MS, BASE + (k - 1) * S + j * MS);
+        }
+        t.observe(k * S, BASE + k * S);
+    }
+    let edge = BASE + 4 * S;
+    // Still growing 1 s per second, and smooth between steps.
+    let (e1, g1) = t.estimate(4 * S + 100 * MS, edge);
+    let (e2, g2) = t.estimate(4 * S + 850 * MS, edge);
+    assert!(g1 && g2);
+    assert_eq!(e2 - e1, 750 * MS);
 }
