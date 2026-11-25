@@ -22,7 +22,8 @@ use crate::client_auth::AuthMethod;
 use crate::osc::SatProvider;
 use crate::tams::client::{FlowSpec, TamsClient};
 use crate::tams::timeline::{
-    reference_tai_ns, shared_pipeline_mapping, AnchorKind, FragmentTimeline, TaiClock,
+    grid_miss_ns, reference_tai_ns, shared_pipeline_mapping, AnchorKind, FragmentTimeline,
+    TaiClock, FIRST_ON_GRID_FRAGMENT,
 };
 use crate::tams::uploader::{
     channel, new_tail_slot, spawn_uploader, FragmentReady, SharedDetected, TailFragment,
@@ -31,7 +32,7 @@ use gst::glib::prelude::ToValue;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use strom_types::tams::{
     CONTENT_TYPE_MP4, CONTENT_TYPE_MPEGTS, FORMAT_AUDIO, FORMAT_MULTI, FORMAT_VIDEO,
@@ -814,6 +815,9 @@ fn build_flow_chain(
         let temp_dir = temp_dir_for_setup;
         let tag = chain_tag;
         let block_id_sig = block_id;
+        // Fragments that started off the grid although their keyframe was
+        // requested in time (see `warn_off_grid`).
+        let off_grid = AtomicU64::new(0);
 
         let _ = splitmuxsink.connect("format-location-full", false, move |args| {
             let element = args.first().and_then(|v| v.get::<gst::Element>().ok());
@@ -884,6 +888,17 @@ fn build_flow_chain(
                 );
             }
             let abs_start = placed.start_ns;
+            if placed.since_anchor >= FIRST_ON_GRID_FRAGMENT {
+                // Splits land on the first keyframe at or after the grid point,
+                // so up to one frame past it is on the grid.
+                let tolerance_ns = buffer
+                    .as_ref()
+                    .and_then(|b| b.duration())
+                    .map_or(50_000_000, |d| d.nseconds() + 1_000_000);
+                if let Some(miss) = grid_miss_ns(abs_start, tail_segment_ns, tolerance_ns) {
+                    warn_off_grid(&block_id_sig, &tag, &off_grid, miss);
+                }
+            }
 
             // Schedule the split that ends this fragment on the next grid point.
             let next_split = timeline
@@ -950,6 +965,35 @@ fn build_flow_chain(
     }));
 
     Ok(())
+}
+
+/// Report a segment that started `miss_ns` past its TAI grid point although its
+/// keyframe was requested one fragment ahead: the encoder did not honour the
+/// request. Boundaries then follow the encoder's own keyframes, off the grid and
+/// differently on each angle. Logged on the first miss and every 30th after.
+fn warn_off_grid(block_id: &str, tag: &str, count: &AtomicU64, miss_ns: u64) {
+    let n = count.fetch_add(1, Ordering::Relaxed) + 1;
+    if n == 1 || n.is_multiple_of(30) {
+        warn!(
+            "TAMS {} ({}): segment boundary {} ms past the TAI grid ({} so far): the \
+             upstream encoder did not make the keyframe requested for it. Check that it \
+             honours force-keyunit requests on time: a Video Encoder block applies \
+             min_keyframe_request_interval_ms only to immediate requests, but other \
+             encoders may drop requests (e.g. min-force-key-unit-interval) or need a GOP \
+             that divides the segment duration.",
+            block_id,
+            tag,
+            miss_ns / 1_000_000,
+            n
+        );
+    } else {
+        debug!(
+            "TAMS {} ({}): segment boundary {} ms past the TAI grid",
+            block_id,
+            tag,
+            miss_ns / 1_000_000
+        );
+    }
 }
 
 /// Register a metadata-only Multi-Flow that groups the per-essence flows via

@@ -283,6 +283,8 @@ pub struct FragmentTimeline {
     last_start_ns: u64,
     /// TAI of the grid point the last fragment was planned to end on.
     planned_end_ns: Option<u64>,
+    /// Fragments placed since the timeline was last (re)anchored.
+    since_anchor: u32,
 }
 
 /// Outcome of placing one fragment on the timeline.
@@ -300,6 +302,27 @@ pub struct FragmentStart {
     /// After a backward jump: how far the start was moved forward so it does
     /// not overlap the previous fragment.
     pub clamped_by_ns: Option<u64>,
+    /// Index of this fragment since the timeline was last (re)anchored (0 for
+    /// the anchoring fragment).
+    pub since_anchor: u32,
+}
+
+/// Fragments after the (re)anchoring one whose split could not be requested
+/// in time: the first ends at a split scheduled only when it opened, and the
+/// keyframe for the second was requested at the same moment. From this index
+/// on, a fragment's start was requested one fragment ahead and should be on
+/// the grid.
+pub const FIRST_ON_GRID_FRAGMENT: u32 = 2;
+
+/// How far past its grid point a fragment starting at `start_ns` lies, when that
+/// is more than `tolerance_ns` (one frame: splits land on the first keyframe at
+/// or after the grid point). `None` when on the grid or with no grid.
+pub fn grid_miss_ns(start_ns: u64, segment_ns: u64, tolerance_ns: u64) -> Option<u64> {
+    if segment_ns == 0 {
+        return None;
+    }
+    let past = start_ns % segment_ns;
+    (past > tolerance_ns).then_some(past)
 }
 
 /// First multiple of `segment_ns` strictly after `tai_ns`.
@@ -362,12 +385,18 @@ impl FragmentTimeline {
         self.last_start_ns = start_ns;
         self.planned_end_ns =
             (segment_ns > 0).then(|| clamp_ns(next_grid_point(start_ns as i128, segment_ns)));
+        self.since_anchor = if anchored.is_some() {
+            0
+        } else {
+            self.since_anchor.saturating_add(1)
+        };
         FragmentStart {
             start_ns,
             prev_end_ns: prev_end_ns.unwrap_or(start_ns),
             anchored,
             went_backward,
             clamped_by_ns,
+            since_anchor: self.since_anchor,
         }
     }
 
@@ -617,6 +646,31 @@ mod tests {
         let d2 = cam2.place(3 * SEG, SEG, || unreachable!());
         assert_eq!(d1.start_ns, planned_end + SEG);
         assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn grid_misses() {
+        assert_eq!(grid_miss_ns(5_000, 1_000, 20), None);
+        assert_eq!(grid_miss_ns(5_020, 1_000, 20), None);
+        assert_eq!(grid_miss_ns(5_021, 1_000, 20), Some(21));
+        assert_eq!(grid_miss_ns(5_480, 1_000, 20), Some(480));
+        assert_eq!(grid_miss_ns(5_480, 0, 20), None);
+    }
+
+    #[test]
+    fn fragments_count_from_the_anchor() {
+        let mut tl = FragmentTimeline::default();
+        assert_eq!(
+            tl.place(0, 10, || (0, AnchorKind::Pipeline)).since_anchor,
+            0
+        );
+        assert_eq!(tl.place(5, 10, || unreachable!()).since_anchor, 1);
+        assert_eq!(tl.place(10, 10, || unreachable!()).since_anchor, 2);
+        // A backward jump re-anchors and starts the count again.
+        assert_eq!(
+            tl.place(1, 10, || (0, AnchorKind::Pipeline)).since_anchor,
+            0
+        );
     }
 
     /// A backward jump whose anchor is already past the planned end (the source
