@@ -15,7 +15,8 @@ struct RawRate {
 #[derive(Deserialize)]
 struct RawSegment {
     object: String,
-    /// TAMS timerange; preferred over the ns fields when present.
+    /// TAMS timerange. Used when `start_ns` and `end_ns` are not both given
+    /// with `end_ns > start_ns`; a valid ns pair takes precedence.
     #[serde(default)]
     timerange: Option<String>,
     #[serde(default)]

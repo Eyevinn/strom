@@ -9,10 +9,13 @@
 //!   splitmuxsink. Each one marks a boundary that must land where asked.
 //!
 //! The GstVideoEncoder base-class property `min-force-key-unit-interval`
-//! drops both kinds alike, so a 1 s floor broke the 1 s TAMS grid (review M3 of
-//! the Open Replay integration). The block therefore sets that property to 0
-//! and applies its own floor in an upstream event probe, to "now" requests
-//! only. The probe fires per event, not per buffer.
+//! drops both kinds alike. With a 1 s floor, a recorder that asks for a
+//! keyframe on every point of a 1 s grid (TAMS Output) lost each request that
+//! came less than a second after the last forced keyframe, and its segment
+//! boundaries left the grid (measured 84-215 ms past it) without a word in the
+//! log. The block therefore sets that property to 0 and applies its own floor
+//! in an upstream event probe, to "now" requests only. The probe fires per
+//! event, not per buffer. See `docs/UPSTREAM_NOTES.md`.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;

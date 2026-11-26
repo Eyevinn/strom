@@ -4,12 +4,35 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ## [Unreleased]
 
+### Added
+- Media Player: timeline mode (replay). A player plays an indexed source (a TAMS flow, `tams+https://<gateway>/flows/<flow_id>`, or a directory with `index.json`) on a timeline that can be scrubbed, jogged and played at any speed, from -8x to 8x. Players with the same `group` form a replay group with one cursor and one speed; the group shares TAI time, and each player has its own frame grid (**Output Framerate**). See [MEDIA_LIBRARY.md](MEDIA_LIBRARY.md)
+- Replay control API: `POST /api/replay/{flow_id}/{group}/command`, `GET /api/replay/{flow_id}/{group}/state` and a WebSocket at `/api/replay/{flow_id}/{group}/ws`, with one command schema for REST and WebSocket (seek by frame, UTC, TAI or distance from live, jog, speed, ramps, cue and bounded play, live, marks). See [REPLAY_API.md](REPLAY_API.md)
+- Replay pages: an operator page for a replay group at `/player/replay/{flow_id}/{group}` (transport, angles through the vision mixer, marks and clips), and a lab page at `/player/replay-lab/{flow_id}/{group}` with latency and per-player telemetry
+- Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture
+- TAMS Output: segments are cut on a TAI grid, and `segment_duration_ms` allows segments shorter than a second. The block asks upstream for a keyframe on each grid point, warns when a boundary still leaves the grid, and writes video `essence_parameters` on its flows
+- Video Encoder: `min_keyframe_request_interval_ms` (default 1000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
+- API: `GET /api/flows/{flow_id}/blocks/{block_id}/pgm-endpoint` returns the WHEP endpoint fed by a vision mixer's PGM output, like `multiview-endpoint`
+
 ### Changed
 - Media Player: an explicit `mode` property (`playlist`, `stinger`, `timeline`) selects what the block does, and the properties panel shows only the properties of that mode. `stinger_mode=true` becomes `mode=stinger`. The Playlist button and transport controls are hidden for a timeline player
 - TAMS Output and the Media Player's timeline mode share the auth properties `auth_mode`, `api_token` and `osc_service_id`
+- Video Encoder: the keyframe-request floor applies only to requests for a keyframe now (a WebRTC viewer's PLI). Requests for a keyframe at a given running time (TAMS Output's grid, `splitmuxsink` in a segmenting recorder) always pass. The GStreamer base-class property `min-force-key-unit-interval` dropped both kinds, which moved TAMS Output's segment boundaries off its grid
+- TAMS Output cuts segments itself instead of with `splitmuxsink`, and registers each segment as soon as the frame after it arrives instead of one GOP later
+
+### Fixed
+- WHEP Output: a viewer whose ICE gathering reports `complete` a second time no longer aborts Strom. The WHEP signaller in gst-plugin-webrtc 0.15 panics on it inside a GObject callback; seen when viewers connect and drop within a second
+- TAMS Output: the last segment of a run ends at its last frame, the open segment is finished when the flow stops, the mapping from running time to TAI is re-anchored after a sleep or clock jump, and the frame rate and size written to the store follow the flow
+- OSC: SAT freshness is judged on the wall clock, and a request that gets 401 is retried once with a new SAT
 
 ### Upgrade notes
 - Saved flows and flows sent through the API with `stinger_mode` are rewritten to `mode` when they are loaded or saved, with a log line per block. The stinger API now asks for "Mode set to Stinger"
+- Video Encoder: scheduled keyframe requests are no longer held back by the 1 s floor. An encoder that feeds a recorder which asks for keyframes at given times (TAMS Output, a segmenting recorder) now makes every keyframe it is asked for, so such a flow can get more keyframes than before. WebRTC PLIs are limited as before
+
+### Documentation
+- REPLAY_API.md: driving a replay group over HTTP or WebSocket
+- MEDIA_LIBRARY.md: the Media Player's modes, and timeline mode
+- BLOCK_GUIDELINES.md: a block that writes files through a muxer finishes the open file when its flow stops
+- UPSTREAM_NOTES.md: `GstSystemClock` TAI on macOS, `vtdec_hw` at EOS, `splitmuxsink` closing a fragment one GOP late, `appsrc` linking to `mp4mux`'s audio pad, `min-force-key-unit-interval` dropping scheduled requests, and the WHEP signaller's panic on a second ICE `complete`
 
 ---
 
