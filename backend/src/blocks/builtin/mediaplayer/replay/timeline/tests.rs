@@ -1237,3 +1237,59 @@ fn marks_during_a_restart_do_not_deadlock() {
     assert!(finished, "mark and register_player deadlocked");
     restarts.join().unwrap();
 }
+
+// --- review 2026-11-26 -----------------------------------------------------
+
+#[test]
+fn an_out_past_the_media_ends_where_the_media_does() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let mut events = tl.subscribe();
+    tl.apply_at(cue(BASE + 50 * S, BASE + 70 * S, None), 0)
+        .unwrap();
+    tl.apply_at(play(None, None, None), 0).unwrap();
+    // The media ends at 60 s: frozen there, with the event.
+    assert_eq!(tl.cursor_tai(11 * S), Some((BASE + 60 * S - 1, 0.0)));
+    assert!(matches!(events.try_recv(), Ok(ReplayEvent::Ended { .. })));
+    // The same for play until.
+    tl.apply_at(seek_tai(BASE + 55 * S), 20 * S).unwrap();
+    tl.apply_at(play(None, Some(BASE + 90 * S), None), 20 * S)
+        .unwrap();
+    assert_eq!(tl.cursor_tai(30 * S), Some((BASE + 60 * S - 1, 0.0)));
+    assert!(matches!(events.try_recv(), Ok(ReplayEvent::Ended { .. })));
+}
+
+#[test]
+fn reverse_play_until_the_cursor_is_refused_as_forward_is() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    tl.apply_at(seek_tai(BASE + 20 * S), 0).unwrap();
+    for speed in [1.0, -1.0] {
+        assert!(matches!(
+            tl.apply_at(play(Some(speed), Some(BASE + 20 * S), None), 0),
+            Err(CommandError::Conflict(_))
+        ));
+    }
+}
+
+#[test]
+fn a_new_run_resets_margin_edge_and_latency() {
+    let old = player("cam0", BASE, BASE + 60 * S, Some((50, 1)));
+    let tl = timeline_of(std::slice::from_ref(&old));
+    tl.apply_at(
+        Command::Live {
+            margin_ms: Some(5000),
+        },
+        0,
+    )
+    .unwrap();
+    tl.cmd_to_push_us.store(1234, Ordering::Relaxed);
+    lock(&tl.edge).observe(0, BASE + 60 * S);
+    tl.unregister_player(&old);
+    let new = player("cam0", BASE + 100 * S, BASE + 160 * S, Some((50, 1)));
+    tl.register_player(&new);
+    assert_eq!(
+        tl.live_margin_ns.load(Ordering::Relaxed),
+        DEFAULT_LIVE_MARGIN_MS as i64 * MS
+    );
+    assert_eq!(tl.cmd_to_push_us.load(Ordering::Relaxed), 0);
+    assert!(lock(&tl.edge).steps.is_empty());
+}

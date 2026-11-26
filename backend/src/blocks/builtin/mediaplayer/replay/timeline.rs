@@ -142,15 +142,14 @@ impl FrameTime {
         }
     }
 
-    /// JSON for the control API. `tai_ns` is a string: it does not fit in a
-    /// JavaScript number.
     /// The time of a source frame that starts at `tai`, its own time (which
     /// can sit off `grid` when the source changed its frame phase). Numbered
     /// by the nearest frame of `grid`.
     pub fn of_frame_at(grid: &FrameGrid, tai: i64, origin: i64) -> Self {
         let utc_ns = tai_to_utc_ns(tai);
         let second_tai = utc_to_tai_ns(utc_ns.div_euclid(1_000_000_000) * 1_000_000_000);
-        // Frames of this run that start in the second before this one.
+        // Frames of `grid` that start in the same UTC second before this one:
+        // the frame's index within its second.
         let before = ((tai - second_tai) as i128 * grid.fps_n as i128)
             .div_euclid(grid.fps_d as i128 * 1_000_000_000) as i64;
         Self {
@@ -161,6 +160,8 @@ impl FrameTime {
         }
     }
 
+    /// JSON for the control API. `tai_ns` is a string: it does not fit in a
+    /// JavaScript number.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self.to_api()).unwrap_or_default()
     }
@@ -539,7 +540,11 @@ fn eval(a: &Anchor, rt: i64, b: &Bounds, live_from: i64, live_slack: i64) -> Eva
     let mut pos = from + moved.round() as i128;
     let mut hit = None;
     if let Some(r) = a.region {
-        let (start, end) = (r.start as i128, r.end as i128);
+        // An out (or in) past the media ends play where the media does: on
+        // media that has stopped growing, play would otherwise hold at its
+        // end for good, with no `Ended` and no end action.
+        let start = r.start.max(b.start) as i128;
+        let end = (r.end.min(b.end) as i128).max(start + 1);
         if pos >= end || pos < start {
             match r.end_action {
                 EndAction::Loop => pos = start + (pos - start).rem_euclid(end - start),
@@ -851,6 +856,10 @@ impl ReplayTimeline {
             *lock(&self.last_cmd) = None;
             *lock(&self.clock_source) = None;
             *lock(&self.created) = Instant::now();
+            *lock(&self.edge) = EdgeTracker::default();
+            self.live_margin_ns
+                .store(DEFAULT_LIVE_MARGIN_MS as i64 * 1_000_000, Ordering::Relaxed);
+            self.cmd_to_push_us.store(0, Ordering::Relaxed);
         }
     }
 
@@ -1248,7 +1257,7 @@ impl ReplayTimeline {
                                 end_action: EndAction::Freeze,
                             }
                         } else {
-                            if until > cur {
+                            if until >= cur {
                                 return Err(conflict("play: until is not behind the cursor"));
                             }
                             let end = held.map_or(cur + 1, |r| r.end.max(cur + 1));
