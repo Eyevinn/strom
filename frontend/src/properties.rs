@@ -181,6 +181,8 @@ pub struct BlockInspectorResult {
     pub vision_mixer_url: Option<(FlowId, String)>,
     /// Replay operator page requested - contains (flow_id, replay group)
     pub replay_page_url: Option<(FlowId, String)>,
+    /// Replay diagnostics page requested - contains (flow_id, replay group)
+    pub replay_diagnostics_url: Option<(FlowId, String)>,
     /// Live property updates to send to running pipeline elements
     pub live_property_updates: Vec<LivePropertyUpdate>,
     /// Inspector rendered a VideoDevice/AudioDevice property — caller should
@@ -845,16 +847,32 @@ impl PropertyInspector {
                 if let Some(fid) = flow_id {
                     let group =
                         strom_types::mediaplayer::timeline_group(&block.properties, &block.id);
-                    if ui
-                        .button(format!("{} Replay", egui_phosphor::regular::ARROW_SQUARE_OUT))
-                        .on_hover_text(format!(
-                            "Open the replay control page for group '{}' in browser",
-                            group
-                        ))
-                        .clicked()
-                    {
-                        result.replay_page_url = Some((fid, group));
-                    }
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(format!(
+                                "{} Replay",
+                                egui_phosphor::regular::ARROW_SQUARE_OUT
+                            ))
+                            .on_hover_text(format!(
+                                "Open the replay control page for group '{}' in browser",
+                                group
+                            ))
+                            .clicked()
+                        {
+                            result.replay_page_url = Some((fid, group.clone()));
+                        }
+                        if ui
+                            .button(format!("{} Diagnostics", egui_phosphor::regular::GAUGE))
+                            .on_hover_text(format!(
+                                "Open the replay diagnostics page for group '{}' in browser \
+                                 (latency, live edge, gaps, decoding)",
+                                group
+                            ))
+                            .clicked()
+                        {
+                            result.replay_diagnostics_url = Some((fid, group.clone()));
+                        }
+                    });
                 }
             }
 

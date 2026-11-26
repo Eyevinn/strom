@@ -1596,6 +1596,10 @@ impl StromApp {
                             let url = self.api.get_replay_page_url(&flow_id, &group);
                             ui.ctx().open_url(egui::OpenUrl::new_tab(&url));
                         }
+                        if let Some((flow_id, group)) = result.replay_diagnostics_url {
+                            let url = self.api.get_replay_diagnostics_url(&flow_id, &group);
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(&url));
+                        }
 
                         // Handle WHIP ingest request (for WHIP Input)
                         if let Some(endpoint_id) = result.whip_ingest_url {

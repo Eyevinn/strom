@@ -180,7 +180,7 @@
     <span class="pill" id="connPill" title="WebSocket to the replay group"><span class="dot"></span><span id="connText">Connecting</span></span>
     <span class="pill tally" id="tallyPill" title="Tally in from the live system is not wired yet"><span class="dot"></span>Tally n/a</span>
     <button class="pill" id="helpBtn" title="Keyboard shortcuts">? Keys</button>
-    <a class="pill" id="labLink" title="The measurement page (latency, per-player telemetry)">Lab</a>
+    <a class="pill" id="diagLink" title="Diagnostics: latency, live edge, gaps, decoding, per-angle telemetry">Diagnostics</a>
   </div>
 </header>
 
@@ -303,7 +303,7 @@ const parts = location.pathname.split('/').filter(Boolean);
 const FLOW = parts[2], GROUP = decodeURIComponent(parts[3] || '');
 const $ = id => document.getElementById(id);
 $('grpName').textContent = `${GROUP} · ${FLOW ? FLOW.slice(0, 8) : '-'}`;
-$('labLink').href = `/player/replay-lab/${FLOW}/${encodeURIComponent(GROUP)}`;
+$('diagLink').href = `/player/replay-diagnostics/${FLOW}/${encodeURIComponent(GROUP)}`;
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (_) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} },
