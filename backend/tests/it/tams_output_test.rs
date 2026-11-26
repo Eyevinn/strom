@@ -632,8 +632,8 @@ mod shared_timeline {
     /// The same with the Video Encoder block's default 1 s keyframe-request
     /// floor (kept for WebRTC PLI storms). The base-class floor it used to set
     /// dropped grid requests that came sooner than a second after the last
-    /// forced keyframe, so boundaries left the grid with nothing in the log
-    /// (review M3). The block now limits only immediate requests.
+    /// forced keyframe, so boundaries left the grid with nothing in the log.
+    /// The block now limits only immediate requests.
     #[test]
     fn encoder_keyframes_follow_the_grid_with_default_floor() {
         keyframes_follow_the_grid(None);
