@@ -97,10 +97,12 @@ pub fn build(
         Some(PropertyValue::Int(i)) if *i >= 0 => *i as u64,
         _ => default,
     };
-    let decoded_ahead_s = uint(DECODED_AHEAD_PROPERTY, DEFAULT_DECODED_AHEAD_S);
+    let decoded_ahead_s =
+        uint(DECODED_AHEAD_PROPERTY, DEFAULT_DECODED_AHEAD_S).min(player::MAX_DECODE_AHEAD_S);
     let read_ahead_s = uint(READ_AHEAD_PROPERTY, NetworkBuffer::DEFAULT_READ_AHEAD_S)
         .min(NetworkBuffer::MAX_READ_AHEAD_S);
-    // The fetcher must hold what the decoder reads ahead.
+    // The fetcher must hold what the decoder reads ahead (both capped, so
+    // this stays within MAX_READ_AHEAD_S).
     if read_ahead_s < decoded_ahead_s + 2 {
         warn!(
             "Media Player {}: read_ahead_s {} is less than decoded_ahead_s + 2; \

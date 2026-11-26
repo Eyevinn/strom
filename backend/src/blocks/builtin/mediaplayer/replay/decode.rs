@@ -22,10 +22,10 @@ use super::source::Segment;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Pick the best available H.264 decoder. `STROM_REPLAY_DECODER` overrides
 /// the choice (diagnostics), when that element exists.
@@ -58,15 +58,43 @@ fn per_segment_pipelines() -> bool {
     })
 }
 
-/// Demuxer and appsrc caps for a container MIME type.
-fn demux_for(container: Option<&str>) -> (&'static str, &'static str) {
-    match container {
-        Some("video/mp4") | Some("video/quicktime") => ("qtdemux", "video/quicktime"),
-        // MPEG-TS is the default: the spike material and TAMS Output's muxed mode.
-        _ => (
+/// Demuxer and appsrc caps for a container MIME type. A source that does
+/// not say (`None`) is taken as MPEG-TS, the spike material and TAMS
+/// Output's muxed mode; one that names another container is an error.
+fn demux_for(container: Option<&str>) -> Result<(&'static str, &'static str), String> {
+    match container.map(mime_essence).as_deref() {
+        Some("video/mp4") | Some("video/quicktime") => Ok(("qtdemux", "video/quicktime")),
+        None | Some("video/mp2t") => Ok((
             "tsdemux",
             "video/mpegts,systemstream=(boolean)true,packetsize=(int)188",
-        ),
+        )),
+        Some(other) => Err(format!(
+            "container '{}' is not supported (video/mp2t or video/mp4)",
+            other
+        )),
+    }
+}
+
+/// A MIME type without parameters, lower case.
+fn mime_essence(mime: &str) -> String {
+    mime.split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// Whether replay can decode a source with this container and codec: H.264
+/// in MPEG-TS or MP4. A source that does not name its codec is tried as
+/// H.264 (its decode fails if it is not).
+pub fn check_supported(container: Option<&str>, codec: Option<&str>) -> Result<(), String> {
+    demux_for(container)?;
+    match codec.map(mime_essence).as_deref() {
+        None | Some("video/h264") | Some("video/avc") => Ok(()),
+        Some(other) => Err(format!(
+            "codec '{}' is not supported (replay decodes H.264 only)",
+            other
+        )),
     }
 }
 
@@ -140,7 +168,11 @@ impl SegmentDecoder {
         let result = session.decode(units, left);
         if result.is_err() {
             // The decoder may be wedged or in error: start afresh next time.
-            self.session = None;
+            // Torn down on a thread of its own: a wedged decoder can block
+            // its teardown too, and the worker must not wait for it.
+            if let Some(s) = self.session.take() {
+                retire(s);
+            }
         }
         debug!(
             "Replay: demux {} ms, decode {} ms",
@@ -311,7 +343,17 @@ fn run_once(
         let first = Some(first_pts.load(Ordering::Relaxed)).filter(|p| *p != u64::MAX);
         Ok((got, first))
     })();
-    let _ = pipeline.set_state(gst::State::Null);
+    if result.is_ok() {
+        let _ = pipeline.set_state(gst::State::Null);
+    } else {
+        // A pipeline that did not reach its end may be stuck in an element,
+        // and so may its teardown: not on the caller's thread.
+        let _ = std::thread::Builder::new()
+            .name("replay-demux-retire".into())
+            .spawn(move || {
+                let _ = pipeline.set_state(gst::State::Null);
+            });
+    }
     result
 }
 
@@ -322,7 +364,7 @@ pub fn demux_bytes(
     sink_caps: &gst::Caps,
     timeout: Duration,
 ) -> Result<Demuxed, String> {
-    let (demux, src_caps) = demux_for(container);
+    let (demux, src_caps) = demux_for(container)?;
     let desc = format!(
         "appsrc name=src format=bytes is-live=false caps=\"{}\" ! {} ! h264parse name=parse ! \
          appsink name=sink sync=false",
@@ -345,7 +387,7 @@ pub fn decode_bytes(
     decoder: &str,
     timeout: Duration,
 ) -> Result<Decoded, String> {
-    let (demux, src_caps) = demux_for(container);
+    let (demux, src_caps) = demux_for(container)?;
     let desc = format!(
         "appsrc name=src format=bytes is-live=false caps=\"{}\" ! {} ! h264parse name=parse ! {} ! \
          videoconvert ! video/x-raw,format=NV12 ! appsink name=sink sync=false",
@@ -382,13 +424,23 @@ pub struct DecoderSession {
 
 impl DecoderSession {
     pub fn new(decoder: &str) -> Result<Self, String> {
+        let dec = gst::ElementFactory::make(decoder)
+            .build()
+            .map_err(|e| e.to_string())?;
+        Self::with_decoder(dec)
+    }
+
+    /// A session around a decoder element made by the caller.
+    fn with_decoder(dec: gst::Element) -> Result<Self, String> {
+        let decoder = dec
+            .factory()
+            .map_or("decoder".into(), |f| f.name().to_string());
         let pipeline = gst::Pipeline::with_name("replay-decoder");
         let make = |f: &str| {
             gst::ElementFactory::make(f)
                 .build()
                 .map_err(|e| e.to_string())
         };
-        let dec = make(decoder)?;
         let convert = make("videoconvert")?;
         let filter = gst::ElementFactory::make("capsfilter")
             .property(
@@ -452,47 +504,118 @@ impl DecoderSession {
     /// Decode one object's access units: flush (after the first), caps when
     /// they change, a new segment, the units with DISCONT on the first, and
     /// end of stream to drain the decoder.
+    ///
+    /// The feeding runs on a thread of its own: a push runs the decoder's
+    /// chain function on the pushing thread, and a decoder that blocks there
+    /// (a hardware decoder out of surfaces, a driver that hangs) would hold
+    /// the caller for good. Past `timeout` the decode fails and the session
+    /// is wedged: drop it (see [`retire`]) and make a new one.
     pub fn decode(&mut self, d: Demuxed, timeout: Duration) -> Result<Decoded, String> {
         let deadline = Instant::now() + timeout;
-        if self.used {
-            self.event(gst::event::FlushStart::new())?;
-            self.event(gst::event::FlushStop::new(true))?;
-        }
+        let flush = self.used;
         self.used = true;
         *lock(&self.out.0) = SinkOut::default();
-        if self.caps.as_ref() != Some(&d.caps) {
-            self.event(gst::event::Caps::new(&d.caps))?;
-            self.caps = Some(d.caps);
+        let caps = (self.caps.as_ref() != Some(&d.caps)).then(|| d.caps.clone());
+        if caps.is_some() {
+            self.caps = Some(d.caps.clone());
         }
-        self.event(gst::event::Segment::new(&gst::FormattedSegment::<
-            gst::ClockTime,
-        >::new()))?;
-        for (i, mut b) in d.units.into_iter().enumerate() {
-            if i == 0 {
-                b.make_mut().set_flags(gst::BufferFlags::DISCONT);
+        let first_pts = d.first_pts;
+        let feed = self.feed.clone();
+        let bus = self.bus.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("replay-feed".into())
+            .spawn(move || {
+                let _ = tx.send(feed_units(&feed, &bus, flush, caps, d.units));
+            })
+            .map_err(|e| format!("feed thread: {}", e))?;
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(r) => r?,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                return Err(format!(
+                    "decoder did not take the segment within {} ms",
+                    timeout.as_millis()
+                ));
             }
-            self.feed.push(b).map_err(|e| format!("push: {:?}", e))?;
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("feed thread ended without a result".into());
+            }
         }
-        self.event(gst::event::Eos::new())?;
         let got = wait_eos(&self.out, &self.bus, deadline)?;
         let caps = got.caps.ok_or("no frames decoded")?;
         Ok(Decoded {
             frames: without_untimed(got.frames),
             caps,
-            first_pts: d.first_pts,
+            first_pts,
         })
     }
+}
 
-    fn event(&self, e: gst::Event) -> Result<(), String> {
+/// Push one object into a session's decoder: flush (`flush`), caps (when
+/// given), a new segment, the units with DISCONT on the first, end of stream.
+fn feed_units(
+    feed: &gst::Pad,
+    bus: &gst::Bus,
+    flush: bool,
+    caps: Option<gst::Caps>,
+    units: Vec<gst::Buffer>,
+) -> Result<(), String> {
+    let event = |e: gst::Event| {
         let name = e.type_().name();
-        if self.feed.push_event(e) {
+        if feed.push_event(e) {
             Ok(())
         } else {
-            Err(match bus_error(&self.bus) {
+            Err(match bus_error(bus) {
                 Some(err) => err,
                 None => format!("{} refused", name),
             })
         }
+    };
+    if flush {
+        event(gst::event::FlushStart::new())?;
+        event(gst::event::FlushStop::new(true))?;
+    }
+    if let Some(caps) = caps {
+        event(gst::event::Caps::new(&caps))?;
+    }
+    event(gst::event::Segment::new(&gst::FormattedSegment::<
+        gst::ClockTime,
+    >::new()))?;
+    for (i, mut b) in units.into_iter().enumerate() {
+        if i == 0 {
+            b.make_mut().set_flags(gst::BufferFlags::DISCONT);
+        }
+        feed.push(b).map_err(|e| format!("push: {:?}", e))?;
+    }
+    event(gst::event::Eos::new())
+}
+
+/// Sessions given up as wedged whose teardown has not finished: each holds
+/// a thread (its feed, its teardown) that may never return.
+static WEDGED: AtomicUsize = AtomicUsize::new(0);
+
+/// Tear a failed session down on a thread of its own. A flush unblocks a
+/// decoder waiting downstream; one stuck in its driver stays stuck, and then
+/// only that thread is lost, not a decode worker.
+fn retire(session: DecoderSession) {
+    let n = WEDGED.fetch_add(1, Ordering::Relaxed) + 1;
+    if n > 1 {
+        warn!(
+            "Replay: {} decoder sessions are still being torn down; a decoder may be hung",
+            n
+        );
+    }
+    let spawned = std::thread::Builder::new()
+        .name("replay-dec-retire".into())
+        .spawn(move || {
+            let _ = session.feed.push_event(gst::event::FlushStart::new());
+            drop(session);
+            WEDGED.fetch_sub(1, Ordering::Relaxed);
+        });
+    if let Err(e) = spawned {
+        WEDGED.fetch_sub(1, Ordering::Relaxed);
+        warn!("Replay: no thread to tear a decoder session down: {}", e);
     }
 }
 
@@ -759,6 +882,52 @@ mod tests {
             let _ = tx.send(out);
         });
         rx.recv_timeout(Duration::from_secs(30)).ok()
+    }
+
+    #[test]
+    fn a_hung_decoder_times_out_instead_of_holding_the_worker() {
+        gst::init().unwrap();
+        // identity sleeping 5 s per buffer: a decoder that blocks in chain.
+        let dec = gst::ElementFactory::make("identity")
+            .property("sleep-time", 5_000_000u32)
+            .build()
+            .unwrap();
+        let mut session = DecoderSession::with_decoder(dec).expect("session");
+        let caps = gst::Caps::builder("video/x-raw")
+            .field("format", "NV12")
+            .field("width", 64i32)
+            .field("height", 48i32)
+            .field("framerate", gst::Fraction::new(25, 1))
+            .build();
+        let mut unit = gst::Buffer::from_mut_slice(vec![0u8; 64 * 48 * 3 / 2]);
+        unit.get_mut().unwrap().set_pts(gst::ClockTime::ZERO);
+        let d = Demuxed {
+            caps,
+            units: vec![unit],
+            first_pts: Some(0),
+        };
+        let started = Instant::now();
+        let r = session.decode(d, Duration::from_millis(300));
+        assert!(r.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "decode returned after {:?}",
+            started.elapsed()
+        );
+        // Teardown does not block the caller either.
+        let started = Instant::now();
+        retire(session);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn unsupported_container_or_codec_is_an_error() {
+        assert!(check_supported(None, None).is_ok());
+        assert!(check_supported(Some("video/mp2t"), Some("video/h264")).is_ok());
+        assert!(check_supported(Some("video/MP4; foo=bar"), Some("video/H264")).is_ok());
+        assert!(check_supported(Some("video/x-matroska"), None).is_err());
+        assert!(check_supported(Some("video/mp2t"), Some("video/h265")).is_err());
+        assert!(demux_for(Some("application/octet-stream")).is_err());
     }
 
     fn pts_of(d: &Decoded) -> Vec<u64> {

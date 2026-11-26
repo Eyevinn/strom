@@ -30,6 +30,8 @@ struct RawIndex {
     frame_rate: Option<RawRate>,
     #[serde(default)]
     container: Option<String>,
+    #[serde(default)]
+    codec: Option<String>,
     /// The times are real TAI. Defaults to false: test material is cut on an
     /// arbitrary `tai_base_ns`.
     #[serde(default)]
@@ -124,6 +126,7 @@ impl LocalIndex {
                     .filter(|r| r.numerator > 0 && r.denominator > 0)
                     .map(|r| (r.numerator, r.denominator)),
                 container: raw.container,
+                codec: raw.codec,
                 absolute_time: raw.absolute_time,
             },
             segments,

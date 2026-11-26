@@ -97,6 +97,8 @@ pub struct SourceInfo {
     pub frame_rate: Option<(u32, u32)>,
     /// Container MIME type, e.g. `video/mp2t`.
     pub container: Option<String>,
+    /// Codec MIME type, e.g. `video/h264`, when the source says.
+    pub codec: Option<String>,
     /// Whether the index times are real TAI (a clock on the wall), so they
     /// convert to UTC. False for material on an arbitrary TAI base.
     pub absolute_time: bool,
@@ -116,25 +118,75 @@ pub trait SourceIndex: Send + Sync {
     async fn first(&self) -> Result<Option<Segment>>;
     /// The latest segment (the live edge).
     async fn last(&self) -> Result<Option<Segment>>;
-    /// Segments that end after `from_ns`, ordered by time: what a growing
-    /// index has not seen yet. At most about `max`, the earliest first;
-    /// [`Since::more`] says the listing stopped before the end.
-    async fn since(&self, from_ns: i64, max: usize) -> Result<Since> {
-        let mut segs = self.list(from_ns, i64::MAX).await?;
-        let more = segs.len() > max;
-        segs.truncate(max);
-        Ok(Since { segs, more })
+    /// The newest segments, read from the live edge backwards `page` at a
+    /// time until the listing reaches `after_ns` (the edge the caller
+    /// knows), at most `max_pages` pages. In time order. Cheap for a store
+    /// that lists newest first without a time filter (TAMS
+    /// `reverse_order=true&limit=N`). [`Since::more`] says the listing
+    /// stopped before it reached `after_ns`: segments between `after_ns` and
+    /// the oldest one returned may be missing. The default lists
+    /// `[after_ns, end)` in one go.
+    async fn newest(&self, after_ns: i64, page: usize, max_pages: usize) -> Result<Since> {
+        let _ = (page, max_pages);
+        let segs = self.list(after_ns, i64::MAX).await?;
+        Ok(Since { segs, more: false })
     }
     /// The bytes of a segment.
     async fn fetch(&self, segment: &Segment) -> Result<Vec<u8>>;
 }
 
-/// The result of [`SourceIndex::since`].
+/// The result of [`SourceIndex::newest`].
 #[derive(Debug, Clone, Default)]
 pub struct Since {
     pub segs: Vec<Segment>,
-    /// The source has segments after these that were not listed.
+    /// The listing stopped before it reached the known edge: the source may
+    /// have segments between that edge and the first of `segs`.
     pub more: bool,
+}
+
+/// Read a newest-first paged listing until it reaches `after_ns`, for
+/// [`SourceIndex::newest`]. `fetch(cursor)` returns one page: its segments,
+/// how many entries the store returned (before dropping unusable ones), and
+/// the cursor of the next page. A page is reached when it holds a segment
+/// that starts at or before `after_ns` (anything older ends before it). A
+/// short page without a next cursor is the end of the store; a full one
+/// without a cursor (a store that does not page) may hide more.
+pub async fn read_newest<C, F, Fut>(
+    after_ns: i64,
+    page: usize,
+    max_pages: usize,
+    mut fetch: F,
+) -> Result<Since>
+where
+    F: FnMut(Option<C>) -> Fut,
+    Fut: std::future::Future<Output = Result<(Vec<Segment>, usize, Option<C>)>>,
+{
+    let mut segs: Vec<Segment> = Vec::new();
+    let mut cursor: Option<C> = None;
+    let mut more = false;
+    for i in 0..max_pages.max(1) {
+        let (got, returned, next) = fetch(cursor.take()).await?;
+        let reached = got.iter().any(|s| s.start_ns <= after_ns);
+        segs.extend(got);
+        if reached {
+            break;
+        }
+        match next {
+            Some(c) if returned > 0 => {
+                if i + 1 == max_pages.max(1) {
+                    more = true;
+                }
+                cursor = Some(c);
+            }
+            _ => {
+                more = returned >= page;
+                break;
+            }
+        }
+    }
+    segs.sort_by_key(|s| s.start_ns);
+    segs.dedup_by_key(|s| s.start_ns);
+    Ok(Since { segs, more })
 }
 
 /// A parsed `source`.
@@ -232,6 +284,57 @@ mod tests {
             parse_source("file:///abs/cam1", "/m").unwrap(),
             SourceSpec::Local("/abs/cam1".into())
         );
+    }
+
+    fn seg(i: i64) -> Segment {
+        Segment {
+            start_ns: i * 10,
+            end_ns: (i + 1) * 10,
+            ts_offset_ns: 0,
+            object_start_ns: None,
+            object_id: i.to_string(),
+            location: Location::Urls(vec![]),
+        }
+    }
+
+    /// `read_newest` over segments `0..n`, pages of `page`, with or without
+    /// paging cursors. Returns the starts (as indexes), `more` and the pages
+    /// read.
+    fn newest(n: i64, after: i64, page: usize, pages: usize, paged: bool) -> (Vec<i64>, bool, u32) {
+        let all: Vec<Segment> = (0..n).rev().map(seg).collect();
+        let mut read = 0;
+        let r = futures::executor::block_on(read_newest(after, page, pages, |c: Option<usize>| {
+            read += 1;
+            let off = c.unwrap_or(0);
+            let got: Vec<Segment> = all.iter().skip(off).take(page).cloned().collect();
+            let len = got.len();
+            let next = (paged && off + len < all.len()).then_some(off + len);
+            async move { Ok((got, len, next)) }
+        }))
+        .unwrap();
+        (
+            r.segs.iter().map(|s| s.start_ns / 10).collect(),
+            r.more,
+            read,
+        )
+    }
+
+    #[test]
+    fn newest_reads_back_to_the_known_edge() {
+        // Edge at 17 (segment 16 ends there): one page reaches it.
+        let (s, more, read) = newest(20, 170, 8, 4, true);
+        assert_eq!((s, more, read), ((12..20).collect(), false, 1));
+        // Edge at 5 (segment 4 ends there): two pages, 19..=12 and 11..=4.
+        let (s, more, read) = newest(20, 50, 8, 4, true);
+        assert_eq!((s.first().copied(), more, read), (Some(4), false, 2));
+        // Not reached within the pages: more.
+        let (s, more, _) = newest(100, 50, 8, 2, true);
+        assert_eq!((s.len(), more), (16, true));
+        // A store without paging: a full page may hide more, a short one is
+        // the whole store.
+        assert!(newest(100, 50, 8, 4, false).1);
+        let (s, more, _) = newest(5, -100, 8, 4, false);
+        assert_eq!((s, more), ((0..5).collect(), false));
     }
 
     #[test]

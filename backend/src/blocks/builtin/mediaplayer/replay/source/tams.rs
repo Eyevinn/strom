@@ -1,17 +1,13 @@
 //! TAMS flow as a replay source: `GET /flows/{id}/segments` for the index and
 //! the segments' `get_urls` for the bytes.
 
-use super::{Location, Segment, Since, SourceIndex, SourceInfo};
+use super::{read_newest, Location, Segment, Since, SourceIndex, SourceInfo};
 use crate::client_auth::AuthMethod;
-use crate::tams::client::{ListedSegment, SegmentQuery, TamsClient};
+use crate::tams::client::{ListedSegment, NextPage, SegmentQuery, TamsClient};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use strom_types::tams::format_timestamp;
 use tracing::warn;
-
-/// Page size and pages followed for a live poll ([`SourceIndex::since`]).
-const SINCE_PAGE: usize = 100;
-const SINCE_MAX_PAGES: usize = 8;
 
 /// Pages followed for one window listing. A window is seconds to minutes of
 /// segments, so this only stops a runaway listing.
@@ -30,18 +26,15 @@ impl TamsIndex {
         })
     }
 
-    async fn query(&self, q: SegmentQuery, max_pages: usize) -> Result<Vec<Segment>> {
-        let listed = self
+    /// The segments of the first `max_pages` pages of a listing, and whether
+    /// the store has more.
+    async fn query(&self, q: SegmentQuery, max_pages: usize) -> Result<(Vec<Segment>, bool)> {
+        let (listed, more) = self
             .client
-            .list_segments(&self.flow_id, &q, max_pages)
+            .list_segments_paged(&self.flow_id, &q, max_pages)
             .await?;
-        Ok(listed.iter().filter_map(to_segment).collect())
+        Ok((listed.iter().filter_map(to_segment).collect(), more))
     }
-}
-
-/// A TAMS timerange from `start_ns` on, open-ended: `[start_`.
-fn timerange_from(start_ns: i64) -> String {
-    format!("[{}_", timestamp(start_ns))
 }
 
 /// A TAMS timerange covering `[start_ns, end_ns)`, signed.
@@ -95,13 +88,17 @@ impl SourceIndex for TamsIndex {
         Ok(SourceInfo {
             frame_rate,
             container: flow["container"].as_str().map(str::to_string),
+            codec: flow["codec"].as_str().map(str::to_string),
             // TAMS timeranges are TAI by definition.
             absolute_time: true,
         })
     }
 
+    /// Every page of the window. A listing cut off at [`MAX_PAGES`] is an
+    /// error, not a partial result: the caller takes a listing as the whole
+    /// truth about the window, and the missing rest would show as holes.
     async fn list(&self, start_ns: i64, end_ns: i64) -> Result<Vec<Segment>> {
-        let mut segs = self
+        let (mut segs, more) = self
             .query(
                 SegmentQuery {
                     timerange: Some(timerange(start_ns, end_ns)),
@@ -111,6 +108,13 @@ impl SourceIndex for TamsIndex {
                 MAX_PAGES,
             )
             .await?;
+        if more {
+            return Err(anyhow!(
+                "listing of {} has more than {} pages",
+                timerange(start_ns, end_ns),
+                MAX_PAGES
+            ));
+        }
         segs.sort_by_key(|s| s.start_ns);
         Ok(segs)
     }
@@ -121,7 +125,7 @@ impl SourceIndex for TamsIndex {
             limit: Some(1),
             reverse_order: false,
         };
-        Ok(self.query(q, 1).await?.into_iter().next())
+        Ok(self.query(q, 1).await?.0.into_iter().next())
     }
 
     async fn last(&self) -> Result<Option<Segment>> {
@@ -130,27 +134,31 @@ impl SourceIndex for TamsIndex {
             limit: Some(1),
             reverse_order: true,
         };
-        Ok(self.query(q, 1).await?.into_iter().next())
+        Ok(self.query(q, 1).await?.0.into_iter().next())
     }
 
-    /// `GET /segments?timerange=[from_` in time order, a page at a time.
-    /// The spec returns the segments that overlap the range, so the one
-    /// that holds `from_ns` comes too; the caller merges by start.
-    async fn since(&self, from_ns: i64, max: usize) -> Result<Since> {
-        let page = max.clamp(1, SINCE_PAGE);
-        let pages = max.div_ceil(page).clamp(1, SINCE_MAX_PAGES);
+    /// `GET /segments?reverse_order=true&limit=page`, following the store's
+    /// paging until the listing reaches `after_ns`. No time filter: a store
+    /// answers this from the end of its index, where a `timerange` query may
+    /// scan the flow (0.06–0.12 s against 0.8–1.0 s on a loaded gateway).
+    async fn newest(&self, after_ns: i64, page: usize, max_pages: usize) -> Result<Since> {
         let q = SegmentQuery {
-            timerange: Some(timerange_from(from_ns)),
-            limit: Some(page as u32),
-            reverse_order: false,
+            timerange: None,
+            limit: Some(page.max(1) as u32),
+            reverse_order: true,
         };
-        let (listed, more) = self
-            .client
-            .list_segments_paged(&self.flow_id, &q, pages)
-            .await?;
-        let mut segs: Vec<Segment> = listed.iter().filter_map(to_segment).collect();
-        segs.sort_by_key(|s| s.start_ns);
-        Ok(Since { segs, more })
+        read_newest(after_ns, page, max_pages, |next: Option<NextPage>| {
+            let q = &q;
+            async move {
+                let (listed, next) = self
+                    .client
+                    .list_segments_page(&self.flow_id, q, next.as_ref())
+                    .await?;
+                let segs = listed.iter().filter_map(to_segment).collect();
+                Ok((segs, listed.len(), next))
+            }
+        })
+        .await
     }
 
     async fn fetch(&self, segment: &Segment) -> Result<Vec<u8>> {
@@ -179,7 +187,6 @@ mod tests {
             "[1800000000:0_1800000001:500000000)"
         );
         assert_eq!(timerange(-1_500_000_000, 0), "[-1:500000000_0:0)");
-        assert_eq!(timerange_from(1_500_000_000), "[1:500000000_");
     }
 
     #[test]

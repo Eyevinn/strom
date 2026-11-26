@@ -612,32 +612,47 @@ impl TamsClient {
         query: &SegmentQuery,
         max_pages: usize,
     ) -> Result<(Vec<ListedSegment>, bool)> {
-        let first = format!("{}/flows/{}/segments", self.base_url, flow_id);
         let mut out = Vec::new();
         let mut next: Option<NextPage> = None;
         for _ in 0..max_pages.max(1) {
-            let url = match &next {
-                None => with_query(&first, &query.params(None))?,
-                Some(NextPage::Key(k)) => with_query(&first, &query.params(Some(k)))?,
-                Some(NextPage::Link(l)) => self.resolve(l)?,
-            };
-            let resp = self.send_authed(reqwest::Method::GET, url, None).await?;
-            if !resp.status().is_success() {
-                return Err(status_error(resp, format!("GET {}", first)).await);
-            }
-            let h = resp.headers();
-            next = next_page(
-                h.get("x-paging-nextkey").and_then(|v| v.to_str().ok()),
-                h.get("link").and_then(|v| v.to_str().ok()),
-            );
-            let page: Vec<ListedSegment> = resp.json().await.context("parsing segments")?;
+            let (page, n) = self
+                .list_segments_page(flow_id, query, next.as_ref())
+                .await?;
             let empty = page.is_empty();
             out.extend(page);
-            if next.is_none() || empty {
+            if n.is_none() || empty {
                 return Ok((out, false));
             }
+            next = n;
         }
         Ok((out, true))
+    }
+
+    /// One page of a segment listing: the first when `next` is `None`, else
+    /// the page it names. Returns the page and where the one after it is.
+    pub async fn list_segments_page(
+        &self,
+        flow_id: &str,
+        query: &SegmentQuery,
+        next: Option<&NextPage>,
+    ) -> Result<(Vec<ListedSegment>, Option<NextPage>)> {
+        let first = format!("{}/flows/{}/segments", self.base_url, flow_id);
+        let url = match next {
+            None => with_query(&first, &query.params(None))?,
+            Some(NextPage::Key(k)) => with_query(&first, &query.params(Some(k)))?,
+            Some(NextPage::Link(l)) => self.resolve(l)?,
+        };
+        let resp = self.send_authed(reqwest::Method::GET, url, None).await?;
+        if !resp.status().is_success() {
+            return Err(status_error(resp, format!("GET {}", first)).await);
+        }
+        let h = resp.headers();
+        let next = next_page(
+            h.get("x-paging-nextkey").and_then(|v| v.to_str().ok()),
+            h.get("link").and_then(|v| v.to_str().ok()),
+        );
+        let page: Vec<ListedSegment> = resp.json().await.context("parsing segments")?;
+        Ok((page, next))
     }
 
     /// Resolve a `Link` target against the gateway base URL. A target outside
