@@ -4,7 +4,12 @@
 
 Media players in timeline mode (`mode = timeline`) that share a `group` form a **replay group**: one cursor and one speed for all angles. The group shares time, not frame numbers. The cursor is a TAI instant, and each angle shows its latest frame that starts at or before it. This page describes how to drive a group from outside: the commands, what they return, the events, and the state.
 
-The built-in operator page `/player/replay/{flow_id}/{group}` uses only this API.
+The built-in operator page `/player/replay/{flow_id}/{group}` drives the group with this API only. Around it, the page also:
+
+- reads the flow (`GET /api/flows/{flow_id}`) to find the group's players and the vision mixer they feed;
+- picks angles through the vision mixer API (`PUT .../blocks/{mixer}/preview`, `POST .../transition`, `GET .../state`);
+- finds its monitors with `GET .../blocks/{mixer}/pgm-endpoint` and `multiview-endpoint`, or without a mixer the nearest WHEP Output downstream of a player, and plays them over WHEP;
+- keeps marks and clips in the browser's `localStorage`, so they belong to that browser.
 
 ## Endpoints
 
@@ -13,6 +18,8 @@ The built-in operator page `/player/replay/{flow_id}/{group}` uses only this API
 | `POST` | `/api/replay/{flow_id}/{group}/command` | a command | the command result |
 | `GET` | `/api/replay/{flow_id}/{group}/state` | | the group state |
 | `GET` (WebSocket) | `/api/replay/{flow_id}/{group}/ws` | commands | acks, errors, events, state every 50 ms |
+
+A WebSocket ends with its group: it closes (code 1001) once the group's players are gone, when the flow stops or is deleted, or when a new run of the flow makes a new group. Reconnect to follow the next run. An open socket does not keep the group alive.
 
 The schema is in the OpenAPI spec (`ReplayCommand`, `ReplayCommandResult`, `ReplayEvent`, under the `replay` tag).
 

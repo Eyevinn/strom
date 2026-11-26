@@ -10,17 +10,21 @@
 //! `error`; the socket also streams the group state every 50 ms (the same
 //! object as `GET .../state`) and sends what the group does by itself as
 //! `{"type": "event", ...}` ([`strom_types::replay::ReplayEvent`]).
+//!
+//! A socket does not keep its group alive: it holds the group weakly and
+//! closes once the group's players are gone (the flow stopped or was deleted)
+//! or a new run replaced the group. A client reconnects to follow the next run.
 
 use crate::blocks::builtin::mediaplayer::replay::timeline::{self, CommandError};
 use crate::json_rejection::JsonBody;
 use crate::state::AppState;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
 use futures::{SinkExt, StreamExt};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use strom_types::api::ErrorResponse;
 use strom_types::replay::{ReplayCommand, ReplayCommandResult};
@@ -125,7 +129,23 @@ pub async fn replay_ws(
     let Some(tl) = timeline::get(flow_id, &group) else {
         return (StatusCode::NOT_FOUND, "replay group not found").into_response();
     };
-    ws.on_upgrade(move |socket| handle(socket, tl))
+    let events = tl.subscribe();
+    let held = Arc::downgrade(&tl);
+    drop(tl);
+    ws.on_upgrade(move |socket| handle(socket, flow_id, group, held, events))
+}
+
+/// The group the socket was opened on, while it is still the group's live
+/// timeline. `None` once its players are gone, or a new run replaced it. The
+/// socket holds only `held`, so it does not keep a stopped or deleted flow's
+/// group alive (which kept answering commands and streaming stale state).
+fn current(
+    flow_id: FlowId,
+    group: &str,
+    held: &Weak<timeline::ReplayTimeline>,
+) -> Option<Arc<timeline::ReplayTimeline>> {
+    let tl = timeline::get(flow_id, group)?;
+    std::ptr::eq(Arc::as_ptr(&tl), held.as_ptr()).then_some(tl)
 }
 
 /// A command from the socket: the reply to send.
@@ -154,10 +174,15 @@ fn ws_reply(tl: &timeline::ReplayTimeline, text: &str) -> serde_json::Value {
     }
 }
 
-async fn handle(socket: WebSocket, tl: Arc<timeline::ReplayTimeline>) {
+async fn handle(
+    socket: WebSocket,
+    flow_id: FlowId,
+    group: String,
+    held: Weak<timeline::ReplayTimeline>,
+    mut events: tokio::sync::broadcast::Receiver<strom_types::replay::ReplayEvent>,
+) {
     let (mut tx, mut rx) = socket.split();
     let mut tick = tokio::time::interval(Duration::from_millis(50));
-    let mut events = tl.subscribe();
     loop {
         tokio::select! {
             ev = events.recv() => {
@@ -173,6 +198,15 @@ async fn handle(socket: WebSocket, tl: Arc<timeline::ReplayTimeline>) {
                 }
             }
             _ = tick.tick() => {
+                let Some(tl) = current(flow_id, &group, &held) else {
+                    let _ = tx
+                        .send(Message::Close(Some(CloseFrame {
+                            code: close_code::AWAY,
+                            reason: "replay group ended".into(),
+                        })))
+                        .await;
+                    break;
+                };
                 let msg = tl.telemetry().to_string();
                 if tx.send(Message::Text(msg.into())).await.is_err() {
                     break;
@@ -181,11 +215,52 @@ async fn handle(socket: WebSocket, tl: Arc<timeline::ReplayTimeline>) {
             msg = rx.next() => {
                 let Some(Ok(msg)) = msg else { break };
                 let Message::Text(text) = msg else { continue };
+                // The next tick closes the socket if the group is gone.
+                let Some(tl) = current(flow_id, &group, &held) else { continue };
                 let reply = ws_reply(&tl, &text);
                 if tx.send(Message::Text(reply.to_string().into())).await.is_err() {
                     break;
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A socket's hold does not keep the group: once the players are gone, the
+    /// group is gone for REST (404) and for the socket, which then closes.
+    #[test]
+    fn a_socket_does_not_keep_its_group_alive() {
+        let flow = uuid::Uuid::new_v4();
+        let player = timeline::get_or_create(flow, "g");
+        let held = Arc::downgrade(&player);
+        assert!(current(flow, "g", &held).is_some());
+        drop(player);
+        assert!(current(flow, "g", &held).is_none());
+        assert!(timeline::get(flow, "g").is_none());
+    }
+
+    /// A new run makes a new group: a socket on the old one does not follow
+    /// it with the old run's subscription.
+    #[test]
+    fn a_new_run_ends_the_old_socket() {
+        let flow = uuid::Uuid::new_v4();
+        let first = timeline::get_or_create(flow, "g");
+        let held = Arc::downgrade(&first);
+        drop(first);
+        let second = timeline::get_or_create(flow, "g");
+        assert!(current(flow, "g", &held).is_none());
+        assert!(current(flow, "g", &Arc::downgrade(&second)).is_some());
+    }
+
+    #[test]
+    fn another_group_is_not_the_held_one() {
+        let flow = uuid::Uuid::new_v4();
+        let a = timeline::get_or_create(flow, "a");
+        let _b = timeline::get_or_create(flow, "b");
+        assert!(current(flow, "b", &Arc::downgrade(&a)).is_none());
     }
 }
