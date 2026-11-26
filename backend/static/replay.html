@@ -368,7 +368,13 @@ function connectWs() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/api/replay/${FLOW}/${encodeURIComponent(GROUP)}/ws`);
   ws.onopen = () => { wsOpen = true; };
-  ws.onclose = () => { wsOpen = false; setTimeout(connectWs, 1000); };
+  ws.onclose = () => {
+    wsOpen = false;
+    // Commands in flight get no reply from this socket; let their callers settle.
+    const pending = [...acks.values()]; acks.clear();
+    for (const cb of pending) cb({ type: 'error', seq: null, error: 'disconnected' });
+    setTimeout(connectWs, 1000);
+  };
   ws.onmessage = ev => {
     lastMsgAt = performance.now();
     const m = JSON.parse(ev.data);
@@ -658,15 +664,26 @@ async function saveClip() {
 }
 // The server holds the clip's bounds: cue parks at IN, play runs to OUT and
 // freezes on the last frame before it (OUT is exclusive).
+// The clip's angle is cut to program first; if the mixer refuses, the clip is
+// not cued, so it cannot go out on the wrong angle. A later clip, mark or
+// deletion takes over: an ack that comes after that changes nothing.
 async function cueClip(c, play) {
-  if (c.angle != null) await cutTo({ input: c.angle });
-  activeClip = { clip: c, pending: true };
+  const cue = { clip: c, pending: true };
+  activeClip = cue;
   renderClips();
-  send({ cmd: 'cue', in: { tai: taiOfNs(c.in_tai) }, out: { tai: taiOfNs(c.out_tai) }, end_action: 'freeze' }, m => {
+  if (c.angle != null && !(await cutTo({ input: c.angle }))) {
+    if (activeClip === cue) { activeClip = null; renderClips(); }
+    return;
+  }
+  if (activeClip !== cue) return;
+  const sent = send({ cmd: 'cue', in: { tai: taiOfNs(c.in_tai) }, out: { tai: taiOfNs(c.out_tai) }, end_action: 'freeze' }, m => {
+    if (activeClip !== cue) return;
     if (m.type !== 'ack') { activeClip = null; renderClips(); return; }
-    activeClip = { clip: c };
+    cue.pending = false;
+    renderClips();
     if (play) send({ cmd: 'play', speed: c.speed || 1 });
   });
+  if (!sent) { activeClip = null; renderClips(); }
 }
 function deleteClip(id) {
   const c = clips.find(x => x.id === id);
@@ -960,20 +977,27 @@ async function api(path, opts) {
   if (!r.ok) throw new Error(`${r.status} ${path}`);
   return r.json();
 }
-// Follow links from a block's output until a WHEP output (as the server's
-// find_whep_endpoint_for_pad does for the mixer).
+// The nearest WHEP output downstream of a block's output pad: breadth first
+// through every link of a pad and every output of the blocks on the way, so a
+// pad linked twice or a block with several outputs cannot hide it. Stops at a
+// vision mixer, whose outputs no longer show this player's picture (the
+// mixer's own outputs come from its pgm-endpoint and multiview-endpoint).
 function whepDownstream(flow, from) {
   const wheps = new Map(flow.blocks.filter(b => b.block_definition_id === 'builtin.whep_output')
     .map(b => [b.id, (b.runtime_data || {}).whep_endpoint_id]));
-  let cur = from; const seen = new Set();
-  for (;;) {
-    const l = flow.links.find(l => l.from === cur); if (!l) return null;
-    const blk = l.to.split(':')[0];
-    if (seen.has(blk)) return null; seen.add(blk);
-    if (wheps.has(blk)) return wheps.get(blk) || null;
-    const nx = flow.links.find(l => l.from.startsWith(blk + ':')); if (!nx) return null;
-    cur = nx.from;
+  const mixers = new Set(flow.blocks.filter(b => b.block_definition_id === 'builtin.vision_mixer').map(b => b.id));
+  const queue = [from]; const seen = new Set([from.split(':')[0]]);
+  while (queue.length) {
+    const pad = queue.shift();
+    for (const l of flow.links.filter(l => l.from === pad)) {
+      const blk = l.to.split(':')[0];
+      if (seen.has(blk)) continue; seen.add(blk);
+      if (wheps.has(blk)) { if (wheps.get(blk)) return wheps.get(blk); continue; }
+      if (mixers.has(blk)) continue;
+      for (const out of new Set(flow.links.filter(n => n.from.startsWith(blk + ':')).map(n => n.from))) queue.push(out);
+    }
   }
+  return null;
 }
 // A tams+http(s) source without credentials, for the clip record.
 function safeSource(s) {
@@ -1077,17 +1101,20 @@ $('pgmRetry').onclick = connectVideo;
 // through the mixer's API (angle choice is the mixer's job, not the player's).
 const vmApi = (path, method, body) => fetch(`/api/flows/${FLOW}/blocks/${ctx.vm}${path}`, {
   method, headers: { 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) });
+// Whether the source is on program afterwards (true without a mixer).
 async function cutTo(source) {
-  if (!ctx.vm) return;
+  if (!ctx.vm) return true;
   // Already on air: nothing to do (the mixer refuses that angle as preview).
-  if (source.input != null && mixer.program_pip == null && mixer.program_input === source.input) return;
+  if (source.input != null && mixer.program_pip == null && mixer.program_input === source.input) return true;
   try {
     const r = await vmApi('/preview', 'PUT', { source });
     if (!r.ok) throw new Error(r.status);
     const j = await r.json();
-    await vmApi('/transition', 'POST', { from_input: j.program_input ?? 0, to_input: j.preview_input ?? 0, transition_type: 'cut', duration_ms: 0 });
-  } catch (e) { toast('Mixer: ' + e.message); }
-  refreshMixer();
+    const t = await vmApi('/transition', 'POST', { from_input: j.program_input ?? 0, to_input: j.preview_input ?? 0, transition_type: 'cut', duration_ms: 0 });
+    if (!t.ok) throw new Error(t.status);
+    return true;
+  } catch (e) { toast('Mixer: ' + e.message); return false; }
+  finally { refreshMixer(); }
 }
 function renderAngles() {
   const el = $('angles');
