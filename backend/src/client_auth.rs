@@ -58,6 +58,21 @@ impl AuthMethod {
             }
         })
     }
+
+    /// The service rejected the credentials `apply` attached (HTTP 401). Drop
+    /// any cached token so the next `apply` gets a new one, and return whether
+    /// retrying the request once could help. Only schemes with a cached,
+    /// refreshable token (OSC) say yes; a static token would fail the same way.
+    pub async fn invalidate_after_rejection(&self) -> bool {
+        match self {
+            AuthMethod::None | AuthMethod::Bearer(_) => false,
+            AuthMethod::Osc {
+                provider,
+                service_id,
+                credential_key,
+            } => provider.invalidate(credential_key, service_id).await,
+        }
+    }
 }
 
 /// Whether two URLs have the same origin (scheme, host and port).

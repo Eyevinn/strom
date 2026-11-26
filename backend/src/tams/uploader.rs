@@ -566,6 +566,8 @@ where
                 // A non-retryable HTTP status (e.g. 413 Payload Too Large, 401
                 // Unauthorized) will fail identically on every attempt — give up
                 // now rather than sleeping through the whole backoff schedule.
+                // (A 401 from a stale OSC SAT has already been retried once with
+                // a new SAT inside `TamsClient`; one that still fails is real.)
                 if !is_retryable(&e) {
                     return Err(e);
                 }

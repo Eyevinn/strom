@@ -18,7 +18,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -29,9 +29,47 @@ const DEFAULT_TOKEN_URL: &str = "https://token.svc.prod.osaas.io/servicetoken";
 /// races expiry. The OSC docs recommend refreshing every ~50 minutes.
 const SAT_REFRESH_AFTER: Duration = Duration::from_secs(50 * 60);
 
+/// When the SAT carries an `exp` claim, refresh this long before it.
+const SAT_EXPIRY_MARGIN: Duration = Duration::from_secs(5 * 60);
+
+/// A cached SAT. Times are wall-clock (`SystemTime`), not `Instant`: on macOS
+/// the monotonic clock stops while the machine sleeps, so an `Instant`-based
+/// age would keep a SAT "fresh" for hours after it really expired.
 struct CachedSat {
     token: String,
-    fetched_at: Instant,
+    fetched_at: SystemTime,
+    refresh_at: SystemTime,
+}
+
+/// The `exp` claim (seconds since the Unix epoch) of a JWT, if it has one.
+/// The signature is not checked: this only decides when to refresh our own
+/// token, never whether to trust one.
+fn jwt_exp(token: &str) -> Option<SystemTime> {
+    use base64::Engine;
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let exp = claims.get("exp")?.as_u64()?;
+    UNIX_EPOCH.checked_add(Duration::from_secs(exp))
+}
+
+/// When a SAT fetched at `fetched_at` should be refreshed: after
+/// [`SAT_REFRESH_AFTER`], or [`SAT_EXPIRY_MARGIN`] before its own `exp`,
+/// whichever comes first.
+fn sat_refresh_at(token: &str, fetched_at: SystemTime) -> SystemTime {
+    let by_age = fetched_at + SAT_REFRESH_AFTER;
+    match jwt_exp(token).and_then(|exp| exp.checked_sub(SAT_EXPIRY_MARGIN)) {
+        Some(by_exp) => by_age.min(by_exp),
+        None => by_age,
+    }
+}
+
+/// Whether a cached SAT is still usable at wall-clock `now`. A clock that
+/// went backwards past `fetched_at` counts as stale: the age is unknown.
+fn sat_is_fresh(sat: &CachedSat, now: SystemTime) -> bool {
+    now >= sat.fetched_at && now < sat.refresh_at
 }
 
 /// Reserved credential key for the default (fallback) PAT, seeded from the
@@ -157,7 +195,7 @@ impl SatProvider {
         {
             let cache = self.cache.lock().await;
             if let Some(c) = cache.get(&cache_key) {
-                if c.fetched_at.elapsed() < SAT_REFRESH_AFTER {
+                if sat_is_fresh(c, SystemTime::now()) {
                     return Ok(c.token.clone());
                 }
             }
@@ -166,14 +204,34 @@ impl SatProvider {
         // endpoint can't stall unrelated callers. A concurrent double-mint is
         // rare and harmless.
         let token = self.mint(&pat, service_id).await?;
+        let fetched_at = SystemTime::now();
         self.cache.lock().await.insert(
             cache_key,
             CachedSat {
+                refresh_at: sat_refresh_at(&token, fetched_at),
                 token: token.clone(),
-                fetched_at: Instant::now(),
+                fetched_at,
             },
         );
         Ok(token)
+    }
+
+    /// Drop the cached SAT for `(credential_key, service_id)`, so the next
+    /// [`Self::token`] mints a new one. Called when a service rejects the SAT
+    /// (HTTP 401) although the cache still held it as fresh. Returns whether a
+    /// PAT exists to mint a new SAT from, i.e. whether a retry could help.
+    pub async fn invalidate(&self, credential_key: &str, service_id: &str) -> bool {
+        let Some(pat) = self.resolve_pat(credential_key) else {
+            return false;
+        };
+        let cache_key = (pat_fingerprint(&pat), service_id.to_string());
+        if self.cache.lock().await.remove(&cache_key).is_some() {
+            info!(
+                "OSC: dropped rejected SAT for service {} (credential {})",
+                service_id, credential_key
+            );
+        }
+        true
     }
 
     /// The PAT for a credential key: its own if registered, else the default.
@@ -319,6 +377,55 @@ mod tests {
         rt.block_on(p.clear_pat("flow-a"));
         assert_eq!(p.resolve_pat("flow-a").as_deref(), Some("pat-default"));
         assert!(p.configured_keys().is_empty());
+    }
+
+    /// A JWT-shaped token with the given claims (unsigned; only `exp` is read).
+    fn jwt(claims: serde_json::Value) -> String {
+        use base64::Engine;
+        let enc = |v: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+        format!(
+            "{}.{}.sig",
+            enc(br#"{"alg":"none"}"#),
+            enc(claims.to_string().as_bytes())
+        )
+    }
+
+    fn cached(token: &str, fetched_at: SystemTime) -> CachedSat {
+        CachedSat {
+            token: token.to_string(),
+            fetched_at,
+            refresh_at: sat_refresh_at(token, fetched_at),
+        }
+    }
+
+    #[test]
+    fn sat_freshness_follows_the_wall_clock() {
+        let t0 = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let sat = cached("opaque", t0);
+        assert!(sat_is_fresh(&sat, t0));
+        assert!(sat_is_fresh(&sat, t0 + Duration::from_secs(49 * 60)));
+        assert!(!sat_is_fresh(&sat, t0 + SAT_REFRESH_AFTER));
+        // A night asleep: wall time moved on, so the SAT is stale.
+        assert!(!sat_is_fresh(&sat, t0 + Duration::from_secs(10 * 3600)));
+        // A clock set backwards past the fetch counts as stale.
+        assert!(!sat_is_fresh(&sat, t0 - Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn sat_refresh_honours_an_earlier_exp_claim() {
+        let t0 = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        // exp in 20 minutes: refresh 5 minutes before it, not after 50.
+        let short = jwt(serde_json::json!({ "exp": 1_800_000_000u64 + 20 * 60 }));
+        let sat = cached(&short, t0);
+        assert_eq!(sat.refresh_at, t0 + Duration::from_secs(15 * 60));
+        assert!(sat_is_fresh(&sat, t0 + Duration::from_secs(14 * 60)));
+        assert!(!sat_is_fresh(&sat, t0 + Duration::from_secs(16 * 60)));
+        // exp further out than the age limit: the age limit wins.
+        let long = jwt(serde_json::json!({ "exp": 1_800_000_000u64 + 3 * 3600 }));
+        assert_eq!(cached(&long, t0).refresh_at, t0 + SAT_REFRESH_AFTER);
+        // No exp, or not a JWT: the age limit.
+        assert_eq!(jwt_exp(&jwt(serde_json::json!({ "sub": "x" }))), None);
+        assert_eq!(jwt_exp("not-a-jwt"), None);
     }
 
     #[test]
