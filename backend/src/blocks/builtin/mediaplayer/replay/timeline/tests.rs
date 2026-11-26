@@ -1197,3 +1197,43 @@ fn shown_time_is_the_frame_own_time_after_a_phase_change() {
     assert_eq!(shown["frame"], 190);
     assert_eq!(shown["frame_in_second"], 44);
 }
+
+// --- locking ---------------------------------------------------------------
+
+/// A flow restarts (its player registers again, resetting the group) while a
+/// client sends marks. Registering held `players` and took `anchor`; a mark
+/// held `anchor` and took `players`: the two could lock each other for good.
+#[test]
+fn marks_during_a_restart_do_not_deadlock() {
+    let tl = Arc::new(ReplayTimeline::new());
+    let p = player("cam0", BASE, BASE + 60 * S, Some((50, 1)));
+    tl.register_player(&p);
+    tl.note_pushed(0, BASE + S);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let restarts = {
+        let (tl, p, stop) = (tl.clone(), p.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                tl.unregister_player(&p);
+                tl.register_player(&p);
+                tl.note_pushed(0, BASE + S);
+            }
+        })
+    };
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    {
+        let tl = tl.clone();
+        std::thread::spawn(move || {
+            for _ in 0..200_000 {
+                let _ = tl.apply_at(Command::Mark { label: None }, 0);
+            }
+            let _ = done_tx.send(());
+        });
+    }
+    let finished = done_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .is_ok();
+    stop.store(true, Ordering::Relaxed);
+    assert!(finished, "mark and register_player deadlocked");
+    restarts.join().unwrap();
+}

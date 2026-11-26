@@ -744,6 +744,9 @@ pub struct Applied {
     pub mark: Option<ReplayMark>,
 }
 
+/// Lock order: `clock_source`, then `anchor`, then the others. `players`,
+/// `first_extent_at`, `created`, `last_cmd`, `last_pushed` and `edge` are
+/// leaves: nothing else is taken while one of them is held.
 pub struct ReplayTimeline {
     anchor: Mutex<Anchor>,
     /// TAI that frame 0 holds: the group's start once every angle has
@@ -831,9 +834,16 @@ impl ReplayTimeline {
     /// player registered, the previous run's having unregistered) resets the
     /// group, so a rebuilt flow can change sources, rates and range.
     pub fn register_player(&self, stats: &Arc<PlayerStats>) {
-        let mut players = lock(&self.players);
-        players.retain(|w| w.strong_count() > 0);
-        if players.is_empty() {
+        // `players` is a leaf lock (see the struct docs): released before the
+        // reset takes the others.
+        let first_of_run = {
+            let mut players = lock(&self.players);
+            players.retain(|w| w.strong_count() > 0);
+            let first = players.is_empty();
+            players.push(Arc::downgrade(stats));
+            first
+        };
+        if first_of_run {
             self.origin_tai.store(UNKNOWN, Ordering::Relaxed);
             *lock(&self.first_extent_at) = None;
             *lock(&self.anchor) = START_ANCHOR;
@@ -842,7 +852,6 @@ impl ReplayTimeline {
             *lock(&self.clock_source) = None;
             *lock(&self.created) = Instant::now();
         }
-        players.push(Arc::downgrade(stats));
     }
 
     /// Called when a player shuts down (its flow stops). Its stats may live
@@ -1133,10 +1142,11 @@ impl ReplayTimeline {
         let reference = self.reference();
         let need_ref =
             || reference.ok_or_else(|| conflict("the group's frame rate is not known yet"));
-        let mut a = lock(&self.anchor);
-        let (cur, cur_speed) = self.advance(&mut a, now, &b);
         if let Command::Mark { label } = cmd {
+            // Before the anchor is locked: a mark reads the players.
             let mark = self.mark(label)?;
+            let mut a = lock(&self.anchor);
+            let (cur, cur_speed) = self.advance(&mut a, now, &b);
             return Ok(Applied {
                 tai: cur,
                 speed: cur_speed,
@@ -1145,6 +1155,8 @@ impl ReplayTimeline {
                 mark: Some(mark),
             });
         }
+        let mut a = lock(&self.anchor);
+        let (cur, cur_speed) = self.advance(&mut a, now, &b);
         let mut ramp = None;
         let live = match cmd {
             Command::Live { .. } => true,
