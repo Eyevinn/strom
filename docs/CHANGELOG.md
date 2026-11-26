@@ -27,6 +27,9 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - TAMS Output: the last segment of a run ends at its last frame, the open segment is finished when the flow stops, the mapping from running time to TAI is re-anchored after a sleep or clock jump, and the frame rate and size written to the store follow the flow
 - TAMS Output: segments are parked on disk instead of dropped when the store is unreachable, a channel is full, or the store answers 401/403, and are uploaded later without holding back new segments. A 404 for the flow creates the flow again, registration is idempotent, and slow clock drift no longer re-anchors the TAI mapping
 - OSC: SAT freshness is judged on the wall clock, and a request that gets 401 is retried once with a new SAT
+- TAMS Output: what is parked on disk is capped per flow directory, by `STROM_TAMS_PARKED_MAX_MB` (default 8192) and `STROM_TAMS_PARKED_MAX_SEGMENTS` (default 20000); past the cap the oldest parked segments are deleted, with an error. A parked segment that keeps failing waits longer before its next try (backoff per segment), so it no longer holds back the others
+- TAMS Output: a parked segment's `.meta` sidecar is JSON and is written to a temporary file and renamed, so a sweep never reads one half written. Sidecars in the old format are still read
+- Media Player (timeline mode): a listed stretch of a growing source that still has a hole near the cursor is listed again, with backoff, so segments registered late are found. The live poll runs off the fetch loop, a decoder that hangs is bounded, and video that is not H.264 (H.265, say) fails with an error that names it instead of hanging
 - OSC: the gateway host is taken from the parsed URL before a SAT is sent. User info that looks like an OSC host (`https://x.svc.auto.prod.osaas.io:pw@evil.example/`) passed the check and the SAT went to the other host; a gateway URL with user info is now refused
 - OSC: a SAT whose `exp` and `iat` claims give an absurd lifetime is refreshed by age instead of panicking on overflow
 - Media Player (timeline mode): a local `source` outside `media_path` is refused, through `..` or a symlink alike
@@ -34,6 +37,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Replay WebSocket: the socket is closed with a close frame when its group's flow stops, not dropped
 
 ### Upgrade notes
+- TAMS Output: parked segments over `STROM_TAMS_PARKED_MAX_MB` or `STROM_TAMS_PARKED_MAX_SEGMENTS` are deleted, oldest first, on the first sweep after an upgrade
 - Saved flows and flows sent through the API with `stinger_mode` are rewritten to `mode` when they are loaded or saved, with a log line per block. The stinger API now asks for "Mode set to Stinger"
 - TAMS Output: saved flows and flows sent through the API with `segment_duration_secs` are rewritten to `segment_duration_ms` (seconds × 1000) when they are loaded or saved, with a log line per block. A non-zero `segment_duration_ms` set alongside it wins, as before
 - Video Encoder: scheduled keyframe requests are no longer held back by the 1 s floor. An encoder that feeds a recorder which asks for keyframes at given times (TAMS Output, a segmenting recorder) now makes every keyframe it is asked for, so such a flow can get more keyframes than before. WebRTC PLIs are limited as before
