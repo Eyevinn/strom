@@ -161,13 +161,13 @@ fn add_tams_output_with(
         pipeline,
         name,
         gateway_url,
-        ("segment_duration_secs", segment_secs),
+        ("segment_duration_ms", segment_secs * 1000),
         video,
     )
 }
 
 /// As [`add_tams_output_with`], with the segment length given as a property
-/// name and value (`segment_duration_secs` or `segment_duration_ms`).
+/// name and value (`segment_duration_ms`).
 fn add_tams_output_segment(
     pipeline: &gst::Pipeline,
     name: &str,
@@ -649,7 +649,7 @@ mod shared_timeline {
     fn keyframes_follow_the_grid(min_keyframe_request_interval_ms: Option<u64>) {
         keyframes_follow_a_grid(
             min_keyframe_request_interval_ms,
-            ("segment_duration_secs", 1),
+            ("segment_duration_ms", 1000),
             1_000_000_000,
         );
     }

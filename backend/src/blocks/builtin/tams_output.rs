@@ -47,7 +47,14 @@ use uuid::Uuid;
 pub struct TamsOutputBuilder;
 
 const BLOCK_NAME: &str = "TAMS Output";
-const DEFAULT_SEGMENT_SECS: u64 = 2;
+/// Block definition id of TAMS Output.
+pub const TAMS_OUTPUT_BLOCK_ID: &str = "builtin.tams_output";
+/// Segment length property, in milliseconds.
+const SEGMENT_DURATION_MS: &str = "segment_duration_ms";
+/// Whole-second segment length, replaced by [`SEGMENT_DURATION_MS`]. Flows
+/// that still carry it are migrated (see [`migrate_legacy_properties`]).
+const LEGACY_SEGMENT_DURATION_SECS: &str = "segment_duration_secs";
+const DEFAULT_SEGMENT_MS: u64 = 2000;
 /// Shortest segment `segment_duration_ms` accepts. Every segment is one HTTP
 /// upload and one TAMS segment registration, so the rate is bounded.
 const MIN_SEGMENT_MS: u64 = 200;
@@ -116,18 +123,79 @@ fn prop_u64(props: &HashMap<String, PropertyValue>, key: &str, default: u64) -> 
     }
 }
 
-/// Segment length in nanoseconds. `segment_duration_ms` wins when it is set
-/// (non-zero) and is clamped to [`MIN_SEGMENT_MS`]; otherwise the older
-/// whole-second `segment_duration_secs` applies (at least 1 s), so existing
-/// flows keep their length.
-fn segment_duration_ns(props: &HashMap<String, PropertyValue>) -> u64 {
-    let ms = prop_u64(props, "segment_duration_ms", 0);
+/// Rewrite the legacy `segment_duration_secs` to `segment_duration_ms`.
+///
+/// - Seconds without milliseconds (or with `segment_duration_ms` 0, which
+///   used to mean "use the seconds"): `secs × 1000` ms, at least 1 s as
+///   before.
+/// - Both, with milliseconds non-zero: milliseconds won, so they stay.
+/// - `segment_duration_ms` 0 without seconds: the default 2000 ms.
+///
+/// The seconds key is removed. Returns a description of the change, or
+/// `None` when there was nothing to migrate.
+pub fn migrate_legacy_properties(
+    properties: &mut HashMap<String, PropertyValue>,
+) -> Option<String> {
+    let secs = properties.remove(LEGACY_SEGMENT_DURATION_SECS);
+    let ms_set = properties.contains_key(SEGMENT_DURATION_MS);
+    let ms = prop_u64(properties, SEGMENT_DURATION_MS, 0);
     if ms > 0 {
-        return ms.max(MIN_SEGMENT_MS).saturating_mul(1_000_000);
+        return secs.map(|_| {
+            format!(
+                "dropped {} ({} = {} wins)",
+                LEGACY_SEGMENT_DURATION_SECS, SEGMENT_DURATION_MS, ms
+            )
+        });
     }
-    prop_u64(props, "segment_duration_secs", DEFAULT_SEGMENT_SECS)
-        .max(1)
-        .saturating_mul(1_000_000_000)
+    let new_ms = match &secs {
+        Some(PropertyValue::UInt(u)) => (*u).max(1).saturating_mul(1000),
+        Some(PropertyValue::Int(i)) => (*i).max(1).unsigned_abs().saturating_mul(1000),
+        _ if ms_set || secs.is_some() => DEFAULT_SEGMENT_MS,
+        _ => return None,
+    };
+    properties.insert(SEGMENT_DURATION_MS.to_string(), PropertyValue::UInt(new_ms));
+    Some(match secs {
+        Some(v) => format!(
+            "{} = {:?} -> {} = {}",
+            LEGACY_SEGMENT_DURATION_SECS, v, SEGMENT_DURATION_MS, new_ms
+        ),
+        None => format!("{} = 0 -> {}", SEGMENT_DURATION_MS, new_ms),
+    })
+}
+
+/// Migrate the legacy properties of every TAMS Output in `flow` (see
+/// [`migrate_legacy_properties`]), logging each block that changed. Returns
+/// whether anything changed.
+pub fn migrate_flow(flow: &mut Flow) -> bool {
+    let mut changed = false;
+    for block in &mut flow.blocks {
+        if block.block_definition_id != TAMS_OUTPUT_BLOCK_ID {
+            continue;
+        }
+        if let Some(change) = migrate_legacy_properties(&mut block.properties) {
+            info!(
+                "Flow '{}', TAMS Output {}: migrated legacy properties: {}",
+                flow.name, block.id, change
+            );
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Segment length in nanoseconds, from `segment_duration_ms` (default
+/// [`DEFAULT_SEGMENT_MS`]) clamped to [`MIN_SEGMENT_MS`]. Flows are migrated
+/// when they are loaded or saved; a legacy `segment_duration_secs` written by
+/// other means is still read through [`migrate_legacy_properties`].
+fn segment_duration_ns(props: &HashMap<String, PropertyValue>) -> u64 {
+    let ms = if props.contains_key(LEGACY_SEGMENT_DURATION_SECS) {
+        let mut migrated = props.clone();
+        migrate_legacy_properties(&mut migrated);
+        prop_u64(&migrated, SEGMENT_DURATION_MS, DEFAULT_SEGMENT_MS)
+    } else {
+        prop_u64(props, SEGMENT_DURATION_MS, DEFAULT_SEGMENT_MS)
+    };
+    ms.max(MIN_SEGMENT_MS).saturating_mul(1_000_000)
 }
 
 /// Parse a `key=value, key=value` string into TAMS flow tags. Blank/keyless
@@ -1304,7 +1372,7 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 
 fn tams_output_definition() -> BlockDefinition {
     BlockDefinition {
-        id: "builtin.tams_output".to_string(),
+        id: TAMS_OUTPUT_BLOCK_ID.to_string(),
         name: BLOCK_NAME.to_string(),
         description: "Records pre-encoded video/audio into a TAMS store (Time-Addressable Media Store) via an Eyevinn TAMS Gateway. Either separate single-essence MP4 flows or one muxed MPEG-TS flow.".to_string(),
         category: "Outputs".to_string(),
@@ -1381,18 +1449,11 @@ fn tams_output_definition() -> BlockDefinition {
                 PropertyValue::Int(1),
             ),
             simple_prop(
-                "segment_duration_secs",
-                "Segment Duration (s)",
-                "Target duration of each TAMS segment in whole seconds. Ignored when Segment Duration (ms) is set. Segments split on a keyframe (one is requested from upstream encoders at each split), so the GOP should divide it: for replay, 1 s segments with a GOP of 0.5 s or shorter.",
-                PropertyType::Int,
-                PropertyValue::Int(DEFAULT_SEGMENT_SECS as i64),
-            ),
-            simple_prop(
-                "segment_duration_ms",
+                SEGMENT_DURATION_MS,
                 "Segment Duration (ms)",
-                "Target duration of each TAMS segment in milliseconds, for segments shorter than a second (at least 200). 0 uses Segment Duration (s). Boundaries stay on the TAI grid (multiples of this length from the TAI epoch), so the GOP should divide it: for 500 ms segments, a GOP of 500 ms or a divisor of it.",
+                "Target duration of each TAMS segment in milliseconds (at least 200). Boundaries stay on the TAI grid (multiples of this length from the TAI epoch), and segments split on a keyframe (one is requested from upstream encoders at each split), so the GOP should divide the segment length. For replay, 500 ms segments with a GOP of 500 ms or a divisor of it.",
                 PropertyType::Int,
-                PropertyValue::Int(0),
+                PropertyValue::Int(DEFAULT_SEGMENT_MS as i64),
             ),
             simple_prop(
                 "tams_source_id",
@@ -1511,41 +1572,73 @@ mod tests {
                 .collect()
         };
         const MS: u64 = 1_000_000;
-        // Neither set: the default whole seconds.
+        // Unset: the default.
+        assert_eq!(segment_duration_ns(&props(&[])), DEFAULT_SEGMENT_MS * MS);
         assert_eq!(
-            segment_duration_ns(&props(&[])),
-            DEFAULT_SEGMENT_SECS * 1000 * MS
-        );
-        // Seconds only (existing flows), clamped to at least 1 s.
-        assert_eq!(
-            segment_duration_ns(&props(&[("segment_duration_secs", PropertyValue::Int(1))])),
-            1000 * MS
-        );
-        assert_eq!(
-            segment_duration_ns(&props(&[("segment_duration_secs", PropertyValue::Int(0))])),
-            1000 * MS
-        );
-        // Milliseconds win over seconds.
-        assert_eq!(
-            segment_duration_ns(&props(&[
-                ("segment_duration_secs", PropertyValue::Int(2)),
-                ("segment_duration_ms", PropertyValue::Int(500)),
-            ])),
+            segment_duration_ns(&props(&[("segment_duration_ms", PropertyValue::Int(500))])),
             500 * MS
-        );
-        // 0 ms means unset.
-        assert_eq!(
-            segment_duration_ns(&props(&[
-                ("segment_duration_secs", PropertyValue::UInt(3)),
-                ("segment_duration_ms", PropertyValue::Int(0)),
-            ])),
-            3000 * MS
         );
         // Clamped to the minimum.
         assert_eq!(
             segment_duration_ns(&props(&[("segment_duration_ms", PropertyValue::Int(40))])),
             MIN_SEGMENT_MS * MS
         );
+        // A legacy seconds value not yet migrated is still read.
+        assert_eq!(
+            segment_duration_ns(&props(&[("segment_duration_secs", PropertyValue::Int(1))])),
+            1000 * MS
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_segment_duration() {
+        let props = |pairs: &[(&str, PropertyValue)]| -> HashMap<String, PropertyValue> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect()
+        };
+        let migrated = |pairs: &[(&str, PropertyValue)]| {
+            let mut p = props(pairs);
+            let change = migrate_legacy_properties(&mut p);
+            assert!(!p.contains_key("segment_duration_secs"));
+            let ms = p
+                .contains_key("segment_duration_ms")
+                .then(|| prop_u64(&p, "segment_duration_ms", u64::MAX));
+            (change.is_some(), ms)
+        };
+        // Seconds only: × 1000.
+        assert_eq!(
+            migrated(&[("segment_duration_secs", PropertyValue::Int(3))]),
+            (true, Some(3000))
+        );
+        // Seconds with the old "unset" 0 ms: × 1000, at least 1 s as before.
+        assert_eq!(
+            migrated(&[
+                ("segment_duration_secs", PropertyValue::UInt(0)),
+                ("segment_duration_ms", PropertyValue::Int(0)),
+            ]),
+            (true, Some(1000))
+        );
+        // Both set: milliseconds win.
+        assert_eq!(
+            migrated(&[
+                ("segment_duration_secs", PropertyValue::Int(2)),
+                ("segment_duration_ms", PropertyValue::Int(500)),
+            ]),
+            (true, Some(500))
+        );
+        // 0 ms alone: the default.
+        assert_eq!(
+            migrated(&[("segment_duration_ms", PropertyValue::Int(0))]),
+            (true, Some(DEFAULT_SEGMENT_MS))
+        );
+        // Current flows are left alone.
+        assert_eq!(
+            migrated(&[("segment_duration_ms", PropertyValue::Int(500))]),
+            (false, Some(500))
+        );
+        assert_eq!(migrated(&[]), (false, None));
     }
 
     #[test]

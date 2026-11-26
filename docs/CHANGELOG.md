@@ -7,9 +7,11 @@ All notable changes to the Strom GStreamer Flow Engine project.
 ### Changed
 - Media Player: an explicit `mode` property (`playlist`, `stinger`, `timeline`) selects what the block does, and the properties panel shows only the properties of that mode. `stinger_mode=true` becomes `mode=stinger`. The Playlist button and transport controls are hidden for a timeline player
 - TAMS Output and the Media Player's timeline mode share the auth properties `auth_mode`, `api_token` and `osc_service_id`
+- TAMS Output: one segment length property, `segment_duration_ms` (default 2000, at least 200), instead of `segment_duration_secs` and `segment_duration_ms`
 
 ### Upgrade notes
 - Saved flows and flows sent through the API with `stinger_mode` are rewritten to `mode` when they are loaded or saved, with a log line per block. The stinger API now asks for "Mode set to Stinger"
+- TAMS Output: saved flows and flows sent through the API with `segment_duration_secs` are rewritten to `segment_duration_ms` (seconds × 1000) when they are loaded or saved, with a log line per block. A non-zero `segment_duration_ms` set alongside it wins, as before
 
 ---
 
