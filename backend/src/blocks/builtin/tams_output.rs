@@ -29,7 +29,7 @@ use crate::tams::tai_mapping::{
 use crate::tams::uploader::{
     channel, clear_orphans, closed_end_ns, media_end_running_time_ns, new_run, new_tail_slot,
     park_on_disk, segment_file_name, spawn_uploader, FragmentReady, MediaEnd, PadMediaEnd,
-    SharedDetected, TailFragment,
+    ParkTarget, SharedDetected, TailFragment,
 };
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -815,6 +815,8 @@ fn build_flow_chain(
         // earlier run parked in the same directory.
         let run = new_run();
         let run_id = run.id().to_string();
+        // What a segment parked from the streaming side is meant for.
+        let park_target = ParkTarget::new(client.base_url(), &spec.flow_id);
         spawn_uploader(
             client,
             spec,
@@ -1034,7 +1036,7 @@ fn build_flow_chain(
             };
             let full = matches!(e, tokio::sync::mpsc::error::TrySendError::Full(_));
             let ready = e.into_inner();
-            match park_on_disk(&ready) {
+            match park_on_disk(&ready, &park_target) {
                 Ok(()) => {
                     let n = overflowed.fetch_add(1, Ordering::Relaxed);
                     if n.is_multiple_of(100) {

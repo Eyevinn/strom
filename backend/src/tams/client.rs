@@ -933,7 +933,8 @@ mod tests {
     #[test]
     fn osc_sat_check_is_not_fooled_by_user_info_or_lookalikes() {
         for gw in [
-            // The review's example: the request would go to evil.example.
+            // User info that looks like the OSC host: the request would go to
+            // evil.example.
             "https://x.eyevinn-tams-gateway.auto.prod.osaas.io:pw@evil.example/",
             "https://x.eyevinn-tams-gateway.auto.prod.osaas.io@evil.example",
             "https://evil.example/x.eyevinn-tams-gateway.auto.prod.osaas.io",
@@ -1257,7 +1258,7 @@ mod tests {
         }
 
         /// A `Link` to another origin is refused: the request (and the token)
-        /// never reaches that host (review M5).
+        /// never reaches that host.
         #[tokio::test]
         async fn cross_origin_link_is_refused() {
             let stolen = Seen::default();

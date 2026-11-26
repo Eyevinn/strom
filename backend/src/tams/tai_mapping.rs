@@ -15,7 +15,7 @@
 //! - any other clock (`Monotonic`, NTP): `offset` is sampled once per pipeline run
 //!   from the system TAI clock and shared by every block in that pipeline.
 //!
-//! The `Other` offset is not re-sampled during a run (review L11). A monotonic
+//! The `Other` offset is deliberately not re-sampled during a run. A monotonic
 //! or NTP clock drifts against disciplined TAI by tens of ppm, so over hours the
 //! store's TAI moves away from wall-clock capture time (about 1-2 s over 10 h at
 //! 50 ppm). Angles of one pipeline share the offset and stay aligned with each
@@ -33,13 +33,20 @@
 //! with a new [`PipelineTaiMapping::epoch`], so every block of the pipeline
 //! re-anchors on the same offset and the angles stay aligned.
 //!
-//! Drift is kept apart from jumps. The check compares the gap with the gap at
-//! the previous check (every fragment), not with zero, so drift that adds up
-//! slowly never re-anchors: at 50 ppm it reaches the 5 s threshold after about
+//! Drift is kept apart from jumps. The gap is checked two ways, and either one
+//! re-anchors:
+//! - against the gap at the previous check (every fragment): a step of more
+//!   than the threshold, plus [`MAX_DRIFT_PPM`] of the time between the two
+//!   checks, is a jump;
+//! - against zero, the gap when the mapping was anchored: a total of more than
+//!   the threshold plus [`MAX_DRIFT_PPM`] of the time since then is a jump too.
+//!   Without this, steps each below the threshold (a few short sleeps) would
+//!   add up without limit.
+//!
+//! Real drift stays within both allowances, since they grow at the largest
+//! drift rate a clock is taken to have: at 50 ppm it reaches 5 s after about
 //! 28 h, and re-anchoring then would cut a 5 s hole in the store, or put angles
-//! 5 s apart. The allowance grows by [`MAX_DRIFT_PPM`] of the time between two
-//! checks, so a long gap between checks is not taken for a jump either. The
-//! accumulated drift is logged for each whole second it grows.
+//! 5 s apart. The accumulated drift is logged for each whole second it grows.
 //!
 //! A buffer that carries a capture time as a `GstReferenceTimestampMeta`
 //! (`timestamp/x-tai`, `x-ptp`, `x-unix` or `x-ntp`) takes precedence: the block
@@ -50,6 +57,7 @@ use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use strom_types::FlowId;
 use tracing::{info, warn};
 
@@ -243,18 +251,35 @@ struct RegistryEntry {
     /// Host TAI and the gap (host TAI minus mapped clock time) at the last
     /// check of an [`ClockDomain::Other`] mapping.
     last_check: (u64, i128),
+    /// Host TAI when the mapping was (re)anchored; the gap was zero then.
+    anchored_tai_ns: u64,
     /// Whole seconds of drift already logged.
     drift_logged_s: u128,
+    /// When a block last asked for the mapping.
+    last_used: Instant,
+}
+
+/// Gap a clock may drift in `since_ns` of host TAI before it counts as a jump.
+fn drift_allowance(since_ns: u64) -> u128 {
+    REANCHOR_THRESHOLD_NS as u128 + since_ns as u128 * MAX_DRIFT_PPM / 1_000_000
 }
 
 /// Whether the gap between mapped clock time and host TAI moved by more than
-/// drift explains since the last check: `gap` now, `last_gap` at the last
-/// check, `since_ns` of host TAI between the two.
-fn is_jump(gap: i128, last_gap: i128, since_ns: u64) -> bool {
-    let allowed = REANCHOR_THRESHOLD_NS as u128 + since_ns as u128 * MAX_DRIFT_PPM / 1_000_000;
-    (gap - last_gap).unsigned_abs() > allowed
+/// drift explains: `gap` now, `last_gap` at the last check, `since_check_ns`
+/// and `since_anchor_ns` of host TAI since the last check and since the
+/// mapping was anchored (when the gap was zero).
+fn is_jump(gap: i128, last_gap: i128, since_check_ns: u64, since_anchor_ns: u64) -> bool {
+    (gap - last_gap).unsigned_abs() > drift_allowance(since_check_ns)
+        || gap.unsigned_abs() > drift_allowance(since_anchor_ns)
 }
 
+/// An entry no block has asked for in this long is dropped when another
+/// pipeline run registers. A running pipeline asks at least every fragment;
+/// a paused one gets a new base time, and so a new entry, when it resumes.
+const REGISTRY_IDLE: Duration = Duration::from_secs(3600);
+
+/// One entry per flow, for its current pipeline run. Pruned of idle entries
+/// (flows that stopped or were deleted) whenever an entry is added.
 static REGISTRY: LazyLock<Mutex<HashMap<FlowId, RegistryEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -292,21 +317,29 @@ fn shared_pipeline_mapping_with(
     if let Some(entry) = reg.get_mut(&flow_id) {
         let same_clock = entry.clock.upgrade().as_ref() == Some(clock);
         if entry.base_time_ns == base_time_ns && same_clock {
+            entry.last_used = Instant::now();
             if entry.mapping.domain == ClockDomain::Other {
                 let (clock_ns, tai_ns) = sample();
                 let gap = tai_ns as i128 - (clock_ns + entry.mapping.offset_ns);
                 let (last_tai, last_gap) = entry.last_check;
-                if is_jump(gap, last_gap, tai_ns.saturating_sub(last_tai)) {
+                if is_jump(
+                    gap,
+                    last_gap,
+                    tai_ns.saturating_sub(last_tai),
+                    tai_ns.saturating_sub(entry.anchored_tai_ns),
+                ) {
                     entry.mapping.offset_ns = tai_ns as i128 - clock_ns;
                     entry.mapping.epoch = entry.mapping.epoch.wrapping_add(1);
                     entry.last_check = (tai_ns, 0);
+                    entry.anchored_tai_ns = tai_ns;
                     entry.drift_logged_s = 0;
                     warn!(
-                        "TAMS: flow {} pipeline clock and host TAI moved {} ms apart (sleep \
-                         or clock step): running time -> TAI re-anchored, offset {} ns \
-                         (epoch {})",
+                        "TAMS: flow {} pipeline clock and host TAI moved apart (sleep or \
+                         clock step; {} ms since the last check, {} ms in all): running \
+                         time -> TAI re-anchored, offset {} ns (epoch {})",
                         flow_id,
                         (gap - last_gap) / 1_000_000,
+                        gap / 1_000_000,
                         entry.mapping.offset_ns,
                         entry.mapping.epoch
                     );
@@ -346,14 +379,21 @@ fn shared_pipeline_mapping_with(
         base_time_ns,
         mapping.offset_ns
     );
+    let now = Instant::now();
+    reg.retain(|_, e| {
+        e.clock.upgrade().is_some() && now.duration_since(e.last_used) < REGISTRY_IDLE
+    });
+    let tai_now = tai.now_ns();
     reg.insert(
         flow_id,
         RegistryEntry {
             base_time_ns,
             clock: clock.downgrade(),
             mapping,
-            last_check: (tai.now_ns(), 0),
+            last_check: (tai_now, 0),
+            anchored_tai_ns: tai_now,
             drift_logged_s: 0,
+            last_used: now,
         },
     );
     mapping
@@ -505,7 +545,7 @@ impl FragmentTimeline {
     /// differ per block). After such a backward jump the start is never earlier
     /// than the grid point the previous fragment was planned to end on, so that
     /// fragment keeps its full timerange rather than being cut to where the new
-    /// one begins (review M2). Blocks on one grid clamp to the same point.
+    /// one begins. Blocks on one grid clamp to the same point.
     pub fn place(
         &mut self,
         running_time_ns: u64,
@@ -765,10 +805,44 @@ mod tests {
     }
 
     /// Drift that adds up past the threshold, a little at each check, does not
-    /// re-anchor (review: after about 28 h at 50 ppm it cut a 5 s hole); a
-    /// sudden step of the same size still does.
+    /// re-anchor: re-anchoring after about 28 h at 50 ppm would cut a 5 s hole
+    /// in the store. A sudden step of the same size still does.
     #[test]
     fn slow_drift_does_not_reanchor() {
+        gst::init().unwrap();
+        const S: u64 = 1_000_000_000;
+        const H28: u64 = 28 * 3600 * S;
+        let tai = HostTai::new();
+        let clock = system_clock(gst::ClockType::Monotonic);
+        let flow = uuid::Uuid::new_v4();
+        let a = shared_pipeline_mapping(flow, &clock, 1_000, &tai);
+        // `elapsed` of host TAI goes by, and the pipeline clock falls `drift`
+        // behind it.
+        let read = |elapsed: u64, drift: u64| {
+            let (c, t) = sample_other(&clock, &tai);
+            (c + elapsed as i128 - drift as i128, t + elapsed)
+        };
+        // 28 h at 50 ppm (5.04 s) in 16 checks.
+        let mut last = (0, 0);
+        for step in 1..=16u64 {
+            let elapsed = H28 * step / 16;
+            let drift = elapsed / 20_000;
+            last = (elapsed, drift);
+            let m =
+                shared_pipeline_mapping_with(flow, &clock, 1_000, &tai, || read(elapsed, drift));
+            assert_eq!(m, a, "drift of {} ms re-anchored", drift / 1_000_000);
+        }
+        // A 6 s step on top of that is a jump.
+        let b = shared_pipeline_mapping_with(flow, &clock, 1_000, &tai, || {
+            read(last.0, last.1 + 6 * S)
+        });
+        assert_eq!(b.epoch, 1);
+    }
+
+    /// Steps that are each below the threshold (short sleeps) but add up past
+    /// it, in far less time than drift needs for that, re-anchor.
+    #[test]
+    fn small_steps_that_add_up_reanchor() {
         gst::init().unwrap();
         const S: u64 = 1_000_000_000;
         let tai = HostTai::new();
@@ -779,24 +853,52 @@ mod tests {
             let (c, t) = sample_other(&clock, &tai);
             (c, t + extra)
         };
-        // 8 s of drift in steps of half a second.
-        for step in 1..=16u64 {
-            let m = shared_pipeline_mapping_with(flow, &clock, 1_000, &tai, || read(step * S / 2));
-            assert_eq!(m, a, "drift of {} ms re-anchored", step * 500);
-        }
-        // A 6 s step on top of that is a jump.
-        let b = shared_pipeline_mapping_with(flow, &clock, 1_000, &tai, || read(14 * S));
-        assert_eq!(b.epoch, 1);
+        // Three 4 s sleeps: the first is within the threshold.
+        let b = shared_pipeline_mapping_with(flow, &clock, 1_000, &tai, || read(4 * S));
+        assert_eq!(b, a);
+        // The second brings the total to 8 s: re-anchored.
+        let c = shared_pipeline_mapping_with(flow, &clock, 1_000, &tai, || read(8 * S));
+        assert_eq!(c.epoch, 1);
+        // The third counts from the new anchor: 4 s again, within the threshold.
+        let d = shared_pipeline_mapping_with(flow, &clock, 1_000, &tai, || read(12 * S));
+        assert_eq!(d, c);
     }
 
     #[test]
     fn drift_allowance_grows_with_time_between_checks() {
         const S: u64 = 1_000_000_000;
-        assert!(!is_jump(4 * S as i128, 0, 0));
-        assert!(is_jump(6 * S as i128, 0, 0));
+        const H28: u64 = 28 * 3600 * S;
+        assert!(!is_jump(4 * S as i128, 0, 0, 0));
+        assert!(is_jump(6 * S as i128, 0, 0, 0));
         // 6 s over 28 h without a check is within 5 s + 100 ppm (10 s).
-        assert!(!is_jump(6 * S as i128, 0, 28 * 3600 * S));
-        assert!(is_jump(-16 * S as i128, 0, 28 * 3600 * S));
+        assert!(!is_jump(6 * S as i128, 0, H28, H28));
+        assert!(is_jump(-16 * S as i128, 0, H28, H28));
+        // Steps within the allowance that add up past the total allowance.
+        assert!(!is_jump(8 * S as i128, 4 * S as i128, 0, H28));
+        assert!(is_jump(8 * S as i128, 4 * S as i128, 0, 0));
+    }
+
+    /// Idle entries (a flow that stopped or was deleted) are dropped when
+    /// another pipeline run registers; an entry in use is kept.
+    #[test]
+    fn idle_registry_entries_are_pruned() {
+        gst::init().unwrap();
+        let tai = HostTai::new();
+        let clock = system_clock(gst::ClockType::Monotonic);
+        let (idle, busy) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        shared_pipeline_mapping(idle, &clock, 1_000, &tai);
+        shared_pipeline_mapping(busy, &clock, 1_000, &tai);
+        {
+            let mut reg = REGISTRY.lock().unwrap();
+            let past = Instant::now()
+                .checked_sub(REGISTRY_IDLE + Duration::from_secs(1))
+                .unwrap();
+            reg.get_mut(&idle).unwrap().last_used = past;
+        }
+        shared_pipeline_mapping(uuid::Uuid::new_v4(), &clock, 1_000, &tai);
+        let reg = REGISTRY.lock().unwrap();
+        assert!(!reg.contains_key(&idle));
+        assert!(reg.contains_key(&busy));
     }
 
     /// After the shared mapping jumps, every block re-anchors on the new offset,
@@ -969,7 +1071,7 @@ mod tests {
         assert!(!b.went_backward && b.anchored.is_none());
     }
 
-    /// Running time steps back inside one pipeline run (review M2). The shared
+    /// Running time steps back inside one pipeline run. The shared
     /// mapping still holds, so the block re-anchors on it, not on host "now":
     /// two blocks that see the jump at different moments stay aligned, and the
     /// fragment before the jump keeps its planned timerange.
