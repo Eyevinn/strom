@@ -175,8 +175,13 @@ impl SourceIndex for LocalIndex {
         match &segment.location {
             Location::Path(p) => {
                 // `parse` refused `..` and absolute objects; a symlink in
-                // the directory can still point out of it.
-                let resolved = confine(p, &self.dir).map_err(anyhow::Error::msg)?;
+                // the directory can still point out of it. Resolving touches
+                // the file system: off the async runtime.
+                let (path, dir) = (p.clone(), self.dir.clone());
+                let resolved = tokio::task::spawn_blocking(move || confine(&path, &dir))
+                    .await
+                    .context("resolving a segment path")?
+                    .map_err(anyhow::Error::msg)?;
                 tokio::fs::read(&resolved)
                     .await
                     .with_context(|| format!("reading {}", p.display()))
