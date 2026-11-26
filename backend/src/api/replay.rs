@@ -174,6 +174,14 @@ fn ws_reply(tl: &timeline::ReplayTimeline, text: &str) -> serde_json::Value {
     }
 }
 
+/// The close frame sent when the socket's group is gone.
+fn group_ended() -> Message {
+    Message::Close(Some(CloseFrame {
+        code: close_code::AWAY,
+        reason: "replay group ended".into(),
+    }))
+}
+
 async fn handle(
     socket: WebSocket,
     flow_id: FlowId,
@@ -189,7 +197,12 @@ async fn handle(
                 let ev = match ev {
                     Ok(ev) => ev,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    // The timeline was dropped (its flow stopped): close
+                    // the socket the same way as when a new run replaced it.
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        let _ = tx.send(group_ended()).await;
+                        break;
+                    }
                 };
                 let mut msg = serde_json::to_value(ev).unwrap_or_default();
                 msg["type"] = "event".into();
@@ -199,12 +212,7 @@ async fn handle(
             }
             _ = tick.tick() => {
                 let Some(tl) = current(flow_id, &group, &held) else {
-                    let _ = tx
-                        .send(Message::Close(Some(CloseFrame {
-                            code: close_code::AWAY,
-                            reason: "replay group ended".into(),
-                        })))
-                        .await;
+                    let _ = tx.send(group_ended()).await;
                     break;
                 };
                 let msg = tl.telemetry().to_string();

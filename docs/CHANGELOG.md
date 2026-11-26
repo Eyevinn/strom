@@ -12,6 +12,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - TAMS Output: segments are cut on a TAI grid, and `segment_duration_ms` allows segments shorter than a second. The block asks upstream for a keyframe on each grid point, warns when a boundary still leaves the grid, and writes video `essence_parameters` on its flows
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
 - API: `GET /api/flows/{flow_id}/blocks/{block_id}/pgm-endpoint` returns the WHEP endpoint fed by a vision mixer's PGM output, like `multiview-endpoint`
+- Media Player: a timeline player has a Replay button in the properties panel that opens the replay page for its group
 
 ### Changed
 - Media Player: an explicit `mode` property (`playlist`, `stinger`, `timeline`) selects what the block does, and the properties panel shows only the properties of that mode. `stinger_mode=true` becomes `mode=stinger`. The Playlist button and transport controls are hidden for a timeline player
@@ -26,6 +27,11 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - TAMS Output: the last segment of a run ends at its last frame, the open segment is finished when the flow stops, the mapping from running time to TAI is re-anchored after a sleep or clock jump, and the frame rate and size written to the store follow the flow
 - TAMS Output: segments are parked on disk instead of dropped when the store is unreachable, a channel is full, or the store answers 401/403, and are uploaded later without holding back new segments. A 404 for the flow creates the flow again, registration is idempotent, and slow clock drift no longer re-anchors the TAI mapping
 - OSC: SAT freshness is judged on the wall clock, and a request that gets 401 is retried once with a new SAT
+- OSC: the gateway host is taken from the parsed URL before a SAT is sent. User info that looks like an OSC host (`https://x.svc.auto.prod.osaas.io:pw@evil.example/`) passed the check and the SAT went to the other host; a gateway URL with user info is now refused
+- OSC: a SAT whose `exp` and `iat` claims give an absurd lifetime is refreshed by age instead of panicking on overflow
+- Media Player (timeline mode): a local `source` outside `media_path` is refused, through `..` or a symlink alike
+- Vision mixer: `pgm-endpoint` and `multiview-endpoint` find a WHEP output behind a pad linked more than once or a block with several outputs (breadth first, not only the first link)
+- Replay WebSocket: the socket is closed with a close frame when its group's flow stops, not dropped
 
 ### Upgrade notes
 - Saved flows and flows sent through the API with `stinger_mode` are rewritten to `mode` when they are loaded or saved, with a log line per block. The stinger API now asks for "Mode set to Stinger"

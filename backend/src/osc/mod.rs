@@ -85,8 +85,13 @@ fn sat_refresh_at(token: &str, fetched_at: SystemTime) -> SystemTime {
     let Some(exp) = jwt_time(token, "exp") else {
         return by_age;
     };
+    // The claims come from the token server: an absurd lifetime that does not
+    // fit in a `SystemTime` refreshes by age instead of panicking.
     let expires_at = match jwt_time(token, "iat").and_then(|iat| exp.duration_since(iat).ok()) {
-        Some(lifetime) => fetched_at + lifetime,
+        Some(lifetime) => match fetched_at.checked_add(lifetime) {
+            Some(t) => t,
+            None => return by_age,
+        },
         None => exp,
     };
     match expires_at.checked_sub(SAT_EXPIRY_MARGIN) {
@@ -538,6 +543,14 @@ mod tests {
         let sat = cached(&tok, t0);
         assert_eq!(sat.refresh_at, t0 + SAT_MIN_REFRESH);
         assert!(sat_is_fresh(&sat, t0 + Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn an_absurd_lifetime_does_not_overflow() {
+        let t0 = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        // exp - iat does not fit after `fetched_at`: refresh by age.
+        let tok = jwt(serde_json::json!({ "iat": 0u64, "exp": i64::MAX as u64 }));
+        assert_eq!(cached(&tok, t0).refresh_at, t0 + SAT_REFRESH_AFTER);
     }
 
     #[test]

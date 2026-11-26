@@ -664,26 +664,26 @@ async function saveClip() {
 }
 // The server holds the clip's bounds: cue parks at IN, play runs to OUT and
 // freezes on the last frame before it (OUT is exclusive).
-// The clip's angle is cut to program first; if the mixer refuses, the clip is
-// not cued, so it cannot go out on the wrong angle. A later clip, mark or
-// deletion takes over: an ack that comes after that changes nothing.
-async function cueClip(c, play) {
+// The clip is cued first and its angle cut to program once the cue has
+// landed, so program shows the clip's IN frame, not the frame the group was
+// on. If the cue or the cut fails, the clip does not play, so it cannot go out
+// on the wrong angle. A later clip, mark or deletion takes over: an ack that
+// comes after that changes nothing.
+function cueClip(c, play) {
   const cue = { clip: c, pending: true };
+  const drop = () => { if (activeClip === cue) { activeClip = null; renderClips(); } };
   activeClip = cue;
   renderClips();
-  if (c.angle != null && !(await cutTo({ input: c.angle }))) {
-    if (activeClip === cue) { activeClip = null; renderClips(); }
-    return;
-  }
-  if (activeClip !== cue) return;
-  const sent = send({ cmd: 'cue', in: { tai: taiOfNs(c.in_tai) }, out: { tai: taiOfNs(c.out_tai) }, end_action: 'freeze' }, m => {
+  const sent = send({ cmd: 'cue', in: { tai: taiOfNs(c.in_tai) }, out: { tai: taiOfNs(c.out_tai) }, end_action: 'freeze' }, async m => {
     if (activeClip !== cue) return;
-    if (m.type !== 'ack') { activeClip = null; renderClips(); return; }
+    if (m.type !== 'ack') { drop(); return; }
+    if (c.angle != null && !(await cutTo({ input: c.angle }))) { drop(); return; }
+    if (activeClip !== cue) return;
     cue.pending = false;
     renderClips();
     if (play) send({ cmd: 'play', speed: c.speed || 1 });
   });
-  if (!sent) { activeClip = null; renderClips(); }
+  if (!sent) drop();
 }
 function deleteClip(id) {
   const c = clips.find(x => x.id === id);
@@ -761,6 +761,7 @@ const optStr = v => v == null || typeof v === 'string';
 const optNum = v => v == null || (typeof v === 'number' && Number.isFinite(v));
 const validClip = c => c && typeof c === 'object' && typeof c.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(c.id)
   && isTai(c.in_tai) && isTai(c.out_tai) && optStr(c.name) && optStr(c.in_tc) && optStr(c.angle_label) && optNum(c.speed)
+  && optStr(c.flow) && optStr(c.group) && (c.angle == null || (Number.isInteger(c.angle) && c.angle >= 0))
   && (c.tags == null || (Array.isArray(c.tags) && c.tags.every(t => typeof t === 'string')));
 const validMark = m => m && typeof m === 'object' && isTai(m.tai_ns) && optStr(m.name) && optStr(m.utc)
   && optNum(m.frame_in_second);

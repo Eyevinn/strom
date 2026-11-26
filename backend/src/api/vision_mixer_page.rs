@@ -11,45 +11,52 @@ use crate::blocks::builtin::vision_mixer::overlay;
 use crate::blocks::builtin::vision_mixer::properties as vm_props;
 use crate::state::AppState;
 
-/// Follow links from a block's output pad through intermediate blocks until
-/// a WHEP output block is reached. Returns the WHEP endpoint path
-/// (e.g. `/whep/{endpoint_id}`) or an empty string if none is found.
+/// The nearest WHEP output downstream of a block's output pad. Returns the
+/// WHEP endpoint path (e.g. `/whep/{endpoint_id}`) or an empty string if none
+/// is found.
+///
+/// Searches breadth first through every link of a pad and every output of the
+/// blocks on the way, so a pad linked twice (a tee) or an intermediate block
+/// with several outputs cannot hide the endpoint. Stops at another vision
+/// mixer, whose outputs no longer carry this pad's picture. Matches
+/// `whepDownstream` in `static/replay.html`.
 pub fn find_whep_endpoint_for_pad(flow: &Flow, block_id: &str, pad_name: &str) -> String {
-    let whep_block_ids: std::collections::HashSet<&str> = flow
-        .blocks
-        .iter()
-        .filter(|b| b.block_definition_id == "builtin.whep_output")
-        .map(|b| b.id.as_str())
-        .collect();
+    use std::collections::{HashSet, VecDeque};
 
-    let mut current = format!("{}:{}", block_id, pad_name);
-    let mut visited = std::collections::HashSet::new();
-
-    while let Some(link) = flow.links.iter().find(|l| l.from == current) {
-        let target_block_id = link.to.split(':').next().unwrap_or("");
-        if !visited.insert(target_block_id.to_string()) {
-            break;
-        }
-        if whep_block_ids.contains(target_block_id) {
-            if let Some(eid) = flow
-                .blocks
-                .iter()
-                .find(|b| b.id == target_block_id)
-                .and_then(|b| b.runtime_data.as_ref())
-                .and_then(|rd| rd.get("whep_endpoint_id"))
-            {
-                return format!("/whep/{}", eid);
+    let block_of = |id: &str| flow.blocks.iter().find(|b| b.id == id);
+    let outputs_of = |blk: &str| {
+        let prefix = format!("{}:", blk);
+        let mut pads: Vec<&str> = Vec::new();
+        for l in &flow.links {
+            if l.from.starts_with(&prefix) && !pads.contains(&l.from.as_str()) {
+                pads.push(l.from.as_str());
             }
-            break;
         }
-        // Follow through: find an output link from this intermediate block
-        match flow
-            .links
-            .iter()
-            .find(|l| l.from.starts_with(&format!("{}:", target_block_id)))
-        {
-            Some(next) => current = next.from.clone(),
-            None => break,
+        pads
+    };
+
+    let start = format!("{}:{}", block_id, pad_name);
+    let mut queue: VecDeque<&str> = VecDeque::from([start.as_str()]);
+    let mut seen: HashSet<&str> = HashSet::from([block_id]);
+
+    while let Some(pad) = queue.pop_front() {
+        for link in flow.links.iter().filter(|l| l.from == pad) {
+            let target = link.to.split(':').next().unwrap_or("");
+            if !seen.insert(target) {
+                continue;
+            }
+            match block_of(target).map(|b| b.block_definition_id.as_str()) {
+                Some("builtin.whep_output") => {
+                    if let Some(eid) = block_of(target)
+                        .and_then(|b| b.runtime_data.as_ref())
+                        .and_then(|rd| rd.get("whep_endpoint_id"))
+                    {
+                        return format!("/whep/{}", eid);
+                    }
+                }
+                Some("builtin.vision_mixer") => {}
+                _ => queue.extend(outputs_of(target)),
+            }
         }
     }
 
@@ -280,4 +287,111 @@ pub async fn get_pgm_endpoint(
     Ok(Json(strom_types::api::MultiviewEndpointResponse {
         endpoint,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_whep_endpoint_for_pad;
+    use strom_types::Flow;
+
+    fn flow(blocks: &[(&str, &str, Option<&str>)], links: &[(&str, &str)]) -> Flow {
+        let mut flow = Flow::new("test");
+        flow.blocks = blocks
+            .iter()
+            .map(|(id, def, eid)| {
+                serde_json::from_value(serde_json::json!({
+                    "id": id,
+                    "block_definition_id": def,
+                    "properties": {},
+                    "position": {"x": 0.0, "y": 0.0},
+                    "runtime_data": eid.map(|e| serde_json::json!({"whep_endpoint_id": e})),
+                }))
+                .unwrap()
+            })
+            .collect();
+        flow.links = links
+            .iter()
+            .map(|(from, to)| strom_types::element::Link {
+                from: (*from).to_string(),
+                to: (*to).to_string(),
+            })
+            .collect();
+        flow
+    }
+
+    #[test]
+    fn follows_second_link_of_a_pad() {
+        let f = flow(
+            &[
+                ("vm", "builtin.vision_mixer", None),
+                ("rec", "builtin.mpegtssrt_output", None),
+                ("whep", "builtin.whep_output", Some("pgm")),
+            ],
+            &[
+                ("vm:pgm_out", "rec:video_in"),
+                ("vm:pgm_out", "whep:video_in"),
+            ],
+        );
+        assert_eq!(find_whep_endpoint_for_pad(&f, "vm", "pgm_out"), "/whep/pgm");
+    }
+
+    #[test]
+    fn follows_second_output_of_an_intermediate_block() {
+        let f = flow(
+            &[
+                ("vm", "builtin.vision_mixer", None),
+                ("enc", "builtin.videoenc", None),
+                ("sink", "builtin.mpegtssrt_output", None),
+                ("whep", "builtin.whep_output", Some("pgm")),
+            ],
+            &[
+                ("vm:pgm_out", "enc:video_in"),
+                ("enc:out_a", "sink:video_in"),
+                ("enc:out_b", "whep:video_in"),
+            ],
+        );
+        assert_eq!(find_whep_endpoint_for_pad(&f, "vm", "pgm_out"), "/whep/pgm");
+    }
+
+    #[test]
+    fn stops_at_another_vision_mixer_and_on_cycles() {
+        let f = flow(
+            &[
+                ("vm", "builtin.vision_mixer", None),
+                ("a", "builtin.videoenc", None),
+                ("b", "builtin.videoenc", None),
+                ("vm2", "builtin.vision_mixer", None),
+                ("whep", "builtin.whep_output", Some("other")),
+            ],
+            &[
+                ("vm:pgm_out", "a:in"),
+                ("a:out", "b:in"),
+                ("b:out", "a:in"),
+                ("b:out2", "vm2:video_in_0"),
+                ("vm2:pgm_out", "whep:video_in"),
+            ],
+        );
+        assert_eq!(find_whep_endpoint_for_pad(&f, "vm", "pgm_out"), "");
+    }
+
+    #[test]
+    fn nearest_endpoint_wins() {
+        let f = flow(
+            &[
+                ("vm", "builtin.vision_mixer", None),
+                ("enc", "builtin.videoenc", None),
+                ("far", "builtin.whep_output", Some("far")),
+                ("near", "builtin.whep_output", Some("near")),
+            ],
+            &[
+                ("vm:pgm_out", "enc:in"),
+                ("enc:out", "far:video_in"),
+                ("vm:pgm_out", "near:video_in"),
+            ],
+        );
+        assert_eq!(
+            find_whep_endpoint_for_pad(&f, "vm", "pgm_out"),
+            "/whep/near"
+        );
+    }
 }
