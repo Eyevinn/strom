@@ -848,11 +848,66 @@ fn fast_play_that_catches_up_goes_live_with_an_event() {
             ..
         })
     ));
-    p[0].end_tai.store(BASE + 70 * S, Ordering::Relaxed);
+    p[0].end_tai.store(BASE + 62 * S, Ordering::Relaxed);
     assert_eq!(tl.cursor_tai(6 * S), Some((BASE + 61 * S, 1.0)));
     assert!(tl.telemetry()["live"].as_bool().unwrap());
     // Following live: no second event.
     tl.cursor_tai(9 * S);
+    assert!(events.try_recv().is_err());
+}
+
+/// `live` sent right after a start, while one angle's index still ends where
+/// the previous run ended: the line starts from that stale edge. Once the
+/// angle catches up, the group jumps to the live point instead of playing the
+/// hole between the runs for good (seen live: a frozen picture for 40 s).
+#[test]
+fn following_live_jumps_forward_when_a_lagging_edge_catches_up() {
+    // cam1 has the new run up to 100 s; cam2's index still ends at 60 s.
+    let (tl, p) = timeline_with(&[(BASE, BASE + 100 * S), (BASE, BASE + 60 * S)]);
+    let mut events = tl.subscribe();
+    let a = tl.apply_at(Command::Live { margin_ms: None }, 0).unwrap();
+    assert_eq!(a.tai, BASE + 60 * S - 1500 * MS);
+    // Still lagging: the group plays on and holds at the common edge.
+    assert_eq!(tl.cursor_tai(S), Some((BASE + 59_500 * MS, 1.0)));
+    assert!(events.try_recv().is_err());
+    // cam2's index catches up: 1.5 s behind the new edge, not 40 s.
+    p[1].end_tai.store(BASE + 100 * S, Ordering::Relaxed);
+    assert_eq!(tl.cursor_tai(2 * S), Some((BASE + 98_500 * MS, 1.0)));
+    assert!(matches!(
+        events.try_recv(),
+        Ok(ReplayEvent::Live {
+            reason: ReplayLiveReason::EdgeMoved,
+            ..
+        })
+    ));
+    assert!(tl.telemetry()["live"].as_bool().unwrap());
+    // Then it follows at 1x along the new line.
+    assert_eq!(tl.cursor_tai(3 * S), Some((BASE + 99_500 * MS, 1.0)));
+    p[0].end_tai.store(BASE + 101 * S, Ordering::Relaxed);
+    p[1].end_tai.store(BASE + 101 * S, Ordering::Relaxed);
+    assert_eq!(tl.cursor_tai(4 * S), Some((BASE + 100_500 * MS, 1.0)));
+    assert!(events.try_recv().is_err());
+}
+
+/// The edge grows a segment at a time while the cursor moves smoothly: a
+/// cursor up to one step further behind than the margin is on its line.
+#[test]
+fn following_live_rides_out_the_edge_steps() {
+    let (tl, p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let mut events = tl.subscribe();
+    // `live` just before the edge steps: right after each step the cursor is
+    // almost a whole step further behind the live point than the margin.
+    tl.apply_at(Command::Live { margin_ms: None }, 0).unwrap();
+    for k in 1..=10 {
+        p[0].end_tai.store(BASE + (60 + k) * S, Ordering::Relaxed);
+        let rt = (k - 1) * S + 10 * MS;
+        assert_eq!(
+            tl.cursor_tai(rt),
+            Some((BASE + 58_500 * MS + rt, 1.0)),
+            "second {}",
+            k
+        );
+    }
     assert!(events.try_recv().is_err());
 }
 
@@ -1058,10 +1113,11 @@ fn following_live_holds_at_the_common_edge_when_it_stalls() {
     // The edge (58 s, where both angles have media) does not grow: hold
     // there, not at the longer angle's end.
     assert_eq!(tl.tai_at(5 * S), Some(BASE + 58 * S - 1));
-    // It grows again: play on along the same line.
-    p[1].end_tai.store(BASE + 70 * S, Ordering::Relaxed);
+    // It grows again (by what was captured meanwhile): play on along the
+    // same line.
+    p[1].end_tai.store(BASE + 63 * S, Ordering::Relaxed);
     assert_eq!(tl.tai_at(5 * S), Some(BASE + 60 * S - 1));
-    p[0].end_tai.store(BASE + 70 * S, Ordering::Relaxed);
+    p[0].end_tai.store(BASE + 63 * S, Ordering::Relaxed);
     assert_eq!(tl.tai_at(5 * S), Some(BASE + 61_500 * MS));
 }
 
