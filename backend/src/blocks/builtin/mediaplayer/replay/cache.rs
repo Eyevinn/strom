@@ -3,7 +3,8 @@
 //! A fetcher thread with its own small async runtime keeps, around the
 //! group cursor:
 //! - the index: segments listed from the [`SourceIndex`] in fixed TAI chunks,
-//!   plus the live edge polled at segment cadence when the source can grow;
+//!   plus, when the source can grow, a live poll at segment cadence of all
+//!   segments since the edge the index knows (and late ones just behind it);
 //! - the coded bytes of the segments within `[T - behind, T + ahead]`, fetched
 //!   nearest first in the direction of travel, a few at a time.
 //!
@@ -107,6 +108,15 @@ impl SegmentStore {
             index.insert(s.start_ns, Arc::new(s));
         }
     }
+
+    /// Insert the segments the index does not have yet (by start), keeping
+    /// those it has: a live poll lists the same few again.
+    fn insert_new(&self, segs: impl IntoIterator<Item = Segment>) {
+        let mut index = lock(&self.index);
+        for s in segs {
+            index.entry(s.start_ns).or_insert_with(|| Arc::new(s));
+        }
+    }
 }
 
 /// A hole shorter than this between two segments is rounding, not a gap,
@@ -114,6 +124,14 @@ impl SegmentStore {
 const MIN_GAP_NS: i64 = 1_000_000;
 /// How often a player recomputes what it publishes about its index.
 const INDEX_VIEW_EVERY: Duration = Duration::from_millis(500);
+/// How far behind the live edge the live poll looks again for segments
+/// registered late (after a later one). A hole younger than this is listed
+/// again on each poll and is not reported as a gap yet.
+const LIVE_BACKFILL_NS: i64 = 10 * S;
+/// Segments one live poll takes at most. When there are more (the index fell
+/// far behind), the index jumps to the edge and the stretch in between is
+/// listed by chunk when the cursor gets there.
+const LIVE_POLL_MAX: usize = 400;
 /// How far from the cursor's window an open hole is followed: chunks are
 /// listed outwards from it until media closes it, up to this far.
 const RESOLVE_REACH_NS: i64 = 600 * S;
@@ -185,6 +203,22 @@ impl Coverage {
 
     pub fn add_media(&mut self, s: i64, e: i64, tol: i64) {
         insert_interval(&mut self.media, s, e, tol);
+    }
+
+    /// Where a live poll starts: the first point of `[floor, end)` that no
+    /// media covers, else `end`.
+    pub fn first_uncovered(&self, floor: i64, end: i64) -> i64 {
+        let mut p = floor;
+        for &(s, e) in &self.media {
+            if e <= p {
+                continue;
+            }
+            if s > p {
+                break;
+            }
+            p = e;
+        }
+        p.min(end)
     }
 
     /// The listed stretch that holds `[a, b]`.
@@ -279,8 +313,8 @@ pub fn by_urgency(segs: &[Arc<Segment>], cursor: i64, forward: bool) -> Vec<Arc<
 }
 
 /// Which index chunks have been listed. A chunk at the live edge gets new
-/// segments from the live poll; it is listed again (dirty) only when the poll
-/// skipped segments or a fetch failed (expired URLs).
+/// segments from the live poll; it is listed again (dirty) only when a fetch
+/// failed (expired URLs).
 #[derive(Default)]
 struct ChunkState {
     listed: HashSet<i64>,
@@ -464,22 +498,15 @@ impl Fetcher {
             // Live edge, at segment cadence.
             if self.source.may_grow() && Instant::now() >= next_poll {
                 next_poll = Instant::now() + Duration::from_nanos(seg_ns as u64);
-                match self.source.last().await {
-                    Ok(Some(l)) if l.end_ns > end => {
-                        if l.start_ns > end {
-                            // Missed segments in between: list them again.
-                            for c in chunk_of(end)..=chunk_of(l.start_ns) {
-                                chunks.dirty.insert(c);
-                            }
+                match self.poll_live(end, &mut coverage).await {
+                    Ok(Some((new_end, new_seg_ns))) => {
+                        seg_ns = new_seg_ns;
+                        if new_end > end {
+                            end = new_end;
+                            self.publish_extent(start, end);
                         }
-                        seg_ns = l.duration_ns().clamp(S / 5, 5 * S);
-                        end = l.end_ns;
-                        coverage.add_listed(l.start_ns, l.end_ns);
-                        coverage.add_media(l.start_ns, l.end_ns, self.tolerance());
-                        self.store.insert([l]);
-                        self.publish_extent(start, end);
                     }
-                    Ok(_) => {}
+                    Ok(None) => {}
                     Err(e) => debug!("Replay {}: live poll failed: {:#}", self.block_id, e),
                 }
                 if Instant::now() >= next_first {
@@ -641,8 +668,14 @@ impl Fetcher {
                     .store(index.len() as u64, Ordering::Relaxed);
                 if Instant::now() >= next_view {
                     next_view = Instant::now() + INDEX_VIEW_EVERY;
-                    self.stats
-                        .set_index_view(coverage.view((start, end), self.tolerance()));
+                    let mut view = coverage.view((start, end), self.tolerance());
+                    if self.source.may_grow() {
+                        // Holes near the live edge may still fill with
+                        // segments registered late: not gaps yet.
+                        let settled = end - LIVE_BACKFILL_NS;
+                        view.gaps.retain(|g| g.1 <= settled);
+                    }
+                    self.stats.set_index_view(view);
                 }
             }
             self.stats
@@ -650,6 +683,51 @@ impl Fetcher {
                 .store(lock(&self.store.bytes).len() as u64, Ordering::Relaxed);
         }
         jobs.abort_all();
+    }
+
+    /// Poll the live edge: list every segment since the edge `end` the
+    /// index knows, from the first hole in the [`LIVE_BACKFILL_NS`] before it
+    /// (a segment registered after a later one fills it on a later poll),
+    /// and merge them into the index. Returns the new end and segment
+    /// length, `None` when the source has nothing new.
+    async fn poll_live(
+        &self,
+        end: i64,
+        coverage: &mut Coverage,
+    ) -> anyhow::Result<Option<(i64, i64)>> {
+        let from = coverage.first_uncovered(end - LIVE_BACKFILL_NS, end);
+        let since = self.source.since(from, LIVE_POLL_MAX).await?;
+        let tol = self.tolerance();
+        let mut new_end = end;
+        for s in &since.segs {
+            coverage.add_media(s.start_ns, s.end_ns, tol);
+            new_end = new_end.max(s.end_ns);
+        }
+        let mut seg_ns = since.segs.last().map(Segment::duration_ns);
+        // The listing knows the source from `from` up to its last segment,
+        // or to its end if it was complete.
+        let listed_to = match (since.more, since.segs.last()) {
+            (true, Some(l)) => l.start_ns,
+            _ => new_end,
+        };
+        coverage.add_listed(from, listed_to);
+        self.store.insert_new(since.segs);
+        if since.more {
+            // Far behind the edge (after a long pause): jump to it. What is in
+            // between is listed by chunk if the cursor goes there.
+            if let Some(l) = self.source.last().await? {
+                debug!(
+                    "Replay {}: live poll fell behind, jumping to the edge",
+                    self.block_id
+                );
+                coverage.add_listed(l.start_ns, l.end_ns);
+                coverage.add_media(l.start_ns, l.end_ns, tol);
+                new_end = new_end.max(l.end_ns);
+                seg_ns = Some(l.duration_ns());
+                self.store.insert_new([l]);
+            }
+        }
+        Ok(seg_ns.map(|d| (new_end, d.clamp(S / 5, 5 * S))))
     }
 
     /// The longest seam that is not a gap, for this source's frame rate.
@@ -764,6 +842,10 @@ mod tests {
         fetch_hangs: bool,
         lists: AtomicU64,
         fetches: Mutex<HashMap<i64, u32>>,
+        /// A growing source: segments registered while the player runs,
+        /// in registration order (not necessarily time order).
+        grows: bool,
+        live: Mutex<Vec<Segment>>,
     }
 
     impl Mock {
@@ -790,7 +872,30 @@ mod tests {
                 fetch_hangs: false,
                 lists: AtomicU64::new(0),
                 fetches: Mutex::new(HashMap::new()),
+                grows: false,
+                live: Mutex::new(Vec::new()),
             }
+        }
+
+        /// All segments, in time order.
+        fn all(&self) -> Vec<Segment> {
+            let mut v = self.segs.clone();
+            v.extend(lock(&self.live).iter().cloned());
+            v.sort_by_key(|s| s.start_ns);
+            v
+        }
+
+        /// Register segment `i` (counted like `build`'s, `len_ms` long).
+        fn register(&self, i: i64, len_ms: i64) {
+            let ms = 1_000_000;
+            lock(&self.live).push(Segment {
+                start_ns: 100 * S + i * len_ms * ms,
+                end_ns: 100 * S + (i + 1) * len_ms * ms,
+                ts_offset_ns: 0,
+                object_start_ns: None,
+                object_id: i.to_string(),
+                location: Location::Urls(vec![]),
+            });
         }
 
         fn fetches_of(&self, start_s: i64) -> u32 {
@@ -807,7 +912,7 @@ mod tests {
             "mock".into()
         }
         fn may_grow(&self) -> bool {
-            false
+            self.grows
         }
         async fn info(&self) -> anyhow::Result<SourceInfo> {
             Ok(SourceInfo {
@@ -822,17 +927,16 @@ mod tests {
                 anyhow::bail!("gateway down");
             }
             Ok(self
-                .segs
-                .iter()
+                .all()
+                .into_iter()
                 .filter(|s| s.end_ns > start && s.start_ns < end)
-                .cloned()
                 .collect())
         }
         async fn first(&self) -> anyhow::Result<Option<Segment>> {
-            Ok(self.segs.first().cloned())
+            Ok(self.all().first().cloned())
         }
         async fn last(&self) -> anyhow::Result<Option<Segment>> {
-            Ok(self.segs.last().cloned())
+            Ok(self.all().last().cloned())
         }
         async fn fetch(&self, seg: &Segment) -> anyhow::Result<Vec<u8>> {
             *lock(&self.fetches).entry(seg.start_ns).or_insert(0) += 1;
@@ -1087,6 +1191,139 @@ mod tests {
         }
         assert!(handle.is_finished());
         assert!(t1.elapsed() < Duration::from_secs(1));
+    }
+
+    /// Index of the first live segment in the growing mock: 30 s after the
+    /// first, in another index chunk than the cursor (which stays at the
+    /// start), so only the live poll indexes the edge.
+    const LIVE0: i64 = 150;
+
+    /// A growing mock with segment 0 and the live segments `[LIVE0,
+    /// LIVE0 + n)` of `len_ms` from TAI 100 s, and a fetcher on it.
+    fn live_fetcher(n: i64, len_ms: i64) -> (Arc<Mock>, Arc<Fetcher>, Arc<AtomicBool>) {
+        let mock = Arc::new(Mock {
+            grows: true,
+            ..Mock::build(0, 1, false, false)
+        });
+        mock.register(0, len_ms);
+        for i in LIVE0..LIVE0 + n {
+            mock.register(i, len_ms);
+        }
+        let timeline = super::super::timeline::get_or_create(uuid::Uuid::new_v4(), "g");
+        let stats = Arc::new(PlayerStats::new("p"));
+        timeline.register_player(&stats);
+        let fetcher = Arc::new(Fetcher::new("p", mock.clone(), timeline, stats, 2));
+        let stop = Arc::new(AtomicBool::new(false));
+        Arc::clone(&fetcher).spawn(Arc::clone(&stop));
+        (mock, fetcher, stop)
+    }
+
+    /// Wait until the fetcher's index has the live segments `[LIVE0,
+    /// LIVE0 + n)` of `len_ms`, or 5 s. The ones it has, counted from LIVE0.
+    fn wait_indexed(f: &Fetcher, n: i64, len_ms: i64) -> Vec<i64> {
+        let ms = 1_000_000;
+        let at = |i: i64| 100 * S + i * len_ms * ms;
+        let t0 = Instant::now();
+        loop {
+            let have: Vec<i64> = f
+                .store
+                .segments_in(at(LIVE0), at(LIVE0 + n))
+                .iter()
+                .map(|s| (s.start_ns - at(LIVE0)) / (len_ms * ms))
+                .collect();
+            if have.len() as i64 == n || t0.elapsed() > Duration::from_secs(5) {
+                return have;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn live_poll_takes_every_segment_since_the_edge() {
+        // 200 ms segments (the poll runs every 200 ms). Three are registered
+        // at once between two polls: polling only the latest misses two.
+        let (mock, f, stop) = live_fetcher(1, 200);
+        assert_eq!(wait_indexed(&f, 1, 200).len(), 1);
+        std::thread::sleep(Duration::from_millis(300));
+        for i in 1..4 {
+            mock.register(LIVE0 + i, 200);
+        }
+        let have = wait_indexed(&f, 4, 200);
+        // And once more after a pause of a few polls.
+        std::thread::sleep(Duration::from_millis(500));
+        for i in 4..7 {
+            mock.register(LIVE0 + i, 200);
+        }
+        let have2 = wait_indexed(&f, 7, 200);
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(have, (0..4).collect::<Vec<_>>());
+        assert_eq!(have2, (0..7).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn live_poll_fills_a_segment_registered_late() {
+        // Segment 3 is registered after 4: the poll sees 4 first and a hole
+        // where 3 goes, and takes 3 on a later poll. Not a gap meanwhile.
+        let (mock, f, stop) = live_fetcher(3, 200);
+        assert_eq!(wait_indexed(&f, 3, 200).len(), 3);
+        mock.register(LIVE0 + 4, 200);
+        let t0 = Instant::now();
+        while f.stats.extent().map(|e| e.1) != Some(100 * S + (LIVE0 + 5) * 200_000_000)
+            && t0.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // A few polls with the hole open.
+        std::thread::sleep(Duration::from_millis(700));
+        let ms = 1_000_000;
+        let a = 100 * S + LIVE0 * 200 * ms;
+        let have: Vec<i64> = f
+            .store
+            .segments_in(a, a + 1000 * ms)
+            .iter()
+            .map(|s| (s.start_ns - a) / (200 * ms))
+            .collect();
+        assert_eq!(have, vec![0, 1, 2, 4]);
+        assert_eq!(
+            f.stats.index_view().gaps,
+            vec![],
+            "a hole at the live edge is not a gap yet"
+        );
+        mock.register(LIVE0 + 3, 200);
+        let have = wait_indexed(&f, 5, 200);
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(have, (0..5).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn live_poll_far_behind_jumps_to_the_edge() {
+        // More segments than one poll takes: the index gets the edge, not a
+        // stale end that catches up a poll at a time.
+        let (mock, f, stop) = live_fetcher(1, 200);
+        assert_eq!(wait_indexed(&f, 1, 200).len(), 1);
+        let n = LIVE0 + 1 + LIVE_POLL_MAX as i64 + 50;
+        for i in LIVE0 + 1..n {
+            mock.register(i, 200);
+        }
+        let edge = 100 * S + n * 200_000_000;
+        let t0 = Instant::now();
+        while f.stats.extent().map(|e| e.1) != Some(edge) && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(f.stats.extent().map(|e| e.1), Some(edge));
+    }
+
+    #[test]
+    fn first_uncovered_finds_the_hole_to_poll_from() {
+        let mut cov = Coverage::default();
+        cov.add_media(0, 10 * S, MIN_GAP_NS);
+        assert_eq!(cov.first_uncovered(5 * S, 10 * S), 10 * S);
+        cov.add_media(11 * S, 12 * S, MIN_GAP_NS);
+        assert_eq!(cov.first_uncovered(5 * S, 12 * S), 10 * S);
+        assert_eq!(cov.first_uncovered(11 * S, 12 * S), 12 * S);
+        // Nothing known in the window: from its floor.
+        assert_eq!(cov.first_uncovered(20 * S, 30 * S), 20 * S);
     }
 
     #[test]

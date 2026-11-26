@@ -592,6 +592,17 @@ impl TamsClient {
         query: &SegmentQuery,
         max_pages: usize,
     ) -> Result<Vec<ListedSegment>> {
+        Ok(self.list_segments_paged(flow_id, query, max_pages).await?.0)
+    }
+
+    /// As [`Self::list_segments`], also saying whether the store has more
+    /// pages than were followed (the listing stopped at `max_pages`).
+    pub async fn list_segments_paged(
+        &self,
+        flow_id: &str,
+        query: &SegmentQuery,
+        max_pages: usize,
+    ) -> Result<(Vec<ListedSegment>, bool)> {
         let first = format!("{}/flows/{}/segments", self.base_url, flow_id);
         let mut out = Vec::new();
         let mut next: Option<NextPage> = None;
@@ -614,10 +625,10 @@ impl TamsClient {
             let empty = page.is_empty();
             out.extend(page);
             if next.is_none() || empty {
-                break;
+                return Ok((out, false));
             }
         }
-        Ok(out)
+        Ok((out, true))
     }
 
     /// Resolve a `Link` target against the gateway base URL. A target outside

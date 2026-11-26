@@ -1,13 +1,17 @@
 //! TAMS flow as a replay source: `GET /flows/{id}/segments` for the index and
 //! the segments' `get_urls` for the bytes.
 
-use super::{Location, Segment, SourceIndex, SourceInfo};
+use super::{Location, Segment, Since, SourceIndex, SourceInfo};
 use crate::client_auth::AuthMethod;
 use crate::tams::client::{ListedSegment, SegmentQuery, TamsClient};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use strom_types::tams::format_timestamp;
 use tracing::warn;
+
+/// Page size and pages followed for a live poll ([`SourceIndex::since`]).
+const SINCE_PAGE: usize = 100;
+const SINCE_MAX_PAGES: usize = 8;
 
 /// Pages followed for one window listing. A window is seconds to minutes of
 /// segments, so this only stops a runaway listing.
@@ -33,6 +37,11 @@ impl TamsIndex {
             .await?;
         Ok(listed.iter().filter_map(to_segment).collect())
     }
+}
+
+/// A TAMS timerange from `start_ns` on, open-ended: `[start_`.
+fn timerange_from(start_ns: i64) -> String {
+    format!("[{}_", timestamp(start_ns))
 }
 
 /// A TAMS timerange covering `[start_ns, end_ns)`, signed.
@@ -124,6 +133,26 @@ impl SourceIndex for TamsIndex {
         Ok(self.query(q, 1).await?.into_iter().next())
     }
 
+    /// `GET /segments?timerange=[from_` in time order, a page at a time.
+    /// The spec returns the segments that overlap the range, so the one
+    /// that holds `from_ns` comes too; the caller merges by start.
+    async fn since(&self, from_ns: i64, max: usize) -> Result<Since> {
+        let page = max.clamp(1, SINCE_PAGE);
+        let pages = max.div_ceil(page).clamp(1, SINCE_MAX_PAGES);
+        let q = SegmentQuery {
+            timerange: Some(timerange_from(from_ns)),
+            limit: Some(page as u32),
+            reverse_order: false,
+        };
+        let (listed, more) = self
+            .client
+            .list_segments_paged(&self.flow_id, &q, pages)
+            .await?;
+        let mut segs: Vec<Segment> = listed.iter().filter_map(to_segment).collect();
+        segs.sort_by_key(|s| s.start_ns);
+        Ok(Since { segs, more })
+    }
+
     async fn fetch(&self, segment: &Segment) -> Result<Vec<u8>> {
         let Location::Urls(urls) = &segment.location else {
             return Err(anyhow!("TAMS segment without get_urls"));
@@ -150,6 +179,7 @@ mod tests {
             "[1800000000:0_1800000001:500000000)"
         );
         assert_eq!(timerange(-1_500_000_000, 0), "[-1:500000000_0:0)");
+        assert_eq!(timerange_from(1_500_000_000), "[1:500000000_");
     }
 
     #[test]
