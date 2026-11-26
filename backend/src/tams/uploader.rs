@@ -43,9 +43,9 @@
 //!   the channel closes — see [`TailSlot`].
 
 use crate::events::EventBroadcaster;
-use crate::tams::client::{FlowSpec, TamsClient};
+use crate::tams::client::{CollectionItem, FlowSpec, TamsClient};
 use gstreamer as gst;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -60,6 +60,18 @@ pub struct DetectedEssence {
     /// Codec label (e.g. `video/h264`); overrides the spec's fallback when set.
     pub codec: Option<String>,
     /// TAMS `essence_parameters`, merged over the spec's.
+    pub essence_parameters: serde_json::Map<String, serde_json::Value>,
+    /// Codec and parameters per track of a muxed flow (`video`, `audio-0`,
+    /// ...), for the member flows it collects (`FlowSpec::collected`).
+    pub tracks: BTreeMap<String, TrackEssence>,
+}
+
+/// What caps say about one track of a muxed flow.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct TrackEssence {
+    /// TAMS codec label, e.g. `audio/aac`.
+    pub codec: String,
+    /// TAMS `essence_parameters` of the track's member flow.
     pub essence_parameters: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -870,6 +882,9 @@ async fn ensure_flow(ctx: &mut UploadCtx<'_>, attempts: u32) -> bool {
             .essence_parameters
             .insert(k.clone(), v.clone());
     }
+    if !ctx.flow_spec.collected.is_empty() {
+        ctx.flow_spec.flow_collection = register_collected(ctx, &detected, attempts).await;
+    }
     match retry(attempts, || ctx.client.ensure_flow(ctx.flow_spec)).await {
         Ok(()) => {
             info!(
@@ -906,6 +921,68 @@ async fn ensure_flow(ctx: &mut UploadCtx<'_>, attempts: u32) -> bool {
             false
         }
     }
+}
+
+/// Register the member flows a muxed flow collects (one per track whose
+/// essence is known), before the flow itself, since a collection lists flows
+/// that are already registered. Returns the collection items of the members
+/// that were registered: those not yet known, or that failed, are left out
+/// and tried again when the essence changes or the flow is registered again.
+async fn register_collected(
+    ctx: &UploadCtx<'_>,
+    detected: &DetectedEssence,
+    attempts: u32,
+) -> Vec<CollectionItem> {
+    let mut items = Vec::new();
+    for member in &ctx.flow_spec.collected {
+        let Some(track) = detected.tracks.get(&member.track) else {
+            continue;
+        };
+        let mut spec = member.spec.clone();
+        spec.codec = Some(track.codec.clone());
+        if member.inherit_parameters {
+            spec.essence_parameters = detected.essence_parameters.clone();
+        }
+        for (k, v) in &track.essence_parameters {
+            spec.essence_parameters.insert(k.clone(), v.clone());
+        }
+        let mut mapping = member.container_mapping.clone();
+        // All channels of the track belong to the member.
+        if let Some(n) = track
+            .essence_parameters
+            .get("channels")
+            .and_then(|c| c.as_u64())
+            .filter(|n| *n > 0)
+        {
+            mapping.insert(
+                "audio_track".into(),
+                serde_json::json!({ "channel_range": format!("0_{}", n - 1) }),
+            );
+        }
+        spec.container_mapping = mapping.clone();
+        match retry(attempts, || ctx.client.ensure_flow(&spec)).await {
+            Ok(()) => {
+                info!(
+                    "TAMS {}: member flow {} ({}) registered: codec {}, essence_parameters {}",
+                    ctx.block_id,
+                    spec.flow_id,
+                    member.role,
+                    track.codec,
+                    serde_json::Value::Object(spec.essence_parameters.clone())
+                );
+                items.push(CollectionItem {
+                    id: spec.flow_id.clone(),
+                    role: member.role.clone(),
+                    container_mapping: mapping,
+                });
+            }
+            Err(e) => warn!(
+                "TAMS {}: member flow {} ({}) not registered yet: {:#}",
+                ctx.block_id, spec.flow_id, member.role, e
+            ),
+        }
+    }
+    items
 }
 
 /// What became of one segment.
@@ -1835,6 +1912,8 @@ mod tests {
             description: None,
             tags: vec![],
             flow_collection: vec![],
+            collected: vec![],
+            container_mapping: Default::default(),
             essence_parameters: Default::default(),
         };
         let detected: SharedDetected = Arc::default();
@@ -1964,6 +2043,8 @@ mod tests {
             description: None,
             tags: vec![],
             flow_collection: vec![],
+            collected: vec![],
+            container_mapping: Default::default(),
             essence_parameters: Default::default(),
         }
     }

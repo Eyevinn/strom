@@ -199,14 +199,50 @@ pub struct FlowSpec {
     pub description: Option<String>,
     /// Flow tags (key -> value), e.g. `production` -> `Studio A`.
     pub tags: Vec<(String, String)>,
-    /// Member flows collected by this flow, as `(flow_id, role)` pairs. Non-empty
-    /// only for a Multi-Flow that groups per-essence Flows under one NMOS
-    /// `format:multi` flow (the canonical TAMS multi-essence model). Serialized as
-    /// the TAMS `flow_collection` array of `{ id, role }` objects.
-    pub flow_collection: Vec<(String, String)>,
+    /// Member flows collected by this flow. Non-empty only for a Multi-Flow
+    /// that groups per-essence Flows under one NMOS `format:multi` flow (the
+    /// canonical TAMS multi-essence model). Serialized as the TAMS
+    /// `flow_collection` array.
+    pub flow_collection: Vec<CollectionItem>,
+    /// Per-essence member flows that live inside this flow's own container (the
+    /// tracks of a muxed MPEG-TS flow). The uploader registers each once its
+    /// essence is known and adds it to `flow_collection`; see
+    /// [`CollectedFlow`].
+    pub collected: Vec<CollectedFlow>,
+    /// The flow's own `container_mapping` (where a member flow's essence is in
+    /// the container of the flow that collects it). Left out when empty.
+    pub container_mapping: serde_json::Map<String, serde_json::Value>,
     /// TAMS `essence_parameters` (e.g. `frame_rate`, `frame_width`), filled in from
     /// caps by the uploader before the flow is created. Empty when unknown.
     pub essence_parameters: serde_json::Map<String, serde_json::Value>,
+}
+
+/// One member of a TAMS `flow_collection`: the member flow's id, its role
+/// (free text, e.g. `video`, `PGM`, `IS`) and its `container_mapping` (where
+/// its essence is in the collecting flow's container; an empty map is left
+/// out).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectionItem {
+    pub id: String,
+    pub role: String,
+    pub container_mapping: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A member flow whose essence is one track of the collecting flow's
+/// container: it has no segments of its own. `spec` is registered with the
+/// essence detected for `track` (see `DetectedEssence::tracks`), and the
+/// collection item gets `container_mapping` plus the track's channel range.
+#[derive(Debug, Clone)]
+pub struct CollectedFlow {
+    /// Key into `DetectedEssence::tracks` (`video`, `audio-0`, ...).
+    pub track: String,
+    pub role: String,
+    pub spec: FlowSpec,
+    pub container_mapping: serde_json::Map<String, serde_json::Value>,
+    /// The member takes the collecting flow's `essence_parameters` (the video
+    /// of a muxed flow, whose parameters the flow itself carries) under the
+    /// track's own.
+    pub inherit_parameters: bool,
 }
 
 /// Build the JSON body for `PUT /flows/{id}` from a [`FlowSpec`]. Pure (no I/O) so
@@ -215,8 +251,8 @@ pub struct FlowSpec {
 /// Wire-format contract (matches what the Eyevinn TAMS gateway accepts):
 /// - `id`, `source_id`, `format`, `essence_parameters` always present.
 /// - `codec`/`container` emitted only when `Some` (a grouping Multi-Flow omits them).
-/// - `flow_collection` members are `{ id, role, container_mapping: { track_index } }`,
-///   where `track_index` is the member's position in the collection.
+/// - `flow_collection` members are `{ id, role, container_mapping }`, the
+///   mapping left out when empty.
 /// - `label`/`description`/`tags` emitted only when present.
 fn flow_request_body(spec: &FlowSpec) -> serde_json::Value {
     let mut body = serde_json::json!({
@@ -234,23 +270,22 @@ fn flow_request_body(spec: &FlowSpec) -> serde_json::Value {
         body["container"] = serde_json::Value::String(container.clone());
     }
     if !spec.flow_collection.is_empty() {
-        // Each member is a collection-item (id + role) plus a container_mapping,
-        // which the gateway requires. A grouping Multi-Flow has no real shared
-        // container, so we use the generic, container-agnostic track_index =
-        // position in the collection (video first, then audio).
         let members: Vec<serde_json::Value> = spec
             .flow_collection
             .iter()
-            .enumerate()
-            .map(|(i, (id, role))| {
-                serde_json::json!({
-                    "id": id,
-                    "role": role,
-                    "container_mapping": { "track_index": i },
-                })
+            .map(|item| {
+                let mut member = serde_json::json!({ "id": item.id, "role": item.role });
+                if !item.container_mapping.is_empty() {
+                    member["container_mapping"] =
+                        serde_json::Value::Object(item.container_mapping.clone());
+                }
+                member
             })
             .collect();
         body["flow_collection"] = serde_json::Value::Array(members);
+    }
+    if !spec.container_mapping.is_empty() {
+        body["container_mapping"] = serde_json::Value::Object(spec.container_mapping.clone());
     }
     if let Some(label) = &spec.label {
         body["label"] = serde_json::Value::String(label.clone());
@@ -819,6 +854,8 @@ mod tests {
             description: None,
             tags: vec![],
             flow_collection: vec![],
+            collected: vec![],
+            container_mapping: Default::default(),
             essence_parameters: Default::default(),
         }
     }
@@ -856,9 +893,17 @@ mod tests {
         s.format = FORMAT_MULTI.into();
         s.codec = None;
         s.container = None;
+        let item = |id: &str, role: &str, track: usize| CollectionItem {
+            id: id.into(),
+            role: role.into(),
+            container_mapping: serde_json::json!({ "track_index": track })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        };
         s.flow_collection = vec![
-            ("video-flow".into(), "video".into()),
-            ("audio-flow".into(), "audio".into()),
+            item("video-flow", "video", 0),
+            item("audio-flow", "audio", 1),
         ];
         let body = flow_request_body(&s);
         let coll = body["flow_collection"].as_array().expect("array");
@@ -869,6 +914,28 @@ mod tests {
         assert_eq!(coll[1]["id"], "audio-flow");
         assert_eq!(coll[1]["role"], "audio");
         assert_eq!(coll[1]["container_mapping"]["track_index"], 1);
+    }
+
+    #[test]
+    fn container_mappings_serialized_when_set() {
+        let mut s = spec();
+        s.flow_collection = vec![CollectionItem {
+            id: "a".into(),
+            role: "PGM".into(),
+            container_mapping: Default::default(),
+        }];
+        let body = flow_request_body(&s);
+        // An empty mapping is left out, on the member and on the flow.
+        assert!(body["flow_collection"][0]
+            .get("container_mapping")
+            .is_none());
+        assert!(body.get("container_mapping").is_none());
+        s.container_mapping
+            .insert("mp2ts_container".into(), serde_json::json!({ "pid": 66 }));
+        assert_eq!(
+            flow_request_body(&s)["container_mapping"]["mp2ts_container"]["pid"],
+            66
+        );
     }
 
     #[test]
