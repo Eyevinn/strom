@@ -1238,7 +1238,7 @@ fn marks_during_a_restart_do_not_deadlock() {
     restarts.join().unwrap();
 }
 
-// --- review 2026-11-26 -----------------------------------------------------
+// --- media bounds, new runs and time base changes --------------------------
 
 #[test]
 fn an_out_past_the_media_ends_where_the_media_does() {
