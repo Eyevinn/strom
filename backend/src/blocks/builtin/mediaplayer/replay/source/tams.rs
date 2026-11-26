@@ -88,7 +88,7 @@ impl SourceIndex for TamsIndex {
         Ok(SourceInfo {
             frame_rate,
             container: flow["container"].as_str().map(str::to_string),
-            codec: flow["codec"].as_str().map(str::to_string),
+            codec: video_codec(&flow),
             // TAMS timeranges are TAI by definition.
             absolute_time: true,
         })
@@ -176,9 +176,35 @@ impl SourceIndex for TamsIndex {
     }
 }
 
+/// The flow's video codec, if it names one. A multi-essence flow (TAMS
+/// Output's muxed mode) carries its container in `codec` (`video/mp2t`), not
+/// the video inside, so it names none: replay then tries H.264, as for a
+/// source that does not say.
+fn video_codec(flow: &serde_json::Value) -> Option<String> {
+    if flow["format"].as_str() == Some("urn:x-nmos:format:multi") {
+        return None;
+    }
+    flow["codec"].as_str().map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_multi_flow_names_no_video_codec() {
+        let muxed = serde_json::json!({
+            "format": "urn:x-nmos:format:multi",
+            "codec": "video/mp2t",
+            "container": "video/mp2t",
+        });
+        assert_eq!(video_codec(&muxed), None);
+        let video = serde_json::json!({
+            "format": "urn:x-nmos:format:video",
+            "codec": "video/h264",
+        });
+        assert_eq!(video_codec(&video).as_deref(), Some("video/h264"));
+    }
 
     #[test]
     fn timerange_is_signed_half_open() {
