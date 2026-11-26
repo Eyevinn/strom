@@ -1,7 +1,7 @@
 //! Background segment uploader for the TAMS Output block.
 //!
-//! A `splitmuxsink` writes complete, GOP-aligned segment files to a temp directory
-//! on the GStreamer streaming thread. Each finished file, together with its
+//! The segmenter ([`crate::tams::segmenter`]) writes complete, GOP-aligned
+//! segment files to a temp directory. Each finished file, together with its
 //! timerange, is handed to this task over a bounded channel. All HTTP and disk reads
 //! happen here — never on the streaming thread — so the pipeline is never blocked by
 //! the gateway or S3.
@@ -16,7 +16,7 @@
 //! - a definitively rejected segment (non-retryable 4xx) is dropped with an error,
 //!   since retrying identical bytes can never succeed;
 //! - when the flow stops, a stop drain sends EOS through the muxer so the current
-//!   file is complete (see [`crate::tams::stop_drain`]), but no next fragment
+//!   file is complete (see [`crate::tams::segmenter::Segmenter::drain`]), but no next fragment
 //!   rotates it into a `FragmentReady`, so the last fragment is flushed here when
 //!   the channel closes — see [`TailSlot`].
 
@@ -54,7 +54,7 @@ pub struct FragmentReady {
     pub end_ns: u64,
 }
 
-/// The currently-open (not-yet-rotated) fragment. `splitmuxsink` has opened this
+/// The currently-open (not-yet-rotated) fragment. The segmenter has opened this
 /// file but it only becomes a `FragmentReady` when the *next* fragment opens. On
 /// pipeline stop there is no "next" fragment, so the uploader flushes whatever is
 /// here when its channel closes.
@@ -328,7 +328,7 @@ pub fn spawn_uploader(
             }
         }
 
-        // Channel closed: the pipeline is tearing down. splitmuxsink has finalized
+        // Channel closed: the pipeline is tearing down. The segmenter has finalized
         // the last file by now, but it was never rotated into a FragmentReady, so
         // flush it as the final segment.
         if let Some(tf) = tail.lock().ok().and_then(|mut t| t.take()) {

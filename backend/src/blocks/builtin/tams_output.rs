@@ -1,14 +1,15 @@
 //! TAMS Output block: records pre-encoded streams into a TAMS store.
 //!
 //! Two container modes (the `container` property):
-//! - **MPEG-TS (default):** all essences are muxed by one `mpegtsmux`/`splitmuxsink`
+//! - **MPEG-TS (default):** all essences are muxed by `mpegtsmux`
 //!   into TS segments and registered on a single NMOS `format:multi` flow.
 //!   Broadcast-native, inherent A/V sync, fewer objects.
-//! - **MP4:** each essence goes to its own `splitmuxsink` (mp4mux) and is
+//! - **MP4:** each essence goes to its own `mp4mux` segments and is
 //!   registered as a separate single-essence TAMS flow (video flow + audio flow
 //!   grouped under one Source). Canonical TAMS model, max flexibility.
 //!
-//! Each split file is a complete, GOP-aligned, independently decodable container =
+//! The segmenter ([`crate::tams::segmenter`]) cuts the streams on the TAI grid,
+//! one muxer per fragment. Each split file is a complete, GOP-aligned, independently decodable container =
 //! one TAMS segment. Files are written to a temp dir; the uploader uploads each as a
 //! media object, registers it with its timerange, then deletes it (kept on disk if
 //! upload ultimately fails — see the uploader module).
@@ -21,7 +22,7 @@ use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockB
 use crate::client_auth::AuthMethod;
 use crate::osc::SatProvider;
 use crate::tams::client::{FlowSpec, TamsClient};
-use crate::tams::stop_drain::MuxDrain;
+use crate::tams::segmenter::{OpenDecision, OpenRequest, Segmenter};
 use crate::tams::tai_mapping::{
     grid_miss_ns, reference_tai_ns, shared_pipeline_mapping, AnchorKind, FragmentTimeline, HostTai,
     FIRST_ON_GRID_FRAGMENT,
@@ -30,9 +31,9 @@ use crate::tams::uploader::{
     channel, closed_end_ns, media_end_running_time_ns, new_tail_slot, spawn_uploader,
     FragmentReady, MediaEnd, PadMediaEnd, SharedDetected, TailFragment,
 };
-use gst::glib::prelude::ToValue;
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_app as gst_app;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -163,8 +164,8 @@ impl BlockBuilder for TamsOutputBuilder {
         &self,
         properties: &HashMap<String, PropertyValue>,
     ) -> Option<ExternalPads> {
-        // Video is a single track (splitmuxsink has one `video` pad); audio can be
-        // several (splitmuxsink `audio_%u`), e.g. multiple language/commentary tracks.
+        // Video is a single track (it decides where segments split); audio can be
+        // several, e.g. multiple language/commentary tracks.
         let num_video = prop_usize(properties, "num_video_tracks", DEFAULT_NUM_VIDEO_TRACKS).min(1);
         let num_audio = prop_usize(properties, "num_audio_tracks", DEFAULT_NUM_AUDIO_TRACKS)
             .min(MAX_AUDIO_TRACKS);
@@ -448,8 +449,8 @@ impl AuthPlan {
 }
 
 /// One essence input on a flow. Audio carries its track index so a flow can mux
-/// (MPEG-TS) or group (MP4) several audio tracks. `splitmuxsink` exposes a single
-/// `video` pad but `audio_%u`, so video is always a single track.
+/// (MPEG-TS) or group (MP4) several audio tracks. Video is always a single
+/// track: it decides where segments split.
 #[derive(Clone, Copy, PartialEq)]
 enum Essence {
     Video,
@@ -475,8 +476,8 @@ impl Essence {
     }
 }
 
-/// Build one TAMS flow chain: N identity inputs -> (dynamic parsers) -> shared
-/// muxer/splitmuxsink -> segment files. For MP4 each chain has a single essence
+/// Build one TAMS flow chain: N identity inputs -> (dynamic parsers) -> appsinks
+/// -> segmenter (one muxer per fragment) -> segment files. For MP4 each chain has a single essence
 /// (one flow per essence); for MPEG-TS a single chain muxes all essences into one
 /// `format:multi` flow. Wires the per-fragment timerange capture + uploader at start.
 ///
@@ -515,73 +516,62 @@ fn build_flow_chain(
         )));
     }
 
-    // One muxer per fragment => each split file is a complete, decodable container.
-    let mux_factory = container.muxer_factory();
-    let mux_id = format!("{}:{}_mux", instance_id, suffix);
-    let mux = gst::ElementFactory::make(mux_factory)
-        .name(&mux_id)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", mux_factory, e)))?;
-    if container == Container::MpegTs && mux.has_property("alignment") {
-        mux.set_property("alignment", 7i32);
+    // Each essence ends in an appsink; the segmenter cuts the streams into
+    // fragment files on the TAI grid and closes each file as soon as the
+    // first frame after it has arrived (see `crate::tams::segmenter`, and why
+    // not `splitmuxsink` there). The appsinks neither sync nor preroll, so an
+    // input that carries no data never holds the pipeline short of PLAYING.
+    let mux_caps = muxer_sink_caps(container.muxer_factory())?;
+    let mut sinks: Vec<gst_app::AppSink> = Vec::with_capacity(inputs.len());
+    for &essence in inputs {
+        let sink_id = format!("{}:{}_{}_sink", instance_id, suffix, essence.tag());
+        let sink = gst::ElementFactory::make("appsink")
+            .name(&sink_id)
+            .property("sync", false)
+            .property("async", false)
+            .property("qos", false)
+            .property("enable-last-sample", false)
+            .property("max-buffers", 0u32)
+            // What the fragment muxer takes, so that the parser converts to it
+            // (mpegtsmux takes H.264 only as byte-stream).
+            .property("caps", &mux_caps)
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("appsink: {}", e)))?
+            .downcast::<gst_app::AppSink>()
+            .map_err(|_| BlockBuildError::ElementCreation("appsink: wrong type".into()))?;
+        elements.push((sink_id, sink.clone().upcast()));
+        sinks.push(sink);
     }
-
-    let sink_id = format!("{}:{}_splitmuxsink", instance_id, suffix);
-    let splitmuxsink = gst::ElementFactory::make("splitmuxsink")
-        .name(&sink_id)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("splitmuxsink: {}", e)))?;
-    splitmuxsink.set_property("muxer", &mux);
-    // No size limit: segments split on a grid of `segment_ns` on the TAI
-    // timeline, scheduled with `split-at-running-time` as each fragment opens (see
-    // the format-location-full handler). A size limit splits wherever the queued
-    // GOPs happen to overrun it, which differs between blocks fed the same input,
-    // so synchronized flows would not share segment boundaries.
-    splitmuxsink.set_property("max-size-time", 0u64);
-    // Fallback location template; the format-location-full signal overrides it.
-    let fallback = temp_dir.join(format!("seg_%05d.{}", container.file_ext()));
-    splitmuxsink.set_property("location", fallback.to_string_lossy().as_ref());
-    // No keyframe requests from splitmuxsink: it asks for a keyframe at a split
-    // point only once the fragment before it opens, a GOP or more late, so the
-    // encoder forces one at once, off the grid, and its min-force-key-unit-interval
-    // then holds every later request off the grid too. The format-location-full
-    // handler asks for keyframes one grid point ahead instead.
-    if splitmuxsink.has_property("send-keyframe-requests") {
-        splitmuxsink.set_property("send-keyframe-requests", false);
-    }
-    // A sink completes READY->PAUSED only once it has prerolled a buffer, so an
-    // input that carries no data would hold the whole pipeline short of PLAYING.
-    // Locked, the sink stays in NULL until the first essence's caps probe links a
-    // parser to it and brings it in.
-    splitmuxsink.set_locked_state(true);
 
     // Codec label for the TAMS flow, derived from caps at runtime by the probes and
     // read by the uploader when it creates the flow.
     let detected_codec: SharedDetected = Arc::default();
-    // Where the media written to the open fragment ends, for the timerange of
-    // the last fragment of a run (no next fragment closes it).
-    let media_end = track_media_end(&mux);
-    // The same, read when a fragment closes: a fragment before a stall ends
-    // at its media.
+    // Where the media written to the open fragment ends, per essence: for the
+    // timerange of the last fragment of a run (no next fragment closes it),
+    // and, read when a fragment closes, for a fragment before a stall.
+    let pad_ends: Vec<Arc<PadMediaEnd>> = inputs
+        .iter()
+        .map(|_| Arc::new(PadMediaEnd::default()))
+        .collect();
+    let media_end: MediaEnd = Arc::new(Mutex::new(pad_ends.clone()));
     let media_end_at_split = media_end.clone();
-    // On a stop, EOS through the muxer completes the open fragment.
-    let mux_drain = Arc::new(MuxDrain::default());
-    mux_drain.watch_muxer(&mux);
+    // On a stop, the open fragment is finished before the pipeline goes down.
+    let segmenter_slot: Arc<Mutex<Option<std::sync::Weak<Segmenter>>>> = Arc::default();
     {
-        let splitmuxsink = splitmuxsink.downgrade();
-        let mux_drain = mux_drain.clone();
-        let label = format!("{} ({})", instance_id, suffix);
+        let slot = segmenter_slot.clone();
         ctx.register_stop_drain(Box::new(move || {
-            if let Some(splitmuxsink) = splitmuxsink.upgrade() {
-                mux_drain.drain(&splitmuxsink, &label);
+            let seg = slot
+                .lock()
+                .ok()
+                .and_then(|s| s.as_ref().and_then(|w| w.upgrade()));
+            if let Some(seg) = seg {
+                seg.drain();
             }
         }));
     }
 
     // One identity input + caps probe per essence, each requesting its own sink pad.
-    for &essence in inputs {
-        let sink_pad_name = request_sink_pad(&splitmuxsink, essence)?;
-
+    for (essence_idx, &essence) in inputs.iter().enumerate() {
         let input_id = format!("{}:{}", instance_id, essence.input_id());
         let input = gst::ElementFactory::make("identity")
             .name(&input_id)
@@ -592,7 +582,7 @@ fn build_flow_chain(
             .ok_or_else(|| BlockBuildError::ElementCreation("identity has no src pad".into()))?;
 
         let parser_inserted = Arc::new(AtomicBool::new(false));
-        let splitmuxsink_weak = splitmuxsink.downgrade();
+        let sink_weak = sinks[essence_idx].downgrade();
         let instance_id_owned = instance_id.to_string();
         let detected_codec_probe = detected_codec.clone();
         src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
@@ -672,14 +662,11 @@ fn build_flow_chain(
                 merge_video_params(&detected_codec_probe, structure, &instance_id_owned);
             }
 
-            let splitmuxsink = match splitmuxsink_weak.upgrade() {
+            let sink = match sink_weak.upgrade() {
                 Some(e) => e,
                 None => return gst::PadProbeReturn::Ok,
             };
-            let bin = match splitmuxsink
-                .parent()
-                .and_then(|p| p.downcast::<gst::Bin>().ok())
-            {
+            let bin = match sink.parent().and_then(|p| p.downcast::<gst::Bin>().ok()) {
                 Some(b) => b,
                 None => return gst::PadProbeReturn::Ok,
             };
@@ -711,7 +698,7 @@ fn build_flow_chain(
                 (Some(a), Some(b)) => (a, b),
                 _ => return gst::PadProbeReturn::Ok,
             };
-            let sink_pad = match splitmuxsink.static_pad(&sink_pad_name) {
+            let sink_pad = match sink.static_pad("sink") {
                 Some(p) => p,
                 None => return gst::PadProbeReturn::Ok,
             };
@@ -727,15 +714,6 @@ fn build_flow_chain(
             // give the rate when nothing else does.
             if essence == Essence::Video {
                 watch_video_essence(&psrc, detected_codec_probe.clone(), &instance_id_owned);
-            }
-            // Bring the sink in before the caps event reaches it. Idempotent across
-            // essences sharing one muxed sink.
-            splitmuxsink.set_locked_state(false);
-            if let Err(e) = splitmuxsink.sync_state_with_parent() {
-                error!(
-                    "TAMS Output {}: failed to sync splitmuxsink with pipeline state: {}",
-                    instance_id_owned, e
-                );
             }
             // Linked successfully — now consume the one-shot guard so subsequent
             // Caps events (renegotiation) don't re-insert a second parser.
@@ -756,14 +734,14 @@ fn build_flow_chain(
         elements.push((input_id, input));
     }
 
-    elements.push((sink_id, splitmuxsink.clone()));
-
     // Wire timerange capture + uploader at pipeline start (flow_id + events available).
     let block_id = instance_id.to_string();
     let temp_dir_for_setup = temp_dir.clone();
     let chain_tag = suffix.to_string();
     let content_type = container.content_type().to_string();
     let file_ext = container.file_ext().to_string();
+    let suffix_owned = suffix.to_string();
+    let mux_factory = container.muxer_factory();
     ctx.register_element_setup(Box::new(move |flow_id, events| {
         // Remove only orphan segment files left by a previous run — plain `seg_*`
         // files with no `.meta` sidecar. Their timerange is lost so they cannot be
@@ -847,37 +825,21 @@ fn build_flow_chain(
         // TAI across blocks (#966). See `crate::tams::tai_mapping`.
         let timeline = Arc::new(Mutex::new(FragmentTimeline::default()));
         let tai = Arc::new(HostTai::new());
-        // `split-at-running-time` takes the lock splitmuxsink holds while it emits
-        // format-location-full, so the next split is scheduled with `call_async`
-        // (GStreamer's thread pool: no tokio runtime needed in this callback, and
-        // it runs right after the signal returns). A split that still lands late
-        // shows up as a segment off the grid (`warn_off_grid`).
         let temp_dir = temp_dir_for_setup;
         let tag = chain_tag;
-        let block_id_sig = block_id;
+        let block_id_sig = block_id.clone();
         // Fragments that started off the grid although their keyframe was
         // requested in time (see `warn_off_grid`).
         let off_grid = AtomicU64::new(0);
         // Running time of the last grid point a keyframe was requested for.
         let requested_until: Mutex<Option<u64>> = Mutex::new(None);
 
-        let _ = splitmuxsink.connect("format-location-full", false, move |args| {
-            let element = args.first().and_then(|v| v.get::<gst::Element>().ok());
-            let fragment_id = args.get(1).and_then(|v| v.get::<u32>().ok()).unwrap_or(0);
-            let sample = args.get(2).and_then(|v| v.get::<gst::Sample>().ok());
-            let buffer = sample.as_ref().and_then(|s| s.buffer_owned());
-            let pts = buffer.as_ref().and_then(|b| b.pts());
-            // Running time of the fragment's first buffer. Without a segment the
-            // PTS is used as is (a default segment maps PTS 1:1 to running time).
-            let running_time_ns = match (pts, sample.as_ref().and_then(|s| s.segment())) {
-                (Some(pts), Some(seg)) => seg
-                    .downcast_ref::<gst::format::Time>()
-                    .and_then(|seg| seg.to_running_time(pts))
-                    .unwrap_or(pts)
-                    .nseconds(),
-                (Some(pts), None) => pts.nseconds(),
-                _ => 0,
-            };
+        let on_open = move |req: OpenRequest<'_>| -> OpenDecision {
+            let element = Some(req.element.clone());
+            let fragment_id = req.fragment_id;
+            let buffer = req.sample.buffer_owned();
+            // Running time of the fragment's first buffer.
+            let running_time_ns = req.running_time_ns;
 
             // Where the closing fragment's media ends: the new fragment's
             // buffers have not entered the muxer yet.
@@ -969,10 +931,11 @@ fn build_flow_chain(
                 .unwrap_or_else(|e| e.into_inner())
                 .next_split_running_time(running_time_ns, segment_ns);
             if let (Some(next), Some(el)) = (next_split, element.as_ref()) {
-                // Ask upstream for keyframes on the grid points after `next`, up
-                // to `KEYFRAME_LEAD_NS` ahead. This fragment opens a GOP or more
-                // after its start and the encoder's input runs ahead of its
-                // output by its latency, so the encoder is often past `next`
+                // The segmenter splits at `next`, on the first keyframe at or
+                // after it. Ask upstream for keyframes on the grid points after `next`, up
+                // to `KEYFRAME_LEAD_NS` ahead. The encoder's input runs ahead of
+                // its output (where this fragment opens) by its latency, which
+                // can be most of a segment, so the encoder is often past `next`
                 // already; a request for a time already passed would force a
                 // keyframe off the grid. The split at `next` itself was requested
                 // by an earlier fragment.
@@ -982,9 +945,9 @@ fn build_flow_chain(
                     *until = Some(last);
                     points
                 };
+                // Sent from GStreamer's thread pool, not from this streaming
+                // thread with the segmenter locked.
                 el.call_async(move |el| {
-                    let at = gst::ClockTime::from_nseconds(next);
-                    el.emit_by_name::<()>("split-at-running-time", &[&at]);
                     for rt in &ahead {
                         let rt = gst::ClockTime::from_nseconds(*rt);
                         for pad in el.sink_pads() {
@@ -998,9 +961,11 @@ fn build_flow_chain(
                 });
             }
 
-            // The previously open fragment is now complete: [its start, this start),
-            // or [its start, its planned end) after a backward jump.
+            // The previously open fragment ends here: [its start, this start),
+            // or [its start, its planned end) after a backward jump. It is
+            // uploaded once the segmenter has finished its file.
             // The just-opened one becomes the new tail (flushed on shutdown).
+            let mut prev_ready = None;
             if let Ok(mut tail) = tail.lock() {
                 if let Some(prev) = tail.take() {
                     let end_ns = closed_end_ns(
@@ -1019,21 +984,11 @@ fn build_flow_chain(
                             (placed.prev_end_ns - end_ns) / 1_000_000
                         );
                     }
-                    let ready = FragmentReady {
+                    prev_ready = Some(FragmentReady {
                         path: prev.path,
                         start_ns: prev.start_ns,
                         end_ns: end_ns.max(prev.start_ns + 1),
-                    };
-                    if let Err(e) = tx.try_send(ready) {
-                        warn!(
-                            "TAMS {} ({}): dropping segment, uploader channel full: {}",
-                            block_id_sig, tag, e
-                        );
-                        // The dropped fragment will never be uploaded; remove its
-                        // file so it doesn't leak in the temp dir under sustained
-                        // backpressure. (Cheap unlink at rotation cadence, not per-buffer.)
-                        let _ = std::fs::remove_file(e.into_inner().path);
-                    }
+                    });
                 }
                 *tail = Some(TailFragment {
                     path: location.clone(),
@@ -1042,16 +997,76 @@ fn build_flow_chain(
                 });
             }
 
-            mux_drain.fragment_opened();
             debug!(
                 "TAMS {} ({}): opening segment {}",
                 block_id_sig, tag, location_str
             );
-            Some(location_str.to_value())
-        });
+            OpenDecision {
+                location,
+                prev_ready,
+                next_split_ns: next_split,
+            }
+        };
+
+        // Hands a finished fragment to the uploader.
+        let deliver_label = format!("{} ({})", block_id, suffix_owned);
+        let deliver = move |ready: FragmentReady| {
+            if let Err(e) = tx.try_send(ready) {
+                warn!(
+                    "TAMS {}: dropping segment, uploader channel full: {}",
+                    deliver_label, e
+                );
+                // The dropped fragment will never be uploaded; remove its
+                // file so it doesn't leak in the temp dir under sustained
+                // backpressure.
+                let _ = std::fs::remove_file(e.into_inner().path);
+            }
+        };
+
+        let segmenter = Segmenter::new(
+            format!("{} ({})", block_id, suffix_owned),
+            mux_factory,
+            container == Container::MpegTs,
+            sinks.len(),
+            0, // video comes first when there is one
+            pad_ends,
+            Box::new(on_open),
+            Box::new(deliver),
+        );
+        if let Ok(mut slot) = segmenter_slot.lock() {
+            *slot = Some(Arc::downgrade(&segmenter));
+        }
+        for (idx, sink) in sinks.iter().enumerate() {
+            let on_sample = segmenter.clone();
+            let on_eos = segmenter.clone();
+            sink.set_callbacks(
+                gst_app::AppSinkCallbacks::builder()
+                    .new_sample(move |sink| {
+                        let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                        on_sample.push(idx, sample, sink.upcast_ref());
+                        Ok(gst::FlowSuccess::Ok)
+                    })
+                    .eos(move |_| on_eos.eos(idx))
+                    .build(),
+            );
+        }
     }));
 
     Ok(())
+}
+
+/// Everything the sink pads of `factory` accept, for the appsinks in front
+/// of the fragment muxer.
+fn muxer_sink_caps(factory: &str) -> Result<gst::Caps, BlockBuildError> {
+    let f = gst::ElementFactory::find(factory)
+        .ok_or_else(|| BlockBuildError::ElementCreation(format!("{} not found", factory)))?;
+    let mut caps = gst::Caps::new_empty();
+    for tmpl in f.static_pad_templates() {
+        if tmpl.direction() == gst::PadDirection::Sink {
+            caps.merge(tmpl.caps());
+        }
+    }
+    Ok(caps)
 }
 
 /// How far ahead of a fragment's next split TAMS Output asks upstream for
@@ -1310,79 +1325,6 @@ fn video_essence_parameters(
         }
     }
     params
-}
-
-/// Request the splitmuxsink sink pad for a given essence (`video` or `audio_%u`).
-/// Track where the media written by `mux` ends, on each of its sink pads.
-///
-/// What the muxer consumed, not what reached splitmuxsink: splitmuxsink queues
-/// a GOP or more before it writes, and buffers still queued, in splitmuxsink or
-/// in the muxer's pad queue, are dropped when the pipeline stops without EOS.
-/// A probe sees each buffer enter the muxer's pad, and an aggregator muxer
-/// (mpegtsmux, mp4mux) reports each one it consumed with the pad's
-/// `buffer-consumed` signal; another muxer counts every buffer that entered.
-/// splitmuxsink requests the muxer's pads itself, so tracking starts on each as
-/// it is added. Per buffer only atomics are updated (see [`PadMediaEnd`]).
-fn track_media_end(mux: &gst::Element) -> MediaEnd {
-    let media_end = MediaEnd::default();
-    let pads = media_end.clone();
-    mux.connect_pad_added(move |_mux, pad| {
-        if pad.direction() != gst::PadDirection::Sink {
-            return;
-        }
-        let end = Arc::new(PadMediaEnd::default());
-        if let Ok(mut pads) = pads.lock() {
-            pads.push(end.clone());
-        }
-        if pad.has_property("emit-signals") {
-            end.count_consumed();
-            pad.set_property("emit-signals", true);
-            let consumed = end.clone();
-            pad.connect("buffer-consumed", false, move |_| {
-                consumed.consume();
-                None
-            });
-        }
-        pad.add_probe(
-            gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
-            move |_pad, info| {
-                match info.data.as_ref() {
-                    Some(gst::PadProbeData::Buffer(buf)) => {
-                        let dur = buf.duration().map_or(0, |d| d.nseconds());
-                        end.add_buffer(buf.pts().map(|p| p.nseconds()), dur);
-                    }
-                    Some(gst::PadProbeData::Event(ev)) => {
-                        if let gst::EventView::Segment(seg) = ev.view() {
-                            end.set_segment(seg.segment());
-                        }
-                    }
-                    _ => {}
-                }
-                gst::PadProbeReturn::Ok
-            },
-        );
-    });
-    media_end
-}
-
-fn request_sink_pad(
-    splitmuxsink: &gst::Element,
-    essence: Essence,
-) -> Result<String, BlockBuildError> {
-    let pad = match essence {
-        Essence::Video => splitmuxsink.request_pad_simple("video").ok_or_else(|| {
-            BlockBuildError::ElementCreation("splitmuxsink: failed to request video pad".into())
-        })?,
-        Essence::Audio(_) => {
-            let tmpl = splitmuxsink.pad_template("audio_%u").ok_or_else(|| {
-                BlockBuildError::ElementCreation("splitmuxsink: no audio_%u template".into())
-            })?;
-            splitmuxsink.request_pad(&tmpl, None, None).ok_or_else(|| {
-                BlockBuildError::ElementCreation("splitmuxsink: failed to request audio pad".into())
-            })?
-        }
-    };
-    Ok(pad.name().to_string())
 }
 
 /// Get TAMS Output block definitions.
