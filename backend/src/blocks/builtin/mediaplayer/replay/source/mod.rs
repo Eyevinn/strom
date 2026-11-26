@@ -116,8 +116,25 @@ pub trait SourceIndex: Send + Sync {
     async fn first(&self) -> Result<Option<Segment>>;
     /// The latest segment (the live edge).
     async fn last(&self) -> Result<Option<Segment>>;
+    /// Segments that end after `from_ns`, ordered by time: what a growing
+    /// index has not seen yet. At most about `max`, the earliest first;
+    /// [`Since::more`] says the listing stopped before the end.
+    async fn since(&self, from_ns: i64, max: usize) -> Result<Since> {
+        let mut segs = self.list(from_ns, i64::MAX).await?;
+        let more = segs.len() > max;
+        segs.truncate(max);
+        Ok(Since { segs, more })
+    }
     /// The bytes of a segment.
     async fn fetch(&self, segment: &Segment) -> Result<Vec<u8>>;
+}
+
+/// The result of [`SourceIndex::since`].
+#[derive(Debug, Clone, Default)]
+pub struct Since {
+    pub segs: Vec<Segment>,
+    /// The source has segments after these that were not listed.
+    pub more: bool,
 }
 
 /// A parsed `source`.
