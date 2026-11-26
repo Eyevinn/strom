@@ -421,8 +421,7 @@ impl ReplayPlayer {
 
     fn scheduler(self: Arc<Self>, tx: mpsc::Sender<Arc<Segment>>) {
         while self.alive() {
-            let rt = self.timeline.now_rt();
-            if let Some((cursor, speed)) = self.timeline.cursor_tai(rt) {
+            if let Some((cursor, speed)) = self.timeline.cursor_now() {
                 let forward = speed >= 0.0;
                 let (lo, hi) = if forward {
                     (
@@ -556,16 +555,35 @@ impl ReplayPlayer {
         let period_ns = grid.frame_ns().ceil() as i64;
 
         while self.alive() {
+            let Some(appsrc) = weak.upgrade() else {
+                break;
+            };
+            match appsrc.current_state() {
+                gst::State::Null => break,
+                gst::State::Playing => {}
+                // Paused (or on its way down): a live source pushes nothing.
+                // Pushed now, the pictures would queue, with running times
+                // the flow goes back on when it plays again.
+                _ => {
+                    drop(appsrc);
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+            }
             // The base time changes when the flow goes PAUSED -> PLAYING:
             // read it each tick, as the timeline's "now" does.
-            if let Some(b) = weak.upgrade().and_then(|a| a.base_time()) {
+            if let Some(b) = appsrc.base_time() {
                 if b != base {
                     // Running time went back by the time spent paused: so do
-                    // the ticks, or the next one would wait that long.
+                    // the ticks, or the next one would wait that long. The
+                    // group moves onto the new base before this player asks
+                    // it for a time on it.
                     base = b;
+                    self.timeline.observe_base(b.nseconds() as i64);
                     k = ((now_rt(base) as f64 / fd).ceil() as i64).max(0);
                 }
             }
+            drop(appsrc);
             let rt = (k as f64 * fd) as i64;
             let id =
                 clock.new_single_shot_id(base + gst::ClockTime::from_nseconds(rt.max(0) as u64));
@@ -574,8 +592,11 @@ impl ReplayPlayer {
             let Some(appsrc) = weak.upgrade() else {
                 break;
             };
-            if appsrc.current_state() == gst::State::Null {
-                break;
+            match appsrc.current_state() {
+                gst::State::Null => break,
+                gst::State::Playing => {}
+                // Paused while waiting: the top of the loop waits it out.
+                _ => continue,
             }
             // Woke up late: skip to the current tick instead of bursting.
             let now = now_rt(base);

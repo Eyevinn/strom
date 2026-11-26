@@ -1307,3 +1307,82 @@ fn a_command_before_the_flow_plays_keeps_its_place_on_the_new_time_base() {
     assert_eq!(tl.tai_at(S), Some(BASE + 11 * S));
     assert_eq!(lock(&tl.last_pushed).map(|(rt, _)| rt), Some(0));
 }
+
+#[test]
+fn an_out_past_growing_media_holds_at_the_edge_until_the_media_reaches_it() {
+    let (tl, p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    // The edge steps 1 s a second: the media grows.
+    let now = mono_ns();
+    for i in 0..3 {
+        lock(&tl.edge).observe(now - (2 - i) * S, BASE + (58 + i) * S);
+    }
+    let mut events = tl.subscribe();
+    tl.apply_at(cue(BASE + 50 * S, BASE + 70 * S, None), 0)
+        .unwrap();
+    tl.apply_at(play(Some(2.0), None, None), 0).unwrap();
+    // Past today's end at 2x: held at the edge, still playing, no end.
+    assert_eq!(tl.cursor_tai(6 * S), Some((BASE + 60 * S - 1, 2.0)));
+    assert!(events.try_recv().is_err());
+    // The media reaches the out: play ends there, not at the old end.
+    p[0].end_tai.store(BASE + 80 * S, Ordering::Relaxed);
+    assert_eq!(tl.cursor_tai(7 * S), Some((BASE + 64 * S, 2.0)));
+    assert_eq!(tl.cursor_tai(11 * S), Some((BASE + 70 * S - 1, 0.0)));
+    assert!(matches!(events.try_recv(), Ok(ReplayEvent::Ended { .. })));
+}
+
+#[test]
+fn a_resume_after_a_pause_keeps_the_cursor_going() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 600 * S)]);
+    let base = 1000 * S;
+    *lock(&tl.clock_source) = Some(ClockSource {
+        element: gst::glib::WeakRef::new(),
+        base: Some(base),
+    });
+    tl.apply_at(seek_tai(BASE + 10 * S), 10 * S).unwrap();
+    tl.apply_at(Command::Speed { speed: 1.0 }, 10 * S).unwrap();
+    tl.note_pushed(20 * S, BASE + 20 * S);
+    // Paused at 20 s for 30 s: the running time read from the clock kept
+    // growing, and a command given during the pause is on that time.
+    tl.apply_at(seek_tai(BASE + 100 * S), 35 * S).unwrap();
+    tl.apply_at(Command::Speed { speed: 1.0 }, 35 * S).unwrap();
+    // PLAYING again: the base moves 30 s on, running time falls back by 30 s.
+    tl.observe_base(base + 30 * S);
+    tl.observe_base(base + 30 * S);
+    // Resumed at 20 s: 15 s after the command, going forward.
+    assert_eq!(tl.cursor_tai(20 * S), Some((BASE + 115 * S, 1.0)));
+    assert_eq!(tl.tai_at(21 * S), Some(BASE + 116 * S));
+    // The first tick after the resume is the latest pushed.
+    tl.note_pushed(21 * S, BASE + 116 * S);
+    assert_eq!(tl.pushed_tai(), Some(BASE + 116 * S));
+}
+
+#[test]
+fn a_base_is_only_observed_on_a_clock_source() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 600 * S)]);
+    tl.apply_at(seek_tai(BASE + 10 * S), 10 * S).unwrap();
+    tl.apply_at(Command::Speed { speed: 1.0 }, 10 * S).unwrap();
+    // On the stand-in there is no base to move from.
+    tl.observe_base(5 * S);
+    assert_eq!(tl.tai_at(20 * S), Some(BASE + 20 * S));
+}
+
+#[test]
+fn a_new_run_resets_under_the_anchor_lock() {
+    let old = player("cam0", BASE, BASE + 60 * S, Some((50, 1)));
+    let tl = Arc::new(timeline_of(std::slice::from_ref(&old)));
+    tl.unregister_player(&old);
+    // Hold the anchor as a command does: the new player is not registered
+    // (so no command can see it) until the reset has happened.
+    let a = lock(&tl.anchor);
+    let new = player("cam0", BASE + 100 * S, BASE + 160 * S, Some((50, 1)));
+    let t = {
+        let tl = tl.clone();
+        let new = new.clone();
+        std::thread::spawn(move || tl.register_player(&new))
+    };
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(tl.players().is_empty());
+    drop(a);
+    t.join().unwrap();
+    assert_eq!(tl.players().len(), 1);
+}

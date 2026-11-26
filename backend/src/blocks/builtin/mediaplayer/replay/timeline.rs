@@ -534,7 +534,8 @@ struct Eval {
 /// The cursor of `a` at `rt`, clamped to the media. `live_from` is where the
 /// group plays from when live (the live edge minus the margin); following
 /// live, a cursor more than `live_slack` behind it has lost the edge.
-fn eval(a: &Anchor, rt: i64, b: &Bounds, live_from: i64, live_slack: i64) -> Eval {
+/// `growing`: the media still grows (see [`EdgeTracker::estimate`]).
+fn eval(a: &Anchor, rt: i64, b: &Bounds, live_from: i64, live_slack: i64, growing: bool) -> Eval {
     let from = a.tai.unwrap_or(b.start) as i128;
     let (moved, mut speed) = travel(a.speed, a.ramp, rt - a.rt);
     let mut pos = from + moved.round() as i128;
@@ -542,9 +543,12 @@ fn eval(a: &Anchor, rt: i64, b: &Bounds, live_from: i64, live_slack: i64) -> Eva
     if let Some(r) = a.region {
         // An out (or in) past the media ends play where the media does: on
         // media that has stopped growing, play would otherwise hold at its
-        // end for good, with no `Ended` and no end action.
+        // end for good, with no `Ended` and no end action. While the media
+        // grows, an out past today's end is where it will be: play holds at
+        // the edge until the media reaches it.
         let start = r.start.max(b.start) as i128;
-        let end = (r.end.min(b.end) as i128).max(start + 1);
+        let r_end = if growing { r.end } else { r.end.min(b.end) };
+        let end = (r_end as i128).max(start + 1);
         if pos >= end || pos < start {
             match r.end_action {
                 EndAction::Loop => pos = start + (pos - start).rem_euclid(end - start),
@@ -759,7 +763,7 @@ pub struct ReplayTimeline {
     origin_tai: AtomicI64,
     /// When the group first had an extent, for the origin's fallback.
     first_extent_at: Mutex<Option<Instant>>,
-    clock_source: Mutex<Option<gst::glib::WeakRef<gst::Element>>>,
+    clock_source: Mutex<Option<ClockSource>>,
     /// Start of the stand-in running time before the flow plays; reset with
     /// the group, so it is on the same footing as the new run's running time.
     created: Mutex<Instant>,
@@ -777,6 +781,14 @@ pub struct ReplayTimeline {
     live_margin_ns: AtomicI64,
     /// What the group does by itself (a bounded play ends, it goes live).
     events: tokio::sync::broadcast::Sender<ReplayEvent>,
+}
+
+/// The element whose clock and base time define the group's "now", and the
+/// base time the group's running times are on.
+struct ClockSource {
+    element: gst::glib::WeakRef<gst::Element>,
+    /// Base time (ns) the anchor's running times are on, once known.
+    base: Option<i64>,
 }
 
 /// Timelines keyed by (flow, group).
@@ -839,28 +851,32 @@ impl ReplayTimeline {
     /// player registered, the previous run's having unregistered) resets the
     /// group, so a rebuilt flow can change sources, rates and range.
     pub fn register_player(&self, stats: &Arc<PlayerStats>) {
-        // `players` is a leaf lock (see the struct docs): released before the
-        // reset takes the others.
+        // `clock_source` and `anchor` are held across the check, the reset and
+        // the registration: a command (which takes both) runs wholly before
+        // the new run (and sees no player of it) or wholly after the reset.
+        // Taken in the lock order; `players` is a leaf, so it is released
+        // before the reset takes the other leaves.
+        let mut src = lock(&self.clock_source);
+        let mut anchor = lock(&self.anchor);
         let first_of_run = {
             let mut players = lock(&self.players);
             players.retain(|w| w.strong_count() > 0);
-            let first = players.is_empty();
-            players.push(Arc::downgrade(stats));
-            first
+            players.is_empty()
         };
         if first_of_run {
             self.origin_tai.store(UNKNOWN, Ordering::Relaxed);
             *lock(&self.first_extent_at) = None;
-            *lock(&self.anchor) = START_ANCHOR;
+            *anchor = START_ANCHOR;
             *lock(&self.last_pushed) = None;
             *lock(&self.last_cmd) = None;
-            *lock(&self.clock_source) = None;
+            *src = None;
             *lock(&self.created) = Instant::now();
             *lock(&self.edge) = EdgeTracker::default();
             self.live_margin_ns
                 .store(DEFAULT_LIVE_MARGIN_MS as i64 * 1_000_000, Ordering::Relaxed);
             self.cmd_to_push_us.store(0, Ordering::Relaxed);
         }
+        lock(&self.players).push(Arc::downgrade(stats));
     }
 
     /// Called when a player shuts down (its flow stops). Its stats may live
@@ -895,15 +911,51 @@ impl ReplayTimeline {
         let mut src = lock(&self.clock_source);
         let alive = src
             .as_ref()
-            .and_then(|w| w.upgrade())
+            .and_then(|s| s.element.upgrade())
             .is_some_and(|e| e.current_state() == gst::State::Playing);
         if !alive {
-            let before = self.rt_of(&src);
-            *src = Some(element.downgrade());
-            let after = self.rt_of(&src);
+            let before = self.rt_of(&mut src);
+            *src = Some(ClockSource {
+                element: element.downgrade(),
+                base: None,
+            });
+            let after = self.rt_of(&mut src);
             // Still holding `clock_source`: no command reads "now" between.
             self.shift_rt(after - before);
         }
+    }
+
+    /// The flow's base time is now `base` (ns), as a player saw it. It
+    /// changes when the flow goes PAUSED -> PLAYING: the running time, which
+    /// kept growing while paused, falls back by the time spent paused. Every
+    /// running time the group keeps moves with it, so the cursor neither
+    /// runs back nor stands still after a pause. A player that sees the new
+    /// base before the timeline does calls this before it uses the new base.
+    pub fn observe_base(&self, base: i64) {
+        let mut src = lock(&self.clock_source);
+        self.rebase(&mut src, base);
+    }
+
+    /// Move the group onto base time `base`, under the `clock_source` lock.
+    fn rebase(&self, src: &mut Option<ClockSource>, base: i64) {
+        let Some(s) = src.as_mut() else {
+            return;
+        };
+        match s.base.replace(base) {
+            // Running time is clock minus base: a later base, an earlier
+            // running time.
+            Some(old) if old != base => self.shift_rt(old - base),
+            _ => {}
+        }
+    }
+
+    /// Run `f` with "now", holding `clock_source` so the time base cannot
+    /// change between reading "now" and using it. `f` must not take
+    /// `clock_source`.
+    fn at_now<R>(&self, f: impl FnOnce(i64) -> R) -> R {
+        let mut src = lock(&self.clock_source);
+        let now = self.rt_of(&mut src);
+        f(now)
     }
 
     /// Move every running time the group keeps by `delta`, for a new time
@@ -920,13 +972,17 @@ impl ReplayTimeline {
 
     /// The flow's running time now, or a monotonic stand-in before it plays.
     pub fn now_rt(&self) -> i64 {
-        self.rt_of(&lock(&self.clock_source))
+        self.rt_of(&mut lock(&self.clock_source))
     }
 
-    fn rt_of(&self, src: &Option<gst::glib::WeakRef<gst::Element>>) -> i64 {
-        if let Some(el) = src.as_ref().and_then(|w| w.upgrade()) {
+    /// "Now" from the clock source, moving the group onto the source's base
+    /// time first if it changed (see [`Self::observe_base`]).
+    fn rt_of(&self, src: &mut Option<ClockSource>) -> i64 {
+        if let Some(el) = src.as_ref().and_then(|s| s.element.upgrade()) {
             if let (Some(clock), Some(base)) = (el.clock(), el.base_time()) {
-                return clock.time().nseconds() as i64 - base.nseconds() as i64;
+                let base = base.nseconds() as i64;
+                self.rebase(src, base);
+                return clock.time().nseconds() as i64 - base;
             }
         }
         lock(&self.created).elapsed().as_nanos() as i64
@@ -992,7 +1048,8 @@ impl ReplayTimeline {
     /// at nearby running times still agree.
     fn advance(&self, a: &mut Anchor, rt: i64, b: &Bounds) -> (i64, f64) {
         let live_from = self.live_target(b);
-        let e = eval(a, rt, b, live_from, self.live_slack());
+        let growing = a.region.is_some_and(|r| r.end > b.end) && self.growing(b);
+        let e = eval(a, rt, b, live_from, self.live_slack(), growing);
         let Some(hit) = e.hit else {
             return (e.tai, e.speed);
         };
@@ -1077,6 +1134,12 @@ impl ReplayTimeline {
         lock(&self.edge).step().unwrap_or(DEFAULT_EDGE_STEP_NS) + LIVE_SLACK_NS
     }
 
+    /// Whether the group's media still grows: its live edge has stepped
+    /// recently.
+    fn growing(&self, b: &Bounds) -> bool {
+        lock(&self.edge).estimate(mono_ns(), b.live_end).1
+    }
+
     /// Where `live` plays from: the live edge minus the margin.
     fn live_target(&self, b: &Bounds) -> i64 {
         b.live_end
@@ -1104,8 +1167,13 @@ impl ReplayTimeline {
 
     /// The speed now.
     pub fn speed(&self) -> f64 {
-        self.cursor_tai(self.now_rt())
+        self.cursor_now()
             .map_or(lock(&self.anchor).speed, |(_, s)| s)
+    }
+
+    /// The cursor's TAI now, and the speed.
+    pub fn cursor_now(&self) -> Option<(i64, f64)> {
+        self.at_now(|now| self.cursor_tai(now))
     }
 
     /// The cue the group holds, if any.
@@ -1164,7 +1232,9 @@ impl ReplayTimeline {
 
     /// Apply a command at "now".
     pub fn apply(&self, cmd: Command) -> Result<Applied, CommandError> {
-        self.apply_at(cmd, self.now_rt())
+        // "Now" is read and used under one hold of `clock_source`: a change
+        // of time base in between would put the anchor on the old base.
+        self.at_now(|now| self.apply_at(cmd, now))
     }
 
     /// Apply a command at running time `now`. Fails, changing nothing, on a
