@@ -493,8 +493,21 @@ document.addEventListener('keydown', e => {
 });
 
 // ---- WHEP (jitter buffer target 0) and the mixer's PGM source
+// ICE and TURN servers from Strom's config (STROM_SERVER_ICE_SERVERS), the
+// same /api/ice-servers the WHEP player page uses. Fetched once; if that
+// fails, the connection goes ahead without them (and the next one asks again).
+let iceConfigP = null;
+function iceConfig() {
+  if (!iceConfigP) {
+    iceConfigP = fetch('/api/ice-servers')
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(c => ({ iceServers: Array.isArray(c.ice_servers) ? c.ice_servers : [], iceTransportPolicy: c.ice_transport_policy === 'relay' ? 'relay' : 'all' }))
+      .catch(err => { console.warn('ICE servers unavailable:', err.message); iceConfigP = null; return { iceServers: [], iceTransportPolicy: 'all' }; });
+  }
+  return iceConfigP;
+}
 async function whep(video, endpointId, nAudio) {
-  const pc = new RTCPeerConnection();
+  const pc = new RTCPeerConnection(await iceConfig());
   const vt = pc.addTransceiver('video', { direction: 'recvonly' });
   for (let i = 0; i < Math.max(nAudio, 0); i++) pc.addTransceiver('audio', { direction: 'recvonly' });
   pc.ontrack = ev => {
