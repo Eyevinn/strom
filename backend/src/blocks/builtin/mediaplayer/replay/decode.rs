@@ -1,10 +1,21 @@
 //! Decoding of one segment's coded bytes into raw frames.
 //!
-//! One short-lived pipeline per segment, fed from memory through `appsrc`
-//! (the spike's model; a pool of long-lived decoders comes later). The demuxer
-//! is chosen from the container type; frames come out as NV12 in presentation
-//! order with their container PTS, which [`map_to_grid`] turns into frames on
-//! the group's TAI grid.
+//! Two stages per segment:
+//! - **demux** in a short-lived pipeline (`appsrc ! demux ! h264parse !
+//!   appsink`), CPU only and cheap: the object's access units, in the stream
+//!   format the decoder takes;
+//! - **decode** in a long-lived [`DecoderSession`] (one per decode worker):
+//!   `decoder ! videoconvert ! appsink`, fed through a pad of our own. Per
+//!   segment: flush, a new segment event, DISCONT on the first access unit,
+//!   then end of stream, which drains the decoder of its last pictures. The
+//!   session (and a hardware decoder's context) lives on, so a segment does
+//!   not pay a decoder start-up.
+//!
+//! Frames come out as NV12 in presentation order with their container PTS,
+//! which [`map_to_grid`] turns into frames on the group's TAI grid. The PTS
+//! are those the demuxer gave, as with a pipeline per segment.
+//! `STROM_REPLAY_DECODER_PER_SEGMENT=1` goes back to one pipeline per segment
+//! (diagnostics, A/B).
 
 use super::grid::FrameGrid;
 use super::source::Segment;
@@ -12,8 +23,9 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use tracing::debug;
 
 /// Pick the best available H.264 decoder. `STROM_REPLAY_DECODER` overrides
 /// the choice (diagnostics), when that element exists.
@@ -34,6 +46,16 @@ pub fn pick_decoder() -> &'static str {
         }
     }
     "decodebin"
+}
+
+/// Whether to go back to one pipeline per segment
+/// (`STROM_REPLAY_DECODER_PER_SEGMENT=1`).
+fn per_segment_pipelines() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        strom_types::env::var_opt("STROM_REPLAY_DECODER_PER_SEGMENT")
+            .is_some_and(|v| v == "1" || v == "true")
+    })
 }
 
 /// Demuxer and appsrc caps for a container MIME type.
@@ -64,10 +86,259 @@ pub fn decode_timeout(segment_ns: i64) -> Duration {
         .clamp(Duration::from_secs(5), Duration::from_secs(60))
 }
 
-/// Decode one segment held in memory. Fails on a pipeline error, or when the
-/// stream has not ended within `timeout`: a stream that errors before its end
-/// (an unlinkable codec, no video stream, garbage) never reaches the appsink
-/// as end of stream, so waiting for it alone would block for ever.
+/// Segment bytes shared with the cache, handed to GStreamer without a copy.
+struct SharedBytes(Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for SharedBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Decodes segments for one worker: a long-lived [`DecoderSession`], made on
+/// first use and made again after a failure.
+pub struct SegmentDecoder {
+    decoder: &'static str,
+    session: Option<DecoderSession>,
+}
+
+impl SegmentDecoder {
+    pub fn new(decoder: &'static str) -> Self {
+        Self {
+            decoder,
+            session: None,
+        }
+    }
+
+    /// Decode one segment held in memory. Fails on a pipeline error, or when
+    /// the stream has not ended within `timeout`.
+    pub fn decode(
+        &mut self,
+        bytes: Arc<Vec<u8>>,
+        container: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Decoded, String> {
+        // decodebin has no sink pad to feed: one pipeline per segment.
+        if per_segment_pipelines() || self.decoder == "decodebin" {
+            return decode_bytes(bytes, container, self.decoder, timeout);
+        }
+        let deadline = Instant::now() + timeout;
+        if self.session.is_none() {
+            let started = Instant::now();
+            self.session = Some(DecoderSession::new(self.decoder)?);
+            debug!(
+                "Replay: {} session started in {} ms",
+                self.decoder,
+                started.elapsed().as_millis()
+            );
+        }
+        let session = self.session.as_mut().expect("made above");
+        let started = Instant::now();
+        let units = demux_bytes(bytes, container, &session.sink_caps, timeout)?;
+        let demux_ms = started.elapsed().as_millis();
+        let left = deadline.saturating_duration_since(Instant::now());
+        let result = session.decode(units, left);
+        if result.is_err() {
+            // The decoder may be wedged or in error: start afresh next time.
+            self.session = None;
+        }
+        debug!(
+            "Replay: demux {} ms, decode {} ms",
+            demux_ms,
+            started.elapsed().as_millis() - demux_ms
+        );
+        result
+    }
+}
+
+/// An object's access units, in the caps the decoder takes.
+pub struct Demuxed {
+    pub caps: gst::Caps,
+    pub units: Vec<gst::Buffer>,
+    pub first_pts: Option<u64>,
+}
+
+/// Collects what an appsink receives, until end of stream.
+#[derive(Default)]
+struct SinkOut {
+    frames: Vec<(u64, gst::Buffer)>,
+    caps: Option<gst::Caps>,
+    eos: bool,
+}
+
+type SharedOut = Arc<(Mutex<SinkOut>, Condvar)>;
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Whether a buffer belongs to a buffer pool: a long-lived decoder recycles
+/// those, and the frame store holds frames for seconds, which would starve
+/// a bounded pool.
+fn from_pool(b: &gst::BufferRef) -> bool {
+    // SAFETY: reads the `pool` field of a valid GstBuffer we hold a
+    // reference to; it is set once, when the pool hands the buffer out.
+    unsafe { !(*b.as_ptr()).pool.is_null() }
+}
+
+/// Appsink callbacks that collect samples (copying pooled buffers when
+/// `own_pooled`) and note the end of stream.
+fn collect_into(sink: &gst_app::AppSink, out: &SharedOut, own_pooled: bool) {
+    let on_sample = Arc::clone(out);
+    let on_eos = Arc::clone(out);
+    sink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Flushing)?;
+                let mut o = lock(&on_sample.0);
+                if o.caps.is_none() {
+                    o.caps = sample.caps_owned();
+                }
+                if let Some(b) = sample.buffer_owned() {
+                    let b = if own_pooled && from_pool(&b) {
+                        b.copy_deep().map_err(|_| gst::FlowError::Error)?
+                    } else {
+                        b
+                    };
+                    let pts = b.pts().map(|p| p.nseconds());
+                    o.frames.push((pts.unwrap_or(u64::MAX), b));
+                }
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .eos(move |_| {
+                lock(&on_eos.0).eos = true;
+                on_eos.1.notify_all();
+            })
+            .build(),
+    );
+}
+
+/// The first error on a bus, if any.
+fn bus_error(bus: &gst::Bus) -> Option<String> {
+    bus.pop_filtered(&[gst::MessageType::Error])
+        .map(|m| match m.view() {
+            gst::MessageView::Error(e) => e.error().to_string(),
+            _ => String::new(),
+        })
+}
+
+/// Wait for end of stream at the appsink. Fails on a bus error, or when it
+/// has not come by `deadline`: a stream that errors before its end (an
+/// unlinkable codec, no video stream, garbage) never reaches the appsink as
+/// end of stream, so waiting for it alone would block for ever.
+fn wait_eos(out: &SharedOut, bus: &gst::Bus, deadline: Instant) -> Result<SinkOut, String> {
+    let mut o = lock(&out.0);
+    while !o.eos {
+        if let Some(e) = bus_error(bus) {
+            return Err(e);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err("no end of stream in time".into());
+        }
+        let wait = (deadline - now).min(Duration::from_millis(50));
+        o = out
+            .1
+            .wait_timeout(o, wait)
+            .unwrap_or_else(|p| p.into_inner())
+            .0;
+    }
+    if let Some(e) = bus_error(bus) {
+        return Err(e);
+    }
+    Ok(std::mem::take(&mut *o))
+}
+
+/// Push a whole object into a pipeline's appsrc as one buffer, then end of
+/// stream.
+fn feed_appsrc(pipeline: &gst::Pipeline, bytes: Arc<Vec<u8>>) -> Result<(), String> {
+    let src = pipeline
+        .by_name("src")
+        .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
+        .ok_or("no appsrc")?;
+    src.set_max_bytes(bytes.len() as u64 + 1);
+    src.push_buffer(gst::Buffer::from_slice(SharedBytes(bytes)))
+        .map_err(|e| format!("push: {:?}", e))?;
+    let _ = src.end_of_stream();
+    Ok(())
+}
+
+/// Track the earliest PTS the parser passes on (per buffer: an atomic only).
+fn probe_first_pts(pipeline: &gst::Pipeline) -> Arc<AtomicU64> {
+    let first_pts = Arc::new(AtomicU64::new(u64::MAX));
+    if let Some(pad) = pipeline.by_name("parse").and_then(|p| p.static_pad("src")) {
+        let first = Arc::clone(&first_pts);
+        pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            if let Some(pts) = info.buffer().and_then(|b| b.pts()) {
+                first.fetch_min(pts.nseconds(), Ordering::Relaxed);
+            }
+            gst::PadProbeReturn::Ok
+        });
+    }
+    first_pts
+}
+
+/// Run a short-lived `appsrc ! … ! appsink` pipeline over one object, to its
+/// end of stream: what reached the appsink, and the earliest parsed PTS.
+fn run_once(
+    desc: &str,
+    sink_caps: Option<&gst::Caps>,
+    bytes: Arc<Vec<u8>>,
+    timeout: Duration,
+) -> Result<(SinkOut, Option<u64>), String> {
+    let pipeline = gst::parse::launch(desc)
+        .map_err(|e| e.to_string())?
+        .downcast::<gst::Pipeline>()
+        .map_err(|_| "not a pipeline".to_string())?;
+    let result = (|| {
+        let sink = pipeline
+            .by_name("sink")
+            .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
+            .ok_or("no appsink")?;
+        sink.set_caps(sink_caps);
+        let bus = pipeline.bus().ok_or("no bus")?;
+        let out: SharedOut = Arc::default();
+        collect_into(&sink, &out, false);
+        let first_pts = probe_first_pts(&pipeline);
+        // A pipeline outside a flow: give its pool threads normal scheduling.
+        crate::gst::thread_priority::reset_streaming_threads(&pipeline);
+        feed_appsrc(&pipeline, bytes)?;
+        let deadline = Instant::now() + timeout;
+        pipeline
+            .set_state(gst::State::Playing)
+            .map_err(|e| e.to_string())?;
+        let got = wait_eos(&out, &bus, deadline)?;
+        let first = Some(first_pts.load(Ordering::Relaxed)).filter(|p| *p != u64::MAX);
+        Ok((got, first))
+    })();
+    let _ = pipeline.set_state(gst::State::Null);
+    result
+}
+
+/// Demux one object into access units in `sink_caps` (the decoder's).
+pub fn demux_bytes(
+    bytes: Arc<Vec<u8>>,
+    container: Option<&str>,
+    sink_caps: &gst::Caps,
+    timeout: Duration,
+) -> Result<Demuxed, String> {
+    let (demux, src_caps) = demux_for(container);
+    let desc = format!(
+        "appsrc name=src format=bytes is-live=false caps=\"{}\" ! {} ! h264parse name=parse ! \
+         appsink name=sink sync=false",
+        src_caps, demux
+    );
+    let (got, first_pts) = run_once(&desc, Some(sink_caps), bytes, timeout)?;
+    let caps = got.caps.ok_or("no access units demuxed")?;
+    Ok(Demuxed {
+        caps,
+        units: got.frames.into_iter().map(|(_, b)| b).collect(),
+        first_pts,
+    })
+}
+
+/// Decode one segment held in memory in a pipeline of its own, made and
+/// torn down for it.
 pub fn decode_bytes(
     bytes: Arc<Vec<u8>>,
     container: Option<&str>,
@@ -80,101 +351,156 @@ pub fn decode_bytes(
          videoconvert ! video/x-raw,format=NV12 ! appsink name=sink sync=false",
         src_caps, demux, decoder
     );
-    let pipeline = gst::parse::launch(&desc)
-        .map_err(|e| e.to_string())?
-        .downcast::<gst::Pipeline>()
-        .map_err(|_| "not a pipeline".to_string())?;
-    let result = run_decode(&pipeline, bytes, timeout);
-    let _ = pipeline.set_state(gst::State::Null);
-    result
-}
-
-/// Segment bytes shared with the cache, handed to GStreamer without a copy.
-struct SharedBytes(Arc<Vec<u8>>);
-
-impl AsRef<[u8]> for SharedBytes {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-fn run_decode(
-    pipeline: &gst::Pipeline,
-    bytes: Arc<Vec<u8>>,
-    timeout: Duration,
-) -> Result<Decoded, String> {
-    let src = pipeline
-        .by_name("src")
-        .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
-        .ok_or("no appsrc")?;
-    let sink = pipeline
-        .by_name("sink")
-        .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
-        .ok_or("no appsink")?;
-    let bus = pipeline.bus().ok_or("no bus")?;
-    // Earliest PTS the parser passes on (per buffer: an atomic only).
-    let first_pts = Arc::new(AtomicU64::new(u64::MAX));
-    if let Some(pad) = pipeline.by_name("parse").and_then(|p| p.static_pad("src")) {
-        let first = Arc::clone(&first_pts);
-        pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
-            if let Some(pts) = info.buffer().and_then(|b| b.pts()) {
-                first.fetch_min(pts.nseconds(), Ordering::Relaxed);
-            }
-            gst::PadProbeReturn::Ok
-        });
-    }
-    // A pipeline outside a flow: give its pool threads normal scheduling.
-    crate::gst::thread_priority::reset_streaming_threads(pipeline);
-    // The whole object as one buffer, then end of stream.
-    src.set_max_bytes(bytes.len() as u64 + 1);
-    src.push_buffer(gst::Buffer::from_slice(SharedBytes(bytes)))
-        .map_err(|e| format!("push: {:?}", e))?;
-    let _ = src.end_of_stream();
-    pipeline
-        .set_state(gst::State::Playing)
-        .map_err(|e| e.to_string())?;
-    let bus_error = || {
-        bus.pop_filtered(&[gst::MessageType::Error])
-            .map(|m| match m.view() {
-                gst::MessageView::Error(e) => e.error().to_string(),
-                _ => String::new(),
-            })
-    };
-    let deadline = Instant::now() + timeout;
-    let mut frames = Vec::with_capacity(64);
-    let mut caps = None;
-    loop {
-        if let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(50)) {
-            if caps.is_none() {
-                caps = sample.caps_owned();
-            }
-            if let Some(b) = sample.buffer_owned() {
-                if let Some(pts) = b.pts() {
-                    frames.push((pts.nseconds(), b));
-                }
-            }
-            continue;
-        }
-        if sink.is_eos() {
-            break;
-        }
-        if let Some(e) = bus_error() {
-            return Err(e);
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("no end of stream within {:?}", timeout));
-        }
-    }
-    if let Some(e) = bus_error() {
-        return Err(e);
-    }
-    let caps = caps.ok_or("no frames decoded")?;
-    let first_pts = Some(first_pts.load(Ordering::Relaxed)).filter(|p| *p != u64::MAX);
+    let (got, first_pts) = run_once(&desc, None, bytes, timeout)?;
+    let caps = got.caps.ok_or("no frames decoded")?;
     Ok(Decoded {
-        frames,
+        frames: without_untimed(got.frames),
         caps,
         first_pts,
     })
+}
+
+/// Frames without a PTS cannot be placed: dropped (marked `u64::MAX`).
+fn without_untimed(frames: Vec<(u64, gst::Buffer)>) -> Vec<(u64, gst::Buffer)> {
+    frames.into_iter().filter(|(p, _)| *p != u64::MAX).collect()
+}
+
+/// A long-lived `decoder ! videoconvert ! appsink` pipeline, fed access
+/// units through a pad of our own (pushes run on the calling thread).
+pub struct DecoderSession {
+    pipeline: gst::Pipeline,
+    feed: gst::Pad,
+    bus: gst::Bus,
+    out: SharedOut,
+    /// What the decoder's sink pad takes: the demux stage's output caps.
+    pub sink_caps: gst::Caps,
+    /// Caps last sent to the decoder.
+    caps: Option<gst::Caps>,
+    /// Whether a segment went through (the next one starts with a flush).
+    used: bool,
+}
+
+impl DecoderSession {
+    pub fn new(decoder: &str) -> Result<Self, String> {
+        let pipeline = gst::Pipeline::with_name("replay-decoder");
+        let make = |f: &str| {
+            gst::ElementFactory::make(f)
+                .build()
+                .map_err(|e| e.to_string())
+        };
+        let dec = make(decoder)?;
+        let convert = make("videoconvert")?;
+        let filter = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                gst::Caps::builder("video/x-raw")
+                    .field("format", "NV12")
+                    .build(),
+            )
+            .build()
+            .map_err(|e| e.to_string())?;
+        let sink = gst_app::AppSink::builder()
+            .sync(false)
+            .async_(false)
+            .enable_last_sample(false)
+            .build();
+        pipeline
+            .add_many([&dec, &convert, &filter, sink.upcast_ref()])
+            .map_err(|e| e.to_string())?;
+        gst::Element::link_many([&dec, &convert, &filter, sink.upcast_ref()])
+            .map_err(|e| e.to_string())?;
+        let out: SharedOut = Arc::default();
+        collect_into(&sink, &out, true);
+        let dec_sink = dec.static_pad("sink").ok_or("decoder has no sink pad")?;
+        let sink_caps = dec_sink.query_caps(None);
+        if sink_caps.is_empty() {
+            return Err(format!("{} takes no caps", decoder));
+        }
+        let feed = gst::Pad::builder(gst::PadDirection::Src)
+            .name("feed")
+            .build();
+        feed.link(&dec_sink).map_err(|e| format!("link: {:?}", e))?;
+        let bus = pipeline.bus().ok_or("no bus")?;
+        crate::gst::thread_priority::reset_streaming_threads(&pipeline);
+        let session = Self {
+            pipeline,
+            feed,
+            bus,
+            out,
+            sink_caps,
+            caps: None,
+            used: false,
+        };
+        session
+            .pipeline
+            .set_state(gst::State::Playing)
+            .map_err(|e| e.to_string())?;
+        session
+            .feed
+            .set_active(true)
+            .map_err(|e| format!("activate: {}", e))?;
+        if !session.feed.push_event(
+            gst::event::StreamStart::builder("replay-decoder")
+                .group_id(gst::GroupId::next())
+                .build(),
+        ) {
+            return Err("stream start refused".into());
+        }
+        Ok(session)
+    }
+
+    /// Decode one object's access units: flush (after the first), caps when
+    /// they change, a new segment, the units with DISCONT on the first, and
+    /// end of stream to drain the decoder.
+    pub fn decode(&mut self, d: Demuxed, timeout: Duration) -> Result<Decoded, String> {
+        let deadline = Instant::now() + timeout;
+        if self.used {
+            self.event(gst::event::FlushStart::new())?;
+            self.event(gst::event::FlushStop::new(true))?;
+        }
+        self.used = true;
+        *lock(&self.out.0) = SinkOut::default();
+        if self.caps.as_ref() != Some(&d.caps) {
+            self.event(gst::event::Caps::new(&d.caps))?;
+            self.caps = Some(d.caps);
+        }
+        self.event(gst::event::Segment::new(&gst::FormattedSegment::<
+            gst::ClockTime,
+        >::new()))?;
+        for (i, mut b) in d.units.into_iter().enumerate() {
+            if i == 0 {
+                b.make_mut().set_flags(gst::BufferFlags::DISCONT);
+            }
+            self.feed.push(b).map_err(|e| format!("push: {:?}", e))?;
+        }
+        self.event(gst::event::Eos::new())?;
+        let got = wait_eos(&self.out, &self.bus, deadline)?;
+        let caps = got.caps.ok_or("no frames decoded")?;
+        Ok(Decoded {
+            frames: without_untimed(got.frames),
+            caps,
+            first_pts: d.first_pts,
+        })
+    }
+
+    fn event(&self, e: gst::Event) -> Result<(), String> {
+        let name = e.type_().name();
+        if self.feed.push_event(e) {
+            Ok(())
+        } else {
+            Err(match bus_error(&self.bus) {
+                Some(err) => err,
+                None => format!("{} refused", name),
+            })
+        }
+    }
+}
+
+impl Drop for DecoderSession {
+    fn drop(&mut self) {
+        let _ = self.feed.set_active(false);
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
 }
 
 /// Place decoded frames on the TAI timeline: a frame's TAI is the segment's first
@@ -414,6 +740,198 @@ mod tests {
         let r = decode_in_thread(test_ts("x265enc", 25), Duration::from_secs(5))
             .expect("decode returned");
         assert!(r.is_err());
+    }
+
+    /// Decode with a long-lived session, on another thread; `None` if it has
+    /// not returned in 30 s.
+    fn session_decode_in_thread(
+        objects: Vec<Vec<u8>>,
+        timeout: Duration,
+    ) -> Option<Vec<Result<Decoded, String>>> {
+        gst::init().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut dec = SegmentDecoder::new(pick_decoder());
+            let out: Vec<_> = objects
+                .into_iter()
+                .map(|b| dec.decode(Arc::new(b), None, timeout))
+                .collect();
+            let _ = tx.send(out);
+        });
+        rx.recv_timeout(Duration::from_secs(30)).ok()
+    }
+
+    fn pts_of(d: &Decoded) -> Vec<u64> {
+        d.frames.iter().map(|f| f.0).collect()
+    }
+
+    #[test]
+    fn a_session_decodes_segment_after_segment_like_a_pipeline_each() {
+        // B-frames: the decoder holds pictures back; end of stream must drain
+        // them for every segment, not only the last. Every frame keeps its
+        // demuxed PTS: 25 fps from the object's first PTS.
+        let a = test_ts("x264enc", 25);
+        let b = test_ts("x264enc", 13);
+        let one = |bytes: &Vec<u8>| {
+            decode_in_thread(bytes.clone(), Duration::from_secs(10))
+                .unwrap()
+                .unwrap()
+        };
+        let (ra, rb) = (one(&a), one(&b));
+        let out = session_decode_in_thread(
+            vec![a.clone(), b.clone(), a.clone(), a],
+            Duration::from_secs(10),
+        )
+        .expect("decodes returned");
+        let want = [(&ra, 25u64), (&rb, 13), (&ra, 25), (&ra, 25)];
+        for (i, (got, (one, n))) in out.iter().zip(want).enumerate() {
+            let got = got.as_ref().expect("decode ok");
+            assert_eq!(got.first_pts, one.first_pts, "segment {}", i);
+            assert_eq!(got.caps, one.caps, "segment {}", i);
+            if pick_decoder() == "vtdec_hw" {
+                // VideoToolbox mis-stamps some B-frames of this material and
+                // may drop a last frame, with a pipeline per segment too
+                // (docs/UPSTREAM_NOTES.md): only the count is checked.
+                let len = got.frames.len() as u64;
+                assert!(len + 1 >= n && len <= n, "segment {}: {} frames", i, len);
+                continue;
+            }
+            let first = got.first_pts.expect("first pts");
+            let expect: Vec<u64> = (0..n).map(|k| first + k * 40_000_000).collect();
+            assert_eq!(pts_of(got), expect, "segment {}", i);
+        }
+    }
+
+    #[test]
+    fn a_session_recovers_after_a_bad_segment() {
+        let good = test_ts("x264enc", 25);
+        let bad: Vec<u8> = (0..188 * 200u32).map(|i| (i * 7919 % 251) as u8).collect();
+        let out = session_decode_in_thread(
+            vec![good.clone(), bad, test_ts("x265enc", 25), Vec::new(), good],
+            Duration::from_secs(5),
+        )
+        .expect("decodes returned");
+        assert_eq!(out[0].as_ref().unwrap().frames.len(), 25);
+        assert!(out[1].is_err());
+        assert!(out[2].is_err());
+        assert!(out[3].is_err());
+        assert_eq!(out[4].as_ref().unwrap().frames.len(), 25);
+    }
+
+    /// Real segments (`STROM_REPLAY_TEST_SEGMENTS`: a directory of `.ts`
+    /// files): a session gives the same frames, bit for bit, as a pipeline
+    /// per segment, in order, backwards and repeated.
+    #[test]
+    #[ignore]
+    fn session_frames_equal_pipeline_frames_on_real_segments() {
+        gst::init().unwrap();
+        let dir = std::env::var("STROM_REPLAY_TEST_SEGMENTS").expect("segment directory");
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "ts"))
+            .collect();
+        paths.sort();
+        let objects: Vec<Vec<u8>> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        let mut order: Vec<usize> = (0..objects.len()).collect();
+        order.extend((0..objects.len()).rev());
+        order.extend([3, 3, 0, 7, 1]);
+        let bytes_of = |b: &gst::Buffer| b.map_readable().unwrap().as_slice().to_vec();
+        let one: Vec<Decoded> = objects
+            .iter()
+            .map(|o| {
+                decode_bytes(
+                    Arc::new(o.clone()),
+                    None,
+                    pick_decoder(),
+                    Duration::from_secs(10),
+                )
+                .unwrap()
+            })
+            .collect();
+        let mut dec = SegmentDecoder::new(pick_decoder());
+        for i in order {
+            let got = dec
+                .decode(Arc::new(objects[i].clone()), None, Duration::from_secs(10))
+                .unwrap();
+            let want = &one[i];
+            assert_eq!(pts_of(&got), pts_of(want), "segment {}", i);
+            assert_eq!(got.first_pts, want.first_pts, "segment {}", i);
+            for (k, (g, w)) in got.frames.iter().zip(&want.frames).enumerate() {
+                assert!(
+                    bytes_of(&g.1) == bytes_of(&w.1),
+                    "segment {} frame {}",
+                    i,
+                    k
+                );
+            }
+        }
+    }
+
+    /// Timing on real segments (`STROM_REPLAY_TEST_SEGMENTS`): `threads`
+    /// workers (4 angles x 2 workers) decode every segment, with a session
+    /// each and with a pipeline per segment; per-segment wall time, ms.
+    #[test]
+    #[ignore]
+    fn bench_session_against_pipeline_per_segment() {
+        gst::init().unwrap();
+        let dir = std::env::var("STROM_REPLAY_TEST_SEGMENTS").expect("segment directory");
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "ts"))
+            .collect();
+        paths.sort();
+        let objects: Arc<Vec<Arc<Vec<u8>>>> = Arc::new(
+            paths
+                .iter()
+                .map(|p| Arc::new(std::fs::read(p).unwrap()))
+                .collect(),
+        );
+        let threads = 8;
+        for session in [false, true] {
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    let objects = Arc::clone(&objects);
+                    std::thread::spawn(move || {
+                        let mut dec = SegmentDecoder::new(pick_decoder());
+                        let mut ms = Vec::new();
+                        for o in objects.iter() {
+                            let t = Instant::now();
+                            let d = if session {
+                                dec.decode(Arc::clone(o), None, Duration::from_secs(20))
+                            } else {
+                                decode_bytes(
+                                    Arc::clone(o),
+                                    None,
+                                    pick_decoder(),
+                                    Duration::from_secs(20),
+                                )
+                            };
+                            assert!(d.is_ok());
+                            ms.push(t.elapsed().as_secs_f64() * 1e3);
+                        }
+                        ms
+                    })
+                })
+                .collect();
+            let mut all: Vec<f64> = handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect();
+            all.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let p = |q: f64| all[((all.len() as f64 * q) as usize).min(all.len() - 1)];
+            eprintln!(
+                "BENCH {} session={} threads={} n={} p50={:.0} p95={:.0} max={:.0} ms",
+                pick_decoder(),
+                session,
+                threads,
+                all.len(),
+                p(0.5),
+                p(0.95),
+                all[all.len() - 1]
+            );
+        }
     }
 
     #[test]

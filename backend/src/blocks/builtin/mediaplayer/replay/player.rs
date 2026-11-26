@@ -17,7 +17,7 @@ use super::backoff::{worth_warning, Backoff};
 #[cfg(test)]
 use super::cache::Hold;
 use super::cache::{by_urgency, Fetcher, SegmentStore};
-use super::decode::{caps_frame_rate, decode_bytes, decode_timeout, map_to_grid, pick_decoder};
+use super::decode::{caps_frame_rate, decode_timeout, map_to_grid, pick_decoder, SegmentDecoder};
 use super::source::{Segment, SourceIndex};
 use super::timeline::{PlayerStats, ReplayTimeline};
 use crate::gst::frame_rate::estimate_frame_rate;
@@ -247,6 +247,8 @@ impl ReplayPlayer {
     // --- decoding -----------------------------------------------------------
 
     fn decode_worker(self: Arc<Self>, rx: Arc<Mutex<mpsc::Receiver<Arc<Segment>>>>) {
+        // One long-lived decoder per worker, kept across segments.
+        let mut decoder = SegmentDecoder::new(self.decoder);
         while self.alive() {
             let job = lock(&rx).recv_timeout(Duration::from_millis(100));
             let seg = match job {
@@ -254,7 +256,7 @@ impl ReplayPlayer {
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
-            match self.decode_one(&seg) {
+            match self.decode_one(&seg, &mut decoder) {
                 Ok(()) => lock(&self.failed).succeed(&seg.start_ns),
                 Err(e) => {
                     let attempts = lock(&self.failed).fail(seg.start_ns, Instant::now());
@@ -277,17 +279,16 @@ impl ReplayPlayer {
 
     /// Decode one segment into the frame store. An error means the segment
     /// gave no usable frames; it is retried later with backoff.
-    fn decode_one(&self, seg: &Segment) -> Result<(), String> {
+    fn decode_one(&self, seg: &Segment, decoder: &mut SegmentDecoder) -> Result<(), String> {
         // Evicted meanwhile: nothing to do, it is sent again when refetched.
         let Some(bytes) = self.store.bytes(seg.start_ns) else {
             return Ok(());
         };
         let container = self.store.info().and_then(|i| i.container);
         let started = Instant::now();
-        let result = decode_bytes(
+        let result = decoder.decode(
             bytes,
             container.as_deref(),
-            self.decoder,
             decode_timeout(seg.duration_ns()),
         );
         let ms = started.elapsed().as_millis() as u64;
