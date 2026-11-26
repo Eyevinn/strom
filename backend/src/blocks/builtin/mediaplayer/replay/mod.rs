@@ -13,6 +13,11 @@
 //! - `timeline`: the group's shared cursor (a TAI instant), range and live
 //!   edge; each player shows its latest frame at or before the cursor;
 //! - `player`: decode scheduling, frame store and the output tick.
+//!
+//! `pacing=offline` exports a clip (`clip_in`, `clip_out`, `clip_speed`):
+//! the same player on a frame counter instead of the flow clock, with a
+//! non-live, blocking appsrc, ending the stream at the out point. Follow it
+//! with an encoder, a muxer and a sink with `sync=false` (e.g. `filesink`).
 
 pub mod backoff;
 pub mod cache;
@@ -36,9 +41,11 @@ use gstreamer_app as gst_app;
 use std::collections::HashMap;
 use strom_types::element::ElementPadRef;
 use strom_types::mediaplayer::{
-    timeline_group, DECODED_AHEAD_PROPERTY, GROUP_PROPERTY, OUTPUT_FRAMERATE_PROPERTY,
-    PRIVATE_GROUP_PREFIX, READ_AHEAD_PROPERTY, SOURCE_PROPERTY,
+    timeline_group, CLIP_IN_PROPERTY, CLIP_OUT_PROPERTY, CLIP_SPEED_PROPERTY,
+    DECODED_AHEAD_PROPERTY, GROUP_PROPERTY, OUTPUT_FRAMERATE_PROPERTY, PACING_OFFLINE,
+    PACING_PROPERTY, PACING_REALTIME, PRIVATE_GROUP_PREFIX, READ_AHEAD_PROPERTY, SOURCE_PROPERTY,
 };
+use strom_types::replay::ReplayTimeRef;
 use strom_types::{FlowId, PropertyValue};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -57,6 +64,87 @@ pub fn parse_frame_rate(s: &str) -> Result<Option<(u32, u32)>, String> {
     match (n, d) {
         (Ok(n), Ok(d)) if n > 0 && d > 0 => Ok(Some((n, d))),
         _ => Err(bad()),
+    }
+}
+
+/// A clip's in or out point: UTC (RFC 3339, has a `T`) or TAI
+/// (`"<seconds>:<nanoseconds>"`).
+pub fn parse_time_ref(s: &str) -> Result<ReplayTimeRef, String> {
+    let s = s.trim();
+    if s.contains('T') {
+        strom_types::tai::parse_utc(s).ok_or_else(|| format!("bad UTC time '{}'", s))?;
+        Ok(ReplayTimeRef {
+            utc: Some(s.to_string()),
+            ..Default::default()
+        })
+    } else {
+        strom_types::tams::parse_timestamp_signed(s).ok_or_else(|| {
+            format!(
+                "bad time '{}', want UTC (2026-11-24T13:21:56.080Z) or TAI (<s>:<ns>)",
+                s
+            )
+        })?;
+        Ok(ReplayTimeRef {
+            tai: Some(s.to_string()),
+            ..Default::default()
+        })
+    }
+}
+
+/// The clip of an offline player, from its properties; `None` when the
+/// player is paced in real time.
+fn clip_of(properties: &HashMap<String, PropertyValue>) -> Result<Option<timeline::Clip>, String> {
+    let pacing = prop_str(properties, PACING_PROPERTY).unwrap_or_else(|| PACING_REALTIME.into());
+    let clip_in = prop_str(properties, CLIP_IN_PROPERTY);
+    let clip_out = prop_str(properties, CLIP_OUT_PROPERTY);
+    match pacing.as_str() {
+        PACING_REALTIME => {
+            if clip_in.is_some() || clip_out.is_some() {
+                return Err(format!(
+                    "{} and {} need {}={} (in real time, play a clip with the cue and \
+                     play commands)",
+                    CLIP_IN_PROPERTY, CLIP_OUT_PROPERTY, PACING_PROPERTY, PACING_OFFLINE
+                ));
+            }
+            Ok(None)
+        }
+        PACING_OFFLINE => {
+            let (Some(i), Some(o)) = (clip_in, clip_out) else {
+                return Err(format!(
+                    "{}={} needs {} and {}",
+                    PACING_PROPERTY, PACING_OFFLINE, CLIP_IN_PROPERTY, CLIP_OUT_PROPERTY
+                ));
+            };
+            let speed = match properties.get(CLIP_SPEED_PROPERTY) {
+                None => 1.0,
+                Some(PropertyValue::Float(f)) => *f,
+                Some(PropertyValue::Int(i)) => *i as f64,
+                Some(PropertyValue::UInt(u)) => *u as f64,
+                Some(PropertyValue::String(s)) if s.trim().is_empty() => 1.0,
+                Some(PropertyValue::String(s)) => s
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| format!("bad {} '{}'", CLIP_SPEED_PROPERTY, s))?,
+                Some(v) => return Err(format!("bad {} {:?}", CLIP_SPEED_PROPERTY, v)),
+            };
+            if !(speed > 0.0 && speed <= timeline::MAX_SPEED) {
+                return Err(format!(
+                    "{} {} is not in (0, {}]",
+                    CLIP_SPEED_PROPERTY,
+                    speed,
+                    timeline::MAX_SPEED
+                ));
+            }
+            Ok(Some(timeline::Clip {
+                in_point: parse_time_ref(&i)?,
+                out: parse_time_ref(&o)?,
+                speed,
+            }))
+        }
+        other => Err(format!(
+            "bad {} '{}', want {} or {}",
+            PACING_PROPERTY, other, PACING_REALTIME, PACING_OFFLINE
+        )),
     }
 }
 
@@ -115,6 +203,7 @@ pub fn build(
     let output_rate =
         parse_frame_rate(&prop_str(properties, OUTPUT_FRAMERATE_PROPERTY).unwrap_or_default())
             .map_err(invalid)?;
+    let clip = clip_of(properties).map_err(invalid)?;
     let spec = source::parse_source(&source, &media_path).map_err(invalid)?;
     // Gateway auth is checked against the gateway it goes to (env token and
     // OSC SAT only to allowed gateways).
@@ -135,10 +224,23 @@ pub fn build(
     let appsrc_id = format!("{}:appsrc_video", instance_id);
     let queue_id = format!("{}:queue_video", instance_id);
     let out_id = format!("{}:video_out", instance_id);
-    let appsrc = live_bridge_appsrc(APPSRC_MAX_BYTES_VIDEO)
-        .name(&appsrc_id)
-        .leaky_type(gst_app::AppLeakyType::Upstream)
-        .build();
+    let appsrc = match clip {
+        // Live: a full queue drops the newest picture, the tick never waits.
+        None => live_bridge_appsrc(APPSRC_MAX_BYTES_VIDEO)
+            .name(&appsrc_id)
+            .leaky_type(gst_app::AppLeakyType::Upstream)
+            .build(),
+        // Offline: not live (the flow prerolls and nothing syncs to the
+        // clock), and a full queue blocks the push: backpressure.
+        Some(_) => gst_app::AppSrc::builder()
+            .name(&appsrc_id)
+            .format(gst::Format::Time)
+            .is_live(false)
+            .block(true)
+            .automatic_eos(false)
+            .max_bytes(APPSRC_MAX_BYTES_VIDEO)
+            .build(),
+    };
     let queue = gst::ElementFactory::make("queue")
         .name(&queue_id)
         .build()
@@ -156,7 +258,10 @@ pub fn build(
         &appsrc,
         decoded_ahead_s,
         read_ahead_s,
-        output_rate,
+        player::Output {
+            rate: output_rate,
+            clip,
+        },
     );
 
     // The bus handler owns the player for the flow's run: when the flow
@@ -194,7 +299,7 @@ pub fn build(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_frame_rate;
+    use super::*;
 
     #[test]
     fn frame_rates_parse() {
@@ -205,5 +310,170 @@ mod tests {
         assert!(parse_frame_rate("0/1").is_err());
         assert!(parse_frame_rate("29.97").is_err());
         assert!(parse_frame_rate("50/").is_err());
+    }
+
+    fn props(kv: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
+        kv.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    fn st(s: &str) -> PropertyValue {
+        PropertyValue::String(s.to_string())
+    }
+
+    #[test]
+    fn clips_parse_from_properties() {
+        assert_eq!(clip_of(&props(&[])), Ok(None));
+        let c = clip_of(&props(&[
+            (PACING_PROPERTY, st("offline")),
+            (CLIP_IN_PROPERTY, st("2026-11-26T10:00:00.000Z")),
+            (CLIP_OUT_PROPERTY, st("1795600000:500000000")),
+            (CLIP_SPEED_PROPERTY, PropertyValue::Float(0.5)),
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(c.in_point.utc.as_deref(), Some("2026-11-26T10:00:00.000Z"));
+        assert_eq!(c.out.tai.as_deref(), Some("1795600000:500000000"));
+        assert_eq!(c.speed, 0.5);
+        // Offline needs both ends; real time takes no clip.
+        assert!(clip_of(&props(&[(PACING_PROPERTY, st("offline"))])).is_err());
+        assert!(clip_of(&props(&[(CLIP_IN_PROPERTY, st("1:0"))])).is_err());
+        let bad_speed = props(&[
+            (PACING_PROPERTY, st("offline")),
+            (CLIP_IN_PROPERTY, st("1:0")),
+            (CLIP_OUT_PROPERTY, st("2:0")),
+            (CLIP_SPEED_PROPERTY, PropertyValue::Float(-1.0)),
+        ]);
+        assert!(clip_of(&bad_speed).is_err());
+        assert!(parse_time_ref("yesterday").is_err());
+        assert!(clip_of(&props(&[(PACING_PROPERTY, st("fast"))])).is_err());
+    }
+
+    /// Four 1 s segments of 25p H.264 (with B-frames) in MPEG-TS and an
+    /// `index.json`, from TAI `BASE`, under `root/segs`.
+    fn write_segments(root: &std::path::Path) {
+        const BASE: i64 = 1_800_000_000_000_000_000;
+        let p = gst::parse::launch(
+            "videotestsrc num-buffers=25 ! video/x-raw,width=320,height=240,framerate=25/1 ! \
+             x264enc bframes=2 key-int-max=25 ! h264parse ! mpegtsmux ! \
+             appsink name=sink sync=false",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let sink = p
+            .by_name("sink")
+            .unwrap()
+            .downcast::<gst_app::AppSink>()
+            .unwrap();
+        p.set_state(gst::State::Playing).unwrap();
+        let mut ts = Vec::new();
+        while let Ok(s) = sink.pull_sample() {
+            ts.extend_from_slice(&s.buffer().unwrap().map_readable().unwrap());
+        }
+        p.set_state(gst::State::Null).unwrap();
+        let dir = root.join("segs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut segs = Vec::new();
+        for i in 0..4i64 {
+            let name = format!("seg_{}.ts", i);
+            std::fs::write(dir.join(&name), &ts).unwrap();
+            segs.push(serde_json::json!({
+                "object": name,
+                "start_ns": BASE + i * 1_000_000_000,
+                "end_ns": BASE + (i + 1) * 1_000_000_000,
+            }));
+        }
+        let index = serde_json::json!({
+            "container": "video/mp2t",
+            "codec": "video/h264",
+            "frame_rate": {"numerator": 25, "denominator": 1},
+            "segments": segs,
+        });
+        std::fs::write(dir.join("index.json"), index.to_string()).unwrap();
+    }
+
+    /// Run an offline player over the segments to end of stream: each
+    /// buffer's PTS and the TAI of the source frame it shows.
+    fn export(speed: f64) -> Vec<(u64, u64)> {
+        gst::init().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        write_segments(root.path());
+        let props = props(&[
+            ("_media_path", st(root.path().to_str().unwrap())),
+            (SOURCE_PROPERTY, st("segs")),
+            (PACING_PROPERTY, st("offline")),
+            (CLIP_IN_PROPERTY, st("1800000001:0")),
+            (CLIP_OUT_PROPERTY, st("1800000003:0")),
+            (CLIP_SPEED_PROPERTY, PropertyValue::Float(speed)),
+        ]);
+        let built = build(&format!("export_test_{}", speed), &props).unwrap();
+        let pipeline = gst::Pipeline::new();
+        let mut elements = HashMap::new();
+        for (id, e) in &built.elements {
+            pipeline.add(e).unwrap();
+            elements.insert(id.clone(), e.clone());
+        }
+        for (a, b) in &built.internal_links {
+            elements[&a.element_id]
+                .link_pads(
+                    a.pad_name.as_deref(),
+                    &elements[&b.element_id],
+                    b.pad_name.as_deref(),
+                )
+                .unwrap();
+        }
+        let sink = gst_app::AppSink::builder().sync(false).build();
+        pipeline.add(&sink).unwrap();
+        let out = built
+            .elements
+            .iter()
+            .find(|(id, _)| id.ends_with(":video_out"))
+            .unwrap();
+        out.1.link(&sink).unwrap();
+        let bus = pipeline.bus().unwrap();
+        let handler = (built.bus_message_handler.unwrap())(
+            &bus,
+            Uuid::nil(),
+            crate::events::EventBroadcaster::default(),
+        );
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let tai_caps = gst::Caps::builder("timestamp/x-tai").build();
+        let mut frames = Vec::new();
+        while let Some(s) = sink.try_pull_sample(gst::ClockTime::from_seconds(20)) {
+            let b = s.buffer().unwrap();
+            let tai = b
+                .iter_meta::<gst::ReferenceTimestampMeta>()
+                .find(|m| m.reference().can_intersect(&tai_caps))
+                .map(|m| m.timestamp().nseconds())
+                .unwrap();
+            frames.push((b.pts().unwrap().nseconds(), tai));
+        }
+        assert!(sink.is_eos(), "the export ended without end of stream");
+        pipeline.set_state(gst::State::Null).unwrap();
+        bus.disconnect(handler);
+        frames
+    }
+
+    #[test]
+    fn an_offline_clip_is_every_frame_once_then_end_of_stream() {
+        let frames = export(1.0);
+        // [1 s, 3 s) of 25p: 50 frames, PTS from 0, each source frame once.
+        assert_eq!(frames.len(), 50);
+        for (k, (pts, tai)) in frames.iter().enumerate() {
+            let k = k as u64;
+            assert_eq!(*pts, k * 40_000_000);
+            assert_eq!(*tai, 1_800_000_001_000_000_000 + k * 40_000_000);
+        }
+    }
+
+    #[test]
+    fn an_offline_clip_at_half_speed_shows_each_frame_twice() {
+        let frames = export(0.5);
+        assert_eq!(frames.len(), 100);
+        for (k, (pts, tai)) in frames.iter().enumerate() {
+            let k = k as u64;
+            assert_eq!(*pts, k * 40_000_000);
+            assert_eq!(*tai, 1_800_000_001_000_000_000 + k / 2 * 40_000_000);
+        }
     }
 }

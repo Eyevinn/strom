@@ -3,8 +3,9 @@
 use super::bridge::Decoder;
 use strom_types::block::*;
 use strom_types::mediaplayer::{
-    PlayerMode, DECODED_AHEAD_PROPERTY, GROUP_PROPERTY, MODE_PROPERTY, OUTPUT_FRAMERATE_PROPERTY,
-    SOURCE_PROPERTY,
+    PlayerMode, CLIP_IN_PROPERTY, CLIP_OUT_PROPERTY, CLIP_SPEED_PROPERTY, DECODED_AHEAD_PROPERTY,
+    GROUP_PROPERTY, MODE_PROPERTY, OUTPUT_FRAMERATE_PROPERTY, PACING_OFFLINE, PACING_PROPERTY,
+    PACING_REALTIME, SOURCE_PROPERTY,
 };
 use strom_types::{MediaType, PropertyValue};
 
@@ -93,6 +94,69 @@ pub fn media_player_definition() -> BlockDefinition {
                 mapping: block_mapping(GROUP_PROPERTY),
                 live: false,
                 persist: None,
+                visible_when: in_modes(&[PlayerMode::Timeline]),
+            },
+            ExposedProperty {
+                name: PACING_PROPERTY.to_string(),
+                label: "Pacing".to_string(),
+                description: "Realtime: output on the flow clock, steered by the replay API. Offline: play the clip (Clip In to Clip Out) once, as fast as downstream takes it, then end the stream: export to a file with an encoder, a muxer and a sink with sync=false."
+                    .to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: PACING_REALTIME.to_string(),
+                            label: Some("Realtime".to_string()),
+                            visible_when: None,
+                        },
+                        EnumValue {
+                            value: PACING_OFFLINE.to_string(),
+                            label: Some("Offline (export a clip)".to_string()),
+                            visible_when: None,
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String(PACING_REALTIME.to_string())),
+                mapping: block_mapping(PACING_PROPERTY),
+                live: false,
+                persist: None,
+                visible_when: in_modes(&[PlayerMode::Timeline]),
+            },
+            ExposedProperty {
+                name: CLIP_IN_PROPERTY.to_string(),
+                label: "Clip In".to_string(),
+                description: "Offline: first instant of the clip, UTC (2026-11-24T13:21:56.080Z) or TAI (<seconds>:<nanoseconds>)."
+                    .to_string(),
+                property_type: PropertyType::String,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: block_mapping(CLIP_IN_PROPERTY),
+                live: false,
+                persist: None,
+                // Conditions are flat: shown in timeline mode, used offline.
+                visible_when: in_modes(&[PlayerMode::Timeline]),
+            },
+            ExposedProperty {
+                name: CLIP_OUT_PROPERTY.to_string(),
+                label: "Clip Out".to_string(),
+                description: "Offline: end of the clip (exclusive), UTC or TAI.".to_string(),
+                property_type: PropertyType::String,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: block_mapping(CLIP_OUT_PROPERTY),
+                live: false,
+                persist: None,
+                // Conditions are flat: shown in timeline mode, used offline.
+                visible_when: in_modes(&[PlayerMode::Timeline]),
+            },
+            ExposedProperty {
+                name: CLIP_SPEED_PROPERTY.to_string(),
+                label: "Clip Speed".to_string(),
+                description: "Offline: constant forward speed of the clip, e.g. 0.5 for slow motion (each 50p source frame twice on a 50p output). Max 8."
+                    .to_string(),
+                property_type: PropertyType::Float,
+                default_value: Some(PropertyValue::Float(1.0)),
+                mapping: block_mapping(CLIP_SPEED_PROPERTY),
+                live: false,
+                persist: None,
+                // Conditions are flat: shown in timeline mode, used offline.
                 visible_when: in_modes(&[PlayerMode::Timeline]),
             },
             ExposedProperty {

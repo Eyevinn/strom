@@ -1386,3 +1386,95 @@ fn a_new_run_resets_under_the_anchor_lock() {
     t.join().unwrap();
     assert_eq!(tl.players().len(), 1);
 }
+
+/// The source frames an offline output shows for `clip` (frame starts on a
+/// 50p grid), one per tick, until play stops: how an offline player walks
+/// the clip.
+fn export_frames(tl: &ReplayTimeline, clip: &Clip) -> Vec<i64> {
+    let g = tl.reference().unwrap();
+    tl.use_counter();
+    tl.start_clip(clip, 0).unwrap();
+    let mut out = Vec::new();
+    for k in 0.. {
+        let rt = tick_rt(k, 50, 1);
+        tl.set_counter(rt);
+        assert_eq!(tl.now_rt(), rt);
+        let Some(t) = tl.playing_at(rt) else {
+            break;
+        };
+        out.push(g.floor_frame(t) - g.floor_frame(BASE));
+        assert!(k < 100_000, "the clip never ended");
+    }
+    out
+}
+
+fn clip(from: i64, to: i64, speed: f64) -> Clip {
+    Clip {
+        in_point: ReplayTimeRef {
+            tai: Some(tai_string(from)),
+            ..Default::default()
+        },
+        out: ReplayTimeRef {
+            tai: Some(tai_string(to)),
+            ..Default::default()
+        },
+        speed,
+    }
+}
+
+#[test]
+fn ticks_are_exact_whole_nanoseconds() {
+    assert_eq!(tick_rt(0, 50, 1), 0);
+    assert_eq!(tick_rt(1, 50, 1), 20 * MS);
+    assert_eq!(tick_rt(3, 30000, 1001), 100_100_000);
+    // No drift over a day of 59.94p.
+    let k = 24 * 3600 * 60_000 / 1001;
+    assert_eq!(tick_rt(k, 60000, 1001), k * 1001 * S / 60000);
+}
+
+#[test]
+fn a_counter_drives_now_and_the_clock_does_not() {
+    gst::init().unwrap();
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 30 * S)]);
+    assert_eq!(tl.time_source(), TimeSource::Clock);
+    tl.use_counter();
+    assert_eq!(tl.time_source(), TimeSource::Counter);
+    assert_eq!(tl.now_rt(), 0);
+    // A clock source does not take over the counter's "now".
+    let el = gst::ElementFactory::make("identity").build().unwrap();
+    tl.set_clock_source(&el);
+    tl.set_counter(7 * S);
+    assert_eq!(tl.now_rt(), 7 * S);
+    // Commands at "now" are at the counter's running time.
+    tl.apply(Command::Speed { speed: 1.0 }).unwrap();
+    tl.set_counter(9 * S);
+    assert_eq!(tl.cursor_now().unwrap().0, BASE + 2 * S);
+    // A new run of the group starts on the clock again.
+    drop(_p);
+    let p = player("cam", BASE, BASE + 30 * S, Some((50, 1)));
+    tl.register_player(&p);
+    assert_eq!(tl.time_source(), TimeSource::Clock);
+}
+
+#[test]
+fn a_clip_on_the_counter_shows_each_frame_once_at_1x() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 30 * S)]);
+    let frames = export_frames(&tl, &clip(BASE + 5 * S, BASE + 15 * S, 1.0));
+    assert_eq!(frames, (250..750).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_clip_on_the_counter_shows_each_frame_twice_at_half_speed() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 30 * S)]);
+    let frames = export_frames(&tl, &clip(BASE + 5 * S, BASE + 15 * S, 0.5));
+    let want: Vec<i64> = (250..750).flat_map(|f| [f, f]).collect();
+    assert_eq!(frames, want);
+}
+
+#[test]
+fn a_clip_must_play_forward() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 30 * S)]);
+    assert!(tl
+        .start_clip(&clip(BASE + 5 * S, BASE + 15 * S, -1.0), 0)
+        .is_err());
+}
