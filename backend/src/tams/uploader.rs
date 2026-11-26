@@ -32,7 +32,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 /// Flow metadata detected from caps at runtime, read when the flow is created.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct DetectedEssence {
     /// Codec label (e.g. `video/h264`); overrides the spec's fallback when set.
     pub codec: Option<String>,
@@ -257,7 +257,7 @@ pub fn spawn_uploader(
 ) {
     tokio::spawn(async move {
         let tams_flow_id = flow_spec.flow_id.clone();
-        let mut flow_created = false;
+        let mut registered: Option<DetectedEssence> = None;
         let mut segments_registered: u64 = 0;
 
         info!(
@@ -267,7 +267,7 @@ pub fn spawn_uploader(
 
         let mut ctx = UploadCtx {
             client: &client,
-            flow_created: &mut flow_created,
+            registered: &mut registered,
             flow_spec: &mut flow_spec,
             detected_codec: &detected_codec,
             content_type: &content_type,
@@ -326,7 +326,8 @@ pub fn spawn_uploader(
 /// recovery paths (avoids a dozen-argument function each).
 struct UploadCtx<'a> {
     client: &'a TamsClient,
-    flow_created: &'a mut bool,
+    /// What the flow was last registered with (`None`: not yet).
+    registered: &'a mut Option<DetectedEssence>,
     flow_spec: &'a mut FlowSpec,
     detected_codec: &'a SharedDetected,
     content_type: &'a str,
@@ -336,28 +337,54 @@ struct UploadCtx<'a> {
     segments_registered: &'a mut u64,
 }
 
-/// Ensure the flow exists on the gateway (once), preferring the codec detected from
-/// caps over the fallback. Returns whether the flow is now present.
+/// Ensure the flow exists on the gateway, preferring the codec detected from caps
+/// over the fallback. The flow is registered again whenever the detected codec or
+/// essence parameters change (caps that arrive late or renegotiate, a frame rate
+/// estimated from timestamps), so it never stays registered with what was known
+/// at the first segment. Returns whether the flow is present.
 async fn ensure_flow(ctx: &mut UploadCtx<'_>) -> bool {
-    if *ctx.flow_created {
+    let detected = ctx
+        .detected_codec
+        .lock()
+        .map(|d| d.clone())
+        .unwrap_or_default();
+    if ctx.registered.as_ref() == Some(&detected) {
         return true;
     }
-    if let Ok(detected) = ctx.detected_codec.lock() {
-        if let Some(codec) = &detected.codec {
-            ctx.flow_spec.codec = Some(codec.clone());
-        }
-        for (k, v) in &detected.essence_parameters {
-            ctx.flow_spec
-                .essence_parameters
-                .insert(k.clone(), v.clone());
-        }
+    let exists = ctx.registered.is_some();
+    if let Some(codec) = &detected.codec {
+        ctx.flow_spec.codec = Some(codec.clone());
+    }
+    for (k, v) in &detected.essence_parameters {
+        ctx.flow_spec
+            .essence_parameters
+            .insert(k.clone(), v.clone());
     }
     match retry(MAX_ATTEMPTS, || ctx.client.ensure_flow(ctx.flow_spec)).await {
         Ok(()) => {
-            *ctx.flow_created = true;
             info!(
-                "TAMS {}: flow {} created",
-                ctx.block_id, ctx.flow_spec.flow_id
+                "TAMS {}: flow {} {} (codec {:?}, essence_parameters {})",
+                ctx.block_id,
+                ctx.flow_spec.flow_id,
+                if exists { "updated" } else { "created" },
+                ctx.flow_spec.codec,
+                serde_json::Value::Object(ctx.flow_spec.essence_parameters.clone())
+            );
+            let params = &ctx.flow_spec.essence_parameters;
+            if params.contains_key("frame_width") && !params.contains_key("frame_rate") {
+                warn!(
+                    "TAMS {}: flow {} has no frame_rate yet",
+                    ctx.block_id, ctx.flow_spec.flow_id
+                );
+            }
+            *ctx.registered = Some(detected);
+            true
+        }
+        Err(e) if exists => {
+            // The flow is there; the update is tried again at the next segment.
+            warn!(
+                "TAMS {}: flow {} not updated yet: {:#}",
+                ctx.block_id, ctx.flow_spec.flow_id, e
             );
             true
         }
@@ -879,5 +906,112 @@ mod tests {
         let d0 = backoff_with_jitter(0);
         assert!(d0 >= Duration::from_secs(1));
         assert!(d0 <= Duration::from_secs(1) + Duration::from_millis(1000));
+    }
+
+    /// A gateway that answers every request with 201 and keeps the bodies of
+    /// the flow PUTs it got.
+    async fn fake_gateway() -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let puts = Arc::new(Mutex::new(Vec::new()));
+        let seen = puts.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let mut stream = BufReader::new(stream);
+                    loop {
+                        let mut request_line = String::new();
+                        if stream.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let mut len = 0usize;
+                        loop {
+                            let mut line = String::new();
+                            stream.read_line(&mut line).await.unwrap();
+                            let line = line.trim_end();
+                            if line.is_empty() {
+                                break;
+                            }
+                            if let Some((k, v)) = line.split_once(':') {
+                                if k.eq_ignore_ascii_case("content-length") {
+                                    len = v.trim().parse().unwrap();
+                                }
+                            }
+                        }
+                        let mut body = vec![0; len];
+                        stream.read_exact(&mut body).await.unwrap();
+                        if request_line.starts_with("PUT /flows/") {
+                            seen.lock()
+                                .unwrap()
+                                .push(serde_json::from_slice(&body).unwrap());
+                        }
+                        stream
+                            .get_mut()
+                            .write_all(b"HTTP/1.1 201 Created\r\ncontent-length: 0\r\n\r\n")
+                            .await
+                            .unwrap();
+                    }
+                });
+            }
+        });
+        (format!("http://{}", addr), puts)
+    }
+
+    /// The flow is registered again when the detected essence changes (a frame
+    /// rate that is only known after the first segment), and not otherwise.
+    #[tokio::test]
+    async fn flow_is_updated_when_the_essence_changes() {
+        let (url, puts) = fake_gateway().await;
+        let client = TamsClient::new(url, crate::client_auth::AuthMethod::None).unwrap();
+        let mut spec = FlowSpec {
+            flow_id: "flow-1".into(),
+            source_id: "src-1".into(),
+            format: crate::tams::client::FORMAT_VIDEO.into(),
+            codec: Some("video/h264".into()),
+            container: Some("video/mp2t".into()),
+            label: None,
+            description: None,
+            tags: vec![],
+            flow_collection: vec![],
+            essence_parameters: Default::default(),
+        };
+        let detected: SharedDetected = Arc::default();
+        detected
+            .lock()
+            .unwrap()
+            .essence_parameters
+            .insert("frame_width".into(), 1280.into());
+        let events = EventBroadcaster::default();
+        let mut registered = None;
+        let mut segments = 0;
+        let mut ctx = UploadCtx {
+            client: &client,
+            registered: &mut registered,
+            flow_spec: &mut spec,
+            detected_codec: &detected,
+            content_type: "video/mp2t",
+            events: &events,
+            strom_flow_id: FlowId::new_v4(),
+            block_id: "t",
+            segments_registered: &mut segments,
+        };
+        assert!(ensure_flow(&mut ctx).await);
+        assert!(ensure_flow(&mut ctx).await);
+        assert_eq!(puts.lock().unwrap().len(), 1);
+
+        detected.lock().unwrap().essence_parameters.insert(
+            "frame_rate".into(),
+            serde_json::json!({ "numerator": 30, "denominator": 1 }),
+        );
+        assert!(ensure_flow(&mut ctx).await);
+        assert!(ensure_flow(&mut ctx).await);
+        let puts = puts.lock().unwrap();
+        assert_eq!(puts.len(), 2);
+        assert_eq!(puts[0]["essence_parameters"]["frame_width"], 1280);
+        assert!(puts[0]["essence_parameters"].get("frame_rate").is_none());
+        assert_eq!(puts[1]["essence_parameters"]["frame_rate"]["numerator"], 30);
+        assert_eq!(puts[1]["essence_parameters"]["frame_width"], 1280);
     }
 }
