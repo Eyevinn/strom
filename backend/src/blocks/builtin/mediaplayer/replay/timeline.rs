@@ -269,12 +269,38 @@ pub struct PlayerStats {
     pub cached_segments: AtomicU64,
     pub decodes: AtomicU64,
     pub last_decode_ms: AtomicU64,
+    /// Decodes that gave no usable frames, and the time spent in successful
+    /// decodes (sum and longest), ms.
+    pub decode_failures: AtomicU64,
+    decode_ms_total: AtomicU64,
+    decode_ms_max: AtomicU64,
+    /// The decoder element and the number of decode workers.
+    decoder: Mutex<Option<(String, usize)>>,
+    /// The latest decodes, oldest first (diagnostics).
+    decode_log: Mutex<std::collections::VecDeque<DecodeRecord>>,
     /// No frame rate is known: none in the index, the stream's caps or its
     /// timestamps. Nothing can be placed on the timeline until one is.
     pub frame_rate_missing: std::sync::atomic::AtomicBool,
     /// [`TimeDomain`] of the source, as u8.
     time_domain: AtomicU8,
     index_view: Mutex<IndexView>,
+}
+
+/// Decodes kept per player in [`PlayerStats`]' log.
+const DECODE_LOG: usize = 16;
+
+/// One segment decode, for diagnostics.
+#[derive(Debug, Clone)]
+pub struct DecodeRecord {
+    /// The segment's TAI range, `[start, end)`.
+    pub start_ns: i64,
+    pub end_ns: i64,
+    /// Wall time of the decode, ms.
+    pub ms: u64,
+    /// Frames placed on the player's grid.
+    pub frames: usize,
+    /// Why the segment gave no usable frames.
+    pub error: Option<String>,
 }
 
 impl PlayerStats {
@@ -307,6 +333,11 @@ impl PlayerStats {
             cached_segments: AtomicU64::new(0),
             decodes: AtomicU64::new(0),
             last_decode_ms: AtomicU64::new(0),
+            decode_failures: AtomicU64::new(0),
+            decode_ms_total: AtomicU64::new(0),
+            decode_ms_max: AtomicU64::new(0),
+            decoder: Mutex::new(None),
+            decode_log: Mutex::new(std::collections::VecDeque::new()),
             frame_rate_missing: std::sync::atomic::AtomicBool::new(false),
             time_domain: AtomicU8::new(TimeDomain::Unknown as u8),
             index_view: Mutex::new(IndexView::default()),
@@ -340,6 +371,28 @@ impl PlayerStats {
             *g = FrameGrid::new(fps_n, fps_d, anchor_tai_ns);
         }
         *g
+    }
+
+    /// The decoder element and how many workers decode for the player.
+    pub fn set_decoder(&self, name: &str, workers: usize) {
+        *lock(&self.decoder) = Some((name.to_string(), workers));
+    }
+
+    /// One segment decoded (or failed to), for the counters and the log.
+    pub fn note_decode(&self, rec: DecodeRecord) {
+        if rec.error.is_some() {
+            self.decode_failures.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.decodes.fetch_add(1, Ordering::Relaxed);
+            self.last_decode_ms.store(rec.ms, Ordering::Relaxed);
+            self.decode_ms_total.fetch_add(rec.ms, Ordering::Relaxed);
+            self.decode_ms_max.fetch_max(rec.ms, Ordering::Relaxed);
+        }
+        let mut log = lock(&self.decode_log);
+        if log.len() >= DECODE_LOG {
+            log.pop_front();
+        }
+        log.push_back(rec);
     }
 
     pub fn set_index_view(&self, v: IndexView) {
@@ -679,8 +732,13 @@ impl EdgeTracker {
         }
     }
 
+    /// Host time (monotonic ns) the edge last stepped.
+    pub fn last_seen(&self) -> Option<i64> {
+        self.steps.back().map(|&(m, _)| m)
+    }
+
     /// Median step of the edge, once it has stepped twice.
-    fn step(&self) -> Option<i64> {
+    pub fn step(&self) -> Option<i64> {
         let mut d: Vec<i64> = self
             .steps
             .iter()
@@ -1544,6 +1602,22 @@ impl ReplayTimeline {
         let wanted = p.wanted_frame.load(Ordering::Relaxed);
         let view = p.index_view();
         let shown_tai = p.shown_tai.load(Ordering::Relaxed);
+        let decoder = lock(&p.decoder).clone();
+        let decodes = p.decodes.load(Ordering::Relaxed);
+        let decode_avg = (decodes > 0)
+            .then(|| p.decode_ms_total.load(Ordering::Relaxed) as f64 / decodes as f64);
+        let recent: Vec<serde_json::Value> = lock(&p.decode_log)
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "segment": range_json(d.start_ns, d.end_ns),
+                    "ms": d.ms,
+                    "frames": d.frames,
+                    "ok": d.error.is_none(),
+                    "error": d.error,
+                })
+            })
+            .collect();
         let shown_time = match (grid, origin) {
             (Some(g), Some(o)) if shown_tai != UNKNOWN => {
                 FrameTime::of_frame_at(&g, shown_tai, o).to_json()
@@ -1584,6 +1658,12 @@ impl ReplayTimeline {
             "cached_segments": p.cached_segments.load(Ordering::Relaxed),
             "decodes": p.decodes.load(Ordering::Relaxed),
             "last_decode_ms": p.last_decode_ms.load(Ordering::Relaxed),
+            "decode_failures": p.decode_failures.load(Ordering::Relaxed),
+            "decode_ms_avg": decode_avg,
+            "decode_ms_max": p.decode_ms_max.load(Ordering::Relaxed),
+            "decoder": decoder.as_ref().map(|d| d.0.clone()),
+            "decode_workers": decoder.as_ref().map(|d| d.1),
+            "recent_decodes": recent,
         })
     }
 
@@ -1653,6 +1733,20 @@ impl ReplayTimeline {
         let (est, growing) = lock(&self.edge).estimate(mono_ns(), b.live_end);
         v["live_edge_estimate"] = instant_json(est);
         v["live_growing"] = growing.into();
+        {
+            let edge = lock(&self.edge);
+            v["live_edge_step_ms"] =
+                serde_json::to_value(edge.step().map(|s| s / 1_000_000)).unwrap_or_default();
+            v["live_edge_seen_ms_ago"] =
+                serde_json::to_value(edge.last_seen().map(|m| (mono_ns() - m) / 1_000_000))
+                    .unwrap_or_default();
+        }
+        v["live_margin_ms"] = (self.live_margin_ns.load(Ordering::Relaxed) / 1_000_000).into();
+        if domain == TimeDomain::Tai {
+            // How old the newest common media is: wall clock minus its capture time.
+            v["live_edge_age_ms"] =
+                ((wall_utc_ns() - tai_to_utc_ns(b.live_end)) / 1_000_000).into();
+        }
         v["behind_live_estimate_ms"] = ((est - cursor) as f64 / 1e6).round().into();
         // What the players last pushed: the picture going out now.
         if let Some(t) = self.pushed_tai() {
