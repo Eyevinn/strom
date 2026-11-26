@@ -9,7 +9,8 @@
 //! - `PUT  /flows/{id}`           create/replace a flow (auto-creates its source)
 //! - `POST /flows/{id}/storage`   allocate media objects, returns presigned PUT URLs
 //! - `PUT  <presigned url>`       upload the segment bytes to S3
-//! - `POST /flows/{id}/segments`  register a segment on the flow timeline
+//! - `POST /flows/{id}/segments`  register a segment on the flow timeline, with
+//!   an `X-Idempotency-Key` derived from the segment (required by some stores)
 //! - `GET  /flows/{id}/segments?timerange=[..)`  list segments (presigned GET URLs)
 //! - `GET  /flows/{id}`           read a flow (frame rate, container)
 //!
@@ -387,6 +388,7 @@ impl TamsClient {
         method: reqwest::Method,
         url: reqwest::Url,
         body: Option<&serde_json::Value>,
+        headers: &[(&'static str, String)],
     ) -> Result<reqwest::Response> {
         if !same_origin(&url, &self.base) {
             bail!(
@@ -401,6 +403,9 @@ impl TamsClient {
             let mut req = self.api.request(method.clone(), url.clone());
             if let Some(body) = body {
                 req = req.json(body);
+            }
+            for (name, value) in headers {
+                req = req.header(*name, value);
             }
             let resp = self
                 .auth
@@ -437,7 +442,7 @@ impl TamsClient {
         let body = flow_request_body(spec);
         let context = format!("PUT {}", redact_url(url.as_str()));
         let resp = self
-            .send_authed(reqwest::Method::PUT, url, Some(&body))
+            .send_authed(reqwest::Method::PUT, url, Some(&body), &[])
             .await?;
         if !resp.status().is_success() {
             return Err(status_error(resp, context).await);
@@ -455,7 +460,7 @@ impl TamsClient {
         let body = serde_json::json!({ "limit": 1, "content_type": content_type });
         let context = format!("POST {}", redact_url(url.as_str()));
         let resp = self
-            .send_authed(reqwest::Method::POST, url, Some(&body))
+            .send_authed(reqwest::Method::POST, url, Some(&body), &[])
             .await?;
         if !resp.status().is_success() {
             return Err(status_error(resp, context).await);
@@ -507,8 +512,14 @@ impl TamsClient {
         let url = self.url(&format!("/flows/{}/segments", flow_id))?;
         let body = serde_json::json!({ "object_id": object_id, "timerange": timerange });
         let context = format!("POST {}", redact_url(url.as_str()));
+        let key = segment_idempotency_key(flow_id, object_id, timerange);
         let resp = self
-            .send_authed(reqwest::Method::POST, url, Some(&body))
+            .send_authed(
+                reqwest::Method::POST,
+                url,
+                Some(&body),
+                &[(IDEMPOTENCY_KEY_HEADER, key)],
+            )
             .await?;
         let status = resp.status();
         // 201 = all registered; 200 = partial failure (failed_segments listed).
@@ -521,6 +532,20 @@ impl TamsClient {
         }
         Ok(())
     }
+}
+
+/// Header that makes a segment registration safe to repeat. Not in the TAMS
+/// spec, but some stores require it (OpenTAMS, REQ-IDEM-01) and others ignore
+/// an unknown header.
+const IDEMPOTENCY_KEY_HEADER: &str = "X-Idempotency-Key";
+
+/// The idempotency key of a segment registration: derived from what is
+/// registered, so a retry of the same segment (after a 401, a timeout or a
+/// restart from a parked segment) sends the same key, and a different
+/// registration never reuses one.
+fn segment_idempotency_key(flow_id: &str, object_id: &str, timerange: &str) -> String {
+    let name = format!("strom:tams-segment:{}/{}/{}", flow_id, object_id, timerange);
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, name.as_bytes()).to_string()
 }
 
 /// One segment as listed by `GET /flows/{id}/segments`. Timeranges and the
@@ -621,7 +646,9 @@ impl TamsClient {
     pub async fn get_flow(&self, flow_id: &str) -> Result<serde_json::Value> {
         let url = self.url(&format!("/flows/{}", flow_id))?;
         let context = format!("GET {}", redact_url(url.as_str()));
-        let resp = self.send_authed(reqwest::Method::GET, url, None).await?;
+        let resp = self
+            .send_authed(reqwest::Method::GET, url, None, &[])
+            .await?;
         if !resp.status().is_success() {
             return Err(status_error(resp, context).await);
         }
@@ -677,7 +704,9 @@ impl TamsClient {
             Some(NextPage::Key(k)) => with_query(&first, &query.params(Some(k)))?,
             Some(NextPage::Link(l)) => self.resolve(l)?,
         };
-        let resp = self.send_authed(reqwest::Method::GET, url, None).await?;
+        let resp = self
+            .send_authed(reqwest::Method::GET, url, None, &[])
+            .await?;
         if !resp.status().is_success() {
             return Err(status_error(resp, format!("GET {}", first)).await);
         }
@@ -836,6 +865,15 @@ mod tests {
     }
 
     // Timerange/timestamp formatting is tested in `strom_types::tams`.
+
+    #[test]
+    fn segment_idempotency_key_is_stable_per_registration() {
+        let a = segment_idempotency_key("f", "o1", "[0:0_1:0)");
+        assert_eq!(a, segment_idempotency_key("f", "o1", "[0:0_1:0)"));
+        assert_ne!(a, segment_idempotency_key("f", "o2", "[0:0_1:0)"));
+        assert_ne!(a, segment_idempotency_key("f", "o1", "[0:0_2:0)"));
+        assert_ne!(a, segment_idempotency_key("g", "o1", "[0:0_1:0)"));
+    }
 
     #[test]
     fn base_url_trailing_slash_trimmed() {
@@ -1273,6 +1311,37 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn register_sends_the_same_idempotency_key_on_a_retry() {
+            let keys: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+            let app = Router::new()
+                .route(
+                    "/flows/f/segments",
+                    axum::routing::post(
+                        |State(keys): State<Arc<Mutex<Vec<Option<String>>>>>, h: HeaderMap| async move {
+                            let k = h
+                                .get("x-idempotency-key")
+                                .and_then(|v| v.to_str().ok())
+                                .map(String::from);
+                            keys.lock().unwrap().push(k);
+                            StatusCode::CREATED
+                        },
+                    ),
+                )
+                .with_state(keys.clone());
+            let c = TamsClient::new(serve(app).await, AuthMethod::None).unwrap();
+            c.register_segment("f", "o1", "[0:0_1:0)").await.unwrap();
+            c.register_segment("f", "o1", "[0:0_1:0)").await.unwrap();
+            c.register_segment("f", "o2", "[1:0_2:0)").await.unwrap();
+            let k = keys.lock().unwrap().clone();
+            assert!(
+                k.iter().all(Option::is_some),
+                "every registration has a key"
+            );
+            assert_eq!(k[0], k[1]);
+            assert_ne!(k[0], k[2]);
+        }
+
+        #[tokio::test]
         async fn a_401_is_retried_only_once() {
             let minted = Arc::new(Mutex::new(0));
             let token_url = token_endpoint(minted.clone()).await;
@@ -1371,7 +1440,7 @@ mod tests {
             )
             .unwrap();
             let resp = c
-                .send_authed(reqwest::Method::GET, url, None)
+                .send_authed(reqwest::Method::GET, url, None, &[])
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
