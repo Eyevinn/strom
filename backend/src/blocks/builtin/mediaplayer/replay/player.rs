@@ -491,7 +491,7 @@ impl ReplayPlayer {
 
     fn tick_loop(self: Arc<Self>) {
         // Wait for the flow to play and for the first frames to exist.
-        let (appsrc, clock, base, grid) = loop {
+        let (appsrc, clock, mut base, grid) = loop {
             if !self.alive() {
                 return;
             }
@@ -532,14 +532,25 @@ impl ReplayPlayer {
 
         // Output tick period.
         let fd = 1e9 * od_ as f64 / on as f64;
-        let now_rt = || clock.time().nseconds() as i64 - base.nseconds() as i64;
-        let mut k = (now_rt() as f64 / fd).ceil() as i64;
+        let now_rt = |base: gst::ClockTime| clock.time().nseconds() as i64 - base.nseconds() as i64;
+        // Ticks from running time 0 on: a PTS is never negative.
+        let mut k = ((now_rt(base) as f64 / fd).ceil() as i64).max(0);
         // Shown TAI and buffer of the last picture.
         let mut last: Option<(i64, gst::Buffer)> = None;
         let mut last_hit: Option<i64> = None;
         let period_ns = grid.frame_ns().ceil() as i64;
 
         while self.alive() {
+            // The base time changes when the flow goes PAUSED -> PLAYING:
+            // read it each tick, as the timeline's "now" does.
+            if let Some(b) = weak.upgrade().and_then(|a| a.base_time()) {
+                if b != base {
+                    // Running time went back by the time spent paused: so do
+                    // the ticks, or the next one would wait that long.
+                    base = b;
+                    k = ((now_rt(base) as f64 / fd).ceil() as i64).max(0);
+                }
+            }
             let rt = (k as f64 * fd) as i64;
             let id =
                 clock.new_single_shot_id(base + gst::ClockTime::from_nseconds(rt.max(0) as u64));
@@ -552,10 +563,10 @@ impl ReplayPlayer {
                 break;
             }
             // Woke up late: skip to the current tick instead of bursting.
-            let now = now_rt();
+            let now = now_rt(base);
             if now > rt + 2 * fd as i64 {
                 self.stats.late_ticks.fetch_add(1, Ordering::Relaxed);
-                k = (now as f64 / fd).ceil() as i64;
+                k = ((now as f64 / fd).ceil() as i64).max(0);
                 continue;
             }
 

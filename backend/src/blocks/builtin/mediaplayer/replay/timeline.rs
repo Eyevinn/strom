@@ -142,15 +142,14 @@ impl FrameTime {
         }
     }
 
-    /// JSON for the control API. `tai_ns` is a string: it does not fit in a
-    /// JavaScript number.
     /// The time of a source frame that starts at `tai`, its own time (which
     /// can sit off `grid` when the source changed its frame phase). Numbered
     /// by the nearest frame of `grid`.
     pub fn of_frame_at(grid: &FrameGrid, tai: i64, origin: i64) -> Self {
         let utc_ns = tai_to_utc_ns(tai);
         let second_tai = utc_to_tai_ns(utc_ns.div_euclid(1_000_000_000) * 1_000_000_000);
-        // Frames of this run that start in the second before this one.
+        // Frames of `grid` that start in the same UTC second before this one:
+        // the frame's index within its second.
         let before = ((tai - second_tai) as i128 * grid.fps_n as i128)
             .div_euclid(grid.fps_d as i128 * 1_000_000_000) as i64;
         Self {
@@ -161,6 +160,8 @@ impl FrameTime {
         }
     }
 
+    /// JSON for the control API. `tai_ns` is a string: it does not fit in a
+    /// JavaScript number.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self.to_api()).unwrap_or_default()
     }
@@ -539,7 +540,11 @@ fn eval(a: &Anchor, rt: i64, b: &Bounds, live_from: i64, live_slack: i64) -> Eva
     let mut pos = from + moved.round() as i128;
     let mut hit = None;
     if let Some(r) = a.region {
-        let (start, end) = (r.start as i128, r.end as i128);
+        // An out (or in) past the media ends play where the media does: on
+        // media that has stopped growing, play would otherwise hold at its
+        // end for good, with no `Ended` and no end action.
+        let start = r.start.max(b.start) as i128;
+        let end = (r.end.min(b.end) as i128).max(start + 1);
         if pos >= end || pos < start {
             match r.end_action {
                 EndAction::Loop => pos = start + (pos - start).rem_euclid(end - start),
@@ -744,6 +749,9 @@ pub struct Applied {
     pub mark: Option<ReplayMark>,
 }
 
+/// Lock order: `clock_source`, then `anchor`, then the others. `players`,
+/// `first_extent_at`, `created`, `last_cmd`, `last_pushed` and `edge` are
+/// leaves: nothing else is taken while one of them is held.
 pub struct ReplayTimeline {
     anchor: Mutex<Anchor>,
     /// TAI that frame 0 holds: the group's start once every angle has
@@ -831,9 +839,16 @@ impl ReplayTimeline {
     /// player registered, the previous run's having unregistered) resets the
     /// group, so a rebuilt flow can change sources, rates and range.
     pub fn register_player(&self, stats: &Arc<PlayerStats>) {
-        let mut players = lock(&self.players);
-        players.retain(|w| w.strong_count() > 0);
-        if players.is_empty() {
+        // `players` is a leaf lock (see the struct docs): released before the
+        // reset takes the others.
+        let first_of_run = {
+            let mut players = lock(&self.players);
+            players.retain(|w| w.strong_count() > 0);
+            let first = players.is_empty();
+            players.push(Arc::downgrade(stats));
+            first
+        };
+        if first_of_run {
             self.origin_tai.store(UNKNOWN, Ordering::Relaxed);
             *lock(&self.first_extent_at) = None;
             *lock(&self.anchor) = START_ANCHOR;
@@ -841,8 +856,11 @@ impl ReplayTimeline {
             *lock(&self.last_cmd) = None;
             *lock(&self.clock_source) = None;
             *lock(&self.created) = Instant::now();
+            *lock(&self.edge) = EdgeTracker::default();
+            self.live_margin_ns
+                .store(DEFAULT_LIVE_MARGIN_MS as i64 * 1_000_000, Ordering::Relaxed);
+            self.cmd_to_push_us.store(0, Ordering::Relaxed);
         }
-        players.push(Arc::downgrade(stats));
     }
 
     /// Called when a player shuts down (its flow stops). Its stats may live
@@ -867,6 +885,12 @@ impl ReplayTimeline {
     }
 
     /// An element in the flow whose clock and base time define "now".
+    ///
+    /// "Now" can jump when the source changes, most of all from the
+    /// stand-in (time since the group was reset) to the flow's running time,
+    /// which starts near 0 when the flow plays. The anchor is moved by the
+    /// same amount, so a command given before the flow played keeps its
+    /// place on the new time base.
     pub fn set_clock_source(&self, element: &gst::Element) {
         let mut src = lock(&self.clock_source);
         let alive = src
@@ -874,13 +898,32 @@ impl ReplayTimeline {
             .and_then(|w| w.upgrade())
             .is_some_and(|e| e.current_state() == gst::State::Playing);
         if !alive {
+            let before = self.rt_of(&src);
             *src = Some(element.downgrade());
+            let after = self.rt_of(&src);
+            // Still holding `clock_source`: no command reads "now" between.
+            self.shift_rt(after - before);
+        }
+    }
+
+    /// Move every running time the group keeps by `delta`, for a new time
+    /// base.
+    fn shift_rt(&self, delta: i64) {
+        if delta == 0 {
+            return;
+        }
+        lock(&self.anchor).rt += delta;
+        if let Some((rt, _)) = lock(&self.last_pushed).as_mut() {
+            *rt += delta;
         }
     }
 
     /// The flow's running time now, or a monotonic stand-in before it plays.
     pub fn now_rt(&self) -> i64 {
-        let src = lock(&self.clock_source);
+        self.rt_of(&lock(&self.clock_source))
+    }
+
+    fn rt_of(&self, src: &Option<gst::glib::WeakRef<gst::Element>>) -> i64 {
         if let Some(el) = src.as_ref().and_then(|w| w.upgrade()) {
             if let (Some(clock), Some(base)) = (el.clock(), el.base_time()) {
                 return clock.time().nseconds() as i64 - base.nseconds() as i64;
@@ -1133,10 +1176,11 @@ impl ReplayTimeline {
         let reference = self.reference();
         let need_ref =
             || reference.ok_or_else(|| conflict("the group's frame rate is not known yet"));
-        let mut a = lock(&self.anchor);
-        let (cur, cur_speed) = self.advance(&mut a, now, &b);
         if let Command::Mark { label } = cmd {
+            // Before the anchor is locked: a mark reads the players.
             let mark = self.mark(label)?;
+            let mut a = lock(&self.anchor);
+            let (cur, cur_speed) = self.advance(&mut a, now, &b);
             return Ok(Applied {
                 tai: cur,
                 speed: cur_speed,
@@ -1145,6 +1189,8 @@ impl ReplayTimeline {
                 mark: Some(mark),
             });
         }
+        let mut a = lock(&self.anchor);
+        let (cur, cur_speed) = self.advance(&mut a, now, &b);
         let mut ramp = None;
         let live = match cmd {
             Command::Live { .. } => true,
@@ -1236,7 +1282,7 @@ impl ReplayTimeline {
                                 end_action: EndAction::Freeze,
                             }
                         } else {
-                            if until > cur {
+                            if until >= cur {
                                 return Err(conflict("play: until is not behind the cursor"));
                             }
                             let end = held.map_or(cur + 1, |r| r.end.max(cur + 1));

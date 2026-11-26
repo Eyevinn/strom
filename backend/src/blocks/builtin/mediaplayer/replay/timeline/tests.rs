@@ -1197,3 +1197,113 @@ fn shown_time_is_the_frame_own_time_after_a_phase_change() {
     assert_eq!(shown["frame"], 190);
     assert_eq!(shown["frame_in_second"], 44);
 }
+
+// --- locking ---------------------------------------------------------------
+
+/// A flow restarts (its player registers again, resetting the group) while a
+/// client sends marks. Registering held `players` and took `anchor`; a mark
+/// held `anchor` and took `players`: the two could lock each other for good.
+#[test]
+fn marks_during_a_restart_do_not_deadlock() {
+    let tl = Arc::new(ReplayTimeline::new());
+    let p = player("cam0", BASE, BASE + 60 * S, Some((50, 1)));
+    tl.register_player(&p);
+    tl.note_pushed(0, BASE + S);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let restarts = {
+        let (tl, p, stop) = (tl.clone(), p.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                tl.unregister_player(&p);
+                tl.register_player(&p);
+                tl.note_pushed(0, BASE + S);
+            }
+        })
+    };
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    {
+        let tl = tl.clone();
+        std::thread::spawn(move || {
+            for _ in 0..200_000 {
+                let _ = tl.apply_at(Command::Mark { label: None }, 0);
+            }
+            let _ = done_tx.send(());
+        });
+    }
+    let finished = done_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .is_ok();
+    stop.store(true, Ordering::Relaxed);
+    assert!(finished, "mark and register_player deadlocked");
+    restarts.join().unwrap();
+}
+
+// --- review 2026-11-26 -----------------------------------------------------
+
+#[test]
+fn an_out_past_the_media_ends_where_the_media_does() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    let mut events = tl.subscribe();
+    tl.apply_at(cue(BASE + 50 * S, BASE + 70 * S, None), 0)
+        .unwrap();
+    tl.apply_at(play(None, None, None), 0).unwrap();
+    // The media ends at 60 s: frozen there, with the event.
+    assert_eq!(tl.cursor_tai(11 * S), Some((BASE + 60 * S - 1, 0.0)));
+    assert!(matches!(events.try_recv(), Ok(ReplayEvent::Ended { .. })));
+    // The same for play until.
+    tl.apply_at(seek_tai(BASE + 55 * S), 20 * S).unwrap();
+    tl.apply_at(play(None, Some(BASE + 90 * S), None), 20 * S)
+        .unwrap();
+    assert_eq!(tl.cursor_tai(30 * S), Some((BASE + 60 * S - 1, 0.0)));
+    assert!(matches!(events.try_recv(), Ok(ReplayEvent::Ended { .. })));
+}
+
+#[test]
+fn reverse_play_until_the_cursor_is_refused_as_forward_is() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    tl.apply_at(seek_tai(BASE + 20 * S), 0).unwrap();
+    for speed in [1.0, -1.0] {
+        assert!(matches!(
+            tl.apply_at(play(Some(speed), Some(BASE + 20 * S), None), 0),
+            Err(CommandError::Conflict(_))
+        ));
+    }
+}
+
+#[test]
+fn a_new_run_resets_margin_edge_and_latency() {
+    let old = player("cam0", BASE, BASE + 60 * S, Some((50, 1)));
+    let tl = timeline_of(std::slice::from_ref(&old));
+    tl.apply_at(
+        Command::Live {
+            margin_ms: Some(5000),
+        },
+        0,
+    )
+    .unwrap();
+    tl.cmd_to_push_us.store(1234, Ordering::Relaxed);
+    lock(&tl.edge).observe(0, BASE + 60 * S);
+    tl.unregister_player(&old);
+    let new = player("cam0", BASE + 100 * S, BASE + 160 * S, Some((50, 1)));
+    tl.register_player(&new);
+    assert_eq!(
+        tl.live_margin_ns.load(Ordering::Relaxed),
+        DEFAULT_LIVE_MARGIN_MS as i64 * MS
+    );
+    assert_eq!(tl.cmd_to_push_us.load(Ordering::Relaxed), 0);
+    assert!(lock(&tl.edge).steps.is_empty());
+}
+
+#[test]
+fn a_command_before_the_flow_plays_keeps_its_place_on_the_new_time_base() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    // Given 5 s into the stand-in time base, before the flow plays.
+    tl.apply_at(seek_tai(BASE + 10 * S), 5 * S).unwrap();
+    tl.apply_at(Command::Speed { speed: 1.0 }, 5 * S).unwrap();
+    tl.note_pushed(5 * S, BASE + 10 * S);
+    // The flow plays: its running time starts near 0.
+    tl.shift_rt(-5 * S);
+    assert_eq!(tl.cursor_tai(0), Some((BASE + 10 * S, 1.0)));
+    assert_eq!(tl.tai_at(S), Some(BASE + 11 * S));
+    assert_eq!(lock(&tl.last_pushed).map(|(rt, _)| rt), Some(0));
+}
