@@ -73,6 +73,8 @@ Commands name a point on the timeline in one of four ways. Give exactly one.
 
 Forward play without a cue that started behind the live point (the live edge minus the `live` margin) and reaches it goes on from there at 1x. It follows the edge and sends a `live` event with reason `caught_up`. It does not jump back and does not stop. Slow motion started inside the margin stays slow motion.
 
+A group that follows live keeps to the margin. If the live point moves ahead of the cursor by more than one step of the edge (plus 250 ms), the group jumps forward to it and sends a `live` event with reason `edge_moved`. This happens when `live` came while an angle's index still lagged, for example right after a start, when one angle's index still ends where the previous run ended.
+
 ### Ramps
 
 A ramp keeps the cue, so a ramp into `out` still freezes there. Any other command that sets the speed ends the ramp where it is.
@@ -107,7 +109,7 @@ Things the group does by itself, as `{"type": "event", "event": ..., ...}`:
 | `event` | Fields | When |
 |---|---|---|
 | `ended` | `at` | Bounded play reached its end with `freeze`. |
-| `live` | `reason` (`end_action` or `caught_up`), `at` | The group went live by itself. |
+| `live` | `reason` (`end_action`, `caught_up` or `edge_moved`), `at` | The group went live by itself. |
 
 ## State
 

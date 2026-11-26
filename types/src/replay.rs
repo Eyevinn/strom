@@ -132,6 +132,11 @@ pub enum ReplayLiveReason {
     /// Forward play caught up with the live point (the live edge minus the
     /// `live` margin) and went on at 1x.
     CaughtUp,
+    /// Following live, the live edge moved ahead of the cursor by more than
+    /// its own steps explain (the edge `live` started from lagged, e.g. an
+    /// angle's index had not caught up right after a start). The group
+    /// jumped forward to the live point.
+    EdgeMoved,
 }
 
 /// Something the group did by itself, sent on the WebSocket as

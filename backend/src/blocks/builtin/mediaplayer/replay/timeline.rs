@@ -52,6 +52,14 @@ pub const ORIGIN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Default distance behind the live edge for the `live` command.
 pub const DEFAULT_LIVE_MARGIN_MS: u64 = 1500;
 
+/// Step of the live edge assumed before it has been seen to grow (1 s
+/// segments).
+const DEFAULT_EDGE_STEP_NS: i64 = 1_000_000_000;
+
+/// Slack over one edge step before a group that follows live counts as
+/// having lost the edge (index polls and uploads jitter).
+const LIVE_SLACK_NS: i64 = 250_000_000;
+
 /// Fastest shuttle, either direction.
 pub const MAX_SPEED: f64 = 8.0;
 
@@ -507,6 +515,9 @@ enum Hit {
     Live,
     /// Unbounded forward play reached the live point.
     CaughtUp,
+    /// Following live, the live point moved ahead of the cursor by more than
+    /// the edge's own steps explain.
+    EdgeMoved,
 }
 
 /// Where the cursor is at a running time, and what (if anything) it ran
@@ -520,8 +531,9 @@ struct Eval {
 }
 
 /// The cursor of `a` at `rt`, clamped to the media. `live_from` is where the
-/// group plays from when live (the live edge minus the margin).
-fn eval(a: &Anchor, rt: i64, b: &Bounds, live_from: i64) -> Eval {
+/// group plays from when live (the live edge minus the margin); following
+/// live, a cursor more than `live_slack` behind it has lost the edge.
+fn eval(a: &Anchor, rt: i64, b: &Bounds, live_from: i64, live_slack: i64) -> Eval {
     let from = a.tai.unwrap_or(b.start) as i128;
     let (moved, mut speed) = travel(a.speed, a.ramp, rt - a.rt);
     let mut pos = from + moved.round() as i128;
@@ -544,6 +556,12 @@ fn eval(a: &Anchor, rt: i64, b: &Bounds, live_from: i64) -> Eval {
         }
     } else if a.catch_up && !a.live && speed > 0.0 && pos >= live_from as i128 {
         hit = Some(Hit::CaughtUp);
+    }
+    if a.live && a.region.is_none() && pos < live_from as i128 - live_slack as i128 {
+        // The line was drawn from an edge that lagged (an angle's index had
+        // not caught up yet, e.g. right after a start): it would stay that far
+        // behind for good.
+        hit = Some(Hit::EdgeMoved);
     }
     if a.live {
         // Following live never runs past the common edge (where an angle
@@ -931,7 +949,7 @@ impl ReplayTimeline {
     /// at nearby running times still agree.
     fn advance(&self, a: &mut Anchor, rt: i64, b: &Bounds) -> (i64, f64) {
         let live_from = self.live_target(b);
-        let e = eval(a, rt, b, live_from);
+        let e = eval(a, rt, b, live_from, self.live_slack());
         let Some(hit) = e.hit else {
             return (e.tai, e.speed);
         };
@@ -970,6 +988,24 @@ impl ReplayTimeline {
                 });
                 (to, 1.0)
             }
+            Hit::EdgeMoved => {
+                // Jump forward to the live point, as a new `live` would.
+                let to = live_from.clamp(b.start, b.end - 1);
+                *a = Anchor {
+                    rt,
+                    tai: Some(to),
+                    speed: 1.0,
+                    ramp: None,
+                    region: None,
+                    live: true,
+                    catch_up: false,
+                };
+                self.emit(ReplayEvent::Live {
+                    reason: ReplayLiveReason::EdgeMoved,
+                    at: instant(to),
+                });
+                (to, 1.0)
+            }
             Hit::CaughtUp => {
                 // Go on from where play is, at 1x: no jump back.
                 *a = Anchor {
@@ -988,6 +1024,14 @@ impl ReplayTimeline {
                 (e.tai, 1.0)
             }
         }
+    }
+
+    /// How far behind the live point a group that follows live may fall
+    /// before it jumps forward: one step of the known edge (it grows a
+    /// segment at a time, so a cursor on a good line is up to one step
+    /// behind), plus [`LIVE_SLACK_NS`].
+    fn live_slack(&self) -> i64 {
+        lock(&self.edge).step().unwrap_or(DEFAULT_EDGE_STEP_NS) + LIVE_SLACK_NS
     }
 
     /// Where `live` plays from: the live edge minus the margin.

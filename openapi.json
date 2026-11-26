@@ -10589,7 +10589,8 @@
         "description": "Why the group went live.",
         "enum": [
           "end_action",
-          "caught_up"
+          "caught_up",
+          "edge_moved"
         ]
       },
       "ReplayMark": {

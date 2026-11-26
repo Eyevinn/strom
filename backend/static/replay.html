@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Strom replay page, version 6 -->
+<!-- Strom replay page, version 7 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -452,7 +452,7 @@ function onState(m) {
 // What the server did by itself.
 function onEvent(m) {
   if (m.event === 'ended') toast(activeClip ? `${activeClip.clip.name}: end` : 'End of cue');
-  else if (m.event === 'live') toast(m.reason === 'caught_up' ? 'Caught up: live' : 'Live');
+  else if (m.event === 'live') toast(m.reason === 'caught_up' ? 'Caught up: live' : m.reason === 'edge_moved' ? 'Live edge moved: jumped to live' : 'Live');
 }
 
 // Playhead between state messages: the server's pushed time advanced at the
