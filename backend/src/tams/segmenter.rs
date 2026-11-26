@@ -400,6 +400,9 @@ impl Segmenter {
     /// Build and start the muxing pipeline of a new fragment.
     fn open_fragment(&self, g: &Inner, location: &std::path::Path) -> Result<Fragment, String> {
         let pipeline = gst::Pipeline::new();
+        // Outside the flow: threads picked from GStreamer's pool may still
+        // carry a WebRTC session's priority and CPUs.
+        crate::gst::thread_priority::reset_streaming_threads(&pipeline);
         let mux = gst::ElementFactory::make(self.muxer_factory)
             .build()
             .map_err(|e| e.to_string())?;
