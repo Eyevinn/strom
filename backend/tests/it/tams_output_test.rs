@@ -27,7 +27,8 @@ use gstreamer::prelude::*;
 
 /// Elements these tests need beyond core GStreamer. Missing on a bare CI image.
 const REQUIRED: &[&str] = &[
-    "splitmuxsink",
+    "appsink",
+    "filesink",
     "mpegtsmux",
     "aacparse",
     "avenc_aac",
@@ -857,7 +858,7 @@ mod last_segment {
     }
 
     /// Frames a decoder gets out of an MPEG-TS segment.
-    fn decoded_frames(ts: &[u8]) -> u64 {
+    pub(super) fn decoded_frames(ts: &[u8]) -> u64 {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), ts).unwrap();
         let pipeline = gst::parse::launch(&format!(
@@ -1052,6 +1053,284 @@ mod last_segment {
                 tr,
                 frames,
                 results
+            );
+        }
+    }
+}
+
+/// A segment is closed, uploaded and registered as soon as the first frame
+/// after it has arrived, not a GOP later. `splitmuxsink` decided on a split
+/// only once the GOP after it was complete, so each segment waited one more
+/// GOP (500 ms here) before it was even closed.
+mod close_at_boundary {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    /// TAI minus UTC, as TAMS Output maps the host clock when nothing better
+    /// is known (`strom_types::tai::TAI_MINUS_UTC_NS`).
+    const TAI_MINUS_UTC_NS: u64 = 37_000_000_000;
+
+    fn now_tai_ns() -> u64 {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+            + TAI_MINUS_UTC_NS
+    }
+
+    fn end_ns(tr: &str) -> u64 {
+        let end = tr
+            .trim_end_matches([']', ')'])
+            .rsplit('_')
+            .next()
+            .unwrap_or("");
+        let (s, ns) = end.split_once(':').unwrap_or((end, "0"));
+        s.parse::<u64>().unwrap() * 1_000_000_000 + ns.parse::<u64>().unwrap()
+    }
+
+    /// Live 50 fps video (x264, zerolatency, GOP 25) into a TAMS Output with
+    /// 500 ms segments, also fed live AAC when `audio` is set. Returns each
+    /// registered segment with how long after its end it was registered,
+    /// and its bytes, in order.
+    fn run(audio: bool, run_ms: u64) -> Vec<(String, u64, axum::body::Bytes)> {
+        run_in(audio, run_ms, "mpegts")
+    }
+
+    /// As [`run`], in `container` (`mpegts` or `mp4`).
+    fn run_in(audio: bool, run_ms: u64, container: &str) -> Vec<(String, u64, axum::body::Bytes)> {
+        let runtime = runtime();
+        let (gateway, registered, segments) = stub_gateway::start_keeping_bytes(&runtime);
+
+        let pipeline = gst::Pipeline::new();
+        let instance_id = format!("tams_close_{}", uuid::Uuid::new_v4().simple());
+        let properties: HashMap<String, PropertyValue> = [
+            ("gateway_url", PropertyValue::String(gateway.clone())),
+            ("segment_duration_ms", PropertyValue::UInt(500)),
+            ("container", PropertyValue::String(container.into())),
+            ("num_video_tracks", PropertyValue::UInt(1)),
+            ("num_audio_tracks", PropertyValue::UInt(audio as u64)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let ctx = BlockBuildContext::new(vec![], "all".to_string());
+        let built = TamsOutputBuilder
+            .build(&instance_id, &properties, &ctx)
+            .expect("TAMS Output block builds");
+        let mut out = TamsOutput {
+            instance_id,
+            ctx,
+            elements: HashMap::new(),
+        };
+        for (id, element) in &built.elements {
+            pipeline.add(element).unwrap();
+            out.elements.insert(id.clone(), element.clone());
+        }
+
+        let src = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .build()
+            .unwrap();
+        let caps = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                gst::Caps::builder("video/x-raw")
+                    .field("width", 160)
+                    .field("height", 90)
+                    .field("framerate", gst::Fraction::new(50, 1))
+                    .build(),
+            )
+            .build()
+            .unwrap();
+        let enc = gst::ElementFactory::make("x264enc")
+            .property("key-int-max", 25u32)
+            .property_from_str("tune", "zerolatency")
+            .build()
+            .unwrap();
+        pipeline.add_many([&src, &caps, &enc]).unwrap();
+        gst::Element::link_many([&src, &caps, &enc]).unwrap();
+        enc.link(&out.input("video_input_0")).unwrap();
+        if audio {
+            feed_audio(&pipeline, &out.input("audio_input_0"), -1);
+        }
+
+        out.run_setups_in_flow(&runtime, uuid::Uuid::new_v4());
+        pipeline.set_state(gst::State::Playing).unwrap();
+        // Note when each segment shows up at the gateway.
+        let mut seen: Vec<(String, u64)> = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(run_ms);
+        while Instant::now() < deadline {
+            let now = now_tai_ns();
+            for (_, tr) in registered.lock().unwrap().iter().skip(seen.len()) {
+                seen.push((tr.clone(), now.saturating_sub(end_ns(tr))));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let error = bus_error(&pipeline);
+        for drain in out.ctx.take_stop_drains() {
+            drain();
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        out.release_elements();
+        drop(pipeline);
+        std::thread::sleep(Duration::from_millis(500));
+        let bytes = segments.lock().unwrap().clone();
+        runtime.shutdown_background();
+        assert_eq!(error, None, "the pipeline posted an error");
+        seen.into_iter()
+            .map(|(tr, age)| {
+                let b = bytes
+                    .iter()
+                    .find(|(t, _)| *t == tr)
+                    .map(|(_, b)| b.clone())
+                    .unwrap_or_default();
+                (tr, age, b)
+            })
+            .collect()
+    }
+
+    /// Whether an MPEG-TS segment carries video and audio packets, and the
+    /// video frames a decoder gets out of it. `mpegtsmux` numbers its
+    /// elementary streams from PID 0x41 in pad order: video, then audio.
+    fn tracks_and_frames(ts: &[u8]) -> (bool, bool, u64) {
+        let pid_packets = |pid: u16| {
+            ts.chunks(188)
+                .filter(|p| p.len() == 188 && (((p[1] as u16 & 0x1f) << 8) | p[2] as u16) == pid)
+                .count()
+        };
+        let (video, audio) = (pid_packets(0x41) > 0, pid_packets(0x42) > 0);
+        (video, audio, last_segment::decoded_frames(ts))
+    }
+
+    fn required() -> bool {
+        plugins_available()
+            && common::plugins_available(&[
+                "videotestsrc",
+                "x264enc",
+                "capsfilter",
+                "tsdemux",
+                "h264parse",
+                "avdec_h264",
+                "fakesink",
+            ])
+    }
+
+    #[test]
+    fn a_segment_is_registered_as_soon_as_it_ends() {
+        if !required() {
+            return;
+        }
+        let segs = run(false, 4_000);
+        // The first two are placed before keyframes follow the grid.
+        let mut ages: Vec<u64> = segs.iter().skip(2).map(|(_, age, _)| *age).collect();
+        assert!(ages.len() >= 3, "too few segments: {:?}", segs.len());
+        ages.sort_unstable();
+        let median = ages[ages.len() / 2];
+        // The segment is closed by the first frame after it (20 ms), then
+        // written and registered at a local stub. One more GOP is 500 ms.
+        assert!(
+            median < 250_000_000,
+            "segments registered a median {} ms after their end (all: {:?})",
+            median / 1_000_000,
+            ages.iter().map(|a| a / 1_000_000).collect::<Vec<_>>()
+        );
+    }
+
+    /// With audio muxed in, every segment holds both tracks, and the
+    /// segments follow each other without holes or overlaps.
+    #[test]
+    fn audio_and_video_segments_follow_each_other() {
+        if !required() || !common::plugins_available(&["avenc_aac"]) {
+            return;
+        }
+        const FRAME_NS: u64 = 20_000_000;
+        let segs = run(true, 3_500);
+        assert!(segs.len() >= 4, "too few segments: {}", segs.len());
+        for pair in segs.windows(2) {
+            assert_eq!(
+                end_ns(&pair[0].0),
+                timerange_start_ns(&pair[1].0),
+                "segments do not follow each other: {} then {}",
+                pair[0].0,
+                pair[1].0
+            );
+        }
+        for (i, (tr, _, bytes)) in segs.iter().enumerate() {
+            if let Ok(dir) = std::env::var("TAMS_TEST_DUMP") {
+                std::fs::write(format!("{}/seg{}.ts", dir, i), bytes).unwrap();
+            }
+            let (video, audio, frames) = tracks_and_frames(bytes);
+            // The first segment may open before the audio caps are known.
+            assert!(
+                video && (audio || i == 0),
+                "segment {} lacks a track (video {}, audio {})",
+                tr,
+                video,
+                audio
+            );
+            let claimed = end_ns(tr) - timerange_start_ns(tr);
+            assert_eq!(
+                frames * FRAME_NS,
+                claimed,
+                "segment {} holds {} frames",
+                tr,
+                frames
+            );
+        }
+    }
+
+    /// MP4 segments are cut the same way, each one a complete file.
+    #[test]
+    fn mp4_segments_are_complete_files() {
+        if !required() || !common::plugins_available(&["mp4mux", "qtdemux"]) {
+            return;
+        }
+        const FRAME_NS: u64 = 20_000_000;
+        let segs = run_in(false, 3_000, "mp4");
+        assert!(segs.len() >= 4, "too few segments: {}", segs.len());
+        for pair in segs.windows(2) {
+            assert_eq!(end_ns(&pair[0].0), timerange_start_ns(&pair[1].0));
+        }
+        for (tr, age, bytes) in segs.iter().skip(2) {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), bytes).unwrap();
+            let pipeline = gst::parse::launch(&format!(
+                "filesrc location=\"{}\" ! qtdemux ! h264parse ! avdec_h264 ! fakesink name=out sync=false",
+                file.path().display()
+            ))
+            .unwrap()
+            .downcast::<gst::Pipeline>()
+            .unwrap();
+            let frames = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let counted = frames.clone();
+            pipeline
+                .by_name("out")
+                .unwrap()
+                .static_pad("sink")
+                .unwrap()
+                .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    gst::PadProbeReturn::Ok
+                });
+            pipeline.set_state(gst::State::Playing).unwrap();
+            let ended = wait_for_eos(&pipeline, Duration::from_secs(10));
+            pipeline.set_state(gst::State::Null).unwrap();
+            assert!(ended, "reading segment {} never reached EOS", tr);
+            let frames = frames.load(std::sync::atomic::Ordering::Relaxed);
+            let claimed = end_ns(tr) - timerange_start_ns(tr);
+            assert_eq!(
+                frames * FRAME_NS,
+                claimed,
+                "segment {} holds {} frames",
+                tr,
+                frames
+            );
+            assert!(
+                *age < 500_000_000,
+                "segment {} registered {} ms late",
+                tr,
+                age / 1_000_000
             );
         }
     }
