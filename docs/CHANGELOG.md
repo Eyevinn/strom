@@ -12,6 +12,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture
 - TAMS Output: segments are cut on a TAI grid, and `segment_duration_ms` allows segments shorter than a second. The block asks upstream for a keyframe on each grid point, warns when a boundary still leaves the grid, and writes video `essence_parameters` on its flows
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
+- Replay page: a margin selector next to LIVE (0.5 to 2.0 s, kept in the browser) sets `margin_ms` for every `live` command, and changing it while following live re-sends `live`. The page shows the margin in use when the server's differs, warns when the margin is under the live edge's step plus 0.3 s, and while following live the timeline puts the playhead the margin in from its right edge
 - API: `GET /api/flows/{flow_id}/blocks/{block_id}/pgm-endpoint` returns the WHEP endpoint fed by a vision mixer's PGM output, like `multiview-endpoint`
 - Media Player: a timeline player has a Replay button in the properties panel that opens the replay page for its group, and a Diagnostics button that opens the diagnostics page
 - TAMS Output sends an `X-Idempotency-Key` with each segment registration, derived from the flow, object and timerange, so a retry of the same segment carries the same key. Stores that require it (OpenTAMS) accept the segments; others ignore the header
@@ -25,6 +26,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - TAMS Output cuts segments itself instead of with `splitmuxsink`, and registers each segment as soon as the frame after it arrives instead of one GOP later
 - Media Player, timeline mode: decoded frames stay in GPU memory when the decoder and the flow downstream both take it: CUDA memory from `nvh264dec` (a GL consumer such as the vision mixer brings it into GL with `cudadownload`, by CUDA-GL interop), GL memory from `vtdec_hw` (sharing the flow's GL context). The frame store holds those buffers, so a frame is no longer downloaded to RAM, copied and uploaded again. Other decoders and system-memory consumers keep NV12 in system memory. `STROM_REPLAY_FRAME_MEMORY` (`auto`, `system`, `cuda`, `gl`) narrows the choice, and `STROM_REPLAY_DECODED_MB` budgets the memory the frames are in
 - TAMS Output: segment files carry a per-run id in their name (`seg_<run>_<n>`), so a new run in the same directory never overwrites segments an earlier run left parked
+- Replay page: the timeline window keeps the playhead in its right half. Near live the window ends at the live edge; further behind, the playhead stays in the middle and a LIVE tab at the right edge shows how far live is past the scale (click to go live). A finished recording ends the window at its last frame
 
 ### Fixed
 - WHEP Output: a viewer whose ICE gathering reports `complete` a second time no longer aborts Strom. The WHEP signaller in gst-plugin-webrtc 0.15 panics on it inside a GObject callback; seen when viewers connect and drop within a second
@@ -39,6 +41,9 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Media Player (timeline mode): a local `source` outside `media_path` is refused, through `..` or a symlink alike
 - Vision mixer: `pgm-endpoint` and `multiview-endpoint` find a WHEP output behind a pad linked more than once or a block with several outputs (breadth first, not only the first link)
 - Replay WebSocket: the socket is closed with a close frame when its group's flow stops, not dropped
+- Replay and replay diagnostics pages: WHEP playback uses the server's ICE and TURN servers from `/api/ice-servers` (`STROM_SERVER_ICE_SERVERS`), like the WHEP player page. Without them ICE failed behind a firewall that only lets TURN through
+- Replay page: the angle buttons under the monitors are no longer covered by them when the window is short or narrow (the stage's grid rows take their content's height)
+- Replay diagnostics page: TAI times show nine nanosecond digits (`1795719399:071504047`, not `1795719399:71504047`), and numbers that update use tabular digits, fixed decimals and fixed or minimum widths, with the tables at content width, so the layout no longer moves as values change
 
 ### Upgrade notes
 - TAMS Output: parked segments over `STROM_TAMS_PARKED_MAX_MB` or `STROM_TAMS_PARKED_MAX_SEGMENTS` are deleted, oldest first, on the first sweep after an upgrade
