@@ -40,6 +40,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Media Player (timeline mode): a local `source` outside `media_path` is refused, through `..` or a symlink alike
 - Vision mixer: `pgm-endpoint` and `multiview-endpoint` find a WHEP output behind a pad linked more than once or a block with several outputs (breadth first, not only the first link)
 - Replay WebSocket: the socket is closed with a close frame when its group's flow stops, not dropped
+- Replay page: the angle buttons under the monitors are no longer covered by them when the window is short or narrow (the stage's grid rows take their content's height)
 - Replay diagnostics page: TAI times show nine nanosecond digits (`1795719399:071504047`, not `1795719399:71504047`), and numbers that update use tabular digits, fixed decimals and fixed or minimum widths, with the tables at content width, so the layout no longer moves as values change
 
 ### Upgrade notes

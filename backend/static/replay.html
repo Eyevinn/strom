@@ -50,7 +50,11 @@
 
   /* ---- main */
   main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 330px; }
-  .stage { min-height: 0; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 10px; padding: 10px; align-content: start; align-items: start; overflow: auto; }
+  .stage { min-height: 0; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); grid-auto-rows: max-content; gap: 10px; padding: 10px; align-content: start; align-items: start; overflow: auto; }
+  /* Rows take their content's full height (grid-auto-rows above). With plain
+     auto rows, a stage shorter than its content shrank the rows to the
+     monitors' automatic minimum, which is 0 for an overflow-hidden box, and
+     the monitors spilled over the angle buttons below them. */
   .mon { background: #000; border: 2px solid var(--line); border-radius: 4px; position: relative; aspect-ratio: 16/9; overflow: hidden; }
   .mon.pgm { border-color: var(--red); }
   .mon video { width: 100%; height: 100%; object-fit: contain; display: block; }
