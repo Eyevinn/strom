@@ -1480,6 +1480,54 @@ mod tests {
         assert!(in_device_memory(Some(d.caps.as_ref())), "caps {}", d.caps);
     }
 
+    /// nvh264dec into a CUDA consumer: every frame in CUDA memory, from no
+    /// pool or an unbounded one (the frame store can hold them without a
+    /// copy), and the same PTS as in system memory. Skipped where nvh264dec
+    /// is missing.
+    #[test]
+    fn cuda_memory_session_decodes_with_nvh264dec() {
+        gst::init().unwrap();
+        if gst::ElementFactory::find("nvh264dec").is_none() {
+            return;
+        }
+        let objects = vec![test_ts("x264enc", 25), test_ts("x264enc", 13)];
+        let want: Vec<Decoded> = objects
+            .iter()
+            .map(|o| {
+                SegmentDecoder::new("nvh264dec")
+                    .decode(Arc::new(o.clone()), None, Duration::from_secs(10))
+                    .unwrap()
+            })
+            .collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut dec = SegmentDecoder::with_memory("nvh264dec", FrameMemory::Cuda, None);
+            let out: Vec<_> = objects
+                .into_iter()
+                .map(|o| dec.decode(Arc::new(o), None, Duration::from_secs(10)))
+                .collect();
+            let _ = tx.send(out);
+        });
+        let got = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("decodes returned");
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            let g = g.as_ref().expect("decode ok");
+            assert!(
+                g.caps
+                    .features(0)
+                    .is_some_and(|f| f.contains("memory:CUDAMemory")),
+                "segment {}: caps {}",
+                i,
+                g.caps
+            );
+            assert_eq!(pts_of(g), pts_of(w), "segment {}", i);
+            for (_, b) in &g.frames {
+                assert!(pool_of(b).is_none_or(|p| !is_bounded(&p)), "segment {}", i);
+            }
+        }
+    }
+
     #[test]
     fn timeout_scales_with_segment_length() {
         assert_eq!(decode_timeout(1_000_000_000), Duration::from_secs(5));
