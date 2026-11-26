@@ -179,7 +179,8 @@ impl SourceIndex for TamsIndex {
 /// The flow's video codec, if it names one. A multi-essence flow (TAMS
 /// Output's muxed mode) carries its container in `codec` (`video/mp2t`), not
 /// the video inside, so it names none: replay then tries H.264, as for a
-/// source that does not say.
+/// source that does not say, and the demux of a segment names the codec
+/// when it is another.
 fn video_codec(flow: &serde_json::Value) -> Option<String> {
     if flow["format"].as_str() == Some("urn:x-nmos:format:multi") {
         return None;

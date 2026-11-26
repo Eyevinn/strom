@@ -86,7 +86,7 @@ fn mime_essence(mime: &str) -> String {
 
 /// Whether replay can decode a source with this container and codec: H.264
 /// in MPEG-TS or MP4. A source that does not name its codec is tried as
-/// H.264 (its decode fails if it is not).
+/// H.264: the demux names the codec it finds when it is not.
 pub fn check_supported(container: Option<&str>, codec: Option<&str>) -> Result<(), String> {
     demux_for(container)?;
     match codec.map(mime_essence).as_deref() {
@@ -113,6 +113,14 @@ pub fn decode_timeout(segment_ns: i64) -> Duration {
     Duration::from_nanos((segment_ns.max(0) as u64).saturating_mul(5))
         .clamp(Duration::from_secs(5), Duration::from_secs(60))
 }
+
+/// The least of a decode's timeout the decode stage gets after the demux:
+/// `timeout / MIN_DECODE_SHARE`, however long the demux took.
+const MIN_DECODE_SHARE: u32 = 2;
+
+/// Hung pipelines (sessions or per-segment pipelines whose teardown has not
+/// finished) past which no new decoder is made.
+const MAX_WEDGED: usize = 4;
 
 /// Segment bytes shared with the cache, handed to GStreamer without a copy.
 struct SharedBytes(Arc<Vec<u8>>);
@@ -148,10 +156,15 @@ impl SegmentDecoder {
     ) -> Result<Decoded, String> {
         // decodebin has no sink pad to feed: one pipeline per segment.
         if per_segment_pipelines() || self.decoder == "decodebin" {
+            refuse_while_wedged()?;
             return decode_bytes(bytes, container, self.decoder, timeout);
         }
         let deadline = Instant::now() + timeout;
         if self.session.is_none() {
+            // Each hung decoder holds a thread (and maybe a hardware
+            // context) that may never come back: past a few, stop making
+            // new ones until their teardown finishes.
+            refuse_while_wedged()?;
             let started = Instant::now();
             self.session = Some(DecoderSession::new(self.decoder)?);
             debug!(
@@ -164,7 +177,11 @@ impl SegmentDecoder {
         let started = Instant::now();
         let units = demux_bytes(bytes, container, &session.sink_caps, timeout)?;
         let demux_ms = started.elapsed().as_millis();
-        let left = deadline.saturating_duration_since(Instant::now());
+        // A slow demux must not leave the decoder no time and get a healthy
+        // session given up as wedged: it gets at least a share of its own.
+        let left = deadline
+            .saturating_duration_since(Instant::now())
+            .max(timeout / MIN_DECODE_SHARE);
         let result = session.decode(units, left);
         if result.is_err() {
             // The decoder may be wedged or in error: start afresh next time.
@@ -310,6 +327,40 @@ fn probe_first_pts(pipeline: &gst::Pipeline) -> Arc<AtomicU64> {
     first_pts
 }
 
+/// Record the media type of each stream the demuxer (`demux`) exposes.
+fn record_streams(pipeline: &gst::Pipeline) -> Arc<Mutex<Vec<String>>> {
+    let streams: Arc<Mutex<Vec<String>>> = Arc::default();
+    if let Some(demux) = pipeline.by_name("demux") {
+        let seen = Arc::clone(&streams);
+        demux.connect_pad_added(move |_, pad| {
+            if let Some(name) = pad
+                .current_caps()
+                .and_then(|c| c.structure(0).map(|s| s.name().to_string()))
+            {
+                lock(&seen).push(name);
+            }
+        });
+    }
+    streams
+}
+
+/// An error naming the video codec when the demuxed streams have video but
+/// no H.264: the only codec replay decodes.
+fn unsupported_stream(streams: &[String]) -> Result<(), String> {
+    let video: Vec<&str> = streams
+        .iter()
+        .map(String::as_str)
+        .filter(|n| n.starts_with("video/"))
+        .collect();
+    match video.first() {
+        Some(codec) if !video.contains(&"video/x-h264") => Err(format!(
+            "the video in the segment is {}; replay decodes H.264 only",
+            codec
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Run a short-lived `appsrc ! … ! appsink` pipeline over one object, to its
 /// end of stream: what reached the appsink, and the earliest parsed PTS.
 fn run_once(
@@ -332,6 +383,7 @@ fn run_once(
         let out: SharedOut = Arc::default();
         collect_into(&sink, &out, false);
         let first_pts = probe_first_pts(&pipeline);
+        let streams = record_streams(&pipeline);
         // A pipeline outside a flow: give its pool threads normal scheduling.
         crate::gst::thread_priority::reset_streaming_threads(&pipeline);
         feed_appsrc(&pipeline, bytes)?;
@@ -339,7 +391,13 @@ fn run_once(
         pipeline
             .set_state(gst::State::Playing)
             .map_err(|e| e.to_string())?;
-        let got = wait_eos(&out, &bus, deadline)?;
+        let got = wait_eos(&out, &bus, deadline);
+        // A stream replay cannot decode (H.265 in TS, say) fails at the
+        // demuxer's unlinked pad, or ends with nothing: name the codec.
+        if got.as_ref().map_or(true, |g| g.frames.is_empty()) {
+            unsupported_stream(&lock(&streams))?;
+        }
+        let got = got?;
         let first = Some(first_pts.load(Ordering::Relaxed)).filter(|p| *p != u64::MAX);
         Ok((got, first))
     })();
@@ -348,11 +406,9 @@ fn run_once(
     } else {
         // A pipeline that did not reach its end may be stuck in an element,
         // and so may its teardown: not on the caller's thread.
-        let _ = std::thread::Builder::new()
-            .name("replay-demux-retire".into())
-            .spawn(move || {
-                let _ = pipeline.set_state(gst::State::Null);
-            });
+        retire_on_thread("replay-demux-retire", move || {
+            let _ = pipeline.set_state(gst::State::Null);
+        });
     }
     result
 }
@@ -366,8 +422,8 @@ pub fn demux_bytes(
 ) -> Result<Demuxed, String> {
     let (demux, src_caps) = demux_for(container)?;
     let desc = format!(
-        "appsrc name=src format=bytes is-live=false caps=\"{}\" ! {} ! h264parse name=parse ! \
-         appsink name=sink sync=false",
+        "appsrc name=src format=bytes is-live=false caps=\"{}\" ! {} name=demux ! \
+         h264parse name=parse ! appsink name=sink sync=false",
         src_caps, demux
     );
     let (got, first_pts) = run_once(&desc, Some(sink_caps), bytes, timeout)?;
@@ -389,8 +445,8 @@ pub fn decode_bytes(
 ) -> Result<Decoded, String> {
     let (demux, src_caps) = demux_for(container)?;
     let desc = format!(
-        "appsrc name=src format=bytes is-live=false caps=\"{}\" ! {} ! h264parse name=parse ! {} ! \
-         videoconvert ! video/x-raw,format=NV12 ! appsink name=sink sync=false",
+        "appsrc name=src format=bytes is-live=false caps=\"{}\" ! {} name=demux ! \
+         h264parse name=parse ! {} ! videoconvert ! video/x-raw,format=NV12 ! appsink name=sink sync=false",
         src_caps, demux, decoder
     );
     let (got, first_pts) = run_once(&desc, None, bytes, timeout)?;
@@ -591,32 +647,54 @@ fn feed_units(
     event(gst::event::Eos::new())
 }
 
-/// Sessions given up as wedged whose teardown has not finished: each holds
+/// Pipelines given up as wedged whose teardown has not finished: each holds
 /// a thread (its feed, its teardown) that may never return.
 static WEDGED: AtomicUsize = AtomicUsize::new(0);
+
+/// Fail while [`MAX_WEDGED`] or more pipelines are still being torn down: a
+/// decoder that hangs would hang the next one too, and each holds a thread.
+/// Decoding resumes as their teardown finishes.
+fn refuse_while_wedged() -> Result<(), String> {
+    let n = WEDGED.load(Ordering::Relaxed);
+    if n >= MAX_WEDGED {
+        return Err(format!(
+            "{} decoder pipelines are hung; no new decoder until they are torn down",
+            n
+        ));
+    }
+    Ok(())
+}
+
+/// Run a teardown on a thread of its own, counted in [`WEDGED`] until it
+/// returns.
+fn retire_on_thread(name: &str, teardown: impl FnOnce() + Send + 'static) {
+    let n = WEDGED.fetch_add(1, Ordering::Relaxed) + 1;
+    if n > 1 {
+        warn!(
+            "Replay: {} decoder pipelines are still being torn down; a decoder may be hung",
+            n
+        );
+    }
+    let spawned = std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            teardown();
+            WEDGED.fetch_sub(1, Ordering::Relaxed);
+        });
+    if let Err(e) = spawned {
+        WEDGED.fetch_sub(1, Ordering::Relaxed);
+        warn!("Replay: no thread to tear a decoder pipeline down: {}", e);
+    }
+}
 
 /// Tear a failed session down on a thread of its own. A flush unblocks a
 /// decoder waiting downstream; one stuck in its driver stays stuck, and then
 /// only that thread is lost, not a decode worker.
 fn retire(session: DecoderSession) {
-    let n = WEDGED.fetch_add(1, Ordering::Relaxed) + 1;
-    if n > 1 {
-        warn!(
-            "Replay: {} decoder sessions are still being torn down; a decoder may be hung",
-            n
-        );
-    }
-    let spawned = std::thread::Builder::new()
-        .name("replay-dec-retire".into())
-        .spawn(move || {
-            let _ = session.feed.push_event(gst::event::FlushStart::new());
-            drop(session);
-            WEDGED.fetch_sub(1, Ordering::Relaxed);
-        });
-    if let Err(e) = spawned {
-        WEDGED.fetch_sub(1, Ordering::Relaxed);
-        warn!("Replay: no thread to tear a decoder session down: {}", e);
-    }
+    retire_on_thread("replay-dec-retire", move || {
+        let _ = session.feed.push_event(gst::event::FlushStart::new());
+        drop(session);
+    });
 }
 
 impl Drop for DecoderSession {
@@ -862,7 +940,21 @@ mod tests {
         // before its end of stream reaches the appsink.
         let r = decode_in_thread(test_ts("x265enc", 25), Duration::from_secs(5))
             .expect("decode returned");
-        assert!(r.is_err());
+        let e = r.err().expect("an error");
+        assert!(
+            e.contains("video/x-h265") && e.contains("H.264 only"),
+            "names the codec: {}",
+            e
+        );
+    }
+
+    #[test]
+    fn only_video_that_is_not_h264_is_unsupported() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(unsupported_stream(&s(&[])).is_ok());
+        assert!(unsupported_stream(&s(&["audio/mpeg"])).is_ok());
+        assert!(unsupported_stream(&s(&["video/x-h264", "audio/mpeg"])).is_ok());
+        assert!(unsupported_stream(&s(&["audio/mpeg", "video/x-h265"])).is_err());
     }
 
     /// Decode with a long-lived session, on another thread; `None` if it has
@@ -982,7 +1074,7 @@ mod tests {
         .expect("decodes returned");
         assert_eq!(out[0].as_ref().unwrap().frames.len(), 25);
         assert!(out[1].is_err());
-        assert!(out[2].is_err());
+        assert!(out[2].as_ref().err().unwrap().contains("video/x-h265"));
         assert!(out[3].is_err());
         assert_eq!(out[4].as_ref().unwrap().frames.len(), 25);
     }
