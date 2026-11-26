@@ -175,17 +175,31 @@ fn add_tams_output_segment(
     segment: (&str, u64),
     video: bool,
 ) -> TamsOutput {
+    add_tams_output_props(
+        pipeline,
+        name,
+        &[
+            ("gateway_url", PropertyValue::String(gateway_url.into())),
+            (segment.0, PropertyValue::UInt(segment.1)),
+            ("container", PropertyValue::String("mpegts".into())),
+            ("num_video_tracks", PropertyValue::UInt(video as u64)),
+            ("num_audio_tracks", PropertyValue::UInt(!video as u64)),
+        ],
+    )
+}
+
+/// Build a TAMS Output with the given properties, add it to `pipeline` and
+/// make the links it declares.
+fn add_tams_output_props(
+    pipeline: &gst::Pipeline,
+    name: &str,
+    props: &[(&str, PropertyValue)],
+) -> TamsOutput {
     let instance_id = format!("{}_{}", name, uuid::Uuid::new_v4().simple());
-    let properties: HashMap<String, PropertyValue> = [
-        ("gateway_url", PropertyValue::String(gateway_url.into())),
-        (segment.0, PropertyValue::UInt(segment.1)),
-        ("container", PropertyValue::String("mpegts".into())),
-        ("num_video_tracks", PropertyValue::UInt(video as u64)),
-        ("num_audio_tracks", PropertyValue::UInt(!video as u64)),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v))
-    .collect();
+    let properties: HashMap<String, PropertyValue> = props
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
 
     let ctx = BlockBuildContext::new(vec![], "all".to_string());
     let built = TamsOutputBuilder
@@ -411,6 +425,8 @@ mod stub_gateway {
     pub type Registered = Arc<Mutex<Vec<(String, String)>>>;
     /// Each registered segment's timerange and the bytes uploaded for it.
     pub type Segments = Arc<Mutex<Vec<(String, axum::body::Bytes)>>>;
+    /// Each flow registration (`PUT /flows/{id}`) body, in order.
+    pub type Flows = Arc<Mutex<Vec<serde_json::Value>>>;
 
     #[derive(Clone)]
     struct Stub {
@@ -418,6 +434,7 @@ mod stub_gateway {
         registered: Registered,
         uploads: Arc<Mutex<HashMap<String, axum::body::Bytes>>>,
         segments: Segments,
+        flows: Flows,
     }
 
     /// Start the stub on a free local port; returns its base URL.
@@ -430,23 +447,38 @@ mod stub_gateway {
     pub fn start_keeping_bytes(
         runtime: &tokio::runtime::Runtime,
     ) -> (String, Registered, Segments) {
+        let (base, registered, segments, _) = start_recording(runtime);
+        (base, registered, segments)
+    }
+
+    /// As [`start_keeping_bytes`], also recording each flow registration.
+    pub fn start_recording(
+        runtime: &tokio::runtime::Runtime,
+    ) -> (String, Registered, Segments, Flows) {
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
             .expect("bind stub gateway");
         let base = format!("http://{}", listener.local_addr().unwrap());
         let registered: Registered = Arc::default();
         let segments: Segments = Arc::default();
+        let flows: Flows = Arc::default();
         let stub = Stub {
             base: base.clone(),
             registered: registered.clone(),
             uploads: Arc::default(),
             segments: segments.clone(),
+            flows: flows.clone(),
         };
         let app =
             Router::new()
                 .route(
                     "/flows/{id}",
-                    put(|| async { axum::http::StatusCode::CREATED }),
+                    put(
+                        |State(s): State<Stub>, Json(body): Json<serde_json::Value>| async move {
+                            s.flows.lock().unwrap().push(body);
+                            axum::http::StatusCode::CREATED
+                        },
+                    ),
                 )
                 .route(
                     "/flows/{id}/storage",
@@ -495,7 +527,7 @@ mod stub_gateway {
         runtime.spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        (base, registered, segments)
+        (base, registered, segments, flows)
     }
 }
 
@@ -1333,5 +1365,216 @@ mod close_at_boundary {
                 age / 1_000_000
             );
         }
+    }
+}
+
+/// Two labelled audio pairs in one MPEG-TS flow: each pair has its own fixed
+/// PID with its language in the TS, and the flow collects one member flow per
+/// track, mapped to its PID, with the audio `essence_parameters` TAMS requires.
+mod audio_pairs {
+    use super::*;
+
+    /// Stereo AAC at 48 kHz from a tone of `freq` Hz into `target`.
+    fn feed_pair(pipeline: &gst::Pipeline, target: &gst::Element, freq: f64) {
+        let src = gst::ElementFactory::make("audiotestsrc")
+            // About 4.3 s: several 1 s segments.
+            .property("num-buffers", 200i32)
+            .property("samplesperbuffer", 1024i32)
+            .property("freq", freq)
+            .property("is-live", true)
+            .build()
+            .unwrap();
+        let conv = gst::ElementFactory::make("audioconvert").build().unwrap();
+        let resample = gst::ElementFactory::make("audioresample").build().unwrap();
+        let caps = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                gst::Caps::builder("audio/x-raw")
+                    .field("rate", 48000i32)
+                    .field("channels", 2i32)
+                    .build(),
+            )
+            .build()
+            .unwrap();
+        let enc = gst::ElementFactory::make("avenc_aac").build().unwrap();
+        pipeline
+            .add_many([&src, &conv, &resample, &caps, &enc])
+            .unwrap();
+        gst::Element::link_many([&src, &conv, &resample, &caps, &enc, target]).unwrap();
+    }
+
+    /// `(PID, language)` of each audio stream `tsdemux` finds in `ts`.
+    fn audio_streams(ts: &[u8]) -> Vec<(u32, Option<String>)> {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), ts).unwrap();
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("filesrc")
+            .property("location", file.path().to_str().unwrap())
+            .build()
+            .unwrap();
+        let demux = gst::ElementFactory::make("tsdemux").build().unwrap();
+        pipeline.add_many([&src, &demux]).unwrap();
+        src.link(&demux).unwrap();
+        let found = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = found.clone();
+        demux.connect_pad_added(move |demux, pad| {
+            let Some(pipeline) = demux.parent().and_then(|p| p.downcast::<gst::Bin>().ok()) else {
+                return;
+            };
+            // tsdemux names pads `audio_<program>_<pid in hex>`.
+            let name = pad.name();
+            let pid = name
+                .rsplit('_')
+                .next()
+                .and_then(|h| u32::from_str_radix(h, 16).ok())
+                .unwrap_or(0);
+            if name.starts_with("audio") {
+                seen.lock().unwrap().push((pid, None));
+                // The language comes as a tag event after the pad is added.
+                let seen = seen.clone();
+                pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+                    if let Some(gst::PadProbeData::Event(e)) = info.data.as_ref() {
+                        if let gst::EventView::Tag(t) = e.view() {
+                            if let Some(lang) = t.tag().get::<gst::tags::LanguageCode>() {
+                                for s in seen.lock().unwrap().iter_mut() {
+                                    if s.0 == pid {
+                                        s.1 = Some(lang.get().to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    gst::PadProbeReturn::Ok
+                });
+            }
+            let sink = gst::ElementFactory::make("fakesink").build().unwrap();
+            pipeline.add(&sink).unwrap();
+            sink.sync_state_with_parent().unwrap();
+            pad.link(&sink.static_pad("sink").unwrap()).unwrap();
+        });
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let ended = wait_for_eos(&pipeline, Duration::from_secs(10));
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert!(ended, "demuxing a segment never reached EOS");
+        let mut found = found.lock().unwrap().clone();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn labelled_pairs_get_pids_languages_and_member_flows() {
+        if !plugins_available() || !common::plugins_available(&["capsfilter", "tsdemux"]) {
+            return;
+        }
+        let runtime = runtime();
+        let (gateway, _registered, segments, flows) = stub_gateway::start_recording(&runtime);
+
+        let pipeline = gst::Pipeline::new();
+        let tams = add_tams_output_props(
+            &pipeline,
+            "tams_pairs",
+            &[
+                ("gateway_url", PropertyValue::String(gateway)),
+                ("segment_duration_ms", PropertyValue::UInt(1000)),
+                ("container", PropertyValue::String("mpegts".into())),
+                ("num_video_tracks", PropertyValue::UInt(0)),
+                ("num_audio_tracks", PropertyValue::UInt(2)),
+                ("audio_labels", PropertyValue::String("PGM, IS".into())),
+                ("audio_languages", PropertyValue::String("swe,eng".into())),
+                ("label", PropertyValue::String("Cam 1".into())),
+            ],
+        );
+        feed_pair(&pipeline, &tams.input("audio_input_0"), 440.0);
+        feed_pair(&pipeline, &tams.input("audio_input_1"), 880.0);
+        tams.run_setups(&runtime);
+
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let reached_eos = wait_for_eos(&pipeline, Duration::from_secs(30));
+        // Let the uploads land.
+        std::thread::sleep(Duration::from_millis(500));
+        pipeline.set_state(gst::State::Null).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let segments = segments.lock().unwrap().clone();
+        let flows = flows.lock().unwrap().clone();
+        runtime.shutdown_background();
+        assert!(reached_eos, "pipeline never reached EOS");
+
+        // Each pair is on its fixed PID, with its language, in every segment.
+        // The two sources start and end independently, so the first and the
+        // last segment may lack one; a track that is missing must not move
+        // the other's PID. The segments between carry both.
+        // (tsdemux reports the ISO 639-2 codes as ISO 639-1.)
+        let both = vec![
+            (0x42, Some("sv".to_string())),
+            (0x43, Some("en".to_string())),
+        ];
+        assert!(segments.len() >= 3, "too few segments: {}", segments.len());
+        for (i, (tr, bytes)) in segments.iter().enumerate() {
+            let streams = audio_streams(bytes);
+            if i == 0 || i == segments.len() - 1 {
+                assert!(
+                    !streams.is_empty() && streams.iter().all(|s| both.contains(s)),
+                    "segment {}: {:?}",
+                    tr,
+                    streams
+                );
+            } else {
+                assert_eq!(streams, both, "segment {}", tr);
+            }
+        }
+
+        let id = |suffix: &str| {
+            uuid::Uuid::new_v5(
+                &uuid::Uuid::from_u128(0x7a3f_2b10_5c84_4e6d_9f12_a8b7_c6d5_e4f3),
+                format!("{}:{}", tams.instance_id, suffix).as_bytes(),
+            )
+            .to_string()
+        };
+        let last_put = |flow: &str| {
+            flows
+                .iter()
+                .rposition(|f| f["id"] == flow)
+                .map(|i| (i, flows[i].clone()))
+                .unwrap_or_else(|| panic!("flow {} never registered: {:#?}", flow, flows))
+        };
+        let (mux_at, mux) = last_put(&id("mux"));
+        for (k, (role, lang, pid)) in [("PGM", "swe", 0x42), ("IS", "eng", 0x43)]
+            .into_iter()
+            .enumerate()
+        {
+            let (at, member) = last_put(&id(&format!("mux-audio-{}", k)));
+            assert!(
+                at < mux_at,
+                "member {} registered after the muxed flow",
+                role
+            );
+            assert_eq!(member["format"], "urn:x-nmos:format:audio");
+            assert_eq!(member["codec"], "audio/aac");
+            assert_eq!(member["container"], "video/mp2t");
+            assert_eq!(member["label"], format!("Cam 1 ({})", role));
+            assert_eq!(member["tags"]["audio_label"], role);
+            assert_eq!(member["tags"]["audio_language"], lang);
+            assert_eq!(
+                member["essence_parameters"],
+                serde_json::json!({
+                    "sample_rate": 48000,
+                    "channels": 2,
+                    "codec_parameters": { "coded_frame_size": 1024, "mp4_oti": 2 }
+                })
+            );
+            let mapping = serde_json::json!({
+                "track_index": k,
+                "format_track_index": k,
+                "mp2ts_container": { "pid": pid },
+                "audio_track": { "channel_range": "0_1" }
+            });
+            assert_eq!(member["container_mapping"], mapping);
+            assert_eq!(
+                mux["flow_collection"][k],
+                serde_json::json!({ "id": id(&format!("mux-audio-{}", k)), "role": role, "container_mapping": mapping })
+            );
+        }
+        assert_eq!(mux["flow_collection"].as_array().unwrap().len(), 2);
+        assert_eq!(mux["format"], "urn:x-nmos:format:multi");
     }
 }

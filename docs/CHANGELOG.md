@@ -13,6 +13,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
 - API: `GET /api/flows/{flow_id}/blocks/{block_id}/pgm-endpoint` returns the WHEP endpoint fed by a vision mixer's PGM output, like `multiview-endpoint`
 - Media Player: a timeline player has a Replay button in the properties panel that opens the replay page for its group
+- TAMS Output: audio `essence_parameters` (`sample_rate`, `channels`, `codec_parameters`) as the TAMS audio flow schema requires, and `audio_labels` (e.g. `PGM,IS`) and `audio_languages` (e.g. `swe,eng`) per audio track. In MPEG-TS each track has a fixed PID (video 0x41, audio 0x42, 0x43, ...) and its ISO 639 language descriptor, and the muxed flow collects one member flow per track (`flow_collection` with role, PID and channel range); in MP4 the label is the audio flow's role
 
 ### Changed
 - Media Player: an explicit `mode` property (`playlist`, `stinger`, `timeline`) selects what the block does, and the properties panel shows only the properties of that mode. `stinger_mode=true` becomes `mode=stinger`. The Playlist button and transport controls are hidden for a timeline player
