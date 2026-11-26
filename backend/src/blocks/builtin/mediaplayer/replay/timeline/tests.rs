@@ -1293,3 +1293,17 @@ fn a_new_run_resets_margin_edge_and_latency() {
     assert_eq!(tl.cmd_to_push_us.load(Ordering::Relaxed), 0);
     assert!(lock(&tl.edge).steps.is_empty());
 }
+
+#[test]
+fn a_command_before_the_flow_plays_keeps_its_place_on_the_new_time_base() {
+    let (tl, _p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    // Given 5 s into the stand-in time base, before the flow plays.
+    tl.apply_at(seek_tai(BASE + 10 * S), 5 * S).unwrap();
+    tl.apply_at(Command::Speed { speed: 1.0 }, 5 * S).unwrap();
+    tl.note_pushed(5 * S, BASE + 10 * S);
+    // The flow plays: its running time starts near 0.
+    tl.shift_rt(-5 * S);
+    assert_eq!(tl.cursor_tai(0), Some((BASE + 10 * S, 1.0)));
+    assert_eq!(tl.tai_at(S), Some(BASE + 11 * S));
+    assert_eq!(lock(&tl.last_pushed).map(|(rt, _)| rt), Some(0));
+}

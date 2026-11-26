@@ -885,6 +885,12 @@ impl ReplayTimeline {
     }
 
     /// An element in the flow whose clock and base time define "now".
+    ///
+    /// "Now" can jump when the source changes, most of all from the
+    /// stand-in (time since the group was reset) to the flow's running time,
+    /// which starts near 0 when the flow plays. The anchor is moved by the
+    /// same amount, so a command given before the flow played keeps its
+    /// place on the new time base.
     pub fn set_clock_source(&self, element: &gst::Element) {
         let mut src = lock(&self.clock_source);
         let alive = src
@@ -892,13 +898,32 @@ impl ReplayTimeline {
             .and_then(|w| w.upgrade())
             .is_some_and(|e| e.current_state() == gst::State::Playing);
         if !alive {
+            let before = self.rt_of(&src);
             *src = Some(element.downgrade());
+            let after = self.rt_of(&src);
+            // Still holding `clock_source`: no command reads "now" between.
+            self.shift_rt(after - before);
+        }
+    }
+
+    /// Move every running time the group keeps by `delta`, for a new time
+    /// base.
+    fn shift_rt(&self, delta: i64) {
+        if delta == 0 {
+            return;
+        }
+        lock(&self.anchor).rt += delta;
+        if let Some((rt, _)) = lock(&self.last_pushed).as_mut() {
+            *rt += delta;
         }
     }
 
     /// The flow's running time now, or a monotonic stand-in before it plays.
     pub fn now_rt(&self) -> i64 {
-        let src = lock(&self.clock_source);
+        self.rt_of(&lock(&self.clock_source))
+    }
+
+    fn rt_of(&self, src: &Option<gst::glib::WeakRef<gst::Element>>) -> i64 {
         if let Some(el) = src.as_ref().and_then(|w| w.upgrade()) {
             if let (Some(clock), Some(base)) = (el.clock(), el.base_time()) {
                 return clock.time().nseconds() as i64 - base.nseconds() as i64;
