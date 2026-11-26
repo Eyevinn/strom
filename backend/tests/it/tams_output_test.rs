@@ -849,6 +849,16 @@ mod last_segment {
     /// does (stop drains, then NULL, no EOS from upstream) `run_ms` in.
     /// Returns the last segment's timerange and decoded frame count.
     fn last_segment_after_stop(run_ms: u64) -> (String, u64) {
+        let mut segs = run_and_stop(run_ms, None);
+        let (tr, bytes) = segs.pop().unwrap();
+        (tr, decoded_frames(&bytes))
+    }
+
+    /// One run of live video into a TAMS Output, stopped as stopping a flow
+    /// does `run_ms` in. The frames whose running time is in `stall` (ms,
+    /// `[from, to)`) never reach the encoder, as when the input stalls.
+    /// Returns every registered segment's timerange and bytes, in order.
+    fn run_and_stop(run_ms: u64, stall: Option<(u64, u64)>) -> Vec<(String, axum::body::Bytes)> {
         let runtime = runtime();
         let (gateway, registered, segments) = stub_gateway::start_keeping_bytes(&runtime);
 
@@ -877,6 +887,18 @@ mod last_segment {
         pipeline.add_many([&src, &caps, &enc]).unwrap();
         gst::Element::link_many([&src, &caps, &enc]).unwrap();
         enc.link(&out.input("video_input_0")).unwrap();
+        if let Some((from, to)) = stall {
+            let (from, to) = (from * 1_000_000, to * 1_000_000);
+            caps.static_pad("src")
+                .unwrap()
+                .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                    let pts = info.buffer().and_then(|b| b.pts()).map(|p| p.nseconds());
+                    match pts {
+                        Some(p) if p >= from && p < to => gst::PadProbeReturn::Drop,
+                        _ => gst::PadProbeReturn::Ok,
+                    }
+                });
+        }
 
         out.run_setups_in_flow(&runtime, uuid::Uuid::new_v4());
         pipeline.set_state(gst::State::Playing).unwrap();
@@ -906,8 +928,58 @@ mod last_segment {
         runtime.shutdown_background();
         segs.sort_by_key(|(tr, _)| timerange_start_ns(tr));
         assert!(segs.len() >= 2, "too few segments: {}", segs.len());
-        let (tr, bytes) = segs.pop().unwrap();
-        (tr, decoded_frames(&bytes))
+        segs
+    }
+
+    /// The input stalls for 2.3 s inside a segment (frames dropped before
+    /// the encoder, as by a leaky queue under load). The segment before the
+    /// stall must end where its media ends, not claim the stall
+    /// (seen live: a 6.248 s timerange over 0.9 s of video).
+    #[test]
+    fn a_stalled_input_leaves_a_hole_not_a_long_segment() {
+        if !plugins_available()
+            || !common::plugins_available(&[
+                "videotestsrc",
+                "x264enc",
+                "capsfilter",
+                "tsdemux",
+                "h264parse",
+                "avdec_h264",
+            ])
+        {
+            return;
+        }
+        const FRAME_NS: u64 = 20_000_000;
+        let segs = run_and_stop(4_500, Some((1_300, 3_600)));
+        let ranges: Vec<(u64, u64)> = segs
+            .iter()
+            .map(|(tr, _)| (timerange_start_ns(tr), timerange_end_ns(tr)))
+            .collect();
+        let all: Vec<&String> = segs.iter().map(|(tr, _)| tr).collect();
+        for (s, e) in &ranges {
+            assert!(
+                e - s <= 1_000_000_000 + FRAME_NS,
+                "a segment claims more than its length: {:?}",
+                all
+            );
+        }
+        // The stall is a hole between two segments.
+        let hole = ranges
+            .windows(2)
+            .map(|w| w[1].0.saturating_sub(w[0].1))
+            .max()
+            .unwrap_or(0);
+        assert!(hole >= 2_000_000_000, "no hole for the stall: {:?}", all);
+        // Every segment holds what its timerange claims.
+        for ((tr, bytes), (s, e)) in segs.iter().zip(&ranges) {
+            assert_eq!(
+                decoded_frames(bytes) * FRAME_NS,
+                e - s,
+                "segment {} of {:?}",
+                tr,
+                all
+            );
+        }
     }
 
     /// A stopped flow sends no EOS. The muxer still holds the tail of the

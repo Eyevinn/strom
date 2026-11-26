@@ -176,7 +176,7 @@ impl PadMediaEnd {
 pub type MediaEnd = Arc<Mutex<Vec<Arc<PadMediaEnd>>>>;
 
 /// Latest end running time over all pads, `None` when no pad saw a buffer.
-fn media_end_running_time_ns(end: &MediaEnd) -> Option<u64> {
+pub fn media_end_running_time_ns(end: &MediaEnd) -> Option<u64> {
     let pads = end.lock().unwrap_or_else(|e| e.into_inner());
     pads.iter().filter_map(|p| p.end_running_time_ns()).max()
 }
@@ -194,6 +194,40 @@ fn tail_end_ns(
             .start_ns
             .saturating_add(end - tail.start_running_time_ns),
         _ => tail.start_ns.saturating_add(nominal_ns.max(1)),
+    }
+}
+
+/// The shortest hole between where a fragment's media ends and where the
+/// next fragment starts that ends the fragment at its media: a stall of the
+/// input, not a frame or two missing at the split (or a buffer the media-end
+/// tracking missed).
+pub const STALL_NS: u64 = 200_000_000;
+
+/// Timerange end of a fragment that the next fragment closes, given the end
+/// `planned_end_ns` (TAI) the timeline gives it. If the input stalled before
+/// the split, so that the next fragment's first buffer (running time
+/// `next_running_time_ns`) comes more than [`STALL_NS`] (or `contiguous_ns`)
+/// after where this fragment's media ends, it ends at its media: the stall
+/// stays a hole in TAMS rather than a segment that claims seconds of media it
+/// does not hold (seen live: a 6.248 s timerange over 0.9 s of video).
+pub fn closed_end_ns(
+    fragment: &TailFragment,
+    planned_end_ns: u64,
+    media_end_running_time_ns: Option<u64>,
+    next_running_time_ns: u64,
+    contiguous_ns: u64,
+) -> u64 {
+    match media_end_running_time_ns {
+        Some(end)
+            if end > fragment.start_running_time_ns
+                && next_running_time_ns > end.saturating_add(contiguous_ns.max(STALL_NS)) =>
+        {
+            let media = fragment
+                .start_ns
+                .saturating_add(end - fragment.start_running_time_ns);
+            planned_end_ns.min(media)
+        }
+        _ => planned_end_ns,
     }
 }
 
@@ -785,6 +819,67 @@ mod tests {
             pad.add_buffer(Some(1_000 + n * 20), 20);
         }
         assert_eq!(pad.end_running_time_ns(), None);
+    }
+
+    #[test]
+    fn a_fragment_before_a_stall_ends_at_its_media() {
+        let frag = TailFragment {
+            path: PathBuf::new(),
+            start_ns: 10_000_000_000,
+            start_running_time_ns: 1_000_000_000,
+        };
+        let frame = 21_000_000;
+        // 0.9 s of media, then 5.3 s without input: ends at its media.
+        assert_eq!(
+            closed_end_ns(
+                &frag,
+                16_200_000_000,
+                Some(1_900_000_000),
+                7_200_000_000,
+                frame
+            ),
+            10_900_000_000
+        );
+        // Contiguous, or a frame or two missing at the split: as planned.
+        assert_eq!(
+            closed_end_ns(
+                &frag,
+                11_000_000_000,
+                Some(2_000_000_000),
+                2_000_000_000,
+                frame
+            ),
+            11_000_000_000
+        );
+        assert_eq!(
+            closed_end_ns(
+                &frag,
+                11_000_000_000,
+                Some(1_940_000_000),
+                2_000_000_000,
+                frame
+            ),
+            11_000_000_000
+        );
+        // Media end unknown, stale, or past the next start (running time went
+        // back): as planned.
+        for media in [None, Some(900_000_000), Some(8_000_000_000)] {
+            assert_eq!(
+                closed_end_ns(&frag, 16_200_000_000, media, 7_200_000_000, frame),
+                16_200_000_000
+            );
+        }
+        // Never later than planned (a backward jump cut it short).
+        assert_eq!(
+            closed_end_ns(
+                &frag,
+                10_500_000_000,
+                Some(1_900_000_000),
+                7_200_000_000,
+                frame
+            ),
+            10_500_000_000
+        );
     }
 
     #[test]

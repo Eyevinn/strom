@@ -27,8 +27,8 @@ use crate::tams::tai_mapping::{
     FIRST_ON_GRID_FRAGMENT,
 };
 use crate::tams::uploader::{
-    channel, new_tail_slot, spawn_uploader, FragmentReady, MediaEnd, PadMediaEnd, SharedDetected,
-    TailFragment,
+    channel, closed_end_ns, media_end_running_time_ns, new_tail_slot, spawn_uploader,
+    FragmentReady, MediaEnd, PadMediaEnd, SharedDetected, TailFragment,
 };
 use gst::glib::prelude::ToValue;
 use gstreamer as gst;
@@ -545,6 +545,9 @@ fn build_flow_chain(
     // Where the media written to the open fragment ends, for the timerange of
     // the last fragment of a run (no next fragment closes it).
     let media_end = track_media_end(&mux);
+    // The same, read when a fragment closes: a fragment before a stall ends
+    // at its media.
+    let media_end_at_split = media_end.clone();
     // On a stop, EOS through the muxer completes the open fragment.
     let mux_drain = Arc::new(MuxDrain::default());
     mux_drain.watch_muxer(&mux);
@@ -849,6 +852,10 @@ fn build_flow_chain(
                 _ => 0,
             };
 
+            // Where the closing fragment's media ends: the new fragment's
+            // buffers have not entered the muxer yet.
+            let closing_media_end = media_end_running_time_ns(&media_end_at_split);
+
             let location = temp_dir.join(format!("seg_{:05}.{}", fragment_id, file_ext));
             let location_str = location.to_string_lossy().to_string();
 
@@ -941,10 +948,26 @@ fn build_flow_chain(
             // The just-opened one becomes the new tail (flushed on shutdown).
             if let Ok(mut tail) = tail.lock() {
                 if let Some(prev) = tail.take() {
+                    let end_ns = closed_end_ns(
+                        &prev,
+                        placed.prev_end_ns,
+                        closing_media_end,
+                        running_time_ns,
+                        frame_ns,
+                    );
+                    if end_ns < placed.prev_end_ns {
+                        info!(
+                            "TAMS {} ({}): the input stalled; the segment before it ends \
+                             at its media, {} ms before the next starts",
+                            block_id_sig,
+                            tag,
+                            (placed.prev_end_ns - end_ns) / 1_000_000
+                        );
+                    }
                     let ready = FragmentReady {
                         path: prev.path,
                         start_ns: prev.start_ns,
-                        end_ns: placed.prev_end_ns.max(prev.start_ns + 1),
+                        end_ns: end_ns.max(prev.start_ns + 1),
                     };
                     if let Err(e) = tx.try_send(ready) {
                         warn!(
