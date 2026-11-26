@@ -272,6 +272,17 @@ impl ApiClient {
         )
     }
 
+    /// Get the replay operator page URL for a replay group in a flow.
+    pub fn get_replay_page_url(&self, flow_id: &strom_types::FlowId, group: &str) -> String {
+        let server_base = self.base_url.trim_end_matches("/api");
+        format!(
+            "{}/player/replay/{}/{}",
+            server_base,
+            flow_id,
+            urlencoding::encode(group)
+        )
+    }
+
     /// Get the WHIP ingest URL for a given endpoint ID.
     /// Returns the full URL that can be opened in a new tab.
     pub fn get_whip_ingest_url(&self, endpoint_id: &str) -> String {

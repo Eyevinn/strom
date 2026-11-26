@@ -1591,6 +1591,12 @@ impl StromApp {
                             ui.ctx().open_url(egui::OpenUrl::new_tab(&url));
                         }
 
+                        // Handle replay operator page request (timeline Media Player)
+                        if let Some((flow_id, group)) = result.replay_page_url {
+                            let url = self.api.get_replay_page_url(&flow_id, &group);
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(&url));
+                        }
+
                         // Handle WHIP ingest request (for WHIP Input)
                         if let Some(endpoint_id) = result.whip_ingest_url {
                             let ingest_url = self.api.get_whip_ingest_url(&endpoint_id);

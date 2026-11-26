@@ -110,6 +110,26 @@ pub fn media_player_definition() -> BlockDefinition {
                 visible_when: in_modes(&[PlayerMode::Timeline]),
             },
             ExposedProperty {
+                name: "read_ahead_s".to_string(),
+                label: "Read-ahead (s)".to_string(),
+                description: "Seconds of coded media fetched ahead of the playhead, in memory. \
+                              Playlist: http(s)/HLS/DASH sources, 0 = GStreamer default. \
+                              Timeline: half as much is kept behind, minimum 2. Max 120."
+                    .to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(
+                    super::bridge::NetworkBuffer::DEFAULT_READ_AHEAD_S,
+                )),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "read_ahead_s".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: in_modes(&[PlayerMode::Playlist, PlayerMode::Timeline]),
+            },
+            ExposedProperty {
                 name: DECODED_AHEAD_PROPERTY.to_string(),
                 label: "Decoded Ahead (s)".to_string(),
                 description: "Seconds of decoded frames kept ahead of the playhead, in the direction it moves. Minimum 1."
@@ -210,42 +230,6 @@ pub fn media_player_definition() -> BlockDefinition {
                 visible_when: in_modes(&[PlayerMode::Playlist]),
             },
             ExposedProperty {
-                name: "read_ahead_s".to_string(),
-                label: "Read-ahead (s)".to_string(),
-                description: "Seconds of coded media fetched ahead of the playhead, in memory. \
-                              Playlist: http(s)/HLS/DASH sources, 0 = GStreamer default. \
-                              Timeline: half as much is kept behind, minimum 2. Max 120."
-                    .to_string(),
-                property_type: PropertyType::UInt,
-                default_value: Some(PropertyValue::UInt(
-                    super::bridge::NetworkBuffer::DEFAULT_READ_AHEAD_S,
-                )),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "read_ahead_s".to_string(),
-                    transform: None,
-                },
-                live: false,
-                persist: None,
-                visible_when: in_modes(&[PlayerMode::Playlist, PlayerMode::Timeline]),
-            },
-            ExposedProperty {
-                name: "loop_playlist".to_string(),
-                label: "Loop Playlist".to_string(),
-                description: "Loop back to the first file when reaching the end of the playlist"
-                    .to_string(),
-                property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(true)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "loop_playlist".to_string(),
-                    transform: None,
-                },
-                live: false,
-                persist: None,
-                visible_when: in_modes(&[PlayerMode::Playlist]),
-            },
-            ExposedProperty {
                 name: "num_video_tracks".to_string(),
                 label: "Video Tracks".to_string(),
                 description: "How many video tracks of a file get an output (video_out, \
@@ -281,6 +265,22 @@ pub fn media_player_definition() -> BlockDefinition {
                 live: false,
                 persist: None,
                 visible_when: in_modes(&[PlayerMode::Playlist, PlayerMode::Stinger]),
+            },
+            ExposedProperty {
+                name: "loop_playlist".to_string(),
+                label: "Loop Playlist".to_string(),
+                description: "Loop back to the first file when reaching the end of the playlist"
+                    .to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "loop_playlist".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: in_modes(&[PlayerMode::Playlist]),
             },
             ExposedProperty {
                 name: "position_update_interval".to_string(),
