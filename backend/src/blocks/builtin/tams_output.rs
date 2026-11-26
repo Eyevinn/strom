@@ -27,8 +27,9 @@ use crate::tams::tai_mapping::{
     FIRST_ON_GRID_FRAGMENT,
 };
 use crate::tams::uploader::{
-    channel, closed_end_ns, media_end_running_time_ns, new_tail_slot, spawn_uploader,
-    FragmentReady, MediaEnd, PadMediaEnd, SharedDetected, TailFragment,
+    channel, clear_orphans, closed_end_ns, media_end_running_time_ns, new_run, new_tail_slot,
+    park_on_disk, segment_file_name, spawn_uploader, FragmentReady, MediaEnd, PadMediaEnd,
+    SharedDetected, TailFragment,
 };
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -706,39 +707,16 @@ fn build_flow_chain(
     let suffix_owned = suffix.to_string();
     let mux_factory = container.muxer_factory();
     ctx.register_element_setup(Box::new(move |flow_id, events| {
-        // Remove only orphan segment files left by a previous run — plain `seg_*`
-        // files with no `.meta` sidecar. Their timerange is lost so they cannot be
-        // re-registered (e.g. a fragment mid-write when the process was killed, or
-        // one already uploaded but not yet deleted). Parked segments (those WITH a
-        // sidecar) and the sidecars are kept: the uploader's recovery sweep
-        // re-registers them, even across a full restart. Safe here: the new run has
-        // not written yet.
-        if let Ok(entries) = std::fs::read_dir(&temp_dir_for_setup) {
-            let mut removed = 0u32;
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default();
-                if !name.starts_with("seg_") || name.ends_with(".meta") {
-                    continue;
-                }
-                let mut sidecar = path.clone().into_os_string();
-                sidecar.push(".meta");
-                if std::path::Path::new(&sidecar).exists() {
-                    continue; // parked for recovery — leave it
-                }
-                if std::fs::remove_file(&path).is_ok() {
-                    removed += 1;
-                }
-            }
-            if removed > 0 {
-                info!(
-                    "TAMS {}: cleared {} orphan segment(s) from a previous run",
-                    block_id, removed
-                );
-            }
+        // Remove orphan segment files left by a previous run (no `.meta`
+        // sidecar, so their timerange is lost). Parked segments are kept for the
+        // uploader's recovery sweep, even across a full restart, and so are the
+        // files of a previous run whose uploader still runs.
+        let removed = clear_orphans(&temp_dir_for_setup);
+        if removed > 0 {
+            info!(
+                "TAMS {}: cleared {} orphan segment(s) from a previous run",
+                block_id, removed
+            );
         }
 
         // OSC auth keys its PAT by the flow id (tenant isolation on a shared
@@ -765,6 +743,10 @@ fn build_flow_chain(
         let (tx, rx) = channel();
         // Holds the currently-open (not-yet-rotated) fragment; flushed on shutdown.
         let tail = new_tail_slot();
+        // Segment files of this run carry its id, so they never overwrite what an
+        // earlier run parked in the same directory.
+        let run = new_run();
+        let run_id = run.id().to_string();
         spawn_uploader(
             client,
             spec,
@@ -778,6 +760,7 @@ fn build_flow_chain(
             tail.clone(),
             media_end,
             segment_ns,
+            run,
         );
 
         // Per-block timeline: TAI = running time + offset. A fragment whose first
@@ -808,7 +791,7 @@ fn build_flow_chain(
             // buffers have not entered the muxer yet.
             let closing_media_end = media_end_running_time_ns(&media_end_at_split);
 
-            let location = temp_dir.join(format!("seg_{:05}.{}", fragment_id, file_ext));
+            let location = temp_dir.join(segment_file_name(&run_id, fragment_id, &file_ext));
             let location_str = location.to_string_lossy().to_string();
 
             // Capture time of the fragment's first buffer, when it carries one.
@@ -971,18 +954,42 @@ fn build_flow_chain(
             }
         };
 
-        // Hands a finished fragment to the uploader.
+        // Hands a finished fragment to the uploader. When its channel is full
+        // (or closed), the fragment is parked on disk instead, for the recovery
+        // sweep of this run or the next; only when that fails too (the disk is
+        // full) is it dropped.
         let deliver_label = format!("{} ({})", block_id, suffix_owned);
+        let overflowed = AtomicU64::new(0);
         let deliver = move |ready: FragmentReady| {
-            if let Err(e) = tx.try_send(ready) {
-                warn!(
-                    "TAMS {}: dropping segment, uploader channel full: {}",
-                    deliver_label, e
-                );
-                // The dropped fragment will never be uploaded; remove its
-                // file so it doesn't leak in the temp dir under sustained
-                // backpressure.
-                let _ = std::fs::remove_file(e.into_inner().path);
+            let Err(e) = tx.try_send(ready) else {
+                return;
+            };
+            let full = matches!(e, tokio::sync::mpsc::error::TrySendError::Full(_));
+            let ready = e.into_inner();
+            match park_on_disk(&ready) {
+                Ok(()) => {
+                    let n = overflowed.fetch_add(1, Ordering::Relaxed);
+                    if n.is_multiple_of(100) {
+                        warn!(
+                            "TAMS {}: uploader {}, parked segment {} on disk for the \
+                             recovery sweep ({} so far)",
+                            deliver_label,
+                            if full { "queue full" } else { "stopped" },
+                            ready.path.display(),
+                            n + 1
+                        );
+                    }
+                }
+                Err(err) => {
+                    error!(
+                        "TAMS {}: uploader queue full and segment {} could not be parked \
+                         ({}); dropping it",
+                        deliver_label,
+                        ready.path.display(),
+                        err
+                    );
+                    let _ = std::fs::remove_file(&ready.path);
+                }
             }
         };
 
