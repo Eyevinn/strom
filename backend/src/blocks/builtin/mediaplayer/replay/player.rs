@@ -13,6 +13,7 @@
 //!   motion repeats frames, reverse walks backwards: the output never stops,
 //!   flushes or seeks, and never waits on the network.
 
+use super::super::bridge::NetworkBuffer;
 use super::backoff::{worth_warning, Backoff};
 #[cfg(test)]
 use super::cache::Hold;
@@ -45,7 +46,7 @@ const DEFAULT_DECODED_BUDGET_MB: u64 = 768;
 /// the next.
 const MIN_DECODED_SEGMENTS: usize = 2;
 /// Upper bound of the decoded window ahead of the cursor, seconds.
-const MAX_DECODE_AHEAD_S: u64 = 30;
+pub const MAX_DECODE_AHEAD_S: u64 = 30;
 
 /// One decoded segment: the TAI of its first and last frame, and the bytes
 /// they hold.
@@ -68,6 +69,32 @@ struct FrameStore {
 }
 
 impl FrameStore {
+    /// Drop the segments not in `keep` and their frames, returned so they
+    /// can be freed outside the lock. A frame in the span of a segment that
+    /// stays may be that segment's too (overlapping segments): it stays, or
+    /// that segment would count as decoded with frames missing.
+    fn evict_except(&mut self, keep: &HashSet<i64>) -> Vec<gst::Buffer> {
+        let evict: Vec<DecodedSegment> = self
+            .segments
+            .iter()
+            .filter(|(k, _)| !keep.contains(k))
+            .map(|(_, d)| *d)
+            .collect();
+        self.segments.retain(|k, _| keep.contains(k));
+        let kept: Vec<(i64, i64)> = self.segments.values().map(|d| (d.first, d.last)).collect();
+        let mut doomed = Vec::new();
+        for d in evict {
+            let frames: Vec<i64> = self
+                .frames
+                .range(d.first..=d.last)
+                .map(|(f, _)| *f)
+                .filter(|f| !kept.iter().any(|&(a, b)| a <= *f && *f <= b))
+                .collect();
+            doomed.extend(frames.iter().filter_map(|f| self.frames.remove(f)));
+        }
+        doomed
+    }
+
     /// Decoded size of a segment, or an estimate.
     fn size_of(&self, seg: &Segment) -> u64 {
         match self.segments.get(&seg.start_ns) {
@@ -164,7 +191,9 @@ impl ReplayPlayer {
             source,
             Arc::clone(&timeline),
             Arc::clone(&stats),
-            prefetch_s.max(cache_ahead_s + 2),
+            prefetch_s
+                .max(cache_ahead_s.min(MAX_DECODE_AHEAD_S) + 2)
+                .min(NetworkBuffer::MAX_READ_AHEAD_S),
         ));
         Arc::new(Self {
             block_id: block_id.to_string(),
@@ -446,28 +475,14 @@ impl ReplayPlayer {
                 let keep: HashSet<i64> = wanted.iter().map(|s| s.start_ns).collect();
                 // Frees the evicted frames after the lock is released, so a
                 // large eviction does not hold up the output tick.
-                let mut doomed: Vec<gst::Buffer> = Vec::new();
-                {
+                let doomed = {
                     let mut store = lock(&self.decoded);
-                    let evict: Vec<(i64, DecodedSegment)> = store
-                        .segments
-                        .iter()
-                        .filter(|(k, _)| !keep.contains(k))
-                        .map(|(k, d)| (*k, *d))
-                        .collect();
-                    for (k, d) in evict {
-                        store.segments.remove(&k);
-                        let frames: Vec<i64> = store
-                            .frames
-                            .range(d.first..=d.last)
-                            .map(|(f, _)| *f)
-                            .collect();
-                        doomed.extend(frames.iter().filter_map(|f| store.frames.remove(f)));
-                    }
+                    let doomed = store.evict_except(&keep);
                     self.stats
                         .cached_segments
                         .store(store.segments.len() as u64, Ordering::Relaxed);
-                }
+                    doomed
+                };
                 drop(doomed);
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -871,6 +886,30 @@ mod tests {
         );
         assert_eq!(store.size_of(&seg(0)), 70);
         assert_eq!(store.size_of(&seg(1)), 100);
+    }
+
+    #[test]
+    fn evicting_a_segment_keeps_the_frames_of_one_that_overlaps_it() {
+        gst::init().unwrap();
+        let mut store = FrameStore::default();
+        // Segment 0 holds frames 0..=9, segment 5 (overlapping) 5..=14.
+        for f in 0..15 {
+            store.frames.insert(f, gst::Buffer::new());
+        }
+        let span = |first, last| DecodedSegment {
+            first,
+            last,
+            bytes: 0,
+        };
+        store.segments.insert(0, span(0, 9));
+        store.segments.insert(5, span(5, 14));
+        let doomed = store.evict_except(&HashSet::from([5]));
+        assert_eq!(doomed.len(), 5);
+        assert_eq!(
+            store.frames.keys().copied().collect::<Vec<_>>(),
+            (5..15).collect::<Vec<_>>()
+        );
+        assert!(store.segments.contains_key(&5) && !store.segments.contains_key(&0));
     }
 
     #[test]

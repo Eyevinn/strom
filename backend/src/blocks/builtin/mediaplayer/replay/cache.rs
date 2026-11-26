@@ -13,6 +13,7 @@
 //! yet, and the tick repeats its last frame.
 
 use super::backoff::{worth_warning, Backoff};
+use super::decode::check_supported;
 use super::source::{Segment, SourceIndex, SourceInfo};
 use super::timeline::{IndexView, PlayerStats, ReplayTimeline, TimeDomain};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -38,6 +39,15 @@ const FETCH_RETRY_MAX: Duration = Duration::from_secs(30);
 /// A failed fetch re-lists its chunk (URLs may have expired), but not more
 /// often than this.
 const RELIST_MIN: Duration = Duration::from_secs(5);
+/// Default budget for one player's coded bytes. `STROM_REPLAY_CODED_MB`
+/// overrides it. The window ahead can be up to two minutes (`read_ahead_s`),
+/// over 1 GB at 50 Mbit/s with the window behind.
+const DEFAULT_CODED_BUDGET_MB: u64 = 512;
+/// Segments kept fetched whatever the budget: the most urgent ones.
+const MIN_CODED_SEGMENTS: usize = 2;
+/// Wait before polling the live edge again after a failed poll: the segment
+/// cadence doubling per consecutive failure, up to this.
+const LIVE_POLL_RETRY_MAX: Duration = Duration::from_secs(5);
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -128,6 +138,16 @@ const INDEX_VIEW_EVERY: Duration = Duration::from_millis(500);
 /// registered late (after a later one). A hole younger than this is listed
 /// again on each poll and is not reported as a gap yet.
 const LIVE_BACKFILL_NS: i64 = 10 * S;
+/// Less often, a live poll looks this far back, for segments registered
+/// later still (an uploader that parked them during an outage). A hole older
+/// than this fills when its chunk is listed again (after the cursor has been
+/// away and come back).
+const LATE_BACKFILL_NS: i64 = 60 * S;
+const LATE_BACKFILL_EVERY: Duration = Duration::from_secs(10);
+/// Coverage intervals kept before the far ones are forgotten.
+const MAX_COVERAGE_INTERVALS: usize = 2048;
+/// What a pruning keeps around the cursor and the live edge.
+const COVERAGE_KEEP_NS: i64 = 900 * S;
 /// Segments one live poll takes at most. When there are more (the index fell
 /// far behind), the index jumps to the edge and the stretch in between is
 /// listed by chunk when the cursor gets there.
@@ -203,6 +223,33 @@ impl Coverage {
 
     pub fn add_media(&mut self, s: i64, e: i64, tol: i64) {
         insert_interval(&mut self.media, s, e, tol);
+    }
+
+    /// Intervals held, listed and media.
+    pub fn intervals(&self) -> usize {
+        self.listed.len() + self.media.len()
+    }
+
+    /// Forget all outside `keep`: listed and media are both cut to it, so a
+    /// hole is never reported where media was forgotten but its listing
+    /// kept.
+    pub fn retain_within(&mut self, keep: &[(i64, i64)]) {
+        let mut k = Vec::new();
+        for &(s, e) in keep {
+            insert_interval(&mut k, s, e, 0);
+        }
+        let cut = |v: &[(i64, i64)]| -> Vec<(i64, i64)> {
+            v.iter()
+                .flat_map(|&(s, e)| {
+                    k.iter().filter_map(move |&(ks, ke)| {
+                        let (a, b) = (s.max(ks), e.min(ke));
+                        (b > a).then_some((a, b))
+                    })
+                })
+                .collect()
+        };
+        self.listed = cut(&self.listed);
+        self.media = cut(&self.media);
     }
 
     /// Where a live poll starts: the first point of `[floor, end)` that no
@@ -312,6 +359,28 @@ pub fn by_urgency(segs: &[Arc<Segment>], cursor: i64, forward: bool) -> Vec<Arc<
     v
 }
 
+/// The most urgent of `order` (ordered by urgency) whose bytes fit in
+/// `budget`, counting `size_of` each. The first `min_keep` always fit. Stops
+/// at the first that does not, so what is kept is never less urgent than
+/// what is left out.
+fn within_budget(
+    order: &[Arc<Segment>],
+    size_of: impl Fn(&Segment) -> u64,
+    budget: u64,
+    min_keep: usize,
+) -> Vec<Arc<Segment>> {
+    let mut total = 0u64;
+    let mut out = Vec::new();
+    for (i, s) in order.iter().enumerate() {
+        total = total.saturating_add(size_of(s));
+        if i >= min_keep && total > budget {
+            break;
+        }
+        out.push(Arc::clone(s));
+    }
+    out
+}
+
 /// Which index chunks have been listed. A chunk at the live edge gets new
 /// segments from the live poll; it is listed again (dirty) only when a fetch
 /// failed (expired URLs).
@@ -336,6 +405,13 @@ impl ChunkState {
     }
 }
 
+/// Wait after the `failures`-th consecutive failed live poll.
+fn live_poll_retry(seg_ns: i64, failures: u32) -> Duration {
+    Duration::from_nanos(seg_ns.max(0) as u64)
+        .saturating_mul(1 << failures.min(16))
+        .min(LIVE_POLL_RETRY_MAX)
+}
+
 fn chunk_of(tai: i64) -> i64 {
     tai.div_euclid(CHUNK_NS)
 }
@@ -348,6 +424,8 @@ pub struct Fetcher {
     block_id: String,
     ahead_ns: i64,
     behind_ns: i64,
+    /// Most coded bytes to hold.
+    coded_budget: u64,
 }
 
 impl Fetcher {
@@ -367,6 +445,11 @@ impl Fetcher {
             block_id: block_id.to_string(),
             ahead_ns,
             behind_ns: (ahead_ns / 2).max(2 * S),
+            coded_budget: strom_types::env::var_opt("STROM_REPLAY_CODED_MB")
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|mb| *mb > 0)
+                .unwrap_or(DEFAULT_CODED_BUDGET_MB)
+                .saturating_mul(1 << 20),
         }
     }
 
@@ -417,14 +500,28 @@ impl Fetcher {
                 anyhow::Ok((info, first, last))
             }
             .await;
+            // A source replay cannot decode is one clear error, not a decode
+            // failure per segment and a picture that never comes.
+            if let Ok((info, _, _)) = &r {
+                if let Err(e) = check_supported(info.container.as_deref(), info.codec.as_deref()) {
+                    warn!(
+                        "Replay {}: {} cannot be played: {}; nothing is fetched or shown",
+                        self.block_id,
+                        self.source.describe(),
+                        e
+                    );
+                    return None;
+                }
+            }
             match r {
                 Ok((info, Some(first), Some(last))) => {
                     info!(
-                        "Replay {}: {} frame rate {:?}, container {:?}",
+                        "Replay {}: {} frame rate {:?}, container {:?}, codec {:?}",
                         self.block_id,
                         self.source.describe(),
                         info.frame_rate,
-                        info.container
+                        info.container,
+                        info.codec
                     );
                     if let Some((n, d)) = info.frame_rate {
                         self.stats.init_grid(n, d, first.start_ns);
@@ -475,7 +572,12 @@ impl Fetcher {
         let mut tasks: HashMap<tokio::task::Id, Arc<Segment>> = HashMap::new();
         let mut next_poll = Instant::now() + Duration::from_nanos(seg_ns as u64);
         let mut next_first = Instant::now() + Duration::from_secs(30);
+        let mut next_late = Instant::now() + LATE_BACKFILL_EVERY;
+        let mut poll_failures: u32 = 0;
         let mut next_view = Instant::now();
+        // Coded bytes per second of media, from the latest fetch: the size
+        // estimate of a segment not fetched yet.
+        let mut bytes_per_s = 0f64;
 
         while !stop.load(Ordering::Relaxed) {
             // Where the group is, or this angle's start before it knows.
@@ -498,16 +600,38 @@ impl Fetcher {
             // Live edge, at segment cadence.
             if self.source.may_grow() && Instant::now() >= next_poll {
                 next_poll = Instant::now() + Duration::from_nanos(seg_ns as u64);
-                match self.poll_live(end, &mut coverage).await {
-                    Ok(Some((new_end, new_seg_ns))) => {
-                        seg_ns = new_seg_ns;
-                        if new_end > end {
-                            end = new_end;
-                            self.publish_extent(start, end);
+                let backfill = if Instant::now() >= next_late {
+                    next_late = Instant::now() + LATE_BACKFILL_EVERY;
+                    LATE_BACKFILL_NS
+                } else {
+                    LIVE_BACKFILL_NS
+                };
+                match self.poll_live(end, backfill, &mut coverage).await {
+                    Ok(r) => {
+                        poll_failures = 0;
+                        if let Some((new_end, new_seg_ns)) = r {
+                            seg_ns = new_seg_ns;
+                            if new_end > end {
+                                end = new_end;
+                                self.publish_extent(start, end);
+                            }
                         }
                     }
-                    Ok(None) => {}
-                    Err(e) => debug!("Replay {}: live poll failed: {:#}", self.block_id, e),
+                    Err(e) => {
+                        poll_failures = poll_failures.saturating_add(1);
+                        if worth_warning(poll_failures) {
+                            warn!(
+                                "Replay {}: live poll failed (attempt {}): {:#}",
+                                self.block_id, poll_failures, e
+                            );
+                        } else {
+                            debug!(
+                                "Replay {}: live poll failed (attempt {}): {:#}",
+                                self.block_id, poll_failures, e
+                            );
+                        }
+                        next_poll = Instant::now() + live_poll_retry(seg_ns, poll_failures);
+                    }
                 }
                 if Instant::now() >= next_first {
                     next_first = Instant::now() + Duration::from_secs(30);
@@ -564,10 +688,22 @@ impl Fetcher {
             let hold_key = hold.as_ref().map(|h| h.seg.start_ns);
             *lock(&self.store.hold) = hold.clone();
 
-            // Fetch bytes, most urgent first.
+            // Fetch bytes, most urgent first, as far as the budget goes.
             let window = self.store.segments_in(lo, hi);
-            let held = hold.map(|h| h.seg);
-            for seg in held.into_iter().chain(by_urgency(&window, cursor, forward)) {
+            let mut order: Vec<Arc<Segment>> = hold.map(|h| h.seg).into_iter().collect();
+            order.extend(
+                by_urgency(&window, cursor, forward)
+                    .into_iter()
+                    .filter(|s| Some(s.start_ns) != hold_key),
+            );
+            let coded_size = |s: &Segment| -> u64 {
+                lock(&self.store.bytes).get(&s.start_ns).map_or(
+                    (bytes_per_s * s.duration_ns() as f64 / 1e9) as u64,
+                    |(_, b)| b.len() as u64,
+                )
+            };
+            let allowed = within_budget(&order, coded_size, self.coded_budget, MIN_CODED_SEGMENTS);
+            for seg in allowed {
                 if inflight.len() >= MAX_INFLIGHT {
                     break;
                 }
@@ -612,6 +748,10 @@ impl Fetcher {
                                     .last_fetch_ms
                                     .store(took.as_millis() as u64, Ordering::Relaxed);
                                 failed.succeed(&seg.start_ns);
+                                if seg.duration_ns() > 0 {
+                                    bytes_per_s =
+                                        bytes.len() as f64 * 1e9 / seg.duration_ns() as f64;
+                                }
                                 lock(&self.store.bytes)
                                     .insert(seg.start_ns, (seg.end_ns, Arc::new(bytes)));
                             }
@@ -645,13 +785,36 @@ impl Fetcher {
             // the window plus a margin. By overlap, not by start: a long
             // segment holding the cursor started long before the window.
             let margin = seg_ns;
-            lock(&self.store.bytes).retain(|start, (end, _)| {
-                (*end > lo - margin && *start < hi + margin) || Some(*start) == hold_key
-            });
+            {
+                let mut bytes = lock(&self.store.bytes);
+                bytes.retain(|start, (end, _)| {
+                    (*end > lo - margin && *start < hi + margin) || Some(*start) == hold_key
+                });
+                // Over the byte budget: keep the most urgent that fit, the
+                // same ones the fetch above stops at.
+                let total: u64 = bytes.values().map(|(_, b)| b.len() as u64).sum();
+                if total > self.coded_budget {
+                    let size =
+                        |s: &Segment| bytes.get(&s.start_ns).map_or(0, |(_, b)| b.len() as u64);
+                    let fit: HashSet<i64> =
+                        within_budget(&order, size, self.coded_budget, MIN_CODED_SEGMENTS)
+                            .iter()
+                            .map(|s| s.start_ns)
+                            .collect();
+                    bytes.retain(|start, _| fit.contains(start) || Some(*start) == hold_key);
+                }
+            }
             let cc = chunk_of(cursor);
             let keep = |c: i64| (c - cc).abs() <= KEEP_CHUNKS;
             chunks.listed.retain(|c| keep(*c));
+            chunks.dirty.retain(|c| keep(*c));
             chunks.listed_at.retain(|c, _| keep(*c));
+            if coverage.intervals() > MAX_COVERAGE_INTERVALS {
+                coverage.retain_within(&[
+                    (cursor - COVERAGE_KEEP_NS, cursor + COVERAGE_KEEP_NS),
+                    (end - COVERAGE_KEEP_NS, end),
+                ]);
+            }
             list_failed.retain(|c| keep(*c));
             let near: HashSet<i64> = self
                 .store
@@ -686,16 +849,17 @@ impl Fetcher {
     }
 
     /// Poll the live edge: list every segment since the edge `end` the
-    /// index knows, from the first hole in the [`LIVE_BACKFILL_NS`] before it
+    /// index knows, from the first hole in the `backfill_ns` before it
     /// (a segment registered after a later one fills it on a later poll),
     /// and merge them into the index. Returns the new end and segment
     /// length, `None` when the source has nothing new.
     async fn poll_live(
         &self,
         end: i64,
+        backfill_ns: i64,
         coverage: &mut Coverage,
     ) -> anyhow::Result<Option<(i64, i64)>> {
-        let from = coverage.first_uncovered(end - LIVE_BACKFILL_NS, end);
+        let from = coverage.first_uncovered(end - backfill_ns, end);
         let since = self.source.since(from, LIVE_POLL_MAX).await?;
         let tol = self.tolerance();
         let mut new_end = end;
@@ -801,6 +965,42 @@ mod tests {
             object_id: i.to_string(),
             location: Location::Urls(vec![]),
         })
+    }
+
+    #[test]
+    fn coded_budget_keeps_the_most_urgent() {
+        let segs: Vec<_> = (0..6).map(seg).collect();
+        let kept = |budget| within_budget(&segs, |_| 10, budget, MIN_CODED_SEGMENTS).len();
+        assert_eq!(kept(35), 3);
+        assert_eq!(kept(5), MIN_CODED_SEGMENTS);
+        assert_eq!(kept(1000), 6);
+    }
+
+    #[test]
+    fn coverage_pruning_cuts_listed_and_media_alike() {
+        let mut c = Coverage::default();
+        c.add_listed(0, 100 * S);
+        for i in 0..10 {
+            // Media with a 1 s hole after each 9 s.
+            c.add_media(i * 10 * S, (i * 10 + 9) * S, 0);
+        }
+        assert_eq!(c.intervals(), 11);
+        c.retain_within(&[(42 * S, 61 * S), (55 * S, 70 * S)]);
+        assert_eq!(c.listed, vec![(42 * S, 70 * S)]);
+        assert_eq!(
+            c.media,
+            vec![(42 * S, 49 * S), (50 * S, 59 * S), (60 * S, 69 * S)]
+        );
+        // The holes within are still holes, nothing outside is one.
+        let gaps = c.view((0, 100 * S), 1).gaps;
+        assert_eq!(gaps, vec![(49 * S, 50 * S), (59 * S, 60 * S)]);
+    }
+
+    #[test]
+    fn live_poll_retry_grows_to_its_cap() {
+        assert_eq!(live_poll_retry(S, 1), Duration::from_secs(2));
+        assert_eq!(live_poll_retry(S, 2), Duration::from_secs(4));
+        assert_eq!(live_poll_retry(S, 40), LIVE_POLL_RETRY_MAX);
     }
 
     #[test]
@@ -918,6 +1118,7 @@ mod tests {
             Ok(SourceInfo {
                 frame_rate: Some((25, 1)),
                 container: None,
+                codec: None,
                 absolute_time: true,
             })
         }

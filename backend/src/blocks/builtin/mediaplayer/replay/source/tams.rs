@@ -30,12 +30,14 @@ impl TamsIndex {
         })
     }
 
-    async fn query(&self, q: SegmentQuery, max_pages: usize) -> Result<Vec<Segment>> {
-        let listed = self
+    /// The segments of the first `max_pages` pages of a listing, and whether
+    /// the store has more.
+    async fn query(&self, q: SegmentQuery, max_pages: usize) -> Result<(Vec<Segment>, bool)> {
+        let (listed, more) = self
             .client
-            .list_segments(&self.flow_id, &q, max_pages)
+            .list_segments_paged(&self.flow_id, &q, max_pages)
             .await?;
-        Ok(listed.iter().filter_map(to_segment).collect())
+        Ok((listed.iter().filter_map(to_segment).collect(), more))
     }
 }
 
@@ -95,13 +97,17 @@ impl SourceIndex for TamsIndex {
         Ok(SourceInfo {
             frame_rate,
             container: flow["container"].as_str().map(str::to_string),
+            codec: flow["codec"].as_str().map(str::to_string),
             // TAMS timeranges are TAI by definition.
             absolute_time: true,
         })
     }
 
+    /// Every page of the window. A listing cut off at [`MAX_PAGES`] is an
+    /// error, not a partial result: the caller takes a listing as the whole
+    /// truth about the window, and the missing rest would show as holes.
     async fn list(&self, start_ns: i64, end_ns: i64) -> Result<Vec<Segment>> {
-        let mut segs = self
+        let (mut segs, more) = self
             .query(
                 SegmentQuery {
                     timerange: Some(timerange(start_ns, end_ns)),
@@ -111,6 +117,13 @@ impl SourceIndex for TamsIndex {
                 MAX_PAGES,
             )
             .await?;
+        if more {
+            return Err(anyhow!(
+                "listing of {} has more than {} pages",
+                timerange(start_ns, end_ns),
+                MAX_PAGES
+            ));
+        }
         segs.sort_by_key(|s| s.start_ns);
         Ok(segs)
     }
@@ -121,7 +134,7 @@ impl SourceIndex for TamsIndex {
             limit: Some(1),
             reverse_order: false,
         };
-        Ok(self.query(q, 1).await?.into_iter().next())
+        Ok(self.query(q, 1).await?.0.into_iter().next())
     }
 
     async fn last(&self) -> Result<Option<Segment>> {
@@ -130,7 +143,7 @@ impl SourceIndex for TamsIndex {
             limit: Some(1),
             reverse_order: true,
         };
-        Ok(self.query(q, 1).await?.into_iter().next())
+        Ok(self.query(q, 1).await?.0.into_iter().next())
     }
 
     /// `GET /segments?timerange=[from_` in time order, a page at a time.

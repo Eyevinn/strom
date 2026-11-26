@@ -97,6 +97,8 @@ pub struct SourceInfo {
     pub frame_rate: Option<(u32, u32)>,
     /// Container MIME type, e.g. `video/mp2t`.
     pub container: Option<String>,
+    /// Codec MIME type, e.g. `video/h264`, when the source says.
+    pub codec: Option<String>,
     /// Whether the index times are real TAI (a clock on the wall), so they
     /// convert to UTC. False for material on an arbitrary TAI base.
     pub absolute_time: bool,
