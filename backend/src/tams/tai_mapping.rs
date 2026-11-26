@@ -25,13 +25,21 @@
 //! accuracy should run the pipeline on a TAI, PTP or Realtime clock, which map
 //! by a fixed offset, or carry reference timestamps.
 //!
-//! The one exception is a jump: when `clock_time + offset` and host TAI disagree
-//! by more than [`REANCHOR_THRESHOLD_NS`], the offset is re-sampled. On macOS the
-//! monotonic clock stops while the machine sleeps, so without this every segment
-//! after a wake was stamped as far in the past as the sleep lasted. The new offset
-//! is stored in the shared entry with a new [`PipelineTaiMapping::epoch`], so every
-//! block of the pipeline re-anchors on the same offset and the angles stay
-//! aligned. The threshold is well above what clock drift adds up to in a day.
+//! The one exception is a jump: when the gap between `clock_time + offset` and
+//! host TAI changes by more than [`REANCHOR_THRESHOLD_NS`] from one check to the
+//! next, the offset is re-sampled. On macOS the monotonic clock stops while the
+//! machine sleeps, so without this every segment after a wake was stamped as far
+//! in the past as the sleep lasted. The new offset is stored in the shared entry
+//! with a new [`PipelineTaiMapping::epoch`], so every block of the pipeline
+//! re-anchors on the same offset and the angles stay aligned.
+//!
+//! Drift is kept apart from jumps. The check compares the gap with the gap at
+//! the previous check (every fragment), not with zero, so drift that adds up
+//! slowly never re-anchors: at 50 ppm it reaches the 5 s threshold after about
+//! 28 h, and re-anchoring then would cut a 5 s hole in the store, or put angles
+//! 5 s apart. The allowance grows by [`MAX_DRIFT_PPM`] of the time between two
+//! checks, so a long gap between checks is not taken for a jump either. The
+//! accumulated drift is logged for each whole second it grows.
 //!
 //! A buffer that carries a capture time as a `GstReferenceTimestampMeta`
 //! (`timestamp/x-tai`, `x-ptp`, `x-unix` or `x-ntp`) takes precedence: the block
@@ -60,7 +68,15 @@ const UNSET_OFFSET_THRESHOLD_NS: u64 = 1_000_000_000;
 /// How far an [`ClockDomain::Other`] mapping may stray from host TAI before it is
 /// re-sampled (the pipeline clock stopped during a sleep, or the wall clock was
 /// stepped).
+///
+/// Compared with how much the gap changed since the previous check, not with
+/// the gap itself, so drift does not count (see the module docs).
 pub const REANCHOR_THRESHOLD_NS: u64 = 5_000_000_000;
+
+/// Largest drift of a pipeline clock against host TAI taken as drift, in parts
+/// per million of the time between two checks. Crystal oscillators are
+/// specified to 50-100 ppm.
+pub const MAX_DRIFT_PPM: u128 = 100;
 
 /// Which timescale a pipeline clock runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +240,19 @@ struct RegistryEntry {
     base_time_ns: u64,
     clock: gst::glib::WeakRef<gst::Clock>,
     mapping: PipelineTaiMapping,
+    /// Host TAI and the gap (host TAI minus mapped clock time) at the last
+    /// check of an [`ClockDomain::Other`] mapping.
+    last_check: (u64, i128),
+    /// Whole seconds of drift already logged.
+    drift_logged_s: u128,
+}
+
+/// Whether the gap between mapped clock time and host TAI moved by more than
+/// drift explains since the last check: `gap` now, `last_gap` at the last
+/// check, `since_ns` of host TAI between the two.
+fn is_jump(gap: i128, last_gap: i128, since_ns: u64) -> bool {
+    let allowed = REANCHOR_THRESHOLD_NS as u128 + since_ns as u128 * MAX_DRIFT_PPM / 1_000_000;
+    (gap - last_gap).unsigned_abs() > allowed
 }
 
 static REGISTRY: LazyLock<Mutex<HashMap<FlowId, RegistryEntry>>> =
@@ -265,20 +294,34 @@ fn shared_pipeline_mapping_with(
         if entry.base_time_ns == base_time_ns && same_clock {
             if entry.mapping.domain == ClockDomain::Other {
                 let (clock_ns, tai_ns) = sample();
-                let mapped = clock_ns + entry.mapping.offset_ns;
-                let jump_ns = tai_ns as i128 - mapped;
-                if jump_ns.unsigned_abs() > REANCHOR_THRESHOLD_NS as u128 {
+                let gap = tai_ns as i128 - (clock_ns + entry.mapping.offset_ns);
+                let (last_tai, last_gap) = entry.last_check;
+                if is_jump(gap, last_gap, tai_ns.saturating_sub(last_tai)) {
                     entry.mapping.offset_ns = tai_ns as i128 - clock_ns;
                     entry.mapping.epoch = entry.mapping.epoch.wrapping_add(1);
+                    entry.last_check = (tai_ns, 0);
+                    entry.drift_logged_s = 0;
                     warn!(
                         "TAMS: flow {} pipeline clock and host TAI moved {} ms apart (sleep \
                          or clock step): running time -> TAI re-anchored, offset {} ns \
                          (epoch {})",
                         flow_id,
-                        jump_ns / 1_000_000,
+                        (gap - last_gap) / 1_000_000,
                         entry.mapping.offset_ns,
                         entry.mapping.epoch
                     );
+                } else {
+                    entry.last_check = (tai_ns, gap);
+                    let drift_s = gap.unsigned_abs() / 1_000_000_000;
+                    if drift_s > entry.drift_logged_s {
+                        entry.drift_logged_s = drift_s;
+                        info!(
+                            "TAMS: flow {} pipeline clock has drifted {} ms from host TAI \
+                             since it was anchored; segments follow the pipeline clock",
+                            flow_id,
+                            gap / 1_000_000
+                        );
+                    }
                 }
             }
             return entry.mapping;
@@ -309,6 +352,8 @@ fn shared_pipeline_mapping_with(
             base_time_ns,
             clock: clock.downgrade(),
             mapping,
+            last_check: (tai.now_ns(), 0),
+            drift_logged_s: 0,
         },
     );
     mapping
@@ -717,6 +762,41 @@ mod tests {
         // The re-sampled mapping holds: later calls (by any block) get the same.
         let d = shared_pipeline_mapping_with(flow, &clock, 1_000, &tai, || read(H16));
         assert_eq!(c, d);
+    }
+
+    /// Drift that adds up past the threshold, a little at each check, does not
+    /// re-anchor (review: after about 28 h at 50 ppm it cut a 5 s hole); a
+    /// sudden step of the same size still does.
+    #[test]
+    fn slow_drift_does_not_reanchor() {
+        gst::init().unwrap();
+        const S: u64 = 1_000_000_000;
+        let tai = HostTai::new();
+        let clock = system_clock(gst::ClockType::Monotonic);
+        let flow = uuid::Uuid::new_v4();
+        let a = shared_pipeline_mapping(flow, &clock, 1_000, &tai);
+        let read = |extra: u64| {
+            let (c, t) = sample_other(&clock, &tai);
+            (c, t + extra)
+        };
+        // 8 s of drift in steps of half a second.
+        for step in 1..=16u64 {
+            let m = shared_pipeline_mapping_with(flow, &clock, 1_000, &tai, || read(step * S / 2));
+            assert_eq!(m, a, "drift of {} ms re-anchored", step * 500);
+        }
+        // A 6 s step on top of that is a jump.
+        let b = shared_pipeline_mapping_with(flow, &clock, 1_000, &tai, || read(14 * S));
+        assert_eq!(b.epoch, 1);
+    }
+
+    #[test]
+    fn drift_allowance_grows_with_time_between_checks() {
+        const S: u64 = 1_000_000_000;
+        assert!(!is_jump(4 * S as i128, 0, 0));
+        assert!(is_jump(6 * S as i128, 0, 0));
+        // 6 s over 28 h without a check is within 5 s + 100 ppm (10 s).
+        assert!(!is_jump(6 * S as i128, 0, 28 * 3600 * S));
+        assert!(is_jump(-16 * S as i128, 0, 28 * 3600 * S));
     }
 
     /// After the shared mapping jumps, every block re-anchors on the new offset,
