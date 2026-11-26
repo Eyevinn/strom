@@ -808,13 +808,20 @@ function computeWindow(now) {
     const a = S.start != null ? S.start : lv - 30e9;
     return [a, Math.max(lv + (live.grow ? LIVE_HEADROOM : 0), a + 5e9)];
   }
+  // The right edge is the live edge (plus headroom while it grows; a finished
+  // recording ends at its last frame). Near live the playhead sits in the
+  // right half; further behind it stays in the middle and the window follows
+  // it, with live drawn as a marker beyond the scale. Both cases meet where
+  // the playhead is half a window from the edge, so the window never jumps.
   const z = zoom * 1e9;
-  let b = lv + (live.grow ? LIVE_HEADROOM : 0), a = b - z;
-  // Follow the playhead when it is behind the window.
+  const edge = lv + (live.grow ? LIVE_HEADROOM : 0);
   const p = playheadNow();
-  if (p != null && p < a + 0.03 * z) { a = p - 0.15 * z; b = a + z; }
-  return [a, b];
+  if (p != null && edge - p > z / 2) return [p - z / 2, p + z / 2];
+  return [edge - z, edge];
 }
+// Live beyond the window's right edge: a tab at the edge, click to go live.
+let liveTab = null;                     // x where the tab starts, css px
+const farOf = ns => { const s = Math.round(ns / 1e9); return s >= 60 ? `${Math.floor(s / 60)}:${pad(s % 60)}` : `${s} s`; };
 const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
 function drawTimeline() {
   const now = performance.now();
@@ -882,10 +889,16 @@ function drawTimeline() {
     g.fillText(String(m.n), xx + 3, 26);
   }
   // Live edge.
+  liveTab = null;
   if (S.live != null && S.live <= b) { g.fillStyle = '#e5484d'; g.fillRect(Math.min(W - 3, x(S.live) - 1), 0, 3, H); }
   else if (S.live != null) {
-    g.fillStyle = '#e5484d'; g.font = 'bold 11px ui-monospace, monospace';
-    g.fillText(`LIVE ${deltaOf((S.live - b) / 1e6)} ▶`, W - 120, H - 18);
+    const label = `LIVE +${farOf(S.live - b)} →`;
+    g.font = 'bold 11px ui-monospace, monospace';
+    const tw = Math.ceil(g.measureText(label).width) + 14, x0 = W - tw;
+    g.fillStyle = 'rgba(229,72,77,0.18)'; g.fillRect(x0, 0, tw, H);
+    g.fillStyle = '#e5484d'; g.fillRect(W - 3, 0, 3, H); g.fillRect(x0, 0, 1, H);
+    g.fillText(label, x0 + 6, H / 2 + 4);
+    liveTab = x0;
   }
   // Playhead.
   if (ph != null && ph >= a && ph <= b) {
@@ -936,6 +949,7 @@ function clipAt(ev) {
 }
 cv.addEventListener('pointerdown', ev => {
   if (!win || !S) return;
+  if (liveTab != null && ev.clientX - cv.getBoundingClientRect().left >= liveTab) { goLive(); return; }
   const c = clipAt(ev);
   if (c) { cueClip(c, false); return; }
   cv.setPointerCapture(ev.pointerId);
@@ -952,7 +966,9 @@ cv.addEventListener('pointermove', ev => {
   if (t != null && S) {
     const c = clipAt(ev);
     const m = marks.find(m => Math.abs(x2(tOf(m)) - hoverX) < 4);
-    tip.textContent = c ? `${c.name} · click to cue` : m ? `${m.name} · ${tcOf(m)}` : `${clockOf(t, true)}  ${S.live != null ? deltaOf((S.live - t) / 1e6) : ''}`;
+    const onTab = liveTab != null && hoverX >= liveTab;
+    cv.style.cursor = onTab ? 'pointer' : '';
+    tip.textContent = onTab ? `Live is ${farOf(S.live - win[1])} past the scale · click to go live` : c ? `${c.name} · click to cue` : m ? `${m.name} · ${tcOf(m)}` : `${clockOf(t, true)}  ${S.live != null ? deltaOf((S.live - t) / 1e6) : ''}`;
     tip.style.left = Math.max(60, Math.min(r.width - 60, hoverX)) + 'px'; tip.style.display = 'block';
   }
   if (dragging) { scrubWant = clampMedia(t); pumpScrub(); }
