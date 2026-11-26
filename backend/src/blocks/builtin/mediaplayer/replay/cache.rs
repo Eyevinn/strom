@@ -6,7 +6,10 @@
 //!   plus, when the source can grow, a live poll at segment cadence of the
 //!   newest segments back to the edge the index knows (a newest-first page,
 //!   no time filter), and now and then a bounded listing of a hole just
-//!   behind the edge, for segments registered late;
+//!   behind the edge, for segments registered late; these requests run as
+//!   tasks of their own, off the fetch loop. A listed chunk near the cursor
+//!   that still has a hole is listed again with backoff, so media registered
+//!   long after (or a stretch a poll that fell behind skipped) is found;
 //! - the coded bytes of the segments within `[T - behind, T + ahead]`, fetched
 //!   nearest first in the direction of travel, a few at a time.
 //!
@@ -16,13 +19,13 @@
 
 use super::backoff::{worth_warning, Backoff};
 use super::decode::check_supported;
-use super::source::{Segment, SourceIndex, SourceInfo};
+use super::source::{Segment, Since, SourceIndex, SourceInfo};
 use super::timeline::{IndexView, PlayerStats, ReplayTimeline, TimeDomain};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::task::JoinSet;
+use tokio::task::{JoinError, JoinHandle, JoinSet};
 use tracing::{debug, info, warn};
 
 const S: i64 = 1_000_000_000;
@@ -141,14 +144,24 @@ const INDEX_VIEW_EVERY: Duration = Duration::from_millis(500);
 const LIVE_BACKFILL_NS: i64 = 10 * S;
 /// How far behind the live edge a hole is listed again for segments
 /// registered late (an uploader that parked them during an outage). A hole
-/// older than this fills when its chunk is listed again (after the cursor has
-/// been away and come back).
+/// older than this fills when the cursor comes near it: a listed chunk with
+/// a hole is listed again (see [`CHUNK_RELIST`]).
 const LATE_BACKFILL_NS: i64 = 60 * S;
 /// Wait between listings of the same hole behind the live edge: doubling
 /// from the first to the max. The newest-first page of each poll covers the
 /// last few segments anyway, so this is for older holes only.
 const HOLE_RETRY: Duration = Duration::from_secs(1);
 const HOLE_RETRY_MAX: Duration = Duration::from_secs(10);
+/// Wait before a listed chunk near the cursor that has a hole (media
+/// registered late, or a stretch a live poll skipped) is listed again, from
+/// its last listing: doubling per listing that leaves the hole, up to the
+/// max. Only for a source that grows; one bounded listing by time each.
+const CHUNK_RELIST: Duration = Duration::from_secs(1);
+const CHUNK_RELIST_MAX: Duration = Duration::from_secs(30);
+/// Weight of the coded bytes already seen in the bitrate estimate, per
+/// second of media fetched since: the estimate follows the bitrate over tens
+/// of seconds, not the size of the last segment.
+const BITRATE_DECAY_PER_S: f64 = 0.95;
 /// Coverage intervals kept before the far ones are forgotten.
 const MAX_COVERAGE_INTERVALS: usize = 2048;
 /// What a pruning keeps around the cursor and the live edge.
@@ -272,6 +285,12 @@ impl Coverage {
             .collect()
     }
 
+    /// Whether media leaves any of `[a, b)` uncovered (seams within the
+    /// tolerance count as covered). An empty stretch has no hole.
+    pub fn has_hole(&self, a: i64, b: i64) -> bool {
+        b > a && !self.media.iter().any(|&(s, e)| s <= a && b <= e)
+    }
+
     /// The listed stretch that holds `[a, b]`.
     fn listed_around(&self, a: i64, b: i64) -> Option<(i64, i64)> {
         self.listed.iter().copied().find(|&(s, e)| s <= a && b <= e)
@@ -386,17 +405,42 @@ fn within_budget(
 }
 
 /// Which index chunks have been listed. A chunk at the live edge gets new
-/// segments from the live poll; it is listed again (dirty) only when a fetch
-/// failed (expired URLs).
+/// segments from the live poll; it is listed again (dirty) when a fetch
+/// failed (expired URLs), and, for a source that grows, while it has a hole
+/// (see [`ChunkState::relist_due`]).
 #[derive(Default)]
 struct ChunkState {
     listed: HashSet<i64>,
     dirty: HashSet<i64>,
     /// When each chunk was last listed successfully.
     listed_at: HashMap<i64, Instant>,
+    /// Listings in a row that left a hole in the chunk.
+    holed: HashMap<i64, u32>,
 }
 
 impl ChunkState {
+    /// Whether listed chunk `c`, which has a hole, is due to be listed again:
+    /// [`CHUNK_RELIST`] after its last listing, doubling per listing that
+    /// left the hole.
+    fn relist_due(&self, c: i64, now: Instant) -> bool {
+        let n = self.holed.get(&c).copied().unwrap_or(0);
+        let wait = CHUNK_RELIST
+            .saturating_mul(1 << n.saturating_sub(1).min(16))
+            .min(CHUNK_RELIST_MAX);
+        self.listed_at
+            .get(&c)
+            .is_none_or(|t| now.duration_since(*t) >= wait)
+    }
+
+    /// Note whether the listing of `c` just done left a hole in it.
+    fn note_hole(&mut self, c: i64, hole: bool) {
+        if hole {
+            *self.holed.entry(c).or_insert(0) += 1;
+        } else {
+            self.holed.remove(&c);
+        }
+    }
+
     /// List `c` again after a failed fetch, unless it was listed recently.
     fn relist_after_fetch_error(&mut self, c: i64, now: Instant) {
         if self
@@ -414,6 +458,95 @@ fn live_poll_retry(seg_ns: i64, failures: u32) -> Duration {
     Duration::from_nanos(seg_ns.max(0) as u64)
         .saturating_mul(1 << failures.min(16))
         .min(LIVE_POLL_RETRY_MAX)
+}
+
+/// A hole behind the live edge `end` to list by time after a live poll
+/// whose page knew the source from `page_from`: the newest hole older than
+/// the page and within [`LATE_BACKFILL_NS`] of the edge whose backoff
+/// allows. Its key (its start) and the stretch to list, bounded to it.
+fn late_hole(
+    end: i64,
+    page_from: i64,
+    coverage: &Coverage,
+    holes: &mut Backoff<i64>,
+) -> Option<(i64, i64, i64)> {
+    let floor = end - LATE_BACKFILL_NS;
+    let gaps = coverage.gaps_in(floor, page_from);
+    holes.retain(|a| gaps.iter().any(|g| g.0 == *a));
+    let now = Instant::now();
+    let &(key, b) = gaps.iter().rev().find(|g| holes.ready(&g.0, now))?;
+    Some((key, key.max(floor), b.min(page_from)))
+}
+
+/// The interval count above which coverage is pruned next, after a pruning
+/// left `kept`.
+fn next_prune(kept: usize) -> usize {
+    MAX_COVERAGE_INTERVALS.max(kept.saturating_add(MAX_COVERAGE_INTERVALS / 2))
+}
+
+/// Coded bytes per second of media over the recent fetches, each weighted
+/// by its duration and fading with [`BITRATE_DECAY_PER_S`].
+#[derive(Default)]
+struct Bitrate {
+    bytes: f64,
+    secs: f64,
+}
+
+impl Bitrate {
+    fn add(&mut self, bytes: usize, duration_ns: i64) {
+        if duration_ns <= 0 {
+            return;
+        }
+        let secs = duration_ns as f64 / 1e9;
+        let keep = BITRATE_DECAY_PER_S.powf(secs);
+        self.bytes = self.bytes * keep + bytes as f64;
+        self.secs = self.secs * keep + secs;
+    }
+
+    fn bytes_per_s(&self) -> f64 {
+        if self.secs > 0.0 {
+            self.bytes / self.secs
+        } else {
+            0.0
+        }
+    }
+}
+
+/// A request of the fetcher's that runs as a task of its own, at most one at
+/// a time per kind. Aborted when dropped.
+struct Job<T>(Option<JoinHandle<T>>);
+
+impl<T> Default for Job<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<T: Send + 'static> Job<T> {
+    fn is_idle(&self) -> bool {
+        self.0.is_none()
+    }
+
+    fn spawn(&mut self, f: impl std::future::Future<Output = T> + Send + 'static) {
+        self.0 = Some(tokio::spawn(f));
+    }
+
+    /// The result, once the task has finished (then the job is idle again).
+    async fn finished(&mut self) -> Option<Result<T, JoinError>> {
+        if self.0.as_ref().is_some_and(|h| h.is_finished()) {
+            Some(self.0.take()?.await)
+        } else {
+            None
+        }
+    }
+}
+
+impl<T> Drop for Job<T> {
+    fn drop(&mut self) {
+        if let Some(h) = &self.0 {
+            h.abort();
+        }
+    }
 }
 
 fn chunk_of(tai: i64) -> i64 {
@@ -578,10 +711,17 @@ impl Fetcher {
         let mut next_first = Instant::now() + Duration::from_secs(30);
         let mut holes: Backoff<i64> = Backoff::new(HOLE_RETRY, HOLE_RETRY_MAX);
         let mut poll_failures: u32 = 0;
+        // The live poll's requests run as tasks of their own, so a slow
+        // gateway does not hold up the fetches and their collection.
+        let mut poll_job: Job<anyhow::Result<Since>> = Job::default();
+        let mut hole_job: Job<(i64, i64, i64, anyhow::Result<Vec<Segment>>)> = Job::default();
+        let mut first_job: Job<anyhow::Result<Option<Segment>>> = Job::default();
         let mut next_view = Instant::now();
-        // Coded bytes per second of media, from the latest fetch: the size
-        // estimate of a segment not fetched yet.
-        let mut bytes_per_s = 0f64;
+        // Coded bytes per second of media, over the recent fetches: the
+        // size estimate of a segment not fetched yet.
+        let mut bitrate = Bitrate::default();
+        // Coverage is pruned when it holds more intervals than this.
+        let mut prune_above = MAX_COVERAGE_INTERVALS;
 
         while !stop.load(Ordering::Relaxed) {
             // Where the group is, or this angle's start before it knows.
@@ -602,16 +742,26 @@ impl Fetcher {
                 };
 
             // Live edge, at segment cadence.
-            if self.source.may_grow() && Instant::now() >= next_poll {
-                next_poll = Instant::now() + Duration::from_nanos(seg_ns as u64);
-                match self.poll_live(end, &mut coverage, &mut holes).await {
-                    Ok(r) => {
+            if let Some(r) = poll_job.finished().await {
+                match r.map_err(anyhow::Error::from).and_then(|r| r) {
+                    Ok(newest) => {
                         poll_failures = 0;
-                        if let Some((new_end, new_seg_ns)) = r {
+                        if let Some((new_end, new_seg_ns, page_from)) =
+                            self.merge_newest(end, newest, &mut coverage)
+                        {
                             seg_ns = new_seg_ns;
                             if new_end > end {
                                 end = new_end;
                                 self.publish_extent(start, end);
+                            }
+                            if hole_job.is_idle() {
+                                if let Some((key, a, b)) =
+                                    late_hole(end, page_from, &coverage, &mut holes)
+                                {
+                                    let source = Arc::clone(&self.source);
+                                    hole_job
+                                        .spawn(async move { (key, a, b, source.list(a, b).await) });
+                                }
                             }
                         }
                     }
@@ -631,12 +781,27 @@ impl Fetcher {
                         next_poll = Instant::now() + live_poll_retry(seg_ns, poll_failures);
                     }
                 }
-                if Instant::now() >= next_first {
+            }
+            if let Some(r) = hole_job.finished().await {
+                match r {
+                    Ok((key, a, b, r)) => self.merge_hole(key, a, b, r, &mut coverage, &mut holes),
+                    Err(e) => debug!("Replay {}: hole listing task: {}", self.block_id, e),
+                }
+            }
+            if let Some(Ok(Ok(Some(f)))) = first_job.finished().await {
+                start = f.start_ns;
+                self.publish_extent(start, end);
+            }
+            if self.source.may_grow() && poll_job.is_idle() && Instant::now() >= next_poll {
+                next_poll = Instant::now() + Duration::from_nanos(seg_ns as u64);
+                let source = Arc::clone(&self.source);
+                poll_job.spawn(
+                    async move { source.newest(end, LIVE_POLL_PAGE, LIVE_POLL_PAGES).await },
+                );
+                if first_job.is_idle() && Instant::now() >= next_first {
                     next_first = Instant::now() + Duration::from_secs(30);
-                    if let Ok(Some(f)) = self.source.first().await {
-                        start = f.start_ns;
-                        self.publish_extent(start, end);
-                    }
+                    let source = Arc::clone(&self.source);
+                    first_job.spawn(async move { source.first().await });
                 }
             }
 
@@ -644,13 +809,29 @@ impl Fetcher {
             let mut listing_ok = true;
             for c in chunk_of(lo.max(start))..=chunk_of(hi.min(end - 1)) {
                 if chunks.listed.contains(&c) && !chunks.dirty.contains(&c) {
-                    continue;
+                    // A listed chunk is listed again only while it has a
+                    // hole that may still fill: a source that grows can
+                    // register media late, or a live poll that fell behind
+                    // skipped a stretch of it.
+                    let (a, b) = ((c * CHUNK_NS).max(start), ((c + 1) * CHUNK_NS).min(end));
+                    if !(self.source.may_grow()
+                        && coverage.has_hole(a, b)
+                        && chunks.relist_due(c, Instant::now()))
+                    {
+                        continue;
+                    }
                 }
                 if !list_failed.ready(&c, Instant::now()) {
                     continue;
                 }
                 if !self
-                    .list_chunk(c, end, &mut chunks, &mut list_failed, &mut coverage)
+                    .list_chunk(
+                        c,
+                        (start, end),
+                        &mut chunks,
+                        &mut list_failed,
+                        &mut coverage,
+                    )
                     .await
                 {
                     listing_ok = false;
@@ -663,8 +844,14 @@ impl Fetcher {
                 if let Some(p) = coverage.to_resolve(cursor, lo, hi, (start, end)) {
                     let c = chunk_of(p);
                     if list_failed.ready(&c, Instant::now()) {
-                        self.list_chunk(c, end, &mut chunks, &mut list_failed, &mut coverage)
-                            .await;
+                        self.list_chunk(
+                            c,
+                            (start, end),
+                            &mut chunks,
+                            &mut list_failed,
+                            &mut coverage,
+                        )
+                        .await;
                     }
                 }
             }
@@ -696,7 +883,7 @@ impl Fetcher {
             );
             let coded_size = |s: &Segment| -> u64 {
                 lock(&self.store.bytes).get(&s.start_ns).map_or(
-                    (bytes_per_s * s.duration_ns() as f64 / 1e9) as u64,
+                    (bitrate.bytes_per_s() * s.duration_ns() as f64 / 1e9) as u64,
                     |(_, b)| b.len() as u64,
                 )
             };
@@ -746,10 +933,7 @@ impl Fetcher {
                                     .last_fetch_ms
                                     .store(took.as_millis() as u64, Ordering::Relaxed);
                                 failed.succeed(&seg.start_ns);
-                                if seg.duration_ns() > 0 {
-                                    bytes_per_s =
-                                        bytes.len() as f64 * 1e9 / seg.duration_ns() as f64;
-                                }
+                                bitrate.add(bytes.len(), seg.duration_ns());
                                 lock(&self.store.bytes)
                                     .insert(seg.start_ns, (seg.end_ns, Arc::new(bytes)));
                             }
@@ -807,11 +991,16 @@ impl Fetcher {
             chunks.listed.retain(|c| keep(*c));
             chunks.dirty.retain(|c| keep(*c));
             chunks.listed_at.retain(|c, _| keep(*c));
-            if coverage.intervals() > MAX_COVERAGE_INTERVALS {
+            chunks.holed.retain(|c, _| keep(*c));
+            if coverage.intervals() > prune_above {
                 coverage.retain_within(&[
                     (cursor - COVERAGE_KEEP_NS, cursor + COVERAGE_KEEP_NS),
                     (end - COVERAGE_KEEP_NS, end),
                 ]);
+                // What is kept may still be over the limit (a source with
+                // many holes): prune again only once it has grown by half
+                // the limit, not on every pass of the loop.
+                prune_above = next_prune(coverage.intervals());
             }
             list_failed.retain(|c| keep(*c));
             let near: HashSet<i64> = self
@@ -846,26 +1035,17 @@ impl Fetcher {
         jobs.abort_all();
     }
 
-    /// Poll the live edge: read the newest segments back to the edge `end`
-    /// the index knows, a newest-first page at a time, and merge them into
-    /// the index. A hole older than the page and within
-    /// [`LATE_BACKFILL_NS`] of the edge (a segment registered late, or more
-    /// new segments than the pages held) is listed by time, with backoff per
-    /// hole. Returns the new end and segment length, `None` when the source
-    /// has nothing.
-    async fn poll_live(
+    /// Merge a live poll's newest segments (read back to the edge `end`
+    /// the index knew) into the index. Returns the new end, the segment
+    /// length and where the page's knowledge of the source starts, `None`
+    /// when the source has nothing.
+    fn merge_newest(
         &self,
         end: i64,
+        newest: Since,
         coverage: &mut Coverage,
-        holes: &mut Backoff<i64>,
-    ) -> anyhow::Result<Option<(i64, i64)>> {
-        let newest = self
-            .source
-            .newest(end, LIVE_POLL_PAGE, LIVE_POLL_PAGES)
-            .await?;
-        let (Some(first), Some(last)) = (newest.segs.first(), newest.segs.last()) else {
-            return Ok(None);
-        };
+    ) -> Option<(i64, i64, i64)> {
+        let (first, last) = (newest.segs.first()?, newest.segs.last()?);
         let tol = self.tolerance();
         // The page knows the source from its oldest segment to its newest
         // (and from `end` on when it reached it), not the stretch before.
@@ -882,39 +1062,44 @@ impl Fetcher {
         }
         self.store.insert_new(newest.segs);
         if newest.more {
+            // The stretch skipped is listed by chunk when the cursor comes
+            // near it (a listed chunk with a hole is listed again).
             debug!(
                 "Replay {}: live poll fell behind, the stretch before the edge is a hole",
                 self.block_id
             );
         }
+        Some((new_end, seg_ns.clamp(S / 5, 5 * S), page_from))
+    }
 
-        // Holes before the page, near the edge: list the newest one whose
-        // backoff allows, by time and bounded to it. One listing per poll at
-        // most, and none while there is no hole.
-        let floor = new_end - LATE_BACKFILL_NS;
-        let gaps = coverage.gaps_in(floor, page_from);
-        holes.retain(|a| gaps.iter().any(|g| g.0 == *a));
-        let now = Instant::now();
-        if let Some(&(key, b)) = gaps.iter().rev().find(|g| holes.ready(&g.0, now)) {
-            let (a, b) = (key.max(floor), b.min(page_from));
-            match self.source.list(a, b).await {
-                Ok(segs) => {
-                    coverage.add_listed(a, b);
-                    for s in &segs {
-                        coverage.add_media(s.start_ns, s.end_ns, tol);
-                    }
-                    self.store.insert_new(segs);
+    /// Merge the listing of hole `key` (listed over `[a, b)`) behind the
+    /// live edge, and back off from it while it stays open.
+    fn merge_hole(
+        &self,
+        key: i64,
+        a: i64,
+        b: i64,
+        listed: anyhow::Result<Vec<Segment>>,
+        coverage: &mut Coverage,
+        holes: &mut Backoff<i64>,
+    ) {
+        match listed {
+            Ok(segs) => {
+                let tol = self.tolerance();
+                coverage.add_listed(a, b);
+                for s in &segs {
+                    coverage.add_media(s.start_ns, s.end_ns, tol);
                 }
-                Err(e) => debug!(
-                    "Replay {}: listing a hole behind the live edge failed: {:#}",
-                    self.block_id, e
-                ),
+                self.store.insert_new(segs);
             }
-            if coverage.gaps_in(a, b).iter().any(|g| g.0 == key) {
-                holes.fail(key, Instant::now());
-            }
+            Err(e) => debug!(
+                "Replay {}: listing a hole behind the live edge failed: {:#}",
+                self.block_id, e
+            ),
         }
-        Ok(Some((new_end, seg_ns.clamp(S / 5, 5 * S))))
+        if coverage.gaps_in(a, b).iter().any(|g| g.0 == key) {
+            holes.fail(key, Instant::now());
+        }
     }
 
     /// The longest seam that is not a gap, for this source's frame rate.
@@ -922,12 +1107,13 @@ impl Fetcher {
         seam_tolerance(self.stats.grid().map(|g| g.frame_ns()))
     }
 
-    /// List index chunk `c` (the source's end is `end`): its segments go
-    /// into the index and the coverage. False if the listing failed.
+    /// List index chunk `c` (the source is `extent`, start to end): its
+    /// segments go into the index and the coverage. False if the listing
+    /// failed.
     async fn list_chunk(
         &self,
         c: i64,
-        end: i64,
+        extent: (i64, i64),
         chunks: &mut ChunkState,
         list_failed: &mut Backoff<i64>,
         coverage: &mut Coverage,
@@ -936,13 +1122,18 @@ impl Fetcher {
             Ok(segs) => {
                 // The listing knows the source up to its end then, not the
                 // rest of the chunk: media written there later is not a hole.
-                let known_end = segs.iter().map(|s| s.end_ns).fold(end, i64::max);
+                let known_end = segs.iter().map(|s| s.end_ns).fold(extent.1, i64::max);
                 coverage.add_listed(c * CHUNK_NS, ((c + 1) * CHUNK_NS).min(known_end));
                 let tol = self.tolerance();
                 for seg in &segs {
                     coverage.add_media(seg.start_ns, seg.end_ns, tol);
                 }
                 self.store.insert(segs);
+                let (a, b) = (
+                    (c * CHUNK_NS).max(extent.0),
+                    ((c + 1) * CHUNK_NS).min(extent.1),
+                );
+                chunks.note_hole(c, coverage.has_hole(a, b));
                 chunks.listed.insert(c);
                 chunks.dirty.remove(&c);
                 chunks.listed_at.insert(c, Instant::now());
@@ -1691,6 +1882,165 @@ mod tests {
         let have = wait_indexed(&f, 17, 200);
         stop.store(true, Ordering::Relaxed);
         assert_eq!(have, (0..17).collect::<Vec<_>>());
+    }
+
+    /// A growing mock with `segs` (see [`Mock::build`]) and a fetcher on it,
+    /// the group seeked to `seek_s` seconds TAI once the source is known.
+    fn growing_fetcher_at(mock: Mock, seek_s: i64) -> (Arc<Mock>, Arc<Fetcher>, Arc<AtomicBool>) {
+        let mock = Arc::new(Mock {
+            grows: true,
+            ..mock
+        });
+        let timeline = super::super::timeline::get_or_create(uuid::Uuid::new_v4(), "g");
+        let stats = Arc::new(PlayerStats::new("p"));
+        timeline.register_player(&stats);
+        let fetcher = Arc::new(Fetcher::new(
+            "p",
+            mock.clone(),
+            Arc::clone(&timeline),
+            stats,
+            2,
+        ));
+        let stop = Arc::new(AtomicBool::new(false));
+        Arc::clone(&fetcher).spawn(Arc::clone(&stop));
+        let t0 = Instant::now();
+        while fetcher.stats.extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        timeline
+            .apply(super::super::timeline::Command::Seek {
+                frame: None,
+                utc: None,
+                tai: Some(format!("{}:0", seek_s)),
+                from_live_ms: None,
+                speed: None,
+            })
+            .unwrap();
+        (mock, fetcher, stop)
+    }
+
+    /// Wait until the index has a segment starting at `at_s` seconds TAI,
+    /// or `within`.
+    fn wait_for_segment(f: &Fetcher, at_s: i64, within: Duration) -> bool {
+        let t0 = Instant::now();
+        loop {
+            if f.store
+                .segments_in(at_s * S, at_s * S + 1)
+                .iter()
+                .any(|s| s.start_ns == at_s * S)
+            {
+                return true;
+            }
+            if t0.elapsed() > within {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_stretch_a_live_poll_skipped_is_listed_when_the_cursor_is_there() {
+        // The cursor near the edge (110 s), then an outage: 390 s come at
+        // once, more than one poll pages back to. The poll lists the newest
+        // and the last minute; the stretch from 110 s is listed when the
+        // cursor's chunk, listed before, is listed again for its hole.
+        let (mock, f, stop) = growing_fetcher_at(Mock::build(10, 1, false, false), 109);
+        assert!(wait_for_segment(&f, 109, Duration::from_secs(5)));
+        std::thread::sleep(Duration::from_millis(300));
+        for i in 10..400 {
+            mock.register(i, 1000);
+        }
+        let got = wait_for_segment(&f, 110, Duration::from_secs(5));
+        let edge = f.stats.extent().map(|e| e.1);
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(edge, Some(500 * S));
+        assert!(got, "the skipped stretch near the cursor is listed");
+    }
+
+    #[test]
+    fn a_segment_registered_long_after_is_listed_when_the_cursor_is_near() {
+        // A hole 120..140 s, far behind the edge (300 s), the cursor in it:
+        // segments registered there late (an uploader back after an
+        // outage) are found by listing the cursor's chunk again, with
+        // backoff while the hole stays.
+        let mut m = Mock::build(200, 1, false, false);
+        m.segs
+            .retain(|s| s.start_ns < 120 * S || s.start_ns >= 140 * S);
+        let (mock, f, stop) = growing_fetcher_at(m, 125);
+        let t0 = Instant::now();
+        while f.store.hold().is_none() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let lists = mock.lists.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(3000));
+        let relists = mock.lists.load(Ordering::Relaxed) - lists;
+        for i in 20..40 {
+            mock.register(i, 1000);
+        }
+        let got = wait_for_segment(&f, 125, Duration::from_secs(6));
+        stop.store(true, Ordering::Relaxed);
+        assert!(
+            (1..=4).contains(&relists),
+            "the hole is listed again with backoff: {}",
+            relists
+        );
+        assert!(got, "the late segments are listed");
+    }
+
+    #[test]
+    fn has_hole_is_any_stretch_without_media() {
+        let mut cov = Coverage::default();
+        cov.add_media(0, 10 * S, MIN_GAP_NS);
+        cov.add_media(12 * S, 20 * S, MIN_GAP_NS);
+        assert!(!cov.has_hole(0, 10 * S));
+        assert!(!cov.has_hole(13 * S, 20 * S));
+        assert!(cov.has_hole(5 * S, 15 * S));
+        assert!(cov.has_hole(15 * S, 25 * S));
+        assert!(!cov.has_hole(5 * S, 5 * S));
+    }
+
+    #[test]
+    fn chunk_relist_backs_off_while_the_hole_stays() {
+        let mut c = ChunkState::default();
+        let t0 = Instant::now();
+        c.listed_at.insert(1, t0);
+        c.note_hole(1, true);
+        assert!(!c.relist_due(1, t0 + Duration::from_millis(900)));
+        assert!(c.relist_due(1, t0 + CHUNK_RELIST));
+        for _ in 0..10 {
+            c.note_hole(1, true);
+        }
+        assert!(!c.relist_due(1, t0 + CHUNK_RELIST_MAX - Duration::from_millis(1)));
+        assert!(c.relist_due(1, t0 + CHUNK_RELIST_MAX));
+        c.note_hole(1, false);
+        assert!(c.relist_due(1, t0 + CHUNK_RELIST));
+    }
+
+    #[test]
+    fn bitrate_is_an_average_not_the_last_segment() {
+        let mut b = Bitrate::default();
+        assert_eq!(b.bytes_per_s(), 0.0);
+        // 1 MB/s for a minute, then one tiny segment.
+        for _ in 0..60 {
+            b.add(1_000_000, S);
+        }
+        b.add(1_000, S);
+        assert!(b.bytes_per_s() > 900_000.0, "{}", b.bytes_per_s());
+        // It follows a lasting change.
+        for _ in 0..120 {
+            b.add(2_000_000, S);
+        }
+        assert!(b.bytes_per_s() > 1_990_000.0, "{}", b.bytes_per_s());
+    }
+
+    #[test]
+    fn pruning_waits_for_growth_when_the_kept_part_is_over_the_limit() {
+        assert_eq!(next_prune(10), MAX_COVERAGE_INTERVALS);
+        assert_eq!(
+            next_prune(3000),
+            3000 + MAX_COVERAGE_INTERVALS / 2,
+            "not every pass of the loop"
+        );
     }
 
     #[test]
