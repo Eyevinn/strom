@@ -83,7 +83,13 @@ mod imp {
         clock: gst::Clock,
         base_time_ns: u64,
         mapping: PipelineTaiMapping,
+        /// Running time at which the shared mapping was last asked for.
+        checked_rt_ns: u64,
     }
+
+    /// How often (in running time) the shared mapping is asked again, so a jump
+    /// it re-anchors on (a sleep, a clock step) reaches the stamps.
+    const RECHECK_NS: u64 = 1_000_000_000;
 
     struct State {
         tai: HostTai,
@@ -196,10 +202,30 @@ mod imp {
             }
 
             let base_ns = base_time.nseconds();
+            let rt_ns = running_time.nseconds();
             let fresh = match &state.cached {
                 Some(c) => c.base_time_ns != base_ns || c.clock != clock,
                 None => true,
             };
+            let recheck = state.flow_id.is_some()
+                && state.cached.as_ref().is_some_and(|c| {
+                    rt_ns < c.checked_rt_ns || rt_ns - c.checked_rt_ns >= RECHECK_NS
+                });
+            if recheck && !fresh {
+                if let (Some(flow_id), Some(c)) = (state.flow_id, state.cached.as_mut()) {
+                    let mapping = shared_pipeline_mapping(flow_id, &clock, base_ns, &state.tai);
+                    if mapping.epoch != c.mapping.epoch {
+                        gst::warning!(
+                            CAT,
+                            imp = self,
+                            "running time -> TAI re-anchored after a clock jump, offset {} ns",
+                            mapping.offset_ns
+                        );
+                    }
+                    c.mapping = mapping;
+                    c.checked_rt_ns = rt_ns;
+                }
+            }
             if fresh {
                 let mapping = match state.flow_id {
                     Some(flow_id) => shared_pipeline_mapping(flow_id, &clock, base_ns, &state.tai),
@@ -218,6 +244,7 @@ mod imp {
                     clock,
                     base_time_ns: base_ns,
                     mapping,
+                    checked_rt_ns: rt_ns,
                 });
             }
             let Some(mapping) = state.cached.as_ref().map(|c| c.mapping) else {

@@ -862,20 +862,32 @@ fn build_flow_chain(
                 .as_ref()
                 .and_then(|b| b.duration())
                 .map_or(50_000_000, |d| d.nseconds() + 1_000_000);
+            // The shared mapping is asked for every fragment without a capture
+            // time, so a jump (the pipeline clock stopped during a sleep) is
+            // noticed and the timeline re-anchors on the re-sampled mapping.
+            let pipeline = if reference_ns.is_none() {
+                element.as_ref().and_then(|el| {
+                    let (clock, base) = (el.clock()?, el.base_time()?.nseconds());
+                    Some((shared_pipeline_mapping(flow_id, &clock, base, &tai), base))
+                })
+            } else {
+                None
+            };
             let placed = {
                 let mut tl = timeline.lock().unwrap_or_else(|e| e.into_inner());
-                tl.place(running_time_ns, segment_ns, reference_ns, frame_ns, || {
-                    if let Some(el) = element.as_ref() {
-                        if let (Some(clock), Some(base)) = (el.clock(), el.base_time()) {
-                            let m = shared_pipeline_mapping(flow_id, &clock, base.nseconds(), &tai);
-                            return (
-                                m.tai_ns(base.nseconds(), running_time_ns),
-                                AnchorKind::Pipeline,
-                            );
-                        }
-                    }
-                    (tai.now_ns(), AnchorKind::Arrival)
-                })
+                if let Some((m, _)) = pipeline {
+                    tl.note_pipeline_epoch(m.epoch);
+                }
+                tl.place(
+                    running_time_ns,
+                    segment_ns,
+                    reference_ns,
+                    frame_ns,
+                    || match pipeline {
+                        Some((m, base)) => (m.tai_ns(base, running_time_ns), AnchorKind::Pipeline),
+                        None => (tai.now_ns(), AnchorKind::Arrival),
+                    },
+                )
             };
             if placed.went_backward {
                 warn!(
@@ -896,6 +908,12 @@ fn build_flow_chain(
                         by / 1_000_000
                     );
                 }
+            } else if placed.jumped {
+                warn!(
+                    "TAMS {} ({}): pipeline clock jumped against TAI (sleep or clock step), \
+                     re-anchored at TAI {} ns",
+                    block_id_sig, tag, placed.start_ns
+                );
             } else if let Some(kind) = placed.anchored {
                 info!(
                     "TAMS {} ({}): timeline anchored ({:?}): running time {} ns -> TAI {} ns",
