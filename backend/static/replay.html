@@ -120,7 +120,8 @@
   .zoom button { background: var(--panel2); border: 1px solid var(--line2); border-radius: 3px; padding: 1px 8px; cursor: pointer; font: 11px var(--mono); color: var(--mut); }
   .zoom button.on { color: var(--fg); border-color: var(--blue); background: #12273d; }
   #tlEnd.live { color: var(--red); font-weight: 700; }
-  .margin { display: inline-flex; flex-direction: column; gap: 1px; font: 10px var(--mono); color: var(--mut); }
+  .margin { display: inline-flex; flex-direction: column; gap: 1px; font: 10px var(--mono); color: var(--mut); width: 21ch; }
+  .margin #marginInfo { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 1.2em; }
   .margin select { background: var(--panel2); border: 1px solid var(--line2); border-radius: 3px; color: var(--fg); font: 11px var(--mono); padding: 1px 2px; }
   .margin .warn { color: var(--amber); }
   .controls { display: flex; gap: 18px; margin-top: 8px; align-items: flex-start; flex-wrap: wrap; }
@@ -451,6 +452,7 @@ function onState(m) {
     live: m.live_edge ? rel(m.live_edge.tai_ns) : null,
     marginMs: m.live_margin_ms ?? null,
     stepMs: m.live_edge_step_ms ?? null,
+    growing: !!m.live_growing,
     players: (m.players || []).length,
     noFrameRate: m.no_frame_rate || [],
   };
@@ -548,7 +550,7 @@ function renderMargin() {
   const parts = [];
   if (s && s.marginMs != null && s.marginMs !== liveMargin) parts.push(`in use ${(s.marginMs / 1000).toFixed(1)} s`);
   const risky = s && s.stepMs != null && liveMargin < s.stepMs + 300;
-  if (risky) parts.push(`⚠ edge steps ${(s.stepMs / 1000).toFixed(1)} s: may freeze`);
+  if (risky) parts.push('⚠ may freeze');
   info.textContent = parts.join(' · ');
   info.classList.toggle('warn', !!risky);
   info.title = risky ? `The live edge moves in steps of ${s.stepMs} ms. A margin under about ${s.stepMs + 300} ms lets the cursor reach the edge between steps, and the picture freezes.` : '';
@@ -851,8 +853,9 @@ function computeWindow(now) {
   // the playhead is half a window from the edge, so the window never jumps.
   const z = zoom * 1e9;
   const p = playheadNow();
-  // Following live: the playhead stands the margin in from the right edge.
-  if (p != null && isLive() && S.marginMs != null) return [p + S.marginMs * 1e6 - z, p + S.marginMs * 1e6];
+  // Following a growing live edge: the playhead stands the margin in from
+  // the right edge. A finished recording ends the window at its last frame.
+  if (p != null && isLive() && (live.grow || S.growing) && S.marginMs != null) return [p + S.marginMs * 1e6 - z, p + S.marginMs * 1e6];
   const edge = lv + (live.grow ? LIVE_HEADROOM : 0);
   if (p != null && edge - p > z / 2) return [p - z / 2, p + z / 2];
   return [edge - z, edge];
@@ -933,7 +936,7 @@ function drawTimeline() {
     const label = `LIVE +${farOf(S.live - b)} →`;
     g.font = 'bold 11px ui-monospace, monospace';
     const tw = Math.ceil(g.measureText(label).width) + 14, x0 = W - tw;
-    g.fillStyle = 'rgba(229,72,77,0.18)'; g.fillRect(x0, 0, tw, H);
+    g.fillStyle = '#0f1216'; g.fillRect(x0, 0, tw, H); g.fillStyle = 'rgba(229,72,77,0.18)'; g.fillRect(x0, 0, tw, H);
     g.fillStyle = '#e5484d'; g.fillRect(W - 3, 0, 3, H); g.fillRect(x0, 0, 1, H);
     g.fillText(label, x0 + 6, H / 2 + 4);
     liveTab = x0;
