@@ -9,7 +9,17 @@
           --acc:#4fa3ff; --red:#e5484d; --grn:#46a758; --amb:#f5a524;
           --mono: ui-monospace, SFMono-Regular, Menlo, monospace; }
   * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.4 system-ui, sans-serif; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.4 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+  /* Values that update many times a second: fixed-width digits and a floor
+     on the width, so a value that changes length does not move the layout. */
+  #clock .kv > :nth-child(even) { min-width: 44ch; }
+  #clock .kv.short > :nth-child(even) { min-width: 30ch; }
+  .num { display:inline-block; text-align:right; font-family:var(--mono); }
+  .w4 { min-width:4ch; } .w6 { min-width:6ch; } .w8 { min-width:8ch; } .w10 { min-width:10ch; }
+  /* Content width, not 100 %: a full-width table hands out its spare width
+     in proportion to the content, so every change moved every column. */
+  #players, #decTable { width:auto; }
+  #players td, #decTable td { min-width:5ch; }
   a { color:var(--acc); }
   header { display:flex; gap:12px; align-items:center; padding:8px 12px; background:var(--panel); flex-wrap:wrap; border-bottom:1px solid var(--line); }
   header select, button, input { background:var(--panel2); color:var(--fg); border:1px solid #3a3b40; border-radius:4px; padding:4px 8px; font:inherit; }
@@ -68,8 +78,8 @@
   <div>
     <span class="mut" id="zone">UTC</span>
     <span class="tc" id="tcTime">--:--:--<span class="ms">.---</span></span>
-    <span class="fr" id="tcFrame">f--</span>
-    <div class="mut" style="font:12px var(--mono)"><span id="tcDate">-</span> · frame <span id="tcAbs">-</span> · <span id="tcTai">TAI -</span></div>
+    <span class="fr num w8" id="tcFrame">f--</span>
+    <div class="mut" style="font:12px var(--mono)"><span id="tcDate">-</span> · frame <span class="num w8" id="tcAbs">-</span> · <span id="tcTai">TAI -</span></div>
   </div>
   <div class="kv" style="min-width:300px">
     <span>time domain</span><span id="domain">-</span>
@@ -83,7 +93,7 @@
     <span>edge age · step · seen</span><span id="edgeAge">-</span>
     <span>behind live · margin</span><span id="behind">-</span>
   </div>
-  <div class="kv">
+  <div class="kv short">
     <span>live</span><span id="liveFlag">-</span>
     <span>cue</span><span id="cueInfo">-</span>
     <span>ramp</span><span id="rampInfo">-</span>
@@ -104,8 +114,8 @@
   <section>
     <h2>Commands</h2>
     <div class="row">
-      <span>speed</span><span class="big" id="curSpeed">-</span>
-      <span>frame</span><span class="big" id="curFrame">-</span><span class="mut">/ <span id="total">-</span></span>
+      <span>speed</span><span class="big num w8" id="curSpeed">-</span>
+      <span>frame</span><span class="big num w8" id="curFrame">-</span><span class="mut">/ <span id="total">-</span></span>
     </div>
     <div id="jog">JOG: drag or scroll · <kbd>←</kbd><kbd>→</kbd> frame · <kbd>Shift</kbd> 10 · <kbd>Space</kbd> 1×/pause · <kbd>K</kbd> pause</div>
     <div class="row">
@@ -147,11 +157,11 @@
       <span class="mut">reading: <span id="measSrc">-</span></span>
     </div>
     <div class="row">
-      last <span class="big" id="latLast">-</span> ms
-      p50 <span class="big" id="latP50">-</span>
-      p95 <span class="big" id="latP95">-</span>
-      max <span id="latMax">-</span>
-      n=<span id="latN">0</span> timeouts <span id="latTo">0</span>
+      last <span class="big num w6" id="latLast">-</span> ms
+      p50 <span class="big num w6" id="latP50">-</span>
+      p95 <span class="big num w6" id="latP95">-</span>
+      max <span class="num w6" id="latMax">-</span>
+      n=<span class="num w4" id="latN">0</span> timeouts <span class="num w4" id="latTo">0</span>
       <button id="latReset">reset</button>
       <button id="latCsv">CSV</button>
     </div>
@@ -161,13 +171,13 @@
   <section>
     <h2>Latency breakdown</h2>
     <table><tbody>
-      <tr><td>ws round trip (command → ack)</td><td><span id="rtt">-</span> ms</td></tr>
-      <tr><td>server: command → frame pushed by the players</td><td><span id="c2p">-</span> ms</td></tr>
-      <tr><td>flow pipeline latency (mixer, encoder …)</td><td><span id="plat">-</span> ms</td></tr>
-      <tr><td>browser: jitter buffer / frame</td><td><span id="jb">-</span> ms</td></tr>
-      <tr><td>browser: decode / frame</td><td><span id="dec">-</span> ms</td></tr>
-      <tr><td>browser: receive → decoded / frame</td><td><span id="proc">-</span> ms</td></tr>
-      <tr><td>browser: decoder · fps · dropped · freezes</td><td><span id="decimpl">-</span> · <span id="fps">-</span> · <span id="drop">-</span> · <span id="frz">-</span></td></tr>
+      <tr><td>ws round trip (command → ack)</td><td><span class="num w8" id="rtt">-</span> ms</td></tr>
+      <tr><td>server: command → frame pushed by the players</td><td><span class="num w8" id="c2p">-</span> ms</td></tr>
+      <tr><td>flow pipeline latency (mixer, encoder …)</td><td><span class="num w8" id="plat">-</span> ms</td></tr>
+      <tr><td>browser: jitter buffer / frame</td><td><span class="num w8" id="jb">-</span> ms</td></tr>
+      <tr><td>browser: decode / frame</td><td><span class="num w8" id="dec">-</span> ms</td></tr>
+      <tr><td>browser: receive → decoded / frame</td><td><span class="num w8" id="proc">-</span> ms</td></tr>
+      <tr><td>browser: decoder · fps · dropped · freezes</td><td><span id="decimpl">-</span> · <span class="num w4" id="fps">-</span> · <span class="num w4" id="drop">-</span> · <span class="num w4" id="frz">-</span></td></tr>
       <tr><td>on screen behind pushed (burn-in, while playing)</td><td><span id="scrBehind">-</span></td></tr>
     </tbody></table>
   </section>
@@ -218,6 +228,12 @@ const store = {
 };
 const TAI_MINUS_UTC_NS = 37000000000n;
 const fmtMs = v => v == null ? '-' : `${Math.round(v)} ms`;
+// TAI as "<s>:<ns>" with the nanoseconds always nine digits (the server's
+// string drops leading zeros, so its length changes from frame to frame).
+const taiPad = s => { if (s == null) return '-'; const [a, b = '0'] = String(s).split(':'); return `${a}:${b.padStart(9, '0')}`; };
+const taiOf = t => t && t.tai_ns != null ? taiPad(`${BigInt(t.tai_ns) / 1000000000n}:${BigInt(t.tai_ns) % 1000000000n}`) : taiPad(t && t.tai);
+// Signed milliseconds with one decimal, the sign always shown.
+const fmtSigned = ms => `${ms < 0 ? '−' : '+'}${Math.abs(ms).toFixed(1)}`.padStart(7, '\u2007');
 const fmtS = v => v == null ? '-' : `${(v / 1000).toFixed(2)} s`;
 const hms = utc => utc ? utc.slice(11, 23) : '-';
 function log(line) {
@@ -299,7 +315,7 @@ function clock(m) {
   $('refFps').innerHTML = m.reference_fps ? esc(m.reference_fps) + (frameNs ? ` · ${(frameNs / 1e6).toFixed(3)} ms` : '')
     : `<span class="warn">unknown${m.no_frame_rate && m.no_frame_rate.length ? ' (no rate: ' + esc(m.no_frame_rate.join(', ')) + ')' : ''}</span>`;
   $('nowUtc').textContent = m.now_utc || '-';
-  $('cursorInfo').textContent = m.cursor ? `${hms(m.cursor.utc)} · f${m.frame} · ${m.tai}` : '-';
+  $('cursorInfo').textContent = m.cursor ? `${hms(m.cursor.utc)} · f${m.frame} · ${taiPad(m.tai)}` : '-';
   pushedTai = m.pushed ? BigInt(m.pushed.tai_ns) : null;
   if (t) {
     const s = showTai ? t.tai_clock : t.utc;
@@ -309,7 +325,7 @@ function clock(m) {
     $('tcFrame').textContent = `f${String(t.frame_in_second).padStart(2, '0')}/${fps}`;
     $('tcDate').textContent = s.slice(0, 10);
     $('tcAbs').textContent = t.frame;
-    $('tcTai').textContent = showTai ? `UTC ${t.utc}` : `TAI ${t.tai}`;
+    $('tcTai').textContent = showTai ? `UTC ${t.utc}` : `TAI ${taiOf(t)}`;
   }
   const e = m.live_edge;
   $('edgeUtc').textContent = e ? `${hms(showTai ? e.tai_clock : e.utc)} · f${m.live_frame ?? '-'}` : '-';
@@ -332,7 +348,7 @@ function players(m) {
     let d = '-', dc = '';
     if (p.shown && refTai != null) {
       const ms = Number(BigInt(p.shown.tai_ns) - refTai) / 1e6;
-      d = ms.toFixed(1);
+      d = fmtSigned(ms);
       // Angles captured at another phase differ by less than a frame; a
       // frame or more is a sync error.
       const lim = Math.max(p.frame_ns || 0, ref.frame_ns || 0) / 1e6;
@@ -342,8 +358,8 @@ function players(m) {
     const cls = (v, bad) => v ? (bad ? 'bad' : 'warn') : '';
     return `<tr><td>${esc(p.block)}</td>
       <td>${p.fps ? esc(p.fps) : '<span class="warn">?</span>'}${p.output_fps && p.output_fps !== p.fps ? '→' + esc(p.output_fps) : ''}</td>
-      <td class="l">${p.shown ? esc(hms(p.shown.utc)) + ' f' + p.shown.frame_in_second : '-'}</td>
-      <td class="l">${p.shown ? esc(p.shown.tai) : '-'}</td>
+      <td class="l">${p.shown ? esc(hms(p.shown.utc)) + ' f' + String(p.shown.frame_in_second).padStart(2, '0') : '-'}</td>
+      <td class="l">${p.shown ? esc(taiOf(p.shown)) : '-'}</td>
       <td class="${dc}">${d}</td>
       <td>${p.shown_frame}</td><td>${p.wanted_frame}</td>
       <td class="${p.in_sync ? 'good' : 'bad'}">${p.in_sync ? 'yes' : 'no'}</td>
@@ -422,7 +438,7 @@ function randomTarget() {
 function randomSeek() {
   const t = randomTarget();
   if (t == null) { log('random seek: no media range yet'); return false; }
-  send({ cmd: 'seek', tai: `${t / 1000000000n}:${t % 1000000000n}`, speed: 0 }, true);
+  send({ cmd: 'seek', tai: taiPad(`${t / 1000000000n}:${t % 1000000000n}`), speed: 0 }, true);
   return true;
 }
 $('randBtn').onclick = randomSeek;
