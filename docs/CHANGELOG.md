@@ -6,13 +6,14 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ### Added
 - Media Player: timeline mode (replay). A player plays an indexed source (a TAMS flow, `tams+https://<gateway>/flows/<flow_id>`, or a directory with `index.json`) on a timeline that can be scrubbed, jogged and played at any speed, from -8x to 8x. Players with the same `group` form a replay group with one cursor and one speed; the group shares TAI time, and each player has its own frame grid (**Output Framerate**). See [MEDIA_LIBRARY.md](MEDIA_LIBRARY.md)
+- Replay state: per angle the decoder, its workers, failed decodes, average and longest decode and the latest decodes per segment; for the group the live margin, the live edge's age, step and when it last stepped
 - Replay control API: `POST /api/replay/{flow_id}/{group}/command`, `GET /api/replay/{flow_id}/{group}/state` and a WebSocket at `/api/replay/{flow_id}/{group}/ws`, with one command schema for REST and WebSocket (seek by frame, UTC, TAI or distance from live, jog, speed, ramps, cue and bounded play, live, marks). See [REPLAY_API.md](REPLAY_API.md)
-- Replay pages: an operator page for a replay group at `/player/replay/{flow_id}/{group}` (transport, angles through the vision mixer, marks and clips), and a lab page at `/player/replay-lab/{flow_id}/{group}` with latency and per-player telemetry
+- Replay pages: an operator page for a replay group at `/player/replay/{flow_id}/{group}` (transport, angles through the vision mixer, marks and clips), and a diagnostics page at `/player/replay-diagnostics/{flow_id}/{group}` (the old `/player/replay-lab/...` redirects there): latency from command to screen, read from the burned-in Reference Timestamp code or the test bitstrip, with a breakdown (server, pipeline, browser), random-seek runs, TAI and UTC per angle and their offset, the live edge (known, estimated, age, step) and margin, gaps per angle, and per-segment decoding
 - Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture
 - TAMS Output: segments are cut on a TAI grid, and `segment_duration_ms` allows segments shorter than a second. The block asks upstream for a keyframe on each grid point, warns when a boundary still leaves the grid, and writes video `essence_parameters` on its flows
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
 - API: `GET /api/flows/{flow_id}/blocks/{block_id}/pgm-endpoint` returns the WHEP endpoint fed by a vision mixer's PGM output, like `multiview-endpoint`
-- Media Player: a timeline player has a Replay button in the properties panel that opens the replay page for its group
+- Media Player: a timeline player has a Replay button in the properties panel that opens the replay page for its group, and a Diagnostics button that opens the diagnostics page
 
 ### Changed
 - Media Player: an explicit `mode` property (`playlist`, `stinger`, `timeline`) selects what the block does, and the properties panel shows only the properties of that mode. `stinger_mode=true` becomes `mode=stinger`. The Playlist button and transport controls are hidden for a timeline player
