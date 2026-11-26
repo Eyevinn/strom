@@ -206,7 +206,7 @@ function onAck(m) {
 let curSpeed = 0;
 function onState(m) {
   onClock(m);
-  frameNs = m.frame_ns; totalFrames = m.total_frames; startFrame = m.start_frame || 0; curSpeed = +m.speed;
+  frameNs = m.frame_ns || 20e6; totalFrames = m.total_frames; startFrame = m.start_frame || 0; curSpeed = +m.speed;
   $('tai').textContent = m.tai ?? '-';
   $('behind').textContent = m.behind_live_ms ?? '-';
   if (m.cmd_to_push_ms != null) $('c2p').textContent = (+m.cmd_to_push_ms).toFixed(1);

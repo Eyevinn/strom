@@ -260,6 +260,9 @@ pub struct PlayerStats {
     pub cached_segments: AtomicU64,
     pub decodes: AtomicU64,
     pub last_decode_ms: AtomicU64,
+    /// No frame rate is known: none in the index, the stream's caps or its
+    /// timestamps. Nothing can be placed on the timeline until one is.
+    pub frame_rate_missing: std::sync::atomic::AtomicBool,
     /// [`TimeDomain`] of the source, as u8.
     time_domain: AtomicU8,
     index_view: Mutex<IndexView>,
@@ -295,6 +298,7 @@ impl PlayerStats {
             cached_segments: AtomicU64::new(0),
             decodes: AtomicU64::new(0),
             last_decode_ms: AtomicU64::new(0),
+            frame_rate_missing: std::sync::atomic::AtomicBool::new(false),
             time_domain: AtomicU8::new(TimeDomain::Unknown as u8),
             index_view: Mutex::new(IndexView::default()),
         }
@@ -1389,6 +1393,7 @@ impl ReplayTimeline {
         serde_json::json!({
             "block": p.block_id,
             "fps": grid.map(|g| fps_string(&g)),
+            "frame_rate_missing": p.frame_rate_missing.load(Ordering::Relaxed),
             "frame_ns": grid.map(|g| g.frame_ns()),
             "output_fps": p.output_rate().map(|(n, d)| format!("{}/{}", n, d)),
             "extent": p.extent().map(|(s, e)| serde_json::json!({
@@ -1430,6 +1435,11 @@ impl ReplayTimeline {
         let domain = TimeDomain::combine(players.iter().map(|p| p.time_domain()));
         let players_json: Vec<serde_json::Value> =
             players.iter().map(|p| self.player_json(p)).collect();
+        let no_frame_rate: Vec<&str> = players
+            .iter()
+            .filter(|p| p.frame_rate_missing.load(Ordering::Relaxed))
+            .map(|p| p.block_id.as_str())
+            .collect();
         let mut v = serde_json::json!({
             "type": "state",
             "speed": self.speed(),
@@ -1437,12 +1447,14 @@ impl ReplayTimeline {
             "players": players_json,
             "time_domain": domain.as_str(),
             "now_utc": format_utc_ms(wall_utc_ns()),
+            "no_frame_rate": no_frame_rate,
         });
         let origin = reference.and_then(|g| self.origin_on(&g));
         let (Some(b), Some(g), Some(origin)) = (bounds, reference, origin) else {
             v["frame"] = 0.into();
             v["total_frames"] = 0.into();
-            v["frame_ns"] = 20e6.into();
+            // No made-up rate: the frame period is unknown until a player has one.
+            v["frame_ns"] = serde_json::Value::Null;
             return v;
         };
         let time_of = |tai: i64| FrameTime::new(&g, g.floor_frame(tai), origin).to_json();

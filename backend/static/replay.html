@@ -325,7 +325,7 @@ const absStr = n => (BASE + BigInt(Math.round(n))).toString();
 const taiOfNs = ns => { const a = BigInt(ns); return `${a / 1000000000n}:${a % 1000000000n}`; };
 const taiArg = n => { const a = BASE + BigInt(Math.round(n)); return `${a / 1000000000n}:${a % 1000000000n}`; };
 let utcMinusTaiMs = null;              // from the server's own (UTC, TAI) pairs
-let fps = 50, frameNs = 20e6;
+let fps = 50, frameNs = 20e6, fpsKnown = false;
 const pad = (n, w = 2) => String(n).padStart(w, '0');
 // Local time of day with frames, from a server FrameTime ({utc, frame_in_second}).
 function tcOf(ft) {
@@ -394,6 +394,7 @@ function updateConn() {
   pill.classList.remove('ok', 'warn', 'bad');
   if (!wsOpen) { pill.classList.add('bad'); $('connText').textContent = 'Disconnected, retrying'; }
   else if (age > 1000) { pill.classList.add('warn'); $('connText').textContent = 'No data'; }
+  else if (S && S.noFrameRate.length) { pill.classList.add('warn'); $('connText').textContent = 'No frame rate: ' + S.noFrameRate.join(', '); }
   else if (!S || S.start == null) { pill.classList.add('warn'); $('connText').textContent = 'Connected, no media'; }
   else { pill.classList.add('ok'); $('connText').textContent = 'Connected'; }
 }
@@ -418,7 +419,9 @@ const liveShown = now => live.v == null ? null : live.v + (live.grow ? (now - li
 
 function onState(m) {
   const now = performance.now();
-  frameNs = m.frame_ns || 20e6; fps = Math.round(1e9 / frameNs);
+  // frame_ns is null until a frame rate is known; 20 ms only keeps the
+  // arithmetic going, and the header says the rate is missing.
+  frameNs = m.frame_ns || 20e6; fps = Math.round(1e9 / frameNs); fpsKnown = !!m.frame_ns;
   const pushed = m.pushed || m.cursor;
   if (pushed && utcMinusTaiMs == null) {
     const taiMs = Number(BigInt(pushed.tai_ns) / 1000000n);
@@ -434,6 +437,7 @@ function onState(m) {
     end: m.end ? rel(m.end.tai_ns) : null,
     live: m.live_edge ? rel(m.live_edge.tai_ns) : null,
     players: (m.players || []).length,
+    noFrameRate: m.no_frame_rate || [],
   };
   s.cue = m.cue || null;
   s.following = !!m.live;
@@ -493,7 +497,7 @@ function renderHeader() {
   if (s) {
     $('infBuf').textContent = s.start != null && s.live != null ? `${clockOf(s.start)} → ${clockOf(s.live)} (${durOf(s.live - s.start).slice(0, -3)})` : 'no media yet';
     $('infLive').textContent = live.grow ? 'growing (live ingest)' : s.live != null ? 'not growing (recording)' : '-';
-    $('infAngles').textContent = `${s.players} player(s) · ${fps} fps · time ${s.domain || '?'}`;
+    $('infAngles').textContent = `${s.players} player(s) · ${fpsKnown ? fps : 'unknown'} fps · time ${s.domain || '?'}`;
     $('infClip').textContent = activeClip ? `${activeClip.clip.name} (${s.cue ? s.cue.end_action : 'cueing'})` : s.cue ? `cue (${s.cue.end_action})` : '-';
   }
 }

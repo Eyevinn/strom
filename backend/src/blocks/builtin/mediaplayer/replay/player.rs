@@ -20,6 +20,7 @@ use super::cache::{by_urgency, Fetcher, SegmentStore};
 use super::decode::{caps_frame_rate, decode_bytes, decode_timeout, map_to_grid, pick_decoder};
 use super::source::{Segment, SourceIndex};
 use super::timeline::{PlayerStats, ReplayTimeline};
+use crate::gst::frame_rate::estimate_frame_rate;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -291,12 +292,38 @@ impl ReplayPlayer {
         );
         let ms = started.elapsed().as_millis() as u64;
         let decoded = result?;
-        // No frame rate from the index: take it from the stream.
+        // No frame rate from the index: take it from the stream, its caps or
+        // else its timestamps (an SPS without timing, e.g. VideoToolbox).
         let grid = self.stats.grid().or_else(|| {
-            let (n, d) = caps_frame_rate(&decoded.caps)?;
+            let (n, d) = caps_frame_rate(&decoded.caps).or_else(|| {
+                let est = estimate_frame_rate(decoded.frames.iter().map(|(pts, _)| *pts));
+                if let Some((n, d)) = est {
+                    info!(
+                        "Replay {}: no frame rate in the index or the stream's caps, \
+                         {}/{} estimated from the timestamps of segment {}",
+                        self.block_id, n, d, seg.object_id
+                    );
+                }
+                est
+            })?;
             self.stats.init_grid(n, d, seg.first_sample_tai())
         });
-        let grid = grid.ok_or("no frame rate known")?;
+        let Some(grid) = grid else {
+            if !self.stats.frame_rate_missing.swap(true, Ordering::Relaxed) {
+                warn!(
+                    "Replay {}: the source has no frame rate: none in the index, the \
+                     stream's caps or the timestamps of segment {} ({} frames); nothing \
+                     can be shown",
+                    self.block_id,
+                    seg.object_id,
+                    decoded.frames.len()
+                );
+            }
+            return Err("no frame rate: none in the index or the stream".into());
+        };
+        self.stats
+            .frame_rate_missing
+            .store(false, Ordering::Relaxed);
         let n_decoded = decoded.frames.len();
         let frames = map_to_grid(seg, &grid, decoded.frames, decoded.first_pts);
         if frames.is_empty() {
