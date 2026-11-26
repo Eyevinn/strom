@@ -19,8 +19,7 @@
 
 use super::refusal::{accept_input, audio_refusal, refuse_input, video_refusal};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
-use crate::client_auth::AuthMethod;
-use crate::osc::SatProvider;
+use crate::tams::auth::TamsAuth;
 use crate::tams::client::{FlowSpec, TamsClient};
 use crate::tams::segmenter::{OpenDecision, OpenRequest, Segmenter};
 use crate::tams::tai_mapping::{
@@ -223,19 +222,15 @@ impl BlockBuilder for TamsOutputBuilder {
                 ))
             },
         )?;
-        let auth_plan = match auth {
-            crate::tams::auth::TamsAuth::Osc { service_id } => {
-                info!(
-                    "TAMS Output {}: OSC PAT/SAT auth for service {}",
-                    instance_id, service_id
-                );
-                AuthPlan::Osc {
-                    provider: crate::osc::sat_provider(),
-                    service_id,
-                }
-            }
-            crate::tams::auth::TamsAuth::Static(auth) => AuthPlan::Fixed(auth),
-        };
+        // OSC mode keys its PAT by the flow id, which is only known in the
+        // element-setup closure, so the concrete AuthMethod is made there.
+        if let TamsAuth::Osc { service_id } = &auth {
+            info!(
+                "TAMS Output {}: OSC PAT/SAT auth for service {}",
+                instance_id, service_id
+            );
+        }
+        let auth_plan = auth;
 
         let segment_ns = segment_duration_ns(properties);
         let num_video = prop_usize(properties, "num_video_tracks", DEFAULT_NUM_VIDEO_TRACKS).min(1);
@@ -416,38 +411,6 @@ impl BlockBuilder for TamsOutputBuilder {
     }
 }
 
-/// Auth configuration resolved per flow at pipeline start.
-///
-/// OSC mode keys its PAT by the flow id, which is only known in the element-setup
-/// closure — not at block-build time. So we carry the recipe and finalize the
-/// concrete [`AuthMethod`] once the flow id is available.
-#[derive(Clone)]
-enum AuthPlan {
-    /// Flow-id-independent auth (static bearer token, or none).
-    Fixed(AuthMethod),
-    /// OSC PAT/SAT; the credential key is the flow id, filled in at setup.
-    Osc {
-        provider: Arc<SatProvider>,
-        service_id: String,
-    },
-}
-
-impl AuthPlan {
-    fn resolve(&self, credential_key: &str) -> AuthMethod {
-        match self {
-            AuthPlan::Fixed(auth) => auth.clone(),
-            AuthPlan::Osc {
-                provider,
-                service_id,
-            } => AuthMethod::Osc {
-                provider: provider.clone(),
-                service_id: service_id.clone(),
-                credential_key: credential_key.to_string(),
-            },
-        }
-    }
-}
-
 /// One essence input on a flow. Audio carries its track index so a flow can mux
 /// (MPEG-TS) or group (MP4) several audio tracks. Video is always a single
 /// track: it decides where segments split.
@@ -493,7 +456,7 @@ fn build_flow_chain(
     inputs: &[Essence],
     detect_codec: bool,
     gateway_url: String,
-    auth_plan: AuthPlan,
+    auth_plan: TamsAuth,
     spec: FlowSpec,
     ctx: &BlockBuildContext,
     elements: &mut Vec<(String, gst::Element)>,
@@ -781,8 +744,8 @@ fn build_flow_chain(
         // OSC auth keys its PAT by the flow id (tenant isolation on a shared
         // instance), which is only known here — so finalize the gateway client now.
         let credential_key = flow_id.to_string();
-        if let AuthPlan::Osc { provider, .. } = &auth_plan {
-            if !provider.has_pat_for(&credential_key) {
+        if let TamsAuth::Osc { .. } = &auth_plan {
+            if !crate::osc::sat_provider().has_pat_for(&credential_key) {
                 warn!(
                     "TAMS {}: OSC mode but no PAT for flow {} yet — uploads will fail \
                      until one is configured (STROM_OSC_PAT / OSC_ACCESS_TOKEN, or push \
@@ -791,7 +754,7 @@ fn build_flow_chain(
                 );
             }
         }
-        let client = match TamsClient::new(&gateway_url, auth_plan.resolve(&credential_key)) {
+        let client = match TamsClient::new(&gateway_url, auth_plan.method(&credential_key)) {
             Ok(c) => c,
             Err(e) => {
                 error!("TAMS {}: failed to build gateway client: {:#}", block_id, e);
@@ -1144,14 +1107,14 @@ fn register_multiflow(
     instance_id: &str,
     spec: FlowSpec,
     gateway_url: String,
-    auth_plan: AuthPlan,
+    auth_plan: TamsAuth,
     ctx: &BlockBuildContext,
 ) {
     let block_id = instance_id.to_string();
     ctx.register_element_setup(Box::new(move |flow_id, _events| {
         // OSC auth keys its PAT by the flow id, matching the essence uploaders.
         let credential_key = flow_id.to_string();
-        let client = match TamsClient::new(&gateway_url, auth_plan.resolve(&credential_key)) {
+        let client = match TamsClient::new(&gateway_url, auth_plan.method(&credential_key)) {
             Ok(c) => c,
             Err(e) => {
                 error!(

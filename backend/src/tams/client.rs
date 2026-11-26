@@ -130,14 +130,23 @@ pub fn env_api_token(gateway: &str) -> Option<String> {
 /// host must be an OSC instance of that service type (HTTPS), or the gateway
 /// allow-listed. An explicit service id that differs from the host's would
 /// otherwise mint a SAT for one service and hand it to another host.
+///
+/// The host is the parsed URL's (`host_str`), the one the request goes to, so
+/// user info, a port or a path that look like an OSC host cannot pass. A URL
+/// with user info is refused outright: an OSC gateway has no use for it.
 fn check_osc_gateway(gateway: &str, service_id: &str, allow_listed: bool) -> Result<(), String> {
     if allow_listed {
         return Ok(());
     }
-    let https = reqwest::Url::parse(gateway).is_ok_and(|u| u.scheme() == "https");
-    match crate::osc::derive_service_id(gateway) {
-        Some(derived) if derived == service_id && https => Ok(()),
-        _ => Err(format!(
+    let osc_host_of_service = reqwest::Url::parse(gateway).is_ok_and(|u| {
+        u.scheme() == "https"
+            && u.username().is_empty()
+            && u.password().is_none()
+            && crate::osc::derive_service_id(u.as_str()).as_deref() == Some(service_id)
+    });
+    match osc_host_of_service {
+        true => Ok(()),
+        false => Err(format!(
             "OSC auth: not sending a SAT for service '{}' to {}: the gateway is not an \
              HTTPS OSC instance of that service; add it to {} to allow it",
             service_id,
@@ -907,6 +916,40 @@ mod tests {
     }
 
     #[test]
+    fn osc_sat_check_is_not_fooled_by_user_info_or_lookalikes() {
+        for gw in [
+            // The review's example: the request would go to evil.example.
+            "https://x.eyevinn-tams-gateway.auto.prod.osaas.io:pw@evil.example/",
+            "https://x.eyevinn-tams-gateway.auto.prod.osaas.io@evil.example",
+            "https://evil.example/x.eyevinn-tams-gateway.auto.prod.osaas.io",
+            "https://evil.example\\x.eyevinn-tams-gateway.auto.prod.osaas.io",
+            "https://evil.example?x.eyevinn-tams-gateway.auto.prod.osaas.io",
+            "https://x.eyevinn-tams-gateway.auto.prod.osaas.io.evil.example",
+            // User info on the right host is refused too.
+            "https://u:p@x.eyevinn-tams-gateway.auto.prod.osaas.io",
+            // Not a URL.
+            "x.eyevinn-tams-gateway.auto.prod.osaas.io",
+        ] {
+            assert!(
+                check_osc_gateway(gw, "eyevinn-tams-gateway", false).is_err(),
+                "{gw}"
+            );
+            assert!(osc_service_id(gw, None).is_err(), "{gw}");
+            assert!(
+                osc_service_id(gw, Some("eyevinn-tams-gateway")).is_err(),
+                "{gw}"
+            );
+        }
+        // A port on the right host is fine.
+        assert!(check_osc_gateway(
+            "https://x.eyevinn-tams-gateway.auto.prod.osaas.io:443/flows",
+            "eyevinn-tams-gateway",
+            false
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn osc_client_refuses_a_foreign_gateway() {
         let osc = |gw: &str, service: &str| {
             TamsClient::new(
@@ -926,6 +969,11 @@ mod tests {
         )
         .is_ok());
         assert!(osc("https://evil.example.net/flows", "eyevinn-tams-gateway").is_err());
+        assert!(osc(
+            "https://x.eyevinn-tams-gateway.auto.prod.osaas.io:pw@evil.example/",
+            "eyevinn-tams-gateway"
+        )
+        .is_err());
     }
 
     /// HTTP-level tests of the request loop against local stub servers.

@@ -122,7 +122,7 @@ pub fn build(
             .method(&flow_id.to_string()),
         source::SourceSpec::Local(_) => AuthMethod::None,
     };
-    let index = source::open(&spec, auth).map_err(invalid)?;
+    let index = source::open(&spec, auth, std::path::Path::new(&media_path)).map_err(invalid)?;
     info!(
         "Media Player {}: timeline mode, group '{}', source {}",
         instance_id,

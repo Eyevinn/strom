@@ -17,7 +17,7 @@ pub mod tams;
 use crate::client_auth::AuthMethod;
 use anyhow::Result;
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use strom_types::tams::{parse_timerange, parse_timestamp_signed};
 
@@ -148,7 +148,8 @@ pub enum SourceSpec {
 
 /// Parse `source`: `tams+https://host[/prefix]/flows/<id>`,
 /// `tams+http://...`, `file:///dir`, or a plain directory path (absolute, or
-/// relative to `media_path`).
+/// relative to `media_path`). A local directory must resolve to a place inside
+/// `media_path`; [`open`] checks that.
 pub fn parse_source(source: &str, media_path: &str) -> Result<SourceSpec, String> {
     let s = source.trim();
     if let Some(rest) = s.strip_prefix("tams+") {
@@ -177,10 +178,15 @@ pub fn parse_source(source: &str, media_path: &str) -> Result<SourceSpec, String
 }
 
 /// Open the index for a source. `auth` is used for a TAMS gateway, already
-/// checked against it (see [`crate::tams::auth::TamsAuth`]).
-pub fn open(spec: &SourceSpec, auth: AuthMethod) -> Result<Arc<dyn SourceIndex>, String> {
+/// checked against it (see [`crate::tams::auth::TamsAuth`]). A local directory
+/// must lie inside `media_path`.
+pub fn open(
+    spec: &SourceSpec,
+    auth: AuthMethod,
+    media_path: &Path,
+) -> Result<Arc<dyn SourceIndex>, String> {
     match spec {
-        SourceSpec::Local(dir) => Ok(Arc::new(local::LocalIndex::load(dir)?)),
+        SourceSpec::Local(dir) => Ok(Arc::new(local::LocalIndex::load(dir, media_path)?)),
         SourceSpec::Tams { gateway, flow_id } => Ok(Arc::new(
             tams::TamsIndex::new(gateway, flow_id, auth).map_err(|e| e.to_string())?,
         )),

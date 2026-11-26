@@ -179,6 +179,12 @@ mod tests {
             PropertyValue::from("eyevinn-tams-gateway"),
         );
         assert!(TamsAuth::from_properties(&p, "https://tams.example.com").is_err());
+        // User info that looks like an OSC host: the request would go to
+        // evil.example. Neither the explicit nor the derived service id passes.
+        let evil = "https://x.eyevinn-tams-gateway.auto.prod.osaas.io:pw@evil.example/";
+        assert!(TamsAuth::from_properties(&p, evil).is_err());
+        p.remove(OSC_SERVICE_ID_PROPERTY);
+        assert!(TamsAuth::from_properties(&p, evil).is_err());
     }
 
     #[test]
