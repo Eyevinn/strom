@@ -41,28 +41,57 @@ struct CachedSat {
     refresh_at: SystemTime,
 }
 
-/// The `exp` claim (seconds since the Unix epoch) of a JWT, if it has one.
-/// The signature is not checked: this only decides when to refresh our own
-/// token, never whether to trust one.
-fn jwt_exp(token: &str) -> Option<SystemTime> {
+/// The claims of a JWT, if it is one. The signature is not checked: this only
+/// decides when to refresh our own token, never whether to trust one.
+fn jwt_claims(token: &str) -> Option<serde_json::Value> {
     use base64::Engine;
     let payload = token.split('.').nth(1)?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload.trim_end_matches('='))
         .ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let exp = claims.get("exp")?.as_u64()?;
-    UNIX_EPOCH.checked_add(Duration::from_secs(exp))
+    serde_json::from_slice(&bytes).ok()
 }
 
+/// A numeric date claim (seconds since the Unix epoch) of a JWT.
+fn jwt_time(token: &str, claim: &str) -> Option<SystemTime> {
+    let secs = jwt_claims(token)?.get(claim)?.as_u64()?;
+    UNIX_EPOCH.checked_add(Duration::from_secs(secs))
+}
+
+/// The `exp` claim of a JWT, if it has one.
+#[cfg(test)]
+fn jwt_exp(token: &str) -> Option<SystemTime> {
+    jwt_time(token, "exp")
+}
+
+/// Never schedule a refresh sooner than this after a fetch. A host clock that
+/// is ahead of the token server's would otherwise put `exp` in the past, and
+/// every request would mint a new SAT. A SAT that really is rejected is
+/// dropped on the 401 (see [`SatProvider::invalidate`]).
+const SAT_MIN_REFRESH: Duration = Duration::from_secs(60);
+
 /// When a SAT fetched at `fetched_at` should be refreshed: after
-/// [`SAT_REFRESH_AFTER`], or [`SAT_EXPIRY_MARGIN`] before its own `exp`,
-/// whichever comes first.
+/// [`SAT_REFRESH_AFTER`], or [`SAT_EXPIRY_MARGIN`] before its own expiry,
+/// whichever comes first, but no sooner than [`SAT_MIN_REFRESH`].
+///
+/// `exp` is on the token server's clock and `fetched_at` on ours, so the two
+/// are not compared directly. With an `iat` claim the token's lifetime
+/// (`exp - iat`, both on the server's clock) is applied to `fetched_at`. Without
+/// one, `exp` is compared with our clock, and the floor bounds what a skewed
+/// clock can do.
 fn sat_refresh_at(token: &str, fetched_at: SystemTime) -> SystemTime {
     let by_age = fetched_at + SAT_REFRESH_AFTER;
-    match jwt_exp(token).and_then(|exp| exp.checked_sub(SAT_EXPIRY_MARGIN)) {
-        Some(by_exp) => by_age.min(by_exp),
-        None => by_age,
+    let floor = fetched_at + SAT_MIN_REFRESH;
+    let Some(exp) = jwt_time(token, "exp") else {
+        return by_age;
+    };
+    let expires_at = match jwt_time(token, "iat").and_then(|iat| exp.duration_since(iat).ok()) {
+        Some(lifetime) => fetched_at + lifetime,
+        None => exp,
+    };
+    match expires_at.checked_sub(SAT_EXPIRY_MARGIN) {
+        Some(by_exp) => by_age.min(by_exp).max(floor),
+        None => floor,
     }
 }
 
@@ -255,7 +284,7 @@ impl SatProvider {
             .with_context(|| format!("POST {}", self.token_url))?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let text = bounded_error_body(resp.text().await.unwrap_or_default());
             return Err(anyhow!(
                 "OSC servicetoken {} -> {}: {}",
                 self.token_url,
@@ -270,6 +299,20 @@ impl SatProvider {
         info!("OSC: minted SAT for service {}", service_id);
         Ok(parsed.token)
     }
+}
+
+/// Longest token-endpoint error body kept in an error. Errors are logged, and
+/// an endpoint (possibly a misconfigured `STROM_OSC_TOKEN_URL`) can send
+/// anything. Same limit as the TAMS client's.
+const MAX_ERROR_BODY_CHARS: usize = 300;
+
+/// `body` cut to [`MAX_ERROR_BODY_CHARS`] characters.
+fn bounded_error_body(mut body: String) -> String {
+    if let Some((cut, _)) = body.char_indices().nth(MAX_ERROR_BODY_CHARS) {
+        body.truncate(cut);
+        body.push_str("...");
+    }
+    body
 }
 
 /// The process-wide OSC SAT provider, built on first use.
@@ -300,19 +343,24 @@ pub fn sat_provider() -> Arc<SatProvider> {
 /// OSC service URLs look like
 /// `https://<tenant>-<instance>.<service-type>.auto.prod.osaas.io`; a SAT is
 /// scoped to `<service-type>` (the second DNS label). Returns `None` for URLs
-/// that are not OSC-hosted (e.g. a self-hosted gateway), so the caller can ask
-/// for an explicit service id instead.
+/// that are not OSC-hosted (e.g. a self-hosted gateway) or do not parse, so the
+/// caller can ask for an explicit service id instead.
+///
+/// The host is taken from the parsed URL, never by splitting the string:
+/// `https://a.svc.auto.prod.osaas.io:pw@evil.example/` has user info that
+/// *looks* like an OSC host, but the request goes to `evil.example`.
 pub fn derive_service_id(url: &str) -> Option<String> {
-    let host = url.split("://").nth(1).unwrap_or(url);
-    let host = host.split('/').next()?; // strip path
-    let host = host.split(':').next()?; // strip port
-    if !host.ends_with(".osaas.io") {
-        return None;
-    }
-    let mut labels = host.split('.');
-    let _tenant_instance = labels.next()?; // <tenant>-<instance>
+    service_id_of_host(reqwest::Url::parse(url).ok()?.host_str()?)
+}
+
+/// The OSC service type of a host name `<tenant>-<instance>.<service-type>.…osaas.io`.
+fn service_id_of_host(host: &str) -> Option<String> {
+    let host = host.to_ascii_lowercase();
+    let prefix = host.strip_suffix(".osaas.io")?;
+    let mut labels = prefix.split('.');
+    let tenant_instance = labels.next()?; // <tenant>-<instance>
     let service_type = labels.next()?; // <service-type>
-    if service_type.is_empty() {
+    if tenant_instance.is_empty() || service_type.is_empty() || labels.any(str::is_empty) {
         None
     } else {
         Some(service_type.to_string())
@@ -342,6 +390,46 @@ mod tests {
     fn returns_none_for_non_osc_urls() {
         assert_eq!(derive_service_id("http://localhost:8000"), None);
         assert_eq!(derive_service_id("https://tams.example.com/flows"), None);
+        // Not a URL, or no host.
+        assert_eq!(
+            derive_service_id("a-b.eyevinn-tams-gateway.auto.prod.osaas.io"),
+            None
+        );
+        assert_eq!(derive_service_id("data:text/plain,osaas.io"), None);
+        assert_eq!(derive_service_id("https://osaas.io"), None);
+        assert_eq!(derive_service_id("https://x.osaas.io"), None);
+        assert_eq!(derive_service_id("https://a..osaas.io"), None);
+    }
+
+    #[test]
+    fn user_info_port_query_and_suffixes_do_not_fake_an_osc_host() {
+        for url in [
+            // The review's example: user info that looks like an OSC host.
+            "https://x.eyevinn-tams-gateway.auto.prod.osaas.io:pw@evil.example/",
+            "https://x.eyevinn-tams-gateway.auto.prod.osaas.io@evil.example/",
+            "https://x.eyevinn-tams-gateway.auto.prod.osaas.io:443@evil.example:443/",
+            // An OSC-looking host in the path, query or fragment.
+            "https://evil.example/x.eyevinn-tams-gateway.auto.prod.osaas.io",
+            "https://evil.example?h=x.eyevinn-tams-gateway.auto.prod.osaas.io",
+            "https://evil.example#x.eyevinn-tams-gateway.auto.prod.osaas.io",
+            "https://evil.example\\x.eyevinn-tams-gateway.auto.prod.osaas.io",
+            // Lookalike hosts.
+            "https://x.eyevinn-tams-gateway.auto.prod.osaas.io.evil.example/",
+            "https://x.eyevinn-tams-gateway.auto.prod.evilosaas.io/",
+            "https://x.eyevinn-tams-gateway.auto.prod.osaas.io./",
+        ] {
+            assert_eq!(derive_service_id(url), None, "{url}");
+        }
+        // User info on a real OSC host does not change the host.
+        assert_eq!(
+            derive_service_id("https://u:p@a-b.eyevinn-tams-gateway.auto.prod.osaas.io:8443/x"),
+            Some("eyevinn-tams-gateway".to_string())
+        );
+        // Host names are case-insensitive.
+        assert_eq!(
+            derive_service_id("https://A-B.Eyevinn-Tams-Gateway.AUTO.PROD.OSAAS.IO"),
+            Some("eyevinn-tams-gateway".to_string())
+        );
     }
 
     #[test]
@@ -426,6 +514,42 @@ mod tests {
         // No exp, or not a JWT: the age limit.
         assert_eq!(jwt_exp(&jwt(serde_json::json!({ "sub": "x" }))), None);
         assert_eq!(jwt_exp("not-a-jwt"), None);
+    }
+
+    #[test]
+    fn a_skewed_host_clock_does_not_mint_per_request() {
+        let t0 = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        // Host clock 2 h ahead of the token server: by our clock the SAT
+        // (iat = server now, exp = +1 h) has already expired. With `iat` the
+        // lifetime is used instead: 1 h - 5 min margin, capped at 50 min.
+        let server_now = 1_800_000_000u64 - 2 * 3600;
+        let tok = jwt(serde_json::json!({ "iat": server_now, "exp": server_now + 3600 }));
+        let sat = cached(&tok, t0);
+        assert_eq!(sat.refresh_at, t0 + SAT_REFRESH_AFTER);
+        assert!(sat_is_fresh(&sat, t0 + Duration::from_secs(10)));
+        // A short-lived SAT with iat: refresh 5 minutes before its lifetime ends.
+        let tok = jwt(serde_json::json!({ "iat": server_now, "exp": server_now + 20 * 60 }));
+        assert_eq!(
+            cached(&tok, t0).refresh_at,
+            t0 + Duration::from_secs(15 * 60)
+        );
+        // No iat, exp in the past by our clock: the floor, not "always stale".
+        let tok = jwt(serde_json::json!({ "exp": server_now + 3600 }));
+        let sat = cached(&tok, t0);
+        assert_eq!(sat.refresh_at, t0 + SAT_MIN_REFRESH);
+        assert!(sat_is_fresh(&sat, t0 + Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn token_endpoint_error_body_is_bounded() {
+        let long = "x".repeat(10_000);
+        let cut = bounded_error_body(long);
+        assert_eq!(cut.len(), MAX_ERROR_BODY_CHARS + 3);
+        assert!(cut.ends_with("..."));
+        // Cut on a character boundary, not a byte.
+        let cut = bounded_error_body("å".repeat(400));
+        assert_eq!(cut.chars().count(), MAX_ERROR_BODY_CHARS + 3);
+        assert_eq!(bounded_error_body("short".into()), "short");
     }
 
     #[test]
