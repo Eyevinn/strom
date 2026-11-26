@@ -18,7 +18,10 @@ use super::backoff::{worth_warning, Backoff};
 #[cfg(test)]
 use super::cache::Hold;
 use super::cache::{by_urgency, Fetcher, SegmentStore};
-use super::decode::{caps_frame_rate, decode_timeout, map_to_grid, pick_decoder, SegmentDecoder};
+use super::decode::{
+    caps_frame_rate, choose_memory, decode_timeout, map_to_grid, pick_decoder, FrameMemory,
+    SegmentDecoder,
+};
 use super::source::{Segment, SourceIndex};
 use super::timeline::{PlayerStats, ReplayTimeline};
 use crate::gst::frame_rate::estimate_frame_rate;
@@ -29,7 +32,7 @@ use gstreamer_video as gst_video;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -40,7 +43,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// Default budget for one player's decoded frames (1080p NV12 is about
-/// 3 MB a frame). `STROM_REPLAY_DECODED_MB` overrides it.
+/// 3 MB a frame), in the memory they are decoded into: GPU memory when the
+/// frames are in CUDA or GL memory. `STROM_REPLAY_DECODED_MB` overrides it.
 const DEFAULT_DECODED_BUDGET_MB: u64 = 768;
 /// Segments kept decoded whatever the budget: the one under the cursor and
 /// the next.
@@ -157,6 +161,8 @@ pub struct ReplayPlayer {
     failed: Mutex<Backoff<i64>>,
     caps: Mutex<Option<gst::Caps>>,
     decoder: &'static str,
+    /// The memory frames are decoded into, chosen once for all workers.
+    memory: OnceLock<FrameMemory>,
     workers: usize,
     /// Decoded window around the cursor, in its direction of travel.
     decode_behind_ns: i64,
@@ -210,6 +216,7 @@ impl ReplayPlayer {
             )),
             caps: Mutex::new(None),
             decoder,
+            memory: OnceLock::new(),
             workers: 2,
             decode_behind_ns: 2 * S,
             decode_ahead_ns: cache_ahead_s.clamp(1, MAX_DECODE_AHEAD_S) as i64 * S,
@@ -277,7 +284,10 @@ impl ReplayPlayer {
 
     fn decode_worker(self: Arc<Self>, rx: Arc<Mutex<mpsc::Receiver<Arc<Segment>>>>) {
         // One long-lived decoder per worker, kept across segments.
-        let mut decoder = SegmentDecoder::new(self.decoder);
+        let anchor = self.appsrc.upgrade().map(|a| a.upcast::<gst::Element>());
+        let mut decoder =
+            SegmentDecoder::with_memory(self.decoder, self.frame_memory(), anchor.as_ref());
+        drop(anchor);
         while self.alive() {
             let job = lock(&rx).recv_timeout(Duration::from_millis(100));
             let seg = match job {
@@ -304,6 +314,22 @@ impl ReplayPlayer {
             }
             lock(&self.inflight).remove(&seg.start_ns);
         }
+    }
+
+    /// The memory to decode into: chosen the first time from the decoder and
+    /// what the flow takes from the output (see `choose_memory`).
+    fn frame_memory(&self) -> FrameMemory {
+        *self.memory.get_or_init(|| {
+            let pad = self.appsrc.upgrade().and_then(|a| a.static_pad("src"));
+            let memory = choose_memory(self.decoder, pad.as_ref());
+            info!(
+                "Replay {}: frames in {} memory ({})",
+                self.block_id,
+                memory.name(),
+                self.decoder
+            );
+            memory
+        })
     }
 
     /// Decode one segment into the frame store. An error means the segment
@@ -752,9 +778,16 @@ fn pick_decodes(
     out
 }
 
-/// Whether frames in caps `b` can go out under caps `a`: same format, size
-/// and interlacing (frame rate and colorimetry aside).
+/// Whether frames in caps `b` can go out under caps `a`: same memory,
+/// format, size and interlacing (frame rate and colorimetry aside).
 fn same_layout(a: &gst::Caps, b: &gst::Caps) -> bool {
+    let memory = |c: &gst::Caps| {
+        c.features(0)
+            .map_or_else(|| "memory:SystemMemory".to_string(), |f| f.to_string())
+    };
+    if memory(a) != memory(b) {
+        return false;
+    }
     match (
         gst_video::VideoInfo::from_caps(a),
         gst_video::VideoInfo::from_caps(b),
@@ -885,6 +918,12 @@ mod tests {
         };
         assert!(same_layout(&caps(1280, 50), &caps(1280, 25)));
         assert!(!same_layout(&caps(1280, 50), &caps(1920, 50)));
+        // Frames in CUDA memory cannot go out under system-memory caps.
+        let mut cuda = caps(1280, 50);
+        cuda.make_mut()
+            .set_features(0, Some(gst::CapsFeatures::new(["memory:CUDAMemory"])));
+        assert!(!same_layout(&caps(1280, 50), &cuda));
+        assert!(same_layout(&cuda, &cuda.clone()));
     }
 
     #[test]

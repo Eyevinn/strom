@@ -20,6 +20,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - TAMS Output: one segment length property, `segment_duration_ms` (default 2000, at least 200), instead of `segment_duration_secs` and `segment_duration_ms`
 - Video Encoder: the keyframe-request floor applies only to requests for a keyframe now (a WebRTC viewer's PLI). Requests for a keyframe at a given running time (TAMS Output's grid, `splitmuxsink` in a segmenting recorder) always pass. The GStreamer base-class property `min-force-key-unit-interval` dropped both kinds, which moved TAMS Output's segment boundaries off its grid
 - TAMS Output cuts segments itself instead of with `splitmuxsink`, and registers each segment as soon as the frame after it arrives instead of one GOP later
+- Media Player, timeline mode: decoded frames stay in GPU memory when the decoder and the flow downstream both take it: CUDA memory from `nvh264dec` (a GL consumer such as the vision mixer brings it into GL with `cudadownload`, by CUDA-GL interop), GL memory from `vtdec_hw` (sharing the flow's GL context). The frame store holds those buffers, so a frame is no longer downloaded to RAM, copied and uploaded again. Other decoders and system-memory consumers keep NV12 in system memory. `STROM_REPLAY_FRAME_MEMORY` (`auto`, `system`, `cuda`, `gl`) narrows the choice, and `STROM_REPLAY_DECODED_MB` budgets the memory the frames are in
 - TAMS Output: segment files carry a per-run id in their name (`seg_<run>_<n>`), so a new run in the same directory never overwrites segments an earlier run left parked
 
 ### Fixed
