@@ -25,6 +25,14 @@
 //! accuracy should run the pipeline on a TAI, PTP or Realtime clock, which map
 //! by a fixed offset, or carry reference timestamps.
 //!
+//! The one exception is a jump: when `clock_time + offset` and host TAI disagree
+//! by more than [`REANCHOR_THRESHOLD_NS`], the offset is re-sampled. On macOS the
+//! monotonic clock stops while the machine sleeps, so without this every segment
+//! after a wake was stamped as far in the past as the sleep lasted. The new offset
+//! is stored in the shared entry with a new [`PipelineTaiMapping::epoch`], so every
+//! block of the pipeline re-anchors on the same offset and the angles stay
+//! aligned. The threshold is well above what clock drift adds up to in a day.
+//!
 //! A buffer that carries a capture time as a `GstReferenceTimestampMeta`
 //! (`timestamp/x-tai`, `x-ptp`, `x-unix` or `x-ntp`) takes precedence: the block
 //! anchors on it instead of the pipeline clock.
@@ -35,7 +43,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 use strom_types::FlowId;
-use tracing::info;
+use tracing::{info, warn};
 
 /// TAI - UTC (37 s, fixed since the 2026 CGPM decision). Used as the fallback
 /// when the kernel has no TAI offset set (macOS, or Linux without chrony
@@ -48,6 +56,11 @@ const NTP_TO_UNIX_NS: u64 = 2_208_988_800 * 1_000_000_000;
 /// Below this, CLOCK_TAI and CLOCK_REALTIME are taken to be the same clock (the
 /// kernel's TAI offset is unset).
 const UNSET_OFFSET_THRESHOLD_NS: u64 = 1_000_000_000;
+
+/// How far an [`ClockDomain::Other`] mapping may stray from host TAI before it is
+/// re-sampled (the pipeline clock stopped during a sleep, or the wall clock was
+/// stepped).
+pub const REANCHOR_THRESHOLD_NS: u64 = 5_000_000_000;
 
 /// Which timescale a pipeline clock runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +179,9 @@ fn tai_from_host_clocks(tai_ns: u64, utc_ns: u64) -> u64 {
 pub struct PipelineTaiMapping {
     pub offset_ns: i128,
     pub domain: ClockDomain,
+    /// Bumped each time the shared mapping of a pipeline run is re-sampled after a
+    /// jump. A block anchored on an older epoch re-anchors.
+    pub epoch: u32,
 }
 
 impl PipelineTaiMapping {
@@ -178,19 +194,30 @@ impl PipelineTaiMapping {
             ClockDomain::Tai => 0,
             ClockDomain::Utc => tai.tai_minus_utc_ns() as i128,
             ClockDomain::Other => {
-                let before = clock.time().nseconds() as i128;
-                let tai_now = tai.now_ns() as i128;
-                let after = clock.time().nseconds() as i128;
-                tai_now - (before + after) / 2
+                let (clock_ns, tai_ns) = sample_other(clock, tai);
+                tai_ns as i128 - clock_ns
             }
         };
-        Self { offset_ns, domain }
+        Self {
+            offset_ns,
+            domain,
+            epoch: 0,
+        }
     }
 
     /// TAI of a buffer with this running time in a pipeline with this base time.
     pub fn tai_ns(&self, base_time_ns: u64, running_time_ns: u64) -> u64 {
         clamp_ns(base_time_ns as i128 + running_time_ns as i128 + self.offset_ns)
     }
+}
+
+/// Read the pipeline clock and host TAI at (about) the same moment: the clock is
+/// read before and after host TAI and averaged.
+fn sample_other(clock: &gst::Clock, tai: &HostTai) -> (i128, u64) {
+    let before = clock.time().nseconds() as i128;
+    let tai_now = tai.now_ns();
+    let after = clock.time().nseconds() as i128;
+    ((before + after) / 2, tai_now)
 }
 
 struct RegistryEntry {
@@ -207,16 +234,53 @@ static REGISTRY: LazyLock<Mutex<HashMap<FlowId, RegistryEntry>>> =
 /// The first block to ask samples it; later calls with the same flow, clock and
 /// base time get the same mapping. A restarted pipeline has a new base time (or
 /// clock), so it gets a fresh one.
+///
+/// Each call also checks an [`ClockDomain::Other`] mapping against host TAI and
+/// re-samples it, with a new epoch, when the two have moved apart by more than
+/// [`REANCHOR_THRESHOLD_NS`] (see the module docs). Callers that cache the
+/// mapping should ask again now and then (every fragment, or every second).
 pub fn shared_pipeline_mapping(
     flow_id: FlowId,
     clock: &gst::Clock,
     base_time_ns: u64,
     tai: &HostTai,
 ) -> PipelineTaiMapping {
+    shared_pipeline_mapping_with(flow_id, clock, base_time_ns, tai, || {
+        sample_other(clock, tai)
+    })
+}
+
+/// [`shared_pipeline_mapping`] with the jump check reading `(pipeline clock time,
+/// host TAI)` from `sample`, so tests can simulate a sleep.
+fn shared_pipeline_mapping_with(
+    flow_id: FlowId,
+    clock: &gst::Clock,
+    base_time_ns: u64,
+    tai: &HostTai,
+    sample: impl Fn() -> (i128, u64),
+) -> PipelineTaiMapping {
     let mut reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(entry) = reg.get(&flow_id) {
+    if let Some(entry) = reg.get_mut(&flow_id) {
         let same_clock = entry.clock.upgrade().as_ref() == Some(clock);
         if entry.base_time_ns == base_time_ns && same_clock {
+            if entry.mapping.domain == ClockDomain::Other {
+                let (clock_ns, tai_ns) = sample();
+                let mapped = clock_ns + entry.mapping.offset_ns;
+                let jump_ns = tai_ns as i128 - mapped;
+                if jump_ns.unsigned_abs() > REANCHOR_THRESHOLD_NS as u128 {
+                    entry.mapping.offset_ns = tai_ns as i128 - clock_ns;
+                    entry.mapping.epoch = entry.mapping.epoch.wrapping_add(1);
+                    warn!(
+                        "TAMS: flow {} pipeline clock and host TAI moved {} ms apart (sleep \
+                         or clock step): running time -> TAI re-anchored, offset {} ns \
+                         (epoch {})",
+                        flow_id,
+                        jump_ns / 1_000_000,
+                        entry.mapping.offset_ns,
+                        entry.mapping.epoch
+                    );
+                }
+            }
             return entry.mapping;
         }
     }
@@ -304,6 +368,11 @@ pub struct FragmentTimeline {
     planned_end_ns: Option<u64>,
     /// Fragments placed since the timeline was last (re)anchored.
     since_anchor: u32,
+    /// Epoch of the shared pipeline mapping last seen (see [`Self::note_pipeline_epoch`]).
+    pipeline_epoch: Option<u32>,
+    /// The shared mapping was re-sampled after a jump: re-anchor on the next
+    /// fragment that has no reference timestamp.
+    reanchor_pending: bool,
 }
 
 /// Outcome of placing one fragment on the timeline.
@@ -318,6 +387,10 @@ pub struct FragmentStart {
     pub anchored: Option<AnchorKind>,
     /// Set when running time went backward and the timeline was re-anchored.
     pub went_backward: bool,
+    /// Set when the timeline was re-anchored because the shared pipeline
+    /// mapping jumped (a sleep or clock step), see
+    /// [`FragmentTimeline::note_pipeline_epoch`].
+    pub jumped: bool,
     /// After a backward jump: how far the start was moved forward so it does
     /// not overlap the previous fragment.
     pub clamped_by_ns: Option<u64>,
@@ -351,6 +424,18 @@ fn next_grid_point(tai_ns: i128, segment_ns: u64) -> i128 {
 }
 
 impl FragmentTimeline {
+    /// Tell the timeline the current epoch of the shared pipeline mapping. When
+    /// it changed since the last call (the mapping was re-sampled after a sleep or
+    /// clock step), the next fragment without a reference timestamp re-anchors on
+    /// the mapping instead of advancing by running time. Every block of the
+    /// pipeline sees the same new offset, so they stay aligned.
+    pub fn note_pipeline_epoch(&mut self, epoch: u32) {
+        if self.offset_ns.is_some() && self.pipeline_epoch.is_some_and(|e| e != epoch) {
+            self.reanchor_pending = true;
+        }
+        self.pipeline_epoch = Some(epoch);
+    }
+
     /// Place a fragment whose first buffer has `running_time_ns`, on a grid of
     /// `segment_ns` (0 = no grid).
     ///
@@ -388,6 +473,7 @@ impl FragmentTimeline {
         let mut went_backward = false;
         let mut clamped_by_ns = None;
         let mut prev_end_ns = None;
+        let mut jumped = false;
         let backward = self.offset_ns.is_some() && running_time_ns < self.last_running_time_ns;
         match (reference_ns, self.offset_ns) {
             (Some(tai), None) => {
@@ -438,8 +524,25 @@ impl FragmentTimeline {
                 anchored = Some(kind);
                 went_backward = true;
             }
+            (None, Some(offset)) if self.reanchor_pending => {
+                // The mapping jumped. The previous fragment's media ends where the
+                // old offset puts this buffer. A forward jump (sleep) leaves a gap;
+                // a backward one is not followed past that point, so the store
+                // never gets overlapping segments.
+                let (tai, kind) = anchor();
+                let expected = clamp_ns(running_time_ns as i128 + offset);
+                let start = tai.max(expected);
+                if start > tai {
+                    clamped_by_ns = Some(start - tai);
+                }
+                self.offset_ns = Some(start as i128 - running_time_ns as i128);
+                prev_end_ns = Some(expected);
+                anchored = Some(kind);
+                jumped = true;
+            }
             (None, Some(_)) => {}
         }
+        self.reanchor_pending = false;
         let offset = self.offset_ns.unwrap_or(0);
         let start_ns = clamp_ns(running_time_ns as i128 + offset);
         self.last_running_time_ns = running_time_ns;
@@ -456,6 +559,7 @@ impl FragmentTimeline {
             prev_end_ns: prev_end_ns.unwrap_or(start_ns),
             anchored,
             went_backward,
+            jumped,
             clamped_by_ns,
             since_anchor: self.since_anchor,
         }
@@ -533,6 +637,7 @@ mod tests {
         let m = PipelineTaiMapping {
             offset_ns: 0,
             domain: ClockDomain::Tai,
+            epoch: 0,
         };
         assert_eq!(m.tai_ns(1_000, 500), 1_500);
         // Whatever the host, a Tai clock maps to host TAI.
@@ -581,6 +686,121 @@ mod tests {
         assert_ne!(c.offset_ns, d.offset_ns);
     }
 
+    /// The pipeline clock stops while the Mac sleeps (16 h here) and host TAI goes
+    /// on. The next call notices and re-samples the shared mapping with a new
+    /// epoch; small drift does not.
+    #[test]
+    fn sleep_jump_reanchors_the_shared_mapping() {
+        gst::init().unwrap();
+        const H16: u64 = 16 * 3600 * 1_000_000_000;
+        let tai = HostTai::new();
+        let clock = system_clock(gst::ClockType::Monotonic);
+        let flow = uuid::Uuid::new_v4();
+        let a = shared_pipeline_mapping(flow, &clock, 1_000, &tai);
+        assert_eq!(a.epoch, 0);
+        let read = |extra: u64| {
+            let (c, t) = sample_other(&clock, &tai);
+            (c, t + extra)
+        };
+        // One second of drift: below the threshold, nothing changes.
+        let b = shared_pipeline_mapping_with(flow, &clock, 1_000, &tai, || read(1_000_000_000));
+        assert_eq!(a, b);
+        // Wake after 16 h.
+        let c = shared_pipeline_mapping_with(flow, &clock, 1_000, &tai, || read(H16));
+        assert_eq!(c.epoch, 1);
+        let moved = c.offset_ns - a.offset_ns;
+        assert!(
+            moved.abs_diff(H16 as i128) < 50_000_000,
+            "offset moved {} ns",
+            moved
+        );
+        // The re-sampled mapping holds: later calls (by any block) get the same.
+        let d = shared_pipeline_mapping_with(flow, &clock, 1_000, &tai, || read(H16));
+        assert_eq!(c, d);
+    }
+
+    /// After the shared mapping jumps, every block re-anchors on the new offset,
+    /// whenever it notices, so the angles stay aligned. The fragment open across
+    /// the sleep ends where its media ends, leaving a gap.
+    #[test]
+    fn blocks_reanchor_together_after_a_sleep() {
+        const SEG: u64 = 1_000_000_000;
+        const H16: i128 = 16 * 3600 * 1_000_000_000;
+        let before = PipelineTaiMapping {
+            offset_ns: 1_800_000_000_000_000_000,
+            domain: ClockDomain::Other,
+            epoch: 0,
+        };
+        let after = PipelineTaiMapping {
+            offset_ns: before.offset_ns + H16,
+            epoch: 1,
+            ..before
+        };
+        let anchor = |m: PipelineTaiMapping, rt| move || (m.tai_ns(0, rt), AnchorKind::Pipeline);
+        let mut cam1 = FragmentTimeline::default();
+        let mut cam2 = FragmentTimeline::default();
+        for tl in [&mut cam1, &mut cam2] {
+            for rt in [10 * SEG, 11 * SEG] {
+                tl.note_pipeline_epoch(before.epoch);
+                tl.place(rt, SEG, None, 0, anchor(before, rt));
+            }
+        }
+        // cam1 sees the new epoch at its next fragment.
+        cam1.note_pipeline_epoch(after.epoch);
+        let j1 = cam1.place(12 * SEG, SEG, None, 0, anchor(after, 12 * SEG));
+        assert!(j1.jumped && !j1.went_backward);
+        assert_eq!(j1.anchored, Some(AnchorKind::Pipeline));
+        assert_eq!(j1.start_ns, after.tai_ns(0, 12 * SEG));
+        assert_eq!(
+            j1.prev_end_ns,
+            before.tai_ns(0, 12 * SEG),
+            "gap, no stretch"
+        );
+        // cam2 places one more fragment before it asks again: still the old
+        // timeline. Then it sees the new epoch and lands where cam1 is.
+        let o2 = cam2.place(12 * SEG, SEG, None, 0, || unreachable!());
+        assert_eq!(o2.start_ns, before.tai_ns(0, 12 * SEG));
+        cam2.note_pipeline_epoch(after.epoch);
+        let j2 = cam2.place(13 * SEG, SEG, None, 0, anchor(after, 13 * SEG));
+        assert!(j2.jumped);
+        let n1 = cam1.place(13 * SEG, SEG, None, 0, || unreachable!());
+        assert_eq!(n1.start_ns, j2.start_ns, "angles aligned after the jump");
+        // Same epoch again: no further re-anchor.
+        cam1.note_pipeline_epoch(after.epoch);
+        let m1 = cam1.place(14 * SEG, SEG, None, 0, || unreachable!());
+        assert!(!m1.jumped && m1.anchored.is_none());
+    }
+
+    /// A backward clock step is not followed past the previous fragment's end:
+    /// the store never gets overlapping segments.
+    #[test]
+    fn backward_mapping_jump_never_overlaps() {
+        const SEG: u64 = 1_000_000_000;
+        let before = PipelineTaiMapping {
+            offset_ns: 1_800_000_000_000_000_000,
+            domain: ClockDomain::Other,
+            epoch: 0,
+        };
+        let after = PipelineTaiMapping {
+            offset_ns: before.offset_ns - 10 * SEG as i128,
+            epoch: 1,
+            ..before
+        };
+        let mut tl = FragmentTimeline::default();
+        tl.note_pipeline_epoch(0);
+        tl.place(10 * SEG, SEG, None, 0, || {
+            (before.tai_ns(0, 10 * SEG), AnchorKind::Pipeline)
+        });
+        tl.note_pipeline_epoch(1);
+        let j = tl.place(11 * SEG, SEG, None, 0, || {
+            (after.tai_ns(0, 11 * SEG), AnchorKind::Pipeline)
+        });
+        assert!(j.jumped);
+        assert_eq!(j.start_ns, before.tai_ns(0, 11 * SEG));
+        assert_eq!(j.prev_end_ns, j.start_ns);
+        assert_eq!(j.clamped_by_ns, Some(10 * SEG));
+    }
+
     #[test]
     fn reference_domains() {
         let off = TAI_MINUS_UTC_NS;
@@ -625,6 +845,7 @@ mod tests {
         let mapping = PipelineTaiMapping {
             offset_ns: 5_000,
             domain: ClockDomain::Other,
+            epoch: 0,
         };
         let base = 1_000_000;
         let mut cam1 = FragmentTimeline::default();
@@ -678,6 +899,7 @@ mod tests {
         let mapping = PipelineTaiMapping {
             offset_ns: 1_800_000_000_000_000_000,
             domain: ClockDomain::Other,
+            epoch: 0,
         };
         let base = 0;
         let anchor = |rt| move || (mapping.tai_ns(base, rt), AnchorKind::Pipeline);
