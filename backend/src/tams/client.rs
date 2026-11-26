@@ -352,17 +352,33 @@ impl TamsClient {
             );
         }
         let context = format!("{} {}", method, redact_url(url.as_str()));
-        let mut req = self.api.request(method, url);
-        if let Some(body) = body {
-            req = req.json(body);
+        let mut retried = false;
+        loop {
+            let mut req = self.api.request(method.clone(), url.clone());
+            if let Some(body) = body {
+                req = req.json(body);
+            }
+            let resp = self
+                .auth
+                .apply(req)
+                .await?
+                .send()
+                .await
+                .map_err(|e| anyhow::Error::new(e.without_url()))
+                .context(context.clone())?;
+            // A 401 with a cached token (OSC SAT) may only mean the token went
+            // stale while the cache still held it (e.g. after the machine
+            // slept). Drop it and retry once with a freshly minted one.
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+                && !retried
+                && self.auth.invalidate_after_rejection().await
+            {
+                warn!("TAMS: {} -> 401, retrying once with a new token", context);
+                retried = true;
+                continue;
+            }
+            return Ok(resp);
         }
-        self.auth
-            .apply(req)
-            .await?
-            .send()
-            .await
-            .map_err(|e| anyhow::Error::new(e.without_url()))
-            .context(context)
     }
 
     /// A gateway URL: the base URL with `path` appended.
@@ -1029,6 +1045,112 @@ mod tests {
 
         fn client(base: &str) -> TamsClient {
             TamsClient::new(base, AuthMethod::Bearer("secret".into())).unwrap()
+        }
+
+        /// An OSC token endpoint that mints `sat-1`, `sat-2`, ... in turn.
+        async fn token_endpoint(minted: Arc<Mutex<u32>>) -> String {
+            let app = Router::new().route(
+                "/servicetoken",
+                axum::routing::post(move || {
+                    let minted = minted.clone();
+                    async move {
+                        let mut n = minted.lock().unwrap();
+                        *n += 1;
+                        axum::Json(serde_json::json!({ "token": format!("sat-{}", *n) }))
+                    }
+                }),
+            );
+            format!("{}/servicetoken", serve(app).await)
+        }
+
+        /// A gateway that accepts only `Bearer <accepted>` on `GET /flows/f`
+        /// and `POST /flows/f/segments`, and answers 401 otherwise.
+        async fn gated_gateway(seen: Seen, accepted: &'static str) -> String {
+            let check = move |what: &'static str| {
+                move |State(seen): State<Seen>, h: HeaderMap| async move {
+                    record(&seen, what.into(), &h);
+                    let ok = h
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(|v| v == format!("Bearer {}", accepted));
+                    if ok {
+                        (StatusCode::CREATED, axum::Json(serde_json::json!({}))).into_response()
+                    } else {
+                        StatusCode::UNAUTHORIZED.into_response()
+                    }
+                }
+            };
+            let app = Router::new()
+                .route("/flows/f", get(check("flow")))
+                .route("/flows/f/segments", axum::routing::post(check("register")))
+                .with_state(seen);
+            serve(app).await
+        }
+
+        /// An OSC client for a local stub. `TamsClient::new` refuses a non-OSC
+        /// host for OSC auth, so swap the auth in after construction.
+        fn osc_client(base: &str, token_url: String) -> TamsClient {
+            let mut c = TamsClient::new(base, AuthMethod::None).unwrap();
+            c.auth = AuthMethod::Osc {
+                provider: Arc::new(
+                    crate::osc::SatProvider::new(Some("pat".into()), Some(token_url)).unwrap(),
+                ),
+                service_id: "svc".into(),
+                credential_key: "k".into(),
+            };
+            c
+        }
+
+        fn auths(seen: &Seen) -> Vec<Option<String>> {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .map(|(_, a)| a.clone())
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn rejected_sat_is_reminted_and_the_request_retried_once() {
+            let minted = Arc::new(Mutex::new(0));
+            let token_url = token_endpoint(minted.clone()).await;
+            let seen: Seen = Arc::default();
+            // sat-1 is "stale" (rejected); sat-2 is accepted.
+            let gw = gated_gateway(seen.clone(), "sat-2").await;
+            let c = osc_client(&gw, token_url);
+
+            // Writer path: registering a segment survives the stale SAT.
+            c.register_segment("f", "o1", "[0:0_1:0)").await.unwrap();
+            assert_eq!(
+                auths(&seen),
+                vec![Some("Bearer sat-1".into()), Some("Bearer sat-2".into())]
+            );
+            // The new SAT is cached: the reader path uses it without a mint.
+            c.get_flow("f").await.unwrap();
+            assert_eq!(*minted.lock().unwrap(), 2);
+            assert_eq!(seen.lock().unwrap().len(), 3);
+        }
+
+        #[tokio::test]
+        async fn a_401_is_retried_only_once() {
+            let minted = Arc::new(Mutex::new(0));
+            let token_url = token_endpoint(minted.clone()).await;
+            let seen: Seen = Arc::default();
+            let gw = gated_gateway(seen.clone(), "never").await;
+            let c = osc_client(&gw, token_url);
+
+            let err = c.get_flow("f").await.unwrap_err();
+            let e = err.downcast_ref::<HttpStatusError>().expect("status error");
+            assert_eq!(e.status, StatusCode::UNAUTHORIZED);
+            assert_eq!(seen.lock().unwrap().len(), 2);
+            assert_eq!(*minted.lock().unwrap(), 2);
+        }
+
+        #[tokio::test]
+        async fn a_401_with_a_static_token_is_not_retried() {
+            let seen: Seen = Arc::default();
+            let gw = gated_gateway(seen.clone(), "never").await;
+            assert!(client(&gw).get_flow("f").await.is_err());
+            assert_eq!(seen.lock().unwrap().len(), 1);
         }
 
         #[tokio::test]
