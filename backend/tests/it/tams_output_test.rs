@@ -156,10 +156,28 @@ fn add_tams_output_with(
     segment_secs: u64,
     video: bool,
 ) -> TamsOutput {
+    add_tams_output_segment(
+        pipeline,
+        name,
+        gateway_url,
+        ("segment_duration_secs", segment_secs),
+        video,
+    )
+}
+
+/// As [`add_tams_output_with`], with the segment length given as a property
+/// name and value (`segment_duration_secs` or `segment_duration_ms`).
+fn add_tams_output_segment(
+    pipeline: &gst::Pipeline,
+    name: &str,
+    gateway_url: &str,
+    segment: (&str, u64),
+    video: bool,
+) -> TamsOutput {
     let instance_id = format!("{}_{}", name, uuid::Uuid::new_v4().simple());
     let properties: HashMap<String, PropertyValue> = [
         ("gateway_url", PropertyValue::String(gateway_url.into())),
-        ("segment_duration_secs", PropertyValue::UInt(segment_secs)),
+        (segment.0, PropertyValue::UInt(segment.1)),
         ("container", PropertyValue::String("mpegts".into())),
         ("num_video_tracks", PropertyValue::UInt(video as u64)),
         ("num_audio_tracks", PropertyValue::UInt(!video as u64)),
@@ -620,7 +638,26 @@ mod shared_timeline {
         keyframes_follow_the_grid(None);
     }
 
+    /// 500 ms segments (`segment_duration_ms`): boundaries on the 500 ms TAI
+    /// grid, with a GOP of one segment.
+    #[test]
+    fn encoder_keyframes_follow_a_subsecond_grid() {
+        keyframes_follow_a_grid(None, ("segment_duration_ms", 500), 500_000_000);
+    }
+
     fn keyframes_follow_the_grid(min_keyframe_request_interval_ms: Option<u64>) {
+        keyframes_follow_a_grid(
+            min_keyframe_request_interval_ms,
+            ("segment_duration_secs", 1),
+            1_000_000_000,
+        );
+    }
+
+    fn keyframes_follow_a_grid(
+        min_keyframe_request_interval_ms: Option<u64>,
+        segment: (&str, u64),
+        segment_ns: u64,
+    ) {
         if !plugins_available()
             || !common::plugins_available(&[
                 "videotestsrc",
@@ -636,7 +673,7 @@ mod shared_timeline {
         let (gateway, registered) = stub_gateway::start(&runtime);
 
         let pipeline = gst::Pipeline::new();
-        let out = add_tams_output_with(&pipeline, "tams_video", &gateway, 1, true);
+        let out = add_tams_output_segment(&pipeline, "tams_video", &gateway, segment, true);
         let src = gst::ElementFactory::make("videotestsrc")
             .property("is-live", true)
             .build()
@@ -706,14 +743,15 @@ mod shared_timeline {
         );
         // The first split is requested too late to be forced and the second may
         // be; from the third segment on, each starts within a frame (20 ms) of a
-        // whole TAI second.
+        // TAI grid point (a multiple of the segment length).
         for tr in &ranges[2..] {
-            let into_second = timerange_start_ns(tr) % 1_000_000_000;
+            let into_segment = timerange_start_ns(tr) % segment_ns;
             assert!(
-                into_second < 20_000_000,
-                "segment {} starts {} ms past the 1 s TAI grid (all: {:?})",
+                into_segment < 20_000_000,
+                "segment {} starts {} ms past the {} ms TAI grid (all: {:?})",
                 tr,
-                into_second / 1_000_000,
+                into_segment / 1_000_000,
+                segment_ns / 1_000_000,
                 ranges
             );
         }

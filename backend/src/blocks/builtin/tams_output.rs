@@ -47,6 +47,9 @@ pub struct TamsOutputBuilder;
 
 const BLOCK_NAME: &str = "TAMS Output";
 const DEFAULT_SEGMENT_SECS: u64 = 2;
+/// Shortest segment `segment_duration_ms` accepts. Every segment is one HTTP
+/// upload and one TAMS segment registration, so the rate is bounded.
+const MIN_SEGMENT_MS: u64 = 200;
 const DEFAULT_NUM_VIDEO_TRACKS: usize = 1;
 const DEFAULT_NUM_AUDIO_TRACKS: usize = 1;
 /// Sanity bound on audio tracks: a flow can carry several audio essences (muxed
@@ -110,6 +113,20 @@ fn prop_u64(props: &HashMap<String, PropertyValue>, key: &str, default: u64) -> 
         Some(PropertyValue::Int(i)) if *i >= 0 => *i as u64,
         _ => default,
     }
+}
+
+/// Segment length in nanoseconds. `segment_duration_ms` wins when it is set
+/// (non-zero) and is clamped to [`MIN_SEGMENT_MS`]; otherwise the older
+/// whole-second `segment_duration_secs` applies (at least 1 s), so existing
+/// flows keep their length.
+fn segment_duration_ns(props: &HashMap<String, PropertyValue>) -> u64 {
+    let ms = prop_u64(props, "segment_duration_ms", 0);
+    if ms > 0 {
+        return ms.max(MIN_SEGMENT_MS).saturating_mul(1_000_000);
+    }
+    prop_u64(props, "segment_duration_secs", DEFAULT_SEGMENT_SECS)
+        .max(1)
+        .saturating_mul(1_000_000_000)
 }
 
 /// Parse a `key=value, key=value` string into TAMS flow tags. Blank/keyless
@@ -219,8 +236,7 @@ impl BlockBuilder for TamsOutputBuilder {
             crate::tams::auth::TamsAuth::Static(auth) => AuthPlan::Fixed(auth),
         };
 
-        let segment_secs =
-            prop_u64(properties, "segment_duration_secs", DEFAULT_SEGMENT_SECS).max(1);
+        let segment_ns = segment_duration_ns(properties);
         let num_video = prop_usize(properties, "num_video_tracks", DEFAULT_NUM_VIDEO_TRACKS).min(1);
         let num_audio = prop_usize(properties, "num_audio_tracks", DEFAULT_NUM_AUDIO_TRACKS)
             .min(MAX_AUDIO_TRACKS);
@@ -276,7 +292,7 @@ impl BlockBuilder for TamsOutputBuilder {
                         instance_id,
                         "video",
                         Container::Mp4,
-                        segment_secs,
+                        segment_ns,
                         &[Essence::Video],
                         true,
                         gateway_url.clone(),
@@ -308,7 +324,7 @@ impl BlockBuilder for TamsOutputBuilder {
                         instance_id,
                         &tag,
                         Container::Mp4,
-                        segment_secs,
+                        segment_ns,
                         &[essence],
                         true,
                         gateway_url.clone(),
@@ -368,7 +384,7 @@ impl BlockBuilder for TamsOutputBuilder {
                     instance_id,
                     "mux",
                     Container::MpegTs,
-                    segment_secs,
+                    segment_ns,
                     &inputs,
                     false, // codec is the container; no per-essence detection
                     gateway_url.clone(),
@@ -381,13 +397,13 @@ impl BlockBuilder for TamsOutputBuilder {
         }
 
         info!(
-            "TAMS Output {}: built ({} video, {} audio, {}), gateway {}, segment {}s",
+            "TAMS Output {}: built ({} video, {} audio, {}), gateway {}, segment {} ms",
             instance_id,
             num_video,
             num_audio,
             container.content_type(),
             gateway_url,
-            segment_secs
+            segment_ns / 1_000_000
         );
 
         Ok(BlockBuildResult {
@@ -472,7 +488,7 @@ fn build_flow_chain(
     instance_id: &str,
     suffix: &str,
     container: Container,
-    segment_secs: u64,
+    segment_ns: u64,
     inputs: &[Essence],
     detect_codec: bool,
     gateway_url: String,
@@ -516,7 +532,7 @@ fn build_flow_chain(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("splitmuxsink: {}", e)))?;
     splitmuxsink.set_property("muxer", &mux);
-    // No size limit: segments split on a grid of `segment_secs` on the TAI
+    // No size limit: segments split on a grid of `segment_ns` on the TAI
     // timeline, scheduled with `split-at-running-time` as each fragment opens (see
     // the format-location-full handler). A size limit splits wherever the queued
     // GOPs happen to overrun it, which differs between blocks fed the same input,
@@ -745,7 +761,6 @@ fn build_flow_chain(
     let chain_tag = suffix.to_string();
     let content_type = container.content_type().to_string();
     let file_ext = container.file_ext().to_string();
-    let segment_ns = segment_secs.saturating_mul(1_000_000_000);
     ctx.register_element_setup(Box::new(move |flow_id, events| {
         // Remove only orphan segment files left by a previous run — plain `seg_*`
         // files with no `.meta` sidecar. Their timerange is lost so they cannot be
@@ -840,6 +855,8 @@ fn build_flow_chain(
         // Fragments that started off the grid although their keyframe was
         // requested in time (see `warn_off_grid`).
         let off_grid = AtomicU64::new(0);
+        // Running time of the last grid point a keyframe was requested for.
+        let requested_until: Mutex<Option<u64>> = Mutex::new(None);
 
         let _ = splitmuxsink.connect("format-location-full", false, move |args| {
             let element = args.first().and_then(|v| v.get::<gst::Element>().ok());
@@ -945,21 +962,31 @@ fn build_flow_chain(
                 .unwrap_or_else(|e| e.into_inner())
                 .next_split_running_time(running_time_ns, segment_ns);
             if let (Some(next), Some(el)) = (next_split, element.as_ref()) {
+                // Ask upstream for keyframes on the grid points after `next`, up
+                // to `KEYFRAME_LEAD_NS` ahead. This fragment opens a GOP or more
+                // after its start and the encoder's input runs ahead of its
+                // output by its latency, so the encoder is often past `next`
+                // already; a request for a time already passed would force a
+                // keyframe off the grid. The split at `next` itself was requested
+                // by an earlier fragment.
+                let ahead = {
+                    let mut until = requested_until.lock().unwrap_or_else(|e| e.into_inner());
+                    let (points, last) = keyframe_request_points(next, segment_ns, *until);
+                    *until = Some(last);
+                    points
+                };
                 el.call_async(move |el| {
                     let at = gst::ClockTime::from_nseconds(next);
                     el.emit_by_name::<()>("split-at-running-time", &[&at]);
-                    // Ask upstream for a keyframe at the grid point after `at`.
-                    // This fragment opens a GOP or more after its start, so the
-                    // encoder is often past `at` already; a request for a time
-                    // already passed would force a keyframe off the grid. The
-                    // split at `at` itself was requested one fragment earlier.
-                    let ahead = gst::ClockTime::from_nseconds(next + segment_ns);
-                    for pad in el.sink_pads() {
-                        let event = gstreamer_video::UpstreamForceKeyUnitEvent::builder()
-                            .running_time(ahead)
-                            .all_headers(true)
-                            .build();
-                        pad.push_event(event);
+                    for rt in &ahead {
+                        let rt = gst::ClockTime::from_nseconds(*rt);
+                        for pad in el.sink_pads() {
+                            let event = gstreamer_video::UpstreamForceKeyUnitEvent::builder()
+                                .running_time(rt)
+                                .all_headers(true)
+                                .build();
+                            pad.push_event(event);
+                        }
                     }
                 });
             }
@@ -1002,6 +1029,41 @@ fn build_flow_chain(
     }));
 
     Ok(())
+}
+
+/// How far ahead of a fragment's next split TAMS Output asks upstream for
+/// keyframes on the grid. It must exceed the upstream encoder's latency (x264
+/// with lookahead holds most of a second), or the request comes after the
+/// encoder has passed that point and forces a keyframe off the grid. With 1 s
+/// segments this is one grid point ahead, as before sub-second segments.
+const KEYFRAME_LEAD_NS: u64 = 1_000_000_000;
+
+/// Grid points (running time) to ask upstream for keyframes at when a fragment
+/// whose next split is `next` opens: every grid point after `next` up to
+/// `KEYFRAME_LEAD_NS` past it (at least one), skipping those already requested
+/// (`requested_until`, the last one asked for). Returns the points and the new
+/// `requested_until`. After a gap or a backward jump it starts over from the
+/// grid point after `next`.
+fn keyframe_request_points(
+    next: u64,
+    segment_ns: u64,
+    requested_until: Option<u64>,
+) -> (Vec<u64>, u64) {
+    let segment_ns = segment_ns.max(1);
+    let lead = KEYFRAME_LEAD_NS.div_ceil(segment_ns).max(1);
+    let last = next.saturating_add(lead.saturating_mul(segment_ns));
+    let first_new = next.saturating_add(segment_ns);
+    let first = match requested_until {
+        Some(r) if r >= first_new && r <= last && (r - next).is_multiple_of(segment_ns) => {
+            r + segment_ns
+        }
+        _ => first_new,
+    };
+    let points = (0..)
+        .map(|i: u64| first.saturating_add(i * segment_ns))
+        .take_while(|p| *p <= last)
+        .collect();
+    (points, last)
 }
 
 /// Report a segment that started `miss_ns` past its TAI grid point although its
@@ -1386,9 +1448,16 @@ fn tams_output_definition() -> BlockDefinition {
             simple_prop(
                 "segment_duration_secs",
                 "Segment Duration (s)",
-                "Target duration of each TAMS segment in seconds. Segments split on a keyframe (one is requested from upstream encoders at each split), so the GOP should divide it: for replay, 1 s segments with a GOP of 0.5 s or shorter.",
+                "Target duration of each TAMS segment in whole seconds. Ignored when Segment Duration (ms) is set. Segments split on a keyframe (one is requested from upstream encoders at each split), so the GOP should divide it: for replay, 1 s segments with a GOP of 0.5 s or shorter.",
                 PropertyType::Int,
                 PropertyValue::Int(DEFAULT_SEGMENT_SECS as i64),
+            ),
+            simple_prop(
+                "segment_duration_ms",
+                "Segment Duration (ms)",
+                "Target duration of each TAMS segment in milliseconds, for segments shorter than a second (at least 200). 0 uses Segment Duration (s). Boundaries stay on the TAI grid (multiples of this length from the TAI epoch), so the GOP should divide it: for 500 ms segments, a GOP of 500 ms or a divisor of it.",
+                PropertyType::Int,
+                PropertyValue::Int(0),
             ),
             simple_prop(
                 "tams_source_id",
@@ -1460,6 +1529,89 @@ fn simple_prop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyframes_requested_a_second_ahead_once_each() {
+        const MS: u64 = 1_000_000;
+        // 1 s segments: one grid point ahead, as before.
+        assert_eq!(
+            keyframe_request_points(10_000 * MS, 1000 * MS, None),
+            (vec![11_000 * MS], 11_000 * MS)
+        );
+        assert_eq!(
+            keyframe_request_points(11_000 * MS, 1000 * MS, Some(11_000 * MS)),
+            (vec![12_000 * MS], 12_000 * MS)
+        );
+        // 500 ms: the first fragment asks for both points within the second,
+        // the next one only for the new point.
+        assert_eq!(
+            keyframe_request_points(10_000 * MS, 500 * MS, None),
+            (vec![10_500 * MS, 11_000 * MS], 11_000 * MS)
+        );
+        assert_eq!(
+            keyframe_request_points(10_500 * MS, 500 * MS, Some(11_000 * MS)),
+            (vec![11_500 * MS], 11_500 * MS)
+        );
+        // A fragment that spans grid points (a missed keyframe) leaves a gap:
+        // start over after `next`.
+        assert_eq!(
+            keyframe_request_points(12_500 * MS, 500 * MS, Some(11_500 * MS)),
+            (vec![13_000 * MS, 13_500 * MS], 13_500 * MS)
+        );
+        // A backward jump in running time starts over too.
+        assert_eq!(
+            keyframe_request_points(1_000 * MS, 500 * MS, Some(11_500 * MS)),
+            (vec![1_500 * MS, 2_000 * MS], 2_000 * MS)
+        );
+        // 200 ms: five points within the second.
+        assert_eq!(keyframe_request_points(0, 200 * MS, None).0.len(), 5);
+    }
+
+    #[test]
+    fn segment_length_from_seconds_or_milliseconds() {
+        let props = |pairs: &[(&str, PropertyValue)]| -> HashMap<String, PropertyValue> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect()
+        };
+        const MS: u64 = 1_000_000;
+        // Neither set: the default whole seconds.
+        assert_eq!(
+            segment_duration_ns(&props(&[])),
+            DEFAULT_SEGMENT_SECS * 1000 * MS
+        );
+        // Seconds only (existing flows), clamped to at least 1 s.
+        assert_eq!(
+            segment_duration_ns(&props(&[("segment_duration_secs", PropertyValue::Int(1))])),
+            1000 * MS
+        );
+        assert_eq!(
+            segment_duration_ns(&props(&[("segment_duration_secs", PropertyValue::Int(0))])),
+            1000 * MS
+        );
+        // Milliseconds win over seconds.
+        assert_eq!(
+            segment_duration_ns(&props(&[
+                ("segment_duration_secs", PropertyValue::Int(2)),
+                ("segment_duration_ms", PropertyValue::Int(500)),
+            ])),
+            500 * MS
+        );
+        // 0 ms means unset.
+        assert_eq!(
+            segment_duration_ns(&props(&[
+                ("segment_duration_secs", PropertyValue::UInt(3)),
+                ("segment_duration_ms", PropertyValue::Int(0)),
+            ])),
+            3000 * MS
+        );
+        // Clamped to the minimum.
+        assert_eq!(
+            segment_duration_ns(&props(&[("segment_duration_ms", PropertyValue::Int(40))])),
+            MIN_SEGMENT_MS * MS
+        );
+    }
 
     #[test]
     fn video_essence_parameters_from_caps() {
