@@ -31,7 +31,9 @@
 //! machine sleeps, so without this every segment after a wake was stamped as far
 //! in the past as the sleep lasted. The new offset is stored in the shared entry
 //! with a new [`PipelineTaiMapping::epoch`], so every block of the pipeline
-//! re-anchors on the same offset and the angles stay aligned.
+//! re-anchors on the same offset and the angles stay aligned. Blocks that stamp
+//! every buffer take the new offset from a clock time they all agree on (see
+//! [`SharedStamps`]), so branches never stamp one running time differently.
 //!
 //! Drift is kept apart from jumps. The gap is checked two ways, and either one
 //! re-anchors:
@@ -56,7 +58,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use strom_types::FlowId;
 use tracing::{info, warn};
@@ -257,6 +259,81 @@ struct RegistryEntry {
     drift_logged_s: u128,
     /// When a block last asked for the mapping.
     last_used: Instant,
+    /// The offsets stampers of this run apply, and from which clock time.
+    stamps: Arc<SharedStamps>,
+}
+
+/// Offsets a [`SharedStamps`] keeps, the one in force included. Older ones are
+/// only needed by a branch that runs more re-anchors behind the others.
+const STAMP_HISTORY: usize = 8;
+
+/// Running time -> TAI for stamping buffers, shared by every stamper of one
+/// pipeline run, so equal running times get equal stamps in every branch,
+/// across a re-anchor too.
+///
+/// A re-anchor is noticed by whichever block asks the registry first. Another
+/// branch, which has not asked since, would go on stamping with the old offset,
+/// so for a while the same running time would get stamps seconds apart. So a
+/// new offset applies from a clock time every stamper agrees on: one past the
+/// latest clock time any of them has stamped. Clock times up to there keep the
+/// old offset, whichever branch stamps them and when; later ones get the new
+/// one. Each buffer goes through [`Self::tai_ns`], which records its clock time
+/// and picks the offset in force for it.
+#[derive(Debug)]
+pub struct SharedStamps {
+    inner: Mutex<StampHistory>,
+}
+
+#[derive(Debug)]
+struct StampHistory {
+    /// The latest clock time (`base_time + running_time`) stamped so far.
+    stamped_through_ns: Option<u64>,
+    /// `(from clock time, offset)`, oldest first. The first entry also covers
+    /// clock times before its own.
+    offsets: Vec<(u64, i128)>,
+}
+
+impl SharedStamps {
+    fn new(offset_ns: i128) -> Self {
+        Self {
+            inner: Mutex::new(StampHistory {
+                stamped_through_ns: None,
+                offsets: vec![(0, offset_ns)],
+            }),
+        }
+    }
+
+    /// TAI of a buffer with this running time in a pipeline with this base time.
+    /// Records the buffer's clock time as stamped.
+    pub fn tai_ns(&self, base_time_ns: u64, running_time_ns: u64) -> u64 {
+        let clock_ns = base_time_ns.saturating_add(running_time_ns);
+        let mut h = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        h.stamped_through_ns = Some(h.stamped_through_ns.map_or(clock_ns, |t| t.max(clock_ns)));
+        let offset = h
+            .offsets
+            .iter()
+            .rev()
+            .find(|(from, _)| *from <= clock_ns)
+            .unwrap_or(&h.offsets[0])
+            .1;
+        clamp_ns(clock_ns as i128 + offset)
+    }
+
+    /// Apply `offset_ns` from one past the latest clock time stamped so far.
+    fn reanchor(&self, offset_ns: i128) {
+        let mut h = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match h.stamped_through_ns {
+            None => h.offsets = vec![(0, offset_ns)],
+            Some(t) => {
+                let from = t.saturating_add(1);
+                h.offsets.retain(|(f, _)| *f < from);
+                h.offsets.push((from, offset_ns));
+                if h.offsets.len() > STAMP_HISTORY {
+                    h.offsets.remove(0);
+                }
+            }
+        }
+    }
 }
 
 /// Gap a clock may drift in `since_ns` of host TAI before it counts as a jump.
@@ -304,6 +381,21 @@ pub fn shared_pipeline_mapping(
     })
 }
 
+/// [`shared_pipeline_mapping`], together with the [`SharedStamps`] of the same
+/// pipeline run. A block that stamps buffers stamps them through it, so every
+/// branch applies a re-anchor from the same clock time. It still asks again now
+/// and then, since jumps are noticed here.
+pub fn shared_pipeline_stamps(
+    flow_id: FlowId,
+    clock: &gst::Clock,
+    base_time_ns: u64,
+    tai: &HostTai,
+) -> (PipelineTaiMapping, Arc<SharedStamps>) {
+    shared_pipeline_entry_with(flow_id, clock, base_time_ns, tai, || {
+        sample_other(clock, tai)
+    })
+}
+
 /// [`shared_pipeline_mapping`] with the jump check reading `(pipeline clock time,
 /// host TAI)` from `sample`, so tests can simulate a sleep.
 fn shared_pipeline_mapping_with(
@@ -313,6 +405,16 @@ fn shared_pipeline_mapping_with(
     tai: &HostTai,
     sample: impl Fn() -> (i128, u64),
 ) -> PipelineTaiMapping {
+    shared_pipeline_entry_with(flow_id, clock, base_time_ns, tai, sample).0
+}
+
+fn shared_pipeline_entry_with(
+    flow_id: FlowId,
+    clock: &gst::Clock,
+    base_time_ns: u64,
+    tai: &HostTai,
+    sample: impl Fn() -> (i128, u64),
+) -> (PipelineTaiMapping, Arc<SharedStamps>) {
     let mut reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(entry) = reg.get_mut(&flow_id) {
         let same_clock = entry.clock.upgrade().as_ref() == Some(clock);
@@ -330,6 +432,7 @@ fn shared_pipeline_mapping_with(
                 ) {
                     entry.mapping.offset_ns = tai_ns as i128 - clock_ns;
                     entry.mapping.epoch = entry.mapping.epoch.wrapping_add(1);
+                    entry.stamps.reanchor(entry.mapping.offset_ns);
                     entry.last_check = (tai_ns, 0);
                     entry.anchored_tai_ns = tai_ns;
                     entry.drift_logged_s = 0;
@@ -357,7 +460,7 @@ fn shared_pipeline_mapping_with(
                     }
                 }
             }
-            return entry.mapping;
+            return (entry.mapping, Arc::clone(&entry.stamps));
         }
     }
     let mapping = PipelineTaiMapping::for_clock(clock, tai);
@@ -384,6 +487,7 @@ fn shared_pipeline_mapping_with(
         e.clock.upgrade().is_some() && now.duration_since(e.last_used) < REGISTRY_IDLE
     });
     let tai_now = tai.now_ns();
+    let stamps = Arc::new(SharedStamps::new(mapping.offset_ns));
     reg.insert(
         flow_id,
         RegistryEntry {
@@ -394,9 +498,10 @@ fn shared_pipeline_mapping_with(
             anchored_tai_ns: tai_now,
             drift_logged_s: 0,
             last_used: now,
+            stamps: Arc::clone(&stamps),
         },
     );
-    mapping
+    (mapping, stamps)
 }
 
 /// Capture time of a buffer from its `GstReferenceTimestampMeta`, as TAI ns.
@@ -816,6 +921,62 @@ mod tests {
         // The re-sampled mapping holds: later calls (by any block) get the same.
         let d = shared_pipeline_mapping_with(flow, &clock, 1_000, &tai, || read(H16));
         assert_eq!(c, d);
+    }
+
+    /// Two branches of one pipeline stamp the same running times, one running
+    /// half a second ahead. The one ahead notices a 16 h sleep and re-anchors;
+    /// the other has not asked since. Both still stamp every running time alike:
+    /// up to the latest one stamped before the re-anchor with the old offset,
+    /// after it with the new one. With each branch on its own cached mapping,
+    /// the one behind stamped 16 h off until its next check.
+    #[test]
+    fn branches_stamp_alike_across_a_reanchor() {
+        gst::init().unwrap();
+        const MS: u64 = 1_000_000;
+        const H16: u64 = 16 * 3600 * 1_000_000_000;
+        const BASE: u64 = 1_000;
+        let tai = HostTai::new();
+        let clock = system_clock(gst::ClockType::Monotonic);
+        let flow = uuid::Uuid::new_v4();
+        let (old, ahead) = shared_pipeline_stamps(flow, &clock, BASE, &tai);
+        let (_, behind) = shared_pipeline_stamps(flow, &clock, BASE, &tai);
+        let rt = |frame: u64| frame * 20 * MS;
+        // Ahead has stamped through 10 s, behind through 9.5 s.
+        let stamped: Vec<u64> = (0..=500).map(|f| ahead.tai_ns(BASE, rt(f))).collect();
+        for (f, &s) in stamped.iter().enumerate().take(476) {
+            assert_eq!(behind.tai_ns(BASE, rt(f as u64)), s);
+        }
+        assert_eq!(stamped[500], old.tai_ns(BASE, rt(500)));
+
+        let read = || {
+            let (c, t) = sample_other(&clock, &tai);
+            (c, t + H16)
+        };
+        let new = shared_pipeline_mapping_with(flow, &clock, BASE, &tai, read);
+        assert_eq!(new.epoch, 1);
+        let next = ahead.tai_ns(BASE, rt(501));
+        assert_eq!(next, new.tai_ns(BASE, rt(501)));
+        assert_ne!(next, old.tai_ns(BASE, rt(501)));
+
+        // Behind catches up: 9.52 s to 10 s as ahead stamped them, then the new
+        // offset, without having asked the registry.
+        for (f, &s) in stamped.iter().enumerate().skip(476) {
+            assert_eq!(behind.tai_ns(BASE, rt(f as u64)), s, "frame {f}");
+        }
+        assert_eq!(behind.tai_ns(BASE, rt(501)), next);
+    }
+
+    /// A re-anchor before anything was stamped applies from the start.
+    #[test]
+    fn reanchor_before_any_stamp_applies_from_the_start() {
+        let stamps = SharedStamps::new(5);
+        stamps.reanchor(7);
+        assert_eq!(stamps.tai_ns(0, 0), 7);
+        assert_eq!(stamps.tai_ns(0, 100), 107);
+        stamps.reanchor(9);
+        // From 101 on; 100 and earlier keep 7.
+        assert_eq!(stamps.tai_ns(0, 100), 107);
+        assert_eq!(stamps.tai_ns(0, 101), 110);
     }
 
     /// Drift that adds up past the threshold, a little at each check, does not
