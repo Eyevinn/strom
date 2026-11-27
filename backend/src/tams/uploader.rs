@@ -24,8 +24,11 @@
 //! - each parked segment that fails waits longer before it is tried again, and
 //!   the sweep moves on to the next one meanwhile, so one segment that always
 //!   fails never holds back the others;
-//! - what is parked is capped in count and bytes ([`ParkedLimits`]); past the cap
-//!   the oldest segments are deleted, with an error event;
+//! - what is parked is capped in count and bytes per flow directory
+//!   ([`ParkedLimits`]); past the cap the oldest segments are deleted, with an
+//!   error event. Every segment is parked through
+//!   [`crate::tams::park::Parking::park`], which also caps all parked segments
+//!   of the server and keeps free space on the volume;
 //! - a retry reuses the storage object an earlier try allocated (and uploaded
 //!   to), so retries do not leave unused objects behind;
 //! - a successfully registered segment (and its sidecar) is deleted;
@@ -317,7 +320,7 @@ const AUTH_REPORT_INTERVAL: Duration = Duration::from_secs(300);
 ///
 /// Default cap on parked segments per flow directory, in MiB
 /// (`STROM_TAMS_PARKED_MAX_MB`).
-const DEFAULT_PARKED_MAX_MB: u64 = 8 * 1024;
+const DEFAULT_PARKED_MAX_MB: u64 = 4 * 1024;
 
 /// Default cap on the number of parked segments per flow directory
 /// (`STROM_TAMS_PARKED_MAX_SEGMENTS`). Every sweep reads each sidecar, so the
@@ -478,10 +481,10 @@ pub fn clear_orphans(temp_dir: &Path) -> u32 {
 static CLAIMED: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
 
 /// A claim on a parked segment, released on drop.
-struct Claim(PathBuf);
+pub(crate) struct Claim(PathBuf);
 
 impl Claim {
-    fn take(path: &Path) -> Option<Self> {
+    pub(crate) fn take(path: &Path) -> Option<Self> {
         let mut claimed = CLAIMED.lock().unwrap_or_else(|e| e.into_inner());
         claimed
             .insert(path.to_path_buf())
@@ -756,8 +759,14 @@ impl ParkedState {
     /// Scan the directory: enforce the cap, forget state of segments that are
     /// gone, and return this target's segments that are due, oldest first.
     async fn refresh(&mut self, ctx: &mut UploadCtx<'_>) -> VecDeque<Parked> {
+        let scanned_at = Instant::now();
         let mut all = collect_parked(&self.temp_dir).await;
         enforce_parked_limits(ctx, &self.limits, &mut all).await;
+        crate::tams::park::parking().sync_dir(
+            &self.temp_dir,
+            scanned_at,
+            all.iter().map(|p| (p.path.clone(), p.start_ns, p.bytes)),
+        );
         let present: HashSet<&Path> = all.iter().map(|p| p.path.as_path()).collect();
         self.retries
             .retain(|path, _| present.contains(path.as_path()));
@@ -1258,18 +1267,24 @@ async fn on_registered(
 
 /// Park a segment on disk for the recovery sweep: keep its bytes and write a `.meta`
 /// sidecar with the timerange so it can be re-registered later (even after a restart).
-/// When the sidecar cannot be written (the disk is full), the segment cannot be
-/// recovered: it is deleted, to free the space, with an error.
+/// When it cannot be parked (over the server's cap or short of free space even
+/// after deleting older parked segments, or the sidecar cannot be written), the
+/// segment cannot be recovered: it is deleted, to free the space, with an error.
 async fn park_segment(ctx: &UploadCtx<'_>, frag: &FragmentReady, reason: &str) -> Outcome {
     let target = ParkTarget::new(ctx.client.base_url(), &ctx.flow_spec.flow_id);
-    let contents = sidecar_contents(frag.start_ns, frag.end_ns, &target);
-    let (sidecar, tmp) = (sidecar_path(&frag.path), sidecar_tmp_path(&frag.path));
-    let written = match tokio::fs::write(&tmp, contents).await {
-        Ok(()) => tokio::fs::rename(&tmp, &sidecar).await,
-        Err(e) => Err(e),
+    let frag_owned = FragmentReady {
+        path: frag.path.clone(),
+        start_ns: frag.start_ns,
+        end_ns: frag.end_ns,
     };
+    let written = tokio::task::spawn_blocking(move || park_on_disk(&frag_owned, &target))
+        .await
+        .unwrap_or_else(|e| {
+            Err(crate::tams::park::ParkError::Io(std::io::Error::other(
+                e.to_string(),
+            )))
+        });
     if let Err(e) = written {
-        let _ = tokio::fs::remove_file(&tmp).await;
         let msg = format!(
             "could not park segment {} ({}), dropping it: {}",
             frag.path.display(),
@@ -1293,16 +1308,19 @@ async fn park_segment(ctx: &UploadCtx<'_>, frag: &FragmentReady, reason: &str) -
 /// Park a finished segment on disk from outside the uploader (the streaming
 /// side, when the uploader's channel is full or closed): write its sidecar so
 /// the recovery sweep of this run or a later one uploads it to `target`.
-/// Blocking; a small write. On an error (the disk is full) the caller drops the
-/// segment.
-pub fn park_on_disk(frag: &FragmentReady, target: &ParkTarget) -> std::io::Result<()> {
-    let tmp = sidecar_tmp_path(&frag.path);
-    let written = std::fs::write(&tmp, sidecar_contents(frag.start_ns, frag.end_ns, target))
-        .and_then(|()| std::fs::rename(&tmp, sidecar_path(&frag.path)));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    written
+/// Blocking; a small write, unless older parked segments must be deleted to
+/// make room (see [`crate::tams::park::Parking::park`]). On an error (over the
+/// server's cap or short of free space, or the disk is full) the caller drops
+/// the segment.
+pub fn park_on_disk(
+    frag: &FragmentReady,
+    target: &ParkTarget,
+) -> Result<(), crate::tams::park::ParkError> {
+    crate::tams::park::parking().park(
+        &frag.path,
+        frag.start_ns,
+        &sidecar_contents(frag.start_ns, frag.end_ns, target),
+    )
 }
 
 /// Run an async operation up to `attempts` times, with jittered exponential backoff.
@@ -1470,14 +1488,14 @@ fn emit_error(events: &EventBroadcaster, flow_id: FlowId, block_id: &str, error:
 // --- Parked-segment sidecars -------------------------------------------------
 
 /// Sidecar path for a segment: `seg_00001.ts` -> `seg_00001.ts.meta`.
-fn sidecar_path(segment: &Path) -> PathBuf {
+pub(crate) fn sidecar_path(segment: &Path) -> PathBuf {
     let mut s = segment.as_os_str().to_owned();
     s.push(SIDECAR_SUFFIX);
     PathBuf::from(s)
 }
 
 /// Temporary file a sidecar is written to before it is renamed into place.
-fn sidecar_tmp_path(segment: &Path) -> PathBuf {
+pub(crate) fn sidecar_tmp_path(segment: &Path) -> PathBuf {
     let mut s = sidecar_path(segment).into_os_string();
     s.push(SIDECAR_TMP_SUFFIX);
     PathBuf::from(s)
@@ -1496,7 +1514,7 @@ fn sidecar_contents(start_ns: u64, end_ns: u64, target: &ParkTarget) -> String {
 
 /// Parse a sidecar: the JSON of [`sidecar_contents`], or `"<start_ns> <end_ns>"`
 /// as written before sidecars carried their target.
-fn parse_sidecar(s: &str) -> Option<(u64, u64, Option<ParkTarget>)> {
+pub(crate) fn parse_sidecar(s: &str) -> Option<(u64, u64, Option<ParkTarget>)> {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
         let start = v.get("start_ns")?.as_u64()?;
         let end = v.get("end_ns")?.as_u64()?;
@@ -1560,6 +1578,7 @@ async fn collect_parked(temp_dir: &Path) -> VecDeque<Parked> {
 
 /// Delete a segment file and its sidecar (if any). Used on success and on giving up.
 async fn discard_segment(segment: &Path) {
+    crate::tams::park::parking().forget(segment);
     if let Err(e) = tokio::fs::remove_file(segment).await {
         if e.kind() != std::io::ErrorKind::NotFound {
             warn!(
