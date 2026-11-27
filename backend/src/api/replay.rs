@@ -236,36 +236,33 @@ pub async fn patch_source_offsets(
     Path(id): Path<FlowId>,
     JsonBody(patch): JsonBody<ReplaySourceOffsetsPatch>,
 ) -> Result<Json<ReplaySourceOffsets>, ApiError> {
-    let mut flow = state.get_flow(&id).await.ok_or_else(flow_not_found)?;
-    let offsets = &mut flow.properties.source_offsets_ms;
+    // Checked whole first: a bad entry changes nothing.
+    let mut changes = std::collections::BTreeMap::new();
     for (key, value) in patch.offsets_ms {
         let key = key.trim().to_string();
-        match value {
-            Some(ms) => {
-                source_offsets::check(&key, ms).map_err(|e| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(ErrorResponse::with_details("invalid", e)),
-                    )
-                })?;
-                offsets.insert(key, ms);
-            }
-            None => {
-                offsets.remove(&key);
-            }
+        if let Some(ms) = value {
+            source_offsets::check(&key, ms).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::with_details("invalid", e)),
+                )
+            })?;
         }
+        changes.insert(key, value);
     }
-    let offsets_ms = offsets.clone();
-    flow.properties.last_modified = Some(chrono::Local::now().to_rfc3339());
-    state.upsert_flow(flow).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::with_details(
-                "Failed to save the flow",
-                e.to_string(),
-            )),
-        )
-    })?;
+    let offsets_ms = state
+        .patch_source_offsets(&id, changes)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::with_details(
+                    "Failed to save the flow",
+                    e.to_string(),
+                )),
+            )
+        })?
+        .ok_or_else(flow_not_found)?;
     Ok(Json(ReplaySourceOffsets { offsets_ms }))
 }
 

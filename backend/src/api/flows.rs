@@ -621,6 +621,12 @@ pub async fn update_flow(
     if flow.properties.created_at.is_none() {
         flow.properties.created_at = old_flow.properties.created_at.clone();
     }
+    // A body without source offsets (a client that does not know them, or
+    // a copy taken before they were set) keeps the stored ones; they are
+    // removed through `/api/flows/{id}/source-offsets`.
+    if flow.properties.source_offsets_ms.is_empty() {
+        flow.properties.source_offsets_ms = old_flow.properties.source_offsets_ms.clone();
+    }
 
     // Check if the flow is currently running
     let is_running = old_flow.running;
@@ -1519,12 +1525,16 @@ pub async fn update_flow_properties(
         )
     })?;
 
-    // Update properties while preserving timestamps
+    // Update properties while preserving timestamps and the source offsets
+    // (those change through `/api/flows/{id}/source-offsets`: a body that
+    // leaves them out must not move running replay players back).
     let old_created_at = flow.properties.created_at.clone();
     let old_started_at = flow.properties.started_at.clone();
+    let old_source_offsets = std::mem::take(&mut flow.properties.source_offsets_ms);
     flow.properties = req.properties;
     flow.properties.created_at = old_created_at;
     flow.properties.started_at = old_started_at;
+    flow.properties.source_offsets_ms = old_source_offsets;
     flow.properties.last_modified = Some(Local::now().to_rfc3339());
 
     // Save the updated flow

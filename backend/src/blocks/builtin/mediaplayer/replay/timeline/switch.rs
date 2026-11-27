@@ -29,6 +29,11 @@ pub trait SourceControl: Send + Sync {
     /// ([`ReplayTimeline::source_changed`]), or gives up and keeps the old
     /// source ([`ReplayTimeline::source_failed`]).
     fn begin_switch(&self, source: OpenedSource, client_ref: Option<String>);
+    /// The stats of the lane being prepared beside the one shown (a source
+    /// switch, or a queued clip), if any: it resolves its own trim.
+    fn pending_stats(&self) -> Option<Arc<PlayerStats>> {
+        None
+    }
 }
 
 /// A switch that passed its checks, to start once the command applied.

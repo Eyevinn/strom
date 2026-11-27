@@ -669,10 +669,14 @@ impl ReplayTimeline {
     }
 
     /// Resolve every angle's offset again (the flow's source offsets
-    /// changed).
+    /// changed), and that of a lane an angle prepares (a source switch or a
+    /// queued clip), so it fetches and decodes the right stretch.
     pub fn refresh_offsets(&self) {
         for p in self.players() {
             p.refresh_offset();
+            if let Some(pending) = p.control().and_then(|c| c.pending_stats()) {
+                pending.refresh_offset();
+            }
         }
     }
 

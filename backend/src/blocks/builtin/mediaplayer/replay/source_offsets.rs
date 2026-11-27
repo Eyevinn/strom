@@ -203,6 +203,41 @@ mod tests {
         assert_eq!(q.offset_ns(), 30 * MS);
     }
 
+    /// A player's control whose lane being prepared (a switch, or a queued
+    /// clip) has stats of its own.
+    struct Preparing(Arc<PlayerStats>);
+
+    impl timeline::SourceControl for Preparing {
+        fn open_source(&self, _: &str) -> Result<timeline::OpenedSource, String> {
+            Err("not used".into())
+        }
+        fn begin_switch(&self, _: timeline::OpenedSource, _: Option<String>) {}
+        fn pending_stats(&self) -> Option<Arc<PlayerStats>> {
+            Some(Arc::clone(&self.0))
+        }
+    }
+
+    /// The lane being prepared for another source moves with the flow's
+    /// offsets as well, not only the lane shown: it must fetch and decode
+    /// the stretch the new offset asks for.
+    #[test]
+    fn a_prepared_lane_takes_a_changed_offset() {
+        let flow = uuid::Uuid::new_v4();
+        set_flow(flow, &offsets(&[("cam1", 100), ("cam2", 200)]));
+        let g = get_or_create(flow, "g");
+        let p = player(flow, "p", "cam1", 0);
+        g.register_player(&p);
+        let ctl = Arc::new(Preparing(player(flow, "p", "cam2", 0)));
+        let weak: std::sync::Weak<dyn timeline::SourceControl> =
+            Arc::downgrade(&ctl) as std::sync::Weak<Preparing>;
+        p.set_control(weak);
+        assert_eq!(ctl.0.offset_ns(), 200 * MS);
+        set_flow(flow, &offsets(&[("cam1", 100), ("cam2", -900)]));
+        assert_eq!(p.offset_ns(), 100 * MS);
+        assert_eq!(ctl.0.offset_ns(), -900 * MS);
+        remove_flow(flow);
+    }
+
     #[test]
     fn bad_entries_are_refused_or_left_out() {
         assert!(check("cam1", MAX_SOURCE_OFFSET_MS).is_ok());

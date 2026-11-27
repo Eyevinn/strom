@@ -442,4 +442,8 @@ impl SourceControl for ReplayPlayer {
             lane.halt();
         }
     }
+
+    fn pending_stats(&self) -> Option<Arc<PlayerStats>> {
+        lock(&self.lanes).pending.as_ref().map(|p| p.stats())
+    }
 }

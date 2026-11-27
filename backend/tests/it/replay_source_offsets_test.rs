@@ -83,3 +83,117 @@ async fn source_offsets_over_rest() {
     assert_eq!(missing.unwrap_err().0, StatusCode::NOT_FOUND);
     drop(tl);
 }
+
+/// A properties save or a whole-flow save whose body leaves the source
+/// offsets out (a client that does not know them, or a copy taken before
+/// they were set) keeps the stored ones: running players do not jump back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_save_without_offsets_keeps_them() {
+    use strom::api::flows::{update_flow, update_flow_properties};
+    use strom_types::api::UpdateFlowPropertiesRequest;
+
+    gstreamer::init().unwrap();
+    let state = common::state::new().app();
+    let flow = Flow::new("offsets kept");
+    let id = flow.id;
+    state.upsert_flow(flow).await.unwrap();
+    let tl = timeline::get_or_create(id, "g");
+    let p = Arc::new(PlayerStats::with_config(
+        "p",
+        PlayerConfig {
+            source_id: Some("cam1".into()),
+            flow_id: Some(id),
+            ..Default::default()
+        },
+    ));
+    tl.register_player(&p);
+    // A copy taken before the offsets were set.
+    let stale = state.get_flow(&id).await.unwrap();
+    let _ = patch_source_offsets(
+        State(state.clone()),
+        Path(id),
+        JsonBody(patch(&[("cam1", Some(1500))])),
+    )
+    .await
+    .unwrap();
+    let want: BTreeMap<String, i64> = [("cam1".into(), 1500)].into();
+    let stored = |state: strom::state::AppState| async move {
+        state
+            .get_flow(&id)
+            .await
+            .unwrap()
+            .properties
+            .source_offsets_ms
+    };
+
+    let mut props = stale.properties.clone();
+    props.description = Some("changed".into());
+    let Json(r) = update_flow_properties(
+        State(state.clone()),
+        Path(id),
+        JsonBody(UpdateFlowPropertiesRequest { properties: props }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.flow.properties.source_offsets_ms, want);
+    assert_eq!(stored(state.clone()).await, want);
+    assert_eq!(p.offset_ns(), 1500 * MS);
+
+    let Json(r) = update_flow(State(state.clone()), Path(id), JsonBody(stale.clone()))
+        .await
+        .unwrap();
+    assert_eq!(r.flow.properties.source_offsets_ms, want);
+    assert_eq!(stored(state.clone()).await, want);
+    assert_eq!(p.offset_ns(), 1500 * MS);
+
+    // A whole-flow save that names offsets still sets them.
+    let mut named = stale;
+    named.properties.source_offsets_ms = [("cam1".into(), -200)].into();
+    let _ = update_flow(State(state.clone()), Path(id), JsonBody(named))
+        .await
+        .unwrap();
+    assert_eq!(p.offset_ns(), -200 * MS);
+    drop(tl);
+}
+
+/// Changes for different sources sent at once all land.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_offset_changes_all_land() {
+    gstreamer::init().unwrap();
+    let state = common::state::new().app();
+    let flow = Flow::new("offsets concurrent");
+    let id = flow.id;
+    state.upsert_flow(flow).await.unwrap();
+    let tasks: Vec<_> = (0..16)
+        .map(|i| {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let key = format!("cam{}", i);
+                let _ = patch_source_offsets(
+                    State(state),
+                    Path(id),
+                    JsonBody(patch(&[(key.as_str(), Some(i * 10))])),
+                )
+                .await
+                .unwrap();
+            })
+        })
+        .collect();
+    for t in tasks {
+        t.await.unwrap();
+    }
+    let stored = state
+        .get_flow(&id)
+        .await
+        .unwrap()
+        .properties
+        .source_offsets_ms;
+    assert_eq!(stored.len(), 16);
+    let missing = patch_source_offsets(
+        State(state.clone()),
+        Path(uuid::Uuid::new_v4()),
+        JsonBody(patch(&[("cam1", Some(1))])),
+    )
+    .await;
+    assert_eq!(missing.unwrap_err().0, StatusCode::NOT_FOUND);
+}

@@ -193,7 +193,7 @@ A time offset belongs to the source (the camera), not to the player that shows i
 - The key is the source as the angle shows it: its `source` (the URI without credentials, e.g. `tams+https://<gateway>/flows/<flow_id>`) or its `source_id` (the TAMS flow id, or the directory name). The URI wins when both are listed.
 - The value is ms, within ±86400000 (a day), positive later on the group's axis, as `offset_ms`.
 - `PATCH /api/flows/{flow_id}/source-offsets` with `{"offsets_ms": {"<source>": 2500, "<other>": null}}` sets the named sources and removes those given `null`; the others stay. An empty source or a value out of range refuses the whole change (400 `invalid`). The flow is saved, and a running flow's players move at once (the state's `offset_ms` per angle shows the offset in use). `GET` returns `{"offsets_ms": {...}}`.
-- Saving the flow's properties (`PATCH /api/flows/{id}/properties`, or the flow itself) sets them too; there, an entry out of range is left out with a warning.
+- Saving the whole flow (`PUT /api/flows/{flow_id}`) with offsets in its body sets them too; there, an entry out of range is left out with a warning. A body without any keeps the stored ones, and `PATCH /api/flows/{flow_id}/properties` always keeps them: a client that does not know them cannot move the players back. Remove them through `source-offsets`.
 
 ### Going live by itself
 
