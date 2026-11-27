@@ -1,10 +1,11 @@
 //! Element that burns a buffer's reference timestamp into the picture, as UTC
 //! text and as a machine-readable code row.
 //!
-//! It renders the same reference timestamp TAMS Output anchors on (the first
-//! `timestamp/x-tai`, `x-ptp`, `x-unix` or `x-ntp` meta), converted to UTC, so a
-//! frame read back from a store can be checked against the time the store gives
-//! it, by eye and automatically. Frames without such a meta pass untouched.
+//! It renders the buffer's capture time (the first `timestamp/x-tai`, `x-ptp`,
+//! `x-unix` or `x-ntp` meta), converted to UTC, so a frame read back from a
+//! store can be checked against the time the store gives it, by eye and
+//! automatically. Frames without such a meta pass untouched, and so do frames
+//! narrower than [`CODE_CELLS`] pixels, where the code row does not fit.
 //!
 //! Layout (all sizes derive from the frame size, see [`Layout`]): a black band
 //! across the full width, holding
@@ -50,17 +51,33 @@ pub struct Layout {
     pub scale: u32,
 }
 
+/// Characters in the text, `YYYY-MM-DD HH:MM:SS.mmm UTC`.
+const TEXT_CHARS: u32 = 27;
+
 impl Layout {
-    pub fn for_frame(width: u32, height: u32) -> Self {
-        let cell_w = (width / CODE_CELLS).max(1);
+    /// `None` when the frame is narrower than [`CODE_CELLS`] pixels: the code
+    /// row would be clipped and could not be read back.
+    pub fn for_frame(width: u32, height: u32) -> Option<Self> {
+        if width < CODE_CELLS {
+            return None;
+        }
+        let cell_w = width / CODE_CELLS;
         let cell_h = (height / 40).max(4);
-        let scale = (height / 180).max(1);
+        // The text, with its padding on both sides, fits the width too: on a
+        // portrait frame the height alone would make it far too wide.
+        let scale = (height / 180)
+            .min(width / (TEXT_CHARS * ADVANCE + 4))
+            .max(1);
         let pad = scale * 2;
         let code_y = height / 12;
         let text_y = code_y + cell_h + pad;
-        let band_y = code_y.saturating_sub(pad);
-        let band_end = (text_y + GLYPH_H * scale + pad).min(height);
-        Self {
+        // The band starts and ends on an even row, so its chroma rows on 4:2:0
+        // formats cover no luma row outside it.
+        let band_y = code_y.saturating_sub(pad) & !1;
+        let band_end = (text_y + GLYPH_H * scale + pad)
+            .next_multiple_of(2)
+            .min(height);
+        Some(Self {
             band_y,
             band_h: band_end.saturating_sub(band_y),
             code_y,
@@ -69,7 +86,7 @@ impl Layout {
             text_x: pad,
             text_y,
             scale,
-        }
+        })
     }
 }
 
@@ -160,12 +177,11 @@ fn chroma_planes(format: gst_video::VideoFormat) -> &'static [(u32, u32, u32, u3
     }
 }
 
-/// Draw the band for `utc_ns` into the planes of a frame.
-fn draw(frame: &mut gst_video::VideoFrameRef<&mut gst::BufferRef>, utc_ns: u64) {
+/// Draw the band for `utc_ns` into the planes of a frame laid out as `layout`.
+fn draw(frame: &mut gst_video::VideoFrameRef<&mut gst::BufferRef>, layout: Layout, utc_ns: u64) {
     let width = frame.width();
     let height = frame.height();
     let format = frame.format();
-    let layout = Layout::for_frame(width, height);
     let strides: Vec<usize> = frame.plane_stride().iter().map(|&s| s as usize).collect();
 
     if let Ok(luma) = frame.plane_data_mut(0) {
@@ -249,6 +265,7 @@ mod imp {
         /// TAI - UTC of this host, sampled on start.
         tai_minus_utc_ns: AtomicU64,
         warned_missing: AtomicBool,
+        warned_narrow: AtomicBool,
     }
 
     #[glib::object_subclass]
@@ -299,6 +316,7 @@ mod imp {
             self.tai_minus_utc_ns
                 .store(HostTai::new().tai_minus_utc_ns(), Ordering::Relaxed);
             self.warned_missing.store(false, Ordering::Relaxed);
+            self.warned_narrow.store(false, Ordering::Relaxed);
             Ok(())
         }
     }
@@ -308,8 +326,27 @@ mod imp {
             &self,
             frame: &mut gst_video::VideoFrameRef<&mut gst::BufferRef>,
         ) -> Result<gst::FlowSuccess, gst::FlowError> {
+            let Some(layout) = Layout::for_frame(frame.width(), frame.height()) else {
+                if !self.warned_narrow.swap(true, Ordering::Relaxed) {
+                    gst::warning!(
+                        CAT,
+                        imp = self,
+                        "frame {} px wide is narrower than the {} px the code row needs: \
+                         nothing burnt in",
+                        frame.width(),
+                        CODE_CELLS
+                    );
+                }
+                return Ok(gst::FlowSuccess::Ok);
+            };
             let off = self.tai_minus_utc_ns.load(Ordering::Relaxed);
             let Some(tai_ns) = reference_tai_ns(frame.buffer(), off) else {
+                // The stamper stamps nothing before the pipeline has a clock (the
+                // preroll frame of a non-live stream); that is expected.
+                if self.obj().clock().is_none() {
+                    gst::debug!(CAT, imp = self, "preroll frame without a stamp");
+                    return Ok(gst::FlowSuccess::Ok);
+                }
                 if !self.warned_missing.swap(true, Ordering::Relaxed) {
                     gst::warning!(
                         CAT,
@@ -319,7 +356,7 @@ mod imp {
                 }
                 return Ok(gst::FlowSuccess::Ok);
             };
-            draw(frame, tai_ns.saturating_sub(off));
+            draw(frame, layout, tai_ns.saturating_sub(off));
             Ok(gst::FlowSuccess::Ok)
         }
     }
@@ -351,11 +388,37 @@ mod tests {
 
     #[test]
     fn layout_fits_the_frame() {
-        for (w, h) in [(1920, 1080), (1280, 720), (320, 180), (64, 48)] {
-            let l = Layout::for_frame(w, h);
+        for (w, h) in [
+            (1920, 1080),
+            (1280, 720),
+            (320, 180),
+            (64, 48),
+            (1080, 1920),
+            (720, 1280),
+            (1920, 1000),
+            (101, 77),
+        ] {
+            let l = Layout::for_frame(w, h).unwrap();
             assert!(l.band_y + l.band_h <= h, "{w}x{h}: {l:?}");
-            assert!(l.cell_w * CODE_CELLS <= w);
+            assert!(
+                l.cell_w >= 1 && l.cell_w * CODE_CELLS <= w,
+                "{w}x{h}: {l:?}"
+            );
             assert!(l.code_y >= l.band_y && l.code_y + l.cell_h <= l.band_y + l.band_h);
+            // The text fits across, on portrait frames too, where the frame is
+            // wide enough for it at one pixel per dot.
+            let text_end = l.text_x + (TEXT_CHARS * ADVANCE - 1) * l.scale;
+            if w >= TEXT_CHARS * ADVANCE + 4 {
+                assert!(text_end <= w, "{w}x{h}: text ends at {text_end}: {l:?}");
+            }
+            assert_eq!(utc_text(0).len() as u32, TEXT_CHARS);
+            // The band starts on an even row and ends on one (or at the
+            // frame's end), so 4:2:0 chroma stays inside it.
+            assert!(l.band_y.is_multiple_of(2), "{w}x{h}: {l:?}");
+            let end = l.band_y + l.band_h;
+            assert!(end.is_multiple_of(2) || end == h, "{w}x{h}: {l:?}");
         }
+        // Too narrow for the code row: nothing is drawn.
+        assert_eq!(Layout::for_frame(63, 480), None);
     }
 }
