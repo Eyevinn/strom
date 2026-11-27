@@ -506,6 +506,10 @@ impl BlockBuilder for TamsOutputBuilder {
                         .to_string(),
                 )
             })?;
+        // Checked here, not first in the element setup: a gateway client that
+        // cannot be built there leaves the run recording nowhere.
+        crate::tams::client::check_gateway_url(gateway_url.trim_end_matches('/'))
+            .map_err(|e| BlockBuildError::InvalidProperty(format!("TAMS Output: {:#}", e)))?;
         // Auth mode selects how the gateway is authenticated. "static" (default) uses
         // a long-lived bearer token (for TAMS gateways run outside OSC); "osc" mints
         // short-lived Service Access Tokens from the OSC PAT configured on this Strom
@@ -844,6 +848,9 @@ impl Essence {
     }
 }
 
+/// Queue bound of each essence's `appsink` (see `build_flow_chain`).
+const APPSINK_MAX_BUFFERS: u32 = 64;
+
 /// Build one TAMS flow chain: N identity inputs -> (dynamic parsers) -> appsinks
 /// -> segmenter (one muxer per fragment) -> segment files. For MP4 each chain has a single essence
 /// (one flow per essence); for MPEG-TS a single chain muxes all essences into one
@@ -908,7 +915,12 @@ fn build_flow_chain(
             .property("async", false)
             .property("qos", false)
             .property("enable-last-sample", false)
-            .property("max-buffers", 0u32)
+            // Bounded and leaky: the segmenter pulls every sample in the
+            // callback, so the queue stays short. When no callback is
+            // installed (the element setup failed), buffers are dropped
+            // instead of piling up in memory for the whole run.
+            .property("max-buffers", APPSINK_MAX_BUFFERS)
+            .property("drop", true)
             // What the fragment muxer takes, so that the parser converts to it
             // (mpegtsmux takes H.264 only as byte-stream).
             .property("caps", &mux_caps)
@@ -2113,6 +2125,53 @@ mod tests {
             derive_id(&a, "source"),
             Uuid::new_v5(&TAMS_NAMESPACE, b"prod-42/cam1:source").to_string()
         );
+    }
+
+    fn build_with(gateway: &str) -> Result<BlockBuildResult, BlockBuildError> {
+        gst::init().unwrap();
+        let properties: HashMap<String, PropertyValue> = [(
+            "gateway_url".to_string(),
+            PropertyValue::String(gateway.into()),
+        )]
+        .into_iter()
+        .collect();
+        let ctx = BlockBuildContext::new(vec![], "all".to_string());
+        TamsOutputBuilder.build("gw_test", &properties, &ctx)
+    }
+
+    /// A gateway URL the client cannot use fails the build. Before, the
+    /// element setup gave up on it at start, and the appsinks queued the
+    /// whole run in memory.
+    #[test]
+    fn gateway_url_without_scheme_fails_the_build() {
+        for gateway in ["gw.example.com", "ftp://gw.example.com", "not a url"] {
+            match build_with(gateway) {
+                Err(BlockBuildError::InvalidProperty(msg)) => {
+                    assert!(msg.contains("gateway url"), "{gateway}: {msg}")
+                }
+                Err(e) => panic!("{gateway}: unexpected error {e}"),
+                Ok(_) => panic!("{gateway}: built"),
+            }
+        }
+        assert!(build_with("http://gw.example.com/").is_ok());
+    }
+
+    /// The appsinks are bounded and leaky, so nothing piles up in memory
+    /// when no callback drains them.
+    #[test]
+    fn appsinks_are_bounded() {
+        let built = build_with("http://gw.example.com").unwrap();
+        let sinks: Vec<_> = built
+            .elements
+            .iter()
+            .filter(|(_, e)| e.factory().is_some_and(|f| f.name() == "appsink"))
+            .collect();
+        assert!(!sinks.is_empty());
+        for (id, sink) in sinks {
+            let max: u32 = sink.property("max-buffers");
+            assert!(max > 0, "{id}: unbounded");
+            assert!(sink.property::<bool>("drop"), "{id}: not leaky");
+        }
     }
 
     #[test]
