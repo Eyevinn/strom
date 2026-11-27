@@ -3480,3 +3480,70 @@ mod ramp_ms_resolution_tests {
         );
     }
 }
+
+/// Every way a flow enters the state migrates its Media Players' legacy
+/// properties (`stinger_mode`, `replay_*`) to `mode` and the current names.
+#[cfg(test)]
+mod mediaplayer_migration_tests {
+    use super::*;
+    use crate::blocks::builtin::mediaplayer::{assert_legacy_test_flow_migrated, legacy_test_flow};
+    use crate::storage::JsonFileStorage;
+
+    fn state_with_storage(storage_file: &std::path::Path) -> AppState {
+        let _ = gstreamer::init();
+        let blocks_file = tempfile::NamedTempFile::new().unwrap();
+        AppState::new(
+            JsonFileStorage::new(storage_file),
+            blocks_file.path(),
+            std::env::temp_dir(),
+            vec![],
+            "all".to_string(),
+            vec![],
+            false,
+            false,
+        )
+    }
+
+    #[tokio::test]
+    async fn load_from_storage_migrates_media_players() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flows.json");
+        let flow = legacy_test_flow();
+        let id = flow.id;
+        std::fs::write(
+            &path,
+            serde_json::json!({ "version": 1, "flows": [flow] }).to_string(),
+        )
+        .unwrap();
+        let state = state_with_storage(&path);
+        state.load_from_storage().await.unwrap();
+        assert_legacy_test_flow_migrated(&state.get_flow(&id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn upsert_flow_migrates_media_players() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flows.json");
+        let state = state_with_storage(&path);
+        let flow = legacy_test_flow();
+        let id = flow.id;
+        state.upsert_flow(flow).await.unwrap();
+        assert_legacy_test_flow_migrated(&state.get_flow(&id).await.unwrap());
+
+        // What was written to storage is migrated too.
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let saved: Flow = serde_json::from_value(saved["flows"][0].clone()).unwrap();
+        assert_legacy_test_flow_migrated(&saved);
+    }
+
+    #[tokio::test]
+    async fn insert_flow_if_absent_migrates_media_players() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_storage(&dir.path().join("flows.json"));
+        let flow = legacy_test_flow();
+        let id = flow.id;
+        assert!(state.insert_flow_if_absent(flow).await.unwrap());
+        assert_legacy_test_flow_migrated(&state.get_flow(&id).await.unwrap());
+    }
+}
