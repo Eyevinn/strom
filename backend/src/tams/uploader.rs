@@ -1055,20 +1055,21 @@ pub(crate) async fn upload_segment(
 }
 
 /// Park a segment that failed, keeping the object allocated for it (in
-/// `slot`) for its next try.
+/// `slot`) for its next try. The object is handed over before the segment is
+/// parked: once parked, the drainer may take the segment at once, and must
+/// find the object, or it allocates (and uploads to) a second one. When the
+/// segment cannot be parked, `park_segment` discards it and forgets the
+/// object.
 async fn park_kept(
     ctx: &mut UploadCtx<'_>,
     frag: &FragmentReady,
     slot: Mutex<Option<Allocation>>,
     reason: &str,
 ) -> Outcome {
-    let outcome = park_segment(ctx, frag, reason).await;
-    if outcome == Outcome::Parked {
-        if let Some(a) = slot.into_inner().unwrap_or_else(|e| e.into_inner()) {
-            allocations().insert(frag.path.clone(), a);
-        }
+    if let Some(a) = slot.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        allocations().insert(frag.path.clone(), a);
     }
-    outcome
+    park_segment(ctx, frag, reason).await
 }
 
 /// Upload and register one freshly-rotated fragment, or park it at once while
@@ -1241,7 +1242,10 @@ pub fn park_on_disk(
         &frag.path,
         frag.start_ns,
         &sidecar_contents(frag.start_ns, frag.end_ns, target),
-    )
+    )?;
+    #[cfg(test)]
+    tests::on_parked(&frag.path);
+    Ok(())
 }
 
 /// Run an async operation up to `attempts` times, with jittered exponential backoff.
@@ -2354,6 +2358,44 @@ mod tests {
         assert_eq!(stub.allocations.load(Ordering::SeqCst), 1);
         assert_eq!(stub.registrations.lock().unwrap().len(), 1);
         assert!(!allocations().contains_key(&path));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What [`ALLOCATIONS`] held for each segment the moment it was parked,
+    /// that is, when the drainer could first take it: whether its bytes were
+    /// uploaded, `None` without an allocation.
+    static AT_PARK: LazyLock<Mutex<HashMap<PathBuf, Option<bool>>>> =
+        LazyLock::new(Default::default);
+
+    pub(super) fn on_parked(segment: &Path) {
+        let held = allocations().get(segment).map(|a| a.uploaded);
+        AT_PARK.lock().unwrap().insert(segment.to_path_buf(), held);
+    }
+
+    /// A segment whose bytes are uploaded but whose registration failed is
+    /// parked with its object already handed over, so a drainer that takes it
+    /// at once reuses the object instead of allocating another.
+    #[tokio::test]
+    async fn the_allocation_is_handed_over_before_the_segment_is_parked() {
+        let stub = Stub::default();
+        stub.register.lock().unwrap().push_back(500);
+        let mut f = Fixture::new(start_stub(stub.clone()).await);
+        let dir = temp_dir();
+        let path = dir.join("seg_r1_00000.ts");
+        std::fs::write(&path, b"bytes").unwrap();
+        let frag = FragmentReady {
+            path: path.clone(),
+            start_ns: 10_000_000_000,
+            end_ns: 12_000_000_000,
+        };
+        let mut ctx = f.ctx();
+        assert_eq!(
+            upload_segment(&mut ctx, &frag, 1, false).await,
+            Outcome::Parked
+        );
+        assert_eq!(AT_PARK.lock().unwrap().get(&path), Some(&Some(true)));
+        forget_allocation(&path);
+        crate::tams::park::parking().forget(&path);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
