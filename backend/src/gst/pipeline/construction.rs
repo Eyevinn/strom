@@ -96,6 +96,8 @@ impl PipelineManager {
             block_message_connect_fns: Vec::new(),
             element_setup_fns: Vec::new(),
             stop_drain_fns: Vec::new(),
+            stopping: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            flow_ended: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             thread_priority_state: None,
             thread_registry: None,
             assigned_cpus: None,
