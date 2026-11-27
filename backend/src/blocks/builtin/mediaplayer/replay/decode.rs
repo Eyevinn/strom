@@ -6,21 +6,21 @@
 //!   format the decoder takes;
 //! - **decode** in a long-lived [`DecoderSession`] (one per decode worker):
 //!   `decoder ! [videoconvert !] capsfilter ! appsink`, fed through a pad of
-//!   our own. Per
-//!   segment: flush, a new segment event, DISCONT on the first access unit,
-//!   then end of stream, which drains the decoder of its last pictures. The
-//!   session (and a hardware decoder's context) lives on, so a segment does
-//!   not pay a decoder start-up.
+//!   our own. Per segment: flush, a new segment event, DISCONT on the first
+//!   access unit, then end of stream, which drains the decoder of its last
+//!   pictures. The session (and a hardware decoder's context) lives on, so a
+//!   segment does not pay a decoder start-up.
 //!
 //! Frames come out as NV12 in presentation order with their container PTS,
-//! in the memory [`choose_memory`] picked for the player ([`FrameMemory`]):
-//! CUDA memory from `nvh264dec`, GL memory from `vtdec_hw`, else system
-//! memory. Device memory stays on the GPU from the decoder to the flow: the
-//! frame store holds it, and a GL consumer takes it as it is (CUDA through
-//! its `cudadownload`, which is CUDA-GL interop, not a download).
-//!
 //! which [`map_to_grid`] turns into frames on the group's TAI grid. The PTS
 //! are those the demuxer gave, as with a pipeline per segment.
+//!
+//! The frames are in the memory [`choose_memory`] picked for the player
+//! ([`FrameMemory`]): CUDA memory from `nvh264dec`, GL memory from
+//! `vtdec_hw`, else system memory. Device memory stays on the GPU from the
+//! decoder to the flow: the frame store holds it, and a GL consumer takes it
+//! as it is (CUDA through its `cudadownload`, which is CUDA-GL interop, not a
+//! download).
 //!
 //! `STROM_REPLAY_DECODER` names the decoder element to use instead of the
 //! automatic choice in [`pick_decoder`] (diagnostics, A/B between decoders).
