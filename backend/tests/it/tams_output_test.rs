@@ -1577,7 +1577,8 @@ mod audio_pairs {
 /// TAMS flow ids derive from the block id, and block ids are only unique
 /// within a Strom flow: two running flows with a TAMS Output of the same id on
 /// one gateway would write into the same TAMS flows. The second flow must fail
-/// to start, and must start once the first one has stopped.
+/// to start, and must start once the first one has stopped. With a `tams_key`
+/// the ids derive from the key instead, so the same holds for blocks of any id.
 mod flow_claims {
     use super::*;
     use strom_types::Flow;
@@ -1585,8 +1586,17 @@ mod flow_claims {
     const BLOCK_ID: &str = "tams_claim_cam";
 
     fn flow_with_tams_output(name: &str, gateway_url: &str) -> Flow {
+        flow_with_keyed_tams_output(name, gateway_url, BLOCK_ID, None)
+    }
+
+    fn flow_with_keyed_tams_output(
+        name: &str,
+        gateway_url: &str,
+        block_id: &str,
+        tams_key: Option<&str>,
+    ) -> Flow {
         let mut flow = Flow::new(name);
-        let props: HashMap<String, PropertyValue> = [
+        let mut props: HashMap<String, PropertyValue> = [
             ("gateway_url", PropertyValue::String(gateway_url.into())),
             ("container", PropertyValue::String("mpegts".into())),
             ("num_video_tracks", PropertyValue::UInt(0)),
@@ -1595,8 +1605,11 @@ mod flow_claims {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
+        if let Some(key) = tams_key {
+            props.insert("tams_key".to_string(), PropertyValue::String(key.into()));
+        }
         flow.blocks.push(strom_types::BlockInstance {
-            id: BLOCK_ID.to_string(),
+            id: block_id.to_string(),
             block_definition_id: "builtin.tams_output".to_string(),
             name: None,
             properties: props,
@@ -1648,5 +1661,82 @@ mod flow_claims {
             .await
             .expect("second flow starts once the first has stopped");
         state.stop_flow(&second_id).await.expect("stop second");
+    }
+
+    /// A product that creates a new Strom flow, with new random block ids, for
+    /// each run (Open Live on every activation) keeps writing to the same TAMS
+    /// flows by setting the same `tams_key`: while the old run is up, the new
+    /// one is refused because it would write the same TAMS flows; once the old
+    /// run has stopped, the new one starts and writes them. A block with the
+    /// same id but another key writes other flows.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tams_key_keeps_tams_flows_across_new_block_ids() {
+        use strom::blocks::builtin::tams_output::tams_id_key;
+
+        gst::init().unwrap();
+        common::init_static_plugins();
+        if !plugins_available() {
+            return;
+        }
+        let state = common::state::new();
+        let gateway = format!(
+            "http://127.0.0.1:9/claims-key-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let key = format!("prod-{}/cam1", uuid::Uuid::new_v4().simple());
+        let (old_block, new_block) = ("cam_run1_7f3a", "cam_run2_c91e");
+
+        let old_run = flow_with_keyed_tams_output("tams_key_run1", &gateway, old_block, Some(&key));
+        let new_run = flow_with_keyed_tams_output("tams_key_run2", &gateway, new_block, Some(&key));
+        // Same block id as the old run, another key: other TAMS flows.
+        let other_key = flow_with_keyed_tams_output(
+            "tams_key_other",
+            &gateway,
+            old_block,
+            Some(&format!("{key}-other")),
+        );
+        // Both runs derive their TAMS ids from the key, not their block ids.
+        let block_props = |f: &Flow| f.blocks[0].properties.clone();
+        assert_eq!(
+            tams_id_key(old_block, &block_props(&old_run)),
+            tams_id_key(new_block, &block_props(&new_run))
+        );
+        let (old_id, new_id, other_id) = (old_run.id, new_run.id, other_key.id);
+        state.upsert_flow(old_run).await.expect("upsert old run");
+        state.upsert_flow(new_run).await.expect("upsert new run");
+        state
+            .upsert_flow(other_key)
+            .await
+            .expect("upsert other key");
+
+        state.start_flow(&old_id).await.expect("old run starts");
+        state
+            .start_flow(&other_id)
+            .await
+            .expect("same block id, other key: other TAMS flows");
+
+        let err = state
+            .start_flow(&new_id)
+            .await
+            .expect_err("a new run with the same key writes the same TAMS flows");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&old_id.to_string()) && msg.contains(old_block),
+            "the error names the old run and its block: {msg}"
+        );
+
+        // Restart: the old run stops, the new run takes its TAMS flows over.
+        state.stop_flow(&old_id).await.expect("stop old run");
+        state
+            .start_flow(&new_id)
+            .await
+            .expect("new run starts once the old run has stopped");
+        state.stop_flow(&new_id).await.expect("stop new run");
+        state.stop_flow(&other_id).await.expect("stop other key");
+        for k in [key.clone(), format!("{key}-other")] {
+            let _ = std::fs::remove_dir_all(strom::blocks::builtin::tams_output::segment_dir(
+                &k, "mux",
+            ));
+        }
     }
 }
