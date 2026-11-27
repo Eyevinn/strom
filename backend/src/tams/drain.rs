@@ -9,9 +9,11 @@
 //! - one upload at a time, round-robin across TAMS flows (one directory each),
 //!   oldest first within a flow, so one flow's large backlog does not starve
 //!   the others;
-//! - never while a live uploader has segments waiting in its queue
-//!   ([`live`]): live first. One drain upload may run alongside a live upload
-//!   in flight;
+//! - live first ([`live`], [`LivePolicy`]): never while some live uploader
+//!   has [`LIVE_BEHIND_QUEUED`] segments waiting in its queue (live is falling
+//!   behind). One waiting segment per uploader is normal; the drainer then
+//!   waits for a moment when none waits, but at most [`DRAIN_MAX_WAIT`], so it
+//!   cannot starve. One drain upload may run alongside live uploads in flight;
 //! - a segment is claimed (`crate::tams::uploader::Claim`) while it is uploaded,
 //!   so the cap on parked segments never deletes it and nothing uploads it
 //!   twice; on success its file, sidecar and index entry are deleted;
@@ -82,14 +84,74 @@ const MIN_IDLE_WAIT: Duration = Duration::from_millis(100);
 
 // --- Live first ------------------------------------------------------------------
 
-/// How often [`LiveBusy::wait_idle`] looks again while live is behind.
+/// How often the drainer looks again while it holds back for live.
 const LIVE_POLL: Duration = Duration::from_millis(50);
 
-/// Whether live uploads are falling behind: some live uploader has segments
-/// waiting in its queue, not yet started. A segment in flight does not count,
-/// so one drain upload runs alongside steady live uploads; with many cameras
-/// some uploader nearly always has one in flight, and the backlog would never
-/// drain. The drainer uploads only while nothing is queued.
+/// Segments waiting in one live uploader's queue at which live is behind and
+/// the drainer pauses. One waiting segment is the steady state of an uploader
+/// whose uploads take a large part of a segment's length; a second one means
+/// the oldest has waited about a segment's length. Override with
+/// `STROM_TAMS_DRAIN_LIVE_BEHIND`.
+pub const LIVE_BEHIND_QUEUED: usize = 2;
+
+/// Longest the drainer waits for a moment when no live segment waits at all,
+/// before it uploads anyway (live not behind). Without it, several live
+/// uploaders with one segment waiting each leave almost no such moment, and the
+/// backlog starved (one upload per 13 s with four cameras of 500 ms segments).
+/// Override with `STROM_TAMS_DRAIN_MAX_WAIT_MS`.
+pub const DRAIN_MAX_WAIT: Duration = Duration::from_secs(1);
+
+/// When the drainer may upload beside live uploads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LivePolicy {
+    /// Waiting segments in one queue at which the drainer pauses
+    /// ([`LIVE_BEHIND_QUEUED`]).
+    pub behind_queued: usize,
+    /// Longest wait for a moment with no live segment waiting
+    /// ([`DRAIN_MAX_WAIT`]).
+    pub max_wait: Duration,
+}
+
+impl Default for LivePolicy {
+    fn default() -> Self {
+        Self {
+            behind_queued: LIVE_BEHIND_QUEUED,
+            max_wait: DRAIN_MAX_WAIT,
+        }
+    }
+}
+
+impl LivePolicy {
+    /// The defaults, with `STROM_TAMS_DRAIN_LIVE_BEHIND` (at least 1) and
+    /// `STROM_TAMS_DRAIN_MAX_WAIT_MS` when set.
+    pub fn from_env() -> Self {
+        fn env<T: std::str::FromStr>(name: &str) -> Option<T> {
+            std::env::var(name).ok()?.trim().parse().ok()
+        }
+        let d = Self::default();
+        Self {
+            behind_queued: env::<usize>("STROM_TAMS_DRAIN_LIVE_BEHIND")
+                .map_or(d.behind_queued, |n| n.max(1)),
+            max_wait: env::<u64>("STROM_TAMS_DRAIN_MAX_WAIT_MS")
+                .map_or(d.max_wait, Duration::from_millis),
+        }
+    }
+}
+
+/// What the live uploaders' queues hold: segments waiting, not yet started. A
+/// segment in flight does not count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LiveLoad {
+    /// Waiting in all queues together.
+    pub queued: usize,
+    /// Waiting in the fullest queue.
+    pub max_queued: usize,
+}
+
+/// The live uploaders' queues, for the drainer to put live first: it pauses
+/// while some queue holds [`LivePolicy::behind_queued`] segments (live is
+/// falling behind), prefers a moment when no segment waits at all, and waits
+/// for one at most [`LivePolicy::max_wait`].
 pub struct LiveBusy {
     /// The live uploaders' queues (see [`crate::tams::uploader::channel`]),
     /// weak, so a queue closes when its producer goes.
@@ -114,29 +176,24 @@ impl LiveBusy {
 
     /// Live segments waiting in the queues of all live uploaders, not yet
     /// started. Queues whose producer is gone are dropped.
-    pub fn queued(&self) -> usize {
+    pub fn load(&self) -> LiveLoad {
         let mut queues = self.lock();
-        let mut queued = 0;
+        let mut load = LiveLoad::default();
         queues.retain(|weak| match weak.upgrade() {
             Some(tx) => {
-                queued += tx.max_capacity() - tx.capacity();
+                let n = tx.max_capacity() - tx.capacity();
+                load.queued += n;
+                load.max_queued = load.max_queued.max(n);
                 true
             }
             None => false,
         });
-        queued
+        load
     }
 
-    /// Whether some live uploader has a segment waiting in its queue.
-    pub fn is_busy(&self) -> bool {
-        self.queued() > 0
-    }
-
-    /// Wait until no live segment is waiting.
-    pub async fn wait_idle(&self) {
-        while self.is_busy() {
-            tokio::time::sleep(LIVE_POLL).await;
-        }
+    /// Live segments waiting in all queues together.
+    pub fn queued(&self) -> usize {
+        self.load().queued
     }
 }
 
@@ -513,7 +570,7 @@ fn gateway_backoff(failures: u32) -> Duration {
 enum Step {
     /// Tried one segment.
     Tried,
-    /// A live uploader became busy.
+    /// Held back for live (see [`Drainer::may_upload`]).
     LiveBusy,
     /// Nothing to try now; try again after this long, or when woken.
     Idle(Duration),
@@ -523,6 +580,10 @@ enum Step {
 pub struct Drainer {
     parking: &'static Parking,
     live: &'static LiveBusy,
+    policy: LivePolicy,
+    /// Since when the drainer has held back for live, with a segment to
+    /// upload; reset by an upload and when there is nothing to upload.
+    held_since: Option<Instant>,
     wake: &'static Notify,
     sat: Arc<SatProvider>,
     events: EventBroadcaster,
@@ -547,6 +608,8 @@ impl Drainer {
         Self {
             parking,
             live,
+            policy: LivePolicy::from_env(),
+            held_since: None,
             wake,
             sat,
             events,
@@ -573,7 +636,6 @@ impl Drainer {
         )));
         let mut next_prune = Instant::now() + SYNC_INTERVAL;
         loop {
-            self.live.wait_idle().await;
             if Instant::now() >= next_prune {
                 // Retries of segments that are gone.
                 let parking = self.parking;
@@ -582,7 +644,7 @@ impl Drainer {
             }
             match self.step().await {
                 Step::Tried => tokio::task::yield_now().await,
-                Step::LiveBusy => {}
+                Step::LiveBusy => tokio::time::sleep(LIVE_POLL).await,
                 Step::Idle(wait) => {
                     let wait = wait.max(MIN_IDLE_WAIT);
                     tokio::select! {
@@ -775,7 +837,7 @@ impl Drainer {
                         // uploader's docs).
                         continue;
                     }
-                    if self.live.is_busy() {
+                    if !self.may_upload(Instant::now()) {
                         return Step::LiveBusy;
                     }
                     let Some(claim) = Claim::take(&seg.path) else {
@@ -793,6 +855,7 @@ impl Drainer {
                         start_ns: seg.start_ns,
                         end_ns: seg.end_ns,
                     };
+                    self.held_since = None;
                     let outcome = self.upload(&dir, auth, &frag).await;
                     drop(claim);
                     self.after_upload(&dir, &gateway, &seg.path, outcome);
@@ -803,7 +866,26 @@ impl Drainer {
                 }
             }
         }
+        // Nothing to upload: a wait for live starts again with the next one.
+        self.held_since = None;
         Step::Idle(next_due.map_or(SYNC_INTERVAL, |at| at.saturating_duration_since(now)))
+    }
+
+    /// Whether a drain upload may start now, beside the live uploads:
+    ///
+    /// - not while some live queue holds [`LivePolicy::behind_queued`]
+    ///   segments: live is falling behind;
+    /// - at once when no live segment waits;
+    /// - else (one segment waits here and there, the steady state with many
+    ///   live uploaders) once the drainer has held back for
+    ///   [`LivePolicy::max_wait`], so it cannot starve.
+    fn may_upload(&mut self, now: Instant) -> bool {
+        let load = self.live.load();
+        let since = *self.held_since.get_or_insert(now);
+        if load.max_queued >= self.policy.behind_queued {
+            return false;
+        }
+        load.queued == 0 || now.saturating_duration_since(since) >= self.policy.max_wait
     }
 
     /// Upload one claimed segment of `dir`'s flow.
@@ -1121,10 +1203,84 @@ mod tests {
         }
     }
 
-    /// A live segment in flight (taken off the queue) does not hold the
-    /// drainer back; one waiting in the queue does, until it is taken.
+    fn drainer_with(p: &'static Parking, live: &'static LiveBusy, policy: LivePolicy) -> Drainer {
+        let mut d = drainer(p, live);
+        d.policy = policy;
+        d
+    }
+
+    /// `n` live queues watched by `live`, each with one segment in flight
+    /// (taken off the queue) and `waiting` segments waiting behind it.
+    async fn live_queues(
+        live: &LiveBusy,
+        n: usize,
+        waiting: usize,
+    ) -> Vec<(
+        tokio::sync::mpsc::Sender<FragmentReady>,
+        tokio::sync::mpsc::Receiver<FragmentReady>,
+    )> {
+        let mut queues = Vec::new();
+        for i in 0..n {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            live.watch(&tx);
+            tx.try_send(live_fragment(i as u64)).unwrap();
+            let _in_flight = rx.recv().await.unwrap();
+            for k in 0..waiting {
+                tx.try_send(live_fragment((i * 100 + k) as u64)).unwrap();
+            }
+            queues.push((tx, rx));
+        }
+        queues
+    }
+
+    async fn wait_registered(store: &Store, n: usize, within: Duration) -> usize {
+        let deadline = Instant::now() + within;
+        while store.registered.lock().unwrap().len() < n && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        store.registered.lock().unwrap().len()
+    }
+
+    /// Several live uploaders with one segment waiting each is the steady
+    /// state; it left the old drainer (paused while any segment waited) almost
+    /// no moment to upload. Now it keeps uploading, one per
+    /// [`LivePolicy::max_wait`] at most.
     #[tokio::test]
-    async fn tams_drain_pauses_only_while_live_segments_wait() {
+    async fn tams_drain_progresses_while_each_live_queue_has_one_waiting() {
+        let store = Store::default();
+        let gw = start_store(store.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        manifest(&root, &gw, "fa", AuthRef::None);
+        for s in 10..14 {
+            park(p, &root, &gw, "fa", s);
+        }
+        let live: &'static LiveBusy = leak(LiveBusy::new());
+        let _queues = live_queues(live, 4, 1).await;
+        assert_eq!(
+            live.load(),
+            LiveLoad {
+                queued: 4,
+                max_queued: 1
+            }
+        );
+        let policy = LivePolicy {
+            behind_queued: 2,
+            max_wait: Duration::from_millis(100),
+        };
+        let task = tokio::spawn(drainer_with(p, live, policy).run());
+        let done = wait_registered(&store, 4, Duration::from_secs(5)).await;
+        task.abort();
+        assert_eq!(done, 4, "the drainer starved beside healthy live uploads");
+    }
+
+    /// A live queue with [`LivePolicy::behind_queued`] segments waiting means
+    /// live is falling behind: the drainer pauses, however long it has waited,
+    /// and resumes when the queue is back to one. A queue whose producer is gone
+    /// no longer counts.
+    #[tokio::test]
+    async fn tams_drain_pauses_while_live_is_behind() {
         let store = Store::default();
         let gw = start_store(store.clone()).await;
         let tmp = tempfile::tempdir().unwrap();
@@ -1134,40 +1290,68 @@ mod tests {
         park(p, &root, &gw, "fa", 10);
         park(p, &root, &gw, "fa", 11);
         let live: &'static LiveBusy = leak(LiveBusy::new());
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        live.watch(&tx);
-        let mut d = drainer(p, live);
-
-        // One live segment in flight, none queued: the drainer goes on.
-        tx.try_send(live_fragment(0)).unwrap();
-        let in_flight = rx.recv().await.unwrap();
-        assert!(!live.is_busy());
-        assert_eq!(d.step().await, Step::Tried);
-        assert_eq!(store.registered.lock().unwrap().len(), 1);
-
-        // A live segment waits behind it: the drainer waits too.
-        tx.try_send(live_fragment(1)).unwrap();
-        assert_eq!(live.queued(), 1);
+        let _healthy = live_queues(live, 2, 1).await;
+        let mut behind = live_queues(live, 1, 2).await;
+        assert_eq!(live.load().max_queued, 2);
+        let policy = LivePolicy {
+            behind_queued: 2,
+            max_wait: Duration::from_millis(50),
+        };
+        let mut d = drainer_with(p, live, policy);
         assert_eq!(d.step().await, Step::LiveBusy);
         let task = tokio::spawn(d.run());
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(store.registered.lock().unwrap().len(), 1);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(store.registered.lock().unwrap().len(), 0);
 
-        // The live uploader takes it (now in flight): the drainer resumes.
-        drop(in_flight);
+        // The behind uploader takes one: one waits, live keeps up again.
+        let (tx, rx) = &mut behind[0];
         let _in_flight = rx.recv().await.unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while store.registered.lock().unwrap().len() < 2 && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        assert_eq!(wait_registered(&store, 2, Duration::from_secs(5)).await, 2);
         task.abort();
-        assert_eq!(store.registered.lock().unwrap().len(), 2);
 
         // A queue whose producer is gone no longer counts.
-        tx.try_send(live_fragment(2)).unwrap();
-        assert!(live.is_busy());
-        drop(tx);
-        assert!(!live.is_busy());
+        tx.try_send(live_fragment(9)).unwrap();
+        assert_eq!(live.load().max_queued, 2);
+        behind.clear();
+        assert_eq!(live.load().max_queued, 1);
+    }
+
+    /// With no live segment waiting the drainer uploads at once; with one
+    /// waiting it first holds back, and uploads once it has held back for
+    /// [`LivePolicy::max_wait`] (the fairness floor). The old drainer held back
+    /// as long as any segment waited.
+    #[tokio::test]
+    async fn tams_drain_fairness_floor() {
+        let store = Store::default();
+        let gw = start_store(store.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        manifest(&root, &gw, "fa", AuthRef::None);
+        park(p, &root, &gw, "fa", 10);
+        park(p, &root, &gw, "fa", 11);
+        park(p, &root, &gw, "fa", 12);
+        let live: &'static LiveBusy = leak(LiveBusy::new());
+        let policy = LivePolicy {
+            behind_queued: 2,
+            max_wait: Duration::from_millis(300),
+        };
+        let mut d = drainer_with(p, live, policy);
+
+        // Nothing waits: at once.
+        let queues = live_queues(live, 1, 0).await;
+        assert_eq!(d.step().await, Step::Tried);
+
+        // One waits: held back, then the floor lets one through.
+        queues[0].0.try_send(live_fragment(1)).unwrap();
+        assert_eq!(d.step().await, Step::LiveBusy);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(d.step().await, Step::LiveBusy);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(d.step().await, Step::Tried);
+        // The wait starts again after an upload.
+        assert_eq!(d.step().await, Step::LiveBusy);
+        assert_eq!(store.registered.lock().unwrap().len(), 2);
     }
 
     /// The segment being uploaded is never deleted to make room, and a claimed

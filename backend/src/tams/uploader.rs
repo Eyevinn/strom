@@ -18,8 +18,8 @@
 //! - the uploader only uploads new segments. It never uploads a parked one, so
 //!   a backlog never holds back the live edge: the server-wide drainer
 //!   ([`crate::tams::drain`]) uploads parked segments, from server start and
-//!   whether or not their flow runs, and pauses while any live uploader is
-//!   has segments waiting in its queue (see [`crate::tams::drain::live`]);
+//!   whether or not their flow runs, and pauses while a live uploader falls
+//!   behind (see [`crate::tams::drain::LivePolicy`]);
 //! - a parked segment keeps its bytes plus a `.meta` sidecar holding its TAI
 //!   timerange and the gateway and TAMS flow it belongs to, and its directory
 //!   a `park.json` manifest (see [`crate::tams::drain::Manifest`]) with what the
