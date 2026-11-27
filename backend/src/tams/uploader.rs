@@ -1464,13 +1464,24 @@ pub(crate) fn parse_sidecar(s: &str) -> Option<(u64, u64, Option<ParkTarget>)> {
 
 /// Scan `temp_dir` for parked segments (a `.meta` sidecar plus its segment file),
 /// oldest first. A sidecar whose segment is gone, or that cannot be parsed, is
-/// cleaned up here. Empty when the directory can't be read.
+/// cleaned up here. Empty when the directory can't be read. On the blocking
+/// pool; see [`collect_parked_blocking`].
+#[cfg(test)]
 pub(crate) async fn collect_parked(temp_dir: &Path) -> VecDeque<Parked> {
+    let dir = temp_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || collect_parked_blocking(&dir))
+        .await
+        .unwrap_or_default()
+}
+
+/// [`collect_parked`], blocking: one task per directory rather than one per
+/// file.
+pub(crate) fn collect_parked_blocking(temp_dir: &Path) -> VecDeque<Parked> {
     let mut parked = Vec::new();
-    let Ok(mut entries) = tokio::fs::read_dir(temp_dir).await else {
+    let Ok(entries) = std::fs::read_dir(temp_dir) else {
         return VecDeque::new();
     };
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    for entry in entries.flatten() {
         let sidecar = entry.path();
         let Some(segment) = sidecar
             .to_str()
@@ -1479,11 +1490,10 @@ pub(crate) async fn collect_parked(temp_dir: &Path) -> VecDeque<Parked> {
         else {
             continue;
         };
-        let range = tokio::fs::read_to_string(&sidecar)
-            .await
+        let range = std::fs::read_to_string(&sidecar)
             .ok()
             .and_then(|s| parse_sidecar(&s));
-        let size = tokio::fs::metadata(&segment).await.ok().map(|m| m.len());
+        let size = std::fs::metadata(&segment).ok().map(|m| m.len());
         match (range, size) {
             (Some((start_ns, end_ns, target)), Some(bytes)) => {
                 parked.push(Parked {
@@ -1498,7 +1508,7 @@ pub(crate) async fn collect_parked(temp_dir: &Path) -> VecDeque<Parked> {
                 // Orphan/corrupt sidecar (no segment, or unparseable): clean it
                 // up, unless another uploader is busy with its segment.
                 if let Some(_claim) = Claim::take(&segment) {
-                    let _ = tokio::fs::remove_file(&sidecar).await;
+                    let _ = std::fs::remove_file(&sidecar);
                 }
             }
         }
