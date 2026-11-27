@@ -203,6 +203,56 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for FirstByteTimeoutStream<S> {
 #[cfg(target_os = "linux")]
 const FD_WATCHDOG_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Raise the soft `RLIMIT_NOFILE` to the hard limit.
+///
+/// Every WebRTC viewer holds file descriptors (its ICE sockets, the event fds
+/// of webrtcbin's and the ICE agent's main contexts), and so does every
+/// connection and pipeline. Containers commonly start with a soft limit of
+/// 1024. When it runs out, a new webrtcbin's thread cannot create its main
+/// context and GLib ends the process with `g_error` ("Creating pipes for
+/// GWakeup"): a `trap int3` in libglib, without a Rust panic or a log line
+/// from Strom.
+#[cfg(target_os = "linux")]
+pub fn raise_fd_limit() {
+    use tracing::{info, warn};
+
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes into the struct it is given.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        warn!(
+            "Could not read the file descriptor limit: {}",
+            io::Error::last_os_error()
+        );
+        return;
+    }
+    if limit.rlim_cur >= limit.rlim_max {
+        info!("File descriptor limit: {}", limit.rlim_cur);
+        return;
+    }
+    let previous = limit.rlim_cur;
+    limit.rlim_cur = limit.rlim_max;
+    // SAFETY: setrlimit only reads the struct.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } == 0 {
+        info!(
+            "File descriptor limit raised from {} to {}",
+            previous, limit.rlim_cur
+        );
+    } else {
+        warn!(
+            "Could not raise the file descriptor limit from {}: {}",
+            previous,
+            io::Error::last_os_error()
+        );
+    }
+}
+
+/// No-op outside Linux.
+#[cfg(not(target_os = "linux"))]
+pub fn raise_fd_limit() {}
+
 /// Usage ratio above which a warning is logged (once per excursion).
 #[cfg(target_os = "linux")]
 const FD_WARN_RATIO: f64 = 0.80;
