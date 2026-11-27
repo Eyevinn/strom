@@ -7,12 +7,19 @@
 //! segments of two recordings. The ids stay derived that
 //! way on purpose (changing the derivation would change the TAMS ids of every
 //! existing recording), so this registry catches the collision instead: a block
-//! claims its TAMS flow ids when it is built, and a claim held by another Strom
-//! flow fails the build.
+//! claims its TAMS flow ids when it is built, and a claim held by another block
+//! fails the build: a block of another Strom flow, or another block of the same
+//! one with the same `tams_key` (a copied block keeps its properties).
 //!
-//! Claims are keyed by gateway (a TAMS flow id on another store is another
-//! flow) and released per Strom flow when the flow is torn down, on stop and
-//! on a failed start alike.
+//! Claims are keyed by the TAMS flow id alone, whatever the gateway: the
+//! segments of a TAMS flow are parked in one directory per id
+//! (`crate::tams::park::flow_dir`), whose `park.json` names one gateway. Two
+//! writers of one id on two gateways would share that directory and the
+//! drainer would upload only one gateway's segments. The ids are UUIDs derived
+//! from the block id or key, so the same id on two gateways is the same
+//! recording written twice; give the copy its own TAMS key. Claims are
+//! released per Strom flow when the flow is torn down, on stop and on a
+//! failed start alike.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -23,6 +30,8 @@ use strom_types::FlowId;
 pub struct ClaimOwner {
     pub flow_id: FlowId,
     pub block_id: String,
+    /// The gateway it writes to, without credentials.
+    pub gateway: String,
 }
 
 /// A TAMS flow another Strom flow already writes to.
@@ -32,31 +41,27 @@ pub struct ClaimConflict {
     pub owner: ClaimOwner,
 }
 
-/// (gateway, TAMS flow id) -> owner.
-static CLAIMS: LazyLock<Mutex<HashMap<(String, String), ClaimOwner>>> =
+/// TAMS flow id -> owner.
+static CLAIMS: LazyLock<Mutex<HashMap<String, ClaimOwner>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// The gateway as a registry key: trimmed, without trailing slashes, so
-/// `https://gw/` and `https://gw` are one store.
-fn gateway_key(gateway_url: &str) -> String {
-    gateway_url.trim().trim_end_matches('/').to_string()
-}
-
-/// Claim `tams_flow_ids` on `gateway_url` for block `block_id` of Strom flow
-/// `flow_id`. All or nothing: if any of them is held by another Strom flow,
-/// nothing is claimed and the first conflict is returned. Claims the same Strom
-/// flow already holds (a rebuild of the flow) are taken over.
+/// Claim `tams_flow_ids` (written to `gateway_url`) for block `block_id` of Strom flow
+/// `flow_id`. All or nothing: if any of them is held by another block (of
+/// another Strom flow, or another block of this one: two blocks with the same
+/// `tams_key`), nothing is claimed and the first conflict is returned. Claims
+/// the same block already holds (a rebuild of the flow) are taken over. The
+/// gateway does not tell claims apart (see the module docs).
 pub fn claim(
     gateway_url: &str,
     tams_flow_ids: &[String],
     flow_id: FlowId,
     block_id: &str,
 ) -> Result<(), ClaimConflict> {
-    let gateway = gateway_key(gateway_url);
+    let gateway = crate::tams::uploader::ParkTarget::new(gateway_url, "").gateway;
     let mut claims = CLAIMS.lock().unwrap_or_else(|e| e.into_inner());
     for id in tams_flow_ids {
-        if let Some(owner) = claims.get(&(gateway.clone(), id.clone())) {
-            if owner.flow_id != flow_id {
+        if let Some(owner) = claims.get(id) {
+            if owner.flow_id != flow_id || owner.block_id != block_id {
                 return Err(ClaimConflict {
                     tams_flow_id: id.clone(),
                     owner: owner.clone(),
@@ -66,10 +71,11 @@ pub fn claim(
     }
     for id in tams_flow_ids {
         claims.insert(
-            (gateway.clone(), id.clone()),
+            id.clone(),
             ClaimOwner {
                 flow_id,
                 block_id: block_id.to_string(),
+                gateway: gateway.clone(),
             },
         );
     }
@@ -105,12 +111,43 @@ mod tests {
         assert_eq!(conflict.owner.flow_id, a);
         assert_eq!(conflict.owner.block_id, "cam1");
 
-        // Another gateway is another store.
-        let other = format!("http://other-{}.example.com", Uuid::new_v4().simple());
-        claim(&other, &ids("cam1"), b, "cam1").unwrap();
-
         release_flow(&a);
         claim(&gw, &ids("cam1"), b, "cam1").unwrap();
+        release_flow(&b);
+    }
+
+    /// Two blocks of one Strom flow with the same `tams_key` derive the same
+    /// TAMS flow ids: the second is refused, as from another Strom flow.
+    #[test]
+    fn tams_claim_held_by_another_block_of_the_same_flow_fails() {
+        let gw = format!("http://gw-{}.example.com", Uuid::new_v4().simple());
+        let a = Uuid::new_v4();
+        claim(&gw, &ids("key"), a, "cam1").unwrap();
+        let conflict = claim(&gw, &ids("key"), a, "cam1_copy").unwrap_err();
+        assert_eq!(conflict.owner.flow_id, a);
+        assert_eq!(conflict.owner.block_id, "cam1");
+        // The block that holds them may build again.
+        claim(&gw, &ids("key"), a, "cam1").unwrap();
+        release_flow(&a);
+    }
+
+    /// The same TAMS flow ids on another gateway share the park directory of
+    /// those ids: refused like on the same gateway.
+    #[test]
+    fn tams_claim_holds_across_gateways() {
+        let gw = format!("http://gw-{}.example.com", Uuid::new_v4().simple());
+        let other = format!("http://u:p@other-{}.example.com", Uuid::new_v4().simple());
+        let block = format!("cam-{}", Uuid::new_v4().simple());
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        claim(&gw, &ids(&block), a, &block).unwrap();
+        let conflict = claim(&other, &ids(&block), b, &block).unwrap_err();
+        assert_eq!(conflict.owner.flow_id, a);
+        assert_eq!(conflict.owner.gateway, gw);
+        release_flow(&a);
+        claim(&other, &ids(&block), b, &block).unwrap();
+        // The gateway is kept without its credentials.
+        let conflict = claim(&gw, &ids(&block), a, &block).unwrap_err();
+        assert!(!conflict.owner.gateway.contains("u:p"));
         release_flow(&b);
     }
 

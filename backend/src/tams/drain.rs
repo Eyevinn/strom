@@ -42,13 +42,12 @@ use crate::osc::SatProvider;
 use crate::tams::client::{gateway_is_allow_listed, FlowSpec, TamsClient};
 use crate::tams::park::Parking;
 use crate::tams::uploader::{
-    collect_parked, discard_segment, enforce_parked_limits, parked_backoff, parse_sidecar,
-    sidecar_path, upload_segment, Claim, DetectedEssence, FragmentReady, Outcome, ParkTarget,
-    ParkedLimits, Retry, SharedDetected, UploadCtx, PARKED_MAX_BACKOFF, PARKED_STUCK_FAILURES,
-    RECOVERY_ATTEMPTS,
+    collect_parked_blocking, discard_segment, enforce_parked_limits, parked_backoff,
+    upload_segment, Claim, DetectedEssence, FragmentReady, Outcome, ParkTarget, ParkedLimits,
+    Retry, SharedDetected, UploadCtx, PARKED_MAX_BACKOFF, PARKED_STUCK_FAILURES, RECOVERY_ATTEMPTS,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -59,10 +58,21 @@ use tracing::{debug, info, warn};
 /// The manifest file in each flow directory.
 pub const MANIFEST_FILE: &str = "park.json";
 
-/// How often the drainer rescans the flow directories: the per-flow cap
-/// (`STROM_TAMS_PARKED_MAX_MB`, `STROM_TAMS_PARKED_MAX_SEGMENTS`), sidecars
-/// without a segment, and files deleted or added behind the index's back.
+/// How often the flow directories are rescanned, in a task of their own beside
+/// the drainer: the per-flow cap (`STROM_TAMS_PARKED_MAX_MB`,
+/// `STROM_TAMS_PARKED_MAX_SEGMENTS`), sidecars without a segment, and files
+/// deleted or added behind the index's back. A directory whose entries did not
+/// change since its last scan (same modification time) is skipped.
 const SYNC_INTERVAL: Duration = Duration::from_secs(30);
+
+/// A directory modified this recently before its scan began is scanned again
+/// next time: on a file system with coarse timestamps, a change in the same
+/// tick as the scan would not change its modification time.
+const MTIME_SLACK: Duration = Duration::from_secs(2);
+
+/// How many parked segments of one directory [`Drainer::step`] takes from the
+/// index at a time.
+const PAGE: usize = 64;
 
 /// Longest wait before a failing gateway is tried again.
 pub const MAX_GATEWAY_BACKOFF: Duration = Duration::from_secs(120);
@@ -288,6 +298,88 @@ fn read_manifest(dir: &Path) -> Option<Manifest> {
     serde_json::from_str(&s).ok()
 }
 
+/// Rescan the flow directories under `parking`'s root every
+/// [`SYNC_INTERVAL`], and wake the drainer after each pass.
+async fn sync_loop(parking: &'static Parking, events: EventBroadcaster, wake: &'static Notify) {
+    let mut unchanged = HashMap::new();
+    loop {
+        sync(parking, &events, &mut unchanged).await;
+        wake.notify_one();
+        tokio::time::sleep(SYNC_INTERVAL).await;
+    }
+}
+
+/// Rescan every flow directory that changed since its last scan: enforce the
+/// per-flow cap, clean sidecars without a segment, and correct the index.
+/// `unchanged` holds the modification time of each directory as last
+/// scanned. A directory is read on the blocking pool, one at a time.
+async fn sync(
+    parking: &Parking,
+    events: &EventBroadcaster,
+    unchanged: &mut HashMap<PathBuf, SystemTime>,
+) {
+    let root = parking.root().to_path_buf();
+    let Ok(mut entries) = tokio::fs::read_dir(&root).await else {
+        return;
+    };
+    let limits = ParkedLimits::from_env();
+    let mut present = HashSet::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if !entry.file_type().await.is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let dir = entry.path();
+        present.insert(dir.clone());
+        let modified = tokio::fs::metadata(&dir)
+            .await
+            .and_then(|m| m.modified())
+            .ok();
+        if modified.is_some() && unchanged.get(&dir) == modified.as_ref() {
+            continue;
+        }
+        let started = SystemTime::now();
+        let scanned_at = Instant::now();
+        let d = dir.clone();
+        let Ok((mut all, manifest)) =
+            tokio::task::spawn_blocking(move || (collect_parked_blocking(&d), read_manifest(&d)))
+                .await
+        else {
+            continue;
+        };
+        let (flow_id, block_id) = match manifest {
+            Some(m) => (m.strom_flow_id, m.block_id),
+            None => (
+                FlowId::nil(),
+                entry.file_name().to_string_lossy().to_string(),
+            ),
+        };
+        enforce_parked_limits(events, flow_id, &block_id, &limits, &mut all).await;
+        parking.sync_dir(&dir, scanned_at, all);
+        match modified {
+            Some(m)
+                if started
+                    .duration_since(m)
+                    .is_ok_and(|age| age >= MTIME_SLACK) =>
+            {
+                unchanged.insert(dir, m);
+            }
+            _ => {
+                unchanged.remove(&dir);
+            }
+        }
+    }
+    unchanged.retain(|d, _| present.contains(d));
+}
+
+/// Aborts a task when dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 // --- Status --------------------------------------------------------------------------
 
 /// What the drainer does with one flow directory's parked segments.
@@ -473,20 +565,26 @@ impl Drainer {
             "TAMS: draining parked segments under {} in the background",
             self.parking.root().display()
         );
-        let mut next_sync = Instant::now();
+        // The rescan runs beside the uploads, not between them.
+        let _sync = AbortOnDrop(tokio::spawn(sync_loop(
+            self.parking,
+            self.events.clone(),
+            self.wake,
+        )));
+        let mut next_prune = Instant::now() + SYNC_INTERVAL;
         loop {
             self.live.wait_idle().await;
-            if Instant::now() >= next_sync {
-                self.sync().await;
-                next_sync = Instant::now() + SYNC_INTERVAL;
+            if Instant::now() >= next_prune {
+                // Retries of segments that are gone.
+                let parking = self.parking;
+                self.retries.retain(|p, _| parking.contains(p));
+                next_prune = Instant::now() + SYNC_INTERVAL;
             }
             match self.step().await {
                 Step::Tried => tokio::task::yield_now().await,
                 Step::LiveBusy => {}
                 Step::Idle(wait) => {
-                    let wait = wait
-                        .min(next_sync.saturating_duration_since(Instant::now()))
-                        .max(MIN_IDLE_WAIT);
+                    let wait = wait.max(MIN_IDLE_WAIT);
                     tokio::select! {
                         _ = self.wake.notified() => {}
                         _ = tokio::time::sleep(wait) => {}
@@ -496,44 +594,11 @@ impl Drainer {
         }
     }
 
-    /// Rescan every flow directory: enforce the per-flow cap, clean sidecars
-    /// without a segment, and correct the index.
-    async fn sync(&mut self) {
-        let root = self.parking.root().to_path_buf();
-        let Ok(mut entries) = tokio::fs::read_dir(&root).await else {
-            return;
-        };
-        let limits = ParkedLimits::from_env();
-        let mut present = HashSet::new();
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            if !entry.file_type().await.is_ok_and(|t| t.is_dir()) {
-                continue;
-            }
-            let dir = entry.path();
-            let scanned_at = Instant::now();
-            let mut all = collect_parked(&dir).await;
-            let (flow_id, block_id) = match read_manifest(&dir) {
-                Some(m) => (m.strom_flow_id, m.block_id),
-                None => (
-                    FlowId::nil(),
-                    entry.file_name().to_string_lossy().to_string(),
-                ),
-            };
-            enforce_parked_limits(&self.events, flow_id, &block_id, &limits, &mut all).await;
-            present.extend(all.iter().map(|p| p.path.clone()));
-            self.parking.sync_dir(
-                &dir,
-                scanned_at,
-                all.iter().map(|p| (p.path.clone(), p.start_ns, p.bytes)),
-            );
-        }
-        self.retries.retain(|p, _| present.contains(p));
-    }
-
     /// The flow of `dir`, its manifest read again when it changed. `None`
     /// without a readable manifest.
-    fn load_flow(&mut self, dir: &Path) -> Option<&mut DrainFlow> {
-        let modified = std::fs::metadata(dir.join(MANIFEST_FILE))
+    async fn load_flow(&mut self, dir: &Path) -> Option<&mut DrainFlow> {
+        let modified = tokio::fs::metadata(dir.join(MANIFEST_FILE))
+            .await
             .and_then(|m| m.modified())
             .ok();
         let Some(modified) = modified else {
@@ -542,7 +607,11 @@ impl Drainer {
         };
         let fresh = self.flows.get(dir).is_some_and(|f| f.modified == modified);
         if !fresh {
-            let manifest = read_manifest(dir)?;
+            let d = dir.to_path_buf();
+            let manifest = tokio::task::spawn_blocking(move || read_manifest(&d))
+                .await
+                .ok()
+                .flatten()?;
             let mut flow = DrainFlow::new(manifest, modified);
             if let Some(old) = self.flows.remove(dir) {
                 flow.segments = old.segments;
@@ -622,29 +691,20 @@ impl Drainer {
     /// backing off.
     async fn step(&mut self) -> Step {
         let now = Instant::now();
-        let mut by_dir: BTreeMap<PathBuf, Vec<(u64, PathBuf)>> = BTreeMap::new();
-        for (path, start_ns) in self.parking.snapshot() {
-            if let Some(dir) = path.parent() {
-                by_dir
-                    .entry(dir.to_path_buf())
-                    .or_default()
-                    .push((start_ns, path));
-            }
-        }
+        let mut dirs = self.parking.dirs();
         let gone: Vec<PathBuf> = self
             .states
             .keys()
-            .filter(|d| !by_dir.contains_key(*d))
+            .filter(|d| dirs.binary_search(d).is_err())
             .cloned()
             .collect();
         for dir in gone {
             self.clear_state(&dir);
         }
-        if by_dir.is_empty() {
+        if dirs.is_empty() {
             return Step::Idle(SYNC_INTERVAL);
         }
         // Round-robin: the directories after the one last served first.
-        let mut dirs: Vec<PathBuf> = by_dir.keys().cloned().collect();
         if let Some(cursor) = &self.cursor {
             let next = dirs.partition_point(|d| d <= cursor);
             dirs.rotate_left(next);
@@ -653,7 +713,7 @@ impl Drainer {
         let mut due = |at: Instant| next_due = Some(next_due.map_or(at, |n| n.min(at)));
 
         for dir in dirs {
-            let Some(flow) = self.load_flow(&dir) else {
+            let Some(flow) = self.load_flow(&dir).await else {
                 if self.no_manifest_reported.insert(dir.clone()) {
                     warn!(
                         "TAMS: parked segments in {} have no readable {}; they are kept \
@@ -696,52 +756,51 @@ impl Drainer {
                 }
             }
             let target = manifest.target();
-            let mut segments = by_dir.remove(&dir).unwrap_or_default();
-            segments.sort();
-            for (_, path) in segments {
-                if let Some(r) = self.retries.get(&path) {
-                    if r.next > now {
-                        due(r.next);
+            // Oldest first, a page at a time from the index: what the
+            // sidecars say is in it, so none is read here.
+            let mut after: Option<(u64, PathBuf)> = None;
+            loop {
+                let page = self.parking.page(&dir, after.as_ref(), PAGE);
+                let full = page.len() == PAGE;
+                after = page.last().map(|p| (p.start_ns, p.path.clone()));
+                for seg in page {
+                    if let Some(r) = self.retries.get(&seg.path) {
+                        if r.next > now {
+                            due(r.next);
+                            continue;
+                        }
+                    }
+                    if seg.target.as_ref().is_some_and(|t| *t != target) {
+                        // Parked for another gateway or flow; kept (see the
+                        // uploader's docs).
                         continue;
                     }
-                }
-                let Some((start_ns, end_ns, seg_target)) =
-                    std::fs::read_to_string(sidecar_path(&path))
-                        .ok()
-                        .and_then(|s| parse_sidecar(&s))
-                else {
-                    // Uploaded or deleted behind the index's back.
-                    if !path.exists() {
-                        self.parking.forget(&path);
+                    if self.live.is_busy() {
+                        return Step::LiveBusy;
                     }
-                    continue;
-                };
-                if seg_target.is_some_and(|t| t != target) {
-                    // Parked for another gateway or flow; kept (see the
-                    // uploader's docs).
-                    continue;
+                    let Some(claim) = Claim::take(&seg.path) else {
+                        continue;
+                    };
+                    if !tokio::fs::try_exists(&seg.path).await.unwrap_or(false) {
+                        // Uploaded or deleted behind the index's back.
+                        self.parking.forget(&seg.path);
+                        continue;
+                    }
+                    self.cursor = Some(dir.clone());
+                    self.set_state(&dir, DrainState::Draining);
+                    let frag = FragmentReady {
+                        path: seg.path.clone(),
+                        start_ns: seg.start_ns,
+                        end_ns: seg.end_ns,
+                    };
+                    let outcome = self.upload(&dir, auth, &frag).await;
+                    drop(claim);
+                    self.after_upload(&dir, &gateway, &seg.path, outcome);
+                    return Step::Tried;
                 }
-                if self.live.is_busy() {
-                    return Step::LiveBusy;
+                if !full {
+                    break;
                 }
-                let Some(claim) = Claim::take(&path) else {
-                    continue;
-                };
-                if !path.exists() {
-                    self.parking.forget(&path);
-                    continue;
-                }
-                self.cursor = Some(dir.clone());
-                self.set_state(&dir, DrainState::Draining);
-                let frag = FragmentReady {
-                    path: path.clone(),
-                    start_ns,
-                    end_ns,
-                };
-                let outcome = self.upload(&dir, auth, &frag).await;
-                drop(claim);
-                self.after_upload(&dir, &gateway, &path, outcome);
-                return Step::Tried;
             }
         }
         Step::Idle(next_due.map_or(SYNC_INTERVAL, |at| at.saturating_duration_since(now)))
@@ -786,7 +845,8 @@ impl Drainer {
         let outcome = upload_segment(&mut ctx, frag, RECOVERY_ATTEMPTS, true).await;
         flow.auth_reported_at = ctx.auth_reported_at;
         if outcome == Outcome::Unreadable {
-            // A sidecar without readable bytes is useless.
+            // A sidecar whose segment is gone is useless. A segment that
+            // could not be read for another reason is kept and tried again.
             discard_segment(&frag.path).await;
         }
         outcome
@@ -795,6 +855,16 @@ impl Drainer {
     fn after_upload(&mut self, dir: &Path, gateway: &str, path: &Path, outcome: Outcome) {
         let now = Instant::now();
         match outcome {
+            Outcome::ReadFailed => {
+                // A local problem: the segment waits out its own backoff; the
+                // gateway is not to blame.
+                let retry = self.retries.entry(path.to_path_buf()).or_insert(Retry {
+                    failures: 0,
+                    next: now,
+                });
+                retry.failures += 1;
+                retry.next = now + parked_backoff(retry.failures);
+            }
             Outcome::Parked => {
                 let retry = self.retries.entry(path.to_path_buf()).or_insert(Retry {
                     failures: 0,
@@ -844,7 +914,7 @@ impl Drainer {
 mod tests {
     use super::*;
     use crate::tams::park::{FreeSpace, ParkLimits, Space};
-    use crate::tams::uploader::sidecar_contents;
+    use crate::tams::uploader::{sidecar_contents, sidecar_path};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Unlimited;
@@ -1039,7 +1109,7 @@ mod tests {
             .map(|(f, s)| (f.to_string(), *s))
             .collect();
         assert_eq!(order, want);
-        assert!(p.snapshot().is_empty());
+        assert!(p.dirs().is_empty());
         assert_eq!(std::fs::read_dir(root.join("fa")).unwrap().count(), 1); // park.json
     }
 
@@ -1253,6 +1323,85 @@ mod tests {
         assert!(matches!(d.step().await, Step::Idle(_)));
         assert!(foreign.exists());
         assert_eq!(store.registered.lock().unwrap().len(), 1);
+    }
+
+    /// A parked segment that cannot be read for a reason other than being
+    /// gone (here: a directory in its place, as an I/O error would) is kept
+    /// with its sidecar, and tried again after its backoff.
+    #[tokio::test]
+    async fn tams_drain_keeps_a_segment_it_could_not_read() {
+        let store = Store::default();
+        let gw = start_store(store.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        let m = manifest(&root, &gw, "fa", AuthRef::None);
+        let seg = park(p, &root, &gw, "fa", 10);
+        std::fs::remove_file(&seg).unwrap();
+        std::fs::create_dir(&seg).unwrap();
+        let mut d = drainer(p, leak(LiveBusy::new()));
+
+        assert_eq!(d.step().await, Step::Tried);
+        assert!(
+            sidecar_path(&seg).exists(),
+            "the parked segment was deleted"
+        );
+        assert!(d.retries.contains_key(&seg));
+        assert_eq!(d.gateways.get(&m.gateway).map_or(0, |g| g.failures), 0);
+        assert!(matches!(d.step().await, Step::Idle(w) if w > Duration::from_secs(1)));
+    }
+
+    /// The rescan corrects the index from disk: a segment deleted behind its
+    /// back is forgotten, one added is found; a directory that did not change
+    /// since is not read again.
+    #[tokio::test]
+    async fn tams_sync_corrects_the_index_and_skips_unchanged_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        let gw = "http://gw.example";
+        manifest(&root, gw, "fa", AuthRef::None);
+        let a = park(p, &root, gw, "fa", 10);
+        let b = park(p, &root, gw, "fa", 11);
+        // Behind the index's back: `a` goes, `c` comes.
+        std::fs::remove_file(&a).unwrap();
+        let c = root.join("fa").join("seg_r1_00012.ts");
+        std::fs::write(&c, [0u8; 100]).unwrap();
+        let start = 12_000_000_000;
+        std::fs::write(
+            sidecar_path(&c),
+            sidecar_contents(start, start + 1_000_000_000, &ParkTarget::new(gw, "fa")),
+        )
+        .unwrap();
+        // Old enough to be trusted as unchanged next time.
+        let old = SystemTime::now() - Duration::from_secs(60);
+        std::fs::File::open(root.join("fa"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        let mut unchanged = HashMap::new();
+        let events = EventBroadcaster::default();
+        sync(p, &events, &mut unchanged).await;
+        assert!(!p.contains(&a) && p.contains(&b) && p.contains(&c));
+        assert!(!sidecar_path(&a).exists());
+        assert_eq!(unchanged.get(&root.join("fa")), Some(&old));
+
+        // Unchanged: not read, so a deletion that kept the time is not seen.
+        std::fs::remove_file(&b).unwrap();
+        std::fs::File::open(root.join("fa"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        sync(p, &events, &mut unchanged).await;
+        assert!(p.contains(&b));
+        // Changed: read again.
+        std::fs::File::open(root.join("fa"))
+            .unwrap()
+            .set_modified(SystemTime::now())
+            .unwrap();
+        sync(p, &events, &mut unchanged).await;
+        assert!(!p.contains(&b));
     }
 
     #[test]

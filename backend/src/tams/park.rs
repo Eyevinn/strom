@@ -45,9 +45,10 @@
 //! `STROM_TAMS_PARKED_MAX_SEGMENTS`) is off unless set; the drainer's rescan
 //! enforces it, see `crate::tams::uploader`.
 
-use std::collections::HashMap;
+use crate::tams::uploader::ParkTarget;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, TryLockError};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
@@ -73,8 +74,9 @@ static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// startup, before any flow is built.
 pub fn init(data_dir: &Path) {
     let _ = DATA_DIR.set(data_dir.to_path_buf());
-    // Build the index of what is parked off the startup path; a park waits
-    // for it.
+    // Build the index of what is parked off the startup path. A park does
+    // not wait for it: until it is merged, the limits see only what was
+    // parked since.
     std::thread::spawn(|| {
         let p = parking();
         p.warm_up();
@@ -316,20 +318,53 @@ impl std::fmt::Display for ParkError {
 
 impl std::error::Error for ParkError {}
 
-/// One parked segment the index knows.
-#[derive(Debug, Clone, Copy)]
+/// One parked segment the index knows, with what its sidecar says, so the
+/// drainer need not read the sidecar again.
+#[derive(Debug, Clone)]
 struct Entry {
     start_ns: u64,
+    end_ns: u64,
+    /// Where it is meant to go; `None` for a sidecar written before sidecars
+    /// carried it.
+    target: Option<ParkTarget>,
     bytes: u64,
     /// When the index learnt of it, so a directory snapshot taken before
     /// does not forget it (see [`Parking::sync_dir`]).
     seen: Instant,
 }
 
+impl Entry {
+    /// From a sidecar's contents; `None` when they do not parse.
+    fn from_sidecar(contents: &str, bytes: u64, seen: Instant) -> Option<Self> {
+        let (start_ns, end_ns, target) = crate::tams::uploader::parse_sidecar(contents)?;
+        Some(Self {
+            start_ns,
+            end_ns,
+            target,
+            bytes,
+            seen,
+        })
+    }
+}
+
+/// A parked segment, as [`Parking::page`] lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParkedSegment {
+    pub path: PathBuf,
+    pub start_ns: u64,
+    pub end_ns: u64,
+    pub target: Option<ParkTarget>,
+}
+
 #[derive(Default)]
 struct State {
-    scanned: bool,
     entries: HashMap<PathBuf, Entry>,
+    /// The entries per flow directory, oldest first.
+    by_dir: BTreeMap<PathBuf, BTreeSet<(u64, PathBuf)>>,
+    /// The startup scan runs (without this lock); what is removed meanwhile
+    /// is recorded, so the scan's merge does not bring it back.
+    scanning: bool,
+    removed_while_scanning: HashSet<PathBuf>,
     total: u64,
     space: Option<(Instant, Option<Space>)>,
     /// Last usage warning: its level and when.
@@ -341,15 +376,41 @@ struct State {
 
 impl State {
     fn remove(&mut self, path: &Path) {
+        if self.scanning {
+            self.removed_while_scanning.insert(path.to_path_buf());
+        }
         if let Some(e) = self.entries.remove(path) {
             self.total = self.total.saturating_sub(e.bytes);
+            self.unlist(path, e.start_ns);
         }
     }
 
     fn insert(&mut self, path: PathBuf, entry: Entry) {
         self.total = self.total.saturating_add(entry.bytes);
-        if let Some(old) = self.entries.insert(path, entry) {
+        if let Some(dir) = path.parent() {
+            self.by_dir
+                .entry(dir.to_path_buf())
+                .or_default()
+                .insert((entry.start_ns, path.clone()));
+        }
+        let start_ns = entry.start_ns;
+        if let Some(old) = self.entries.insert(path.clone(), entry) {
             self.total = self.total.saturating_sub(old.bytes);
+            if old.start_ns != start_ns {
+                self.unlist(&path, old.start_ns);
+            }
+        }
+    }
+
+    fn unlist(&mut self, path: &Path, start_ns: u64) {
+        let Some(dir) = path.parent() else {
+            return;
+        };
+        if let Some(set) = self.by_dir.get_mut(dir) {
+            set.remove(&(start_ns, path.to_path_buf()));
+            if set.is_empty() {
+                self.by_dir.remove(dir);
+            }
         }
     }
 }
@@ -361,6 +422,8 @@ pub struct Parking {
     limits: Option<ParkLimits>,
     fs: Box<dyn FreeSpace>,
     state: Mutex<State>,
+    /// Held while the root is scanned; `true` once it was.
+    scanned: Mutex<bool>,
 }
 
 /// The process-wide [`Parking`] over [`root`].
@@ -385,6 +448,7 @@ impl Parking {
             limits,
             fs,
             state: Mutex::new(State::default()),
+            scanned: Mutex::new(false),
         }
     }
 
@@ -394,8 +458,8 @@ impl Parking {
 
     /// Index what is parked under the root and log the limits.
     fn warm_up(&self) {
+        self.ensure_scanned(true);
         let mut st = self.lock();
-        self.ensure_scanned(&mut st);
         let space = self.space(&mut st);
         let limits = self.limits(space);
         info!(
@@ -432,47 +496,35 @@ impl Parking {
         }
     }
 
-    fn ensure_scanned(&self, st: &mut State) {
-        if st.scanned {
+    /// Index what is parked under the root, once. The scan runs without the
+    /// index's lock, so a park (on a streaming thread) is not held up by it,
+    /// and is merged when done. With `wait`, a scan that runs elsewhere is
+    /// waited for; without, the caller goes on with what the index holds.
+    fn ensure_scanned(&self, wait: bool) {
+        let mut done = if wait {
+            self.scanned.lock().unwrap_or_else(|e| e.into_inner())
+        } else {
+            match self.scanned.try_lock() {
+                Ok(g) => g,
+                Err(TryLockError::Poisoned(e)) => e.into_inner(),
+                Err(TryLockError::WouldBlock) => return,
+            }
+        };
+        if *done {
             return;
         }
-        st.scanned = true;
-        let Ok(dirs) = std::fs::read_dir(&self.root) else {
-            return;
-        };
-        let now = Instant::now();
-        for dir in dirs
-            .flatten()
-            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        {
-            let Ok(files) = std::fs::read_dir(dir.path()) else {
-                continue;
-            };
-            for sidecar in files.flatten().map(|e| e.path()) {
-                let Some(segment) = sidecar
-                    .to_str()
-                    .and_then(|s| s.strip_suffix(SIDECAR_SUFFIX))
-                    .map(PathBuf::from)
-                else {
-                    continue;
-                };
-                let start = std::fs::read_to_string(&sidecar)
-                    .ok()
-                    .and_then(|s| crate::tams::uploader::parse_sidecar(&s))
-                    .map(|(start_ns, _, _)| start_ns);
-                let bytes = std::fs::metadata(&segment).ok().map(|m| m.len());
-                if let (Some(start_ns), Some(bytes)) = (start, bytes) {
-                    st.insert(
-                        segment,
-                        Entry {
-                            start_ns,
-                            bytes,
-                            seen: now,
-                        },
-                    );
-                }
+        self.lock().scanning = true;
+        let found = scan_root(&self.root);
+        let mut st = self.lock();
+        st.scanning = false;
+        let removed = std::mem::take(&mut st.removed_while_scanning);
+        for (path, entry) in found {
+            // Parked again since (the newer entry wins), or gone since.
+            if !st.entries.contains_key(&path) && !removed.contains(&path) {
+                st.insert(path, entry);
             }
         }
+        *done = true;
     }
 
     /// Park `segment` (already written, starting at `start_ns`): write its
@@ -481,7 +533,9 @@ impl Parking {
     /// limits: past the cap, or short of free space, the oldest parked
     /// segments of the whole server are deleted first; if that is not
     /// enough, nothing is written and [`ParkError::Refused`] is returned. The
-    /// caller then drops the segment. Blocking.
+    /// caller then drops the segment. A segment the index holds already (a
+    /// drain retry that failed) takes no new space: neither limit is checked
+    /// and nothing is deleted for it. Blocking.
     pub fn park(
         &self,
         segment: &Path,
@@ -489,12 +543,33 @@ impl Parking {
         sidecar_contents: &str,
     ) -> Result<(), ParkError> {
         let bytes = std::fs::metadata(segment).map_err(ParkError::Io)?.len();
+        let entry = Entry::from_sidecar(sidecar_contents, bytes, Instant::now())
+            .filter(|e| e.start_ns == start_ns)
+            .ok_or_else(|| {
+                ParkError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "sidecar contents do not parse, or do not start at the segment's start",
+                ))
+            })?;
+        self.ensure_scanned(false);
         let mut st = self.lock();
-        self.ensure_scanned(&mut st);
+        if st.entries.contains_key(segment) {
+            // Parked again (a drain retry that failed): it is on disk and
+            // counted already, so it takes no new space. Neither limit is
+            // checked, or a volume filled by something else would delete the
+            // older backlog and then this segment too.
+            if std::fs::read_to_string(crate::tams::uploader::sidecar_path(segment))
+                .ok()
+                .as_deref()
+                != Some(sidecar_contents)
+            {
+                write_sidecar(segment, sidecar_contents)?;
+            }
+            st.insert(segment.to_path_buf(), entry);
+            return Ok(());
+        }
         let space = self.space(&mut st);
         let limits = self.limits(space);
-        // A segment parked again (a retry that failed) is counted once.
-        st.remove(segment);
 
         let freed = self.make_room(&mut st, segment, bytes, space, &limits);
         if let Some((_, Some(s))) = st.space.as_mut() {
@@ -523,22 +598,8 @@ impl Parking {
             }
         }
 
-        let sidecar = crate::tams::uploader::sidecar_path(segment);
-        let tmp = crate::tams::uploader::sidecar_tmp_path(segment);
-        let written =
-            std::fs::write(&tmp, sidecar_contents).and_then(|()| std::fs::rename(&tmp, &sidecar));
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(ParkError::Io(e));
-        }
-        st.insert(
-            segment.to_path_buf(),
-            Entry {
-                start_ns,
-                bytes,
-                seen: Instant::now(),
-            },
-        );
+        write_sidecar(segment, sidecar_contents)?;
+        st.insert(segment.to_path_buf(), entry);
         self.warn_usage(&mut st, &limits);
         drop(st);
         crate::tams::drain::wake();
@@ -659,29 +720,33 @@ impl Parking {
     /// Replace what the index knows of `dir` with a fresh scan of it, taken
     /// at `scanned_at`: corrects segments deleted or added behind its back.
     /// A segment parked after the scan began is kept.
-    pub fn sync_dir(
+    pub(crate) fn sync_dir(
         &self,
         dir: &Path,
         scanned_at: Instant,
-        parked: impl IntoIterator<Item = (PathBuf, u64, u64)>,
+        parked: impl IntoIterator<Item = crate::tams::uploader::Parked>,
     ) {
         let mut st = self.lock();
         let stale: Vec<PathBuf> = st
-            .entries
-            .iter()
-            .filter(|(p, e)| p.parent() == Some(dir) && e.seen < scanned_at)
-            .map(|(p, _)| p.clone())
+            .by_dir
+            .get(dir)
+            .into_iter()
+            .flatten()
+            .filter(|(_, p)| st.entries.get(p).is_some_and(|e| e.seen < scanned_at))
+            .map(|(_, p)| p.clone())
             .collect();
         for p in stale {
             st.remove(&p);
         }
-        for (path, start_ns, bytes) in parked {
-            if !st.entries.contains_key(&path) {
+        for p in parked {
+            if !st.entries.contains_key(&p.path) {
                 st.insert(
-                    path,
+                    p.path,
                     Entry {
-                        start_ns,
-                        bytes,
+                        start_ns: p.start_ns,
+                        end_ns: p.end_ns,
+                        target: p.target,
+                        bytes: p.bytes,
                         seen: scanned_at,
                     },
                 );
@@ -689,15 +754,45 @@ impl Parking {
         }
     }
 
-    /// Every parked segment the index knows, with its start time. The index
-    /// is built first if it is not yet.
-    pub fn snapshot(&self) -> Vec<(PathBuf, u64)> {
-        let mut st = self.lock();
-        self.ensure_scanned(&mut st);
-        st.entries
-            .iter()
-            .map(|(p, e)| (p.clone(), e.start_ns))
+    /// The flow directories that hold parked segments, in order.
+    pub fn dirs(&self) -> Vec<PathBuf> {
+        self.lock().by_dir.keys().cloned().collect()
+    }
+
+    /// Up to `limit` parked segments of `dir`, oldest first, after `after`
+    /// (a `(start_ns, path)` of an earlier page).
+    pub fn page(
+        &self,
+        dir: &Path,
+        after: Option<&(u64, PathBuf)>,
+        limit: usize,
+    ) -> Vec<ParkedSegment> {
+        use std::ops::Bound;
+        let st = self.lock();
+        let Some(set) = st.by_dir.get(dir) else {
+            return Vec::new();
+        };
+        let from = match after {
+            Some(a) => Bound::Excluded(a.clone()),
+            None => Bound::Unbounded,
+        };
+        set.range((from, Bound::Unbounded))
+            .take(limit)
+            .filter_map(|(_, path)| {
+                let e = st.entries.get(path)?;
+                Some(ParkedSegment {
+                    path: path.clone(),
+                    start_ns: e.start_ns,
+                    end_ns: e.end_ns,
+                    target: e.target.clone(),
+                })
+            })
             .collect()
+    }
+
+    /// Whether the index holds `segment`.
+    pub fn contains(&self, segment: &Path) -> bool {
+        self.lock().entries.contains_key(segment)
     }
 
     /// The root this index covers.
@@ -709,6 +804,55 @@ impl Parking {
     pub fn total_bytes(&self) -> u64 {
         self.lock().total
     }
+}
+
+/// Write the sidecar of `segment` through a temporary file renamed into place.
+fn write_sidecar(segment: &Path, contents: &str) -> Result<(), ParkError> {
+    let sidecar = crate::tams::uploader::sidecar_path(segment);
+    let tmp = crate::tams::uploader::sidecar_tmp_path(segment);
+    let written = std::fs::write(&tmp, contents).and_then(|()| std::fs::rename(&tmp, &sidecar));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(ParkError::Io(e));
+    }
+    Ok(())
+}
+
+/// Every parked segment under `root`: each sidecar that parses, with its
+/// segment's size. Blocking, and without the index's lock.
+fn scan_root(root: &Path) -> Vec<(PathBuf, Entry)> {
+    let mut found = Vec::new();
+    let Ok(dirs) = std::fs::read_dir(root) else {
+        return found;
+    };
+    let now = Instant::now();
+    for dir in dirs
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+    {
+        let Ok(files) = std::fs::read_dir(dir.path()) else {
+            continue;
+        };
+        for sidecar in files.flatten().map(|e| e.path()) {
+            let Some(segment) = sidecar
+                .to_str()
+                .and_then(|s| s.strip_suffix(SIDECAR_SUFFIX))
+                .map(PathBuf::from)
+            else {
+                continue;
+            };
+            let Some(bytes) = std::fs::metadata(&segment).ok().map(|m| m.len()) else {
+                continue;
+            };
+            let entry = std::fs::read_to_string(&sidecar)
+                .ok()
+                .and_then(|s| Entry::from_sidecar(&s, bytes, now));
+            if let Some(entry) = entry {
+                found.push((segment, entry));
+            }
+        }
+    }
+    found
 }
 
 fn has_sidecar(dir: &Path) -> bool {
@@ -855,6 +999,81 @@ mod tests {
         assert!(!b20.exists() && !a30.exists());
         assert!(!crate::tams::uploader::sidecar_path(&b40).exists());
         assert_eq!(p.total_bytes(), 0);
+    }
+
+    /// A segment parked again (a drain retry that failed) is on disk and
+    /// counted already: short of free space, it deletes no older segment and
+    /// is not refused.
+    #[test]
+    fn tams_park_again_needs_no_new_space() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let limits = ParkLimits {
+            max_total_bytes: u64::MAX,
+            min_free_bytes: 2_000,
+        };
+        let space = fake(10_000);
+        let p = Parking::new(root.into(), Some(limits), Box::new(space.clone()));
+        let (a10, _) = park_one(&p, root, "a", 10);
+        let (b20, _) = park_one(&p, root, "b", 20);
+
+        // The volume fills with something else.
+        space.0.lock().unwrap().free = 500;
+        std::thread::sleep(SPACE_CACHE);
+        let start_ns = 20 * 1_000_000_000;
+        let contents = format!("{} {}", start_ns, start_ns + 1_000_000_000);
+        let r = p.park(&b20, start_ns, &contents);
+        assert!(r.is_ok(), "{:?}", r);
+        assert!(parked(&a10) && parked(&b20));
+        assert_eq!(p.total_bytes(), 200);
+    }
+
+    /// A park (on a streaming thread) does not wait for the startup scan,
+    /// which runs without the index's lock; the scan's merge then counts what
+    /// was parked before, and does not bring back what went meanwhile.
+    #[test]
+    fn tams_park_does_not_wait_for_the_startup_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let limits = ParkLimits {
+            max_total_bytes: u64::MAX,
+            min_free_bytes: 0,
+        };
+        let before = Parking::new(root.clone(), Some(limits), Box::new(fake(u64::MAX)));
+        let (a10, _) = park_one(&before, &root, "a", 10);
+        let (a11, _) = park_one(&before, &root, "a", 11);
+
+        let p = std::sync::Arc::new(Parking::new(
+            root.clone(),
+            Some(limits),
+            Box::new(fake(u64::MAX)),
+        ));
+        // A scan runs elsewhere.
+        let gate = p.scanned.lock().unwrap();
+        p.lock().scanning = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (p2, root2) = (p.clone(), root.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(park_one(&p2, &root2, "b", 20));
+        });
+        let (b20, r) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the park waited for the scan");
+        assert!(r.is_ok() && parked(&b20));
+        // Uploaded while the scan runs.
+        p.forget(&a11);
+        drop(gate);
+
+        p.warm_up();
+        assert!(p.contains(&a10) && p.contains(&b20) && !p.contains(&a11));
+        assert_eq!(p.total_bytes(), 200);
+        assert_eq!(p.dirs(), vec![root.join("a"), root.join("b")]);
+        let page = p.page(&root.join("a"), None, 10);
+        assert_eq!(page.len(), 1);
+        assert_eq!(
+            (page[0].start_ns, page[0].end_ns),
+            (10_000_000_000, 11_000_000_000)
+        );
     }
 
     #[test]

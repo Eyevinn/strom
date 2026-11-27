@@ -895,8 +895,11 @@ pub(crate) enum Outcome {
     Parked,
     /// Rejected for good, or could not be parked; deleted.
     Dropped,
-    /// Its file could not be read; left to the caller.
+    /// Its file is gone; left to the caller.
     Unreadable,
+    /// Its file could not be read for another reason (`EIO`, `EMFILE`, ...),
+    /// which may pass; kept, left to the caller.
+    ReadFailed,
 }
 
 /// Why an upload failed, and so what to do with the segment.
@@ -948,7 +951,11 @@ pub(crate) async fn upload_segment(
             let msg = format!("reading segment {}: {}", frag.path.display(), e);
             error!("TAMS {}: {}", ctx.block_id, msg);
             emit_error(ctx.events, ctx.strom_flow_id, ctx.block_id, msg);
-            return Outcome::Unreadable;
+            return if e.kind() == std::io::ErrorKind::NotFound {
+                Outcome::Unreadable
+            } else {
+                Outcome::ReadFailed
+            };
         }
     };
     debug!(
@@ -1055,20 +1062,21 @@ pub(crate) async fn upload_segment(
 }
 
 /// Park a segment that failed, keeping the object allocated for it (in
-/// `slot`) for its next try.
+/// `slot`) for its next try. The object is handed over before the segment is
+/// parked: once parked, the drainer may take the segment at once, and must
+/// find the object, or it allocates (and uploads to) a second one. When the
+/// segment cannot be parked, `park_segment` discards it and forgets the
+/// object.
 async fn park_kept(
     ctx: &mut UploadCtx<'_>,
     frag: &FragmentReady,
     slot: Mutex<Option<Allocation>>,
     reason: &str,
 ) -> Outcome {
-    let outcome = park_segment(ctx, frag, reason).await;
-    if outcome == Outcome::Parked {
-        if let Some(a) = slot.into_inner().unwrap_or_else(|e| e.into_inner()) {
-            allocations().insert(frag.path.clone(), a);
-        }
+    if let Some(a) = slot.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        allocations().insert(frag.path.clone(), a);
     }
-    outcome
+    park_segment(ctx, frag, reason).await
 }
 
 /// Upload and register one freshly-rotated fragment, or park it at once while
@@ -1241,7 +1249,10 @@ pub fn park_on_disk(
         &frag.path,
         frag.start_ns,
         &sidecar_contents(frag.start_ns, frag.end_ns, target),
-    )
+    )?;
+    #[cfg(test)]
+    tests::on_parked(&frag.path);
+    Ok(())
 }
 
 /// Run an async operation up to `attempts` times, with jittered exponential backoff.
@@ -1453,13 +1464,24 @@ pub(crate) fn parse_sidecar(s: &str) -> Option<(u64, u64, Option<ParkTarget>)> {
 
 /// Scan `temp_dir` for parked segments (a `.meta` sidecar plus its segment file),
 /// oldest first. A sidecar whose segment is gone, or that cannot be parsed, is
-/// cleaned up here. Empty when the directory can't be read.
+/// cleaned up here. Empty when the directory can't be read. On the blocking
+/// pool; see [`collect_parked_blocking`].
+#[cfg(test)]
 pub(crate) async fn collect_parked(temp_dir: &Path) -> VecDeque<Parked> {
+    let dir = temp_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || collect_parked_blocking(&dir))
+        .await
+        .unwrap_or_default()
+}
+
+/// [`collect_parked`], blocking: one task per directory rather than one per
+/// file.
+pub(crate) fn collect_parked_blocking(temp_dir: &Path) -> VecDeque<Parked> {
     let mut parked = Vec::new();
-    let Ok(mut entries) = tokio::fs::read_dir(temp_dir).await else {
+    let Ok(entries) = std::fs::read_dir(temp_dir) else {
         return VecDeque::new();
     };
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    for entry in entries.flatten() {
         let sidecar = entry.path();
         let Some(segment) = sidecar
             .to_str()
@@ -1468,11 +1490,10 @@ pub(crate) async fn collect_parked(temp_dir: &Path) -> VecDeque<Parked> {
         else {
             continue;
         };
-        let range = tokio::fs::read_to_string(&sidecar)
-            .await
+        let range = std::fs::read_to_string(&sidecar)
             .ok()
             .and_then(|s| parse_sidecar(&s));
-        let size = tokio::fs::metadata(&segment).await.ok().map(|m| m.len());
+        let size = std::fs::metadata(&segment).ok().map(|m| m.len());
         match (range, size) {
             (Some((start_ns, end_ns, target)), Some(bytes)) => {
                 parked.push(Parked {
@@ -1487,7 +1508,7 @@ pub(crate) async fn collect_parked(temp_dir: &Path) -> VecDeque<Parked> {
                 // Orphan/corrupt sidecar (no segment, or unparseable): clean it
                 // up, unless another uploader is busy with its segment.
                 if let Some(_claim) = Claim::take(&segment) {
-                    let _ = tokio::fs::remove_file(&sidecar).await;
+                    let _ = std::fs::remove_file(&sidecar);
                 }
             }
         }
@@ -2354,6 +2375,44 @@ mod tests {
         assert_eq!(stub.allocations.load(Ordering::SeqCst), 1);
         assert_eq!(stub.registrations.lock().unwrap().len(), 1);
         assert!(!allocations().contains_key(&path));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What [`ALLOCATIONS`] held for each segment the moment it was parked,
+    /// that is, when the drainer could first take it: whether its bytes were
+    /// uploaded, `None` without an allocation.
+    static AT_PARK: LazyLock<Mutex<HashMap<PathBuf, Option<bool>>>> =
+        LazyLock::new(Default::default);
+
+    pub(super) fn on_parked(segment: &Path) {
+        let held = allocations().get(segment).map(|a| a.uploaded);
+        AT_PARK.lock().unwrap().insert(segment.to_path_buf(), held);
+    }
+
+    /// A segment whose bytes are uploaded but whose registration failed is
+    /// parked with its object already handed over, so a drainer that takes it
+    /// at once reuses the object instead of allocating another.
+    #[tokio::test]
+    async fn the_allocation_is_handed_over_before_the_segment_is_parked() {
+        let stub = Stub::default();
+        stub.register.lock().unwrap().push_back(500);
+        let mut f = Fixture::new(start_stub(stub.clone()).await);
+        let dir = temp_dir();
+        let path = dir.join("seg_r1_00000.ts");
+        std::fs::write(&path, b"bytes").unwrap();
+        let frag = FragmentReady {
+            path: path.clone(),
+            start_ns: 10_000_000_000,
+            end_ns: 12_000_000_000,
+        };
+        let mut ctx = f.ctx();
+        assert_eq!(
+            upload_segment(&mut ctx, &frag, 1, false).await,
+            Outcome::Parked
+        );
+        assert_eq!(AT_PARK.lock().unwrap().get(&path), Some(&Some(true)));
+        forget_allocation(&path);
+        crate::tams::park::parking().forget(&path);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
