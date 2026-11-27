@@ -18,8 +18,21 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
 
-/// Block property on a Media Player that makes it a stinger clip source.
+/// Block property on a Media Player that makes it a stinger clip source,
+/// and on an HTML Input that makes its page a stinger.
 pub const STINGER_MODE_PROPERTY: &str = "stinger_mode";
+
+/// HTML Input property: how long a stinger page covers the program, from
+/// the trigger. Required for a page stinger.
+pub const WEB_STINGER_DURATION_PROPERTY: &str = "stinger_duration_ms";
+
+/// HTML Input property: how far into a stinger page the program changes.
+/// 0 takes the middle of the duration.
+pub const WEB_STINGER_CUT_POINT_PROPERTY: &str = "stinger_cut_point_ms";
+
+/// HTML Input property: how long the program mixes at the cut point
+/// (0 = cut).
+pub const WEB_STINGER_MIX_PROPERTY: &str = "stinger_mix_ms";
 
 /// Block property on a Media Player holding per-clip stinger settings, as a
 /// JSON object keyed by playlist entry. Managed through the stinger API.
@@ -234,12 +247,27 @@ pub struct StingerTakeReport {
     pub warning: Option<String>,
 }
 
+/// What feeds a vision mixer's stinger input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum StingerSourceKind {
+    /// A Media Player whose playlist is the clip library.
+    Clips,
+    /// An HTML Input whose page plays the stinger on a trigger. Its settings
+    /// are properties of the block, and it is the only entry in `clips`.
+    Page,
+}
+
 /// Stinger state of one vision mixer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct StingerState {
-    /// The Media Player wired to the stinger input.
+    /// The block wired to the stinger input.
     pub source_block_id: Option<String>,
+    /// What kind of block that is.
+    #[serde(default)]
+    pub source_kind: Option<StingerSourceKind>,
     /// Why stingers cannot run, when they cannot.
     pub problem: Option<String>,
     /// Whether the matte variants run here (GPU mixer).
