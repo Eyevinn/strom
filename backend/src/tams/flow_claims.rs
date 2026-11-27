@@ -1,9 +1,10 @@
 //! Which running Strom flow writes to which TAMS flow.
 //!
-//! TAMS Output derives its TAMS flow ids from the block instance id alone, and
-//! a block id is only unique within one Strom flow. Two Strom flows with a TAMS
-//! Output of the same block id would write to the same TAMS flows on a shared
-//! gateway, interleaving segments of two recordings. The ids stay derived that
+//! TAMS Output derives its TAMS flow ids from the block instance id (or from
+//! its `tams_key` when set), and a block id is only unique within one Strom
+//! flow. Two Strom flows with a TAMS Output of the same block id (or key)
+//! would write to the same TAMS flows on a shared gateway, interleaving
+//! segments of two recordings. The ids stay derived that
 //! way on purpose (changing the derivation would change the TAMS ids of every
 //! existing recording), so this registry catches the collision instead: a block
 //! claims its TAMS flow ids when it is built, and a claim held by another Strom
