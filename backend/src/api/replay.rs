@@ -317,7 +317,26 @@ impl WsParams {
     }
 }
 
-/// GET /api/replay/{flow_id}/{group}/ws?diagnostics=1&state_ms=200
+/// WebSocket to control a replay group and follow its state and events.
+///
+/// Commands are JSON text frames, as for `POST .../command`, with an optional
+/// `seq`. See docs/REPLAY_API.md for the messages.
+#[utoipa::path(
+    get,
+    path = "/api/replay/{flow_id}/{group}/ws",
+    tag = "replay",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("group" = String, Path, description = "Replay group"),
+        ("diagnostics" = Option<String>, Query, description = "`1` or `true`: send diagnostics with each state"),
+        ("state_ms" = Option<u64>, Query, description = "State every this many ms, 50 .. 1000 (clamped)")
+    ),
+    responses(
+        (status = 101, description = "WebSocket connection upgraded"),
+        (status = 401, description = "Authentication required"),
+        (status = 404, description = "Replay group not found", body = ErrorResponse)
+    )
+)]
 pub async fn replay_ws(
     ws: WebSocketUpgrade,
     State(_state): State<AppState>,
@@ -325,7 +344,7 @@ pub async fn replay_ws(
     Query(params): Query<WsParams>,
 ) -> Response {
     let Some(tl) = timeline::get(flow_id, &group) else {
-        return (StatusCode::NOT_FOUND, "replay group not found").into_response();
+        return not_found().into_response();
     };
     let events = tl.subscribe();
     let held = Arc::downgrade(&tl);

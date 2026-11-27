@@ -196,6 +196,7 @@ use utoipa::OpenApi;
         crate::api::replay::replay_group,
         crate::api::replay::replay_command,
         crate::api::replay::replay_state,
+        crate::api::replay::replay_ws,
         crate::api::replay::replay_diagnostics,
         crate::api::replay::get_source_offsets,
         crate::api::replay::patch_source_offsets,
