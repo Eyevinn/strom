@@ -293,6 +293,10 @@ pub struct MixerEditor {
     strip_interacted: bool,
     /// Whether the pipeline is currently running (set by the app)
     pipeline_running: bool,
+    /// Construction-time properties the editor has no controls for, kept as
+    /// loaded. A save replaces the block's properties wholesale, so anything
+    /// not written back here is lost.
+    build_config: HashMap<String, PropertyValue>,
 }
 
 impl MixerEditor {

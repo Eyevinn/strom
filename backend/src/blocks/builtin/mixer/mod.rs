@@ -33,6 +33,12 @@
 //!                                                        ├→ solo_mixer
 //! group_K_out_tee → group_afl_volume_K → group_afl_queue_K ─┘
 //! ```
+//! With `direct_outs` on, each channel also gets a direct output tapped after
+//! its to-Main switch:
+//! ```text
+//! routing_tee_N → to_main_vol_N → direct_tee_N → to_main_queue_N → main audiomixer
+//!                                 direct_tee_N → direct_queue_N (leaky) → direct_out_tee_N
+//! ```
 //! `level_N` sits pre-fader so the channel meter shows the signal hitting the
 //! fader regardless of fader position or mute. Bus meters (`main_level`,
 //! `monitor_level`, `auxN_level`, `groupN_level`) sit on the bus output,
