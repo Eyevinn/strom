@@ -12,6 +12,12 @@
 //!   carrying its TAI as a reference timestamp. Pause repeats a frame, slow
 //!   motion repeats frames, reverse walks backwards: the output never stops,
 //!   flushes or seeks, and never waits on the network.
+//! - Offline (a [`Clip`] to export), the group runs on a frame counter
+//!   instead ([`super::timeline::TimeSource::Counter`]): the tick is output
+//!   frame `k`, running time `k * period`. It waits for the frame to be
+//!   decoded instead of repeating the last one, pushes with backpressure
+//!   (a blocking, non-live appsrc), and ends the stream at the clip's out
+//!   point. Same timeline, same frames, as fast as downstream goes.
 
 use super::super::bridge::NetworkBuffer;
 use super::backoff::{worth_warning, Backoff};
@@ -20,7 +26,7 @@ use super::cache::Hold;
 use super::cache::{by_urgency, Fetcher, SegmentStore};
 use super::decode::{caps_frame_rate, decode_timeout, map_to_grid, pick_decoder, SegmentDecoder};
 use super::source::{Segment, SourceIndex};
-use super::timeline::{PlayerStats, ReplayTimeline};
+use super::timeline::{tick_rt, Clip, PlayerStats, ReplayTimeline};
 use crate::gst::frame_rate::estimate_frame_rate;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -29,7 +35,7 @@ use gstreamer_video as gst_video;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -47,6 +53,9 @@ const DEFAULT_DECODED_BUDGET_MB: u64 = 768;
 const MIN_DECODED_SEGMENTS: usize = 2;
 /// Upper bound of the decoded window ahead of the cursor, seconds.
 pub const MAX_DECODE_AHEAD_S: u64 = 30;
+/// Offline: longest wait for the media, and then for one frame, before the
+/// export fails (a fetch or decode that never succeeds).
+const OFFLINE_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One decoded segment: the TAI of its first and last frame, and the bytes
 /// they hold.
@@ -144,6 +153,16 @@ fn within_budget(
     out
 }
 
+/// What a player outputs: at which rate, and paced how.
+#[derive(Debug, Clone, Default)]
+pub struct Output {
+    /// Output frame rate; `None` = the source's own rate.
+    pub rate: Option<(u32, u32)>,
+    /// Offline: the clip to play once, on the frame counter. `None` = live,
+    /// on the flow clock.
+    pub clip: Option<Clip>,
+}
+
 pub struct ReplayPlayer {
     pub block_id: String,
     timeline: Arc<ReplayTimeline>,
@@ -152,6 +171,9 @@ pub struct ReplayPlayer {
     store: Arc<SegmentStore>,
     appsrc: gst::glib::WeakRef<gst_app::AppSrc>,
     decoded: Mutex<FrameStore>,
+    /// Signalled when frames are added to `decoded` (an offline tick waits
+    /// on it).
+    frame_ready: Condvar,
     inflight: Mutex<HashSet<i64>>,
     /// Segments whose decode failed (or gave no frames), retried with backoff.
     failed: Mutex<Backoff<i64>>,
@@ -165,6 +187,9 @@ pub struct ReplayPlayer {
     decoded_budget: u64,
     /// Output frame rate; `None` = the source's own rate.
     output_rate: Option<(u32, u32)>,
+    /// Offline: the clip to play once, on the frame counter. `None` = live,
+    /// on the flow clock.
+    clip: Option<Clip>,
     /// Read the bitstrip and burned-in time of pushed frames
     /// (STROM_REPLAY_BITSTRIP=1).
     read_strip: bool,
@@ -180,10 +205,17 @@ impl ReplayPlayer {
         appsrc: &gst_app::AppSrc,
         cache_ahead_s: u64,
         prefetch_s: u64,
-        output_rate: Option<(u32, u32)>,
+        output: Output,
     ) -> Arc<Self> {
+        let Output {
+            rate: output_rate,
+            clip,
+        } = output;
         let stats = Arc::new(PlayerStats::new(block_id));
         timeline.register_player(&stats);
+        if clip.is_some() {
+            timeline.use_counter();
+        }
         let decoder = pick_decoder();
         info!("Replay player {}: decoder {}", block_id, decoder);
         let fetcher = Arc::new(Fetcher::new(
@@ -203,6 +235,7 @@ impl ReplayPlayer {
             stats,
             appsrc: appsrc.downgrade(),
             decoded: Mutex::new(FrameStore::default()),
+            frame_ready: Condvar::new(),
             inflight: Mutex::new(HashSet::new()),
             failed: Mutex::new(Backoff::new(
                 Duration::from_millis(250),
@@ -219,6 +252,7 @@ impl ReplayPlayer {
                 .unwrap_or(DEFAULT_DECODED_BUDGET_MB)
                 .saturating_mul(1 << 20),
             output_rate,
+            clip,
             read_strip: strom_types::env::var_opt("STROM_REPLAY_BITSTRIP")
                 .is_some_and(|v| v == "1" || v == "true"),
             started: AtomicBool::new(false),
@@ -250,7 +284,10 @@ impl ReplayPlayer {
         let me = Arc::clone(self);
         std::thread::Builder::new()
             .name(format!("replay-tick-{}", self.block_id))
-            .spawn(move || me.tick_loop())
+            .spawn(move || match me.clip.clone() {
+                Some(clip) => me.offline_loop(clip),
+                None => me.tick_loop(),
+            })
             .ok();
     }
 
@@ -413,6 +450,7 @@ impl ReplayPlayer {
                 },
             );
             store.frames.extend(frames);
+            self.frame_ready.notify_all();
         }
         self.stats.decodes.fetch_add(1, Ordering::Relaxed);
         self.stats.last_decode_ms.store(ms, Ordering::Relaxed);
@@ -584,7 +622,7 @@ impl ReplayPlayer {
                 }
             }
             drop(appsrc);
-            let rt = (k as f64 * fd) as i64;
+            let rt = tick_rt(k, on, od_);
             let id =
                 clock.new_single_shot_id(base + gst::ClockTime::from_nseconds(rt.max(0) as u64));
             let _ = id.wait();
@@ -658,22 +696,7 @@ impl ReplayPlayer {
                 }
             };
             if let Some((shown_tai, b)) = &last {
-                let mut out = b.copy();
-                if let Some(o) = out.get_mut() {
-                    o.set_pts(gst::ClockTime::from_nseconds(rt as u64));
-                    o.set_dts(gst::ClockTime::NONE);
-                    o.set_duration(gst::ClockTime::from_nseconds(fd as u64));
-                    // The capture time of the source frame shown.
-                    let tai = *shown_tai;
-                    if tai >= 0 {
-                        gst::ReferenceTimestampMeta::add(
-                            o,
-                            &tai_caps,
-                            gst::ClockTime::from_nseconds(tai as u64),
-                            gst::ClockTime::from_nseconds(grid.frame_ns() as u64),
-                        );
-                    }
-                }
+                let out = out_buffer(b, rt, fd as i64, *shown_tai, &grid, &tai_caps);
                 let pushed = appsrc.push_buffer(out);
                 if let Some(t) = hit {
                     self.timeline.note_pushed(rt, t);
@@ -687,6 +710,173 @@ impl ReplayPlayer {
         }
         info!("Replay {}: output stopped", self.block_id);
         self.halt();
+    }
+
+    /// The offline output: the clip on the frame counter. Tick `k` is the
+    /// output frame at running time `k * period`; it waits for its frame to
+    /// be decoded (no repeat on a miss), pushes it with backpressure, and
+    /// ends the stream when play reaches the out point. Nothing waits on the
+    /// clock, so it runs as fast as fetching, decoding and downstream allow.
+    fn offline_loop(self: Arc<Self>, clip: Clip) {
+        let started = Instant::now();
+        let result = self.run_offline(&clip);
+        // Held only for the end: a strong ref across the run would keep the
+        // element alive after its flow is torn down.
+        let Some(appsrc) = self.appsrc.upgrade() else {
+            self.halt();
+            return;
+        };
+        match result {
+            Ok(frames) => {
+                let wall = started.elapsed().as_secs_f64();
+                let media = self
+                    .stats
+                    .output_rate()
+                    .map_or(0.0, |(n, d)| frames as f64 * d as f64 / n as f64);
+                info!(
+                    "Replay {}: clip done, {} frames ({:.2} s) in {:.2} s, {:.1}x real time",
+                    self.block_id,
+                    frames,
+                    media,
+                    wall,
+                    if wall > 0.0 { media / wall } else { 0.0 }
+                );
+                let _ = appsrc.end_of_stream();
+            }
+            Err(None) => debug!("Replay {}: offline output stopped", self.block_id),
+            Err(Some(e)) => {
+                warn!("Replay {}: export failed: {}", self.block_id, e);
+                appsrc.post_error_message(gst::error_msg!(
+                    gst::StreamError::Failed,
+                    ["Replay {}: {}", self.block_id, e]
+                ));
+            }
+        }
+        self.halt();
+    }
+
+    /// The body of [`Self::offline_loop`]: the number of frames pushed, or
+    /// why it stopped (`None`: the flow stopped).
+    fn run_offline(&self, clip: &Clip) -> Result<u64, Option<String>> {
+        // Media, frame rate and caps: the first decode.
+        let deadline = Instant::now() + OFFLINE_FRAME_TIMEOUT;
+        let appsrc = || self.appsrc.upgrade().ok_or(None);
+        let grid = loop {
+            if !self.alive() {
+                return Err(None);
+            }
+            let appsrc = appsrc()?;
+            // Pushed before the flow is on its way to play, a buffer would
+            // be refused (flushing).
+            if let (true, true, Some(grid), Some(_)) = (
+                appsrc.current_state() >= gst::State::Paused,
+                lock(&self.caps).is_some(),
+                self.stats.grid(),
+                self.timeline.bounds(),
+            ) {
+                break grid;
+            }
+            if Instant::now() > deadline {
+                return Err(Some(format!(
+                    "no media from the source after {:?}",
+                    OFFLINE_FRAME_TIMEOUT
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let (on, od) = self.output_rate.unwrap_or((grid.fps_n, grid.fps_d));
+        self.stats.set_output_rate(on, od);
+        let mut caps = lock(&self.caps).clone().ok_or(None)?;
+        caps.make_mut()
+            .set("framerate", gst::Fraction::new(on as i32, od as i32));
+        let video_info = gst_video::VideoInfo::from_caps(&caps).ok();
+        appsrc()?.set_caps(Some(&caps));
+        self.timeline.set_counter(0);
+        let applied = self
+            .timeline
+            .start_clip(clip, 0)
+            .map_err(|e| Some(format!("clip: {}", e)))?;
+        info!(
+            "Replay {}: offline clip from {} at {}x, output {}/{} fps, caps {}",
+            self.block_id, applied.tai, applied.speed, on, od, caps
+        );
+        let tai_caps = gst::Caps::builder("timestamp/x-tai").build();
+        let period_ns = grid.frame_ns().ceil() as i64;
+        let mut last_frame: Option<i64> = None;
+        let mut k: i64 = 0;
+        loop {
+            let rt = tick_rt(k, on, od);
+            self.timeline.set_counter(rt);
+            let Some(t) = self.timeline.playing_at(rt) else {
+                return Ok(k as u64);
+            };
+            self.stats
+                .wanted_frame
+                .store(grid.floor_frame(t), Ordering::Relaxed);
+            let (ft, b, gap) = self.wait_frame(t, period_ns)?;
+            self.stats.set_gap(gap);
+            if self.read_strip && gap.is_none() && last_frame != Some(ft) {
+                if let Some(info) = &video_info {
+                    self.check_picture(&b, info, &grid, ft, t);
+                }
+            }
+            last_frame = Some(ft);
+            self.stats
+                .shown_frame
+                .store(grid.nearest_frame(ft), Ordering::Relaxed);
+            self.stats.shown_tai.store(ft, Ordering::Relaxed);
+            let duration = tick_rt(k + 1, on, od) - rt;
+            // Blocks while downstream is full: the backpressure that paces
+            // the export.
+            appsrc()?
+                .push_buffer(out_buffer(&b, rt, duration, ft, &grid, &tai_caps))
+                .map_err(|e| {
+                    debug!("Replay {}: push stopped: {:?}", self.block_id, e);
+                    None
+                })?;
+            self.timeline.note_pushed(rt, t);
+            k += 1;
+        }
+    }
+
+    /// The frame that holds `t`, waiting until it is decoded: the latest
+    /// frame at or before `t`, or in a hole of the recording the last frame
+    /// before the hole (and the hole). An error after
+    /// [`OFFLINE_FRAME_TIMEOUT`]; `None` when the player stops.
+    #[allow(clippy::type_complexity)]
+    fn wait_frame(
+        &self,
+        t: i64,
+        period_ns: i64,
+    ) -> Result<(i64, gst::Buffer, Option<(i64, i64)>), Option<String>> {
+        let deadline = Instant::now() + OFFLINE_FRAME_TIMEOUT;
+        let mut store = lock(&self.decoded);
+        loop {
+            if let Some((ft, b)) = frame_holding(&store.frames, t, period_ns) {
+                return Ok((ft, b, None));
+            }
+            if let Some(h) = self.store.hold().filter(|h| h.holds(t)) {
+                if let Some((ft, b)) = held_in(&store, &h.seg) {
+                    return Ok((ft, b, Some(h.hole)));
+                }
+            }
+            if !self.alive() {
+                return Err(None);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(Some(format!(
+                    "the frame at TAI {} was not decoded within {:?}",
+                    super::timeline::tai_string(t),
+                    OFFLINE_FRAME_TIMEOUT
+                )));
+            }
+            store = self
+                .frame_ready
+                .wait_timeout(store, (deadline - now).min(Duration::from_millis(50)))
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
+        }
     }
 
     /// Diagnostics on a new pushed picture of the test material: the bitstrip
@@ -724,6 +914,33 @@ impl ReplayPlayer {
             }
         }
     }
+}
+
+/// The output buffer for a tick at running time `rt`: the decoded frame,
+/// restamped, carrying the capture time (TAI) of the source frame shown.
+fn out_buffer(
+    b: &gst::Buffer,
+    rt: i64,
+    duration: i64,
+    shown_tai: i64,
+    grid: &super::grid::FrameGrid,
+    tai_caps: &gst::Caps,
+) -> gst::Buffer {
+    let mut out = b.copy();
+    if let Some(o) = out.get_mut() {
+        o.set_pts(gst::ClockTime::from_nseconds(rt as u64));
+        o.set_dts(gst::ClockTime::NONE);
+        o.set_duration(gst::ClockTime::from_nseconds(duration as u64));
+        if shown_tai >= 0 {
+            gst::ReferenceTimestampMeta::add(
+                o,
+                tai_caps,
+                gst::ClockTime::from_nseconds(shown_tai as u64),
+                gst::ClockTime::from_nseconds(grid.frame_ns() as u64),
+            );
+        }
+    }
+    out
 }
 
 /// The segments to send to the decode workers, most urgent first: not done

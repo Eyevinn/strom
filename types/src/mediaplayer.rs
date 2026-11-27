@@ -109,6 +109,17 @@ pub const DECODED_AHEAD_PROPERTY: &str = "decoded_ahead_s";
 pub const OUTPUT_FRAMERATE_PROPERTY: &str = "output_framerate";
 /// Playlist and timeline mode: seconds of coded media fetched ahead.
 pub const READ_AHEAD_PROPERTY: &str = "read_ahead_s";
+/// Timeline mode: how the output is paced, [`PACING_REALTIME`] (default, on
+/// the flow clock) or [`PACING_OFFLINE`] (a clip, as fast as downstream
+/// takes it, then end of stream: export).
+pub const PACING_PROPERTY: &str = "pacing";
+pub const PACING_REALTIME: &str = "realtime";
+pub const PACING_OFFLINE: &str = "offline";
+/// Timeline mode, offline: the clip's in and out point (out exclusive), UTC
+/// (RFC 3339) or TAI (`"<seconds>:<nanoseconds>"`), and its speed.
+pub const CLIP_IN_PROPERTY: &str = "clip_in";
+pub const CLIP_OUT_PROPERTY: &str = "clip_out";
+pub const CLIP_SPEED_PROPERTY: &str = "clip_speed";
 /// TAMS source auth, named as on TAMS Output.
 pub const AUTH_MODE_PROPERTY: &str = "auth_mode";
 pub const API_TOKEN_PROPERTY: &str = "api_token";

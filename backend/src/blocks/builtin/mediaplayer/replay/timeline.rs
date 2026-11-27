@@ -23,6 +23,12 @@
 //! telemetry gives the UTC and TAI of the frames it names (see [`FrameTime`]).
 //! Times are only wall-clock times when every source says its index is real
 //! TAI ([`TimeDomain`]).
+//!
+//! **Where running time comes from** ([`TimeSource`]): live, the flow clock
+//! (`Clock`); offline (export), a frame counter that the output advances one
+//! frame at a time, as fast as downstream takes the frames (`Counter`). The
+//! cursor is the same function of running time in both, so the same commands
+//! at the same running times give the same frames.
 
 use super::grid::FrameGrid;
 use gstreamer as gst;
@@ -59,6 +65,36 @@ const DEFAULT_EDGE_STEP_NS: i64 = 1_000_000_000;
 /// Slack over one edge step before a group that follows live counts as
 /// having lost the edge (index polls and uploads jitter).
 const LIVE_SLACK_NS: i64 = 250_000_000;
+
+/// Where the group's running time ("now") comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeSource {
+    /// The flow clock: the clock source's running time (live).
+    Clock,
+    /// A frame counter: the running time of the frame the output is about to
+    /// push, `k * frame period`, set by the player that pushes it (offline).
+    /// Fetching and decoding follow it at whatever pace the output goes.
+    Counter,
+}
+
+/// `counter` when the group runs on the clock.
+const NO_COUNTER: i64 = i64::MIN;
+
+/// Running time of output frame `k` at `fps_n/fps_d`, in whole ns: computed
+/// exactly (rounded down), so the same `k` is the same running time in
+/// every mode and on every run.
+pub fn tick_rt(k: i64, fps_n: u32, fps_d: u32) -> i64 {
+    (k as i128 * 1_000_000_000 * fps_d as i128 / fps_n.max(1) as i128) as i64
+}
+
+/// A clip played once: from `in_point` to `out` (exclusive) at a constant
+/// forward `speed`, then the end. The bounded program of an export.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Clip {
+    pub in_point: ReplayTimeRef,
+    pub out: ReplayTimeRef,
+    pub speed: f64,
+}
 
 /// Fastest shuttle, either direction.
 pub const MAX_SPEED: f64 = 8.0;
@@ -764,6 +800,9 @@ pub struct ReplayTimeline {
     /// When the group first had an extent, for the origin's fallback.
     first_extent_at: Mutex<Option<Instant>>,
     clock_source: Mutex<Option<ClockSource>>,
+    /// Running time from the frame counter ([`TimeSource::Counter`]), or
+    /// [`NO_COUNTER`] on the clock.
+    counter: AtomicI64,
     /// Start of the stand-in running time before the flow plays; reset with
     /// the group, so it is on the same footing as the new run's running time.
     created: Mutex<Instant>,
@@ -826,6 +865,7 @@ impl ReplayTimeline {
             origin_tai: AtomicI64::new(UNKNOWN),
             first_extent_at: Mutex::new(None),
             clock_source: Mutex::new(None),
+            counter: AtomicI64::new(NO_COUNTER),
             created: Mutex::new(Instant::now()),
             players: Mutex::new(Vec::new()),
             last_cmd: Mutex::new(None),
@@ -870,6 +910,7 @@ impl ReplayTimeline {
             *lock(&self.last_pushed) = None;
             *lock(&self.last_cmd) = None;
             *src = None;
+            self.counter.store(NO_COUNTER, Ordering::Relaxed);
             *lock(&self.created) = Instant::now();
             *lock(&self.edge) = EdgeTracker::default();
             self.live_margin_ns
@@ -900,6 +941,36 @@ impl ReplayTimeline {
         reference_grid(self.players().iter().filter_map(|p| p.grid()))
     }
 
+    /// Run the group on a frame counter from running time 0 on, instead of
+    /// the flow clock (see [`TimeSource`]). Called at build by an offline
+    /// player, after it registered.
+    pub fn use_counter(&self) {
+        let _src = lock(&self.clock_source);
+        let _ = self
+            .counter
+            .compare_exchange(NO_COUNTER, 0, Ordering::Relaxed, Ordering::Relaxed);
+    }
+
+    /// The group's time source.
+    pub fn time_source(&self) -> TimeSource {
+        if self.counter.load(Ordering::Relaxed) == NO_COUNTER {
+            TimeSource::Clock
+        } else {
+            TimeSource::Counter
+        }
+    }
+
+    /// Counter time: the running time of the next frame out. No effect on a
+    /// group that runs on the clock.
+    pub fn set_counter(&self, rt: i64) {
+        let _src = lock(&self.clock_source);
+        let _ = self
+            .counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+                (c != NO_COUNTER).then_some(rt)
+            });
+    }
+
     /// An element in the flow whose clock and base time define "now".
     ///
     /// "Now" can jump when the source changes, most of all from the
@@ -909,6 +980,10 @@ impl ReplayTimeline {
     /// place on the new time base.
     pub fn set_clock_source(&self, element: &gst::Element) {
         let mut src = lock(&self.clock_source);
+        if self.counter.load(Ordering::Relaxed) != NO_COUNTER {
+            // On the counter: the clock does not define "now".
+            return;
+        }
         let alive = src
             .as_ref()
             .and_then(|s| s.element.upgrade())
@@ -970,7 +1045,8 @@ impl ReplayTimeline {
         }
     }
 
-    /// The flow's running time now, or a monotonic stand-in before it plays.
+    /// The flow's running time now, or a monotonic stand-in before it plays;
+    /// on the counter, the counter.
     pub fn now_rt(&self) -> i64 {
         self.rt_of(&mut lock(&self.clock_source))
     }
@@ -978,6 +1054,10 @@ impl ReplayTimeline {
     /// "Now" from the clock source, moving the group onto the source's base
     /// time first if it changed (see [`Self::observe_base`]).
     fn rt_of(&self, src: &mut Option<ClockSource>) -> i64 {
+        let counter = self.counter.load(Ordering::Relaxed);
+        if counter != NO_COUNTER {
+            return counter;
+        }
         if let Some(el) = src.as_ref().and_then(|s| s.element.upgrade()) {
             if let (Some(clock), Some(base)) = (el.clock(), el.base_time()) {
                 let base = base.nseconds() as i64;
@@ -1448,6 +1528,41 @@ impl ReplayTimeline {
             live,
             mark: None,
         })
+    }
+
+    /// Start `clip` at running time `rt`: cue `[in, out)`, freezing at the
+    /// end, and play it from `in` at its speed. The same two commands an
+    /// operator gives, applied at an exact running time.
+    pub fn start_clip(&self, clip: &Clip, rt: i64) -> Result<Applied, CommandError> {
+        if clip.speed.is_nan() || clip.speed <= 0.0 {
+            return Err(invalid(format!(
+                "clip: speed {} is not forward play",
+                clip.speed
+            )));
+        }
+        self.apply_at(
+            Command::Cue {
+                in_point: clip.in_point.clone(),
+                out: clip.out.clone(),
+                end_action: Some(EndAction::Freeze),
+            },
+            rt,
+        )?;
+        self.apply_at(
+            Command::Play {
+                speed: Some(clip.speed),
+                until: None,
+                end_action: None,
+            },
+            rt,
+        )
+    }
+
+    /// The cursor at `rt` while play goes on; `None` once it has stopped
+    /// (a clip reached its out point and froze) or there is no media.
+    pub fn playing_at(&self, rt: i64) -> Option<i64> {
+        let (t, speed) = self.cursor_tai(rt)?;
+        (speed != 0.0).then_some(t)
     }
 
     /// The reference frame that holds `tai` (relative to the origin) and its
