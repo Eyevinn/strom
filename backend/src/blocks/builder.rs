@@ -514,9 +514,22 @@ impl BlockBuildContext {
     /// Stopping a flow sets the pipeline to NULL without EOS, so a muxer drops
     /// what it has taken in but not yet written. A block that writes files
     /// uses this to send EOS through its muxer and wait until the file is
-    /// complete. The drain must return within a few seconds on its own (wait
-    /// with a timeout); drains of one flow run in parallel, before the state
-    /// change, with the bus watch already removed.
+    /// complete.
+    ///
+    /// - Drains run before the flow's WHIP sessions and Media Players are torn
+    ///   down, with the bus watch still connected: bus handlers and error
+    ///   reporting see what a drain causes, and an EOS reaching the pipeline
+    ///   is not reported as the flow ending.
+    /// - They run only if the pipeline is PLAYING and has not posted EOS or an
+    ///   error. A flow that never started or already ended runs none.
+    /// - Drains of one flow run in parallel, each on its own plain OS thread,
+    ///   outside the tokio runtime: `Handle::current()` and `block_on` panic
+    ///   there. Capture a `tokio::runtime::Handle` at build time if the drain
+    ///   needs async work.
+    /// - A drain must bound its own wait (a few seconds). Stopping waits for
+    ///   all of them together at most 10 s, then leaves the rest behind.
+    /// - Graceful shutdown of the process does not run drains, only stopping
+    ///   a flow does.
     pub fn register_stop_drain(&self, drain: StopDrainFn) {
         self.stop_drains.borrow_mut().push(drain);
     }

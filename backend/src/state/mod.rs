@@ -1561,11 +1561,24 @@ impl AppState {
         &self,
         id: &FlowId,
         tams_run: crate::tams::flow_claims::Run,
-        manager: Option<PipelineManager>,
+        mut manager: Option<PipelineManager>,
         endpoints: Option<RegisteredEndpoints>,
     ) -> Result<PipelineState, PipelineError> {
-        // Before anything else, and on every path including the one below where
-        // no pipeline was built: the vision mixer's overlay timer thread has no
+        // The blocks' stop drains first, while the flow's sources (WHIP
+        // sessions, Media Players, the overlay timer) still feed it: a drain
+        // that sends EOS through a muxer needs data to carry it. Bounded by
+        // STOP_DRAIN_TIMEOUT. stop() below finds none left to run.
+        if let Some(manager) = manager.as_mut() {
+            let drains = manager.take_stop_drains();
+            if !drains.is_empty() {
+                if let Err(e) = tokio::task::spawn_blocking(move || drains.run()).await {
+                    warn!("Stop drains for flow {} did not complete: {}", id, e);
+                }
+            }
+        }
+
+        // Before anything else but the drains, and on every path including the
+        // one below where no pipeline was built: the vision mixer's overlay timer thread has no
         // exit condition other than this unregistration, so a teardown that
         // skips it leaves a thread rendering at full framerate for the life of
         // the process. Doing it first also means the thread is not pushing into
