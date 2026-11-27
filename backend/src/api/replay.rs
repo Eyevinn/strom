@@ -469,7 +469,7 @@ mod tests {
 
     /// The socket loop: an `ack` goes out before the event its command
     /// caused; a socket that fell behind gets `lagged` with the number
-    /// missed, and `event_seq` then goes on without a jump.
+    /// missed, and every jump in `event_seq` equals what was reported missed.
     #[tokio::test]
     async fn the_socket_acks_before_events_and_reports_lag() {
         use futures::channel::mpsc;
@@ -533,28 +533,32 @@ mod tests {
         }
         drop(to_server);
         task.await.unwrap();
-        // The lag before any event, with what was missed (the channel keeps
-        // the last 64; the command's own event may be among them).
-        let lag = got
-            .iter()
-            .position(|v| v["type"] == "lagged")
-            .expect("no lagged");
-        let first_event = got.iter().position(|v| v["type"] == "event").unwrap();
-        assert!(lag < first_event, "{:?}", got);
-        let missed = got[lag]["missed"].as_u64().unwrap();
-        assert!(
-            missed == n - 64 || missed == n + 1 - 64,
-            "missed {}",
-            missed
-        );
-        // Then the events it kept, numbered on from the missed ones, no jump.
-        let seqs: Vec<u64> = got
-            .iter()
-            .filter(|v| v["type"] == "event")
-            .map(|v| v["event_seq"].as_u64().unwrap())
-            .collect();
-        let want: Vec<u64> = (missed + 1..=n + 1).collect();
-        assert_eq!(seqs, want);
+        // No silent gap: every jump in `event_seq` comes after `lagged`
+        // messages whose `missed` add up to the jump. There may be more than
+        // one: the command's own event can push another unread one out of
+        // the channel (it keeps the last 64) after the first `lagged`.
+        let mut last = 0u64;
+        let mut pending = 0u64;
+        let mut missed_total = 0u64;
+        let mut received = 0u64;
+        for v in &got {
+            if v["type"] == "lagged" {
+                let m = v["missed"].as_u64().unwrap();
+                assert!(m > 0, "{:?}", got);
+                pending += m;
+                missed_total += m;
+            } else if v["type"] == "event" {
+                let seq = v["event_seq"].as_u64().unwrap();
+                assert_eq!(seq, last + 1 + pending, "{:?}", got);
+                last = seq;
+                pending = 0;
+                received += 1;
+            }
+        }
+        // The socket fell behind, and every event is either received or
+        // counted as missed.
+        assert!(missed_total >= n - 64, "missed {}", missed_total);
+        assert_eq!(missed_total + received, n + 1);
         // The ack comes before the event its command caused.
         let ack = got
             .iter()
