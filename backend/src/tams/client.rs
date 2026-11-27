@@ -9,7 +9,8 @@
 //! - `PUT  /flows/{id}`           create/replace a flow (auto-creates its source)
 //! - `POST /flows/{id}/storage`   allocate media objects, returns presigned PUT URLs
 //! - `PUT  <presigned url>`       upload the segment bytes to S3
-//! - `POST /flows/{id}/segments`  register a segment on the flow timeline
+//! - `POST /flows/{id}/segments`  register a segment on the flow timeline, with
+//!   an `X-Idempotency-Key` derived from the segment (required by some stores)
 //! - `GET  /flows/{id}/segments?timerange=[..)`  list segments (presigned GET URLs)
 //! - `GET  /flows/{id}`           read a flow (frame rate, container)
 //!
@@ -199,14 +200,50 @@ pub struct FlowSpec {
     pub description: Option<String>,
     /// Flow tags (key -> value), e.g. `production` -> `Studio A`.
     pub tags: Vec<(String, String)>,
-    /// Member flows collected by this flow, as `(flow_id, role)` pairs. Non-empty
-    /// only for a Multi-Flow that groups per-essence Flows under one NMOS
-    /// `format:multi` flow (the canonical TAMS multi-essence model). Serialized as
-    /// the TAMS `flow_collection` array of `{ id, role }` objects.
-    pub flow_collection: Vec<(String, String)>,
+    /// Member flows collected by this flow. Non-empty only for a Multi-Flow
+    /// that groups per-essence Flows under one NMOS `format:multi` flow (the
+    /// canonical TAMS multi-essence model). Serialized as the TAMS
+    /// `flow_collection` array.
+    pub flow_collection: Vec<CollectionItem>,
+    /// Per-essence member flows that live inside this flow's own container (the
+    /// tracks of a muxed MPEG-TS flow). The uploader registers each once its
+    /// essence is known and adds it to `flow_collection`; see
+    /// [`CollectedFlow`].
+    pub collected: Vec<CollectedFlow>,
+    /// The flow's own `container_mapping` (where a member flow's essence is in
+    /// the container of the flow that collects it). Left out when empty.
+    pub container_mapping: serde_json::Map<String, serde_json::Value>,
     /// TAMS `essence_parameters` (e.g. `frame_rate`, `frame_width`), filled in from
     /// caps by the uploader before the flow is created. Empty when unknown.
     pub essence_parameters: serde_json::Map<String, serde_json::Value>,
+}
+
+/// One member of a TAMS `flow_collection`: the member flow's id, its role
+/// (free text, e.g. `video`, `PGM`, `IS`) and its `container_mapping` (where
+/// its essence is in the collecting flow's container; an empty map is left
+/// out).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectionItem {
+    pub id: String,
+    pub role: String,
+    pub container_mapping: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A member flow whose essence is one track of the collecting flow's
+/// container: it has no segments of its own. `spec` is registered with the
+/// essence detected for `track` (see `DetectedEssence::tracks`), and the
+/// collection item gets `container_mapping` plus the track's channel range.
+#[derive(Debug, Clone)]
+pub struct CollectedFlow {
+    /// Key into `DetectedEssence::tracks` (`video`, `audio-0`, ...).
+    pub track: String,
+    pub role: String,
+    pub spec: FlowSpec,
+    pub container_mapping: serde_json::Map<String, serde_json::Value>,
+    /// The member takes the collecting flow's `essence_parameters` (the video
+    /// of a muxed flow, whose parameters the flow itself carries) under the
+    /// track's own.
+    pub inherit_parameters: bool,
 }
 
 /// Build the JSON body for `PUT /flows/{id}` from a [`FlowSpec`]. Pure (no I/O) so
@@ -215,8 +252,8 @@ pub struct FlowSpec {
 /// Wire-format contract (matches what the Eyevinn TAMS gateway accepts):
 /// - `id`, `source_id`, `format`, `essence_parameters` always present.
 /// - `codec`/`container` emitted only when `Some` (a grouping Multi-Flow omits them).
-/// - `flow_collection` members are `{ id, role, container_mapping: { track_index } }`,
-///   where `track_index` is the member's position in the collection.
+/// - `flow_collection` members are `{ id, role, container_mapping }`, the
+///   mapping left out when empty.
 /// - `label`/`description`/`tags` emitted only when present.
 fn flow_request_body(spec: &FlowSpec) -> serde_json::Value {
     let mut body = serde_json::json!({
@@ -234,23 +271,22 @@ fn flow_request_body(spec: &FlowSpec) -> serde_json::Value {
         body["container"] = serde_json::Value::String(container.clone());
     }
     if !spec.flow_collection.is_empty() {
-        // Each member is a collection-item (id + role) plus a container_mapping,
-        // which the gateway requires. A grouping Multi-Flow has no real shared
-        // container, so we use the generic, container-agnostic track_index =
-        // position in the collection (video first, then audio).
         let members: Vec<serde_json::Value> = spec
             .flow_collection
             .iter()
-            .enumerate()
-            .map(|(i, (id, role))| {
-                serde_json::json!({
-                    "id": id,
-                    "role": role,
-                    "container_mapping": { "track_index": i },
-                })
+            .map(|item| {
+                let mut member = serde_json::json!({ "id": item.id, "role": item.role });
+                if !item.container_mapping.is_empty() {
+                    member["container_mapping"] =
+                        serde_json::Value::Object(item.container_mapping.clone());
+                }
+                member
             })
             .collect();
         body["flow_collection"] = serde_json::Value::Array(members);
+    }
+    if !spec.container_mapping.is_empty() {
+        body["container_mapping"] = serde_json::Value::Object(spec.container_mapping.clone());
     }
     if let Some(label) = &spec.label {
         body["label"] = serde_json::Value::String(label.clone());
@@ -352,6 +388,7 @@ impl TamsClient {
         method: reqwest::Method,
         url: reqwest::Url,
         body: Option<&serde_json::Value>,
+        headers: &[(&'static str, String)],
     ) -> Result<reqwest::Response> {
         if !same_origin(&url, &self.base) {
             bail!(
@@ -366,6 +403,9 @@ impl TamsClient {
             let mut req = self.api.request(method.clone(), url.clone());
             if let Some(body) = body {
                 req = req.json(body);
+            }
+            for (name, value) in headers {
+                req = req.header(*name, value);
             }
             let resp = self
                 .auth
@@ -402,7 +442,7 @@ impl TamsClient {
         let body = flow_request_body(spec);
         let context = format!("PUT {}", redact_url(url.as_str()));
         let resp = self
-            .send_authed(reqwest::Method::PUT, url, Some(&body))
+            .send_authed(reqwest::Method::PUT, url, Some(&body), &[])
             .await?;
         if !resp.status().is_success() {
             return Err(status_error(resp, context).await);
@@ -420,7 +460,7 @@ impl TamsClient {
         let body = serde_json::json!({ "limit": 1, "content_type": content_type });
         let context = format!("POST {}", redact_url(url.as_str()));
         let resp = self
-            .send_authed(reqwest::Method::POST, url, Some(&body))
+            .send_authed(reqwest::Method::POST, url, Some(&body), &[])
             .await?;
         if !resp.status().is_success() {
             return Err(status_error(resp, context).await);
@@ -472,8 +512,14 @@ impl TamsClient {
         let url = self.url(&format!("/flows/{}/segments", flow_id))?;
         let body = serde_json::json!({ "object_id": object_id, "timerange": timerange });
         let context = format!("POST {}", redact_url(url.as_str()));
+        let key = segment_idempotency_key(flow_id, object_id, timerange);
         let resp = self
-            .send_authed(reqwest::Method::POST, url, Some(&body))
+            .send_authed(
+                reqwest::Method::POST,
+                url,
+                Some(&body),
+                &[(IDEMPOTENCY_KEY_HEADER, key)],
+            )
             .await?;
         let status = resp.status();
         // 201 = all registered; 200 = partial failure (failed_segments listed).
@@ -486,6 +532,20 @@ impl TamsClient {
         }
         Ok(())
     }
+}
+
+/// Header that makes a segment registration safe to repeat. Not in the TAMS
+/// spec, but some stores require it (OpenTAMS, REQ-IDEM-01) and others ignore
+/// an unknown header.
+const IDEMPOTENCY_KEY_HEADER: &str = "X-Idempotency-Key";
+
+/// The idempotency key of a segment registration: derived from what is
+/// registered, so a retry of the same segment (after a 401, a timeout or a
+/// restart from a parked segment) sends the same key, and a different
+/// registration never reuses one.
+fn segment_idempotency_key(flow_id: &str, object_id: &str, timerange: &str) -> String {
+    let name = format!("strom:tams-segment:{}/{}/{}", flow_id, object_id, timerange);
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, name.as_bytes()).to_string()
 }
 
 /// One segment as listed by `GET /flows/{id}/segments`. Timeranges and the
@@ -586,7 +646,9 @@ impl TamsClient {
     pub async fn get_flow(&self, flow_id: &str) -> Result<serde_json::Value> {
         let url = self.url(&format!("/flows/{}", flow_id))?;
         let context = format!("GET {}", redact_url(url.as_str()));
-        let resp = self.send_authed(reqwest::Method::GET, url, None).await?;
+        let resp = self
+            .send_authed(reqwest::Method::GET, url, None, &[])
+            .await?;
         if !resp.status().is_success() {
             return Err(status_error(resp, context).await);
         }
@@ -642,7 +704,9 @@ impl TamsClient {
             Some(NextPage::Key(k)) => with_query(&first, &query.params(Some(k)))?,
             Some(NextPage::Link(l)) => self.resolve(l)?,
         };
-        let resp = self.send_authed(reqwest::Method::GET, url, None).await?;
+        let resp = self
+            .send_authed(reqwest::Method::GET, url, None, &[])
+            .await?;
         if !resp.status().is_success() {
             return Err(status_error(resp, format!("GET {}", first)).await);
         }
@@ -803,6 +867,15 @@ mod tests {
     // Timerange/timestamp formatting is tested in `strom_types::tams`.
 
     #[test]
+    fn segment_idempotency_key_is_stable_per_registration() {
+        let a = segment_idempotency_key("f", "o1", "[0:0_1:0)");
+        assert_eq!(a, segment_idempotency_key("f", "o1", "[0:0_1:0)"));
+        assert_ne!(a, segment_idempotency_key("f", "o2", "[0:0_1:0)"));
+        assert_ne!(a, segment_idempotency_key("f", "o1", "[0:0_2:0)"));
+        assert_ne!(a, segment_idempotency_key("g", "o1", "[0:0_1:0)"));
+    }
+
+    #[test]
     fn base_url_trailing_slash_trimmed() {
         let c = TamsClient::new("http://localhost:8000/", AuthMethod::None).unwrap();
         assert_eq!(c.base_url, "http://localhost:8000");
@@ -819,6 +892,8 @@ mod tests {
             description: None,
             tags: vec![],
             flow_collection: vec![],
+            collected: vec![],
+            container_mapping: Default::default(),
             essence_parameters: Default::default(),
         }
     }
@@ -856,9 +931,17 @@ mod tests {
         s.format = FORMAT_MULTI.into();
         s.codec = None;
         s.container = None;
+        let item = |id: &str, role: &str, track: usize| CollectionItem {
+            id: id.into(),
+            role: role.into(),
+            container_mapping: serde_json::json!({ "track_index": track })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        };
         s.flow_collection = vec![
-            ("video-flow".into(), "video".into()),
-            ("audio-flow".into(), "audio".into()),
+            item("video-flow", "video", 0),
+            item("audio-flow", "audio", 1),
         ];
         let body = flow_request_body(&s);
         let coll = body["flow_collection"].as_array().expect("array");
@@ -869,6 +952,28 @@ mod tests {
         assert_eq!(coll[1]["id"], "audio-flow");
         assert_eq!(coll[1]["role"], "audio");
         assert_eq!(coll[1]["container_mapping"]["track_index"], 1);
+    }
+
+    #[test]
+    fn container_mappings_serialized_when_set() {
+        let mut s = spec();
+        s.flow_collection = vec![CollectionItem {
+            id: "a".into(),
+            role: "PGM".into(),
+            container_mapping: Default::default(),
+        }];
+        let body = flow_request_body(&s);
+        // An empty mapping is left out, on the member and on the flow.
+        assert!(body["flow_collection"][0]
+            .get("container_mapping")
+            .is_none());
+        assert!(body.get("container_mapping").is_none());
+        s.container_mapping
+            .insert("mp2ts_container".into(), serde_json::json!({ "pid": 66 }));
+        assert_eq!(
+            flow_request_body(&s)["container_mapping"]["mp2ts_container"]["pid"],
+            66
+        );
     }
 
     #[test]
@@ -1206,6 +1311,37 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn register_sends_the_same_idempotency_key_on_a_retry() {
+            let keys: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+            let app = Router::new()
+                .route(
+                    "/flows/f/segments",
+                    axum::routing::post(
+                        |State(keys): State<Arc<Mutex<Vec<Option<String>>>>>, h: HeaderMap| async move {
+                            let k = h
+                                .get("x-idempotency-key")
+                                .and_then(|v| v.to_str().ok())
+                                .map(String::from);
+                            keys.lock().unwrap().push(k);
+                            StatusCode::CREATED
+                        },
+                    ),
+                )
+                .with_state(keys.clone());
+            let c = TamsClient::new(serve(app).await, AuthMethod::None).unwrap();
+            c.register_segment("f", "o1", "[0:0_1:0)").await.unwrap();
+            c.register_segment("f", "o1", "[0:0_1:0)").await.unwrap();
+            c.register_segment("f", "o2", "[1:0_2:0)").await.unwrap();
+            let k = keys.lock().unwrap().clone();
+            assert!(
+                k.iter().all(Option::is_some),
+                "every registration has a key"
+            );
+            assert_eq!(k[0], k[1]);
+            assert_ne!(k[0], k[2]);
+        }
+
+        #[tokio::test]
         async fn a_401_is_retried_only_once() {
             let minted = Arc::new(Mutex::new(0));
             let token_url = token_endpoint(minted.clone()).await;
@@ -1304,7 +1440,7 @@ mod tests {
             )
             .unwrap();
             let resp = c
-                .send_authed(reqwest::Method::GET, url, None)
+                .send_authed(reqwest::Method::GET, url, None, &[])
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);

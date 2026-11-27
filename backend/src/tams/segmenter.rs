@@ -67,6 +67,17 @@ pub struct OpenDecision {
     pub next_split_ns: Option<u64>,
 }
 
+/// How one essence enters each fragment's muxer.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MuxStream {
+    /// Name of the muxer sink pad to request, e.g. `sink_66` (MPEG-TS PID 66).
+    /// `None`: the muxer picks.
+    pub pad_name: Option<String>,
+    /// ISO 639 language code, sent as a `language-code` tag (MPEG-TS writes
+    /// it as the stream's ISO 639 language descriptor).
+    pub language: Option<String>,
+}
+
 pub type OpenFn = Box<dyn FnMut(OpenRequest<'_>) -> OpenDecision + Send>;
 pub type DeliverFn = Box<dyn Fn(FragmentReady) + Send>;
 
@@ -117,6 +128,8 @@ pub struct Segmenter {
     muxer_factory: &'static str,
     mpegts: bool,
     media_end: Vec<Arc<PadMediaEnd>>,
+    /// Per essence: muxer pad name and stream tags (see [`Self::set_mux_streams`]).
+    mux_streams: std::sync::OnceLock<Vec<MuxStream>>,
     inner: Mutex<Inner>,
     finisher: Mutex<Option<mpsc::Sender<FinishJob>>>,
 }
@@ -167,6 +180,7 @@ impl Segmenter {
             muxer_factory,
             mpegts,
             media_end,
+            mux_streams: std::sync::OnceLock::new(),
             inner: Mutex::new(Inner {
                 reference,
                 caps: vec![None; essences],
@@ -182,6 +196,13 @@ impl Segmenter {
             }),
             finisher: Mutex::new(spawned.ok().map(|_| tx)),
         })
+    }
+
+    /// Fix how each essence enters the muxer: a named pad (a fixed MPEG-TS
+    /// PID, so a track keeps its PID even in a fragment that lacks an
+    /// earlier track) and a language. Set once, before the first fragment.
+    pub fn set_mux_streams(&self, streams: Vec<MuxStream>) {
+        let _ = self.mux_streams.set(streams);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -445,13 +466,23 @@ impl Segmenter {
                 .into_iter()
                 .find(|t| t.direction() == gst::PadDirection::Sink && t.caps().can_intersect(caps))
                 .ok_or_else(|| format!("{} takes no {}", self.muxer_factory, caps))?;
+            let stream = self.mux_streams.get().and_then(|s| s.get(idx));
+            let pad_name = stream.and_then(|s| s.pad_name.as_deref());
             let sink_pad = mux
-                .request_pad(&tmpl, None, None)
+                .request_pad(&tmpl, pad_name, None)
                 .ok_or_else(|| format!("{}: no pad from {}", self.muxer_factory, tmpl.name()))?;
             src.static_pad("src")
                 .ok_or("appsrc has no src pad")?
                 .link(&sink_pad)
                 .map_err(|e| e.to_string())?;
+            if let Some(lang) = stream.and_then(|s| s.language.as_deref()) {
+                // Queued by appsrc ahead of the first buffer.
+                let mut tags = gst::TagList::new();
+                tags.get_mut()
+                    .expect("new tag list")
+                    .add::<gst::tags::LanguageCode>(&lang, gst::TagMergeMode::Replace);
+                src.send_event(gst::event::Tag::new(tags));
+            }
             srcs[idx] = Some(src);
         }
         pipeline
