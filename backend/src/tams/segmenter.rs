@@ -57,6 +57,12 @@ pub const MAX_HOLD_NS: u64 = 5_000_000_000;
 /// Most buffers held per essence.
 const MAX_HELD: usize = 1000;
 
+/// Most reference buffers held back for frames that come later in decode
+/// order but earlier in presentation (B-frames), see [`Inner::reorder`].
+/// More than an encoder's reorder depth; a hole that stays longer (frames
+/// lost upstream) is written as it is.
+const MAX_REORDER: usize = 16;
+
 /// What the segmenter hands the owner when it opens a fragment.
 pub struct OpenRequest<'a> {
     /// Index of the fragment (0, 1, ...), for the file name.
@@ -114,6 +120,15 @@ struct Inner {
     next_fragment_id: u32,
     /// After a stop drain nothing more is written.
     stopped: bool,
+    /// Reference buffers not written yet, in decode order, with their
+    /// presentation interval in running time: a frame whose presentation
+    /// leaves a hole before it (a P-frame ahead of its B-frames) waits until
+    /// the hole is filled. A stop then never leaves a fragment that ends on a
+    /// P-frame whose B-frames the encoder never delivered, so where its media
+    /// ends (from presentation times) is what the file holds.
+    reorder: VecDeque<(u64, u64, gst::Sample)>,
+    /// End of the reference's written presentation, in running time.
+    ref_end: Option<u64>,
     /// Held buffers at or past a split written to the fragment before it,
     /// because the reference lagged more than [`MAX_HOLD_NS`].
     late_flushes: u64,
@@ -199,6 +214,8 @@ impl Segmenter {
                 next_fragment_id: 0,
                 stopped: false,
                 late_flushes: 0,
+                reorder: VecDeque::new(),
+                ref_end: None,
                 on_open,
             }),
             finisher: Mutex::new(spawned.ok().map(|_| tx)),
@@ -247,6 +264,8 @@ impl Segmenter {
             return;
         }
         if split {
+            // Reference frames held back belong to the fragment this ends.
+            self.release_reorder(g, true);
             // Held buffers before the split belong to the fragment it ends.
             self.release_held(g, Some(rt));
             let fragment_id = g.next_fragment_id;
@@ -302,7 +321,18 @@ impl Segmenter {
                 }
             }
         }
-        self.write(g, r, &sample, false);
+        let duration = sample.buffer().and_then(|b| b.duration());
+        match duration {
+            Some(d) => {
+                g.reorder
+                    .push_back((rt, rt.saturating_add(d.nseconds()), sample));
+                self.release_reorder(g, false);
+            }
+            None => {
+                self.release_reorder(g, true);
+                self.write(g, r, &sample, false);
+            }
+        }
         g.pos[r] = Some(rt);
         if !split {
             // The next split is at a keyframe after this buffer.
@@ -365,6 +395,33 @@ impl Segmenter {
         }
         if let Some(r) = ref_pos {
             self.check_closing(g, r);
+        }
+    }
+
+    /// Write the held-back reference frames to the open fragment, in decode
+    /// order: all of them with `force`, else once their presentation leaves no
+    /// hole after what was written (or too many are held).
+    fn release_reorder(&self, g: &mut Inner, force: bool) {
+        if g.reorder.is_empty() {
+            return;
+        }
+        if !force && g.reorder.len() <= MAX_REORDER {
+            let mut spans: Vec<(u64, u64)> = g.reorder.iter().map(|(s, e, _)| (*s, *e)).collect();
+            spans.sort_unstable();
+            let mut end = g.ref_end.unwrap_or(spans[0].0);
+            for (s, e) in spans {
+                // Half a frame of slack for rounded timestamps.
+                if s > end.saturating_add((e - s) / 2) {
+                    return;
+                }
+                end = end.max(e);
+            }
+        }
+        let r = g.reference;
+        let frames: Vec<_> = g.reorder.drain(..).collect();
+        for (_, e, s) in frames {
+            g.ref_end = Some(g.ref_end.map_or(e, |x| x.max(e)));
+            self.write(g, r, &s, false);
         }
     }
 
@@ -556,6 +613,9 @@ impl Segmenter {
         }
         g.eos[idx] = true;
         if idx == g.reference {
+            // The encoder delivered everything: what is still held back has
+            // a real hole before it.
+            self.release_reorder(&mut g, true);
             self.release_held(&mut g, None);
         }
         if let Some(r) = g.pos[g.reference] {
@@ -567,6 +627,9 @@ impl Segmenter {
     }
 
     fn close_all(&self, g: &mut Inner, done: Option<&mpsc::SyncSender<()>>) -> usize {
+        // Reference frames still held back wait for frames that will not come
+        // (a stop: the encoder is not drained); the fragment ends before them.
+        g.reorder.clear();
         let mut n = 0;
         if let Some(c) = g.closing.take() {
             self.finish_fragment(c.fragment, c.ready, done.cloned());
@@ -731,6 +794,48 @@ mod tests {
             .caps(&caps)
             .segment(&segment)
             .build()
+    }
+
+    /// Video written, as running times in write order.
+    fn video_written(seg: &Segmenter) -> Vec<u64> {
+        seg.written
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, idx, _)| *idx == 0)
+            .map(|(_, _, rt)| *rt)
+            .collect()
+    }
+
+    /// With B-frames the encoder delivers a P-frame before the B-frames shown
+    /// before it. A stop (the encoder is not drained) can come between them:
+    /// the P-frame is then not written, so the fragment never claims media
+    /// up to its end while frames before it are missing. Frames come out in
+    /// decode order once complete.
+    #[test]
+    fn a_stop_leaves_no_p_frame_without_its_b_frames() {
+        if !available() {
+            return;
+        }
+        let (seg, dir) = segmenter();
+        let el = gst::ElementFactory::make("fakesink").build().unwrap();
+        let f = |n: u64| n * 20 * MS;
+        // Decode order: I0 P3 B1 B2 P6 B4 (B5 never comes).
+        for (n, key) in [
+            (0, true),
+            (3, false),
+            (1, false),
+            (2, false),
+            (6, false),
+            (4, false),
+        ] {
+            let s = sample(true, f(n), key);
+            seg.push(0, s, &el);
+        }
+        assert!(seg.drain());
+        assert_eq!(video_written(&seg), vec![f(0), f(3), f(1), f(2)]);
+        drop(seg);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Audio written per fragment, as (fragment, running time).
