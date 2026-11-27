@@ -5,8 +5,8 @@ All notable changes to the Strom GStreamer Flow Engine project.
 ## [Unreleased]
 
 ### Fixed
-- OSC: SAT freshness is judged on the wall clock, and a request that gets 401 is retried once with a new SAT
-- OSC: the gateway host is taken from the parsed URL before a SAT is sent. User info that looks like an OSC host (`https://x.svc.auto.prod.osaas.io:pw@evil.example/`) passed the check and the SAT went to the other host; a gateway URL with user info is now refused
+- OSC: SAT freshness is judged on the wall clock, so a cached SAT no longer looks fresh for hours after a macOS sleep
+- OSC: the gateway host is taken from the parsed URL before a SAT is sent. User info that looks like an OSC host (`https://x.svc.auto.prod.osaas.io:pw@evil.example/`) passed the check and the SAT went to the other host. Only the real host decides now; user info never makes a URL count as OSC-hosted
 - OSC: a SAT whose `exp` and `iat` claims give an absurd lifetime is refreshed by age instead of panicking on overflow
 
 ---
