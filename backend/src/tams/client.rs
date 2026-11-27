@@ -29,7 +29,7 @@
 use crate::client_auth::{redact_url, same_origin, same_origin_redirects, AuthMethod};
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::warn;
 
@@ -182,8 +182,10 @@ impl HttpStatusError {
     }
 }
 
-/// Metadata describing a flow to create on the gateway.
-#[derive(Debug, Clone)]
+/// Metadata describing a flow to create on the gateway. Serializable so a
+/// park manifest can register the flow when its block is not running (see
+/// `crate::tams::drain`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowSpec {
     pub flow_id: String,
     pub source_id: String,
@@ -222,7 +224,7 @@ pub struct FlowSpec {
 /// (free text, e.g. `video`, `PGM`, `IS`) and its `container_mapping` (where
 /// its essence is in the collecting flow's container; an empty map is left
 /// out).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CollectionItem {
     pub id: String,
     pub role: String,
@@ -233,7 +235,7 @@ pub struct CollectionItem {
 /// container: it has no segments of its own. `spec` is registered with the
 /// essence detected for `track` (see `DetectedEssence::tracks`), and the
 /// collection item gets `container_mapping` plus the track's channel range.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectedFlow {
     /// Key into `DetectedEssence::tracks` (`video`, `audio-0`, ...).
     pub track: String,
@@ -640,6 +642,11 @@ impl TamsClient {
     /// Base URL without trailing slash.
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// How the client authenticates.
+    pub fn auth(&self) -> &AuthMethod {
+        &self.auth
     }
 
     /// `GET /flows/{id}` as JSON.

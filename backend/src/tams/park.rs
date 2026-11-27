@@ -35,9 +35,14 @@
 //! enough (the volume is filled by something else), the new segment is not
 //! parked; the caller drops it. Parking never stops a live flow.
 //!
+//! A segment being uploaded is claimed (`crate::tams::uploader::Claim`), and
+//! never deleted for space while the claim is held.
+//!
+//! The server-wide drainer (`crate::tams::drain`) uploads what the index holds.
+//!
 //! Deleting the oldest of the whole server gives every flow the same window
 //! back in time. A per-flow cap (`STROM_TAMS_PARKED_MAX_MB`,
-//! `STROM_TAMS_PARKED_MAX_SEGMENTS`) is off unless set; each uploader's sweep
+//! `STROM_TAMS_PARKED_MAX_SEGMENTS`) is off unless set; the drainer's rescan
 //! enforces it, see `crate::tams::uploader`.
 
 use std::collections::HashMap;
@@ -535,6 +540,8 @@ impl Parking {
             },
         );
         self.warn_usage(&mut st, &limits);
+        drop(st);
+        crate::tams::drain::wake();
         Ok(())
     }
 
@@ -586,6 +593,7 @@ impl Parking {
                 }
             };
             let _ = std::fs::remove_file(crate::tams::uploader::sidecar_path(&path));
+            crate::tams::uploader::forget_allocation(&path);
             st.remove(&path);
             if existed {
                 freed = freed.saturating_add(gone);
@@ -679,6 +687,22 @@ impl Parking {
                 );
             }
         }
+    }
+
+    /// Every parked segment the index knows, with its start time. The index
+    /// is built first if it is not yet.
+    pub fn snapshot(&self) -> Vec<(PathBuf, u64)> {
+        let mut st = self.lock();
+        self.ensure_scanned(&mut st);
+        st.entries
+            .iter()
+            .map(|(p, e)| (p.clone(), e.start_ns))
+            .collect()
+    }
+
+    /// The root this index covers.
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Total size of what is parked, as the index knows it.

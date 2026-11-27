@@ -1047,7 +1047,7 @@ fn build_flow_chain(
     ctx.register_element_setup(Box::new(move |flow_id, events| {
         // Remove orphan segment files left by a previous run (no `.meta`
         // sidecar, so their timerange is lost). Parked segments are kept for the
-        // uploader's recovery sweep, even across a full restart, and so are the
+        // server-wide drainer, even across a full restart, and so are the
         // files of a previous run whose uploader still runs.
         let removed = clear_orphans(&temp_dir_for_setup);
         if removed > 0 {
@@ -1295,8 +1295,8 @@ fn build_flow_chain(
         };
 
         // Hands a finished fragment to the uploader. When its channel is full
-        // (or closed), the fragment is parked on disk instead, for the recovery
-        // sweep of this run or the next; only when that fails too (the disk is
+        // (or closed), the fragment is parked on disk instead, for the
+        // server-wide drainer; only when that fails too (the disk is
         // full) is it dropped.
         let deliver_label = format!("{} ({})", block_id, suffix_owned);
         let overflowed = AtomicU64::new(0);
@@ -1312,7 +1312,7 @@ fn build_flow_chain(
                     if n.is_multiple_of(100) {
                         warn!(
                             "TAMS {}: uploader {}, parked segment {} on disk for the \
-                             recovery sweep ({} so far)",
+                             drainer ({} so far)",
                             deliver_label,
                             if full { "queue full" } else { "stopped" },
                             ready.path.display(),
