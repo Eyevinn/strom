@@ -408,6 +408,11 @@ fn eval(a: &Anchor, rt: i64, b: &Bounds, l: Live) -> Eval {
     }
 }
 
+/// The running time `el` paused at, as GStreamer keeps it while paused.
+fn start_time_of(el: &gst::Element) -> Option<i64> {
+    el.start_time().map(|t| t.nseconds() as i64)
+}
+
 /// Host monotonic time, ns since the first call.
 fn mono_ns() -> i64 {
     static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
@@ -504,6 +509,9 @@ pub struct ReplayTimeline {
     /// The group became ready with `start_mode: live`: the next look at the
     /// cursor takes it live.
     start_live: AtomicBool,
+    /// The flow played again after a pause while the group followed live:
+    /// the next look at the cursor takes it to the live point.
+    resume_live: AtomicBool,
     /// What the events last said (readiness, range).
     watch: Mutex<state::Watch>,
     /// Number of the next event.
@@ -518,6 +526,9 @@ struct ClockSource {
     element: gst::glib::WeakRef<gst::Element>,
     /// Base time (ns) the anchor's running times are on, once known.
     base: Option<i64>,
+    /// While the flow is paused: the running time it paused at, which is
+    /// "now" until it plays again.
+    paused: Option<i64>,
 }
 
 /// Timelines keyed by (flow, group).
@@ -584,6 +595,7 @@ impl ReplayTimeline {
             follow_live_set: Mutex::new(None),
             commanded: AtomicBool::new(false),
             start_live: AtomicBool::new(false),
+            resume_live: AtomicBool::new(false),
             watch: Mutex::new(state::Watch::default()),
             event_seq: Mutex::new(0),
             events: tokio::sync::broadcast::channel(64).0,
@@ -640,6 +652,7 @@ impl ReplayTimeline {
             *lock(&self.follow_live_set) = None;
             self.commanded.store(false, Ordering::Relaxed);
             self.start_live.store(false, Ordering::Relaxed);
+            self.resume_live.store(false, Ordering::Relaxed);
             *lock(&self.watch) = state::Watch::default();
             self.cmd_to_push_us.store(0, Ordering::Relaxed);
         }
@@ -800,6 +813,7 @@ impl ReplayTimeline {
             *src = Some(ClockSource {
                 element: element.downgrade(),
                 base: None,
+                paused: None,
             });
             let after = self.rt_of(&mut src);
             // Still holding `clock_source`: no command reads "now" between.
@@ -807,27 +821,37 @@ impl ReplayTimeline {
         }
     }
 
-    /// The flow's base time is now `base` (ns), as a player saw it. It
-    /// changes when the flow goes PAUSED -> PLAYING: the running time, which
-    /// kept growing while paused, falls back by the time spent paused. Every
-    /// running time the group keeps moves with it, so the cursor neither
-    /// runs back nor stands still after a pause. A player that sees the new
-    /// base before the timeline does calls this before it uses the new base.
-    pub fn observe_base(&self, base: i64) {
+    /// The flow's base time may have changed, as a player saw it: it changes
+    /// when the flow goes PAUSED -> PLAYING. A player that sees the new base
+    /// before the timeline does calls this before it uses the new base.
+    pub fn observe_base(&self) {
         let mut src = lock(&self.clock_source);
-        self.rebase(&mut src, base);
+        let _ = self.rt_of(&mut src);
     }
 
-    /// Move the group onto base time `base`, under the `clock_source` lock.
-    fn rebase(&self, src: &mut Option<ClockSource>, base: i64) {
-        let Some(s) = src.as_mut() else {
-            return;
-        };
-        match s.base.replace(base) {
-            // Running time is clock minus base: a later base, an earlier
-            // running time.
-            Some(old) if old != base => self.shift_rt(old - base),
-            _ => {}
+    /// The flow plays (again) on base time `base` (ns), "now" being `now` on
+    /// it, under the `clock_source` lock.
+    ///
+    /// A pause of the flow is a pause of the group: GStreamer's running time
+    /// resumes where it paused (the base moves on by the time spent paused),
+    /// and the cursor goes on from where it stopped, as the group's running
+    /// times are left on that running time. "Now" was frozen while paused;
+    /// if it was frozen at another running time than play resumes at (the
+    /// element has no start time), the group's running times move by the
+    /// difference. A group that followed live goes to the live point instead.
+    fn resume(&self, s: &mut ClockSource, el: &gst::Element, base: i64, now: i64) {
+        let rebased = s.base.replace(base).is_some_and(|old| old != base);
+        let frozen = s.paused.take();
+        if let Some(f) = frozen {
+            let at = if rebased {
+                start_time_of(el).unwrap_or(now)
+            } else {
+                now
+            };
+            self.shift_rt(at - f);
+        }
+        if (rebased || frozen.is_some()) && lock(&self.anchor).live {
+            self.resume_live.store(true, Ordering::Relaxed);
         }
     }
 
@@ -858,18 +882,28 @@ impl ReplayTimeline {
         self.rt_of(&mut lock(&self.clock_source))
     }
 
-    /// "Now" from the clock source, moving the group onto the source's base
-    /// time first if it changed (see [`Self::observe_base`]).
+    /// "Now" from the clock source: frozen while the flow is paused, and
+    /// after a pause on the new base time (see [`Self::resume`]).
     fn rt_of(&self, src: &mut Option<ClockSource>) -> i64 {
         let counter = self.counter.load(Ordering::Relaxed);
         if counter != NO_COUNTER {
             return counter;
         }
-        if let Some(el) = src.as_ref().and_then(|s| s.element.upgrade()) {
-            if let (Some(clock), Some(base)) = (el.clock(), el.base_time()) {
-                let base = base.nseconds() as i64;
-                self.rebase(src, base);
-                return clock.time().nseconds() as i64 - base;
+        if let Some(s) = src.as_mut() {
+            if let Some(el) = s.element.upgrade() {
+                if let (Some(clock), Some(base)) = (el.clock(), el.base_time()) {
+                    let base = base.nseconds() as i64;
+                    let now = clock.time().nseconds() as i64 - base;
+                    if el.current_state() != gst::State::Playing
+                        || el.pending_state() == gst::State::Paused
+                    {
+                        return *s
+                            .paused
+                            .get_or_insert_with(|| start_time_of(&el).unwrap_or(now));
+                    }
+                    self.resume(s, &el, base, now);
+                    return now;
+                }
             }
         }
         lock(&self.created).elapsed().as_nanos() as i64
@@ -951,6 +985,28 @@ impl ReplayTimeline {
     /// old one ended, so callers at nearby running times still agree.
     fn advance(&self, a: &mut Anchor, rt: i64, b: &Bounds) -> (i64, f64) {
         let l = self.live_params(b);
+        if rt >= a.rt && self.resume_live.swap(false, Ordering::Relaxed) && a.live {
+            // The flow played again after a pause while following live.
+            let to = l.from.clamp(b.start, b.end - 1);
+            *a = Anchor {
+                rt,
+                tai: Some(to),
+                speed: 1.0,
+                ramp: None,
+                region: None,
+                live: true,
+                catch_up: false,
+            };
+            let client_ref = lock(&self.anchor_ref).take();
+            self.emit(
+                ReplayCause::EdgeMoved,
+                client_ref,
+                ReplayEventKind::Live {
+                    at: self.view().instant(to),
+                },
+            );
+            return (to, 1.0);
+        }
         if rt >= a.rt
             && self.start_live.swap(false, Ordering::Relaxed)
             && !self.commanded.load(Ordering::Relaxed)
