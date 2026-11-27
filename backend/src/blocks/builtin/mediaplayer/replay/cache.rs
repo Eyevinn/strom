@@ -717,9 +717,11 @@ impl Fetcher {
         let mut hole_job: Job<(i64, i64, i64, anyhow::Result<Vec<Segment>>)> = Job::default();
         let mut first_job: Job<anyhow::Result<Option<Segment>>> = Job::default();
         // The listing of one index chunk, and that chunk (for a task that
-        // panics).
-        let mut list_job: Job<(i64, anyhow::Result<Vec<Segment>>)> = Job::default();
-        let mut list_job_chunk: i64 = 0;
+        // panics) with the live edge when the listing started: the listing
+        // knows the source up to there, not up to where the edge has moved
+        // since.
+        let mut list_job: Job<anyhow::Result<Vec<Segment>>> = Job::default();
+        let mut list_job_chunk: (i64, i64) = (0, 0);
         let mut next_view = Instant::now();
         // Coded bytes per second of media, over the recent fetches: the
         // size estimate of a segment not fetched yet.
@@ -828,14 +830,12 @@ impl Fetcher {
             // fetches (a listing awaited here stopped the edge for as long
             // as it took, up to the client's timeout).
             if let Some(r) = list_job.finished().await {
-                let (c, r) = match r {
-                    Ok((c, r)) => (c, r),
-                    Err(e) => (list_job_chunk, Err(anyhow::anyhow!("listing task: {}", e))),
-                };
+                let (c, listed_to) = list_job_chunk;
+                let r = r.unwrap_or_else(|e| Err(anyhow::anyhow!("listing task: {}", e)));
                 self.apply_listing(
                     c,
                     r,
-                    (start, end),
+                    (start, listed_to),
                     &mut chunks,
                     &mut list_failed,
                     &mut coverage,
@@ -871,11 +871,10 @@ impl Fetcher {
                         .filter(|c| list_failed.ready(c, now))
                 });
                 if let Some(c) = next {
-                    list_job_chunk = c;
+                    list_job_chunk = (c, end);
                     let source = Arc::clone(&self.source);
-                    list_job.spawn(async move {
-                        (c, source.list(c * CHUNK_NS, (c + 1) * CHUNK_NS).await)
-                    });
+                    list_job
+                        .spawn(async move { source.list(c * CHUNK_NS, (c + 1) * CHUNK_NS).await });
                 }
             }
 
@@ -1130,10 +1129,11 @@ impl Fetcher {
         seam_tolerance(self.stats.grid().map(|g| g.frame_ns()))
     }
 
-    /// List index chunk `c` (the source is `extent`, start to end): its
-    /// segments go into the index and the coverage. False if the listing
-    /// failed.
-    /// Take the listing `r` of chunk `c` into the index, or note its failure.
+    /// Take the listing `r` of index chunk `c` into the index and the
+    /// coverage, or note its failure. `extent` is the source, start to end,
+    /// as it was when the listing started: an edge that moved while it was
+    /// in flight is not known to the listing, and the stretch between is
+    /// not a hole.
     fn apply_listing(
         &self,
         c: i64,
@@ -1279,6 +1279,9 @@ mod tests {
         fetch_hangs: bool,
         /// Listings by time take this long (a slow or hanging gateway).
         list_delay: Duration,
+        /// When set, how long the listing of `[start, end)` takes, in place
+        /// of `list_delay`.
+        list_delay_of: Option<Box<dyn Fn(i64, i64) -> Duration + Send + Sync>>,
         /// Listings by time (`list`): the expensive query on a TAMS gateway.
         lists: AtomicU64,
         /// Pages of newest-first listings (`newest`): the cheap one.
@@ -1313,6 +1316,7 @@ mod tests {
                 fetch_panics: false,
                 fetch_hangs: false,
                 list_delay: Duration::ZERO,
+                list_delay_of: None,
                 lists: AtomicU64::new(0),
                 pages: AtomicU64::new(0),
                 fetches: Mutex::new(HashMap::new()),
@@ -1368,17 +1372,24 @@ mod tests {
         }
         async fn list(&self, start: i64, end: i64) -> anyhow::Result<Vec<Segment>> {
             self.lists.fetch_add(1, Ordering::Relaxed);
-            if !self.list_delay.is_zero() {
-                tokio::time::sleep(self.list_delay).await;
+            // The store answers with what it held when the query came in,
+            // however long the answer takes to arrive.
+            let segs: Vec<Segment> = self
+                .all()
+                .into_iter()
+                .filter(|s| s.end_ns > start && s.start_ns < end)
+                .collect();
+            let delay = self
+                .list_delay_of
+                .as_ref()
+                .map_or(self.list_delay, |f| f(start, end));
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
             }
             if self.list_fails {
                 anyhow::bail!("gateway down");
             }
-            Ok(self
-                .all()
-                .into_iter()
-                .filter(|s| s.end_ns > start && s.start_ns < end)
-                .collect())
+            Ok(segs)
         }
         /// Newest first with paging, as a TAMS store with
         /// `reverse_order=true`: the cursor is the offset from the newest.
@@ -1753,6 +1764,127 @@ mod tests {
         );
         assert_eq!(have, (0..4).collect::<Vec<_>>());
         assert!(fetched, "the segment at the cursor was fetched");
+    }
+
+    #[test]
+    fn an_edge_that_moves_while_a_chunk_is_listed_is_not_a_hole() {
+        // The chunk at the live edge is listed while the edge is at E0 (the
+        // listing knows the source to there). Meanwhile more segments land
+        // than a live poll reads back, so the poll's page starts after E0.
+        // Taking the listing in must not claim the stretch from E0 to the
+        // page as listed: the source has media there, and a cursor in it
+        // would hold a false hole.
+        const LEN_MS: i64 = 200;
+        let ms = 1_000_000;
+        let at = |i: i64| 100 * S + i * LEN_MS * ms;
+        let edge_chunk = chunk_of(at(LIVE0));
+        let started = Arc::new(AtomicU64::new(0));
+        let done = Arc::new(AtomicBool::new(false));
+        let mock = {
+            let (started, done) = (Arc::clone(&started), Arc::clone(&done));
+            Arc::new(Mock {
+                grows: true,
+                // The first listing that reaches into the edge chunk takes
+                // 1.5 s; the rest there hang, so nothing heals the index
+                // while it is looked at.
+                list_delay_of: Some(Box::new(move |s, e| {
+                    let (cs, ce) = (edge_chunk * CHUNK_NS, (edge_chunk + 1) * CHUNK_NS);
+                    if e <= cs || s >= ce {
+                        return Duration::ZERO;
+                    }
+                    if started.fetch_add(1, Ordering::Relaxed) == 0 {
+                        let done = Arc::clone(&done);
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(1500));
+                            done.store(true, Ordering::Relaxed);
+                        });
+                        Duration::from_millis(1500)
+                    } else {
+                        Duration::from_secs(30)
+                    }
+                })),
+                ..Mock::build(0, 1, false, false)
+            })
+        };
+        mock.register(0, LEN_MS);
+        mock.register(LIVE0, LEN_MS);
+        let timeline = super::super::timeline::get_or_create(uuid::Uuid::new_v4(), "g");
+        let stats = Arc::new(PlayerStats::new("p"));
+        timeline.register_player(&stats);
+        let f = Arc::new(Fetcher::new(
+            "p",
+            mock.clone(),
+            Arc::clone(&timeline),
+            stats,
+            2,
+        ));
+        let stop = Arc::new(AtomicBool::new(false));
+        Arc::clone(&f).spawn(Arc::clone(&stop));
+        let seek = |t: i64| {
+            timeline
+                .apply_at(
+                    super::super::timeline::Command::Seek {
+                        to: strom_types::replay::ReplayTarget::t(t),
+                        speed: Some(0.0),
+                    },
+                    timeline.now_rt(),
+                )
+                .unwrap();
+        };
+        let t0 = Instant::now();
+        while f.stats.extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Into the edge segment: its chunk is listed.
+        seek(at(LIVE0) + 100 * ms);
+        let t0 = Instant::now();
+        while started.load(Ordering::Relaxed) == 0 && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            started.load(Ordering::Relaxed) > 0,
+            "the edge chunk is listed"
+        );
+        // More than a poll reads back, at once, while the listing is out.
+        let n = 1 + 5 * LIVE_POLL_PAGE as i64;
+        {
+            let mut live = lock(&mock.live);
+            for i in LIVE0 + 1..LIVE0 + n {
+                live.push(Segment {
+                    start_ns: at(i),
+                    end_ns: at(i + 1),
+                    ts_offset_ns: 0,
+                    object_start_ns: None,
+                    object_id: i.to_string(),
+                    location: Location::Urls(vec![]),
+                });
+            }
+        }
+        let edge = at(LIVE0 + n);
+        let t0 = Instant::now();
+        while f.stats.extent().map(|e| e.1) != Some(edge) && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let moved = f.stats.extent().map(|e| e.1) == Some(edge);
+        let in_flight = !done.load(Ordering::Relaxed);
+        // Into the stretch the poll skipped (the source has media there).
+        let t = at(LIVE0 + 3) + 100 * ms;
+        seek(t);
+        let t0 = Instant::now();
+        while !done.load(Ordering::Relaxed) && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The listing's result taken in, a few loop turns on.
+        std::thread::sleep(Duration::from_millis(500));
+        let hold = f.store.hold();
+        stop.store(true, Ordering::Relaxed);
+        assert!(moved, "the live poll moved the edge");
+        assert!(in_flight, "while the listing was in flight");
+        assert!(
+            f.store.segments_in(t, t + 1).is_empty(),
+            "the poll skipped the stretch"
+        );
+        assert_eq!(hold.map(|h| h.hole), None, "no false hole at the cursor");
     }
 
     #[test]

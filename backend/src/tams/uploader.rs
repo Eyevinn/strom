@@ -551,8 +551,12 @@ pub fn spawn_uploader(
     tail_segment_ns: u64,
     run: RunGuard,
 ) {
+    // Counted from now, so a teardown that has stopped the pipeline waits for
+    // the queue and the final segment before it frees the TAMS flow ids.
+    let writer = crate::tams::flow_claims::Writer::new(strom_flow_id);
     tokio::spawn(async move {
         let _run = run;
+        let _writer = writer;
         let tams_flow_id = flow_spec.flow_id.clone();
         let mut registered: Option<DetectedEssence> = None;
         let mut segments_registered: u64 = 0;
