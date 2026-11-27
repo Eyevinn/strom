@@ -22,10 +22,14 @@
 //! - Other essences follow by running time. A buffer at or past a scheduled
 //!   split that the reference has not reached yet is held until the reference
 //!   decides (the keyframe may come late, or not at all if the encoder ignored
-//!   the request). A fragment that has been split off stays open until every
-//!   other essence has passed the split, so a lagging audio track still ends up
-//!   in the right file; a track that lags more than [`MAX_LAG_NS`] is not
-//!   waited for.
+//!   the request), as long as the reference lags it by at most
+//!   [`MAX_HOLD_NS`]: a video encoder with lookahead delivers its frames well
+//!   after the audio of the same time. Before the reference's first keyframe,
+//!   other essences are held whatever the lag (bounded in number), since the
+//!   first fragment starts there. A fragment that has been split off stays
+//!   open until every other essence has passed the split, so a lagging audio
+//!   track still ends up in the right file; a track that lags more than
+//!   [`MAX_LAG_NS`] is not waited for.
 
 use crate::tams::uploader::{FragmentReady, PadMediaEnd};
 use gstreamer as gst;
@@ -41,9 +45,17 @@ use tracing::{debug, error, warn};
 const FINISH_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Longest a split-off fragment waits for the other essences to pass the
-/// split, measured on the reference's running time; also how far ahead of
-/// the reference another essence's buffers are held.
+/// split, measured on the reference's running time.
 pub const MAX_LAG_NS: u64 = 1_000_000_000;
+
+/// How far ahead of the reference another essence's buffers are held for a
+/// split the reference has not reached yet. Larger than the latency of a
+/// video encoder with lookahead; past it the reference is taken to have
+/// stalled, and held buffers go to the open fragment.
+pub const MAX_HOLD_NS: u64 = 5_000_000_000;
+
+/// Most buffers held per essence.
+const MAX_HELD: usize = 1000;
 
 /// What the segmenter hands the owner when it opens a fragment.
 pub struct OpenRequest<'a> {
@@ -73,6 +85,8 @@ pub type DeliverFn = Box<dyn Fn(FragmentReady) + Send>;
 /// One open segment file: its muxing pipeline and one `appsrc` per essence
 /// whose caps were known when it opened.
 struct Fragment {
+    #[cfg_attr(not(test), allow(dead_code))]
+    id: u32,
     pipeline: gst::Pipeline,
     srcs: Vec<Option<gst_app::AppSrc>>,
     location: PathBuf,
@@ -100,6 +114,9 @@ struct Inner {
     next_fragment_id: u32,
     /// After a stop drain nothing more is written.
     stopped: bool,
+    /// Held buffers at or past a split written to the fragment before it,
+    /// because the reference lagged more than [`MAX_HOLD_NS`].
+    late_flushes: u64,
     on_open: OpenFn,
 }
 
@@ -119,6 +136,9 @@ pub struct Segmenter {
     media_end: Vec<Arc<PadMediaEnd>>,
     inner: Mutex<Inner>,
     finisher: Mutex<Option<mpsc::Sender<FinishJob>>>,
+    /// Every buffer written: (fragment id, essence, running time).
+    #[cfg(test)]
+    written: Mutex<Vec<(u32, usize, u64)>>,
 }
 
 /// Running time of a sample's PTS (or DTS when it has none).
@@ -178,9 +198,12 @@ impl Segmenter {
                 pending_split: None,
                 next_fragment_id: 0,
                 stopped: false,
+                late_flushes: 0,
                 on_open,
             }),
             finisher: Mutex::new(spawned.ok().map(|_| tx)),
+            #[cfg(test)]
+            written: Mutex::new(Vec::new()),
         })
     }
 
@@ -254,7 +277,7 @@ impl Segmenter {
                 );
             }
             g.pending_split = decision.next_split_ns;
-            match self.open_fragment(g, &decision.location) {
+            match self.open_fragment(g, fragment_id, &decision.location) {
                 Ok(f) => g.current = Some(f),
                 Err(e) => error!(
                     "TAMS {}: cannot open segment {}: {}",
@@ -264,18 +287,22 @@ impl Segmenter {
                 ),
             }
             // Held buffers from the split on start the new fragment; at the
-            // first fragment, earlier ones are dropped.
+            // first fragment, earlier ones are dropped. Those at or past the
+            // new fragment's own split stay held for the fragment after it.
             let start = rt;
+            let next = g.pending_split;
             for idx in 0..g.held.len() {
                 let held: Vec<_> = g.held[idx].drain(..).collect();
                 for (t, s) in held {
-                    if t >= start {
-                        self.write(g, idx, &s, t, false);
+                    if next.is_some_and(|n| t >= n) {
+                        g.held[idx].push_back((t, s));
+                    } else if t >= start {
+                        self.write(g, idx, &s, false);
                     }
                 }
             }
         }
-        self.write(g, r, &sample, rt, false);
+        self.write(g, r, &sample, false);
         g.pos[r] = Some(rt);
         if !split {
             // The next split is at a keyframe after this buffer.
@@ -290,7 +317,7 @@ impl Segmenter {
         let ref_done = g.eos[g.reference];
         if let Some(c) = &g.closing {
             if rt < c.split_ns {
-                self.write(g, idx, &sample, rt, true);
+                self.write(g, idx, &sample, true);
                 let at = ref_pos.unwrap_or(rt);
                 self.check_closing(g, at);
                 return;
@@ -305,20 +332,36 @@ impl Segmenter {
             };
         if hold {
             g.held[idx].push_back((rt, sample));
-            // Do not hold on for a reference that does not come.
+            // Do not hold on for a reference that does not come. Before the
+            // first fragment the reference may not have started yet (its
+            // encoder is slower): only the number held is bounded then.
+            let started = g.current.is_some();
             while let Some((t, _)) = g.held[idx].front() {
-                let too_far = ref_pos.is_none_or(|r| *t > r.saturating_add(MAX_LAG_NS));
-                if g.held[idx].len() <= 1000 && !too_far {
+                let too_far = started && ref_pos.is_none_or(|r| *t > r.saturating_add(MAX_HOLD_NS));
+                if g.held[idx].len() <= MAX_HELD && !too_far {
                     break;
                 }
                 if let Some((t, s)) = g.held[idx].pop_front() {
                     if g.current.is_some() {
-                        self.write(g, idx, &s, t, false);
+                        if g.pending_split.is_some_and(|at| t >= at) {
+                            g.late_flushes += 1;
+                            if g.late_flushes == 1 || g.late_flushes.is_multiple_of(500) {
+                                warn!(
+                                    "TAMS {}: the reference track lags another by more \
+                                     than {} s; that track's media past a split goes into \
+                                     the segment before it ({} buffers so far)",
+                                    self.label,
+                                    MAX_HOLD_NS / 1_000_000_000,
+                                    g.late_flushes
+                                );
+                            }
+                        }
+                        self.write(g, idx, &s, false);
                     }
                 }
             }
         } else if g.current.is_some() {
-            self.write(g, idx, &sample, rt, false);
+            self.write(g, idx, &sample, false);
         }
         if let Some(r) = ref_pos {
             self.check_closing(g, r);
@@ -333,8 +376,8 @@ impl Segmenter {
                 if before.is_some_and(|b| *t >= b) {
                     break;
                 }
-                if let Some((t, s)) = g.held[idx].pop_front() {
-                    self.write(g, idx, &s, t, false);
+                if let Some((_, s)) = g.held[idx].pop_front() {
+                    self.write(g, idx, &s, false);
                 }
             }
         }
@@ -364,12 +407,16 @@ impl Segmenter {
     }
 
     /// Push one sample into the open fragment (`to_closing`: the split-off one).
-    fn write(&self, g: &mut Inner, idx: usize, sample: &gst::Sample, _rt: u64, to_closing: bool) {
+    fn write(&self, g: &mut Inner, idx: usize, sample: &gst::Sample, to_closing: bool) {
         let fragment = if to_closing {
             g.closing.as_ref().map(|c| &c.fragment)
         } else {
             g.current.as_ref()
         };
+        #[cfg(test)]
+        if let (Some(f), Some(rt)) = (fragment, running_time_ns(sample)) {
+            self.written.lock().unwrap().push((f.id, idx, rt));
+        }
         let Some(src) = fragment
             .and_then(|f| f.srcs.get(idx))
             .and_then(|s| s.as_ref())
@@ -398,7 +445,12 @@ impl Segmenter {
     }
 
     /// Build and start the muxing pipeline of a new fragment.
-    fn open_fragment(&self, g: &Inner, location: &std::path::Path) -> Result<Fragment, String> {
+    fn open_fragment(
+        &self,
+        g: &Inner,
+        id: u32,
+        location: &std::path::Path,
+    ) -> Result<Fragment, String> {
         let pipeline = gst::Pipeline::new();
         // Outside the flow: threads picked from GStreamer's pool may still
         // carry a WebRTC session's priority and CPUs.
@@ -459,6 +511,7 @@ impl Segmenter {
             .map_err(|e| e.to_string())?;
         debug!("TAMS {}: opened segment {}", self.label, location.display());
         Ok(Fragment {
+            id,
             pipeline,
             srcs,
             location: location.to_path_buf(),
@@ -613,5 +666,142 @@ fn finish(label: &str, job: FinishJob, deliver: &DeliverFn) {
     }
     if let Some(done) = done {
         let _ = done.send(());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MS: u64 = 1_000_000;
+    const SEG: u64 = 1000 * MS;
+
+    fn available() -> bool {
+        gst::init().is_ok() && gst::ElementFactory::find("mpegtsmux").is_some()
+    }
+
+    /// A segmenter for video (essence 0, the reference) and one audio track,
+    /// splitting on a 1 s grid, writing into a fresh temp directory.
+    fn segmenter() -> (Arc<Segmenter>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("strom-segmenter-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = dir.clone();
+        let on_open = move |req: OpenRequest<'_>| OpenDecision {
+            location: files.join(format!("seg_{}.ts", req.fragment_id)),
+            prev_ready: None,
+            next_split_ns: Some((req.running_time_ns / SEG + 1) * SEG),
+        };
+        let seg = Segmenter::new(
+            "test".into(),
+            "mpegtsmux",
+            true,
+            2,
+            0,
+            vec![Arc::default(), Arc::default()],
+            Box::new(on_open),
+            Box::new(|_| {}),
+        );
+        (seg, dir)
+    }
+
+    fn sample(video: bool, rt: u64, key: bool) -> gst::Sample {
+        let caps = if video {
+            gst::Caps::builder("video/x-h264")
+                .field("stream-format", "byte-stream")
+                .field("alignment", "au")
+                .build()
+        } else {
+            gst::Caps::builder("audio/mpeg")
+                .field("mpegversion", 4i32)
+                .field("stream-format", "adts")
+                .build()
+        };
+        let mut buf = gst::Buffer::with_size(8).unwrap();
+        {
+            let b = buf.get_mut().unwrap();
+            b.set_pts(gst::ClockTime::from_nseconds(rt));
+            b.set_duration(gst::ClockTime::from_nseconds(20 * MS));
+            if !key {
+                b.set_flags(gst::BufferFlags::DELTA_UNIT);
+            }
+        }
+        let segment = gst::FormattedSegment::<gst::ClockTime>::new();
+        gst::Sample::builder()
+            .buffer(&buf)
+            .caps(&caps)
+            .segment(&segment)
+            .build()
+    }
+
+    /// Audio written per fragment, as (fragment, running time).
+    fn audio_written(seg: &Segmenter) -> Vec<(u32, u64)> {
+        seg.written
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, idx, _)| *idx == 1)
+            .map(|(f, _, rt)| (*f, *rt))
+            .collect()
+    }
+
+    /// Audio that reaches the segmenter before the video's first keyframe
+    /// (the video encoder is slower), but whose running time is at or after
+    /// it, starts the first segment. It was dropped.
+    #[test]
+    fn audio_before_the_first_keyframe_starts_the_first_segment() {
+        if !available() {
+            return;
+        }
+        let (seg, dir) = segmenter();
+        let el = gst::ElementFactory::make("fakesink").build().unwrap();
+        let audio: Vec<u64> = (0..30).map(|i| 60 * MS + i * 20 * MS).collect();
+        for &rt in &audio {
+            seg.push(1, sample(false, rt, true), &el);
+        }
+        for i in 0..10 {
+            seg.push(0, sample(true, 100 * MS + i * 40 * MS, i == 0), &el);
+        }
+        let want: Vec<(u32, u64)> = audio
+            .iter()
+            .filter(|&&rt| rt >= 100 * MS)
+            .map(|&rt| (0, rt))
+            .collect();
+        assert_eq!(audio_written(&seg), want);
+        drop(seg);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Video that lags the audio by more than [`MAX_LAG_NS`] (an encoder with
+    /// lookahead): audio past a split waits for the split, and goes into the
+    /// segment its own running time belongs to. It went into the segment
+    /// before.
+    #[test]
+    fn audio_goes_to_its_own_segment_when_video_lags() {
+        if !available() {
+            return;
+        }
+        let (seg, dir) = segmenter();
+        let el = gst::ElementFactory::make("fakesink").build().unwrap();
+        let video = |seg: &Segmenter, from: u64| {
+            for i in 0..25 {
+                let rt = from + i * 40 * MS;
+                seg.push(0, sample(true, rt, i == 0), &el);
+            }
+        };
+        video(&seg, 0);
+        // Audio 2 s ahead of the video.
+        let audio: Vec<u64> = (0..150).map(|i| i * 20 * MS).collect();
+        for &rt in &audio {
+            seg.push(1, sample(false, rt, true), &el);
+        }
+        video(&seg, SEG);
+        video(&seg, 2 * SEG);
+        video(&seg, 3 * SEG);
+        let want: Vec<(u32, u64)> = audio.iter().map(|&rt| ((rt / SEG) as u32, rt)).collect();
+        let mut got = audio_written(&seg);
+        got.sort_by_key(|&(_, rt)| rt);
+        assert_eq!(got, want);
+        drop(seg);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
