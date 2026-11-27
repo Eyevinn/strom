@@ -366,16 +366,22 @@ fn derive_id(key: &str, suffix: &str) -> String {
 }
 
 /// What every TAMS id of block `instance_id` derives from: its `tams_key`
-/// when set, else the block id. A block id is random per Strom flow when a
-/// product creates a new flow for each run (Open Live does, on every
-/// activation of a production); a `tams_key` that is stable for the product
-/// (e.g. `"<production id>/<source>"`) keeps a new run writing to the same
-/// TAMS source and flows. Unset, the ids are those of earlier versions.
+/// when set, else `"<flow id>/<block id>"`. A block id is only unique within
+/// a Strom flow, so the flow id keeps two flows with a TAMS Output of the same
+/// id apart; without a flow id (`_flow_id`, injected by block expansion; a
+/// bare builder in a test) it is the block id alone. A block id is random per
+/// Strom flow when a product creates a new flow for each run (Open Live does,
+/// on every activation of a production); a `tams_key` that is stable for the
+/// product (e.g. `"<production id>/<source>"`) keeps a new run writing to the
+/// same TAMS source and flows, and gives the same ids as before.
 pub fn tams_id_key(instance_id: &str, properties: &HashMap<String, PropertyValue>) -> String {
     prop_str(properties, TAMS_KEY)
         .map(|k| k.trim().to_string())
         .filter(|k| !k.is_empty())
-        .unwrap_or_else(|| instance_id.to_string())
+        .unwrap_or_else(|| match prop_str(properties, "_flow_id") {
+            Some(flow_id) => format!("{}/{}", flow_id, instance_id),
+            None => instance_id.to_string(),
+        })
 }
 
 /// The segment directory of the TAMS flow chain `suffix` (`video`, `audio-0`,
@@ -2063,8 +2069,8 @@ mod tests {
             .collect()
     }
 
-    /// Without a `tams_key` the ids are those of earlier versions: derived
-    /// from the block id. Pinned, so a change that would orphan existing
+    /// Without a `tams_key` or a flow id (a bare builder) the ids derive from
+    /// the block id. Pinned, so a change that would orphan existing
     /// recordings fails here.
     #[test]
     fn tams_ids_without_key_derive_from_block_id() {
@@ -2079,6 +2085,26 @@ mod tests {
             derive_id("cam1", "mux"),
             "0b2fb420-2f9c-5cff-9b6c-6cdd1a876b15"
         );
+    }
+
+    /// Two Strom flows with a TAMS Output of the same block id get their own
+    /// TAMS ids (block ids are only unique within a flow). A `tams_key`
+    /// overrides that: its ids are exactly those it gave before.
+    #[test]
+    fn tams_ids_without_key_are_per_strom_flow() {
+        let with = |flow: &str, key: Option<&str>| {
+            let mut p = key_props(key);
+            p.insert("_flow_id".to_string(), PropertyValue::String(flow.into()));
+            tams_id_key("cam1", &p)
+        };
+        assert_eq!(with("f1", None), "f1/cam1");
+        assert_ne!(
+            derive_id(&with("f1", None), "mux"),
+            derive_id(&with("f2", None), "mux")
+        );
+        assert_eq!(with("f1", Some("prod-42/cam1")), "prod-42/cam1");
+        assert_eq!(with("f2", Some("prod-42/cam1")), "prod-42/cam1");
+        assert_eq!(with("f1", Some("  ")), "f1/cam1");
     }
 
     /// With a `tams_key` every TAMS id is the same whatever the block id, so
