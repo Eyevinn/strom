@@ -23,7 +23,6 @@ pub mod source;
 pub mod timeline;
 
 use super::bridge::NetworkBuffer;
-use super::definition::DEFAULT_DECODED_AHEAD_S;
 use crate::blocks::{
     live_bridge_appsrc, BlockBuildError, BlockBuildResult, BusMessageConnectFn,
     APPSRC_MAX_BYTES_VIDEO,
@@ -35,8 +34,8 @@ use gstreamer_app as gst_app;
 use std::collections::HashMap;
 use strom_types::element::ElementPadRef;
 use strom_types::mediaplayer::{
-    timeline_group, DECODED_AHEAD_PROPERTY, GROUP_PROPERTY, OUTPUT_FRAMERATE_PROPERTY,
-    PRIVATE_GROUP_PREFIX, READ_AHEAD_PROPERTY, SOURCE_PROPERTY,
+    timeline_group, DECODED_AHEAD_PROPERTY, DEFAULT_DECODED_AHEAD_S, GROUP_PROPERTY,
+    OUTPUT_FRAMERATE_PROPERTY, PRIVATE_GROUP_PREFIX, READ_AHEAD_PROPERTY, SOURCE_PROPERTY,
 };
 use strom_types::{FlowId, PropertyValue};
 use tracing::{info, warn};

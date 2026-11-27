@@ -3,13 +3,10 @@
 use super::bridge::Decoder;
 use strom_types::block::*;
 use strom_types::mediaplayer::{
-    PlayerMode, DECODED_AHEAD_PROPERTY, GROUP_PROPERTY, MODE_PROPERTY, OUTPUT_FRAMERATE_PROPERTY,
-    READ_AHEAD_PROPERTY, SOURCE_PROPERTY,
+    PlayerMode, DECODED_AHEAD_PROPERTY, DEFAULT_DECODED_AHEAD_S, GROUP_PROPERTY, MODE_PROPERTY,
+    OUTPUT_FRAMERATE_PROPERTY, READ_AHEAD_PROPERTY, SOURCE_PROPERTY,
 };
 use strom_types::{MediaType, PropertyValue};
-
-/// Default of `decoded_ahead_s`.
-pub const DEFAULT_DECODED_AHEAD_S: u64 = 3;
 
 /// Show and apply a property only in these modes.
 fn in_modes(modes: &[PlayerMode]) -> Option<PropertyCondition> {
