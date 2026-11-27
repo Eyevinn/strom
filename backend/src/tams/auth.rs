@@ -185,4 +185,20 @@ mod tests {
         p.remove(OSC_SERVICE_ID_PROPERTY);
         assert!(TamsAuth::from_properties(&p, evil).is_err());
     }
+
+    #[test]
+    fn property_names_match_the_media_player_constants() {
+        assert_eq!(
+            AUTH_MODE_PROPERTY,
+            strom_types::mediaplayer::AUTH_MODE_PROPERTY
+        );
+        assert_eq!(
+            API_TOKEN_PROPERTY,
+            strom_types::mediaplayer::API_TOKEN_PROPERTY
+        );
+        assert_eq!(
+            OSC_SERVICE_ID_PROPERTY,
+            strom_types::mediaplayer::OSC_SERVICE_ID_PROPERTY
+        );
+    }
 }
