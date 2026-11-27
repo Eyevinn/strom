@@ -493,11 +493,12 @@ impl ReplayTimeline {
             }
         }
         {
-            // `live` and `end` leave clip play: the queue goes. Otherwise the
-            // clip the queue started stays while its cue is held.
+            // `live` and `end` leave clip play, and `uncue` drops the clip a
+            // queue follows: the queue goes. Otherwise the clip the queue
+            // started stays while its cue is held.
             let mut q = lock(&self.queue);
             match &cmd {
-                Command::Live { .. } | Command::End {} => q.clear(),
+                Command::Live { .. } | Command::End {} | Command::Uncue {} => q.clear(),
                 Command::Cue { .. } | Command::Play { until: Some(_), .. } => q.commanded(false),
                 _ => q.commanded(region.is_some()),
             }

@@ -252,8 +252,8 @@ fn a_queued_clip_ends_a_loop() {
 
 /// `clear_queue` empties the queue: the clip playing goes to its out and
 /// its end action applies. `cue_next {replace}` empties it before adding;
-/// `live` and `end` leave clip play and empty it. Neither changes the
-/// motion.
+/// `live` and `end` leave clip play and empty it, and `uncue` (no clip
+/// left for the queue to follow) does too. Neither changes the motion.
 #[test]
 fn the_queue_is_cleared_and_replaced() {
     let (tl, _p) = playing_a();
@@ -294,14 +294,30 @@ fn the_queue_is_cleared_and_replaced() {
     assert_eq!(tl.tai_at(200 * MS), Some(BASE + 40 * S));
     assert_eq!(tl.queue_view().0, 3, "the third clip queued plays");
 
-    // `live` and `end` empty it.
-    for leave in [Command::Live { margin_ms: None }, Command::End {}] {
+    // `live`, `end` and `uncue` empty it.
+    for leave in [
+        Command::Live { margin_ms: None },
+        Command::End {},
+        Command::Uncue {},
+    ] {
         let (tl, _p) = playing_a();
         tl.apply_at(cue_next(BASE + 30 * S, BASE + 31 * S, None, None), 0)
             .unwrap();
         tl.apply_at(leave.clone(), 10 * MS).unwrap();
         assert_eq!(tl.queued(), 0, "{:?}", leave);
     }
+
+    // `uncue` keeps the cursor and the speed: play goes on past a's out,
+    // and nothing is swapped in there.
+    let (tl, _p) = playing_a();
+    tl.apply_at(cue_next(BASE + 30 * S, BASE + 31 * S, None, None), 0)
+        .unwrap();
+    let before = tl.cursor_tai(100 * MS).unwrap();
+    let a = tl.apply_at(Command::Uncue {}, 100 * MS).unwrap();
+    assert_eq!((a.tai, a.speed), before);
+    assert!(tl.cue().is_none());
+    assert_eq!(tl.queue_view().0, 0);
+    assert_eq!(tl.tai_at(300 * MS), Some(BASE + 10_300 * MS));
 
     // Other commands keep it: a pause in the clip, then play on to the out.
     let (tl, _p) = playing_a();
