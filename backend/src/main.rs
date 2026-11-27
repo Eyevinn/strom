@@ -649,6 +649,7 @@ fn run_with_gui(
             .configure(config.media_download_settings());
         state.configure_relays(config.relays.clone());
         strom::media_download::spawn_temp_file_sweeper(state.media_path().clone());
+        strom::tams::park::init(&config.data_dir);
         state
             .load_from_storage()
             .await
@@ -923,6 +924,7 @@ async fn run_headless(
         .configure(config.media_download_settings());
     state.configure_relays(config.relays.clone());
     strom::media_download::spawn_temp_file_sweeper(state.media_path().clone());
+    strom::tams::park::init(&config.data_dir);
     state.load_from_storage().await?;
 
     // Store the log reload handle so log levels can be changed at runtime
