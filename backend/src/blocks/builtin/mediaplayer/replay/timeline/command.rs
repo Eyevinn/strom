@@ -171,11 +171,27 @@ impl ReplayTimeline {
         Ok(cursor.saturating_add(ms.saturating_mul(MS)))
     }
 
-    /// Apply a command at "now".
+    /// Apply a command at "now". A source switch (`cue {source}`,
+    /// `source`) is checked and its source opened first, and started once
+    /// the motion applied: a refused command changes nothing.
     pub fn apply(&self, req: Request) -> Result<Applied, CommandError> {
+        let switch = match &req.command {
+            Command::Cue { source, block, .. } => {
+                self.prepare_switch(source.as_deref(), block.as_deref())?
+            }
+            Command::Source { source, block } => {
+                self.prepare_switch(Some(source), block.as_deref())?
+            }
+            _ => None,
+        };
+        let client_ref = req.client_ref.clone();
         // "Now" is read and used under one hold of `clock_source`: a change
         // of time base in between would put the anchor on the old base.
-        self.at_now(|now| self.apply_req_at(req, now))
+        let applied = self.at_now(|now| self.apply_req_at(req, now))?;
+        if let Some(s) = switch {
+            s.begin(client_ref);
+        }
+        Ok(applied)
     }
 
     /// Apply a command without a `client_ref` at running time `now`.
@@ -232,6 +248,20 @@ impl ReplayTimeline {
                 live: a.live,
                 ramp: ramp_view(&a, now),
                 mark: Some(mark),
+                client_ref,
+            });
+        }
+        if let Command::Source { .. } = cmd {
+            // The switch is the player's (see `apply`): the motion stays.
+            let mut a = lock(&self.anchor);
+            let (cur, cur_speed) = self.advance(&mut a, now, &b);
+            return Ok(Applied {
+                tai: cur,
+                speed: cur_speed,
+                region: a.region,
+                live: a.live,
+                ramp: ramp_view(&a, now),
+                mark: None,
                 client_ref,
             });
         }
@@ -393,6 +423,7 @@ impl ReplayTimeline {
                 in_point,
                 out,
                 end_action,
+                ..
             } => {
                 let start = resolve(in_point, "cue in")?;
                 let end = resolve(out, "cue out")?;
@@ -419,7 +450,7 @@ impl ReplayTimeline {
                 ramp = a.ramp_left(now);
                 (cur, cur_speed, Cue::Keep)
             }
-            Command::Mark { .. } => unreachable!("handled above"),
+            Command::Mark { .. } | Command::Source { .. } => unreachable!("handled above"),
         };
         // Clamp to the media, so later moves start from what is shown, then
         // keep the cue only if it holds the cursor.
@@ -496,6 +527,8 @@ impl ReplayTimeline {
                 in_point: clip.in_point.clone(),
                 out: clip.out.clone(),
                 end_action: Some(EndAction::Freeze),
+                source: None,
+                block: None,
             },
             rt,
         )?;

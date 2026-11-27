@@ -405,6 +405,54 @@ mod tests {
         assert!(timeline::get(flow, "g").is_none());
     }
 
+    /// `source` and `cue {source}` over REST: refused as 400 (which angle,
+    /// a source that does not open) or 409 (no common time) with the code
+    /// in `error`, applied as 200 with the motion unchanged.
+    #[tokio::test]
+    async fn source_switch_over_rest() {
+        use timeline::switch_tests::angle;
+        use timeline::TimeDomain;
+        let post = |flow: FlowId, body: serde_json::Value| async move {
+            replay_command(Path((flow, "g".to_string())), JsonBody(body)).await
+        };
+        let code = |r: Result<Json<ReplayCommandResult>, ApiError>| match r {
+            Err((status, Json(e))) => (status, e.error),
+            Ok(_) => (StatusCode::OK, String::new()),
+        };
+
+        let flow = uuid::Uuid::new_v4();
+        let tl = timeline::get_or_create(flow, "g");
+        let (_a, _ra) = angle(&tl, "a", TimeDomain::Tai);
+        let (_b, rb) = angle(&tl, "b", TimeDomain::Tai);
+        let src = serde_json::json!({"cmd": "source", "source": "cam2"});
+        assert_eq!(
+            code(post(flow, src).await),
+            (StatusCode::BAD_REQUEST, "invalid".to_string())
+        );
+        let bad = serde_json::json!({"cmd": "source", "source": "bad", "block": "b"});
+        assert_eq!(code(post(flow, bad).await).0, StatusCode::BAD_REQUEST);
+        let ok = serde_json::json!({"cmd": "source", "source": "cam2", "block": "b",
+            "client_ref": "r1"});
+        let Json(res) = post(flow, ok).await.unwrap();
+        assert_eq!(res.client_ref.as_deref(), Some("r1"));
+        assert_eq!(res.motion.speed, 0.0);
+        assert_eq!(
+            rb.begun.lock().unwrap().clone(),
+            vec![("cam2".to_string(), Some("r1".to_string()))]
+        );
+
+        let loose = uuid::Uuid::new_v4();
+        let tl2 = timeline::get_or_create(loose, "g");
+        let (_c, _rc) = angle(&tl2, "c", TimeDomain::Unanchored);
+        let cue = serde_json::json!({"cmd": "cue", "in": {"rel_ms": 0}, "out": {"rel_ms": 1000},
+            "source": "cam2"});
+        assert_eq!(
+            code(post(loose, cue).await),
+            (StatusCode::CONFLICT, "conflict".to_string())
+        );
+        drop((tl, tl2));
+    }
+
     /// A new run makes a new group: a socket on the old one does not follow
     /// it with the old run's subscription.
     #[test]
