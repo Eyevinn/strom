@@ -46,7 +46,9 @@ const FETCH_RETRY_MAX: Duration = Duration::from_secs(30);
 const RELIST_MIN: Duration = Duration::from_secs(5);
 /// Default budget for one player's coded bytes. `STROM_REPLAY_CODED_MB`
 /// overrides it. The window ahead can be up to two minutes (`read_ahead_s`),
-/// over 1 GB at 50 Mbit/s with the window behind.
+/// over 1 GB at 50 Mbit/s with the window behind. Per player, not shared:
+/// with the decoded budget (`player.rs`) a player can hold about 1.25 GB, so
+/// a group of 8 angles about 10 GB.
 const DEFAULT_CODED_BUDGET_MB: u64 = 512;
 /// Segments kept fetched whatever the budget: the most urgent ones.
 const MIN_CODED_SEGMENTS: usize = 2;

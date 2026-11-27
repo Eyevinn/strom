@@ -157,9 +157,10 @@ workaround can go once we move past that version.
 - **Hint:** a guess: the frame still in flight in VideoToolbox when EOS arrives is not
   always output by the drain in `finish`/`drain` (`gst_vtdec_drain` /
   `VTDecompressionSessionWaitForAsynchronousFrames`).
-- **Tests:** none; seen in the replay spike's warning "segment ... gave 49 frames".
+- **Tests:** none; seen in the replay engine's warning "segment ... gave 49 frames".
 - **Upstream:** not searched.
-- **Found in:** the replay spike (branch `feat/replay-tams`, not merged).
+- **Found in:** [#1292](https://github.com/Eyevinn/strom/pull/1292), the replay engine (media
+  player timeline mode).
 
 ### `vtenc`: ABR rate control ignores the bitrate target
 - **Seen on:** GStreamer 1.28 on Apple Silicon (720p30, 5 Mbit/s target).

@@ -42,7 +42,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// Default budget for one player's decoded frames (1080p NV12 is about
-/// 3 MB a frame). `STROM_REPLAY_DECODED_MB` overrides it.
+/// 3 MB a frame). `STROM_REPLAY_DECODED_MB` overrides it. Per player, on
+/// top of the coded budget (see `cache.rs`).
 const DEFAULT_DECODED_BUDGET_MB: u64 = 768;
 /// Segments kept decoded whatever the budget: the one under the cursor and
 /// the next.
@@ -145,8 +146,9 @@ pub struct ReplayPlayer {
     decoded_budget: u64,
     /// Output frame rate; `None` = the source's own rate.
     output_rate: Option<(u32, u32)>,
-    /// Read the bitstrip and burned-in time of pushed frames
-    /// (STROM_REPLAY_BITSTRIP=1).
+    /// Diagnostics only (STROM_REPLAY_BITSTRIP=1): read the spike test
+    /// material's bitstrip and the burned-in time of pushed frames, see
+    /// [`ReplayPlayer::check_picture`].
     read_strip: bool,
     started: AtomicBool,
     stop: Arc<AtomicBool>,
@@ -701,7 +703,7 @@ impl ReplayPlayer {
         shown_tai: i64,
         t: i64,
     ) {
-        let n = read_bitstrip(b, info).map_or(-1, i64::from);
+        let n = diagnostic_read_spike_bitstrip(b, info).map_or(-1, i64::from);
         self.stats.strip_frame.store(n, Ordering::Relaxed);
         if let Some(origin) = self.timeline.origin_on(grid) {
             if n != grid.nearest_frame(shown_tai) - origin {
@@ -794,9 +796,11 @@ impl Drop for PlayerGuard {
     }
 }
 
-/// Read the spike test material's bitstrip: 20 blocks of 48x32 px at the top left of
-/// a 1920-wide picture, white = 1, LSB first. Diagnostics only.
-fn read_bitstrip(buf: &gst::Buffer, info: &gst_video::VideoInfo) -> Option<u32> {
+/// Diagnostics only, for the spike's test material (not a general picture
+/// reader): its bitstrip is 20 blocks of 48x32 px at the top left of a
+/// 1920-wide picture, white = 1, LSB first. Read only with
+/// `STROM_REPLAY_BITSTRIP=1`; other pictures give a meaningless number.
+fn diagnostic_read_spike_bitstrip(buf: &gst::Buffer, info: &gst_video::VideoInfo) -> Option<u32> {
     let frame = gst_video::VideoFrameRef::from_buffer_ref_readable(buf.as_ref(), info).ok()?;
     let y = frame.plane_data(0).ok()?;
     let stride = info.stride()[0] as usize;

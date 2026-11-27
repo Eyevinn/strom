@@ -72,17 +72,16 @@ pub fn build(
     instance_id: &str,
     properties: &HashMap<String, PropertyValue>,
 ) -> Result<BlockBuildResult, BlockBuildError> {
-    let flow_id: FlowId = prop_str(properties, "_flow_id")
-        .and_then(|s| Uuid::parse_str(&s).ok())
-        .unwrap_or_else(Uuid::nil);
     let invalid =
         |e: String| BlockBuildError::InvalidProperty(format!("Media Player timeline mode: {}", e));
+    // Groups are per flow: without the flow's id, players of different flows
+    // would share timelines (also the private `@<block id>` ones). The flow
+    // builder always injects it.
+    let flow_id: FlowId = prop_str(properties, "_flow_id")
+        .and_then(|s| Uuid::parse_str(&s).ok())
+        .ok_or_else(|| invalid("no flow id (_flow_id) to key the group on".to_string()))?;
     let source = prop_str(properties, SOURCE_PROPERTY).ok_or_else(|| {
-        invalid(
-            "source is required (a segment directory or \
-             tams+https://<gateway>/flows/<flow_id>)"
-                .to_string(),
-        )
+        invalid("source is required (tams+https://<gateway>/flows/<flow_id>)".to_string())
     })?;
     if prop_str(properties, GROUP_PROPERTY).is_some_and(|g| g.starts_with(PRIVATE_GROUP_PREFIX)) {
         return Err(invalid(format!(
