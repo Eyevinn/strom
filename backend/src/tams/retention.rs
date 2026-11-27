@@ -16,11 +16,17 @@
 //! are deleted by the next one. A store error is logged and retried on the
 //! next round; it never stops the writer.
 //!
+//! While a task runs, its flows are listed as trimmed ([`runs_for`]): the
+//! parked-segment drainer drops only what such a task deletes anyway, and
+//! keeps (and uploads) the parked media of a flow that no longer runs.
+//!
 //! [`ProtectedRanges`] is the hook for ranges that must survive the window
 //! (clips with their handles). Nothing provides one yet.
 
 use super::client::{DeleteOutcome, TamsClient};
-use std::sync::Arc;
+use super::uploader::ParkTarget;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use strom_types::tams::format_timestamp;
 use tracing::{debug, info, warn};
@@ -107,6 +113,46 @@ fn range(from: Option<u64>, to: u64) -> String {
     }
 }
 
+/// The (gateway, TAMS flow) pairs a retention task currently trims, with how
+/// many tasks trim each.
+static RUNNING: LazyLock<Mutex<HashMap<ParkTarget, usize>>> = LazyLock::new(Default::default);
+
+fn running() -> std::sync::MutexGuard<'static, HashMap<ParkTarget, usize>> {
+    RUNNING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether a retention task trims `target` now, i.e. its writer runs.
+pub fn runs_for(target: &ParkTarget) -> bool {
+    running().get(target).is_some_and(|&n| n > 0)
+}
+
+/// Lists its targets as trimmed (see [`runs_for`]) until dropped.
+pub struct Running(Vec<ParkTarget>);
+
+impl Running {
+    pub fn new(targets: Vec<ParkTarget>) -> Self {
+        let mut r = running();
+        for t in &targets {
+            *r.entry(t.clone()).or_default() += 1;
+        }
+        Self(targets)
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let mut r = running();
+        for t in &self.0 {
+            if let Some(n) = r.get_mut(t) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    r.remove(t);
+                }
+            }
+        }
+    }
+}
+
 /// Run `r` against `client` every [`interval`] (the first round at once),
 /// as long as `alive()` says the writer runs. `now_ns` is TAI now. `label`
 /// names the writer in logs.
@@ -130,7 +176,15 @@ pub fn spawn_every(
     alive: impl Fn() -> bool + Send + 'static,
     now_ns: impl Fn() -> u64 + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
+    // Listed from now until the task ends (or is aborted).
+    let listed = Running::new(
+        r.flow_ids
+            .iter()
+            .map(|f| ParkTarget::new(client.base_url(), f))
+            .collect(),
+    );
     tokio::spawn(async move {
+        let _listed = listed;
         info!(
             "TAMS {}: retention keeps {} s of {} flow(s), deleting every {} s",
             label,

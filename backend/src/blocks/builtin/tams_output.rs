@@ -73,7 +73,11 @@ const DEFAULT_CONTAINER: &str = "mpegts";
 const AUDIO_LABELS: &str = "audio_labels";
 /// ISO 639 languages of the audio tracks in track order, e.g. `swe,eng`.
 const AUDIO_LANGUAGES: &str = "audio_languages";
-/// Rolling-buffer window in seconds (0 = keep everything).
+/// Rolling-buffer window in seconds (0 = keep everything; at least 30).
+/// Deletes through the TAMS index (`crate::tams::retention`), so a clip
+/// copied into a flow of its own survives. Runs every tenth of the window
+/// (5 to 60 s) and only while the flow runs. With a TAMS Key the flows outlive
+/// a run, and media of earlier runs older than the window is deleted too.
 const RETENTION_S: &str = "retention_s";
 /// MPEG-TS PID of the video track. Audio track `k` gets `PID_AUDIO_0 + k`.
 /// These are what `mpegtsmux` picks itself when every track is present
@@ -1901,7 +1905,7 @@ fn tams_output_definition() -> BlockDefinition {
             simple_prop(
                 RETENTION_S,
                 "Retention (s)",
-                "Rolling buffer: keep this many seconds of media in the store and delete older segments of this block's TAMS flows (at least 30; 0 keeps everything). Deletes through the TAMS index (DELETE segments by timerange), so the store removes the media objects no other flow references: a clip copied into a flow of its own survives. Runs every tenth of the window (5 to 60 s), so the store holds up to that much more. With a TAMS Key the flows outlive a run, and media of earlier runs older than the window is deleted too. Deletion only runs while the flow runs.",
+                "Rolling buffer in seconds: delete this block's TAMS segments older than this (min 30; 0 = keep all). Runs while the flow runs.",
                 PropertyType::Int,
                 PropertyValue::Int(0),
             ),

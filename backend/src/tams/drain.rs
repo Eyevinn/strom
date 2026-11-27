@@ -45,10 +45,13 @@
 //! through the API wakes the drainer ([`wake`]).
 //!
 //! A manifest with a retention window (`retention_s`, the TAMS Output's rolling
-//! buffer) bounds what is worth uploading: a parked segment that ends before
-//! `now − window`, on the TAI clock the retention task cuts with, would only
-//! be deleted from the store again. It is deleted locally instead, with a log
-//! line, and counted ([`expired_discarded`]).
+//! buffer) bounds what is worth uploading while the writer runs: a parked
+//! segment that ends before `now − window`, on the TAI clock the retention
+//! task cuts with, would only be deleted from the store again. It is deleted
+//! locally instead, with a log line, and counted ([`expired_discarded`]). This
+//! holds only while a retention task trims that flow
+//! ([`retention::runs_for`]); a stopped or deleted flow's parked media is
+//! uploaded whole, since nothing deletes it from the store.
 
 use crate::client_auth::AuthMethod;
 use crate::events::EventBroadcaster;
@@ -325,8 +328,9 @@ pub struct Manifest {
     #[serde(default)]
     pub detected: DetectedEssence,
     /// The writer's retention window in seconds (`retention_s` of the TAMS
-    /// Output); 0, or absent in a manifest written before it, is none. Parked
-    /// segments older than the window are deleted, not uploaded.
+    /// Output); 0, or absent in a manifest written before it, is none. While
+    /// the writer's retention task runs, parked segments older than the window
+    /// are deleted, not uploaded.
     #[serde(default)]
     pub retention_s: u64,
 }
@@ -1029,9 +1033,12 @@ impl Drainer {
             }
             let target = manifest.target();
             // What ends before this lies outside the writer's retention window:
-            // the retention task deletes it from the store (or will), so it is
-            // not uploaded. The same cutoff without the grid floor.
+            // the retention task deletes it from the store, so it is not
+            // uploaded. The same cutoff without the grid floor. Only while that
+            // task runs (the writer runs): after a stop nothing deletes from
+            // the store, so the whole backlog is uploaded.
             let expired_before = retention::window_from_secs(manifest.retention_s)
+                .filter(|_| retention::runs_for(&target))
                 .and_then(|w| retention::cutoff_ns((self.tai_now)(), w, 0));
             let mut expired: Vec<(PathBuf, Claim)> = Vec::new();
             // Oldest first, a page at a time from the index: what the
@@ -2412,6 +2419,8 @@ mod tests {
         let edge = park(p, &root, &gw, "fa", 90);
         let fresh = park(p, &root, &gw, "fa", 100);
         let before = expired_discarded();
+        // The writer runs: its retention task trims the flow.
+        let _running = retention::Running::new(vec![m.target()]);
         let mut d = drainer_n(p, leak(LiveBusy::new()), 8);
         d.tai_now = Arc::new(|| 150_000_000_000);
 
@@ -2433,6 +2442,39 @@ mod tests {
         assert_eq!(starts, vec![90, 100]);
         assert!(!edge.exists() && !fresh.exists());
         assert!(p.dirs().is_empty());
+    }
+
+    /// A stopped flow (no retention task trims it) keeps its retention
+    /// window in `park.json`, but nothing deletes from the store any more:
+    /// every parked segment is uploaded, however old.
+    #[tokio::test]
+    async fn tams_drain_uploads_old_parked_segments_of_a_stopped_flow() {
+        let store = Store::default();
+        let gw = start_store(store.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        let mut m = manifest(&root, &gw, "fs", AuthRef::None);
+        m.retention_s = 60;
+        write_manifest_file(&root.join("fs"), &serde_json::to_string(&m).unwrap()).unwrap();
+        let old = park(p, &root, &gw, "fs", 10);
+        let fresh = park(p, &root, &gw, "fs", 100);
+        assert!(!retention::runs_for(&m.target()));
+        let mut d = drainer_n(p, leak(LiveBusy::new()), 8);
+        d.tai_now = Arc::new(|| 7_350_000_000_000);
+
+        assert_eq!(d.step().await, Step::Tried);
+        assert!(matches!(d.step().await, Step::Idle(_)));
+        assert_eq!(d.expired, 0);
+        let starts: Vec<u64> = store
+            .registered
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, tr)| start_s(tr))
+            .collect();
+        assert_eq!(starts, vec![10, 100]);
+        assert!(!old.exists() && !fresh.exists());
     }
 
     /// Without a retention window every parked segment is uploaded, however

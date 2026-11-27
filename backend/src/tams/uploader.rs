@@ -334,7 +334,7 @@ pub fn channel() -> (mpsc::Sender<FragmentReady>, mpsc::Receiver<FragmentReady>)
 /// sidecar. The drainer only uploads segments parked for their manifest's target,
 /// so changing a block's gateway or flow id never sends old segments to the
 /// new one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ParkTarget {
     /// Gateway URL without credentials, query or fragment.
     pub gateway: String,
