@@ -3,13 +3,10 @@
 use super::bridge::Decoder;
 use strom_types::block::*;
 use strom_types::mediaplayer::{
-    PlayerMode, DECODED_AHEAD_PROPERTY, GROUP_PROPERTY, MODE_PROPERTY, OUTPUT_FRAMERATE_PROPERTY,
-    SOURCE_PROPERTY,
+    PlayerMode, DECODED_AHEAD_PROPERTY, DEFAULT_DECODED_AHEAD_S, GROUP_PROPERTY, MODE_PROPERTY,
+    OUTPUT_FRAMERATE_PROPERTY, READ_AHEAD_PROPERTY, SOURCE_PROPERTY,
 };
 use strom_types::{MediaType, PropertyValue};
-
-/// Default of `decoded_ahead_s`.
-pub const DEFAULT_DECODED_AHEAD_S: u64 = 3;
 
 /// Show and apply a property only in these modes.
 fn in_modes(modes: &[PlayerMode]) -> Option<PropertyCondition> {
@@ -42,7 +39,7 @@ pub fn media_player_definition() -> BlockDefinition {
             ExposedProperty {
                 name: MODE_PROPERTY.to_string(),
                 label: "Mode".to_string(),
-                description: "Playlist = files and URLs in order. Stinger = clip source for a Vision Mixer's stinger input. Timeline = an indexed source to scrub, jog and play at any speed (replay)."
+                description: "Playlist = files and URLs in order. Stinger clip source = feeds a Vision Mixer's stinger input: the playlist is the stinger library. The player decodes, parks the cued clip on its first frame and plays it once per take; looping, sync and playout delay are overridden. Wire video_out to the mixer's stinger input; audio_out carries the clip's sound. Timeline (replay) = an indexed source on a timeline shared by its group."
                     .to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
@@ -110,24 +107,21 @@ pub fn media_player_definition() -> BlockDefinition {
                 visible_when: in_modes(&[PlayerMode::Timeline]),
             },
             ExposedProperty {
-                name: "read_ahead_s".to_string(),
+                name: READ_AHEAD_PROPERTY.to_string(),
                 label: "Read-ahead (s)".to_string(),
                 description: "Seconds of coded media fetched ahead of the playhead, in memory. \
-                              Playlist: http(s)/HLS/DASH sources, 0 = GStreamer default. \
+                              Playlist and Stinger: http(s)/HLS/DASH sources, 0 = GStreamer default. \
                               Timeline: half as much is kept behind, minimum 2. Max 120."
                     .to_string(),
                 property_type: PropertyType::UInt,
                 default_value: Some(PropertyValue::UInt(
                     super::bridge::NetworkBuffer::DEFAULT_READ_AHEAD_S,
                 )),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "read_ahead_s".to_string(),
-                    transform: None,
-                },
+                mapping: block_mapping(READ_AHEAD_PROPERTY),
                 live: false,
                 persist: None,
-                visible_when: in_modes(&[PlayerMode::Playlist, PlayerMode::Timeline]),
+                // Every mode reads it: a stinger player's clips can be http(s).
+                visible_when: None,
             },
             ExposedProperty {
                 name: DECODED_AHEAD_PROPERTY.to_string(),
@@ -327,5 +321,108 @@ pub fn media_player_definition() -> BlockDefinition {
             height: Some(2.5),
             ..Default::default()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{BTreeSet, HashMap};
+    use strom_types::block::effective_properties;
+
+    /// The properties a block in `mode` is built with when every exposed
+    /// property is set: what `visible_properties` leaves of a saved flow.
+    fn applied_in(mode: PlayerMode) -> BTreeSet<String> {
+        let definition = media_player_definition();
+        let mut properties: HashMap<String, PropertyValue> = definition
+            .exposed_properties
+            .iter()
+            .filter_map(|p| Some((p.name.clone(), p.default_value.clone()?)))
+            .collect();
+        properties.insert(
+            MODE_PROPERTY.to_string(),
+            PropertyValue::String(mode.as_str().to_string()),
+        );
+        let (effective, _) = effective_properties(&definition.exposed_properties, &properties);
+        effective.into_keys().collect()
+    }
+
+    fn names(list: &[&str]) -> BTreeSet<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn playlist_mode_applies_the_playlist_properties() {
+        assert_eq!(
+            applied_in(PlayerMode::Playlist),
+            names(&[
+                "mode",
+                "read_ahead_s",
+                "decode",
+                "decoder",
+                "sync",
+                "playout_delay_ms",
+                "num_video_tracks",
+                "num_audio_tracks",
+                "loop_playlist",
+                "position_update_interval",
+            ])
+        );
+    }
+
+    #[test]
+    fn stinger_mode_applies_what_a_stinger_player_reads() {
+        // Decode, sync, playout delay and looping are overridden in stinger
+        // mode. Read-ahead is honoured, as it was before `mode`.
+        assert_eq!(
+            applied_in(PlayerMode::Stinger),
+            names(&[
+                "mode",
+                "read_ahead_s",
+                "decoder",
+                "num_video_tracks",
+                "num_audio_tracks",
+                "position_update_interval",
+            ])
+        );
+    }
+
+    #[test]
+    fn timeline_mode_applies_the_timeline_properties() {
+        assert_eq!(
+            applied_in(PlayerMode::Timeline),
+            names(&[
+                "mode",
+                "source",
+                "group",
+                "output_framerate",
+                "read_ahead_s",
+                "decoded_ahead_s",
+                "auth_mode",
+                "api_token",
+                "osc_service_id",
+            ])
+        );
+    }
+
+    #[test]
+    fn a_saved_stinger_read_ahead_is_kept() {
+        let definition = media_player_definition();
+        let properties: HashMap<String, PropertyValue> = [
+            (
+                MODE_PROPERTY.to_string(),
+                PropertyValue::String("stinger".to_string()),
+            ),
+            (READ_AHEAD_PROPERTY.to_string(), PropertyValue::UInt(0)),
+        ]
+        .into();
+        let (effective, ignored) =
+            effective_properties(&definition.exposed_properties, &properties);
+        assert!(ignored.is_empty(), "{:?}", ignored);
+        let buffer = super::super::bridge::NetworkBuffer::from_properties(&effective);
+        assert_eq!(
+            buffer.read_ahead_s, 0,
+            "the saved 0 must win over the default"
+        );
     }
 }

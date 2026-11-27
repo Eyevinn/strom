@@ -105,9 +105,11 @@ pub const SOURCE_PROPERTY: &str = "source";
 pub const GROUP_PROPERTY: &str = "group";
 /// Timeline mode: seconds of decoded frames kept ahead of the playhead.
 pub const DECODED_AHEAD_PROPERTY: &str = "decoded_ahead_s";
+/// Default of [`DECODED_AHEAD_PROPERTY`], in seconds.
+pub const DEFAULT_DECODED_AHEAD_S: u64 = 3;
 /// Timeline mode: output frame rate (empty = the source's rate).
 pub const OUTPUT_FRAMERATE_PROPERTY: &str = "output_framerate";
-/// Playlist and timeline mode: seconds of coded media fetched ahead.
+/// Every mode: seconds of coded media fetched ahead.
 pub const READ_AHEAD_PROPERTY: &str = "read_ahead_s";
 /// TAMS source auth, named as on TAMS Output.
 pub const AUTH_MODE_PROPERTY: &str = "auth_mode";
