@@ -6,13 +6,15 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ### Added
 - Media Player: timeline mode (replay). A player plays an indexed source (a TAMS flow, `tams+https://<gateway>/flows/<flow_id>`, or a directory with `index.json`) on a timeline that can be scrubbed, jogged and played at any speed, from -8x to 8x. Players with the same `group` form a replay group with one cursor and one speed; the group shares TAI time, and each player has its own frame grid (**Output Framerate**). See [MEDIA_LIBRARY.md](MEDIA_LIBRARY.md)
+- Replay state: per angle the decoder, its workers, failed decodes, average and longest decode and the latest decodes per segment; for the group the live margin, the live edge's age, step and when it last stepped
 - Replay control API: `POST /api/replay/{flow_id}/{group}/command`, `GET /api/replay/{flow_id}/{group}/state` and a WebSocket at `/api/replay/{flow_id}/{group}/ws`, with one command schema for REST and WebSocket (seek by frame, UTC, TAI or distance from live, jog, speed, ramps, cue and bounded play, live, marks). See [REPLAY_API.md](REPLAY_API.md)
-- Replay page: an operator page for a replay group at `/player/replay/{flow_id}/{group}` (transport, angles through the vision mixer, marks and clips)
+- Replay pages: an operator page for a replay group at `/player/replay/{flow_id}/{group}` (transport, angles through the vision mixer, marks and clips), and a diagnostics page at `/player/replay-diagnostics/{flow_id}/{group}` (the old `/player/replay-lab/...` redirects there): latency from command to screen, read from the burned-in Reference Timestamp code or the test bitstrip, with a breakdown (server, pipeline, browser), random-seek runs, TAI and UTC per angle and their offset, the live edge (known, estimated, age, step) and margin, gaps per angle, and per-segment decoding
 - Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture
 - TAMS Output: segments are cut on a TAI grid, and `segment_duration_ms` allows segments shorter than a second. The block asks upstream for a keyframe on each grid point, warns when a boundary still leaves the grid, and writes video `essence_parameters` on its flows
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
+- Replay page: a margin selector next to LIVE (0.5 to 2.0 s, kept in the browser) sets `margin_ms` for every `live` command, and changing it while following live re-sends `live`. The page shows the margin in use when the server's differs, warns when the margin is under the live edge's step plus 0.3 s, and while following live the timeline puts the playhead the margin in from its right edge
 - API: `GET /api/flows/{flow_id}/blocks/{block_id}/pgm-endpoint` returns the WHEP endpoint fed by a vision mixer's PGM output, like `multiview-endpoint`
-- Media Player: a timeline player has a Replay button in the properties panel that opens the replay page for its group
+- Media Player: a timeline player has a Replay button in the properties panel that opens the replay page for its group, and a Diagnostics button that opens the diagnostics page
 
 ### Changed
 - Media Player: an explicit `mode` property (`playlist`, `stinger`, `timeline`) selects what the block does, and the properties panel shows only the properties of that mode. `stinger_mode=true` becomes `mode=stinger`. The Playlist button and transport controls are hidden for a timeline player
@@ -22,8 +24,10 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - TAMS Output cuts segments itself instead of with `splitmuxsink`, and registers each segment as soon as the frame after it arrives instead of one GOP later
 - Media Player, timeline mode: decoded frames stay in GPU memory when the decoder and the flow downstream both take it: CUDA memory from `nvh264dec` (a GL consumer such as the vision mixer brings it into GL with `cudadownload`, by CUDA-GL interop), GL memory from `vtdec_hw` (sharing the flow's GL context). The frame store holds those buffers, so a frame is no longer downloaded to RAM, copied and uploaded again. Other decoders and system-memory consumers keep NV12 in system memory. `STROM_REPLAY_FRAME_MEMORY` (`auto`, `system`, `cuda`, `gl`) narrows the choice, and `STROM_REPLAY_DECODED_MB` budgets the memory the frames are in
 - TAMS Output: segment files carry a per-run id in their name (`seg_<run>_<n>`), so a new run in the same directory never overwrites segments an earlier run left parked
+- Replay page: the timeline window keeps the playhead in its right half. Near live the window ends at the live edge; further behind, the playhead stays in the middle and a LIVE tab at the right edge shows how far live is past the scale (click to go live). A finished recording ends the window at its last frame
 
 ### Fixed
+- Replay page: the zoom buttons under the timeline, the header timecodes and the transport buttons no longer shift when a label changes (LIVE or a time, Play or Pause); the timeline row is a three-column grid and the changing labels have fixed widths
 - TAMS Output: the last segment of a run ends at its last frame, the open segment is finished when the flow stops, the mapping from running time to TAI is re-anchored after a sleep or clock jump, and the frame rate and size written to the store follow the flow
 - TAMS Output: segments are parked on disk instead of dropped when the store is unreachable, a channel is full, or the store answers 401/403, and are uploaded later without holding back new segments. A 404 for the flow creates the flow again, registration is idempotent, and slow clock drift no longer re-anchors the TAI mapping
 - OSC: SAT freshness is judged on the wall clock, and a request that gets 401 is retried once with a new SAT
@@ -35,6 +39,9 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Media Player (timeline mode): a local `source` outside `media_path` is refused, through `..` or a symlink alike
 - Vision mixer: `pgm-endpoint` and `multiview-endpoint` find a WHEP output behind a pad linked more than once or a block with several outputs (breadth first, not only the first link)
 - Replay WebSocket: the socket is closed with a close frame when its group's flow stops, not dropped
+- Replay and replay diagnostics pages: WHEP playback uses the server's ICE and TURN servers from `/api/ice-servers` (`STROM_SERVER_ICE_SERVERS`), like the WHEP player page. Without them ICE failed behind a firewall that only lets TURN through
+- Replay page: the angle buttons under the monitors are no longer covered by them when the window is short or narrow (the stage's grid rows take their content's height)
+- Replay diagnostics page: TAI times show nine nanosecond digits (`1795719399:071504047`, not `1795719399:71504047`), and numbers that update use tabular digits, fixed decimals and fixed or minimum widths, with the tables at content width, so the layout no longer moves as values change
 
 ### Upgrade notes
 - TAMS Output: parked segments over `STROM_TAMS_PARKED_MAX_MB` or `STROM_TAMS_PARKED_MAX_SEGMENTS` are deleted, oldest first, on the first sweep after an upgrade

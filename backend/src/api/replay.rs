@@ -1,5 +1,7 @@
 //! Replay control: commands and state per replay group, over REST and a
-//! WebSocket, plus the operator page.
+//! WebSocket, plus the operator page and the diagnostics page (latency from
+//! command to screen, live edge, gaps, decoding and per-angle telemetry, for
+//! measuring the engine).
 //!
 //! Both transports take the same commands ([`ReplayCommand`], JSON tagged by
 //! `cmd`) and return the same result ([`ReplayCommandResult`]). A malformed
@@ -20,7 +22,7 @@ use crate::state::AppState;
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Json;
 use futures::{SinkExt, StreamExt};
 use std::sync::{Arc, Weak};
@@ -105,10 +107,28 @@ pub async fn replay_state(
 }
 
 const REPLAY_HTML: &str = include_str!("../../static/replay.html");
+const REPLAY_DIAGNOSTICS_HTML: &str = include_str!("../../static/replay-diagnostics.html");
 
 /// GET /player/replay/{flow_id}/{group}
 pub async fn replay_page(Path((_flow_id, _group)): Path<(String, String)>) -> Html<&'static str> {
     Html(REPLAY_HTML)
+}
+
+/// GET /player/replay-diagnostics/{flow_id}/{group}
+pub async fn replay_diagnostics_page(
+    Path((_flow_id, _group)): Path<(String, String)>,
+) -> Html<&'static str> {
+    Html(REPLAY_DIAGNOSTICS_HTML)
+}
+
+/// GET /player/replay-lab/{flow_id}/{group}: the old name of the
+/// diagnostics page.
+pub async fn replay_lab_page(Path((flow_id, group)): Path<(String, String)>) -> Redirect {
+    Redirect::permanent(&format!(
+        "/player/replay-diagnostics/{}/{}",
+        urlencoding::encode(&flow_id),
+        urlencoding::encode(&group)
+    ))
 }
 
 /// GET /api/replay/{flow_id}/{group}/ws

@@ -478,6 +478,14 @@ pub async fn create_app_with_config(
         .route("/whip-ingest", get(api::whip_ingest::whip_ingest_page))
         .route("/replay/{flow_id}/{group}", get(api::replay::replay_page))
         .route(
+            "/replay-diagnostics/{flow_id}/{group}",
+            get(api::replay::replay_diagnostics_page),
+        )
+        .route(
+            "/replay-lab/{flow_id}/{group}",
+            get(api::replay::replay_lab_page),
+        )
+        .route(
             "/vision-mixer/{flow_id}",
             get(api::vision_mixer_page::vision_mixer_page),
         )
