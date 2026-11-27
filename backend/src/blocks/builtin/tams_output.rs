@@ -871,6 +871,14 @@ fn build_flow_chain(
     if inputs.is_empty() {
         return Ok(());
     }
+    // One mux stream per input (the segmenter's essences).
+    if mux_streams.len() != inputs.len() {
+        return Err(BlockBuildError::InvalidConfiguration(format!(
+            "TAMS Output: {} mux streams for {} inputs",
+            mux_streams.len(),
+            inputs.len()
+        )));
+    }
 
     // Directory for this TAMS flow's segment files, parked ones included. Keyed
     // by the TAMS flow id and the gateway, so a backlog survives a restart of
@@ -1447,13 +1455,12 @@ fn build_flow_chain(
             format!("{} ({})", block_id, suffix_owned),
             mux_factory,
             container == Container::MpegTs,
-            sinks.len(),
+            mux_streams,
             0, // video comes first when there is one
             pad_ends,
             Box::new(on_open),
             Box::new(deliver),
         );
-        segmenter.set_mux_streams(mux_streams);
         if let Ok(mut slot) = segmenter_slot.lock() {
             *slot = Some(Arc::downgrade(&segmenter));
         }

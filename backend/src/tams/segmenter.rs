@@ -129,8 +129,8 @@ pub struct Segmenter {
     muxer_factory: &'static str,
     mpegts: bool,
     media_end: Vec<Arc<PadMediaEnd>>,
-    /// Per essence: muxer pad name and stream tags (see [`Self::set_mux_streams`]).
-    mux_streams: std::sync::OnceLock<Vec<MuxStream>>,
+    /// Per essence: muxer pad name and stream tags.
+    mux_streams: Vec<MuxStream>,
     inner: Mutex<Inner>,
     finisher: Mutex<Option<mpsc::Sender<FinishJob>>>,
     /// Jobs handed to the finisher and not finished yet. It takes them one
@@ -153,7 +153,10 @@ fn running_time_ns(sample: &gst::Sample) -> Option<u64> {
 }
 
 impl Segmenter {
-    /// `essences` inputs, of which `reference` decides the splits. One
+    /// One input per entry in `streams` (how that essence enters each
+    /// fragment's muxer: a named pad, so a track keeps a fixed MPEG-TS PID even
+    /// in a fragment that lacks an earlier track, and a language), of which
+    /// `reference` decides the splits. One
     /// [`PadMediaEnd`] per essence in `media_end` tracks where the written
     /// media ends. `on_open` is called with the segmenter locked, on the
     /// reference's streaming thread; `deliver` on the finisher thread.
@@ -162,12 +165,13 @@ impl Segmenter {
         label: String,
         muxer_factory: &'static str,
         mpegts: bool,
-        essences: usize,
+        streams: Vec<MuxStream>,
         reference: usize,
         media_end: Vec<Arc<PadMediaEnd>>,
         on_open: OpenFn,
         deliver: DeliverFn,
     ) -> Arc<Self> {
+        let essences = streams.len();
         let (tx, rx) = mpsc::channel::<FinishJob>();
         let thread_label = label.clone();
         let finishing = Arc::new(AtomicUsize::new(0));
@@ -188,7 +192,7 @@ impl Segmenter {
             muxer_factory,
             mpegts,
             media_end,
-            mux_streams: std::sync::OnceLock::new(),
+            mux_streams: streams,
             inner: Mutex::new(Inner {
                 reference,
                 caps: vec![None; essences],
@@ -205,13 +209,6 @@ impl Segmenter {
             finisher: Mutex::new(spawned.ok().map(|_| tx)),
             finishing,
         })
-    }
-
-    /// Fix how each essence enters the muxer: a named pad (a fixed MPEG-TS
-    /// PID, so a track keeps its PID even in a fragment that lacks an
-    /// earlier track) and a language. Set once, before the first fragment.
-    pub fn set_mux_streams(&self, streams: Vec<MuxStream>) {
-        let _ = self.mux_streams.set(streams);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -475,7 +472,7 @@ impl Segmenter {
                 .into_iter()
                 .find(|t| t.direction() == gst::PadDirection::Sink && t.caps().can_intersect(caps))
                 .ok_or_else(|| format!("{} takes no {}", self.muxer_factory, caps))?;
-            let stream = self.mux_streams.get().and_then(|s| s.get(idx));
+            let stream = self.mux_streams.get(idx);
             let pad_name = stream.and_then(|s| s.pad_name.as_deref());
             let sink_pad = mux
                 .request_pad(&tmpl, pad_name, None)
