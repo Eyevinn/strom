@@ -78,6 +78,26 @@ workaround can go once we move past that version.
 - **Upstream:** not searched.
 - **Found in:** the WHEP Output input bridge (`gst::video_input_bridge`).
 
+### `GstVideoEncoder`: `min-force-key-unit-interval` also drops scheduled keyframe requests
+- **Seen on:** GStreamer 1.28.6 (Homebrew, macOS), `x264enc`. Linux not checked.
+- **Symptom:** the base-class property is meant to keep a burst of requests (WebRTC PLIs) from
+  forcing back-to-back keyframes, but it drops every upstream force-key-unit request that comes
+  within the interval of the last forced keyframe, also one that asks for a keyframe at a given
+  running time. A recorder that asks for a keyframe on each point of a 1 s grid, behind an
+  encoder with the interval at 1 s, had segment boundaries 84–215 ms past the grid, with
+  nothing in the log.
+- **Repro:** untested as `gst-launch`. `x264enc min-force-key-unit-interval=1000000000` in front
+  of `splitmuxsink` with `split-at-running-time` every second, or any element that sends
+  `GstForceKeyUnit` with a running time once a second; compare keyframe times with the grid.
+- **Hint:** not read. The property makes no difference between a request with a running time
+  and one without.
+- **Tests:** `tams_output_test::shared_timeline::encoder_keyframes_follow_the_grid_with_default_floor`
+  (fails with the base-class property set).
+- **Upstream:** not searched.
+- **Found in:** the Video Encoder block now sets the property to 0 and limits only requests
+  without a running time, in an upstream event probe
+  (`backend/src/blocks/builtin/videoenc/keyframe_requests.rs`).
+
 ### `nvcodec` has no NVDEC 4:2:2 decode
 - **Seen on:** GStreamer 1.24, 1.26, 1.28 and main (sources read).
 - **Symptom:** H.264 4:2:2 10-bit falls back to CPU decode, even on Blackwell GPUs whose NVDEC
