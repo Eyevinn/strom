@@ -14,8 +14,10 @@
 //! Frames come out as NV12 in presentation order with their container PTS,
 //! which [`map_to_grid`] turns into frames on the group's TAI grid. The PTS
 //! are those the demuxer gave, as with a pipeline per segment.
-//! `STROM_REPLAY_DECODER_PER_SEGMENT=1` goes back to one pipeline per segment
-//! (diagnostics, A/B).
+//!
+//! `STROM_REPLAY_DECODER` names the decoder element to use instead of the
+//! automatic choice in [`pick_decoder`] (diagnostics, A/B between decoders).
+//! It accepts any element, not only an H.264 decoder.
 
 use super::grid::FrameGrid;
 use super::source::Segment;
@@ -25,13 +27,30 @@ use gstreamer_app as gst_app;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Pick the best available H.264 decoder. `STROM_REPLAY_DECODER` overrides
-/// the choice (diagnostics), when that element exists.
+/// the choice when that element exists; it is read once, at the first call.
+/// The override is for diagnostics and accepts any element: one that is not
+/// an H.264 decoder fails to link or gives garbage frames.
 pub fn pick_decoder() -> &'static str {
     static OVERRIDE: OnceLock<Option<String>> = OnceLock::new();
-    let wanted = OVERRIDE.get_or_init(|| strom_types::env::var_opt("STROM_REPLAY_DECODER"));
+    let wanted = OVERRIDE.get_or_init(|| {
+        let name = strom_types::env::var_opt("STROM_REPLAY_DECODER")?;
+        if gst::ElementFactory::find(&name).is_some() {
+            info!("STROM_REPLAY_DECODER: using decoder {name}");
+            Some(name)
+        } else {
+            warn!("STROM_REPLAY_DECODER: no element {name}, choosing the decoder automatically");
+            None
+        }
+    });
+    choose_decoder(wanted.as_deref())
+}
+
+/// [`pick_decoder`] without the environment: `wanted` if that element
+/// exists, else the best available H.264 decoder.
+fn choose_decoder(wanted: Option<&str>) -> &str {
     if let Some(name) = wanted {
         if gst::ElementFactory::find(name).is_some() {
             return name;
@@ -46,16 +65,6 @@ pub fn pick_decoder() -> &'static str {
         }
     }
     "decodebin"
-}
-
-/// Whether to go back to one pipeline per segment
-/// (`STROM_REPLAY_DECODER_PER_SEGMENT=1`).
-fn per_segment_pipelines() -> bool {
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| {
-        strom_types::env::var_opt("STROM_REPLAY_DECODER_PER_SEGMENT")
-            .is_some_and(|v| v == "1" || v == "true")
-    })
 }
 
 /// Demuxer and appsrc caps for a container MIME type. A source that does
@@ -155,7 +164,7 @@ impl SegmentDecoder {
         timeout: Duration,
     ) -> Result<Decoded, String> {
         // decodebin has no sink pad to feed: one pipeline per segment.
-        if per_segment_pipelines() || self.decoder == "decodebin" {
+        if self.decoder == "decodebin" {
             refuse_while_wedged()?;
             return decode_bytes(bytes, container, self.decoder, timeout);
         }
@@ -770,6 +779,21 @@ mod tests {
             object_id: "o".into(),
             location: Location::Urls(vec![]),
         }
+    }
+
+    #[test]
+    fn a_wanted_decoder_that_exists_is_chosen() {
+        gst::init().unwrap();
+        assert_eq!(choose_decoder(Some("identity")), "identity");
+    }
+
+    #[test]
+    fn a_wanted_decoder_that_does_not_exist_falls_back() {
+        gst::init().unwrap();
+        assert_eq!(
+            choose_decoder(Some("no_such_decoder_element")),
+            choose_decoder(None)
+        );
     }
 
     #[test]
