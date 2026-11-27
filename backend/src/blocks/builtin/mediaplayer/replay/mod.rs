@@ -6,7 +6,7 @@
 //! of the flow clock. Jog, scrub, slow motion and reverse move the cursor.
 //!
 //! Modules, from source to output:
-//! - `source`: a `SourceIndex` per protocol (local `index.json`, TAMS);
+//! - `source`: a `SourceIndex` per protocol (TAMS; an experimental local `index.json`);
 //! - `cache`: index window and coded bytes around the cursor, fetched async;
 //! - `decode`: segment bytes to frames on the player's own TAI frame grid
 //!   (`grid`, the source's rate);

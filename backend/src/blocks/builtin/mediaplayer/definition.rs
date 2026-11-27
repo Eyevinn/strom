@@ -76,7 +76,7 @@ pub fn media_player_definition() -> BlockDefinition {
             ExposedProperty {
                 name: SOURCE_PROPERTY.to_string(),
                 label: "Source".to_string(),
-                description: "Indexed source: a TAMS flow as tams+https://<gateway>/flows/<flow_id> (or tams+http://), or a directory with index.json (absolute or relative to media path)."
+                description: "Indexed source: a TAMS flow as tams+https://<gateway>/flows/<flow_id> (or tams+http://)."
                     .to_string(),
                 property_type: PropertyType::String,
                 default_value: Some(PropertyValue::String(String::new())),
