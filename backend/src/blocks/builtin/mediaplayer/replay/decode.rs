@@ -5,13 +5,20 @@
 //!   appsink`), CPU only and cheap: the object's access units, in the stream
 //!   format the decoder takes;
 //! - **decode** in a long-lived [`DecoderSession`] (one per decode worker):
-//!   `decoder ! videoconvert ! appsink`, fed through a pad of our own. Per
+//!   `decoder ! [videoconvert !] capsfilter ! appsink`, fed through a pad of
+//!   our own. Per
 //!   segment: flush, a new segment event, DISCONT on the first access unit,
 //!   then end of stream, which drains the decoder of its last pictures. The
 //!   session (and a hardware decoder's context) lives on, so a segment does
 //!   not pay a decoder start-up.
 //!
 //! Frames come out as NV12 in presentation order with their container PTS,
+//! in the memory [`choose_memory`] picked for the player ([`FrameMemory`]):
+//! CUDA memory from `nvh264dec`, GL memory from `vtdec_hw`, else system
+//! memory. Device memory stays on the GPU from the decoder to the flow: the
+//! frame store holds it, and a GL consumer takes it as it is (CUDA through
+//! its `cudadownload`, which is CUDA-GL interop, not a download).
+//!
 //! which [`map_to_grid`] turns into frames on the group's TAI grid. The PTS
 //! are those the demuxer gave, as with a pipeline per segment.
 
@@ -21,7 +28,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
@@ -36,6 +43,130 @@ pub fn pick_decoder() -> &'static str {
         }
     }
     "decodebin"
+}
+
+/// Where decoded frames live, from the decoder to the flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameMemory {
+    /// System memory: `videoconvert` to NV12, as any decoder can.
+    System,
+    /// CUDA memory (`nvh264dec`). A GL consumer brings it into GL with
+    /// `cudadownload`, by CUDA-GL interop on the GPU.
+    Cuda,
+    /// GL memory (`vtdec_hw`). The decode pipeline shares the flow's GL
+    /// context (see [`crate::gst::context_forward`]).
+    Gl,
+}
+
+impl FrameMemory {
+    /// The caps feature of the memory; `None` for system memory.
+    pub fn feature(self) -> Option<&'static str> {
+        match self {
+            FrameMemory::System => None,
+            FrameMemory::Cuda => Some("memory:CUDAMemory"),
+            FrameMemory::Gl => Some("memory:GLMemory"),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            FrameMemory::System => "system",
+            FrameMemory::Cuda => "cuda",
+            FrameMemory::Gl => "gl",
+        }
+    }
+
+    /// NV12 in this memory.
+    fn nv12(self) -> gst::Caps {
+        let caps = gst::Caps::builder("video/x-raw").field("format", "NV12");
+        match self.feature() {
+            Some(f) => caps.features([f]).build(),
+            None => caps.build(),
+        }
+    }
+
+    /// What a decode session's appsink takes: NV12 in this memory, then NV12
+    /// in system memory, which a decoder falls back to when it cannot give
+    /// device memory after all (a GL context that is not CUDA-compatible,
+    /// say). The player refuses a segment whose memory differs from the
+    /// output's, so the two never mix.
+    fn session_caps(self) -> gst::Caps {
+        let mut caps = self.nv12();
+        if self != FrameMemory::System {
+            caps.merge(FrameMemory::System.nv12());
+        }
+        caps
+    }
+}
+
+/// The memory to decode into, from what the decoder can output and what the
+/// flow takes from the player's output (`consumer`, the appsrc's source pad,
+/// linked: its peer answers for what is downstream). CUDA memory first, then
+/// GL memory, else system memory: an unlinked output, a decoder in system
+/// memory only (`avdec_h264`), or a consumer that takes system memory only
+/// (an encoder behind `videoconvert`, an export to file).
+///
+/// `STROM_REPLAY_FRAME_MEMORY` = `system`, `cuda` or `gl` narrows the choice
+/// (`system` always goes to system memory); unset or `auto`, all are tried.
+pub fn choose_memory(decoder: &str, consumer: Option<&gst::Pad>) -> FrameMemory {
+    static WANTED: OnceLock<Option<String>> = OnceLock::new();
+    let wanted = WANTED
+        .get_or_init(|| strom_types::env::var_opt("STROM_REPLAY_FRAME_MEMORY"))
+        .as_deref()
+        .map(|v| v.trim().to_ascii_lowercase());
+    let offers = |m: FrameMemory| decoder_offers(decoder, m);
+    let takes = |m: FrameMemory| consumer.is_some_and(|pad| consumer_takes(pad, m));
+    pick_memory(wanted.as_deref(), offers, takes)
+}
+
+/// [`choose_memory`] without GStreamer: `wanted` from the environment, and
+/// what the decoder offers and the consumer takes.
+fn pick_memory(
+    wanted: Option<&str>,
+    offers: impl Fn(FrameMemory) -> bool,
+    takes: impl Fn(FrameMemory) -> bool,
+) -> FrameMemory {
+    let allowed = |m: FrameMemory| match wanted {
+        None | Some("") | Some("auto") => true,
+        Some(w) => w == m.name(),
+    };
+    [FrameMemory::Cuda, FrameMemory::Gl]
+        .into_iter()
+        .find(|&m| allowed(m) && offers(m) && takes(m))
+        .unwrap_or(FrameMemory::System)
+}
+
+/// Whether the decoder's source template has `memory`.
+fn decoder_offers(decoder: &str, memory: FrameMemory) -> bool {
+    let Some(feature) = memory.feature() else {
+        return true;
+    };
+    let Some(factory) = gst::ElementFactory::find(decoder) else {
+        return false;
+    };
+    factory
+        .static_pad_templates()
+        .into_iter()
+        .filter(|t| t.direction() == gst::PadDirection::Src)
+        .any(|t| {
+            t.caps()
+                .iter_with_features()
+                .any(|(_, f)| f.contains(feature))
+        })
+}
+
+/// Whether what is linked to `pad` takes NV12 in `memory`. An unlinked pad
+/// takes nothing: its frames would have nowhere to go.
+fn consumer_takes(pad: &gst::Pad, memory: FrameMemory) -> bool {
+    if !pad.is_linked() {
+        return false;
+    }
+    let want = memory.nv12();
+    let caps = pad.peer_query_caps(Some(&want));
+    // The answer within the filter: a peer that answers ANY or with other
+    // memories narrows to what it really takes here.
+    let caps = caps.intersect(&want);
+    !caps.is_empty()
 }
 
 /// Demuxer and appsrc caps for a container MIME type. A source that does
@@ -115,13 +246,29 @@ impl AsRef<[u8]> for SharedBytes {
 /// first use and made again after a failure.
 pub struct SegmentDecoder {
     decoder: &'static str,
+    memory: FrameMemory,
+    /// An element in the flow, for the GL context (GL memory only).
+    flow_anchor: Option<gst::glib::WeakRef<gst::Element>>,
     session: Option<DecoderSession>,
 }
 
 impl SegmentDecoder {
+    /// Frames in system memory.
     pub fn new(decoder: &'static str) -> Self {
+        Self::with_memory(decoder, FrameMemory::System, None)
+    }
+
+    /// Frames in `memory`. GL memory shares the GL context of the flow that
+    /// `flow_anchor` is in.
+    pub fn with_memory(
+        decoder: &'static str,
+        memory: FrameMemory,
+        flow_anchor: Option<&gst::Element>,
+    ) -> Self {
         Self {
             decoder,
+            memory,
+            flow_anchor: flow_anchor.map(|e| e.downgrade()),
             session: None,
         }
     }
@@ -146,10 +293,16 @@ impl SegmentDecoder {
             // new ones until their teardown finishes.
             refuse_while_wedged()?;
             let started = Instant::now();
-            self.session = Some(DecoderSession::new(self.decoder)?);
-            debug!(
-                "Replay: {} session started in {} ms",
+            let anchor = self.flow_anchor.as_ref().and_then(|w| w.upgrade());
+            self.session = Some(DecoderSession::new(
                 self.decoder,
+                self.memory,
+                anchor.as_ref(),
+            )?);
+            debug!(
+                "Replay: {} session ({} memory) started in {} ms",
+                self.decoder,
+                self.memory.name(),
                 started.elapsed().as_millis()
             );
         }
@@ -201,17 +354,49 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Whether a buffer belongs to a buffer pool: a long-lived decoder recycles
-/// those, and the frame store holds frames for seconds, which would starve
+/// The pool a buffer belongs to, if any: a long-lived decoder recycles its
+/// buffers, and the frame store holds frames for seconds, which would starve
 /// a bounded pool.
-fn from_pool(b: &gst::BufferRef) -> bool {
+fn pool_of(b: &gst::BufferRef) -> Option<gst::BufferPool> {
+    use gst::glib::translate::from_glib_none;
     // SAFETY: reads the `pool` field of a valid GstBuffer we hold a
-    // reference to; it is set once, when the pool hands the buffer out.
-    unsafe { !(*b.as_ptr()).pool.is_null() }
+    // reference to; it is set once, when the pool hands the buffer out, and
+    // the buffer holds a reference to the pool while it is out.
+    unsafe {
+        let pool = (*b.as_ptr()).pool;
+        (!pool.is_null()).then(|| from_glib_none(pool))
+    }
+}
+
+/// Whether a pool has a most buffers it hands out (and would block, or
+/// fail, once the frame store holds them all).
+fn is_bounded(pool: &gst::BufferPool) -> bool {
+    pool.config().params().is_none_or(|(_, _, _, max)| max > 0)
+}
+
+/// Whether caps are in device memory (CUDA, GL, ...), not system memory.
+fn in_device_memory(caps: Option<&gst::CapsRef>) -> bool {
+    caps.and_then(|c| c.features(0)).is_some_and(|f| {
+        !f.is_any()
+            && f.iter().any(|name| name.as_str().starts_with("memory:"))
+            && !f.contains("memory:SystemMemory")
+    })
+}
+
+/// Whether the frame store must hold a copy of a pooled buffer rather than
+/// the buffer itself. System memory: always, as before (CPU copy). Device
+/// memory: only from a bounded pool, and then the copy is made on the GPU
+/// (`gst_memory_copy` of CUDA or GL memory is a device copy). An unbounded
+/// pool (`nvh264dec`'s own CUDA pool) grows instead.
+fn must_copy(b: &gst::BufferRef, caps: Option<&gst::CapsRef>) -> bool {
+    match pool_of(b) {
+        None => false,
+        Some(pool) => !in_device_memory(caps) || is_bounded(&pool),
+    }
 }
 
 /// Appsink callbacks that collect samples (copying pooled buffers when
-/// `own_pooled`) and note the end of stream.
+/// `own_pooled` and [`must_copy`] says so) and note the end of stream.
 fn collect_into(sink: &gst_app::AppSink, out: &SharedOut, own_pooled: bool) {
     let on_sample = Arc::clone(out);
     let on_eos = Arc::clone(out);
@@ -224,7 +409,7 @@ fn collect_into(sink: &gst_app::AppSink, out: &SharedOut, own_pooled: bool) {
                     o.caps = sample.caps_owned();
                 }
                 if let Some(b) = sample.buffer_owned() {
-                    let b = if own_pooled && from_pool(&b) {
+                    let b = if own_pooled && must_copy(&b, sample.caps()) {
                         b.copy_deep().map_err(|_| gst::FlowError::Error)?
                     } else {
                         b
@@ -459,15 +644,32 @@ pub struct DecoderSession {
 }
 
 impl DecoderSession {
-    pub fn new(decoder: &str) -> Result<Self, String> {
+    /// A session decoding into `memory`. GL memory shares the GL context of
+    /// the flow `flow_anchor` is in.
+    pub fn new(
+        decoder: &str,
+        memory: FrameMemory,
+        flow_anchor: Option<&gst::Element>,
+    ) -> Result<Self, String> {
         let dec = gst::ElementFactory::make(decoder)
             .build()
             .map_err(|e| e.to_string())?;
-        Self::with_decoder(dec)
+        if memory == FrameMemory::Cuda && dec.find_property("num-output-surfaces").is_some() {
+            // 1 = always copy: each picture is copied on the GPU out of the
+            // decoder's mapped output surfaces into a buffer of its own CUDA
+            // pool. The frame store holds pictures for seconds; with the
+            // surfaces exported instead, it would hold the decoder's few.
+            dec.set_property("num-output-surfaces", 1u32);
+        }
+        Self::with_decoder(dec, memory, flow_anchor)
     }
 
     /// A session around a decoder element made by the caller.
-    fn with_decoder(dec: gst::Element) -> Result<Self, String> {
+    fn with_decoder(
+        dec: gst::Element,
+        memory: FrameMemory,
+        flow_anchor: Option<&gst::Element>,
+    ) -> Result<Self, String> {
         let decoder = dec
             .factory()
             .map_or("decoder".into(), |f| f.name().to_string());
@@ -477,14 +679,14 @@ impl DecoderSession {
                 .build()
                 .map_err(|e| e.to_string())
         };
-        let convert = make("videoconvert")?;
+        // Device memory goes straight from the decoder to the appsink: a
+        // videoconvert would take system memory only.
+        let convert = match memory {
+            FrameMemory::System => Some(make("videoconvert")?),
+            _ => None,
+        };
         let filter = gst::ElementFactory::make("capsfilter")
-            .property(
-                "caps",
-                gst::Caps::builder("video/x-raw")
-                    .field("format", "NV12")
-                    .build(),
-            )
+            .property("caps", memory.session_caps())
             .build()
             .map_err(|e| e.to_string())?;
         let sink = gst_app::AppSink::builder()
@@ -492,11 +694,19 @@ impl DecoderSession {
             .async_(false)
             .enable_last_sample(false)
             .build();
-        pipeline
-            .add_many([&dec, &convert, &filter, sink.upcast_ref()])
-            .map_err(|e| e.to_string())?;
-        gst::Element::link_many([&dec, &convert, &filter, sink.upcast_ref()])
-            .map_err(|e| e.to_string())?;
+        let chain: Vec<&gst::Element> = std::iter::once(&dec)
+            .chain(convert.as_ref())
+            .chain([&filter, sink.upcast_ref()])
+            .collect();
+        pipeline.add_many(&chain).map_err(|e| e.to_string())?;
+        gst::Element::link_many(&chain).map_err(|e| e.to_string())?;
+        if memory == FrameMemory::Gl {
+            // GL memory is only usable in the GL context that made it, or one
+            // shared with it: the decoder takes the flow's.
+            if let Some(anchor) = flow_anchor {
+                crate::gst::context_forward::install(&pipeline, anchor);
+            }
+        }
         let out: SharedOut = Arc::default();
         collect_into(&sink, &out, true);
         let dec_sink = dec.static_pad("sink").ok_or("decoder has no sink pad")?;
@@ -964,7 +1174,8 @@ mod tests {
             .property("sleep-time", 5_000_000u32)
             .build()
             .unwrap();
-        let mut session = DecoderSession::with_decoder(dec).expect("session");
+        let mut session =
+            DecoderSession::with_decoder(dec, FrameMemory::System, None).expect("session");
         let caps = gst::Caps::builder("video/x-raw")
             .field("format", "NV12")
             .field("width", 64i32)
@@ -1172,6 +1383,128 @@ mod tests {
                 p(0.95),
                 all[all.len() - 1]
             );
+        }
+    }
+
+    #[test]
+    fn device_memory_when_decoder_and_consumer_both_have_it() {
+        use FrameMemory::*;
+        let all = |_: FrameMemory| true;
+        let only = |m: FrameMemory| move |x: FrameMemory| x == m;
+        // nvh264dec into a GL mixer (its front takes CUDA memory too).
+        assert_eq!(pick_memory(None, all, all), Cuda);
+        // vtdec_hw: GL memory only.
+        assert_eq!(pick_memory(None, only(Gl), all), Gl);
+        // avdec_h264, or an encoder behind videoconvert: system memory.
+        assert_eq!(pick_memory(None, |_| false, all), System);
+        assert_eq!(pick_memory(None, all, |_| false), System);
+        // A consumer that takes GL but not CUDA memory.
+        assert_eq!(pick_memory(Some("auto"), all, only(Gl)), Gl);
+        // The environment narrows the choice.
+        assert_eq!(pick_memory(Some("system"), all, all), System);
+        assert_eq!(pick_memory(Some("gl"), all, all), Gl);
+        assert_eq!(pick_memory(Some("cuda"), only(Gl), all), System);
+    }
+
+    #[test]
+    fn session_caps_fall_back_to_system_memory() {
+        gst::init().unwrap();
+        let caps = FrameMemory::Cuda.session_caps();
+        assert_eq!(caps.size(), 2);
+        assert!(caps.features(0).unwrap().contains("memory:CUDAMemory"));
+        assert!(!in_device_memory(Some(FrameMemory::System.nv12().as_ref())));
+        assert!(in_device_memory(Some(FrameMemory::Cuda.nv12().as_ref())));
+        assert!(in_device_memory(Some(FrameMemory::Gl.nv12().as_ref())));
+        assert_eq!(FrameMemory::System.session_caps().size(), 1);
+    }
+
+    #[test]
+    fn an_unlinked_or_system_memory_consumer_gets_system_memory() {
+        gst::init().unwrap();
+        let src = gst::Pad::builder(gst::PadDirection::Src).build();
+        assert!(!consumer_takes(&src, FrameMemory::Cuda));
+        // A sink pad that takes NV12 in system memory only.
+        let tmpl = gst::PadTemplate::new(
+            "sink",
+            gst::PadDirection::Sink,
+            gst::PadPresence::Always,
+            &FrameMemory::System.nv12(),
+        )
+        .unwrap();
+        let sink = gst::Pad::builder_from_template(&tmpl).build();
+        src.link(&sink).unwrap();
+        assert!(consumer_takes(&src, FrameMemory::System));
+        assert!(!consumer_takes(&src, FrameMemory::Cuda));
+        assert!(!consumer_takes(&src, FrameMemory::Gl));
+    }
+
+    /// vtdec_hw into a GL consumer: frames in GL memory, as many as in
+    /// system memory (macOS only; skipped where vtdec_hw is missing).
+    #[test]
+    fn gl_memory_session_decodes_with_vtdec() {
+        gst::init().unwrap();
+        if gst::ElementFactory::find("vtdec_hw").is_none() {
+            return;
+        }
+        let bytes = Arc::new(test_ts("x264enc", 25));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut dec = SegmentDecoder::with_memory("vtdec_hw", FrameMemory::Gl, None);
+            let _ = tx.send(dec.decode(bytes, None, Duration::from_secs(10)));
+        });
+        let d = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("decode returned")
+            .expect("decode ok");
+        assert!(d.frames.len() >= 24, "{} frames", d.frames.len());
+        assert!(in_device_memory(Some(d.caps.as_ref())), "caps {}", d.caps);
+    }
+
+    /// nvh264dec into a CUDA consumer: every frame in CUDA memory, from no
+    /// pool or an unbounded one (the frame store can hold them without a
+    /// copy), and the same PTS as in system memory. Skipped where nvh264dec
+    /// is missing.
+    #[test]
+    fn cuda_memory_session_decodes_with_nvh264dec() {
+        gst::init().unwrap();
+        if gst::ElementFactory::find("nvh264dec").is_none() {
+            return;
+        }
+        let objects = vec![test_ts("x264enc", 25), test_ts("x264enc", 13)];
+        let want: Vec<Decoded> = objects
+            .iter()
+            .map(|o| {
+                SegmentDecoder::new("nvh264dec")
+                    .decode(Arc::new(o.clone()), None, Duration::from_secs(10))
+                    .unwrap()
+            })
+            .collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut dec = SegmentDecoder::with_memory("nvh264dec", FrameMemory::Cuda, None);
+            let out: Vec<_> = objects
+                .into_iter()
+                .map(|o| dec.decode(Arc::new(o), None, Duration::from_secs(10)))
+                .collect();
+            let _ = tx.send(out);
+        });
+        let got = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("decodes returned");
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            let g = g.as_ref().expect("decode ok");
+            assert!(
+                g.caps
+                    .features(0)
+                    .is_some_and(|f| f.contains("memory:CUDAMemory")),
+                "segment {}: caps {}",
+                i,
+                g.caps
+            );
+            assert_eq!(pts_of(g), pts_of(w), "segment {}", i);
+            for (_, b) in &g.frames {
+                assert!(pool_of(b).is_none_or(|p| !is_bounded(&p)), "segment {}", i);
+            }
         }
     }
 
