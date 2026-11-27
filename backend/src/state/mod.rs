@@ -527,9 +527,13 @@ impl AppState {
                     crate::blocks::builtin::mediaplayer::migrate_flow(flow);
                 }
 
-                // TAMS Outputs saved with segment_duration_secs.
+                // TAMS Outputs saved with segment_duration_secs. Written back
+                // below, so the migration (and its log line) runs once.
+                let mut migrated = Vec::new();
                 for flow in flows.values_mut() {
-                    crate::blocks::builtin::tams_output::migrate_flow(flow);
+                    if crate::blocks::builtin::tams_output::migrate_flow(flow) {
+                        migrated.push(flow.id);
+                    }
                 }
 
                 // Reset all flow states to None on server restart since pipelines aren't running
@@ -541,6 +545,18 @@ impl AppState {
                             flow.name, flow.gst_state
                         );
                         flow.set_gst_state(None);
+                    }
+                }
+
+                for id in &migrated {
+                    if let Some(flow) = flows.get(id) {
+                        if let Err(e) = self.inner.storage.save_flow(flow).await {
+                            warn!(
+                                "Failed to save migrated flow '{}': {} (migrated again on \
+                                 the next start)",
+                                flow.name, e
+                            );
+                        }
                     }
                 }
 
