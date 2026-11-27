@@ -5,7 +5,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 ## [Unreleased]
 
 ### Added
-- Media Player: timeline mode (replay). A player plays an indexed source (a TAMS flow, `tams+https://<gateway>/flows/<flow_id>`) on a timeline that can be scrubbed, jogged and played at any speed, from -8x to 8x. Players with the same `group` form a replay group with one cursor and one speed; the group shares TAI time, and each player has its own frame grid (**Output Framerate**). See [MEDIA_LIBRARY.md](MEDIA_LIBRARY.md)
+- Media Player: timeline mode (replay). A player plays an indexed source (a TAMS flow, `tams+https://<gateway>/flows/<flow_id>`, or a directory with `index.json`) on a timeline that can be scrubbed, jogged and played at any speed, from -8x to 8x. Players with the same `group` form a replay group with one cursor and one speed; the group shares TAI time, and each player has its own frame grid (**Output Framerate**). See [MEDIA_LIBRARY.md](MEDIA_LIBRARY.md)
 - Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture
 - TAMS Output: segments are cut on a TAI grid, and `segment_duration_ms` allows segments shorter than a second. The block asks upstream for a keyframe on each grid point, warns when a boundary still leaves the grid, and writes video `essence_parameters` on its flows
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
@@ -27,6 +27,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Media Player (timeline mode): a listed stretch of a growing source that still has a hole near the cursor is listed again, with backoff, so segments registered late are found. The live poll runs off the fetch loop, a decoder that hangs is bounded, and video that is not H.264 (H.265, say) fails with an error that names it instead of hanging
 - OSC: the gateway host is taken from the parsed URL before a SAT is sent. User info that looks like an OSC host (`https://x.svc.auto.prod.osaas.io:pw@evil.example/`) passed the check and the SAT went to the other host; a gateway URL with user info is now refused
 - OSC: a SAT whose `exp` and `iat` claims give an absurd lifetime is refreshed by age instead of panicking on overflow
+- Media Player (timeline mode): a local `source` outside `media_path` is refused, through `..` or a symlink alike
 
 ### Upgrade notes
 - TAMS Output: parked segments over `STROM_TAMS_PARKED_MAX_MB` or `STROM_TAMS_PARKED_MAX_SEGMENTS` are deleted, oldest first, on the first sweep after an upgrade

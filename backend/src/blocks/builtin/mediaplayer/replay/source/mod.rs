@@ -4,17 +4,20 @@
 //! media exist and which TAI time each covers) and the bytes of a piece. A
 //! [`SourceIndex`] provides both, one implementation per protocol:
 //!
+//! - [`local::LocalIndex`]: a directory with a TAMS-like `index.json` and
+//!   segment files (the spike's test material).
 //! - [`tams::TamsIndex`]: a TAMS flow, via `GET /flows/{id}/segments`.
 //!
 //! HLS, DASH or byte ranges of a file can plug in later behind the same trait.
 //! The source is chosen by URI, see [`open`].
 
+pub mod local;
 pub mod tams;
 
 use crate::client_auth::AuthMethod;
 use anyhow::Result;
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use strom_types::tams::{parse_timerange, parse_timestamp_signed};
 
@@ -189,13 +192,17 @@ where
 /// A parsed `source`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceSpec {
+    /// Directory with `index.json`.
+    Local(PathBuf),
     /// `tams+http(s)://<gateway>/flows/<flow_id>`.
     Tams { gateway: String, flow_id: String },
 }
 
-/// Parse `source`: `tams+https://host[/prefix]/flows/<id>` or
-/// `tams+http://...`.
-pub fn parse_source(source: &str) -> Result<SourceSpec, String> {
+/// Parse `source`: `tams+https://host[/prefix]/flows/<id>`,
+/// `tams+http://...`, `file:///dir`, or a plain directory path (absolute, or
+/// relative to `media_path`). A local directory must resolve to a place inside
+/// `media_path`; [`open`] checks that.
+pub fn parse_source(source: &str, media_path: &str) -> Result<SourceSpec, String> {
     let s = source.trim();
     if let Some(rest) = s.strip_prefix("tams+") {
         if !(rest.starts_with("http://") || rest.starts_with("https://")) {
@@ -213,16 +220,25 @@ pub fn parse_source(source: &str) -> Result<SourceSpec, String> {
             flow_id: flow_id.to_string(),
         });
     }
-    Err(format!(
-        "unsupported source '{}': expected tams+https://<gateway>/flows/<flow_id>",
-        s
-    ))
+    let path = s.strip_prefix("file://").unwrap_or(s);
+    let p = PathBuf::from(path);
+    Ok(SourceSpec::Local(if p.is_absolute() {
+        p
+    } else {
+        PathBuf::from(media_path).join(p)
+    }))
 }
 
 /// Open the index for a source. `auth` is used for a TAMS gateway, already
-/// checked against it (see [`crate::tams::auth::TamsAuth`]).
-pub fn open(spec: &SourceSpec, auth: AuthMethod) -> Result<Arc<dyn SourceIndex>, String> {
+/// checked against it (see [`crate::tams::auth::TamsAuth`]). A local directory
+/// must lie inside `media_path`.
+pub fn open(
+    spec: &SourceSpec,
+    auth: AuthMethod,
+    media_path: &Path,
+) -> Result<Arc<dyn SourceIndex>, String> {
     match spec {
+        SourceSpec::Local(dir) => Ok(Arc::new(local::LocalIndex::load(dir, media_path)?)),
         SourceSpec::Tams { gateway, flow_id } => Ok(Arc::new(
             tams::TamsIndex::new(gateway, flow_id, auth).map_err(|e| e.to_string())?,
         )),
@@ -236,23 +252,38 @@ mod tests {
     #[test]
     fn parses_tams_uri() {
         assert_eq!(
-            parse_source("tams+https://gw.example.com/flows/abc-1").unwrap(),
+            parse_source("tams+https://gw.example.com/flows/abc-1", "/m").unwrap(),
             SourceSpec::Tams {
                 gateway: "https://gw.example.com".into(),
                 flow_id: "abc-1".into()
             }
         );
         assert_eq!(
-            parse_source("tams+http://localhost:18000/api/flows/x/").unwrap(),
+            parse_source("tams+http://localhost:18000/api/flows/x/", "/m").unwrap(),
             SourceSpec::Tams {
                 gateway: "http://localhost:18000/api".into(),
                 flow_id: "x".into()
             }
         );
-        assert!(parse_source("tams+ftp://h/flows/x").is_err());
-        assert!(parse_source("tams+http://h/x").is_err());
-        assert!(parse_source("tams+http://h/flows/").is_err());
-        assert!(parse_source("/abs/cam1").is_err());
+        assert!(parse_source("tams+ftp://h/flows/x", "/m").is_err());
+        assert!(parse_source("tams+http://h/x", "/m").is_err());
+        assert!(parse_source("tams+http://h/flows/", "/m").is_err());
+    }
+
+    #[test]
+    fn parses_local_paths() {
+        assert_eq!(
+            parse_source("/abs/cam1", "/m").unwrap(),
+            SourceSpec::Local("/abs/cam1".into())
+        );
+        assert_eq!(
+            parse_source("gop10/cam1", "/m").unwrap(),
+            SourceSpec::Local("/m/gop10/cam1".into())
+        );
+        assert_eq!(
+            parse_source("file:///abs/cam1", "/m").unwrap(),
+            SourceSpec::Local("/abs/cam1".into())
+        );
     }
 
     fn seg(i: i64) -> Segment {
