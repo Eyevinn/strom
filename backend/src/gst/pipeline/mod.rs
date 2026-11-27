@@ -4,6 +4,7 @@ mod bus;
 mod construction;
 pub(crate) mod effects;
 mod lifecycle;
+pub use lifecycle::StopDrains;
 mod linking;
 pub(crate) mod properties;
 mod srt;
@@ -195,6 +196,14 @@ pub struct PipelineManager {
     block_message_connect_fns: Vec<crate::blocks::BusMessageConnectFn>,
     /// Element signal setup functions from blocks (called when pipeline starts)
     element_setup_fns: Vec<crate::blocks::ElementSetupFn>,
+    /// Stop drain functions from blocks (run when the pipeline is stopped)
+    stop_drain_fns: Vec<crate::blocks::StopDrainFn>,
+    /// Set when a stop begins. The bus handler then does not report an EOS
+    /// as the flow ending on its own: a stop drain may cause one.
+    stopping: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set by the bus handler on EOS or on an error. Stop drains are skipped
+    /// for a flow that already ended: there is no data left to drain.
+    flow_ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Thread priority state tracker (tracks whether priority was successfully set)
     thread_priority_state: Option<ThreadPriorityState>,
     /// Thread registry for tracking streaming threads (optional, for CPU monitoring)
@@ -313,7 +322,7 @@ pub(crate) mod test_utils {
 mod tests {
     use super::*;
     use crate::blocks::BlockRegistry;
-    use strom_types::{Element, Flow};
+    use strom_types::{Element, Flow, StromEvent};
 
     fn create_test_flow() -> Flow {
         let mut flow = Flow::new("Test Pipeline");
@@ -378,6 +387,132 @@ mod tests {
         let state = manager.stop();
         assert!(state.is_ok());
         assert_eq!(state.unwrap(), PipelineState::Null);
+    }
+
+    fn build_test_manager(events: EventBroadcaster) -> PipelineManager {
+        gst::init().unwrap();
+        let registry = BlockRegistry::new("test_blocks.json");
+        PipelineManager::new(
+            &create_test_flow(),
+            events,
+            &registry,
+            default_test_ice_servers(),
+            "all".to_string(),
+            None,
+            std::path::PathBuf::from("./media"),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    /// Bus handlers only fire with a GLib main loop running, as in main().
+    fn ensure_glib_main_loop() {
+        static STARTED: std::sync::Once = std::sync::Once::new();
+        STARTED.call_once(crate::gst::start_glib_main_loop);
+    }
+
+    fn start_playing(manager: &mut PipelineManager) {
+        manager.start().unwrap();
+        let (result, state, _) = manager.pipeline.state(gst::ClockTime::from_seconds(10));
+        assert!(result.is_ok() && state == gst::State::Playing, "{state:?}");
+    }
+
+    fn flag_drain(
+        ran: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> crate::blocks::StopDrainFn {
+        let ran = ran.clone();
+        Box::new(move || ran.store(true, std::sync::atomic::Ordering::SeqCst))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stop_drains_run_for_a_playing_pipeline() {
+        let mut manager = build_test_manager(EventBroadcaster::default());
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        manager.stop_drain_fns.push(flag_drain(&ran));
+        start_playing(&mut manager);
+        manager.stop().unwrap();
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stop_drains_are_skipped_for_a_pipeline_that_never_played() {
+        let mut manager = build_test_manager(EventBroadcaster::default());
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        manager.stop_drain_fns.push(flag_drain(&ran));
+        manager.stop().unwrap();
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stop_drains_are_skipped_after_the_flow_ended() {
+        ensure_glib_main_loop();
+        let events = EventBroadcaster::default();
+        let mut rx = events.subscribe();
+        let mut manager = build_test_manager(events);
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        manager.stop_drain_fns.push(flag_drain(&ran));
+        start_playing(&mut manager);
+        manager
+            .pipeline
+            .bus()
+            .unwrap()
+            .post(gst::message::Eos::builder().src(&manager.pipeline).build())
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !matches!(rx.recv().await, Ok(StromEvent::PipelineEos { .. })) {}
+        })
+        .await
+        .expect("EOS was not reported");
+        manager.stop().unwrap();
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A drain runs with the bus watch connected: an error it causes is
+    /// reported, and an EOS it causes is not reported as the flow ending.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stop_drains_run_with_the_bus_watch_connected() {
+        ensure_glib_main_loop();
+        let events = EventBroadcaster::default();
+        let mut rx = events.subscribe();
+        let mut manager = build_test_manager(events);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new((false, false)));
+        let seen_in_drain = seen.clone();
+        let pipeline_weak = manager.pipeline.downgrade();
+        manager.stop_drain_fns.push(Box::new(move || {
+            let pipeline = pipeline_weak.upgrade().unwrap();
+            let bus = pipeline.bus().unwrap();
+            bus.post(gst::message::Eos::builder().src(&pipeline).build())
+                .unwrap();
+            bus.post(
+                gst::message::Error::builder(gst::CoreError::Failed, "drain failed")
+                    .src(&pipeline)
+                    .build(),
+            )
+            .unwrap();
+            // Messages are handled in order: once the error is reported, an
+            // EOS report would have come before it.
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < until {
+                match rx.try_recv() {
+                    Ok(StromEvent::PipelineEos { .. }) => seen_in_drain.lock().unwrap().1 = true,
+                    Ok(StromEvent::PipelineError { .. }) => {
+                        seen_in_drain.lock().unwrap().0 = true;
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                }
+            }
+        }));
+        start_playing(&mut manager);
+        manager.stop().unwrap();
+        let (error_reported, eos_reported) = *seen.lock().unwrap();
+        assert!(error_reported, "an error during a drain was not reported");
+        assert!(
+            !eos_reported,
+            "an EOS during a drain was reported as the flow ending"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
