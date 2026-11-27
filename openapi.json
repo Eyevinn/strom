@@ -10515,6 +10515,13 @@
             "format": "int64",
             "description": "Trim: the angle's media is moved this far on the group's axis."
           },
+          "pending_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The source the angle is switching to, until it shows it or gives up."
+          },
           "ready": {
             "$ref": "#/components/schemas/ReplayReady"
           },
@@ -10528,6 +10535,13 @@
                 "type": "null"
               }
             ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The source the angle shows, without credentials."
           }
         }
       },
@@ -10547,6 +10561,7 @@
           "end",
           "mark",
           "follow_live",
+          "source",
           "cue_end",
           "caught_up",
           "edge_moved",
@@ -10712,13 +10727,20 @@
           },
           {
             "type": "object",
-            "description": "Hold `[in, out)` and park, paused, on `in`.",
+            "description": "Hold `[in, out)` and park, paused, on `in`. With `source`, the angle\n`block` switches to that source too (see [`ReplayCommand::Source`]).",
             "required": [
               "in",
               "out",
               "cmd"
             ],
             "properties": {
+              "block": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The angle that switches; may be left out when the group has one."
+              },
               "cmd": {
                 "type": "string",
                 "enum": [
@@ -10741,6 +10763,40 @@
               "out": {
                 "$ref": "#/components/schemas/ReplayTarget",
                 "description": "Exclusive."
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "A source URI for angle `block` to switch to."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Switch angle `block` to another source in the same store, without a\nrebuild. The angle holds its last picture until the new source has\nthe frame for the cursor, then shows it. Needs a group on real TAI.\nThe motion does not change.",
+            "required": [
+              "source",
+              "cmd"
+            ],
+            "properties": {
+              "block": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The angle that switches; may be left out when the group has one."
+              },
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "source"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "description": "A source URI, as the player's `source` property takes it."
               }
             }
           },
@@ -11109,6 +11165,61 @@
               },
               "ready": {
                 "$ref": "#/components/schemas/ReplayReady"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Angle `block` shows its new source (`cue {source}` or `source`).",
+            "required": [
+              "block",
+              "event"
+            ],
+            "properties": {
+              "block": {
+                "type": "string"
+              },
+              "event": {
+                "type": "string",
+                "enum": [
+                  "source_changed"
+                ]
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The source URI without credentials."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Angle `block` did not switch to `source` and stays on its old one.",
+            "required": [
+              "block",
+              "error",
+              "event"
+            ],
+            "properties": {
+              "block": {
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              },
+              "event": {
+                "type": "string",
+                "enum": [
+                  "source_failed"
+                ]
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             }
           }

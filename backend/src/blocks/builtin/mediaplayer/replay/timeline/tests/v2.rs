@@ -85,6 +85,11 @@ fn every_command_from_every_state_does_what_the_table_says() {
         },
         Command::FollowLive { on: true },
         Command::FollowLive { on: false },
+        // At the timeline, without a player that switches: the motion stays.
+        Command::Source {
+            source: "cam2".into(),
+            block: None,
+        },
     ];
     let rt = S;
     for follow in [true, false] {
@@ -140,7 +145,7 @@ fn every_command_from_every_state_does_what_the_table_says() {
                     Command::Uncue {} => (cur, cur_speed, None, before.live, ramp_left),
                     Command::Live { .. } => (BASE + 58_500 * MS, 1.0, None, true, None),
                     Command::End {} => (BASE + 60 * S - 1, 0.0, None, false, None),
-                    Command::Mark { .. } => (
+                    Command::Mark { .. } | Command::Source { .. } => (
                         cur,
                         cur_speed,
                         held.map(|r| (r.start, r.end)),
@@ -578,6 +583,27 @@ fn start_mode_live_goes_live_once_ready() {
     }
     tl.bounds();
     assert_eq!(tl.cursor_tai(S), Some((BASE + 5 * S, 0.0)));
+}
+
+/// Retention removes the start under a paused cursor: the cursor shows the
+/// new start, and a seek into what was removed lands on it.
+#[test]
+fn a_cursor_in_what_retention_removed_moves_to_the_start() {
+    let (tl, p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    tl.apply_at(Command::FollowLive { on: false }, 0).unwrap();
+    assert_eq!(
+        tl.apply_at(seek_tai(BASE + 5 * S), 0).unwrap().tai,
+        BASE + 5 * S
+    );
+    p[0].start_tai.store(BASE + 10 * S, Ordering::Relaxed);
+    assert_eq!(tl.tai_at(0), Some(BASE + 10 * S));
+    assert_eq!(
+        tl.apply_at(seek_tai(BASE + 2 * S), 0).unwrap().tai,
+        BASE + 10 * S
+    );
+    // Play from there goes on from the new start.
+    tl.apply_at(Command::Speed { speed: 1.0 }, 0).unwrap();
+    assert_eq!(tl.tai_at(S), Some(BASE + 11 * S));
 }
 
 #[test]

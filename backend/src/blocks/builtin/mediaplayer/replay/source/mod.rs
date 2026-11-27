@@ -90,6 +90,39 @@ impl Segment {
     }
 }
 
+/// A segment's media is no longer in the store: the store deleted it
+/// (retention), or its index still lists media whose object is gone. Not
+/// worth retrying; the index has moved on.
+#[derive(Debug)]
+pub struct Gone(pub String);
+
+impl std::fmt::Display for Gone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "segment {} is no longer in the store", self.0)
+    }
+}
+
+impl std::error::Error for Gone {}
+
+/// Whether `e` says the media is gone: a [`Gone`], an HTTP 404 or 410 from
+/// the store, or a file that does not exist.
+pub fn is_gone(e: &anyhow::Error) -> bool {
+    // `downcast_ref` also finds a `Gone` added as context.
+    e.downcast_ref::<Gone>().is_some()
+        || e.chain().any(|c| {
+            c.is::<Gone>()
+                || c.downcast_ref::<crate::tams::client::HttpStatusError>()
+                    .is_some_and(|h| {
+                        matches!(
+                            h.status,
+                            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+                        )
+                    })
+                || c.downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+        })
+}
+
 /// What a source says about its essence.
 #[derive(Debug, Clone, Default)]
 pub struct SourceInfo {
@@ -131,7 +164,8 @@ pub trait SourceIndex: Send + Sync {
         let segs = self.list(after_ns, i64::MAX).await?;
         Ok(Since { segs, more: false })
     }
-    /// The bytes of a segment.
+    /// The bytes of a segment. An error that [`is_gone`] says the store
+    /// no longer has it.
     async fn fetch(&self, segment: &Segment) -> Result<Vec<u8>>;
 }
 
@@ -335,6 +369,29 @@ mod tests {
         assert!(newest(100, 50, 8, 4, false).1);
         let (s, more, _) = newest(5, -100, 8, 4, false);
         assert_eq!((s, more), ((0..5).collect(), false));
+    }
+
+    #[test]
+    fn gone_is_a_missing_object_not_any_failure() {
+        let http = |status| {
+            anyhow::Error::new(crate::tams::client::HttpStatusError {
+                status,
+                context: "GET media object".into(),
+                body: String::new(),
+            })
+        };
+        assert!(is_gone(&http(reqwest::StatusCode::NOT_FOUND)));
+        assert!(is_gone(&http(reqwest::StatusCode::GONE)));
+        assert!(is_gone(
+            &http(reqwest::StatusCode::NOT_FOUND).context("fetch")
+        ));
+        // An expired presigned URL is 403: list again, not gone.
+        assert!(!is_gone(&http(reqwest::StatusCode::FORBIDDEN)));
+        assert!(!is_gone(&anyhow::anyhow!("connection reset")));
+        assert!(is_gone(&anyhow::Error::new(Gone("o".into()))));
+        assert!(is_gone(&anyhow::anyhow!("x").context(Gone("o".into()))));
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(is_gone(&anyhow::Error::new(missing).context("reading x")));
     }
 
     #[test]

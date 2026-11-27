@@ -30,7 +30,9 @@ that mode:
   the player's own frame grid, e.g. the mixer's rate for slow motion from a 100p source. TAMS
   sources authenticate as TAMS Output does (**Authentication**, **API Token**, **OSC Service
   ID**), with the same rule: the instance's `STROM_TAMS_API_TOKEN` and OSC SATs go only to an
-  allowed gateway.
+  allowed gateway. When the store deletes old media (a TAMS Output with **Retention**, or any
+  other cleaner), the timeline's start follows it within seconds: a paused cursor or a seek in
+  what was deleted lands on the new start, and a deleted segment is skipped, not retried.
 
 Flows saved before **Mode** existed keep working: `stinger_mode` and the `replay_*`
 properties are rewritten to the current names when a flow is loaded or saved.

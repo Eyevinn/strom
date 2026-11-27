@@ -18,6 +18,10 @@
 //!   decoded instead of repeating the last one, pushes with backpressure
 //!   (a blocking, non-live appsrc), and ends the stream at the clip's out
 //!   point. Same timeline, same frames, as fast as downstream goes.
+//! - A source switch (`lane`) puts a second index, fetcher and frame store
+//!   beside the first, behind the same decoders and output: no rebuild. The
+//!   tick holds the last picture until the new source has the one for the
+//!   cursor, then shows the new source.
 
 use super::super::bridge::NetworkBuffer;
 use super::backoff::{worth_warning, Backoff};
@@ -29,7 +33,10 @@ use super::decode::{
     SegmentDecoder,
 };
 use super::source::{Segment, SourceIndex};
-use super::timeline::{tick_rt, Clip, DecodeRecord, PlayerConfig, PlayerStats, ReplayTimeline};
+use super::timeline::{
+    tick_rt, Clip, DecodeRecord, OpenedSource, PlayerConfig, PlayerStats, ReplayTimeline,
+    SourceControl, SourceIdent,
+};
 use crate::gst::frame_rate::estimate_frame_rate;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -38,9 +45,14 @@ use gstreamer_video as gst_video;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
+
+mod lane;
+
+pub use lane::SWITCH_TIMEOUT;
+use lane::{Lane, Lanes, Settle};
 
 const S: i64 = 1_000_000_000;
 
@@ -159,8 +171,12 @@ fn within_budget(
     out
 }
 
+/// How a player opens another source for a switch: from a URI as the
+/// `source` property takes it, with the block's auth and media path.
+pub type OpenSource = dyn Fn(&str) -> Result<OpenedSource, String> + Send + Sync;
+
 /// What a player outputs: at which rate, and paced how.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Output {
     /// Output frame rate; `None` = the source's own rate.
     pub rate: Option<(u32, u32)>,
@@ -169,22 +185,21 @@ pub struct Output {
     pub clip: Option<Clip>,
     /// The player's replay properties and identity.
     pub config: PlayerConfig,
+    /// The `source` property as given, and how to open another source; a
+    /// player without it cannot switch source.
+    pub switching: Option<(String, Arc<OpenSource>)>,
 }
 
 pub struct ReplayPlayer {
     pub block_id: String,
     timeline: Arc<ReplayTimeline>,
     pub stats: Arc<PlayerStats>,
-    fetcher: Arc<Fetcher>,
-    store: Arc<SegmentStore>,
+    /// Lock order: `lanes` before any lock of a lane.
+    lanes: Mutex<Lanes>,
+    switching: Option<Arc<OpenSource>>,
+    /// Seconds of coded bytes a fetcher reads ahead.
+    prefetch_s: u64,
     appsrc: gst::glib::WeakRef<gst_app::AppSrc>,
-    decoded: Mutex<FrameStore>,
-    /// Signalled when frames are added to `decoded` (an offline tick waits
-    /// on it).
-    frame_ready: Condvar,
-    inflight: Mutex<HashSet<i64>>,
-    /// Segments whose decode failed (or gave no frames), retried with backoff.
-    failed: Mutex<Backoff<i64>>,
     caps: Mutex<Option<gst::Caps>>,
     decoder: &'static str,
     /// The memory frames are decoded into, chosen once for all workers.
@@ -221,7 +236,13 @@ impl ReplayPlayer {
             rate: output_rate,
             clip,
             config,
+            switching,
         } = output;
+        let ident = SourceIdent {
+            source: config.source.clone(),
+            source_id: config.source_id.clone(),
+            store: config.store.clone(),
+        };
         let stats = Arc::new(PlayerStats::with_config(block_id, config));
         if let Some((n, d)) = output_rate {
             stats.set_output_rate(n, d);
@@ -233,29 +254,32 @@ impl ReplayPlayer {
         let decoder = pick_decoder();
         stats.set_decoder(decoder, DECODE_WORKERS);
         info!("Replay player {}: decoder {}", block_id, decoder);
-        let fetcher = Arc::new(Fetcher::new(
+        let prefetch_s = prefetch_s
+            .max(cache_ahead_s.min(MAX_DECODE_AHEAD_S) + 2)
+            .min(NetworkBuffer::MAX_READ_AHEAD_S);
+        let fetcher = Fetcher::new(
             block_id,
             source,
             Arc::clone(&timeline),
             Arc::clone(&stats),
-            prefetch_s
-                .max(cache_ahead_s.min(MAX_DECODE_AHEAD_S) + 2)
-                .min(NetworkBuffer::MAX_READ_AHEAD_S),
-        ));
-        Arc::new(Self {
+            prefetch_s,
+        );
+        let (uri, switching) = match switching {
+            // An export plays one clip from one source.
+            Some((uri, open)) if clip.is_none() => (Some(uri), Some(open)),
+            _ => (None, None),
+        };
+        let player = Arc::new(Self {
             block_id: block_id.to_string(),
-            store: Arc::clone(&fetcher.store),
-            fetcher,
+            lanes: Mutex::new(Lanes {
+                current: Lane::new(fetcher, uri, ident, None),
+                pending: None,
+            }),
+            switching,
+            prefetch_s,
             timeline,
             stats,
             appsrc: appsrc.downgrade(),
-            decoded: Mutex::new(FrameStore::default()),
-            frame_ready: Condvar::new(),
-            inflight: Mutex::new(HashSet::new()),
-            failed: Mutex::new(Backoff::new(
-                Duration::from_millis(250),
-                Duration::from_secs(10),
-            )),
             caps: Mutex::new(None),
             decoder,
             memory: OnceLock::new(),
@@ -273,7 +297,12 @@ impl ReplayPlayer {
                 .is_some_and(|v| v == "1" || v == "true"),
             started: AtomicBool::new(false),
             stop: Arc::new(AtomicBool::new(false)),
-        })
+        });
+        if player.switching.is_some() {
+            let control: Weak<dyn SourceControl> = Arc::downgrade(&player) as Weak<ReplayPlayer>;
+            player.stats.set_control(control);
+        }
+        player
     }
 
     /// Start the threads, once, when the flow starts.
@@ -281,8 +310,8 @@ impl ReplayPlayer {
         if self.started.swap(true, Ordering::SeqCst) {
             return;
         }
-        Arc::clone(&self.fetcher).spawn(Arc::clone(&self.stop));
-        let (tx, rx) = mpsc::channel::<Arc<Segment>>();
+        self.current().spawn();
+        let (tx, rx) = mpsc::channel::<DecodeJob>();
         let rx = Arc::new(Mutex::new(rx));
         for w in 0..self.workers {
             let me = Arc::clone(self);
@@ -311,8 +340,29 @@ impl ReplayPlayer {
         !self.stop.load(Ordering::Relaxed)
     }
 
+    /// Stop the player's threads and every lane's fetcher.
     fn halt(&self) {
         self.stop.store(true, Ordering::Relaxed);
+        let lanes = lock(&self.lanes);
+        lanes.current.halt();
+        if let Some(p) = &lanes.pending {
+            p.halt();
+        }
+    }
+
+    /// The lane shown.
+    fn current(&self) -> Arc<Lane> {
+        Arc::clone(&lock(&self.lanes).current)
+    }
+
+    /// The lane shown, and the one being switched to.
+    fn lanes(&self) -> (Arc<Lane>, Option<Arc<Lane>>) {
+        let l = lock(&self.lanes);
+        (Arc::clone(&l.current), l.pending.clone())
+    }
+
+    fn is_current(&self, lane: &Arc<Lane>) -> bool {
+        Arc::ptr_eq(&lock(&self.lanes).current, lane)
     }
 
     /// Stop the player for good (its flow stopped or was torn down): every
@@ -320,15 +370,16 @@ impl ReplayPlayer {
     /// at once, the others within one loop), and the player leaves its
     /// group, so the group's next run starts from a clean state.
     pub fn shutdown(&self) {
-        if !self.stop.swap(true, Ordering::SeqCst) {
+        if !self.stop.load(Ordering::SeqCst) {
             debug!("Replay {}: shutting down", self.block_id);
         }
+        self.halt();
         self.timeline.unregister_player(&self.stats);
     }
 
     // --- decoding -----------------------------------------------------------
 
-    fn decode_worker(self: Arc<Self>, rx: Arc<Mutex<mpsc::Receiver<Arc<Segment>>>>) {
+    fn decode_worker(self: Arc<Self>, rx: Arc<Mutex<mpsc::Receiver<DecodeJob>>>) {
         // One long-lived decoder per worker, kept across segments.
         let anchor = self.appsrc.upgrade().map(|a| a.upcast::<gst::Element>());
         let mut decoder =
@@ -336,23 +387,23 @@ impl ReplayPlayer {
         drop(anchor);
         while self.alive() {
             let job = lock(&rx).recv_timeout(Duration::from_millis(100));
-            let seg = match job {
-                Ok(s) => s,
+            let (lane, seg) = match job {
+                Ok(j) => j,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
             let started = Instant::now();
-            match self.decode_one(&seg, &mut decoder) {
-                Ok(()) => lock(&self.failed).succeed(&seg.start_ns),
+            match self.decode_one(&lane, &seg, &mut decoder) {
+                Ok(()) => lock(&lane.failed).succeed(&seg.start_ns),
                 Err(e) => {
-                    self.stats.note_decode(DecodeRecord {
+                    lane.stats().note_decode(DecodeRecord {
                         start_ns: seg.start_ns,
                         end_ns: seg.end_ns,
                         ms: started.elapsed().as_millis() as u64,
                         frames: 0,
                         error: Some(e.clone()),
                     });
-                    let attempts = lock(&self.failed).fail(seg.start_ns, Instant::now());
+                    let attempts = lock(&lane.failed).fail(seg.start_ns, Instant::now());
                     if worth_warning(attempts) {
                         warn!(
                             "Replay {}: segment {} not decoded (attempt {}): {}",
@@ -366,7 +417,7 @@ impl ReplayPlayer {
                     }
                 }
             }
-            lock(&self.inflight).remove(&seg.start_ns);
+            lock(&lane.inflight).remove(&seg.start_ns);
         }
     }
 
@@ -393,12 +444,18 @@ impl ReplayPlayer {
 
     /// Decode one segment into the frame store. An error means the segment
     /// gave no usable frames; it is retried later with backoff.
-    fn decode_one(&self, seg: &Segment, decoder: &mut SegmentDecoder) -> Result<(), String> {
+    fn decode_one(
+        &self,
+        lane: &Arc<Lane>,
+        seg: &Segment,
+        decoder: &mut SegmentDecoder,
+    ) -> Result<(), String> {
         // Evicted meanwhile: nothing to do, it is sent again when refetched.
-        let Some(bytes) = self.store.bytes(seg.start_ns) else {
+        let Some(bytes) = lane.store().bytes(seg.start_ns) else {
             return Ok(());
         };
-        let container = self.store.info().and_then(|i| i.container);
+        let stats = lane.stats();
+        let container = lane.store().info().and_then(|i| i.container);
         let started = Instant::now();
         let result = decoder.decode(
             bytes,
@@ -409,7 +466,7 @@ impl ReplayPlayer {
         let decoded = result?;
         // No frame rate from the index: take it from the stream, its caps or
         // else its timestamps (an SPS without timing, e.g. VideoToolbox).
-        let grid = self.stats.grid().or_else(|| {
+        let grid = stats.grid().or_else(|| {
             let (n, d) = caps_frame_rate(&decoded.caps).or_else(|| {
                 let est = estimate_frame_rate(decoded.frames.iter().map(|(pts, _)| *pts));
                 if let Some((n, d)) = est {
@@ -421,10 +478,10 @@ impl ReplayPlayer {
                 }
                 est
             })?;
-            self.stats.init_grid(n, d, seg.first_sample_tai())
+            stats.init_grid(n, d, seg.first_sample_tai())
         });
         let Some(grid) = grid else {
-            if !self.stats.frame_rate_missing.swap(true, Ordering::Relaxed) {
+            if !stats.frame_rate_missing.swap(true, Ordering::Relaxed) {
                 warn!(
                     "Replay {}: the source has no frame rate: none in the index, the \
                      stream's caps or the timestamps of segment {} ({} frames); nothing \
@@ -436,9 +493,7 @@ impl ReplayPlayer {
             }
             return Err("no frame rate: none in the index or the stream".into());
         };
-        self.stats
-            .frame_rate_missing
-            .store(false, Ordering::Relaxed);
+        stats.frame_rate_missing.store(false, Ordering::Relaxed);
         let n_decoded = decoded.frames.len();
         let frames = map_to_grid(seg, &grid, decoded.frames, decoded.first_pts);
         if frames.is_empty() {
@@ -475,10 +530,18 @@ impl ReplayPlayer {
             let mut caps = lock(&self.caps);
             match caps.as_ref() {
                 Some(out) if !same_layout(out, &decoded.caps) => {
-                    return Err(format!(
+                    let e = format!(
                         "decoded as {}, the output is {}; not shown",
                         decoded.caps, out
-                    ));
+                    );
+                    // A source switched to that cannot go out: the switch
+                    // gives up, instead of holding the last picture until
+                    // it times out.
+                    drop(caps);
+                    if !self.is_current(lane) {
+                        *lock(&lane.error) = Some(e.clone());
+                    }
+                    return Err(e);
                 }
                 Some(_) => {}
                 None => *caps = Some(decoded.caps),
@@ -486,7 +549,7 @@ impl ReplayPlayer {
         }
         if let (Some(lo), Some(hi)) = (frames.first().map(|f| f.0), frames.last().map(|f| f.0)) {
             let bytes: u64 = frames.iter().map(|(_, b)| b.size() as u64).sum();
-            let mut store = lock(&self.decoded);
+            let mut store = lock(&lane.decoded);
             if seg.duration_ns() > 0 {
                 store.bytes_per_s = bytes as f64 * 1e9 / seg.duration_ns() as f64;
             }
@@ -499,9 +562,9 @@ impl ReplayPlayer {
                 },
             );
             store.frames.extend(frames);
-            self.frame_ready.notify_all();
+            lane.frame_ready.notify_all();
         }
-        self.stats.note_decode(DecodeRecord {
+        stats.note_decode(DecodeRecord {
             start_ns: seg.start_ns,
             end_ns: seg.end_ns,
             ms,
@@ -511,90 +574,112 @@ impl ReplayPlayer {
         Ok(())
     }
 
-    fn scheduler(self: Arc<Self>, tx: mpsc::Sender<Arc<Segment>>) {
+    fn scheduler(self: Arc<Self>, tx: mpsc::Sender<DecodeJob>) {
         while self.alive() {
-            // The group's cursor, in this source's own time.
-            let offset = self.stats.offset_ns();
-            if let Some((cursor, speed)) = self
-                .timeline
-                .cursor_now()
-                .map(|(t, v)| (t.saturating_sub(offset), v))
-            {
-                let forward = speed >= 0.0;
-                let (lo, hi) = if forward {
-                    (
-                        cursor - self.decode_behind_ns,
-                        cursor + self.decode_ahead_ns,
-                    )
-                } else {
-                    (
-                        cursor - self.decode_ahead_ns,
-                        cursor + self.decode_behind_ns,
-                    )
-                };
-                let mut near = by_urgency(&self.store.segments_in(lo, hi), cursor, forward);
-                // In a hole, the segment before it holds the picture: most
-                // urgent, however far behind it ends.
-                if let Some(h) = self.store.hold().filter(|h| h.holds(cursor)) {
-                    near.retain(|s| s.start_ns != h.seg.start_ns);
-                    near.insert(0, h.seg);
-                }
-                // The most urgent segments whose frames fit the memory budget.
-                let wanted = {
-                    let decoded = lock(&self.decoded);
-                    within_budget(
-                        &near,
-                        |s| decoded.size_of(s),
-                        self.decoded_budget,
-                        MIN_DECODED_SEGMENTS,
-                    )
-                };
-                {
-                    let decoded = lock(&self.decoded);
-                    let mut inflight = lock(&self.inflight);
-                    let mut failed = lock(&self.failed);
-                    let keys: HashSet<i64> = near.iter().map(|s| s.start_ns).collect();
-                    failed.retain(|k| keys.contains(k));
-                    let jobs = pick_decodes(
-                        &wanted,
-                        |k| decoded.segments.contains_key(&k) || self.store.bytes(k).is_none(),
-                        &mut inflight,
-                        &failed,
-                        self.workers,
-                        Instant::now(),
-                    );
-                    for s in jobs {
-                        if tx.send(s).is_err() {
-                            return;
-                        }
+            let (current, pending) = self.lanes();
+            // The source switched to first: it is what the picture waits
+            // for. Two sources share the budget.
+            let lanes: Vec<Arc<Lane>> = pending.into_iter().chain([current]).collect();
+            let budget = self.decoded_budget / lanes.len() as u64;
+            if let Some((cursor, speed)) = self.timeline.cursor_now() {
+                for lane in &lanes {
+                    let busy: usize = lanes.iter().map(|l| lock(&l.inflight).len()).sum();
+                    if !self.schedule(lane, &tx, cursor, speed, budget, busy) {
+                        return;
                     }
                 }
-                let keep: HashSet<i64> = wanted.iter().map(|s| s.start_ns).collect();
-                // Frees the evicted frames after the lock is released, so a
-                // large eviction does not hold up the output tick.
-                let doomed = {
-                    let mut store = lock(&self.decoded);
-                    let doomed = store.evict_except(&keep);
-                    self.stats
-                        .cached_segments
-                        .store(store.segments.len() as u64, Ordering::Relaxed);
-                    doomed
-                };
-                drop(doomed);
             }
             std::thread::sleep(Duration::from_millis(5));
         }
     }
 
+    /// Keep `lane`'s segments around the group cursor `group_cursor`
+    /// decoded, within `budget` bytes, and evict the rest. `busy` decodes
+    /// are in flight over all lanes. `false` when the workers are gone.
+    fn schedule(
+        &self,
+        lane: &Arc<Lane>,
+        tx: &mpsc::Sender<DecodeJob>,
+        group_cursor: i64,
+        speed: f64,
+        budget: u64,
+        busy: usize,
+    ) -> bool {
+        let stats = lane.stats();
+        // The group's cursor, in this source's own time.
+        let cursor = group_cursor.saturating_sub(stats.offset_ns());
+        let forward = speed >= 0.0;
+        let (lo, hi) = if forward {
+            (
+                cursor - self.decode_behind_ns,
+                cursor + self.decode_ahead_ns,
+            )
+        } else {
+            (
+                cursor - self.decode_ahead_ns,
+                cursor + self.decode_behind_ns,
+            )
+        };
+        let store = lane.store();
+        let mut near = by_urgency(&store.segments_in(lo, hi), cursor, forward);
+        // In a hole, the segment before it holds the picture: most
+        // urgent, however far behind it ends.
+        if let Some(h) = store.hold().filter(|h| h.holds(cursor)) {
+            near.retain(|s| s.start_ns != h.seg.start_ns);
+            near.insert(0, h.seg);
+        }
+        // The most urgent segments whose frames fit the memory budget.
+        let wanted = {
+            let decoded = lock(&lane.decoded);
+            within_budget(&near, |s| decoded.size_of(s), budget, MIN_DECODED_SEGMENTS)
+        };
+        {
+            let decoded = lock(&lane.decoded);
+            let mut inflight = lock(&lane.inflight);
+            let mut failed = lock(&lane.failed);
+            let keys: HashSet<i64> = near.iter().map(|s| s.start_ns).collect();
+            failed.retain(|k| keys.contains(k));
+            // The workers are shared: the other lanes' decodes count.
+            let others = busy.saturating_sub(inflight.len());
+            let jobs = pick_decodes(
+                &wanted,
+                |k| decoded.segments.contains_key(&k) || store.bytes(k).is_none(),
+                &mut inflight,
+                &failed,
+                self.workers.saturating_sub(others),
+                Instant::now(),
+            );
+            for s in jobs {
+                if tx.send((Arc::clone(lane), s)).is_err() {
+                    return false;
+                }
+            }
+        }
+        let keep: HashSet<i64> = wanted.iter().map(|s| s.start_ns).collect();
+        // Frees the evicted frames after the lock is released, so a
+        // large eviction does not hold up the output tick.
+        let doomed = {
+            let mut decoded = lock(&lane.decoded);
+            let doomed = decoded.evict_except(&keep);
+            stats
+                .cached_segments
+                .store(decoded.segments.len() as u64, Ordering::Relaxed);
+            doomed
+        };
+        drop(doomed);
+        true
+    }
+
     fn frame_holding(&self, t: i64, period_ns: i64) -> Option<(i64, gst::Buffer)> {
-        frame_holding(&lock(&self.decoded).frames, t, period_ns)
+        frame_holding(&lock(&self.current().decoded).frames, t, period_ns)
     }
 
     /// In a hole of the recording at `t`: the hole and the last frame before
     /// it (once its segment is decoded), as when play runs into the hole.
     fn held_frame(&self, t: i64) -> Option<((i64, i64), Option<TaiFrame>)> {
-        let h = self.store.hold().filter(|h| h.holds(t))?;
-        let decoded = lock(&self.decoded);
+        let lane = self.current();
+        let h = lane.store().hold().filter(|h| h.holds(t))?;
+        let decoded = lock(&lane.decoded);
         let frame = held_in(&decoded, &h.seg);
         Some((h.hole, frame))
     }
@@ -603,7 +688,7 @@ impl ReplayPlayer {
 
     fn tick_loop(self: Arc<Self>) {
         // Wait for the flow to play and for the first frames to exist.
-        let (appsrc, clock, mut base, grid) = loop {
+        let (appsrc, clock, mut base, mut grid) = loop {
             if !self.alive() {
                 return;
             }
@@ -617,6 +702,8 @@ impl ReplayPlayer {
                     // The group's "now" exists as soon as the flow plays, so
                     // the cursor (and prefetch) can start before any decode.
                     self.timeline.set_clock_source(appsrc.upcast_ref());
+                    // A source switched to before the first picture.
+                    self.settle_switch(self.timeline.cursor_now().map(|c| c.0));
                     if let (true, Some(grid)) = (has_caps, self.stats.grid()) {
                         break (appsrc, clock, base, grid);
                     }
@@ -650,7 +737,7 @@ impl ReplayPlayer {
         // Shown TAI and buffer of the last picture.
         let mut last: Option<(i64, gst::Buffer)> = None;
         let mut last_hit: Option<i64> = None;
-        let period_ns = grid.frame_ns().ceil() as i64;
+        let mut period_ns = grid.frame_ns().ceil() as i64;
 
         while self.alive() {
             let Some(appsrc) = weak.upgrade() else {
@@ -705,19 +792,35 @@ impl ReplayPlayer {
             }
 
             // The group's time at this tick, and this angle's frame for it.
-            // The group's time at this tick, in this source's own time.
-            let offset = self.stats.offset_ns();
             let want_group = self.timeline.tai_at(rt);
             if let Some(t) = want_group {
                 self.stats.wanted_tai.store(t, Ordering::Relaxed);
             }
+            // Switching source: the last picture holds until the new source
+            // has the one for this time; from then on it is the source shown,
+            // with its own grid and trim.
+            let switching = match self.settle_switch(want_group) {
+                Settle::Waiting => true,
+                Settle::Committed => {
+                    if let Some(g) = self.stats.grid() {
+                        grid = g;
+                        period_ns = grid.frame_ns().ceil() as i64;
+                    }
+                    last_hit = None;
+                    false
+                }
+                Settle::None => false,
+            };
+            // The group's time at this tick, in this source's own time.
+            let offset = self.stats.offset_ns();
             let want = want_group.map(|t| t.saturating_sub(offset));
-            let mut hit =
-                want.and_then(|t| self.frame_holding(t, period_ns).map(|(ft, b)| (ft, t, b)));
+            let mut hit = want
+                .filter(|_| !switching)
+                .and_then(|t| self.frame_holding(t, period_ns).map(|(ft, b)| (ft, t, b)));
             // No frame holds the time: in a hole of the recording, the last
             // frame before it (also right after a seek into the hole).
             let mut gap = None;
-            if let (None, Some(t)) = (&hit, want) {
+            if let (None, Some(t), false) = (&hit, want, switching) {
                 if let Some((hole, frame)) = self.held_frame(t) {
                     gap = Some(hole);
                     hit = frame.map(|(ft, b)| (ft, t, b));
@@ -752,7 +855,9 @@ impl ReplayPlayer {
                     Some(t)
                 }
                 None => {
-                    self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                    if !switching {
+                        self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                    }
                     None
                 }
             };
@@ -911,12 +1016,14 @@ impl ReplayPlayer {
         period_ns: i64,
     ) -> Result<(i64, gst::Buffer, Option<(i64, i64)>), Option<String>> {
         let deadline = Instant::now() + OFFLINE_FRAME_TIMEOUT;
-        let mut store = lock(&self.decoded);
+        // An export does not switch source: one lane.
+        let lane = self.current();
+        let mut store = lock(&lane.decoded);
         loop {
             if let Some((ft, b)) = frame_holding(&store.frames, t, period_ns) {
                 return Ok((ft, b, None));
             }
-            if let Some(h) = self.store.hold().filter(|h| h.holds(t)) {
+            if let Some(h) = lane.store().hold().filter(|h| h.holds(t)) {
                 if let Some((ft, b)) = held_in(&store, &h.seg) {
                     return Ok((ft, b, Some(h.hole)));
                 }
@@ -932,7 +1039,7 @@ impl ReplayPlayer {
                     OFFLINE_FRAME_TIMEOUT
                 )));
             }
-            store = self
+            store = lane
                 .frame_ready
                 .wait_timeout(store, (deadline - now).min(Duration::from_millis(50)))
                 .unwrap_or_else(|p| p.into_inner())
@@ -1029,6 +1136,9 @@ fn pick_decodes(
     }
     out
 }
+
+/// A segment for a decode worker, and the lane it is from.
+type DecodeJob = (Arc<Lane>, Arc<Segment>);
 
 /// Whether frames in caps `b` can go out under caps `a`: same memory,
 /// format, size and interlacing (frame rate and colorimetry aside).

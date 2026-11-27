@@ -26,6 +26,7 @@ pub const REPLAY_FEATURES: &[&str] = &[
     "jog_grid",
     "start_mode",
     "diagnostics",
+    "source_switch",
 ];
 
 /// Longest `client_ref` a command may carry.
@@ -217,7 +218,8 @@ pub enum ReplayCommand {
     /// Change the speed linearly to `to` over `duration_ms` (0 .. 60000),
     /// run by the server.
     Ramp { to: f64, duration_ms: u64 },
-    /// Hold `[in, out)` and park, paused, on `in`.
+    /// Hold `[in, out)` and park, paused, on `in`. With `source`, the angle
+    /// `block` switches to that source too (see [`ReplayCommand::Source`]).
     Cue {
         #[serde(rename = "in")]
         in_point: ReplayTarget,
@@ -225,6 +227,23 @@ pub enum ReplayCommand {
         out: ReplayTarget,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         end_action: Option<ReplayEndAction>,
+        /// A source URI for angle `block` to switch to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        /// The angle that switches; may be left out when the group has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+    },
+    /// Switch angle `block` to another source in the same store, without a
+    /// rebuild. The angle holds its last picture until the new source has
+    /// the frame for the cursor, then shows it. Needs a group on real TAI.
+    /// The motion does not change.
+    Source {
+        /// A source URI, as the player's `source` property takes it.
+        source: String,
+        /// The angle that switches; may be left out when the group has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
     },
     /// Drop the cue. The cursor, the speed and a running ramp stay.
     Uncue {},
@@ -264,6 +283,7 @@ impl ReplayCommand {
             Self::End {} => "end",
             Self::Mark { .. } => "mark",
             Self::FollowLive { .. } => "follow_live",
+            Self::Source { .. } => "source",
         }
     }
 
@@ -282,6 +302,7 @@ impl ReplayCommand {
             Self::End {} => ReplayCause::End,
             Self::Mark { .. } => ReplayCause::Mark,
             Self::FollowLive { .. } => ReplayCause::FollowLive,
+            Self::Source { .. } => ReplayCause::Source,
         }
     }
 }
@@ -422,6 +443,10 @@ pub struct ReplaySpan {
 pub struct ReplayAngleState {
     /// The player block's id.
     pub block: String,
+    /// The source the angle shows, without credentials.
+    pub source: Option<String>,
+    /// The source the angle is switching to, until it shows it or gives up.
+    pub pending_source: Option<String>,
     pub ready: ReplayReady,
     /// The source's frame rate, `N/D`.
     pub fps: Option<String>,
@@ -585,6 +610,7 @@ pub enum ReplayCause {
     End,
     Mark,
     FollowLive,
+    Source,
     /// Bounded play reached the end of its cue.
     CueEnd,
     /// Forward play reached the live point (with `follow_live`).
@@ -616,6 +642,18 @@ pub enum ReplayEventKind {
     RangeChanged { range: ReplayRange },
     /// The group's readiness changed.
     Ready { ready: ReplayReady },
+    /// Angle `block` shows its new source (`cue {source}` or `source`).
+    SourceChanged {
+        block: String,
+        /// The source URI without credentials.
+        source: Option<String>,
+    },
+    /// Angle `block` did not switch to `source` and stays on its old one.
+    SourceFailed {
+        block: String,
+        source: Option<String>,
+        error: String,
+    },
 }
 
 /// Something the group did, sent on the WebSocket.
@@ -801,6 +839,10 @@ mod tests {
             json!({"cmd": "follow_live", "on": false}),
             json!({"cmd": "live", "margin_ms": 900}),
             json!({"cmd": "ramp", "to": 0.25, "duration_ms": 800}),
+            json!({"cmd": "cue", "in": {"t": "1"}, "out": {"t": "2"},
+                   "source": "tams+https://gw.example.com/flows/b", "block": "p1"}),
+            json!({"cmd": "source", "source": "cam2"}),
+            json!({"cmd": "source", "source": "cam2", "block": "p1"}),
         ] {
             let parsed: ReplayCommand = serde_json::from_value(c.clone()).unwrap();
             assert_eq!(serde_json::to_value(&parsed).unwrap(), c);
@@ -848,6 +890,35 @@ mod tests {
             json!({"type": "event", "event_seq": 44, "event": "ready", "cause": "media",
                    "ready": "ready"})
         );
+    }
+
+    #[test]
+    fn source_events_are_tagged() {
+        let ev = ReplayEvent {
+            event_seq: 7,
+            cause: ReplayCause::Source,
+            client_ref: Some("c1".into()),
+            kind: ReplayEventKind::SourceChanged {
+                block: "p1".into(),
+                source: Some("cam2".into()),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(ReplayWsMessage::Event(ev)).unwrap(),
+            json!({"type": "event", "event_seq": 7, "event": "source_changed", "cause": "source",
+                   "client_ref": "c1", "block": "p1", "source": "cam2"})
+        );
+        let failed = ReplayEventKind::SourceFailed {
+            block: "p1".into(),
+            source: None,
+            error: "x".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(failed).unwrap(),
+            json!({"event": "source_failed", "block": "p1", "source": null, "error": "x"})
+        );
+        // A source command needs its source.
+        assert!(serde_json::from_value::<ReplayCommand>(json!({"cmd": "source"})).is_err());
     }
 
     #[test]

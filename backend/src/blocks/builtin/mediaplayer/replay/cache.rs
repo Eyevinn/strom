@@ -19,7 +19,7 @@
 
 use super::backoff::{worth_warning, Backoff};
 use super::decode::check_supported;
-use super::source::{Segment, Since, SourceIndex, SourceInfo};
+use super::source::{is_gone, Segment, Since, SourceIndex, SourceInfo};
 use super::timeline::{IndexView, PlayerStats, ReplayTimeline, TimeDomain, TimeSource};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,6 +50,12 @@ const RELIST_MIN: Duration = Duration::from_secs(5);
 const DEFAULT_CODED_BUDGET_MB: u64 = 512;
 /// Segments kept fetched whatever the budget: the most urgent ones.
 const MIN_CODED_SEGMENTS: usize = 2;
+/// How often a source that grows is asked for its first segment: where its
+/// start is, which moves when the store deletes old media (retention). A
+/// fetch that finds a segment gone asks at once.
+const FIRST_POLL: Duration = Duration::from_secs(10);
+/// Wait between two lookups of the start caused by gone segments.
+const FIRST_POLL_MIN: Duration = Duration::from_secs(1);
 /// Wait before polling the live edge again after a failed poll: the segment
 /// cadence doubling per consecutive failure, up to this.
 const LIVE_POLL_RETRY_MAX: Duration = Duration::from_secs(5);
@@ -557,12 +563,21 @@ pub struct Fetcher {
     pub store: Arc<SegmentStore>,
     source: Arc<dyn SourceIndex>,
     timeline: Arc<ReplayTimeline>,
-    stats: Arc<PlayerStats>,
+    /// Where what the fetcher learns about its source goes: the player's
+    /// stats, or, for a source being switched to, stats of its own until
+    /// the switch (see [`Fetcher::retarget`]). What the group reads (extent,
+    /// grid, time domain, index) is written under this lock.
+    stats: Mutex<Arc<PlayerStats>>,
+    /// Why the source cannot be played (unsupported container or codec);
+    /// the fetcher has stopped.
+    error: Mutex<Option<String>>,
     block_id: String,
     ahead_ns: i64,
     behind_ns: i64,
     /// Most coded bytes to hold.
     coded_budget: u64,
+    /// How often the start of a growing source is looked up.
+    first_every: Duration,
 }
 
 impl Fetcher {
@@ -578,7 +593,8 @@ impl Fetcher {
             store: Arc::new(SegmentStore::default()),
             source,
             timeline,
-            stats,
+            stats: Mutex::new(stats),
+            error: Mutex::new(None),
             block_id: block_id.to_string(),
             ahead_ns,
             behind_ns: (ahead_ns / 2).max(2 * S),
@@ -587,7 +603,27 @@ impl Fetcher {
                 .filter(|mb| *mb > 0)
                 .unwrap_or(DEFAULT_CODED_BUDGET_MB)
                 .saturating_mul(1 << 20),
+            first_every: FIRST_POLL,
         }
+    }
+
+    /// The stats the fetcher reports to now.
+    pub fn stats(&self) -> Arc<PlayerStats> {
+        Arc::clone(&lock(&self.stats))
+    }
+
+    /// Report to `to` from now on. `adopt(from, to)` runs first, under the
+    /// same lock as every write the group reads: nothing the fetcher learns
+    /// lands between the two, or on the old stats after.
+    pub fn retarget(&self, to: Arc<PlayerStats>, adopt: impl FnOnce(&PlayerStats, &PlayerStats)) {
+        let mut s = lock(&self.stats);
+        adopt(&s, &to);
+        *s = to;
+    }
+
+    /// Why the source cannot be played, once the fetcher has found out.
+    pub fn error(&self) -> Option<String> {
+        lock(&self.error).clone()
     }
 
     /// Run on a dedicated thread until `stop` is set.
@@ -641,6 +677,7 @@ impl Fetcher {
             // failure per segment and a picture that never comes.
             if let Ok((info, _, _)) = &r {
                 if let Err(e) = check_supported(info.container.as_deref(), info.codec.as_deref()) {
+                    *lock(&self.error) = Some(e.clone());
                     warn!(
                         "Replay {}: {} cannot be played: {}; nothing is fetched or shown",
                         self.block_id,
@@ -660,14 +697,17 @@ impl Fetcher {
                         info.container,
                         info.codec
                     );
-                    if let Some((n, d)) = info.frame_rate {
-                        self.stats.init_grid(n, d, first.start_ns);
+                    {
+                        let stats = lock(&self.stats);
+                        if let Some((n, d)) = info.frame_rate {
+                            stats.init_grid(n, d, first.start_ns);
+                        }
+                        stats.set_time_domain(if info.absolute_time {
+                            TimeDomain::Tai
+                        } else {
+                            TimeDomain::Unanchored
+                        });
                     }
-                    self.stats.set_time_domain(if info.absolute_time {
-                        TimeDomain::Tai
-                    } else {
-                        TimeDomain::Unanchored
-                    });
                     *lock(&self.store.info) = Some(info);
                     return Some((first, last));
                 }
@@ -708,7 +748,13 @@ impl Fetcher {
         // The segment of each fetch task, also when the task panics.
         let mut tasks: HashMap<tokio::task::Id, Arc<Segment>> = HashMap::new();
         let mut next_poll = Instant::now() + Duration::from_nanos(seg_ns as u64);
-        let mut next_first = Instant::now() + Duration::from_secs(30);
+        let mut next_first = Instant::now() + self.first_every;
+        // Segments whose media the store no longer has (deleted by
+        // retention): not fetched again, dropped from the index.
+        let mut gone: HashSet<i64> = HashSet::new();
+        // A gone segment asks for the start before the next regular lookup.
+        let mut start_moved = false;
+        let mut last_first = Instant::now();
         let mut holes: Backoff<i64> = Backoff::new(HOLE_RETRY, HOLE_RETRY_MAX);
         let mut poll_failures: u32 = 0;
         // The live poll's requests run as tasks of their own, so a slow
@@ -742,7 +788,7 @@ impl Fetcher {
             let (cursor, speed) = self
                 .timeline
                 .cursor_tai(rt)
-                .map_or((start, 0.0), |(t, v)| (t - self.stats.offset_ns(), v));
+                .map_or((start, 0.0), |(t, v)| (t - self.stats().offset_ns(), v));
             let forward = speed >= 0.0;
             // Offline play only goes forward: nothing behind the cursor is
             // needed again.
@@ -809,7 +855,15 @@ impl Fetcher {
                 }
             }
             if let Some(Ok(Ok(Some(f)))) = first_job.finished().await {
+                if f.start_ns > start {
+                    self.retire_before(f.start_ns, start, &mut coverage, &mut gone);
+                }
                 start = f.start_ns;
+                // The first segment is kept in the index (see the eviction
+                // below), as at the start.
+                coverage.add_listed(f.start_ns, f.end_ns);
+                coverage.add_media(f.start_ns, f.end_ns, self.tolerance());
+                self.store.insert_new([f]);
                 self.publish_extent(start, end);
             }
             if grows && poll_job.is_idle() && Instant::now() >= next_poll {
@@ -818,11 +872,15 @@ impl Fetcher {
                 poll_job.spawn(
                     async move { source.newest(end, LIVE_POLL_PAGE, LIVE_POLL_PAGES).await },
                 );
-                if first_job.is_idle() && Instant::now() >= next_first {
-                    next_first = Instant::now() + Duration::from_secs(30);
-                    let source = Arc::clone(&self.source);
-                    first_job.spawn(async move { source.first().await });
-                }
+            }
+            let first_due = (grows && Instant::now() >= next_first)
+                || (start_moved && last_first.elapsed() >= FIRST_POLL_MIN);
+            if first_due && first_job.is_idle() {
+                next_first = Instant::now() + self.first_every;
+                last_first = Instant::now();
+                start_moved = false;
+                let source = Arc::clone(&self.source);
+                first_job.spawn(async move { source.first().await });
             }
 
             // Index chunks: one listing at a time, as a task of its own, so a
@@ -916,6 +974,7 @@ impl Fetcher {
                 }
                 let key = seg.start_ns;
                 if inflight.contains(&key)
+                    || gone.contains(&key)
                     || self.store.bytes(key).is_some()
                     || !failed.ready(&key, Instant::now())
                 {
@@ -948,10 +1007,11 @@ impl Fetcher {
                         };
                         let Some(seg) = tasks.remove(&id) else { continue };
                         inflight.remove(&seg.start_ns);
-                        self.stats.fetches.fetch_add(1, Ordering::Relaxed);
+                        let stats = self.stats();
+                        stats.fetches.fetch_add(1, Ordering::Relaxed);
                         match r {
                             Ok(bytes) => {
-                                self.stats
+                                stats
                                     .last_fetch_ms
                                     .store(took.as_millis() as u64, Ordering::Relaxed);
                                 failed.succeed(&seg.start_ns);
@@ -959,8 +1019,21 @@ impl Fetcher {
                                 lock(&self.store.bytes)
                                     .insert(seg.start_ns, (seg.end_ns, Arc::new(bytes)));
                             }
+                            Err(e) if is_gone(&e) => {
+                                // Deleted from the store (retention): not an
+                                // error to retry. Drop it from the index and
+                                // look up where the source starts now.
+                                debug!(
+                                    "Replay {}: segment {} is gone from the store: {:#}",
+                                    self.block_id, seg.object_id, e
+                                );
+                                failed.succeed(&seg.start_ns);
+                                gone.insert(seg.start_ns);
+                                lock(&self.store.index).remove(&seg.start_ns);
+                                start_moved = true;
+                            }
                             Err(e) => {
-                                self.stats.fetch_errors.fetch_add(1, Ordering::Relaxed);
+                                stats.fetch_errors.fetch_add(1, Ordering::Relaxed);
                                 let attempts = failed.fail(seg.start_ns, Instant::now());
                                 if worth_warning(attempts) {
                                     warn!(
@@ -1032,10 +1105,13 @@ impl Fetcher {
                 .map(|s| s.start_ns)
                 .collect();
             failed.retain(|k| near.contains(k));
+            // Gone segments are no longer in the index: kept as long as their
+            // chunk would be, in case a stale listing names them again.
+            gone.retain(|k| *k >= start && keep(chunk_of(*k)));
             {
                 let mut index = lock(&self.store.index);
                 index.retain(|k, _| keep(chunk_of(*k)) || *k == start || Some(*k) == hold_key);
-                self.stats
+                self.stats()
                     .index_segments
                     .store(index.len() as u64, Ordering::Relaxed);
                 if Instant::now() >= next_view {
@@ -1047,10 +1123,10 @@ impl Fetcher {
                         let settled = end - LIVE_BACKFILL_NS;
                         view.gaps.retain(|g| g.1 <= settled);
                     }
-                    self.stats.set_index_view(view);
+                    lock(&self.stats).set_index_view(view);
                 }
             }
-            self.stats
+            self.stats()
                 .fetched_segments
                 .store(lock(&self.store.bytes).len() as u64, Ordering::Relaxed);
         }
@@ -1126,7 +1202,7 @@ impl Fetcher {
 
     /// The longest seam that is not a gap, for this source's frame rate.
     fn tolerance(&self) -> i64 {
-        seam_tolerance(self.stats.grid().map(|g| g.frame_ns()))
+        seam_tolerance(self.stats().grid().map(|g| g.frame_ns()))
     }
 
     /// Take the listing `r` of index chunk `c` into the index and the
@@ -1181,9 +1257,33 @@ impl Fetcher {
         }
     }
 
+    /// The source now starts at `new_start`, later than `old_start`: the
+    /// store deleted what was before (retention). Forget it: the index, the
+    /// fetched bytes and the coverage before the new start. Segments that
+    /// reach past it stay.
+    fn retire_before(
+        &self,
+        new_start: i64,
+        old_start: i64,
+        coverage: &mut Coverage,
+        gone: &mut HashSet<i64>,
+    ) {
+        lock(&self.store.index).retain(|_, s| s.end_ns > new_start);
+        lock(&self.store.bytes).retain(|_, (end, _)| *end > new_start);
+        coverage.retain_within(&[(new_start, i64::MAX)]);
+        gone.retain(|k| *k >= new_start);
+        debug!(
+            "Replay {}: {} now starts {} ms later (deleted by the store)",
+            self.block_id,
+            self.source.describe(),
+            (new_start - old_start) / 1_000_000
+        );
+    }
+
     fn publish_extent(&self, start: i64, end: i64) {
-        self.stats.start_tai.store(start, Ordering::Relaxed);
-        self.stats.end_tai.store(end, Ordering::Relaxed);
+        let stats = lock(&self.stats);
+        stats.start_tai.store(start, Ordering::Relaxed);
+        stats.end_tai.store(end, Ordering::Relaxed);
     }
 }
 
@@ -1291,6 +1391,9 @@ mod tests {
         /// in registration order (not necessarily time order).
         grows: bool,
         live: Mutex<Vec<Segment>>,
+        /// Retention: segments that end at or before this are deleted (not
+        /// listed, and their objects give 404).
+        gone_before: std::sync::atomic::AtomicI64,
     }
 
     impl Mock {
@@ -1322,6 +1425,7 @@ mod tests {
                 fetches: Mutex::new(HashMap::new()),
                 grows: false,
                 live: Mutex::new(Vec::new()),
+                gone_before: std::sync::atomic::AtomicI64::new(i64::MIN),
             }
         }
 
@@ -1329,6 +1433,8 @@ mod tests {
         fn all(&self) -> Vec<Segment> {
             let mut v = self.segs.clone();
             v.extend(lock(&self.live).iter().cloned());
+            let cut = self.gone_before.load(Ordering::Relaxed);
+            v.retain(|s| s.end_ns > cut);
             v.sort_by_key(|s| s.start_ns);
             v
         }
@@ -1427,6 +1533,9 @@ mod tests {
             }
             if self.fetch_fails {
                 anyhow::bail!("404");
+            }
+            if seg.end_ns <= self.gone_before.load(Ordering::Relaxed) {
+                return Err(super::super::source::Gone(seg.object_id.clone()).into());
             }
             Ok(vec![0; 16])
         }
@@ -1832,7 +1941,7 @@ mod tests {
                 .unwrap();
         };
         let t0 = Instant::now();
-        while f.stats.extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
+        while f.stats().extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(5));
         }
         // Into the edge segment: its chunk is listed.
@@ -1862,10 +1971,11 @@ mod tests {
         }
         let edge = at(LIVE0 + n);
         let t0 = Instant::now();
-        while f.stats.extent().map(|e| e.1) != Some(edge) && t0.elapsed() < Duration::from_secs(5) {
+        while f.stats().extent().map(|e| e.1) != Some(edge) && t0.elapsed() < Duration::from_secs(5)
+        {
             std::thread::sleep(Duration::from_millis(5));
         }
-        let moved = f.stats.extent().map(|e| e.1) == Some(edge);
+        let moved = f.stats().extent().map(|e| e.1) == Some(edge);
         let in_flight = !done.load(Ordering::Relaxed);
         // Into the stretch the poll skipped (the source has media there).
         let t = at(LIVE0 + 3) + 100 * ms;
@@ -1917,7 +2027,7 @@ mod tests {
         assert_eq!(wait_indexed(&f, 3, 200).len(), 3);
         mock.register(LIVE0 + 4, 200);
         let t0 = Instant::now();
-        while f.stats.extent().map(|e| e.1) != Some(100 * S + (LIVE0 + 5) * 200_000_000)
+        while f.stats().extent().map(|e| e.1) != Some(100 * S + (LIVE0 + 5) * 200_000_000)
             && t0.elapsed() < Duration::from_secs(5)
         {
             std::thread::sleep(Duration::from_millis(20));
@@ -1934,7 +2044,7 @@ mod tests {
             .collect();
         assert_eq!(have, vec![0, 1, 2, 4]);
         assert_eq!(
-            f.stats.index_view().gaps,
+            f.stats().index_view().gaps,
             vec![],
             "a hole at the live edge is not a gap yet"
         );
@@ -1958,11 +2068,12 @@ mod tests {
         }
         let edge = 100 * S + n * 200_000_000;
         let t0 = Instant::now();
-        while f.stats.extent().map(|e| e.1) != Some(edge) && t0.elapsed() < Duration::from_secs(5) {
+        while f.stats().extent().map(|e| e.1) != Some(edge) && t0.elapsed() < Duration::from_secs(5)
+        {
             std::thread::sleep(Duration::from_millis(20));
         }
         stop.store(true, Ordering::Relaxed);
-        assert_eq!(f.stats.extent().map(|e| e.1), Some(edge));
+        assert_eq!(f.stats().extent().map(|e| e.1), Some(edge));
     }
 
     #[test]
@@ -2057,7 +2168,8 @@ mod tests {
         }
         let edge = 100 * S + (LIVE0 + 17) * 200_000_000;
         let t0 = Instant::now();
-        while f.stats.extent().map(|e| e.1) != Some(edge) && t0.elapsed() < Duration::from_secs(5) {
+        while f.stats().extent().map(|e| e.1) != Some(edge) && t0.elapsed() < Duration::from_secs(5)
+        {
             std::thread::sleep(Duration::from_millis(20));
         }
         // Polls with the hole open: listed by time with backoff.
@@ -2068,7 +2180,7 @@ mod tests {
             .segments_in(a + 600_000_000, a + 800_000_000)
             .is_empty());
         assert_eq!(
-            f.stats.index_view().gaps,
+            f.stats().index_view().gaps,
             vec![],
             "a hole near the live edge is not a gap yet"
         );
@@ -2104,7 +2216,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         Arc::clone(&fetcher).spawn(Arc::clone(&stop));
         let t0 = Instant::now();
-        while fetcher.stats.extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
+        while fetcher.stats().extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(5));
         }
         timeline
@@ -2151,7 +2263,7 @@ mod tests {
             mock.register(i, 1000);
         }
         let got = wait_for_segment(&f, 110, Duration::from_secs(5));
-        let edge = f.stats.extent().map(|e| e.1);
+        let edge = f.stats().extent().map(|e| e.1);
         stop.store(true, Ordering::Relaxed);
         assert_eq!(edge, Some(500 * S));
         assert!(got, "the skipped stretch near the cursor is listed");
@@ -2248,5 +2360,129 @@ mod tests {
         assert_eq!(chunk_of(0), 0);
         assert_eq!(chunk_of(CHUNK_NS - 1), 0);
         assert_eq!(chunk_of(-1), -1);
+    }
+
+    /// A growing source of 1 s segments from TAI 100 s to 160 s, and a
+    /// fetcher on it that looks up the start every `first_every`.
+    fn retention_fetcher(
+        first_every: Duration,
+    ) -> (
+        Arc<Mock>,
+        Arc<Fetcher>,
+        Arc<ReplayTimeline>,
+        Arc<AtomicBool>,
+    ) {
+        let mock = Arc::new(Mock {
+            grows: true,
+            ..Mock::build(60, 1, false, false)
+        });
+        let timeline = super::super::timeline::get_or_create(uuid::Uuid::new_v4(), "g");
+        let stats = Arc::new(PlayerStats::new("p"));
+        timeline.register_player(&stats);
+        let mut f = Fetcher::new("p", mock.clone(), Arc::clone(&timeline), stats, 2);
+        f.first_every = first_every;
+        let f = Arc::new(f);
+        let stop = Arc::new(AtomicBool::new(false));
+        Arc::clone(&f).spawn(Arc::clone(&stop));
+        let t0 = Instant::now();
+        while f.stats().extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        timeline
+            .apply_at(
+                super::super::timeline::Command::FollowLive { on: false },
+                timeline.now_rt(),
+            )
+            .unwrap();
+        (mock, f, timeline, stop)
+    }
+
+    fn seek_paused(timeline: &ReplayTimeline, t: i64) {
+        timeline
+            .apply_at(
+                super::super::timeline::Command::Seek {
+                    to: strom_types::replay::ReplayTarget::t(t),
+                    speed: Some(0.0),
+                },
+                timeline.now_rt(),
+            )
+            .unwrap();
+    }
+
+    fn wait_start(f: &Fetcher, start: i64, within: Duration) -> bool {
+        let t0 = Instant::now();
+        while f.stats().extent().map(|e| e.0) != Some(start) && t0.elapsed() < within {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        f.stats().extent().map(|e| e.0) == Some(start)
+    }
+
+    #[test]
+    fn retention_moves_the_start_and_drops_what_it_removed() {
+        // The cursor at the start, its segments fetched. Then the store
+        // deletes the first 10 s: the start follows it, and the index, the
+        // bytes and the cursor leave what was deleted.
+        let (mock, f, timeline, stop) = retention_fetcher(Duration::from_millis(200));
+        seek_paused(&timeline, 100 * S + S / 2);
+        let t0 = Instant::now();
+        while f.store.bytes(100 * S).is_none() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let fetched = f.store.bytes(100 * S).is_some();
+        mock.gone_before.store(110 * S, Ordering::Relaxed);
+        let moved = wait_start(&f, 110 * S, Duration::from_secs(5));
+        // A loop turn after the start moved.
+        std::thread::sleep(Duration::from_millis(100));
+        let indexed_before = f.store.segments_in(0, 110 * S).len();
+        let bytes_before = (100..110)
+            .filter(|i| f.store.bytes(i * S).is_some())
+            .count();
+        let cursor = timeline.tai_at(timeline.now_rt());
+        // And the segments at the new start are fetched.
+        let t0 = Instant::now();
+        while f.store.bytes(110 * S).is_none() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let fetched_new = f.store.bytes(110 * S).is_some();
+        stop.store(true, Ordering::Relaxed);
+        assert!(fetched, "the segment at the old start was fetched");
+        assert!(
+            moved,
+            "the start follows the store: {:?}",
+            f.stats().extent()
+        );
+        assert_eq!(indexed_before, 0, "no deleted segment left in the index");
+        assert_eq!(bytes_before, 0, "no bytes of deleted segments kept");
+        assert_eq!(
+            cursor,
+            Some(110 * S),
+            "the paused cursor is on the new start"
+        );
+        assert!(fetched_new, "the new start is fetched");
+    }
+
+    #[test]
+    fn a_gone_segment_moves_the_start_at_once_and_is_not_retried() {
+        // The start is looked up rarely (an hour). The store deletes the
+        // first 10 s; a seek into it (the group does not know yet) fetches a
+        // segment that is gone: the start is looked up at once, and the
+        // segment is not fetched again.
+        let (mock, f, timeline, stop) = retention_fetcher(Duration::from_secs(3600));
+        mock.gone_before.store(110 * S, Ordering::Relaxed);
+        seek_paused(&timeline, 105 * S + S / 2);
+        let moved = wait_start(&f, 110 * S, Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(500));
+        let tries = mock.fetches_of(105);
+        let errors = f.stats().fetch_errors.load(Ordering::Relaxed);
+        let cursor = timeline.tai_at(timeline.now_rt());
+        stop.store(true, Ordering::Relaxed);
+        assert!(
+            moved,
+            "the start follows the store: {:?}",
+            f.stats().extent()
+        );
+        assert_eq!(tries, 1, "a gone segment is fetched once");
+        assert_eq!(errors, 0, "a gone segment is not a fetch error");
+        assert_eq!(cursor, Some(110 * S));
     }
 }

@@ -12,7 +12,8 @@
 //!   (`grid`, the source's rate);
 //! - `timeline`: the group's shared cursor (a TAI instant), range and live
 //!   edge; each player shows its latest frame at or before the cursor;
-//! - `player`: decode scheduling, frame store and the output tick.
+//! - `player`: decode scheduling, frame store and the output tick; a source
+//!   switch at runtime (`cue {source}`, `source`) without a rebuild.
 //!
 //! `pacing=offline` exports a clip (`clip_in`, `clip_out`, `clip_speed`):
 //! the same player on a frame counter instead of the flow clock, with a
@@ -157,26 +158,11 @@ fn player_config(
             OFFSET_MS_PROPERTY, offset_ms, MAX_OFFSET_MS, MAX_OFFSET_MS
         ));
     }
-    let (store, source_id, source) = match spec {
-        source::SourceSpec::Tams { gateway, flow_id } => {
-            let store = format!(
-                "tams+{}",
-                crate::client_auth::redact_url(gateway).trim_end_matches('/')
-            );
-            // A query or fragment (a token, say) is not part of the id, and
-            // discovery must not show it.
-            let flow_id = flow_id.split(['?', '#']).next().unwrap_or_default();
-            let uri = format!("{}/flows/{}", store, flow_id);
-            (Some(store), Some(flow_id.to_string()), Some(uri))
-        }
-        // Local: the property as given (relative to the media path, or a
-        // path inside it); the directory's name is its id.
-        source::SourceSpec::Local(dir) => (
-            None,
-            dir.file_name().map(|n| n.to_string_lossy().into_owned()),
-            Some(source.to_string()),
-        ),
-    };
+    let timeline::SourceIdent {
+        source,
+        source_id,
+        store,
+    } = source_ident(spec, source);
     Ok(timeline::PlayerConfig {
         name: prop_str(properties, "_block_name"),
         source,
@@ -187,6 +173,89 @@ fn player_config(
         start_mode,
         live_margin_ms,
         offset_ns: offset_ms * 1_000_000,
+    })
+}
+
+/// How a source shows in discovery and the state: without credentials.
+fn source_ident(spec: &source::SourceSpec, source: &str) -> timeline::SourceIdent {
+    match spec {
+        source::SourceSpec::Tams { gateway, flow_id } => {
+            let store = format!(
+                "tams+{}",
+                crate::client_auth::redact_url(gateway).trim_end_matches('/')
+            );
+            // A query or fragment (a token, say) is not part of the id, and
+            // discovery must not show it.
+            let flow_id = flow_id.split(['?', '#']).next().unwrap_or_default();
+            let uri = format!("{}/flows/{}", store, flow_id);
+            timeline::SourceIdent {
+                source: Some(uri),
+                source_id: Some(flow_id.to_string()),
+                store: Some(store),
+            }
+        }
+        // Local: the property as given (relative to the media path, or a
+        // path inside it); the directory's name is its id.
+        source::SourceSpec::Local(dir) => timeline::SourceIdent {
+            source: Some(source.to_string()),
+            source_id: dir.file_name().map(|n| n.to_string_lossy().into_owned()),
+            store: None,
+        },
+    }
+}
+
+/// Whether a switch from the built source `from` to `to` stays in the same
+/// store: the same TAMS gateway, or local directories. The block's gateway
+/// credentials (an `api_token` property) were given for its own gateway;
+/// a switch must not carry them anywhere else.
+fn same_store(from: &source::SourceSpec, to: &source::SourceSpec) -> bool {
+    match (from, to) {
+        (
+            source::SourceSpec::Tams { gateway: a, .. },
+            source::SourceSpec::Tams { gateway: b, .. },
+        ) => a.trim_end_matches('/') == b.trim_end_matches('/'),
+        (source::SourceSpec::Local(_), source::SourceSpec::Local(_)) => true,
+        _ => false,
+    }
+}
+
+/// How the player opens another source for a switch: in the same store as
+/// its built source, with the block's auth, a local directory inside the
+/// media path.
+fn source_opener(
+    properties: &HashMap<String, PropertyValue>,
+    media_path: &str,
+    flow_id: FlowId,
+    built: source::SourceSpec,
+) -> std::sync::Arc<player::OpenSource> {
+    let properties = properties.clone();
+    let media_path = media_path.to_string();
+    std::sync::Arc::new(move |uri: &str| {
+        let spec = source::parse_source(uri, &media_path)?;
+        if !same_store(&built, &spec) {
+            let ident = |s: &source::SourceSpec| {
+                source_ident(s, "")
+                    .store
+                    .unwrap_or_else(|| "local media".to_string())
+            };
+            return Err(format!(
+                "{} is not in the player's store ({}); a switch stays in it",
+                ident(&spec),
+                ident(&built)
+            ));
+        }
+        let auth = match &spec {
+            source::SourceSpec::Tams { gateway, .. } => {
+                TamsAuth::from_properties(&properties, gateway)?.method(&flow_id.to_string())
+            }
+            source::SourceSpec::Local(_) => AuthMethod::None,
+        };
+        let index = source::open(&spec, auth, std::path::Path::new(&media_path))?;
+        Ok(timeline::OpenedSource {
+            index,
+            uri: uri.to_string(),
+            ident: source_ident(&spec, uri),
+        })
     })
 }
 
@@ -362,6 +431,10 @@ pub fn build(
             rate: output_rate,
             clip,
             config,
+            switching: Some((
+                source.clone(),
+                source_opener(properties, &media_path, flow_id, spec),
+            )),
         },
     );
 
@@ -483,12 +556,20 @@ mod tests {
     /// Four 1 s segments of 25p H.264 (with B-frames) in MPEG-TS and an
     /// `index.json`, from TAI `BASE`, under `root/segs`.
     fn write_segments(root: &std::path::Path) {
+        write_segments_as(root, "segs", "smpte", false);
+    }
+
+    /// The same under `root/dir`, of videotestsrc `pattern`; `absolute`:
+    /// the index says its times are real TAI.
+    fn write_segments_as(root: &std::path::Path, dir: &str, pattern: &str, absolute: bool) {
         const BASE: i64 = 1_800_000_000_000_000_000;
-        let p = gst::parse::launch(
-            "videotestsrc num-buffers=25 ! video/x-raw,width=320,height=240,framerate=25/1 ! \
+        let p = gst::parse::launch(&format!(
+            "videotestsrc num-buffers=25 pattern={} ! \
+             video/x-raw,width=320,height=240,framerate=25/1 ! \
              x264enc bframes=2 key-int-max=25 ! h264parse ! mpegtsmux ! \
              appsink name=sink sync=false",
-        )
+            pattern
+        ))
         .unwrap()
         .downcast::<gst::Pipeline>()
         .unwrap();
@@ -503,7 +584,7 @@ mod tests {
             ts.extend_from_slice(&s.buffer().unwrap().map_readable().unwrap());
         }
         p.set_state(gst::State::Null).unwrap();
-        let dir = root.join("segs");
+        let dir = root.join(dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut segs = Vec::new();
         for i in 0..4i64 {
@@ -519,6 +600,7 @@ mod tests {
             "container": "video/mp2t",
             "codec": "video/h264",
             "frame_rate": {"numerator": 25, "denominator": 1},
+            "absolute_time": absolute,
             "segments": segs,
         });
         std::fs::write(dir.join("index.json"), index.to_string()).unwrap();
@@ -607,5 +689,200 @@ mod tests {
             assert_eq!(*pts, k * 40_000_000);
             assert_eq!(*tai, 1_800_000_001_000_000_000 + k / 2 * 40_000_000);
         }
+    }
+
+    /// A switch stays in the player's store: a TAMS player does not take a
+    /// local directory or another gateway (its `api_token` was given for
+    /// its own), and the source must parse.
+    #[test]
+    fn a_switch_stays_in_the_players_store() {
+        let tams = |g: &str| source::parse_source(&format!("tams+{}/flows/a", g), "/m").unwrap();
+        let local = source::parse_source("cam1", "/m").unwrap();
+        let gw = "https://gw.example.com";
+        assert!(same_store(&tams(gw), &tams(&format!("{}/", gw))));
+        assert!(!same_store(&tams(gw), &tams("https://other.example.com")));
+        assert!(!same_store(&tams(gw), &local));
+        assert!(!same_store(&local, &tams(gw)));
+        assert!(same_store(
+            &local,
+            &source::parse_source("cam2", "/m").unwrap()
+        ));
+
+        let props = props(&[("api_token", st("SECRET"))]);
+        let open = source_opener(&props, "/m", Uuid::nil(), tams(gw));
+        let err = |uri: &str| match open(uri) {
+            Err(e) => e,
+            Ok(_) => panic!("{} opened", uri),
+        };
+        let e = err("tams+https://other.example.com/flows/b");
+        assert!(e.contains("not in the player's store"), "{}", e);
+        assert!(!e.contains("SECRET"));
+        assert!(err("cam2").contains("not in the player's store"));
+        assert!(err("tams+ftp://gw.example.com/flows/b").contains("unsupported"));
+        let ok = open("tams+https://gw.example.com/flows/b?k=1").unwrap();
+        assert_eq!(
+            ok.ident.source.as_deref(),
+            Some("tams+https://gw.example.com/flows/b")
+        );
+        assert_eq!(ok.ident.source_id.as_deref(), Some("b"));
+    }
+
+    /// The luma of the top left pixel of an NV12 frame.
+    fn luma(s: &gst::Sample) -> u8 {
+        let info = gstreamer_video::VideoInfo::from_caps(s.caps().unwrap()).unwrap();
+        let frame =
+            gstreamer_video::VideoFrameRef::from_buffer_ref_readable(s.buffer().unwrap(), &info)
+                .unwrap();
+        frame.plane_data(0).unwrap()[0]
+    }
+
+    /// The next event of a kind `want` picks, within `within`.
+    fn wait_event<T>(
+        events: &mut tokio::sync::broadcast::Receiver<strom_types::replay::ReplayEvent>,
+        within: std::time::Duration,
+        want: impl Fn(&strom_types::replay::ReplayEvent) -> Option<T>,
+    ) -> Option<T> {
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < within {
+            match events.try_recv() {
+                Ok(ev) => {
+                    if let Some(t) = want(&ev) {
+                        return Some(t);
+                    }
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        None
+    }
+
+    /// A running player switches source with the `source` command, without
+    /// a rebuild: the same pipeline goes on, and the picture changes from
+    /// the old source to the new one. A switch to a source that is not on
+    /// real TAI gives up and the old source stays.
+    #[test]
+    fn a_running_player_switches_source_without_a_rebuild() {
+        use strom_types::replay::{ReplayEventKind, ReplayTimeDomain};
+        gst::init().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        // Black and white on the same TAI range, and one not on real TAI.
+        write_segments_as(root.path(), "black", "black", true);
+        write_segments_as(root.path(), "white", "white", true);
+        write_segments_as(root.path(), "loose", "white", false);
+        let flow_id = Uuid::new_v4();
+        let props = props(&[
+            ("_media_path", st(root.path().to_str().unwrap())),
+            ("_flow_id", st(&flow_id.to_string())),
+            (SOURCE_PROPERTY, st("black")),
+            (GROUP_PROPERTY, st("g")),
+        ]);
+        let built = build("switch_test", &props).unwrap();
+        let pipeline = gst::Pipeline::new();
+        let mut elements = HashMap::new();
+        for (id, e) in &built.elements {
+            pipeline.add(e).unwrap();
+            elements.insert(id.clone(), e.clone());
+        }
+        for (a, b) in &built.internal_links {
+            elements[&a.element_id]
+                .link_pads(
+                    a.pad_name.as_deref(),
+                    &elements[&b.element_id],
+                    b.pad_name.as_deref(),
+                )
+                .unwrap();
+        }
+        // System memory, so the test can read the pixels.
+        let sink = gst_app::AppSink::builder()
+            .caps(&gst::Caps::builder("video/x-raw").build())
+            .sync(false)
+            .build();
+        pipeline.add(&sink).unwrap();
+        elements["switch_test:video_out"].link(&sink).unwrap();
+        let bus = pipeline.bus().unwrap();
+        let handler = (built.bus_message_handler.unwrap())(
+            &bus,
+            flow_id,
+            crate::events::EventBroadcaster::default(),
+        );
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let tl = timeline::get(flow_id, "g").unwrap();
+        let mut events = tl.subscribe();
+        let pull = || {
+            sink.try_pull_sample(gst::ClockTime::from_seconds(10))
+                .map(|s| luma(&s))
+        };
+        // The old source: black.
+        let t0 = std::time::Instant::now();
+        while pull().is_none_or(|y| y > 40) {
+            assert!(t0.elapsed().as_secs() < 20, "no black picture");
+        }
+        assert_eq!(tl.state().time_domain, ReplayTimeDomain::Tai);
+        let switch = |source: &str, client_ref: &str| {
+            tl.apply(
+                timeline::parse_command(serde_json::json!({
+                    "cmd": "source", "source": source, "client_ref": client_ref
+                }))
+                .unwrap(),
+            )
+        };
+
+        // Not on real TAI: refused by the player once it reads the index.
+        switch("loose", "c1").unwrap();
+        let failed = wait_event(
+            &mut events,
+            std::time::Duration::from_secs(15),
+            |ev| match &ev.kind {
+                ReplayEventKind::SourceFailed { error, .. } => {
+                    Some((error.clone(), ev.client_ref.clone()))
+                }
+                ReplayEventKind::SourceChanged { .. } => panic!("switched to a loose source"),
+                _ => None,
+            },
+        )
+        .expect("no source_failed");
+        assert!(failed.0.contains("TAI"), "{}", failed.0);
+        assert_eq!(failed.1.as_deref(), Some("c1"));
+        assert!(pull().unwrap() < 40, "the old source did not stay");
+        assert_eq!(tl.state().angles[0].source.as_deref(), Some("black"));
+
+        // On TAI: the same pipeline shows the new source.
+        switch("white", "c2").unwrap();
+        let changed = wait_event(
+            &mut events,
+            std::time::Duration::from_secs(15),
+            |ev| match &ev.kind {
+                ReplayEventKind::SourceChanged { block, source } => {
+                    Some((block.clone(), source.clone(), ev.client_ref.clone()))
+                }
+                ReplayEventKind::SourceFailed { error, .. } => panic!("switch failed: {}", error),
+                _ => None,
+            },
+        )
+        .expect("no source_changed");
+        assert_eq!(
+            changed,
+            (
+                "switch_test".to_string(),
+                Some("white".to_string()),
+                Some("c2".to_string())
+            )
+        );
+        let t0 = std::time::Instant::now();
+        while pull().is_none_or(|y| y < 200) {
+            assert!(
+                t0.elapsed().as_secs() < 10,
+                "no white picture after the switch"
+            );
+        }
+        let state = tl.state();
+        assert_eq!(state.angles[0].source.as_deref(), Some("white"));
+        assert_eq!(state.angles[0].pending_source, None);
+        assert_eq!(
+            tl.info(flow_id, "g").angles[0].source_id.as_deref(),
+            Some("white")
+        );
+        pipeline.set_state(gst::State::Null).unwrap();
+        bus.disconnect(handler);
     }
 }

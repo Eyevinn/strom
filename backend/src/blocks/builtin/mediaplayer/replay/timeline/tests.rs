@@ -749,6 +749,8 @@ fn cue(start: i64, end: i64, end_action: Option<EndAction>) -> Command {
         in_point: at_tai(start),
         out: at_tai(end),
         end_action,
+        source: None,
+        block: None,
     }
 }
 
