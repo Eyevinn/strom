@@ -191,7 +191,21 @@ pub fn build(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_frame_rate;
+    use super::{build, parse_frame_rate};
+    use std::collections::HashMap;
+    use strom_types::mediaplayer::SOURCE_PROPERTY;
+    use strom_types::PropertyValue;
+
+    #[test]
+    fn a_player_without_a_flow_id_is_not_built() {
+        // Its groups would be shared with every other flow's.
+        let props = HashMap::from([(
+            SOURCE_PROPERTY.to_string(),
+            PropertyValue::String("tams+https://gateway.example/flows/f".to_string()),
+        )]);
+        let e = build("p", &props).err().expect("an error");
+        assert!(e.to_string().contains("flow id"), "{}", e);
+    }
 
     #[test]
     fn frame_rates_parse() {
