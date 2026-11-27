@@ -517,6 +517,11 @@ impl AppState {
                     }
                 }
 
+                // TAMS Outputs saved with segment_duration_secs.
+                for flow in flows.values_mut() {
+                    crate::blocks::builtin::tams_output::migrate_flow(flow);
+                }
+
                 // Reset all flow states to None on server restart since pipelines aren't running
                 // This prevents showing stale "Playing" states from before the server stopped
                 for flow in flows.values_mut() {
@@ -741,6 +746,8 @@ impl AppState {
         // this, an explicit save from the frontend would re-engage transient
         // state (e.g. PFL/AFL solo) on the next restart.
         self.strip_transient_properties(&mut flow).await;
+        // A client may still send legacy TAMS Output properties.
+        crate::blocks::builtin::tams_output::migrate_flow(&mut flow);
 
         // Update in-memory state. `insert` reports whether the id was already
         // taken, so newness is decided under the same lock that writes it.
@@ -760,6 +767,7 @@ impl AppState {
     /// cannot both succeed and overwrite one another.
     pub async fn insert_flow_if_absent(&self, mut flow: Flow) -> anyhow::Result<bool> {
         self.strip_transient_properties(&mut flow).await;
+        crate::blocks::builtin::tams_output::migrate_flow(&mut flow);
 
         {
             let mut flows = self.inner.flows.write().await;
