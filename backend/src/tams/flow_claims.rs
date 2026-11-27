@@ -19,11 +19,15 @@
 //! from the block id or key, so the same id on two gateways is the same
 //! recording written twice; give the copy its own TAMS key. Claims are
 //! released per Strom flow when the flow is torn down, on stop and on a
-//! failed start alike.
+//! failed start alike, but only once its pipeline has stopped and its
+//! uploaders have finished (see [`Writer`]): until then the old run still
+//! writes, and a flow that claimed the ids at once would be a second writer.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
 use strom_types::FlowId;
+use tokio::sync::Notify;
 
 /// The block that holds a claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,10 +87,74 @@ pub fn claim(
 }
 
 /// Release every claim held by Strom flow `flow_id`. Called when the flow is
-/// torn down; a flow that holds none is ignored.
+/// torn down, after [`writers_done`]; a flow that holds none is ignored.
 pub fn release_flow(flow_id: &FlowId) {
     let mut claims = CLAIMS.lock().unwrap_or_else(|e| e.into_inner());
     claims.retain(|_, owner| owner.flow_id != *flow_id);
+}
+
+/// Uploaders still running, per Strom flow.
+static WRITERS: LazyLock<Mutex<HashMap<FlowId, usize>>> = LazyLock::new(Default::default);
+
+/// Woken whenever a [`Writer`] ends.
+static WRITER_ENDED: Notify = Notify::const_new();
+
+/// A task that writes to the TAMS flows of Strom flow `flow_id`: a TAMS
+/// Output's uploader, which keeps uploading its queue and the final segment
+/// after the pipeline has stopped. Counted while it lives.
+pub struct Writer(FlowId);
+
+impl Writer {
+    pub fn new(flow_id: FlowId) -> Self {
+        *WRITERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(flow_id)
+            .or_insert(0) += 1;
+        Writer(flow_id)
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        let mut writers = WRITERS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = writers.get_mut(&self.0) {
+            *n -= 1;
+            if *n == 0 {
+                writers.remove(&self.0);
+            }
+        }
+        drop(writers);
+        WRITER_ENDED.notify_waiters();
+    }
+}
+
+fn writers_of(flow_id: &FlowId) -> usize {
+    WRITERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(flow_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Wait until no [`Writer`] of Strom flow `flow_id` runs, at most `max`.
+/// False if some still ran then (an uploader stuck on the gateway, or held
+/// by a pipeline that was never freed).
+pub async fn writers_done(flow_id: &FlowId, max: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + max;
+    loop {
+        let ended = WRITER_ENDED.notified();
+        tokio::pin!(ended);
+        // Registered before the count is read, so an end in between wakes it.
+        ended.as_mut().enable();
+        if writers_of(flow_id) == 0 {
+            return true;
+        }
+        if tokio::time::timeout_at(deadline, ended).await.is_err() {
+            return writers_of(flow_id) == 0;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -149,6 +217,22 @@ mod tests {
         let conflict = claim(&gw, &ids(&block), a, &block).unwrap_err();
         assert!(!conflict.owner.gateway.contains("u:p"));
         release_flow(&b);
+    }
+
+    #[tokio::test]
+    async fn writers_done_waits_for_the_last_writer() {
+        let a = Uuid::new_v4();
+        assert!(writers_done(&a, Duration::ZERO).await, "no writer");
+        let (w1, w2) = (Writer::new(a), Writer::new(a));
+        // Another flow's writer does not count.
+        let _other = Writer::new(Uuid::new_v4());
+        assert!(!writers_done(&a, Duration::from_millis(20)).await);
+        let wait = tokio::spawn(async move { writers_done(&a, Duration::from_secs(5)).await });
+        drop(w1);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!wait.is_finished(), "one writer still runs");
+        drop(w2);
+        assert!(wait.await.unwrap());
     }
 
     #[test]

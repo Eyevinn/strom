@@ -31,6 +31,11 @@ use tracing_subscriber::EnvFilter;
 /// Handle for reloading the log filter at runtime.
 pub type LogReloadHandle = reload::Handle<EnvFilter, tracing_subscriber::Registry>;
 
+/// How long a teardown waits for a stopped flow's TAMS uploaders (their queue
+/// and final segment) before it frees the flow's TAMS flow ids anyway. A final
+/// segment takes about a second against a gateway that answers.
+const TAMS_WRITERS_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The endpoint registrations a teardown is allowed to remove.
 ///
 /// Only ever narrower than "everything the flow declares", and only for a
@@ -1540,9 +1545,6 @@ impl AppState {
         // the process. Doing it first also means the thread is not pushing into
         // an appsrc while the pipeline is being taken to NULL below.
         crate::blocks::builtin::vision_mixer::overlay::unregister_flow(id);
-        // TAMS Output claims on TAMS flow ids (see `crate::tams::flow_claims`):
-        // released on every path, so a failed start never blocks another flow.
-        crate::tams::flow_claims::release_flow(id);
 
         let Some(mut manager) = manager else {
             // No pipeline was ever built. Blocks constructed before the failing
@@ -1550,6 +1552,7 @@ impl AppState {
             // may already be held; deallocate() ignores an id it does not know.
             Self::unregister_media_players(*id).await;
             self.inner.affinity_manager.deallocate(id);
+            Self::release_tams_claims(id).await;
             return Ok(PipelineState::Null);
         };
 
@@ -1636,6 +1639,8 @@ impl AppState {
         // Release the cores before returning, whatever stop() said. A flow that
         // fails to stop would otherwise hold them until the process restarts.
         self.inner.affinity_manager.deallocate(id);
+        // Only now: the pipeline has stopped writing segments.
+        Self::release_tams_claims(id).await;
 
         match stopped {
             Ok((result, flow_name, pipeline_survived, leaked_elements)) => {
@@ -1655,6 +1660,25 @@ impl AppState {
                 join_err
             ))),
         }
+    }
+
+    /// Release the TAMS Output claims of flow `id` on TAMS flow ids (see
+    /// `crate::tams::flow_claims`), on every teardown path, so a failed start
+    /// never blocks another flow. Called once the pipeline has stopped, and
+    /// after its uploaders have sent their queue and final segment: a flow
+    /// that claimed the ids before then would write next to them. An
+    /// uploader that takes longer than [`TAMS_WRITERS_WAIT`] (a gateway that
+    /// does not answer) does not keep the ids from other flows any longer.
+    async fn release_tams_claims(id: &FlowId) {
+        if !crate::tams::flow_claims::writers_done(id, TAMS_WRITERS_WAIT).await {
+            warn!(
+                "Flow {}: TAMS uploads still running {} s after stop; releasing its TAMS \
+                 flow ids anyway",
+                id,
+                TAMS_WRITERS_WAIT.as_secs()
+            );
+        }
+        crate::tams::flow_claims::release_flow(id);
     }
 
     pub async fn stop_flow(&self, id: &FlowId) -> Result<PipelineState, PipelineError> {

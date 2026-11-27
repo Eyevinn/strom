@@ -1674,6 +1674,70 @@ mod flow_claims {
         state.stop_flow(&second_id).await.expect("stop second");
     }
 
+    /// After its pipeline has stopped, a flow's uploader still sends its queue
+    /// and final segment. Until it has, the TAMS flows are still written, and
+    /// another flow must not claim them: it would be a second writer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tams_claims_are_held_until_the_uploader_has_finished() {
+        use strom::tams::flow_claims::Writer;
+
+        gst::init().unwrap();
+        common::init_static_plugins();
+        if !plugins_available() {
+            return;
+        }
+        let state = common::state::new();
+        let gateway = format!(
+            "http://127.0.0.1:9/claims-drain-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        // A block id of its own: claims hold across gateways, so another
+        // test's flows with the same block id would hold these TAMS flows.
+        let block = format!("tams_claim_drain_{}", uuid::Uuid::new_v4().simple());
+        let first = flow_with_keyed_tams_output("tams_claim_drain_first", &gateway, &block, None);
+        let second = flow_with_keyed_tams_output("tams_claim_drain_second", &gateway, &block, None);
+        let (first_id, second_id) = (first.id, second.id);
+        state.upsert_flow(first).await.expect("upsert first");
+        state.upsert_flow(second).await.expect("upsert second");
+        state
+            .start_flow(&first_id)
+            .await
+            .expect("first flow starts");
+
+        // An uploader of the first flow, still flushing after its pipeline
+        // has stopped.
+        let flushing = Writer::new(first_id);
+        let stopping = {
+            let state = state.app();
+            tokio::spawn(async move { state.stop_flow(&first_id).await })
+        };
+        // The pipeline is gone from the running set at once; its teardown
+        // goes on.
+        let t0 = Instant::now();
+        while state.pipelines_read().await.contains_key(&first_id)
+            && t0.elapsed() < Duration::from_secs(10)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!stopping.is_finished(), "stop waits for the uploader");
+        state
+            .start_flow(&second_id)
+            .await
+            .expect_err("the first flow's uploader still writes the TAMS flows");
+
+        drop(flushing);
+        stopping
+            .await
+            .expect("stop task")
+            .expect("first flow stops");
+        state
+            .start_flow(&second_id)
+            .await
+            .expect("second flow starts once the uploader has finished");
+        state.stop_flow(&second_id).await.expect("stop second");
+    }
+
     /// A product that creates a new Strom flow, with new random block ids, for
     /// each run (Open Live on every activation) keeps writing to the same TAMS
     /// flows by setting the same `tams_key`: while the old run is up, the new
