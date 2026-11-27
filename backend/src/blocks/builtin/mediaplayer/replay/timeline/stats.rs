@@ -5,9 +5,10 @@
 //! say "group" move them by the player's `offset_ms` onto the group's axis.
 
 use super::super::grid::FrameGrid;
+use super::switch::SourceControl;
 use super::{lock, TimeDomain, UNKNOWN};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 use strom_types::replay::{ReplayJogGrid, ReplayReady};
 
 /// Consecutive in-sync ticks before an angle counts as ready (decoding keeps
@@ -24,7 +25,20 @@ pub enum StartMode {
     Live,
 }
 
-/// A player's replay properties and identity, fixed for the run.
+/// Which source a player shows, for discovery and the state. Without
+/// credentials.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceIdent {
+    /// The source URI.
+    pub source: Option<String>,
+    /// The source's own id (TAMS flow id, directory name).
+    pub source_id: Option<String>,
+    /// The store the source is in.
+    pub store: Option<String>,
+}
+
+/// A player's replay properties and identity, as built. The source can
+/// change during the run ([`PlayerStats::source_ident`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerConfig {
     /// The block's name in the flow.
@@ -149,6 +163,15 @@ pub struct PlayerStats {
     /// [`TimeDomain`] of the source, as u8.
     time_domain: AtomicU8,
     index_view: Mutex<IndexView>,
+    /// The source shown now (the build's, or the last one switched to).
+    ident: Mutex<SourceIdent>,
+    /// The trim of the source shown now, ns.
+    offset_ns: AtomicI64,
+    /// The source being switched to, without credentials.
+    pending_source: Mutex<Option<String>>,
+    /// The player, for a source switch; `None` for a player that cannot
+    /// switch (an export, a test).
+    control: Mutex<Option<Weak<dyn SourceControl>>>,
 }
 
 impl PlayerStats {
@@ -159,6 +182,14 @@ impl PlayerStats {
     pub fn with_config(block_id: &str, config: PlayerConfig) -> Self {
         Self {
             block_id: block_id.to_string(),
+            ident: Mutex::new(SourceIdent {
+                source: config.source.clone(),
+                source_id: config.source_id.clone(),
+                store: config.store.clone(),
+            }),
+            offset_ns: AtomicI64::new(config.offset_ns),
+            pending_source: Mutex::new(None),
+            control: Mutex::new(None),
             config,
             start_tai: AtomicI64::new(UNKNOWN),
             end_tai: AtomicI64::new(UNKNOWN),
@@ -201,7 +232,51 @@ impl PlayerStats {
 
     /// The trim, ns: source time + offset = group time.
     pub fn offset_ns(&self) -> i64 {
-        self.config.offset_ns
+        self.offset_ns.load(Ordering::Relaxed)
+    }
+
+    /// The source shown now.
+    pub fn source_ident(&self) -> SourceIdent {
+        lock(&self.ident).clone()
+    }
+
+    pub fn pending_source(&self) -> Option<String> {
+        lock(&self.pending_source).clone()
+    }
+
+    pub fn set_pending_source(&self, source: Option<String>) {
+        *lock(&self.pending_source) = source;
+    }
+
+    /// Who switches this player's source.
+    pub fn set_control(&self, control: Weak<dyn SourceControl>) {
+        *lock(&self.control) = Some(control);
+    }
+
+    pub fn control(&self) -> Option<Arc<dyn SourceControl>> {
+        lock(&self.control).as_ref().and_then(|w| w.upgrade())
+    }
+
+    /// Take over what `from` (the stats a new source was read into) knows
+    /// about its source: identity, trim, extent, grid, time domain and
+    /// index. The counters stay: they are the player's.
+    pub fn adopt_source(&self, from: &PlayerStats, ident: SourceIdent) {
+        *lock(&self.ident) = ident;
+        self.offset_ns.store(from.offset_ns(), Ordering::Relaxed);
+        self.start_tai
+            .store(from.start_tai.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.end_tai
+            .store(from.end_tai.load(Ordering::Relaxed), Ordering::Relaxed);
+        *lock(&self.grid) = from.grid();
+        self.time_domain
+            .store(from.time_domain.load(Ordering::Relaxed), Ordering::Relaxed);
+        *lock(&self.index_view) = from.index_view();
+        self.frame_rate_missing.store(
+            from.frame_rate_missing.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        *lock(&self.gap_now) = None;
+        *lock(&self.pending_source) = None;
     }
 
     pub fn set_time_domain(&self, d: TimeDomain) {

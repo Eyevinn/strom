@@ -85,6 +85,11 @@ fn every_command_from_every_state_does_what_the_table_says() {
         },
         Command::FollowLive { on: true },
         Command::FollowLive { on: false },
+        // At the timeline, without a player that switches: the motion stays.
+        Command::Source {
+            source: "cam2".into(),
+            block: None,
+        },
     ];
     let rt = S;
     for follow in [true, false] {
@@ -140,7 +145,7 @@ fn every_command_from_every_state_does_what_the_table_says() {
                     Command::Uncue {} => (cur, cur_speed, None, before.live, ramp_left),
                     Command::Live { .. } => (BASE + 58_500 * MS, 1.0, None, true, None),
                     Command::End {} => (BASE + 60 * S - 1, 0.0, None, false, None),
-                    Command::Mark { .. } => (
+                    Command::Mark { .. } | Command::Source { .. } => (
                         cur,
                         cur_speed,
                         held.map(|r| (r.start, r.end)),
