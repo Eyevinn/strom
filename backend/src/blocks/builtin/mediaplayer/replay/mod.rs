@@ -332,12 +332,15 @@ pub fn build(
     instance_id: &str,
     properties: &HashMap<String, PropertyValue>,
 ) -> Result<BlockBuildResult, BlockBuildError> {
-    let flow_id: FlowId = prop_str(properties, "_flow_id")
-        .and_then(|s| Uuid::parse_str(&s).ok())
-        .unwrap_or_else(Uuid::nil);
     let media_path = prop_str(properties, "_media_path").unwrap_or_else(|| "./media".to_string());
     let invalid =
         |e: String| BlockBuildError::InvalidProperty(format!("Media Player timeline mode: {}", e));
+    // Groups are per flow: without the flow's id, players of different flows
+    // would share timelines (also the private `@<block id>` ones). The flow
+    // builder always injects it.
+    let flow_id: FlowId = prop_str(properties, "_flow_id")
+        .and_then(|s| Uuid::parse_str(&s).ok())
+        .ok_or_else(|| invalid("no flow id (_flow_id) to key the group on".to_string()))?;
     let source = prop_str(properties, SOURCE_PROPERTY).ok_or_else(|| {
         invalid(
             "source is required (a segment directory or \
@@ -498,6 +501,14 @@ mod tests {
         PropertyValue::String(s.to_string())
     }
 
+    #[test]
+    fn a_player_without_a_flow_id_is_not_built() {
+        // Its groups would be shared with every other flow's.
+        let props = props(&[(SOURCE_PROPERTY, st("tams+https://gateway.example/flows/f"))]);
+        let e = build("p", &props).err().expect("an error");
+        assert!(e.to_string().contains("flow id"), "{}", e);
+    }
+
     /// Discovery never shows a TAMS URI's query, fragment or credentials:
     /// not in the store, the source id or the source.
     #[test]
@@ -616,7 +627,9 @@ mod tests {
         gst::init().unwrap();
         let root = tempfile::tempdir().unwrap();
         write_segments_as(root.path(), "segs", "smpte", absolute);
+        let flow_id = Uuid::new_v4().to_string();
         let props = props(&[
+            ("_flow_id", st(&flow_id)),
             ("_media_path", st(root.path().to_str().unwrap())),
             (SOURCE_PROPERTY, st("segs")),
             (PACING_PROPERTY, st("offline")),

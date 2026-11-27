@@ -1,22 +1,21 @@
 //! Which running Strom flow writes to which TAMS flow.
 //!
-//! TAMS Output derives its TAMS flow ids from the block instance id (or from
-//! its `tams_key` when set), and a block id is only unique within one Strom
-//! flow. Two Strom flows with a TAMS Output of the same block id (or key)
-//! would write to the same TAMS flows on a shared gateway, interleaving
-//! segments of two recordings. The ids stay derived that
-//! way on purpose (changing the derivation would change the TAMS ids of every
-//! existing recording), so this registry catches the collision instead: a block
-//! claims its TAMS flow ids when it is built, and a claim held by another block
-//! fails the build: a block of another Strom flow, or another block of the same
-//! one with the same `tams_key` (a copied block keeps its properties).
+//! TAMS Output derives its TAMS flow ids from its `tams_key` when set, else
+//! from the Strom flow id and the block id. Two blocks with the same
+//! `tams_key` (in two flows, or a copied block in one) would write to the same
+//! TAMS flows on a shared gateway, interleaving segments of two recordings,
+//! and so would two builds without a flow id (a bare builder). This registry
+//! catches that: a block claims its TAMS flow ids when it is built, and a
+//! claim held by another block fails the build: a block of another Strom flow,
+//! or another block of the same one with the same `tams_key` (a copied block
+//! keeps its properties).
 //!
 //! Claims are keyed by the TAMS flow id alone, whatever the gateway: the
 //! segments of a TAMS flow are parked in one directory per id
 //! (`crate::tams::park::flow_dir`), whose `park.json` names one gateway. Two
 //! writers of one id on two gateways would share that directory and the
 //! drainer would upload only one gateway's segments. The ids are UUIDs derived
-//! from the block id or key, so the same id on two gateways is the same
+//! from the key (or flow and block id), so the same id on two gateways is the same
 //! recording written twice; give the copy its own TAMS key. Claims are
 //! released per run of a Strom flow when that run is torn down, on stop and
 //! on a failed start alike, but only once its pipeline has stopped and its

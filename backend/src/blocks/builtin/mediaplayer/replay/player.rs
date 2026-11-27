@@ -27,10 +27,10 @@ use super::super::bridge::NetworkBuffer;
 use super::backoff::{worth_warning, Backoff};
 #[cfg(test)]
 use super::cache::Hold;
-use super::cache::{by_urgency, Fetcher, SegmentStore};
+use super::cache::{by_urgency, within_budget, Fetcher, SegmentStore};
 use super::decode::{
-    caps_frame_rate, choose_memory, decode_timeout, map_to_grid, pick_decoder, FrameMemory,
-    SegmentDecoder,
+    caps_frame_rate, choose_memory, decode_timeout, map_to_grid, pick_decoder, DecodeError,
+    FrameMemory, SegmentDecoder,
 };
 use super::source::{Segment, SourceIndex};
 use super::timeline::{
@@ -63,6 +63,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// Default budget for one player's decoded frames (1080p NV12 is about
 /// 3 MB a frame), in the memory they are decoded into: GPU memory when the
 /// frames are in CUDA or GL memory. `STROM_REPLAY_DECODED_MB` overrides it.
+/// Per player, on top of the coded budget (see `cache.rs`).
 const DEFAULT_DECODED_BUDGET_MB: u64 = 768;
 /// Decode workers per player, each with its own long-lived decoder.
 const DECODE_WORKERS: usize = 2;
@@ -149,28 +150,6 @@ fn held_in(store: &FrameStore, seg: &Segment) -> Option<TaiFrame> {
     store.frames.get(&last).map(|b| (last, b.clone()))
 }
 
-/// The most urgent of `wanted` (ordered by urgency) whose decoded frames fit
-/// in `budget` bytes, counting `size_of` each. The first `min_keep` always
-/// fit. Stops at the first that does not, so what is kept is never less
-/// urgent than what is left out.
-fn within_budget(
-    wanted: &[Arc<Segment>],
-    size_of: impl Fn(&Segment) -> u64,
-    budget: u64,
-    min_keep: usize,
-) -> Vec<Arc<Segment>> {
-    let mut total = 0u64;
-    let mut out = Vec::new();
-    for (i, s) in wanted.iter().enumerate() {
-        total = total.saturating_add(size_of(s));
-        if i >= min_keep && total > budget {
-            break;
-        }
-        out.push(Arc::clone(s));
-    }
-    out
-}
-
 /// How a player opens another source for a switch: from a URI as the
 /// `source` property takes it, with the block's auth and media path.
 pub type OpenSource = dyn Fn(&str) -> Result<OpenedSource, String> + Send + Sync;
@@ -215,8 +194,9 @@ pub struct ReplayPlayer {
     /// Offline: the clip to play once, on the frame counter. `None` = live,
     /// on the flow clock.
     clip: Option<Clip>,
-    /// Read the bitstrip and burned-in time of pushed frames
-    /// (STROM_REPLAY_BITSTRIP=1).
+    /// Diagnostics only (STROM_REPLAY_BITSTRIP=1): read the spike test
+    /// material's bitstrip and the burned-in time of pushed frames, see
+    /// [`ReplayPlayer::check_picture`].
     read_strip: bool,
     started: AtomicBool,
     stop: Arc<AtomicBool>,
@@ -467,7 +447,20 @@ impl ReplayPlayer {
             decode_timeout(seg.duration_ns()),
         );
         let ms = started.elapsed().as_millis() as u64;
-        let decoded = result?;
+        let decoded = match result {
+            Ok(d) => d,
+            // Every segment would fail the same way: the lane cannot be
+            // played (the output fails the flow with it; a switch to it gives
+            // up).
+            Err(DecodeError::Unsupported(e)) => {
+                lock(&lane.error).get_or_insert_with(|| {
+                    warn!("Replay {}: source cannot be played: {}", self.block_id, e);
+                    e.clone()
+                });
+                return Err(e);
+            }
+            Err(DecodeError::Failed(e)) => return Err(e),
+        };
         // No frame rate from the index: take it from the stream, its caps or
         // else its timestamps (an SPS without timing, e.g. VideoToolbox).
         let grid = stats.grid().or_else(|| {
@@ -703,6 +696,25 @@ impl ReplayPlayer {
                 self.halt();
                 return;
             };
+            // A source replay cannot decode: fail the flow with an error
+            // naming the codec or container, rather than a flow that runs
+            // and never shows a picture. Posted once the block is in its
+            // flow's pipeline, so the error reaches the flow's bus.
+            if let Some(why) = self.current().error() {
+                if appsrc.parent().is_some() {
+                    gst::element_error!(
+                        appsrc,
+                        gst::StreamError::CodecNotFound,
+                        (
+                            "Replay {}: the source cannot be played: {}",
+                            self.block_id,
+                            why
+                        )
+                    );
+                    self.halt();
+                    return;
+                }
+            }
             let has_caps = lock(&self.caps).is_some();
             if appsrc.current_state() == gst::State::Playing {
                 if let (Some(clock), Some(base)) = (appsrc.clock(), appsrc.base_time()) {
@@ -943,6 +955,10 @@ impl ReplayPlayer {
                 return Err(None);
             }
             let appsrc = appsrc()?;
+            // A source replay cannot decode: fail now, naming why.
+            if let Some(e) = self.current().error() {
+                return Err(Some(e));
+            }
             // Pushed before the flow is on its way to play, a buffer would
             // be refused (flushing).
             if let (true, true, Some(grid), Some(_)) = (
@@ -1070,7 +1086,7 @@ impl ReplayPlayer {
         shown_tai: i64,
         t: i64,
     ) {
-        let n = read_bitstrip(b, info).map_or(-1, i64::from);
+        let n = diagnostic_read_spike_bitstrip(b, info).map_or(-1, i64::from);
         self.stats.strip_frame.store(n, Ordering::Relaxed);
         if let Some(origin) = self.timeline.origin_on(grid) {
             if n != grid.nearest_frame(shown_tai) - origin {
@@ -1200,9 +1216,11 @@ impl Drop for PlayerGuard {
     }
 }
 
-/// Read the spike test material's bitstrip: 20 blocks of 48x32 px at the top left of
-/// a 1920-wide picture, white = 1, LSB first. Diagnostics only.
-fn read_bitstrip(buf: &gst::Buffer, info: &gst_video::VideoInfo) -> Option<u32> {
+/// Diagnostics only, for the spike's test material (not a general picture
+/// reader): its bitstrip is 20 blocks of 48x32 px at the top left of a
+/// 1920-wide picture, white = 1, LSB first. Read only with
+/// `STROM_REPLAY_BITSTRIP=1`; other pictures give a meaningless number.
+fn diagnostic_read_spike_bitstrip(buf: &gst::Buffer, info: &gst_video::VideoInfo) -> Option<u32> {
     let frame = gst_video::VideoFrameRef::from_buffer_ref_readable(buf.as_ref(), info).ok()?;
     let y = frame.plane_data(0).ok()?;
     let stride = info.stride()[0] as usize;
@@ -1449,5 +1467,216 @@ mod tests {
         assert!(!holds(1_000, p, 1_000 + p + 2_000_000));
         // Captured after the group time: a frame from the future.
         assert!(!holds(1_000 + 5_000_000, p, 1_000));
+    }
+
+    // --- the output loop, against a pipeline -------------------------------
+
+    /// One-second segments from `START` on, each the same MPEG-TS object of
+    /// 25 frames at 25 fps.
+    struct TsSource {
+        segs: Vec<Segment>,
+        bytes: Vec<u8>,
+        codec: Option<String>,
+    }
+
+    const START: i64 = 1_000 * S;
+
+    impl TsSource {
+        fn new(n: i64, encoder: &str, codec: Option<&str>) -> Arc<Self> {
+            let segs = (0..n)
+                .map(|i| Segment {
+                    start_ns: START + i * S,
+                    end_ns: START + (i + 1) * S,
+                    ts_offset_ns: 0,
+                    object_start_ns: None,
+                    object_id: i.to_string(),
+                    location: Location::Urls(vec![]),
+                })
+                .collect();
+            Arc::new(Self {
+                segs,
+                bytes: super::super::decode::tests::test_ts(encoder, 25),
+                codec: codec.map(str::to_string),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SourceIndex for TsSource {
+        fn describe(&self) -> String {
+            "test source".into()
+        }
+        fn may_grow(&self) -> bool {
+            false
+        }
+        async fn info(&self) -> anyhow::Result<super::super::source::SourceInfo> {
+            Ok(super::super::source::SourceInfo {
+                frame_rate: Some((25, 1)),
+                container: Some("video/mp2t".into()),
+                codec: self.codec.clone(),
+                absolute_time: true,
+            })
+        }
+        async fn list(&self, start: i64, end: i64) -> anyhow::Result<Vec<Segment>> {
+            Ok(self
+                .segs
+                .iter()
+                .filter(|s| s.end_ns > start && s.start_ns < end)
+                .cloned()
+                .collect())
+        }
+        async fn first(&self) -> anyhow::Result<Option<Segment>> {
+            Ok(self.segs.first().cloned())
+        }
+        async fn last(&self) -> anyhow::Result<Option<Segment>> {
+            Ok(self.segs.last().cloned())
+        }
+        async fn fetch(&self, _: &Segment) -> anyhow::Result<Vec<u8>> {
+            Ok(self.bytes.clone())
+        }
+    }
+
+    /// A player on `source` feeding `appsrc ! appsink`, the pipeline playing.
+    fn run_player(
+        source: Arc<TsSource>,
+    ) -> (
+        Arc<ReplayPlayer>,
+        Arc<ReplayTimeline>,
+        gst::Pipeline,
+        gst_app::AppSink,
+    ) {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let appsrc =
+            crate::blocks::live_bridge_appsrc(crate::blocks::APPSRC_MAX_BYTES_VIDEO).build();
+        let sink = gst_app::AppSink::builder().sync(false).build();
+        pipeline
+            .add_many([appsrc.upcast_ref::<gst::Element>(), sink.upcast_ref()])
+            .unwrap();
+        appsrc.link(&sink).unwrap();
+        let timeline = super::super::timeline::get_or_create(uuid::Uuid::new_v4(), "g");
+        let player = ReplayPlayer::new(
+            "p",
+            source,
+            Arc::clone(&timeline),
+            &appsrc,
+            2,
+            4,
+            Output::default(),
+        );
+        pipeline.set_state(gst::State::Playing).unwrap();
+        player.start();
+        (player, timeline, pipeline, sink)
+    }
+
+    /// PTS and the TAI reference timestamp of the next output buffer.
+    fn next_out(sink: &gst_app::AppSink) -> (i64, Option<i64>, i64) {
+        let sample = sink
+            .try_pull_sample(gst::ClockTime::from_seconds(10))
+            .expect("the output stalled");
+        let b = sample.buffer().unwrap();
+        let tai = b
+            .iter_meta::<gst::ReferenceTimestampMeta>()
+            .find(|m| {
+                m.reference()
+                    .structure(0)
+                    .is_some_and(|s| s.name() == "timestamp/x-tai")
+            })
+            .map(|m| m.timestamp().nseconds() as i64);
+        (
+            b.pts().unwrap().nseconds() as i64,
+            tai,
+            b.duration().unwrap().nseconds() as i64,
+        )
+    }
+
+    #[test]
+    fn the_output_runs_on_every_tick_through_play_pause_and_resume() {
+        const FD: i64 = 40_000_000;
+        let (player, timeline, pipeline, sink) = run_player(TsSource::new(10, "x264enc", None));
+        // Paused at the group start until a command: the first frame, held.
+        let (mut last_pts, tai, dur) = next_out(&sink);
+        assert_eq!(dur, FD);
+        assert_eq!(tai, Some(START), "the first frame, stamped with its TAI");
+        let play =
+            || super::super::timeline::parse_command(serde_json::json!({"cmd": "play"})).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while timeline.apply(play()).is_err() {
+            assert!(Instant::now() < deadline, "play was never accepted");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Every buffer one or more whole ticks after the one before (a late
+        // tick is skipped, never pushed in a burst), each with a TAI.
+        let mut tais = Vec::new();
+        for _ in 0..50 {
+            let (pts, tai, _) = next_out(&sink);
+            let step = pts - last_pts;
+            assert!(step >= FD && step % FD == 0, "PTS step {} ns", step);
+            last_pts = pts;
+            tais.push(tai.expect("every buffer carries its TAI"));
+        }
+        assert!(tais.windows(2).all(|w| w[0] <= w[1]), "playing forward");
+        assert!(
+            tais.last().unwrap() - tais[0] >= 25 * FD,
+            "the picture moves at speed 1: {} ns over 50 ticks",
+            tais.last().unwrap() - tais[0]
+        );
+
+        // A pause of the flow: nothing goes out meanwhile, and on resume the
+        // ticks go on from the running time where they stopped (the new base
+        // time), not after a stall or with a burst of the paused time.
+        pipeline.set_state(gst::State::Paused).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        // What went out before the pause and was not read yet.
+        let mut before = last_pts;
+        while let Some(s) = sink.try_pull_sample(gst::ClockTime::ZERO) {
+            before = s.buffer().unwrap().pts().unwrap().nseconds() as i64;
+        }
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let (pts, tai, _) = next_out(&sink);
+        assert!(pts > before, "PTS goes on after the pause");
+        assert!(
+            pts - before < 250_000_000,
+            "the paused time is not in the running time: {} ns",
+            pts - before
+        );
+        assert!(tai.is_some());
+        let mut last = pts;
+        for _ in 0..10 {
+            let (pts, _, _) = next_out(&sink);
+            assert!(pts - last >= FD && (pts - last) % FD == 0);
+            last = pts;
+        }
+        player.shutdown();
+        pipeline.set_state(gst::State::Null).unwrap();
+    }
+
+    /// The error a flow gets from its pipeline's bus within 10 s.
+    fn flow_error(pipeline: &gst::Pipeline) -> Option<String> {
+        let msg = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Error])?;
+        match msg.view() {
+            gst::MessageView::Error(e) => Some(e.error().to_string()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_source_in_a_codec_replay_cannot_decode_fails_the_flow() {
+        // Said by the index.
+        let (player, _, pipeline, _) = run_player(TsSource::new(3, "x265enc", Some("video/h265")));
+        let e = flow_error(&pipeline).expect("the flow fails");
+        assert!(e.contains("video/h265"), "names the codec: {}", e);
+        player.shutdown();
+        pipeline.set_state(gst::State::Null).unwrap();
+
+        // Found by the demux of the first segment (the index does not say).
+        let (player, _, pipeline, _) = run_player(TsSource::new(3, "x265enc", None));
+        let e = flow_error(&pipeline).expect("the flow fails");
+        assert!(e.contains("video/x-h265"), "names the codec: {}", e);
+        player.shutdown();
+        pipeline.set_state(gst::State::Null).unwrap();
     }
 }

@@ -177,7 +177,7 @@ impl PlayerMode {
     }
 
     /// The mode of a block from its properties: `mode` when set, else what
-    /// the legacy properties select (see [`migrate_legacy_properties`]).
+    /// the older properties select (see [`migrate_legacy_properties`]).
     /// An unknown `mode` value is an error naming the value.
     pub fn from_properties(properties: &HashMap<String, PropertyValue>) -> Result<Self, String> {
         match properties.get(MODE_PROPERTY) {
@@ -193,12 +193,17 @@ impl PlayerMode {
     }
 }
 
-/// Legacy property names, before `mode` existed. Read only by
+/// Property names from before `mode` existed. Read only by
 /// [`migrate_legacy_properties`].
+///
+/// Only `stinger_mode` is released. The `replay_*` names were never on
+/// `main`: they are the unreleased replay prototype's, kept so flows saved
+/// on its test deployments still load. They can go once those are gone.
 pub mod legacy {
     /// `true` selected stinger mode (released, may be in saved flows).
     pub const STINGER_MODE: &str = crate::stinger::STINGER_MODE_PROPERTY;
-    /// Non-empty selected the replay (timeline) mode and named its group.
+    /// Unreleased prototype name: non-empty selected the replay (timeline)
+    /// mode and named its group.
     pub const REPLAY_GROUP: &str = "replay_group";
     pub const REPLAY_SOURCE: &str = "replay_source";
     pub const REPLAY_CACHE_S: &str = "replay_cache_s";
@@ -216,7 +221,7 @@ fn non_empty_str<'a>(properties: &'a HashMap<String, PropertyValue>, key: &str) 
     }
 }
 
-/// The mode the legacy properties select, as the block did before `mode`:
+/// The mode the older properties select, as the block did before `mode`:
 /// a non-empty `replay_group` wins over `stinger_mode`.
 fn legacy_mode(properties: &HashMap<String, PropertyValue>) -> Option<PlayerMode> {
     if non_empty_str(properties, legacy::REPLAY_GROUP).is_some() {
@@ -231,11 +236,13 @@ fn legacy_mode(properties: &HashMap<String, PropertyValue>) -> Option<PlayerMode
     }
 }
 
-/// Rewrite a Media Player's legacy properties to the current names, so a
-/// flow saved before `mode` keeps doing what it did:
+/// Rewrite a Media Player's older properties to the current names, so a
+/// flow saved before `mode` keeps doing what it did. `stinger_mode` is the
+/// released one; the `replay_*` names are the unreleased replay prototype's
+/// (see [`legacy`]):
 ///
+/// - `stinger_mode=true`: `mode=stinger` (a `replay_group` wins);
 /// - `replay_group` non-empty: `mode=timeline`, `group`;
-/// - `stinger_mode=true`: `mode=stinger` (a `replay_group` wins, as before);
 /// - `replay_source`, `replay_cache_s`, `replay_auth_mode`,
 ///   `replay_api_token`, `replay_osc_service_id`, `replay_output_framerate`:
 ///   `source`, `decoded_ahead_s`, `auth_mode`, `api_token`,
@@ -243,7 +250,7 @@ fn legacy_mode(properties: &HashMap<String, PropertyValue>) -> Option<PlayerMode
 /// - `replay_prefetch_s`: `read_ahead_s`, the one read-ahead of both modes.
 ///   A replay block ignored `read_ahead_s`, so its old value is replaced.
 ///
-/// A current name already set wins over its legacy name. Legacy keys are
+/// A current name already set wins over its older name. Older keys are
 /// removed. Idempotent. Returns one line per change, for the log; empty when
 /// nothing changed.
 pub fn migrate_legacy_properties(properties: &mut HashMap<String, PropertyValue>) -> Vec<String> {
@@ -260,7 +267,7 @@ pub fn migrate_legacy_properties(properties: &mut HashMap<String, PropertyValue>
             MODE_PROPERTY.to_string(),
             PropertyValue::String(mode.as_str().to_string()),
         );
-        changes.push(format!("mode={} (from legacy properties)", mode.as_str()));
+        changes.push(format!("mode={} (from older properties)", mode.as_str()));
         if mode == PlayerMode::Timeline
             && matches!(
                 properties.get(legacy::STINGER_MODE),
@@ -272,10 +279,10 @@ pub fn migrate_legacy_properties(properties: &mut HashMap<String, PropertyValue>
             );
         }
     } else if has_mode && legacy_mode(properties).is_some() {
-        changes.push("legacy mode properties ignored: mode is set".to_string());
+        changes.push("older mode properties ignored: mode is set".to_string());
     }
 
-    // A block that the legacy properties put in timeline mode read its
+    // A block that the prototype's properties put in timeline mode read its
     // read-ahead from replay_prefetch_s (default 10 s, the same as
     // read_ahead_s) and ignored read_ahead_s.
     if derived == Some(PlayerMode::Timeline) {
@@ -329,7 +336,7 @@ pub fn migrate_legacy_properties(properties: &mut HashMap<String, PropertyValue>
         }
     }
 
-    // Left only when the block was not a legacy timeline (handled above):
+    // Left only when the block was not a prototype timeline (handled above):
     // the playlist and stinger modes never read it.
     if properties.remove(legacy::REPLAY_PREFETCH_S).is_some() {
         changes.push(format!(
@@ -407,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_properties_select_the_mode_without_migration() {
+    fn older_properties_select_the_mode_without_migration() {
         let replay = props(&[(legacy::REPLAY_GROUP, s("r1"))]);
         assert_eq!(
             PlayerMode::from_properties(&replay),
@@ -424,7 +431,7 @@ mod tests {
             PlayerMode::from_properties(&empty),
             Ok(PlayerMode::Playlist)
         );
-        // An explicit mode wins over legacy selectors.
+        // An explicit mode wins over older selectors.
         let both = props(&[
             (MODE_PROPERTY, s("playlist")),
             (legacy::STINGER_MODE, PropertyValue::Bool(true)),
@@ -433,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_a_legacy_replay_block() {
+    fn migrates_a_prototype_replay_block() {
         let mut p = props(&[
             (legacy::REPLAY_GROUP, s("r1")),
             (legacy::REPLAY_SOURCE, s("tams+http://gw/flows/abc")),
@@ -466,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_replay_drops_the_read_ahead_it_ignored() {
+    fn prototype_replay_drops_the_read_ahead_it_ignored() {
         let mut p = props(&[
             (legacy::REPLAY_GROUP, s("r1")),
             (legacy::REPLAY_SOURCE, s("/dir")),
@@ -507,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn current_names_win_over_legacy_names() {
+    fn current_names_win_over_older_names() {
         let mut p = props(&[
             (MODE_PROPERTY, s("timeline")),
             (SOURCE_PROPERTY, s("new")),

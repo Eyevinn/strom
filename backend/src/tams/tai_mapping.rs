@@ -56,7 +56,7 @@
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -563,6 +563,9 @@ pub struct FragmentTimeline {
     /// The shared mapping was re-sampled after a jump: re-anchor on the next
     /// fragment that has no reference timestamp.
     reanchor_pending: bool,
+    /// Keyframes asked for upstream, by TAI grid point: the running time each
+    /// was asked at (see [`Self::keyframe_requests`]). Cleared on a re-anchor.
+    requested: BTreeMap<i128, u64>,
 }
 
 /// Outcome of placing one fragment on the timeline.
@@ -610,15 +613,18 @@ pub fn first_on_grid_fragment(segment_ns: u64) -> u32 {
     u32::try_from(lead).unwrap_or(u32::MAX).saturating_add(1)
 }
 
-/// How far past its grid point a fragment starting at `start_ns` lies, when that
-/// is more than `tolerance_ns` (one frame: splits land on the first keyframe at
-/// or after the grid point). `None` when on the grid or with no grid.
+/// How far from its nearest grid point a fragment starting at `start_ns` lies,
+/// when that is more than `tolerance_ns` (one frame: splits land on the first
+/// keyframe at or after the running time the keyframe was requested at, and a
+/// capture time that jitters moves that by up to a frame either way). `None`
+/// when on the grid or with no grid.
 pub fn grid_miss_ns(start_ns: u64, segment_ns: u64, tolerance_ns: u64) -> Option<u64> {
     if segment_ns == 0 {
         return None;
     }
     let past = start_ns % segment_ns;
-    (past > tolerance_ns).then_some(past)
+    let miss = past.min(segment_ns - past);
+    (miss > tolerance_ns).then_some(miss)
 }
 
 /// First multiple of `segment_ns` strictly after `tai_ns`.
@@ -747,6 +753,10 @@ impl FragmentTimeline {
             (None, Some(_)) => {}
         }
         self.reanchor_pending = false;
+        if anchored.is_some() {
+            // Requests made on the old offset say nothing about the new grid.
+            self.requested.clear();
+        }
         let offset = self.offset_ns.unwrap_or(0);
         let start_ns = clamp_ns(running_time_ns as i128 + offset);
         self.last_running_time_ns = running_time_ns;
@@ -775,13 +785,71 @@ impl FragmentTimeline {
     /// Splitting on a TAI grid gives every flow written from the same frames the
     /// same segment boundaries, and puts boundaries of flows on a shared clock at
     /// the same TAI. `None` until the timeline is anchored or with a zero length.
+    ///
+    /// The keyframe for that grid point was asked for earlier, on the offset
+    /// of that moment. With reference timestamps the offset follows the capture
+    /// time, so it may have moved since by a little (jitter, slow drift). The
+    /// encoder makes the first frame at or after the requested running time a
+    /// keyframe, so the split is the earlier of the two: a split at a running
+    /// time the new offset puts later would skip that keyframe, and the
+    /// fragment would run on to the next grid point.
     pub fn next_split_running_time(&self, running_time_ns: u64, segment_ns: u64) -> Option<u64> {
         let offset = self.offset_ns?;
         if segment_ns == 0 {
             return None;
         }
-        let tai = running_time_ns as i128 + offset;
-        Some(clamp_ns(next_grid_point(tai, segment_ns) - offset))
+        let grid = self.split_grid(running_time_ns, segment_ns, offset);
+        let planned = clamp_ns(grid - offset);
+        let split = match self.requested.get(&grid) {
+            Some(&asked) if asked.abs_diff(planned) <= segment_ns / 2 => asked.min(planned),
+            _ => planned,
+        };
+        Some(split)
+    }
+
+    /// TAI grid point a fragment that starts at `running_time_ns` ends on: the
+    /// next one after its start, or the one after that when this fragment
+    /// opened on the keyframe asked for the next one (its capture time came in
+    /// a little early, so it starts just before that grid point).
+    fn split_grid(&self, running_time_ns: u64, segment_ns: u64, offset: i128) -> i128 {
+        let grid = next_grid_point(running_time_ns as i128 + offset, segment_ns);
+        match self.requested.get(&grid) {
+            Some(&asked) if asked <= running_time_ns => grid + segment_ns as i128,
+            _ => grid,
+        }
+    }
+
+    /// Grid points (as running time) to ask upstream for keyframes at, when a
+    /// fragment that starts at `running_time_ns` opens: every grid point after
+    /// its split up to [`KEYFRAME_LEAD_NS`] past it (at least one), and its
+    /// split itself when the timeline was just (re)anchored, so that the first
+    /// fragment is not as long as the encoder's own GOP. Points already asked
+    /// for are skipped; the rest are remembered for
+    /// [`Self::next_split_running_time`].
+    pub fn keyframe_requests(&mut self, running_time_ns: u64, segment_ns: u64) -> Vec<u64> {
+        let Some(offset) = self.offset_ns else {
+            return Vec::new();
+        };
+        if segment_ns == 0 {
+            return Vec::new();
+        }
+        let seg = segment_ns as i128;
+        let next = self.split_grid(running_time_ns, segment_ns, offset);
+        // Points before this fragment's split are done with.
+        self.requested = self.requested.split_off(&next);
+        let lead = KEYFRAME_LEAD_NS.div_ceil(segment_ns).max(1) as i128;
+        let first = if self.since_anchor == 0 { 0 } else { 1 };
+        let mut points = Vec::new();
+        for k in first..=lead {
+            let grid = next + k * seg;
+            if self.requested.contains_key(&grid) {
+                continue;
+            }
+            let rt = clamp_ns(grid - offset);
+            self.requested.insert(grid, rt);
+            points.push(rt);
+        }
+        points
     }
 }
 
@@ -1294,7 +1362,102 @@ mod tests {
         assert_eq!(grid_miss_ns(5_020, 1_000, 20), None);
         assert_eq!(grid_miss_ns(5_021, 1_000, 20), Some(21));
         assert_eq!(grid_miss_ns(5_480, 1_000, 20), Some(480));
+        // Just before the grid point is on it too, within the tolerance.
+        assert_eq!(grid_miss_ns(4_990, 1_000, 20), None);
+        assert_eq!(grid_miss_ns(4_970, 1_000, 20), Some(30));
         assert_eq!(grid_miss_ns(5_480, 0, 20), None);
+    }
+
+    #[test]
+    fn keyframes_requested_a_second_ahead_once_each() {
+        const MS: u64 = 1_000_000;
+        let anchored = |seg_ms: u64| {
+            let mut tl = FragmentTimeline::default();
+            // Running time 0 is TAI 10 s.
+            tl.place(0, seg_ms * MS, None, 0, || {
+                (10_000 * MS, AnchorKind::Pipeline)
+            });
+            tl
+        };
+        // 1 s segments: the anchoring fragment asks for its own split too,
+        // then one grid point ahead.
+        let mut tl = anchored(1000);
+        assert_eq!(
+            tl.keyframe_requests(0, 1000 * MS),
+            vec![1000 * MS, 2000 * MS]
+        );
+        tl.place(1000 * MS, 1000 * MS, None, 0, || unreachable!());
+        assert_eq!(tl.keyframe_requests(1000 * MS, 1000 * MS), vec![3000 * MS]);
+        // 500 ms: the next fragment asks only for the new point.
+        let mut tl = anchored(500);
+        assert_eq!(
+            tl.keyframe_requests(0, 500 * MS),
+            vec![500 * MS, 1000 * MS, 1500 * MS]
+        );
+        tl.place(500 * MS, 500 * MS, None, 0, || unreachable!());
+        assert_eq!(tl.keyframe_requests(500 * MS, 500 * MS), vec![2000 * MS]);
+        // A fragment that spans grid points (a missed keyframe): the points
+        // after its split that were not asked for yet.
+        tl.place(2500 * MS, 500 * MS, None, 0, || unreachable!());
+        assert_eq!(
+            tl.keyframe_requests(2500 * MS, 500 * MS),
+            vec![3500 * MS, 4000 * MS]
+        );
+        // A backward jump re-anchors and starts over.
+        tl.place(100 * MS, 500 * MS, None, 0, || {
+            (20_000 * MS, AnchorKind::Pipeline)
+        });
+        assert_eq!(
+            tl.keyframe_requests(100 * MS, 500 * MS),
+            vec![600 * MS, 1100 * MS, 1600 * MS]
+        );
+        // 200 ms: five points within the second, plus the split.
+        assert_eq!(anchored(200).keyframe_requests(0, 200 * MS).len(), 6);
+    }
+
+    /// With reference timestamps the offset follows the capture time. When it
+    /// steps back by less than a frame after the keyframe for a grid point was
+    /// requested, the split is where the keyframe was asked for, not where the
+    /// new offset puts the grid point: the encoder made the first frame at or
+    /// after the requested running time a keyframe, and a split later than
+    /// that frame would skip it and double the segment.
+    #[test]
+    fn split_follows_the_requested_keyframe_through_jitter() {
+        const MS: u64 = 1_000_000;
+        const SEG: u64 = 1000 * MS;
+        const FRAME: u64 = 40 * MS;
+        let mut tl = FragmentTimeline::default();
+        // Running time 0 is captured at TAI 10 s.
+        tl.place(0, SEG, Some(10 * SEG), FRAME, || unreachable!());
+        assert_eq!(tl.next_split_running_time(0, SEG), Some(SEG));
+        assert_eq!(tl.keyframe_requests(0, SEG), vec![SEG, 2 * SEG]);
+        // The next fragment's capture time comes in 10 ms early: the offset
+        // follows it, and running time 2 s now maps to TAI 12 s - 10 ms.
+        let b = tl.place(SEG, SEG, Some(11 * SEG - 10 * MS), FRAME, || unreachable!());
+        assert!(b.anchored.is_none());
+        // The keyframe was asked for at 2 s, so the encoder made the frame at
+        // 2 s one. Splitting at 2 s + 10 ms would skip it.
+        let split = tl.next_split_running_time(SEG, SEG).unwrap();
+        assert_eq!(split, 2 * SEG);
+        // The fragment that starts there lies within a frame of the grid.
+        let c = tl.place(
+            split,
+            SEG,
+            Some(12 * SEG - 10 * MS),
+            FRAME,
+            || unreachable!(),
+        );
+        assert_eq!(grid_miss_ns(c.start_ns, SEG, FRAME), None);
+        // A capture time that comes in late needs nothing: the requested
+        // keyframe is after the grid point the new offset gives.
+        let mut tl = FragmentTimeline::default();
+        tl.place(0, SEG, Some(10 * SEG), FRAME, || unreachable!());
+        tl.keyframe_requests(0, SEG);
+        tl.place(SEG, SEG, Some(11 * SEG + 10 * MS), FRAME, || unreachable!());
+        assert_eq!(
+            tl.next_split_running_time(SEG, SEG),
+            Some(2 * SEG - 10 * MS)
+        );
     }
 
     /// The first on-grid fragment is the first whose keyframe was requested

@@ -39,7 +39,7 @@ workaround can go once we move past that version.
   `.property("clock-type", gst::ClockType::Tai)` and compare `time()` with a `Realtime` one.
 - **Hint:** macOS has no `CLOCK_TAI`; `gstsystemclock.c` seems to fall back to the monotonic
   clock id for unknown clock types instead of the realtime one. Not read in detail.
-- **Tests:** `tams::timeline::tests::clock_domains` and
+- **Tests:** `tams::tai_mapping::tests::clock_domains` and
   `host_clocks_without_tai_offset_fall_back_to_37s` cover Strom's check for it.
 - **Upstream:** not searched.
 - **Found in:** TAMS Output shared timeline work (#966). Strom treats a TAI reading that is not
@@ -157,9 +157,10 @@ workaround can go once we move past that version.
 - **Hint:** a guess: the frame still in flight in VideoToolbox when EOS arrives is not
   always output by the drain in `finish`/`drain` (`gst_vtdec_drain` /
   `VTDecompressionSessionWaitForAsynchronousFrames`).
-- **Tests:** none; seen in the replay spike's warning "segment ... gave 49 frames".
+- **Tests:** none; seen in the replay engine's warning "segment ... gave 49 frames".
 - **Upstream:** not searched.
-- **Found in:** the replay spike (branch `feat/replay-tams`, not merged).
+- **Found in:** [#1292](https://github.com/Eyevinn/strom/pull/1292), the replay engine (media
+  player timeline mode).
 
 ### `vtenc`: ABR rate control ignores the bitrate target
 - **Seen on:** GStreamer 1.28 on Apple Silicon (720p30, 5 Mbit/s target).
