@@ -2,6 +2,16 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [Unreleased]
+
+### Added
+- Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture
+
+### Documentation
+- UPSTREAM_NOTES.md: `GstSystemClock` TAI on macOS
+
+---
+
 ## [0.8.4] - 2026-11-18
 
 ### Fixed
