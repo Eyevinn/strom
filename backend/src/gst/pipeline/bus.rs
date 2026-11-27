@@ -3,6 +3,7 @@ use super::PipelineManager;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::Instant;
 use strom_types::{PipelineState, StromEvent};
@@ -62,6 +63,10 @@ impl PipelineManager {
         self.bus_signal_watches += 1;
 
         // Set up main pipeline message handler using connect_message
+        self.stopping.store(false, Ordering::SeqCst);
+        self.flow_ended.store(false, Ordering::SeqCst);
+        let stopping = self.stopping.clone();
+        let flow_ended = self.flow_ended.clone();
         let flow_name = self.flow_name.clone();
         let events = self.events.clone();
         let cached_state = self.cached_state.clone();
@@ -123,6 +128,7 @@ impl PipelineManager {
                     let debug_info = err.debug();
                     let source = err.src().map(|s| s.name().to_string());
 
+                    flow_ended.store(true, Ordering::SeqCst);
                     error!(
                         "Pipeline error in flow '{}': {} (debug: {:?}, source: {:?})",
                         flow_name, error_msg, debug_info, source
@@ -199,6 +205,13 @@ impl PipelineManager {
                     });
                 }
                 MessageView::Eos(_) => {
+                    flow_ended.store(true, Ordering::SeqCst);
+                    // A stop drain sends EOS through a muxer; when that reaches
+                    // the pipeline, it is the stop, not the flow ending.
+                    if stopping.load(Ordering::SeqCst) {
+                        debug!("Pipeline '{}' reached end of stream while stopping", flow_name);
+                        return;
+                    }
                     info!("Pipeline '{}' reached end of stream", flow_name);
                     events.broadcast(StromEvent::PipelineEos { flow_id });
                 }

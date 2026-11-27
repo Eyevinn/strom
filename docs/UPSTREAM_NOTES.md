@@ -97,25 +97,29 @@ workaround can go once we move past that version.
 - **Upstream:** not searched.
 - **Found in:** the WHEP Output input bridge (`gst::video_input_bridge`).
 
-### `GstVideoEncoder`: `min-force-key-unit-interval` also drops scheduled keyframe requests
+### `GstVideoEncoder`: `min-force-key-unit-interval` also delays scheduled keyframe requests
 - **Seen on:** GStreamer 1.28.6 (Homebrew, macOS), `x264enc`. Linux not checked.
 - **Symptom:** the base-class property is meant to keep a burst of requests (WebRTC PLIs) from
-  forcing back-to-back keyframes, but it drops every upstream force-key-unit request that comes
-  within the interval of the last forced keyframe, also one that asks for a keyframe at a given
-  running time. A recorder that asks for a keyframe on each point of a 1 s grid, behind an
-  encoder with the interval at 1 s, had segment boundaries 84–215 ms past the grid, with
-  nothing in the log.
+  forcing back-to-back keyframes, but it holds back every upstream force-key-unit request that
+  comes within the interval of the last forced keyframe, also one that asks for a keyframe at a
+  given running time. Such a request is not dropped: it is honoured on the first frame after the
+  interval has run out. A recorder that asks for a keyframe on each point of a 1 s grid, behind
+  an encoder with the interval at 1 s, had segment boundaries 84–215 ms past the grid, with
+  nothing in the log at the default level.
 - **Repro:** untested as `gst-launch`. `x264enc min-force-key-unit-interval=1000000000` in front
   of `splitmuxsink` with `split-at-running-time` every second, or any element that sends
   `GstForceKeyUnit` with a running time once a second; compare keyframe times with the grid.
-- **Hint:** not read. The property makes no difference between a request with a running time
-  and one without.
-- **Tests:** `tams_output_test::shared_timeline::encoder_keyframes_follow_the_grid_with_default_floor`
-  (fails with the base-class property set).
+- **Hint:** read in `gst_video_encoder_chain` (`gst-libs/gst/video/gstvideoencoder.c`, 1.28.6).
+  `throttled` is true while `last_force_key_unit_request` or `last_key_unit` plus the interval
+  is past the frame's running time, whether the queued request has a running time or not. A
+  throttled request stays in `priv->force_key_unit` and is matched on a later frame; the
+  "Not requesting a new key unit yet due to throttling" line is at DEBUG.
+- **Tests:** `videoenc::tests::block_holds_back_early_keyframe_requests` (the Strom floor that
+  replaces the property). The grid test lives with TAMS Output, which is not on main yet.
 - **Upstream:** not searched.
-- **Found in:** the Video Encoder block now sets the property to 0 and limits only requests
-  without a running time, in an upstream event probe
-  (`backend/src/blocks/builtin/videoenc/keyframe_requests.rs`).
+- **Found in:** [#1284](https://github.com/Eyevinn/strom/pull/1284). The Video Encoder block
+  now sets the property to 0 and limits only requests without a running time, in an upstream
+  event probe (`backend/src/blocks/builtin/videoenc/keyframe_requests.rs`).
 
 ### `nvcodec` has no NVDEC 4:2:2 decode
 - **Seen on:** GStreamer 1.24, 1.26, 1.28 and main (sources read).
@@ -481,6 +485,32 @@ workaround can go once we move past that version.
   (`srt_uri_key_without_value_test`).
 - **Upstream:** not searched.
 - **Found in:** #1257 (capabilities review).
+
+### `whepserversink` (`whep_signaller`): a second ICE gathering `complete` aborts the process
+- **Seen on:** gst-plugin-webrtc 0.15.4. Seen in the field (Linux) and reproduced on macOS.
+- **Symptom:** when a viewer's webrtcbin reports `ice-gathering-state` `complete` a second time,
+  the signaller panics with "SDP answer Sender needs to be valid". The panic is in a GObject
+  signal callback, which cannot unwind, so the whole process aborts; other threads that wait for
+  the signaller's settings lock panic on `PoisonError`. Seen when viewers connect and drop within
+  a second.
+- **Repro:** untested as `gst-launch`. POST a WHEP offer to `whepserversink`, and after the
+  answer has gone out, emit `notify::ice-gathering-state` on that viewer's webrtcbin again.
+- **Hint:** read in `src/whep_signaller/server.rs` of the gst-plugin-webrtc 0.15.4 crate
+  (around line 112). The signaller connects a `notify::ice-gathering-state` handler to every
+  viewer's webrtcbin. Each time it reads `complete`, it takes the sender that carries the SDP
+  answer to the waiting POST out of `settings.sdp_response` with `.expect(...)`, while it holds
+  the settings lock. The sender is there once per session, and webrtcbin can go from `complete`
+  back to `gathering` and reach `complete` again. The WHIP server signaller
+  (`src/whip_signaller/imp.rs`, around line 681) has the same `.expect` on `sdp_answer`, under
+  the same lock, in the `notify::ice-gathering-state` handler it connects in `webrtcbin-ready`
+  (read, not run). WHIP Input (`whipserversrc`) has no guard for it.
+- **Tests:** `whep_output_repeated_ice_complete_test::second_ice_gathering_complete_does_not_abort`
+  (a test binary of its own, since the panic aborts the process). WHEP Output works around it:
+  it stops the emission on every `complete` after the first, in a handler connected in
+  `consumer-added`, before the signaller's own
+  (`backend/src/blocks/builtin/whep/output/ice_complete_guard.rs`).
+- **Upstream:** not searched.
+- **Found in:** #1283.
 
 ## Muxing
 

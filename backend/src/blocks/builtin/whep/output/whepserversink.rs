@@ -400,6 +400,10 @@ pub(super) fn build_whepserversink(
     // dropped while its ICE/DTLS came up.
     crate::blocks::builtin::webrtcsink_keyframe_gate::install(&whepserversink);
 
+    // WORKAROUND #5: a viewer whose ICE gathering completes a second time must
+    // not abort the process in the WHEP server signaller.
+    super::ice_complete_guard::install(&whepserversink, instance_id);
+
     // Handle consumer-removed to clean up webrtcbin from stats storage
     let dynamic_webrtcbin_store_remove = ctx.dynamic_webrtcbin_store();
     let block_id_for_remove = instance_id.to_string();
