@@ -1810,8 +1810,12 @@ mod flow_claims {
 
     const BLOCK_ID: &str = "tams_claim_cam";
 
+    /// Two flows collide on their TAMS flows only through a shared
+    /// `tams_key`: without one the ids derive from the flow id too.
+    const SHARED_KEY: &str = "tams-claim-shared";
+
     fn flow_with_tams_output(name: &str, gateway_url: &str) -> Flow {
-        flow_with_keyed_tams_output(name, gateway_url, BLOCK_ID, None)
+        flow_with_keyed_tams_output(name, gateway_url, BLOCK_ID, Some(SHARED_KEY))
     }
 
     fn flow_with_keyed_tams_output(
@@ -1846,7 +1850,7 @@ mod flow_claims {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn tams_second_flow_with_same_block_id_fails_until_first_stops() {
+    async fn tams_second_flow_with_same_tams_key_fails_until_first_stops() {
         gst::init().unwrap();
         common::init_static_plugins();
         if !plugins_available() {
@@ -1905,11 +1909,14 @@ mod flow_claims {
             "http://127.0.0.1:9/claims-drain-{}",
             uuid::Uuid::new_v4().simple()
         );
-        // A block id of its own: claims hold across gateways, so another
-        // test's flows with the same block id would hold these TAMS flows.
+        // A block id and TAMS key of their own: claims hold across gateways,
+        // so another test's flows with the same key would hold these TAMS
+        // flows. The two flows collide through the shared key.
         let block = format!("tams_claim_drain_{}", uuid::Uuid::new_v4().simple());
-        let first = flow_with_keyed_tams_output("tams_claim_drain_first", &gateway, &block, None);
-        let second = flow_with_keyed_tams_output("tams_claim_drain_second", &gateway, &block, None);
+        let first =
+            flow_with_keyed_tams_output("tams_claim_drain_first", &gateway, &block, Some(&block));
+        let second =
+            flow_with_keyed_tams_output("tams_claim_drain_second", &gateway, &block, Some(&block));
         let (first_id, second_id) = (first.id, second.id);
         state.upsert_flow(first).await.expect("upsert first");
         state.upsert_flow(second).await.expect("upsert second");
@@ -1971,8 +1978,10 @@ mod flow_claims {
             uuid::Uuid::new_v4().simple()
         );
         let block = format!("tams_claim_restart_{}", uuid::Uuid::new_v4().simple());
-        let first = flow_with_keyed_tams_output("tams_claim_restart_first", &gateway, &block, None);
-        let other = flow_with_keyed_tams_output("tams_claim_restart_other", &gateway, &block, None);
+        let first =
+            flow_with_keyed_tams_output("tams_claim_restart_first", &gateway, &block, Some(&block));
+        let other =
+            flow_with_keyed_tams_output("tams_claim_restart_other", &gateway, &block, Some(&block));
         let (first_id, other_id) = (first.id, other.id);
         state.upsert_flow(first).await.expect("upsert first");
         state.upsert_flow(other).await.expect("upsert other");
