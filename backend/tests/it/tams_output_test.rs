@@ -2164,9 +2164,6 @@ mod parked_drain {
             return;
         }
         gst::init().unwrap();
-        // Park whatever the free space of the developer's disk (the default
-        // keeps 10 % of the volume free).
-        std::env::set_var(strom::tams::park::MIN_FREE_MB_ENV, "0");
         let runtime = runtime();
         // A port nothing listens on while the flow runs.
         let addr = std::net::TcpListener::bind("127.0.0.1:0")
@@ -2322,6 +2319,31 @@ mod retention {
             behind / 1_000_000
         );
     }
+}
+
+/// The harness turns the parking limits off, so a park in these tests never
+/// depends on the host disk's free space (a CI runner after a full build is
+/// often below the default floor). Parks through the streaming side's path,
+/// which goes through the limits like every park.
+#[test]
+fn tams_parking_in_tests_does_not_depend_on_the_host_disk() {
+    use strom::tams::uploader::{park_on_disk, FragmentReady, ParkTarget};
+    common::init_static_plugins();
+    let flow = format!("harness-{}", uuid::Uuid::new_v4().simple());
+    let dir = strom::tams::park::flow_dir(UNREACHABLE_GATEWAY, &flow);
+    std::fs::create_dir_all(&dir).unwrap();
+    let segment = dir.join("seg_r1_00001.ts");
+    std::fs::write(&segment, [0u8; 188]).unwrap();
+    let frag = FragmentReady {
+        path: segment.clone(),
+        start_ns: 1_000_000_000,
+        end_ns: 2_000_000_000,
+    };
+    let parked = park_on_disk(&frag, &ParkTarget::new(UNREACHABLE_GATEWAY, &flow));
+    let sidecar_exists = dir.join("seg_r1_00001.ts.meta").exists();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(parked.is_ok(), "{}", parked.unwrap_err());
+    assert!(sidecar_exists);
 }
 
 /// OSC PAT/SAT mode mints a SAT and sends it to `gateway_url`. An explicit

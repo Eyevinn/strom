@@ -94,7 +94,8 @@ pub fn require_elements(required: &[&str]) {
 /// Register the plugins the server links in statically (the `gst-plugins-rs`
 /// WebRTC, inter, rtp and isobmff elements, strom-dsp, and EFP when the `efp`
 /// feature is on) through `strom::gst::register_static_plugins()`, the call
-/// the server makes at startup. Also initialises GStreamer. Safe to call
+/// the server makes at startup. Also initialises GStreamer, and turns the
+/// TAMS parking limits off (see the call below). Safe to call
 /// repeatedly, from any thread.
 ///
 /// Every test registers static plugins through here, never with a plugin's own
@@ -116,6 +117,10 @@ pub fn init_static_plugins() {
         gst::init().expect("GStreamer initialises");
         strom::gst::demote_qsv_plugin();
         strom::gst::register_static_plugins();
+        // TAMS Output parks segments under limits that follow the host
+        // volume's free space; a test must not depend on that, so they are
+        // off. The limits are tested on their own in `strom::tams::park`.
+        strom::tams::park::parking().set_limits(Some(strom::tams::park::ParkLimits::UNLIMITED));
     });
 }
 
