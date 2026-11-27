@@ -2885,6 +2885,63 @@
         }
       }
     },
+    "/api/flows/{flow_id}/blocks/{block_id}/whep-endpoint": {
+      "get": {
+        "tags": [
+          "whep"
+        ],
+        "summary": "Get the WHEP endpoint fed by an output pad of any block or element.",
+        "description": "The nearest WHEP Output downstream, followed through blocks that pass the\npicture on (an encoder, a tee). The search stops at blocks that combine\ninputs (vision mixer, compositor, audio mixer). The endpoint is empty when\nthere is none or the nearest WHEP Output is not started.",
+        "operationId": "get_whep_endpoint",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Block or element ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pad",
+            "in": "query",
+            "description": "Output pad of the block to search from (e.g. `video_out`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "WHEP endpoint info",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhepEndpointResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing `pad` query parameter"
+          },
+          "404": {
+            "description": "Flow or block not found"
+          }
+        }
+      }
+    },
     "/api/flows/{flow_id}/elements/{element_id}/pads/{pad_name}/properties": {
       "get": {
         "tags": [

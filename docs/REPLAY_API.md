@@ -8,7 +8,7 @@ The built-in operator page `/player/replay/{flow_id}/{group}` drives the group w
 
 - reads the flow (`GET /api/flows/{flow_id}`) to find the group's players and the vision mixer they feed;
 - picks angles through the vision mixer API (`PUT .../blocks/{mixer}/preview`, `POST .../transition`, `GET .../state`);
-- finds its monitors with `GET .../blocks/{mixer}/pgm-endpoint` and `multiview-endpoint` (without a vision mixer it has no monitors), and plays them with the shared WHEP client (`/static/whep.js`);
+- finds its monitors with `GET .../blocks/{mixer}/pgm-endpoint` and `multiview-endpoint`, and plays them with the shared WHEP client (`/static/whep.js`). Without a vision mixer it asks `GET .../blocks/{player}/whep-endpoint?pad=video_out` for each player's own WHEP output and shows one player at a time (keys 1–9 or the player buttons choose which);
 - keeps marks and clips in the browser's `localStorage`, so they belong to that browser.
 
 The diagnostics page `/player/replay-diagnostics/{flow_id}/{group}` shows the state and the engine diagnostics, and measures the time from a command to the picture on screen.
