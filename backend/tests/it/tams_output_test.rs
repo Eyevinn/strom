@@ -5,6 +5,8 @@
 //!   PLAYING, and one that gets data must still write segments.
 //! - `shared_timeline`: two TAMS Outputs in one pipeline place the same buffer at
 //!   the same TAI, even when one of them gets its data later (#966).
+//! - `retention`: `retention_s` deletes the flow's segments behind the window
+//!   through the store's index.
 //!
 //! Except in `shared_timeline` (which runs a stub gateway), the gateway URL
 //! points at a closed local port. The block registers its flow
@@ -422,7 +424,7 @@ mod idle_input {
 /// A stub TAMS gateway: accepts flows, hands out upload URLs on itself, and
 /// records each registered segment's `(tams flow id, timerange)`.
 mod stub_gateway {
-    use axum::extract::{Path, State};
+    use axum::extract::{Path, Query, State};
     use axum::routing::{post, put};
     use axum::{Json, Router};
     use std::collections::HashMap;
@@ -433,6 +435,9 @@ mod stub_gateway {
     pub type Segments = Arc<Mutex<Vec<(String, axum::body::Bytes)>>>;
     /// Each flow registration (`PUT /flows/{id}`) body, in order.
     pub type Flows = Arc<Mutex<Vec<serde_json::Value>>>;
+    /// Each segment deletion (`DELETE /flows/{id}/segments`): `(tams flow id,
+    /// timerange)`, in order.
+    pub type Deleted = Arc<Mutex<Vec<(String, String)>>>;
 
     #[derive(Clone)]
     struct Stub {
@@ -441,6 +446,7 @@ mod stub_gateway {
         uploads: Arc<Mutex<HashMap<String, axum::body::Bytes>>>,
         segments: Segments,
         flows: Flows,
+        deleted: Deleted,
     }
 
     /// Start the stub on a free local port; returns its base URL.
@@ -461,6 +467,21 @@ mod stub_gateway {
     pub fn start_recording(
         runtime: &tokio::runtime::Runtime,
     ) -> (String, Registered, Segments, Flows) {
+        let (base, registered, segments, flows, _) = start_all(runtime);
+        (base, registered, segments, flows)
+    }
+
+    /// As [`start`], also recording each segment deletion.
+    pub fn start_with_deletions(
+        runtime: &tokio::runtime::Runtime,
+    ) -> (String, Registered, Deleted) {
+        let (base, registered, _, _, deleted) = start_all(runtime);
+        (base, registered, deleted)
+    }
+
+    fn start_all(
+        runtime: &tokio::runtime::Runtime,
+    ) -> (String, Registered, Segments, Flows, Deleted) {
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
             .expect("bind stub gateway");
@@ -468,12 +489,14 @@ mod stub_gateway {
         let registered: Registered = Arc::default();
         let segments: Segments = Arc::default();
         let flows: Flows = Arc::default();
+        let deleted: Deleted = Arc::default();
         let stub = Stub {
             base: base.clone(),
             registered: registered.clone(),
             uploads: Arc::default(),
             segments: segments.clone(),
             flows: flows.clone(),
+            deleted: deleted.clone(),
         };
         let app =
             Router::new()
@@ -527,13 +550,22 @@ mod stub_gateway {
                             s.registered.lock().unwrap().push((id, tr));
                             axum::http::StatusCode::CREATED
                         },
+                    )
+                    .delete(
+                        |State(s): State<Stub>,
+                         Path(id): Path<String>,
+                         Query(q): Query<HashMap<String, String>>| async move {
+                            let tr = q.get("timerange").cloned().unwrap_or_default();
+                            s.deleted.lock().unwrap().push((id, tr));
+                            axum::http::StatusCode::ACCEPTED
+                        },
                     ),
                 )
                 .with_state(stub);
         runtime.spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        (base, registered, segments, flows)
+        (base, registered, segments, flows, deleted)
     }
 }
 
@@ -2028,6 +2060,103 @@ mod parked_drain {
         assert!(out.segments().is_empty(), "parked segments left");
         assert_eq!(registered.lock().unwrap().len(), parked);
         runtime.shutdown_background();
+    }
+}
+
+/// `retention_s` makes the block delete its flow's segments older than the
+/// window through the store's index; without it nothing is deleted.
+mod retention {
+    use super::*;
+
+    #[test]
+    fn retention_deletes_behind_the_window_through_the_index() {
+        if !plugins_available() || !common::plugins_available(&["tee", "queue"]) {
+            return;
+        }
+        let runtime = runtime();
+        let (gateway, registered, deleted) = stub_gateway::start_with_deletions(&runtime);
+
+        let pipeline = gst::Pipeline::new();
+        let props = |retention: Option<u64>| {
+            let mut p = vec![
+                ("gateway_url", PropertyValue::String(gateway.clone())),
+                ("segment_duration_ms", PropertyValue::UInt(1000)),
+                ("container", PropertyValue::String("mpegts".into())),
+                ("num_video_tracks", PropertyValue::UInt(0)),
+                ("num_audio_tracks", PropertyValue::UInt(1)),
+            ];
+            if let Some(r) = retention {
+                p.push(("retention_s", PropertyValue::UInt(r)));
+            }
+            p
+        };
+        let rolling = add_tams_output_props(&pipeline, "tams_rolling", &props(Some(30)));
+        let keeping = add_tams_output_props(&pipeline, "tams_keeping", &props(None));
+
+        let src = gst::ElementFactory::make("audiotestsrc")
+            .property("is-live", true)
+            .build()
+            .unwrap();
+        let conv = gst::ElementFactory::make("audioconvert").build().unwrap();
+        let resample = gst::ElementFactory::make("audioresample").build().unwrap();
+        let enc = gst::ElementFactory::make("avenc_aac").build().unwrap();
+        let tee = gst::ElementFactory::make("tee").build().unwrap();
+        let q1 = gst::ElementFactory::make("queue").build().unwrap();
+        let q2 = gst::ElementFactory::make("queue").build().unwrap();
+        pipeline
+            .add_many([&src, &conv, &resample, &enc, &tee, &q1, &q2])
+            .unwrap();
+        gst::Element::link_many([&src, &conv, &resample, &enc, &tee]).unwrap();
+        gst::Element::link_many([&tee, &q1, &rolling.input("audio_input_0")]).unwrap();
+        gst::Element::link_many([&tee, &q2, &keeping.input("audio_input_0")]).unwrap();
+
+        let flow_id = uuid::Uuid::new_v4();
+        rolling.run_setups_in_flow(&runtime, flow_id);
+        keeping.run_setups_in_flow(&runtime, flow_id);
+
+        pipeline.set_state(gst::State::Playing).unwrap();
+        std::thread::sleep(Duration::from_millis(2_500));
+        let error = bus_error(&pipeline);
+        pipeline.set_state(gst::State::Null).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let registered = registered.lock().unwrap().clone();
+        let deleted = deleted.lock().unwrap().clone();
+        runtime.shutdown_background();
+        assert_eq!(error, None, "the pipeline posted an error");
+
+        let flow_of = |t: &TamsOutput| {
+            uuid::Uuid::new_v5(
+                &uuid::Uuid::from_u128(0x7a3f_2b10_5c84_4e6d_9f12_a8b7_c6d5_e4f3),
+                format!("{}:mux", t.instance_id).as_bytes(),
+            )
+            .to_string()
+        };
+        let (rolling_flow, keeping_flow) = (flow_of(&rolling), flow_of(&keeping));
+        assert!(
+            deleted.iter().all(|(f, _)| *f == rolling_flow),
+            "only the block with retention deletes: {:?}",
+            deleted
+        );
+        let (_, tr) = deleted
+            .first()
+            .unwrap_or_else(|| panic!("no deletion request; registered {:?}", registered));
+        // Everything before the cutoff, an open start, on the 1 s grid.
+        assert!(tr.starts_with('_') && tr.ends_with(')'), "{}", tr);
+        let cutoff = timerange_start_ns(&format!("[{}", &tr[1..tr.len() - 1]));
+        assert_eq!(cutoff % 1_000_000_000, 0, "cutoff {} off the grid", tr);
+        // 30 s behind what is being recorded.
+        let first = registered
+            .iter()
+            .find(|(f, _)| *f == keeping_flow)
+            .map(|(_, tr)| timerange_start_ns(tr))
+            .expect("segments registered");
+        let behind = first as i128 - cutoff as i128;
+        assert!(
+            (27_000_000_000..=33_000_000_000).contains(&behind),
+            "cutoff {} is {} ms behind the recording",
+            tr,
+            behind / 1_000_000
+        );
     }
 }
 

@@ -24,6 +24,7 @@ use super::refusal::{accept_input, audio_refusal, refuse_input, video_refusal};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::tams::auth::TamsAuth;
 use crate::tams::client::{CollectedFlow, CollectionItem, FlowSpec, TamsClient};
+use crate::tams::retention::Retention;
 use crate::tams::segmenter::{MuxStream, OpenDecision, OpenRequest, Segmenter};
 use crate::tams::tai_mapping::{
     first_on_grid_fragment, grid_miss_ns, reference_tai_ns, shared_pipeline_mapping, AnchorKind,
@@ -72,6 +73,12 @@ const DEFAULT_CONTAINER: &str = "mpegts";
 const AUDIO_LABELS: &str = "audio_labels";
 /// ISO 639 languages of the audio tracks in track order, e.g. `swe,eng`.
 const AUDIO_LANGUAGES: &str = "audio_languages";
+/// Rolling-buffer window in seconds (0 = keep everything; at least 30).
+/// Deletes through the TAMS index (`crate::tams::retention`), so a clip
+/// copied into a flow of its own survives. Runs every tenth of the window
+/// (5 to 60 s) and only while the flow runs. With a TAMS Key the flows outlive
+/// a run, and media of earlier runs older than the window is deleted too.
+const RETENTION_S: &str = "retention_s";
 /// MPEG-TS PID of the video track. Audio track `k` gets `PID_AUDIO_0 + k`.
 /// These are what `mpegtsmux` picks itself when every track is present
 /// (from 0x41 in pad order), now fixed so that a fragment that lacks a track
@@ -464,6 +471,16 @@ impl BlockBuilder for TamsOutputBuilder {
         let auth_plan = auth;
 
         let segment_ns = segment_duration_ns(properties);
+        let retention_s = prop_u64(properties, RETENTION_S, 0);
+        let retention = crate::tams::retention::window_from_secs(retention_s);
+        if let Some(window) = retention.filter(|w| w.as_secs() != retention_s) {
+            warn!(
+                "TAMS Output {}: retention_s {} is under the minimum, keeping {} s",
+                instance_id,
+                retention_s,
+                window.as_secs()
+            );
+        }
         let num_video = prop_usize(properties, "num_video_tracks", DEFAULT_NUM_VIDEO_TRACKS).min(1);
         let num_audio = prop_usize(properties, "num_audio_tracks", DEFAULT_NUM_AUDIO_TRACKS)
             .min(MAX_AUDIO_TRACKS);
@@ -553,6 +570,7 @@ impl BlockBuilder for TamsOutputBuilder {
                         spec,
                         ctx,
                         vec![MuxStream::default()],
+                        retention,
                         &mut elements,
                     )?;
                 }
@@ -591,6 +609,7 @@ impl BlockBuilder for TamsOutputBuilder {
                             pad_name: None,
                             language: meta.language.clone(),
                         }],
+                        retention,
                         &mut elements,
                     )?;
                 }
@@ -719,6 +738,7 @@ impl BlockBuilder for TamsOutputBuilder {
                     spec,
                     ctx,
                     streams,
+                    retention,
                     &mut elements,
                 )?;
             }
@@ -792,6 +812,7 @@ fn build_flow_chain(
     spec: FlowSpec,
     ctx: &BlockBuildContext,
     mux_streams: Vec<MuxStream>,
+    retention: Option<std::time::Duration>,
     elements: &mut Vec<(String, gst::Element)>,
 ) -> Result<(), BlockBuildError> {
     if inputs.is_empty() {
@@ -1104,6 +1125,24 @@ fn build_flow_chain(
         let run_id = run.id().to_string();
         // What a segment parked from the streaming side is meant for.
         let park_target = ParkTarget::new(client.base_url(), &spec.flow_id);
+        // Rolling buffer: delete this flow's segments older than the window,
+        // for as long as the chain runs (its sender lives with the segmenter).
+        if let Some(window) = retention {
+            let alive = tx.downgrade();
+            let tai = HostTai::new();
+            crate::tams::retention::spawn(
+                client.clone(),
+                Retention {
+                    flow_ids: vec![spec.flow_id.clone()],
+                    window,
+                    grid_ns: segment_ns,
+                    protected: None,
+                },
+                format!("{} ({})", block_id, suffix_owned),
+                move || alive.upgrade().is_some(),
+                move || tai.now_ns(),
+            );
+        }
         spawn_uploader(
             client,
             spec,
@@ -1118,6 +1157,7 @@ fn build_flow_chain(
             media_end,
             segment_ns,
             run,
+            retention.map_or(0, |w| w.as_secs()),
         );
 
         // Per-block timeline: TAI = running time + offset. A fragment whose first
@@ -1861,6 +1901,13 @@ fn tams_output_definition() -> BlockDefinition {
                 "Target duration of each TAMS segment in milliseconds (at least 200). Boundaries stay on the TAI grid (multiples of this length from the TAI epoch), and segments split on a keyframe (one is requested from upstream encoders at each split), so the GOP should divide the segment length. For replay, 500 ms segments with a GOP of 500 ms or a divisor of it.",
                 PropertyType::Int,
                 PropertyValue::Int(DEFAULT_SEGMENT_MS as i64),
+            ),
+            simple_prop(
+                RETENTION_S,
+                "Retention (s)",
+                "Rolling buffer in seconds: delete this block's TAMS segments older than this (min 30; 0 = keep all). Runs while the flow runs.",
+                PropertyType::Int,
+                PropertyValue::Int(0),
             ),
             simple_prop(
                 TAMS_KEY,
