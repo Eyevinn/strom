@@ -26,8 +26,8 @@ use crate::tams::auth::TamsAuth;
 use crate::tams::client::{CollectedFlow, CollectionItem, FlowSpec, TamsClient};
 use crate::tams::segmenter::{MuxStream, OpenDecision, OpenRequest, Segmenter};
 use crate::tams::tai_mapping::{
-    grid_miss_ns, reference_tai_ns, shared_pipeline_mapping, AnchorKind, FragmentTimeline, HostTai,
-    FIRST_ON_GRID_FRAGMENT,
+    first_on_grid_fragment, grid_miss_ns, reference_tai_ns, shared_pipeline_mapping, AnchorKind,
+    FragmentTimeline, HostTai, KEYFRAME_LEAD_NS,
 };
 use crate::tams::uploader::{
     channel, clear_orphans, closed_end_ns, media_end_running_time_ns, new_run, new_tail_slot,
@@ -1203,7 +1203,7 @@ fn build_flow_chain(
                 );
             }
             let abs_start = placed.start_ns;
-            if placed.since_anchor >= FIRST_ON_GRID_FRAGMENT {
+            if placed.since_anchor >= first_on_grid_fragment(segment_ns) {
                 // Splits land on the first keyframe at or after the grid point,
                 // so up to one frame past it is on the grid.
                 if let Some(miss) = grid_miss_ns(abs_start, segment_ns, frame_ns) {
@@ -1379,13 +1379,6 @@ fn muxer_sink_caps(factory: &str) -> Result<gst::Caps, BlockBuildError> {
     }
     Ok(caps)
 }
-
-/// How far ahead of a fragment's next split TAMS Output asks upstream for
-/// keyframes on the grid. It must exceed the upstream encoder's latency (x264
-/// with lookahead holds most of a second), or the request comes after the
-/// encoder has passed that point and forces a keyframe off the grid. With 1 s
-/// segments this is one grid point ahead, as before sub-second segments.
-const KEYFRAME_LEAD_NS: u64 = 1_000_000_000;
 
 /// Grid points (running time) to ask upstream for keyframes at when a fragment
 /// whose next split is `next` opens: every grid point after `next` up to
