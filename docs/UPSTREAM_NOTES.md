@@ -463,9 +463,10 @@ workaround can go once we move past that version.
   on peer `connection-state` `failed` (`src/webrtcsink/imp.rs`, around line 3290). The server
   never learned a candidate of the viewer, so its ICE agent has no pair to check and never
   fails. There is no connect timeout.
-- **Tests:** `whep_output_unconnected_viewer_test::viewer_that_never_connects_is_ended`.
+- **Tests:** `whep_output_unconnected_viewer_test::viewer_that_never_connects_is_ended`. Strom
+  works around it: WHEP Output ends every session whose peer connection has not come up 30 s
+  after its answer went out (60 s after the offer if no answer went out) by emitting
+  `session-ended` on the signaller, as DELETE does. Strom also raises its soft `RLIMIT_NOFILE`
+  towards the hard limit at startup.
 - **Upstream:** not searched.
-- **Found in:** WHEP Output ends every session that has not reached `connected` within 30 s by
-  emitting `session-ended` on the signaller, as DELETE does
-  (`backend/src/blocks/builtin/whep/output/unconnected_viewer_reaper.rs`). Strom also raises
-  its soft `RLIMIT_NOFILE` to the hard limit at startup (`server_hardening::raise_fd_limit`).
+- **Found in:** [#1290](https://github.com/Eyevinn/strom/pull/1290)

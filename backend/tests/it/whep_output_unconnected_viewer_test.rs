@@ -202,10 +202,6 @@ fn viewer_that_never_connects_is_ended() {
         );
     }
 
-    pipeline
-        .set_state(gst::State::Playing)
-        .expect("pipeline goes to PLAYING");
-
     let removed = Arc::new(Mutex::new(Vec::<String>::new()));
     {
         let removed = removed.clone();
@@ -233,7 +229,7 @@ fn viewer_that_never_connects_is_ended() {
     assert_eq!(webrtcbins.lock().unwrap().len(), 1, "one viewer session");
 
     // The viewer never connects and never sends DELETE. The block's connect
-    // timeout is 30 s; give it some slack.
+    // timeout is 30 s from the answer; give it some slack.
     let deadline = Instant::now() + Duration::from_secs(45);
     let ended = loop {
         let alive = webrtcbins
