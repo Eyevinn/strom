@@ -7,8 +7,9 @@
 //! segments of two recordings. The ids stay derived that
 //! way on purpose (changing the derivation would change the TAMS ids of every
 //! existing recording), so this registry catches the collision instead: a block
-//! claims its TAMS flow ids when it is built, and a claim held by another Strom
-//! flow fails the build.
+//! claims its TAMS flow ids when it is built, and a claim held by another block
+//! fails the build: a block of another Strom flow, or another block of the same
+//! one with the same `tams_key` (a copied block keeps its properties).
 //!
 //! Claims are keyed by gateway (a TAMS flow id on another store is another
 //! flow) and released per Strom flow when the flow is torn down, on stop and
@@ -43,9 +44,10 @@ fn gateway_key(gateway_url: &str) -> String {
 }
 
 /// Claim `tams_flow_ids` on `gateway_url` for block `block_id` of Strom flow
-/// `flow_id`. All or nothing: if any of them is held by another Strom flow,
-/// nothing is claimed and the first conflict is returned. Claims the same Strom
-/// flow already holds (a rebuild of the flow) are taken over.
+/// `flow_id`. All or nothing: if any of them is held by another block (of
+/// another Strom flow, or another block of this one: two blocks with the same
+/// `tams_key`), nothing is claimed and the first conflict is returned. Claims
+/// the same block already holds (a rebuild of the flow) are taken over.
 pub fn claim(
     gateway_url: &str,
     tams_flow_ids: &[String],
@@ -56,7 +58,7 @@ pub fn claim(
     let mut claims = CLAIMS.lock().unwrap_or_else(|e| e.into_inner());
     for id in tams_flow_ids {
         if let Some(owner) = claims.get(&(gateway.clone(), id.clone())) {
-            if owner.flow_id != flow_id {
+            if owner.flow_id != flow_id || owner.block_id != block_id {
                 return Err(ClaimConflict {
                     tams_flow_id: id.clone(),
                     owner: owner.clone(),
@@ -112,6 +114,21 @@ mod tests {
         release_flow(&a);
         claim(&gw, &ids("cam1"), b, "cam1").unwrap();
         release_flow(&b);
+    }
+
+    /// Two blocks of one Strom flow with the same `tams_key` derive the same
+    /// TAMS flow ids: the second is refused, as from another Strom flow.
+    #[test]
+    fn tams_claim_held_by_another_block_of_the_same_flow_fails() {
+        let gw = format!("http://gw-{}.example.com", Uuid::new_v4().simple());
+        let a = Uuid::new_v4();
+        claim(&gw, &ids("key"), a, "cam1").unwrap();
+        let conflict = claim(&gw, &ids("key"), a, "cam1_copy").unwrap_err();
+        assert_eq!(conflict.owner.flow_id, a);
+        assert_eq!(conflict.owner.block_id, "cam1");
+        // The block that holds them may build again.
+        claim(&gw, &ids("key"), a, "cam1").unwrap();
+        release_flow(&a);
     }
 
     #[test]

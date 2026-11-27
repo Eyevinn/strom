@@ -346,9 +346,10 @@ fn written_flow_ids(
 }
 
 /// Claim the block's TAMS flows for its Strom flow (`_flow_id`, injected by
-/// block expansion), or fail the build when another running Strom flow
-/// already writes to them: the TAMS flow ids derive from the block id (or the
-/// `tams_key`), and block ids are only unique within a Strom flow. See
+/// block expansion), or fail the build when another running Strom flow, or
+/// another block of this one with the same `tams_key`, already writes to them:
+/// the TAMS flow ids derive from the block id (or the `tams_key`), and block
+/// ids are only unique within a Strom flow. See
 /// `crate::tams::flow_claims`. A build without `_flow_id` (a bare builder in a
 /// test) claims nothing.
 fn claim_tams_flows(
@@ -362,6 +363,14 @@ fn claim_tams_flows(
         return Ok(());
     };
     crate::tams::flow_claims::claim(gateway_url, tams_flow_ids, flow_id, instance_id).map_err(|c| {
+        if c.owner.flow_id == flow_id {
+            return BlockBuildError::InvalidConfiguration(format!(
+                "TAMS Output '{}': TAMS flow {} on {} is already written by block '{}' of \
+                 this Strom flow: both blocks have the same TAMS key. Give each TAMS Output \
+                 its own TAMS key",
+                instance_id, c.tams_flow_id, gateway_url, c.owner.block_id
+            ));
+        }
         BlockBuildError::InvalidConfiguration(format!(
             "TAMS Output '{}': TAMS flow {} on {} is already written by block '{}' of \
                  running Strom flow {} (this is Strom flow {}). TAMS flow ids derive from \
