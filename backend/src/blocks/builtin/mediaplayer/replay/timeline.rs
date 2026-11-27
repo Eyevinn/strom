@@ -691,6 +691,14 @@ impl ReplayTimeline {
         lock(&self.players).retain(|w| w.strong_count() > 0 && !w.ptr_eq(&target));
     }
 
+    /// Resolve every angle's offset again (the flow's source offsets
+    /// changed).
+    pub fn refresh_offsets(&self) {
+        for p in self.players() {
+            p.refresh_offset();
+        }
+    }
+
     fn players(&self) -> Vec<Arc<PlayerStats>> {
         lock(&self.players)
             .iter()

@@ -182,6 +182,10 @@ pub async fn create_app_with_config(
             patch(api::flows::update_flow_properties),
         )
         .route(
+            "/flows/{id}/source-offsets",
+            get(api::replay::get_source_offsets).patch(api::replay::patch_source_offsets),
+        )
+        .route(
             "/flows/{id}/webrtc-stats",
             get(api::flows::get_webrtc_stats),
         )
