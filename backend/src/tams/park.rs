@@ -32,10 +32,15 @@
 //! whichever flow they belong to:
 //!
 //! - a cap on their total size ([`ParkLimits::max_total_bytes`],
-//!   `STROM_TAMS_PARK_MAX_TOTAL_MB`; default 25 % of the volume);
+//!   `STROM_TAMS_PARK_MAX_TOTAL_MB`; default 10 % of the volume, at most
+//!   32 GiB);
 //! - a floor on the free space of the root's volume
 //!   ([`ParkLimits::min_free_bytes`], `STROM_TAMS_PARK_MIN_FREE_MB`; default
-//!   the larger of 5 GiB and 10 % of the volume).
+//!   10 % of the volume, at least 5 GiB and at most 32 GiB).
+//!
+//! Both defaults have a ceiling, so a large shared data volume does not keep
+//! hundreds of GiB free or parked: on a 4 TB volume parking stops when less
+//! than 32 GiB is free, not 400 GiB.
 //!
 //! Past either, the oldest parked segments of the whole server (lowest start
 //! time, whichever flow) are deleted until the new one fits. When that is not
@@ -199,14 +204,17 @@ pub const MIN_FREE_MB_ENV: &str = "STROM_TAMS_PARK_MIN_FREE_MB";
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
 
-/// Default cap on all parked segments: this share of the volume.
-const DEFAULT_MAX_TOTAL_PERCENT: u64 = 25;
-/// Default cap on all parked segments when the volume's size is unknown.
-const DEFAULT_MAX_TOTAL_UNKNOWN_VOLUME: u64 = 32 * GIB;
+/// Default cap on all parked segments: this share of the volume ...
+const DEFAULT_MAX_TOTAL_PERCENT: u64 = 10;
+/// ... but never more than this, which is also the cap when the volume's
+/// size is unknown.
+const DEFAULT_MAX_TOTAL_CEILING: u64 = 32 * GIB;
 /// Default free space kept: this share of the volume ...
 const DEFAULT_MIN_FREE_PERCENT: u64 = 10;
-/// ... but never less than this.
+/// ... but never less than this ...
 const DEFAULT_MIN_FREE_FLOOR: u64 = 5 * GIB;
+/// ... nor more than this.
+const DEFAULT_MIN_FREE_CEILING: u64 = 32 * GIB;
 
 /// How long a free-space reading is reused.
 const SPACE_CACHE: Duration = Duration::from_secs(1);
@@ -230,31 +238,52 @@ pub struct ParkLimits {
 }
 
 impl ParkLimits {
-    /// The defaults for a volume of `volume_bytes`: the cap is 25 % of the
-    /// volume; the free space kept is 10 % of the volume, at least 5 GiB.
-    /// When the volume's size is unknown: a 32 GiB cap and 5 GiB free.
+    /// No limits: nothing is ever deleted for space or refused.
+    pub const UNLIMITED: Self = Self {
+        max_total_bytes: u64::MAX,
+        min_free_bytes: 0,
+    };
+
+    /// The defaults for a volume of `volume_bytes`: the cap is 10 % of the
+    /// volume, at most 32 GiB; the free space kept is 10 % of the volume, at
+    /// least 5 GiB and at most 32 GiB. When the volume's size is unknown: a
+    /// 32 GiB cap and 5 GiB free.
     pub fn defaults(volume_bytes: Option<u64>) -> Self {
         match volume_bytes {
             Some(v) => Self {
-                max_total_bytes: percent_of(v, DEFAULT_MAX_TOTAL_PERCENT),
-                min_free_bytes: percent_of(v, DEFAULT_MIN_FREE_PERCENT).max(DEFAULT_MIN_FREE_FLOOR),
+                max_total_bytes: percent_of(v, DEFAULT_MAX_TOTAL_PERCENT)
+                    .min(DEFAULT_MAX_TOTAL_CEILING),
+                min_free_bytes: percent_of(v, DEFAULT_MIN_FREE_PERCENT)
+                    .clamp(DEFAULT_MIN_FREE_FLOOR, DEFAULT_MIN_FREE_CEILING),
             },
             None => Self {
-                max_total_bytes: DEFAULT_MAX_TOTAL_UNKNOWN_VOLUME,
+                max_total_bytes: DEFAULT_MAX_TOTAL_CEILING,
                 min_free_bytes: DEFAULT_MIN_FREE_FLOOR,
             },
         }
     }
 
     /// The defaults, overridden by `STROM_TAMS_PARK_MAX_TOTAL_MB` and
-    /// `STROM_TAMS_PARK_MIN_FREE_MB`.
+    /// `STROM_TAMS_PARK_MIN_FREE_MB`. A value that is not a whole number of
+    /// MiB is warned about (once per value) and the default used.
     pub fn from_env(volume_bytes: Option<u64>) -> Self {
         fn mb(name: &str) -> Option<u64> {
-            strom_types::env::var_opt(name)?
-                .trim()
-                .parse::<u64>()
-                .ok()
-                .map(|v| v.saturating_mul(MIB))
+            let value = strom_types::env::var_opt(name)?;
+            match mb_value(name, &value) {
+                Ok(bytes) => Some(bytes),
+                Err(why) => {
+                    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+                    let fresh = WARNED
+                        .get_or_init(Default::default)
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(format!("{name}={value}"));
+                    if fresh {
+                        warn!("TAMS: {}", why);
+                    }
+                    None
+                }
+            }
         }
         let d = Self::defaults(volume_bytes);
         Self {
@@ -262,6 +291,22 @@ impl ParkLimits {
             min_free_bytes: mb(MIN_FREE_MB_ENV).unwrap_or(d.min_free_bytes),
         }
     }
+}
+
+/// The bytes of `value`, a whole number of MiB set in variable `name`, or
+/// why it is not one.
+fn mb_value(name: &str, value: &str) -> Result<u64, String> {
+    value
+        .trim()
+        .parse::<u64>()
+        .map(|v| v.saturating_mul(MIB))
+        .map_err(|_| {
+            format!(
+                "{}={:?} is not a whole number of MiB (e.g. 10240 for 10 GiB); using the \
+                 default",
+                name, value
+            )
+        })
 }
 
 fn percent_of(v: u64, percent: u64) -> u64 {
@@ -1169,19 +1214,19 @@ mod tests {
     #[test]
     fn tams_park_default_limits_follow_the_volume() {
         let d = |v| ParkLimits::defaults(v);
-        // Large volume: a quarter of it, with no upper limit; 10 % stays free.
+        // Large shared volume: both stop at 32 GiB, not 10 % (400 GiB).
         assert_eq!(
             d(Some(4000 * GIB)),
             ParkLimits {
-                max_total_bytes: 1000 * GIB,
-                min_free_bytes: 400 * GIB,
+                max_total_bytes: 32 * GIB,
+                min_free_bytes: 32 * GIB,
             }
         );
-        // 100 GiB: a quarter, and 10 % free.
+        // 100 GiB: 10 % each.
         assert_eq!(
             d(Some(100 * GIB)),
             ParkLimits {
-                max_total_bytes: 25 * GIB,
+                max_total_bytes: 10 * GIB,
                 min_free_bytes: 10 * GIB,
             }
         );
@@ -1189,7 +1234,7 @@ mod tests {
         assert_eq!(
             d(Some(20 * GIB)),
             ParkLimits {
-                max_total_bytes: 5 * GIB,
+                max_total_bytes: 2 * GIB,
                 min_free_bytes: 5 * GIB,
             }
         );
@@ -1200,6 +1245,18 @@ mod tests {
                 max_total_bytes: 32 * GIB,
                 min_free_bytes: 5 * GIB,
             }
+        );
+    }
+
+    /// A value that is not a whole number of MiB is reported, naming the
+    /// variable, and the default is used.
+    #[test]
+    fn tams_park_invalid_mb_value_is_reported() {
+        assert_eq!(mb_value(MAX_TOTAL_MB_ENV, " 12 "), Ok(12 * MIB));
+        let why = mb_value(MAX_TOTAL_MB_ENV, "10G").unwrap_err();
+        assert!(
+            why.contains(MAX_TOTAL_MB_ENV) && why.contains("10G"),
+            "{why}"
         );
     }
 }
