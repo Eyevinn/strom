@@ -416,6 +416,9 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     });
 
+    // Before any pipeline or connection takes file descriptors.
+    strom::server_hardening::raise_fd_limit();
+
     match soup_http {
         strom::gst::soup_http::SoupHttp::Http1 => {
             info!("libsoup HTTP sources use HTTP/1.1 (STROM_SOUP_HTTP2=on allows HTTP/2)")
