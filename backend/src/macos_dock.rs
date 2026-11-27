@@ -11,7 +11,10 @@
 //!
 //! A run loop observer on the main thread puts the policy back after each such
 //! call. GL creates its window from a block dispatched to the main queue, so the
-//! observer runs as soon as that block returns. GUI mode does not install it.
+//! observer runs as soon as that block returns. The process is still Regular
+//! for that moment, so the Dock icon may flash at startup and when a flow
+//! creates a GL context; avoiding that needs the upstream fix (GL setting
+//! Regular only when it shows a window). GUI mode does not install it.
 
 #[cfg(target_os = "macos")]
 mod imp {

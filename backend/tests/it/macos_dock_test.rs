@@ -28,6 +28,25 @@ struct Server {
 }
 
 impl Server {
+    /// Start a headless server and wait until it listens. Retries with a new
+    /// port when the server exits before that: the port is picked here and
+    /// released before the server binds it, so a parallel test can take it.
+    fn start_headless() -> Self {
+        for _ in 0..3 {
+            let mut server = Self::spawn_headless();
+            if server.wait_for_log(READY, Duration::from_secs(90)) {
+                return server;
+            }
+            if server.child.try_wait().ok().flatten().is_none() {
+                panic!(
+                    "the headless server never logged {READY:?}:\n{}",
+                    server.log_text()
+                );
+            }
+        }
+        panic!("the headless server exited before logging {READY:?} three times");
+    }
+
     fn spawn_headless() -> Self {
         let dir = tempfile::tempdir().expect("create a data directory");
         let log = tempfile::NamedTempFile::new().expect("create a log file");
@@ -96,8 +115,8 @@ impl Server {
     }
 
     /// Give the main run loop time to run the observer, then read the type.
-    fn settled_application_type(&self) -> String {
-        std::thread::sleep(Duration::from_secs(1));
+    async fn settled_application_type(&self) -> String {
+        tokio::time::sleep(Duration::from_secs(1)).await;
         self.application_type()
     }
 }
@@ -128,20 +147,21 @@ fn gl_flow() -> serde_json::Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn headless_server_stays_out_of_the_dock_after_gl() {
-    let mut server = Server::spawn_headless();
+    let server = Server::start_headless();
 
-    assert!(
-        server.wait_for_log(READY, Duration::from_secs(90)),
-        "the headless server never logged {READY:?}:\n{}",
-        server.log_text()
-    );
     assert!(
         server.log_text().contains(GL_PROBED),
         "the server never logged {GL_PROBED:?}, so no GL context was created at \
          startup and this test cannot tell whether GL's Regular policy is undone"
     );
 
-    let after_probe = server.settled_application_type();
+    let after_probe = server.settled_application_type().await;
+    assert!(
+        !after_probe.is_empty(),
+        "lsappinfo has no application type for the server: the process is not \
+         registered with LaunchServices, so this machine has no GUI session to \
+         test the Dock in. That is the environment, not the Dock fix"
+    );
     assert_eq!(
         after_probe, "UIElement",
         "after the startup GL probe, headless Strom is {after_probe:?}: GL set the \
@@ -174,9 +194,30 @@ async fn headless_server_stays_out_of_the_dock_after_gl() {
         started.text().await.unwrap_or_default()
     );
 
-    // glupload makes its GL context when the flow negotiates; give it time.
-    std::thread::sleep(Duration::from_secs(2));
-    let after_flow = server.settled_application_type();
+    // glupload makes its GL context when the flow negotiates, so wait until
+    // the flow runs. Otherwise the check below could read the type before the
+    // flow's GL context exists and pass without testing anything.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let flow: serde_json::Value = client
+            .get(format!("{base}/flows/{id}"))
+            .send()
+            .await
+            .expect("read the GL flow")
+            .json()
+            .await
+            .expect("parse the GL flow");
+        let flow = flow.get("flow").unwrap_or(&flow);
+        if flow["running"].as_bool() == Some(true) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the GL flow never ran, so it made no GL context to test: {flow}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let after_flow = server.settled_application_type().await;
     assert_eq!(
         after_flow, "UIElement",
         "with a GL flow running, headless Strom is {after_flow:?}: the policy was \

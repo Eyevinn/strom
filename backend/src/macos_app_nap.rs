@@ -5,9 +5,9 @@
 //! GL context (#1279, see `macos_dock`). macOS App-Naps that shape ~32 s after
 //! launch: every thread drops to scheduling priority 4, which on Apple Silicon
 //! means efficiency cores at a throttled clock, and pipelines run ~7x slower for
-//! the rest of the process's life. Headless Strom now stays `UIElement`, as
-//! `gst-launch-1.0` without GL does, but whether that alone keeps it out of App
-//! Nap is not measured, so the assertion stays.
+//! the rest of the process's life. Headless Strom now returns to `UIElement`
+//! after each GL context, as `gst-launch-1.0` without GL stays, but whether that
+//! alone keeps it out of App Nap is not measured, so the assertion stays.
 //!
 //! `beginActivityWithOptions:reason:` is the documented opt-out, and works
 //! regardless of activation policy.
