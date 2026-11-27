@@ -164,7 +164,10 @@ pub fn osc_service_id(gateway: &str, explicit: Option<&str>) -> Result<String, S
     let service_id = match explicit {
         Some(id) => id.to_string(),
         None => crate::osc::derive_service_id(gateway).ok_or_else(|| {
-            "OSC auth: cannot derive the service id from the gateway URL".to_string()
+            "OSC auth: cannot derive the service id from the gateway URL. It must be an \
+             absolute OSC URL (https://<tenant>-<instance>.<service>.auto.prod.osaas.io); \
+             for another gateway set the OSC Service ID property"
+                .to_string()
         })?,
     };
     check_osc_gateway(gateway, &service_id, gateway_is_allow_listed(gateway))?;
@@ -1068,6 +1071,12 @@ mod tests {
             false
         )
         .is_ok());
+    }
+
+    #[test]
+    fn a_gateway_url_without_scheme_says_it_must_be_absolute() {
+        let err = osc_service_id("x.eyevinn-tams-gateway.auto.prod.osaas.io", None).unwrap_err();
+        assert!(err.contains("absolute"), "{err}");
     }
 
     #[test]
