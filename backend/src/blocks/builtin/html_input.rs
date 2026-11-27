@@ -6,9 +6,18 @@
 //! actually exposes an audio pad.
 //!
 //! ```text
-//! cefsrc -> capsfilter -> cefdemux -> video -> queue -> videoconvert -> video_output -> [video_out]
+//! cefsrc -> capsfilter -> cefdemux -> video -> queue -> video_output -> [video_out]
 //!                                  -> audio -> queue -> audioconvert -> audioresample -> audio_output -> [audio_out]
 //! ```
+//!
+//! The frames are BGRA in GL memory or in system memory, whichever the
+//! consumer takes; GL memory first. Strom's gstcefsrc offers GL memory only
+//! while Chromium renders on the GPU and hands its frames over as dma-bufs,
+//! which it copies into GL memory on the GPU. Frames Chromium paints to CPU
+//! memory (no GPU, or after a fallback) are uploaded into the same GL memory,
+//! so the output does not depend on how the page was painted. Consumers adapt
+//! their own input, as every block does: a GL mixer takes the frames as they
+//! are, others download them.
 //!
 //! Both branches of the split get a queue: they leave `cefdemux` on one
 //! streaming thread, so without them a sink that blocks on one branch blocks
@@ -17,7 +26,7 @@
 //! Video only skips `cefdemux` entirely:
 //!
 //! ```text
-//! cefsrc -> capsfilter -> videoconvert -> video_output -> [video_out]
+//! cefsrc -> capsfilter -> video_output -> [video_out]
 //! ```
 //!
 //! The capsfilter is what decides the render size: `cefsrc` sizes its browser
@@ -67,6 +76,13 @@ pub const URL_PROPERTY: &str = "url";
 /// machine that renders its own local pages. Anything that lets a customer
 /// edit a flow must never expose it.
 pub const STRICT_NETWORK_PROPERTY: &str = "strict_network";
+
+/// The block property choosing how Chromium's frames reach the flow.
+pub const RENDER_MODE_PROPERTY: &str = "render_mode";
+
+/// The `cefsrc` property, from Strom's gstcefsrc build (gl-output patch),
+/// that [`RENDER_MODE_PROPERTY`] sets: `auto`, `gpu` or `cpu`.
+const CEFSRC_FRAME_HANDOVER_PROPERTY: &str = "frame-handover";
 
 /// The `cefsrc` property, from Strom's gstcefsrc build, that gives a browser its
 /// own cookies, storage and cache instead of the process-wide ones.
@@ -349,6 +365,48 @@ pub fn normalize_url(raw: &str) -> Result<String, String> {
     Ok(format!("{}:{}", scheme, rest))
 }
 
+/// The block's render mode: `auto` (the default), `gpu` or `cpu`. Anything
+/// else is `auto`.
+fn render_mode(properties: &HashMap<String, PropertyValue>) -> String {
+    match properties.get(RENDER_MODE_PROPERTY) {
+        Some(PropertyValue::String(s)) if s == "gpu" || s == "cpu" => s.clone(),
+        _ => "auto".to_string(),
+    }
+}
+
+/// Tell `cefsrc` how Chromium's frames are to reach it. A gstcefsrc without
+/// the property (not Strom's build) has only the CPU path: `auto` and `cpu`
+/// run on it as they are, and `gpu` fails the block, since it asks for an
+/// error rather than a silent CPU path.
+fn set_render_mode(
+    cefsrc: &gst::Element,
+    instance_id: &str,
+    mode: &str,
+) -> Result<(), BlockBuildError> {
+    if cefsrc
+        .find_property(CEFSRC_FRAME_HANDOVER_PROPERTY)
+        .is_some()
+    {
+        cefsrc.set_property_from_str(CEFSRC_FRAME_HANDOVER_PROPERTY, mode);
+        return Ok(());
+    }
+    if mode == "gpu" {
+        return Err(BlockBuildError::InvalidProperty(format!(
+            "HTML Input block {}: Render Mode is GPU, but this gstcefsrc has no GPU frame \
+             handover (no {} property; it comes with Strom's strom-full image). Set Render \
+             Mode to Auto or CPU.",
+            instance_id, CEFSRC_FRAME_HANDOVER_PROPERTY
+        )));
+    }
+    if mode == "cpu" {
+        info!(
+            "HTML Input block {}: this gstcefsrc only hands frames over in CPU memory",
+            instance_id
+        );
+    }
+    Ok(())
+}
+
 /// Whether this block is kept off the server's own network. Anything but an
 /// explicit `false` is strict.
 pub fn strict_network(properties: &HashMap<String, PropertyValue>) -> bool {
@@ -596,6 +654,8 @@ impl BlockBuilder for HtmlInputBuilder {
             strict_network(properties),
         );
 
+        set_render_mode(&cefsrc, instance_id, &render_mode(properties))?;
+
         isolate_browser(
             &cefsrc,
             &format!("HTML Input block {}", instance_id),
@@ -618,17 +678,10 @@ impl BlockBuilder for HtmlInputBuilder {
 
         // cefsrc renders at whatever size is negotiated downstream, so this
         // capsfilter is the page's viewport. BGRA is what cefsrc produces and
-        // what cefdemux accepts; converting happens after the split.
+        // what cefdemux accepts, in GL memory or system memory (see the
+        // module docs); the consumer picks.
         let capsfilter = make("capsfilter")?;
-        capsfilter.set_property(
-            "caps",
-            gst::Caps::builder("video/x-raw")
-                .field("format", "BGRA")
-                .field("width", width as i32)
-                .field("height", height as i32)
-                .field("framerate", gst::Fraction::new(framerate as i32, 1))
-                .build(),
-        );
+        capsfilter.set_property("caps", output_caps(width, height, framerate));
 
         let mut elements: Vec<(String, gst::Element)> = vec![
             (format!("{}:cefsrc", instance_id), cefsrc),
@@ -694,16 +747,10 @@ impl BlockBuilder for HtmlInputBuilder {
         };
 
         if mode.has_video() {
-            let videoconvert = make("videoconvert")?;
             let video_output = make("identity")?;
-            elements.push((format!("{}:videoconvert", instance_id), videoconvert));
             elements.push((format!("{}:video_output", instance_id), video_output));
             internal_links.push((
                 ElementPadRef::pad(video_source.0.clone(), video_source.1),
-                ElementPadRef::pad(format!("{}:videoconvert", instance_id), "sink"),
-            ));
-            internal_links.push((
-                ElementPadRef::pad(format!("{}:videoconvert", instance_id), "src"),
                 ElementPadRef::pad(format!("{}:video_output", instance_id), "sink"),
             ));
         } else {
@@ -726,6 +773,20 @@ impl BlockBuilder for HtmlInputBuilder {
             pad_properties: HashMap::new(),
         })
     }
+}
+
+/// The caps the block renders at: BGRA at the block's size and rate, in GL
+/// memory first and system memory second. cefsrc offers GL memory only when
+/// it can import Chromium's GPU frames, so without a GPU this is system
+/// memory as before.
+fn output_caps(width: u64, height: u64, framerate: u64) -> gst::Caps {
+    let raw = format!(
+        "format=BGRA,width={},height={},framerate={}/1,pixel-aspect-ratio=1/1",
+        width, height, framerate
+    );
+    format!("video/x-raw(memory:GLMemory),{raw},texture-target=2D; video/x-raw,{raw}")
+        .parse()
+        .expect("HTML output caps are valid")
 }
 
 /// Get metadata for HTML input blocks (for UI/API).
@@ -884,6 +945,41 @@ fn html_input_definition() -> BlockDefinition {
                 visible_when: None,
             },
             ExposedProperty {
+                name: RENDER_MODE_PROPERTY.to_string(),
+                label: "Render Mode".to_string(),
+                description: "How frames reach the flow when HTML renders on a GPU. Auto: GPU \
+                              memory, CPU if that fails. GPU: GPU or an error. CPU: always CPU."
+                    .to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "auto".to_string(),
+                            label: Some("Auto".to_string()),
+                            visible_when: None,
+                        },
+                        EnumValue {
+                            value: "gpu".to_string(),
+                            label: Some("GPU (fail if unavailable)".to_string()),
+                            visible_when: None,
+                        },
+                        EnumValue {
+                            value: "cpu".to_string(),
+                            label: Some("CPU".to_string()),
+                            visible_when: None,
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("auto".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: RENDER_MODE_PROPERTY.to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
+            ExposedProperty {
                 name: STRICT_NETWORK_PROPERTY.to_string(),
                 label: "Strict Network Access".to_string(),
                 description: "SECURITY: leave this on for any server deployment. On, the page \
@@ -930,6 +1026,43 @@ fn html_input_definition() -> BlockDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A GL consumer gets Chromium's GPU frames only if GL memory is offered,
+    /// and first: a consumer that takes both picks the first it can.
+    #[test]
+    fn output_caps_offer_gl_memory_before_system_memory() {
+        gst::init().unwrap();
+        let caps = output_caps(1280, 720, 50);
+        assert_eq!(caps.size(), 2);
+        let gl = caps.features(0).unwrap();
+        assert!(gl.contains("memory:GLMemory"));
+        assert!(!caps.features(1).unwrap().contains("memory:GLMemory"));
+        for s in caps.iter() {
+            assert_eq!(s.get::<&str>("format").unwrap(), "BGRA");
+            assert_eq!(s.get::<i32>("width").unwrap(), 1280);
+            assert_eq!(s.get::<i32>("height").unwrap(), 720);
+            assert_eq!(
+                s.get::<gst::Fraction>("framerate").unwrap(),
+                gst::Fraction::new(50, 1)
+            );
+        }
+    }
+
+    #[test]
+    fn render_mode_is_auto_unless_gpu_or_cpu() {
+        let mode = |v: Option<PropertyValue>| {
+            let mut p = HashMap::new();
+            if let Some(v) = v {
+                p.insert(RENDER_MODE_PROPERTY.to_string(), v);
+            }
+            render_mode(&p)
+        };
+        assert_eq!(mode(None), "auto");
+        assert_eq!(mode(Some(PropertyValue::String("gpu".into()))), "gpu");
+        assert_eq!(mode(Some(PropertyValue::String("cpu".into()))), "cpu");
+        assert_eq!(mode(Some(PropertyValue::String("GPU".into()))), "auto");
+        assert_eq!(mode(Some(PropertyValue::Bool(true))), "auto");
+    }
 
     fn props(pairs: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
         pairs
