@@ -4,11 +4,21 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ## [Unreleased]
 
+### Upgrade notes
+- Video Encoder: scheduled keyframe requests are no longer held back by the 1 s floor. An encoder that feeds a recorder which asks for keyframes at given times (TAMS Output, a segmenting recorder) now makes every keyframe it is asked for, so such a flow can get more keyframes than before. WebRTC PLIs are limited as before
+
+### Added
+- Video Encoder: `min_keyframe_request_interval_ms` (default 1000, at most 60000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
+
 ### Fixed
 - WHEP Output: a viewer whose ICE gathering reports `complete` a second time no longer aborts Strom. The WHEP signaller in gst-plugin-webrtc 0.15 panics on it inside a GObject callback; seen when viewers connect and drop within a second
 
+### Changed
+- Video Encoder: the keyframe-request floor applies only to requests for a keyframe now (a WebRTC viewer's PLI). Requests for a keyframe at a given running time (TAMS Output's grid, `splitmuxsink` in a segmenting recorder) always pass. A request for a keyframe now that comes within the floor is held back and sent when the floor runs out; a keyframe forced by a scheduled request also counts towards the floor. The GStreamer base-class property `min-force-key-unit-interval` delayed both kinds, which moved TAMS Output's segment boundaries off its grid
+
 ### Documentation
 - UPSTREAM_NOTES.md: the WHEP signaller's panic on a second ICE `complete`
+- UPSTREAM_NOTES.md: `min-force-key-unit-interval` delaying scheduled requests
 
 ---
 

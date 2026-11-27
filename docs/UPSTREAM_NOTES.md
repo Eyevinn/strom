@@ -78,6 +78,30 @@ workaround can go once we move past that version.
 - **Upstream:** not searched.
 - **Found in:** the WHEP Output input bridge (`gst::video_input_bridge`).
 
+### `GstVideoEncoder`: `min-force-key-unit-interval` also delays scheduled keyframe requests
+- **Seen on:** GStreamer 1.28.6 (Homebrew, macOS), `x264enc`. Linux not checked.
+- **Symptom:** the base-class property is meant to keep a burst of requests (WebRTC PLIs) from
+  forcing back-to-back keyframes, but it holds back every upstream force-key-unit request that
+  comes within the interval of the last forced keyframe, also one that asks for a keyframe at a
+  given running time. Such a request is not dropped: it is honoured on the first frame after the
+  interval has run out. A recorder that asks for a keyframe on each point of a 1 s grid, behind
+  an encoder with the interval at 1 s, had segment boundaries 84–215 ms past the grid, with
+  nothing in the log at the default level.
+- **Repro:** untested as `gst-launch`. `x264enc min-force-key-unit-interval=1000000000` in front
+  of `splitmuxsink` with `split-at-running-time` every second, or any element that sends
+  `GstForceKeyUnit` with a running time once a second; compare keyframe times with the grid.
+- **Hint:** read in `gst_video_encoder_chain` (`gst-libs/gst/video/gstvideoencoder.c`, 1.28.6).
+  `throttled` is true while `last_force_key_unit_request` or `last_key_unit` plus the interval
+  is past the frame's running time, whether the queued request has a running time or not. A
+  throttled request stays in `priv->force_key_unit` and is matched on a later frame; the
+  "Not requesting a new key unit yet due to throttling" line is at DEBUG.
+- **Tests:** `videoenc::tests::block_holds_back_early_keyframe_requests` (the Strom floor that
+  replaces the property). The grid test lives with TAMS Output, which is not on main yet.
+- **Upstream:** not searched.
+- **Found in:** [#1284](https://github.com/Eyevinn/strom/pull/1284). The Video Encoder block
+  now sets the property to 0 and limits only requests without a running time, in an upstream
+  event probe (`backend/src/blocks/builtin/videoenc/keyframe_requests.rs`).
+
 ### `nvcodec` has no NVDEC 4:2:2 decode
 - **Seen on:** GStreamer 1.24, 1.26, 1.28 and main (sources read).
 - **Symptom:** H.264 4:2:2 10-bit falls back to CPU decode, even on Blackwell GPUs whose NVDEC
