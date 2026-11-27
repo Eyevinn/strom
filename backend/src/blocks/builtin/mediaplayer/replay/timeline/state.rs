@@ -9,8 +9,8 @@ use strom_types::replay::{
     ReplayAngleDiagnostics, ReplayAngleInfo, ReplayAngleState, ReplayCause, ReplayCommandResult,
     ReplayCue, ReplayDecodeRecord, ReplayDiagnostics, ReplayEventKind, ReplayExtent, ReplayFrame,
     ReplayGrid, ReplayGridRate, ReplayGroupInfo, ReplayInstant, ReplayLiveMargin, ReplayMotion,
-    ReplayOnAir, ReplayPosition, ReplayRampState, ReplayRange, ReplayReady, ReplaySpan,
-    ReplayState, ReplayTimeDomain,
+    ReplayOnAir, ReplayPosition, ReplayQueueState, ReplayRampState, ReplayRange, ReplayReady,
+    ReplaySpan, ReplayState, ReplayTimeDomain,
 };
 use strom_types::tai::{format_utc_ms, tai_to_utc_ns};
 use strom_types::FlowId;
@@ -307,12 +307,17 @@ impl ReplayTimeline {
             on_air: None,
             range: None,
             angles: players.iter().map(|p| self.angle_state(p, &v)).collect(),
+            queue: ReplayQueueState::default(),
         };
         let Some(b) = bounds else {
             return s;
         };
         let (cursor, speed) = self.advance(&mut lock(&self.anchor), now, &b);
         let a = *lock(&self.anchor);
+        s.queue = ReplayQueueState {
+            clip_ref: a.region.and_then(|_| lock(&self.cue_ref).clone()),
+            waiting: self.queued(),
+        };
         s.motion = Some(ReplayMotion {
             cursor: v.position(cursor),
             speed,
