@@ -85,6 +85,17 @@ pub struct OpenDecision {
     pub next_split_ns: Option<u64>,
 }
 
+/// How one essence enters each fragment's muxer.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MuxStream {
+    /// Name of the muxer sink pad to request, e.g. `sink_66` (MPEG-TS PID 66).
+    /// `None`: the muxer picks.
+    pub pad_name: Option<String>,
+    /// ISO 639 language code, sent as a `language-code` tag (MPEG-TS writes
+    /// it as the stream's ISO 639 language descriptor).
+    pub language: Option<String>,
+}
+
 pub type OpenFn = Box<dyn FnMut(OpenRequest<'_>) -> OpenDecision + Send>;
 pub type DeliverFn = Box<dyn Fn(FragmentReady) + Send>;
 
@@ -149,6 +160,8 @@ pub struct Segmenter {
     muxer_factory: &'static str,
     mpegts: bool,
     media_end: Vec<Arc<PadMediaEnd>>,
+    /// Per essence: muxer pad name and stream tags.
+    mux_streams: Vec<MuxStream>,
     inner: Mutex<Inner>,
     finisher: Mutex<Option<mpsc::Sender<FinishJob>>>,
     /// Every buffer written: (fragment id, essence, running time).
@@ -170,7 +183,10 @@ fn running_time_ns(sample: &gst::Sample) -> Option<u64> {
 }
 
 impl Segmenter {
-    /// `essences` inputs, of which `reference` decides the splits. One
+    /// One input per entry in `streams` (how that essence enters each
+    /// fragment's muxer: a named pad, so a track keeps a fixed MPEG-TS PID even
+    /// in a fragment that lacks an earlier track, and a language), of which
+    /// `reference` decides the splits. One
     /// [`PadMediaEnd`] per essence in `media_end` tracks where the written
     /// media ends. `on_open` is called with the segmenter locked, on the
     /// reference's streaming thread; `deliver` on the finisher thread.
@@ -179,12 +195,13 @@ impl Segmenter {
         label: String,
         muxer_factory: &'static str,
         mpegts: bool,
-        essences: usize,
+        streams: Vec<MuxStream>,
         reference: usize,
         media_end: Vec<Arc<PadMediaEnd>>,
         on_open: OpenFn,
         deliver: DeliverFn,
     ) -> Arc<Self> {
+        let essences = streams.len();
         let (tx, rx) = mpsc::channel::<FinishJob>();
         let thread_label = label.clone();
         let spawned = std::thread::Builder::new()
@@ -202,6 +219,7 @@ impl Segmenter {
             muxer_factory,
             mpegts,
             media_end,
+            mux_streams: streams,
             inner: Mutex::new(Inner {
                 reference,
                 caps: vec![None; essences],
@@ -554,13 +572,23 @@ impl Segmenter {
                 .into_iter()
                 .find(|t| t.direction() == gst::PadDirection::Sink && t.caps().can_intersect(caps))
                 .ok_or_else(|| format!("{} takes no {}", self.muxer_factory, caps))?;
+            let stream = self.mux_streams.get(idx);
+            let pad_name = stream.and_then(|s| s.pad_name.as_deref());
             let sink_pad = mux
-                .request_pad(&tmpl, None, None)
+                .request_pad(&tmpl, pad_name, None)
                 .ok_or_else(|| format!("{}: no pad from {}", self.muxer_factory, tmpl.name()))?;
             src.static_pad("src")
                 .ok_or("appsrc has no src pad")?
                 .link(&sink_pad)
                 .map_err(|e| e.to_string())?;
+            if let Some(lang) = stream.and_then(|s| s.language.as_deref()) {
+                // Queued by appsrc ahead of the first buffer.
+                let mut tags = gst::TagList::new();
+                tags.get_mut()
+                    .expect("new tag list")
+                    .add::<gst::tags::LanguageCode>(&lang, gst::TagMergeMode::Replace);
+                src.send_event(gst::event::Tag::new(tags));
+            }
             srcs[idx] = Some(src);
         }
         pipeline
@@ -758,7 +786,7 @@ mod tests {
             "test".into(),
             "mpegtsmux",
             true,
-            2,
+            vec![MuxStream::default(); 2],
             0,
             vec![Arc::default(), Arc::default()],
             Box::new(on_open),

@@ -9,7 +9,8 @@
 //! - `PUT  /flows/{id}`           create/replace a flow (auto-creates its source)
 //! - `POST /flows/{id}/storage`   allocate media objects, returns presigned PUT URLs
 //! - `PUT  <presigned url>`       upload the segment bytes to S3
-//! - `POST /flows/{id}/segments`  register a segment on the flow timeline
+//! - `POST /flows/{id}/segments`  register a segment on the flow timeline, with
+//!   an `X-Idempotency-Key` derived from the segment (required by some stores)
 //! - `GET  /flows/{id}/segments?timerange=[..)`  list segments (presigned GET URLs)
 //! - `GET  /flows/{id}`           read a flow (frame rate, container)
 //!
@@ -53,27 +54,6 @@ impl std::fmt::Display for HttpStatusError {
 }
 
 impl std::error::Error for HttpStatusError {}
-
-/// A segment registration answered 200: TAMS's partial failure, with the
-/// segments the store refused in `failed_segments`. Sending the same request
-/// again fails the same way.
-#[derive(Debug)]
-pub struct SegmentsRejected {
-    pub context: String,
-    pub body: String,
-}
-
-impl std::fmt::Display for SegmentsRejected {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}: segment registration failed: {}",
-            self.context, self.body
-        )
-    }
-}
-
-impl std::error::Error for SegmentsRejected {}
 
 /// Longest response body kept in an error. Error bodies are logged, and the
 /// server that sent them is not always trusted.
@@ -223,14 +203,51 @@ pub struct FlowSpec {
     pub description: Option<String>,
     /// Flow tags (key -> value), e.g. `production` -> `Studio A`.
     pub tags: Vec<(String, String)>,
-    /// Member flows collected by this flow, as `(flow_id, role)` pairs. Non-empty
-    /// only for a Multi-Flow that groups per-essence Flows under one NMOS
-    /// `format:multi` flow (the canonical TAMS multi-essence model). Serialized as
-    /// the TAMS `flow_collection` array of `{ id, role }` objects.
-    pub flow_collection: Vec<(String, String)>,
+    /// Member flows collected by this flow. Non-empty only for a Multi-Flow
+    /// that groups per-essence Flows under one NMOS `format:multi` flow (the
+    /// canonical TAMS multi-essence model). Serialized as the TAMS
+    /// `flow_collection` array.
+    pub flow_collection: Vec<CollectionItem>,
+    /// Per-essence member flows that live inside this flow's own container (the
+    /// tracks of a muxed MPEG-TS flow). The uploader registers each once its
+    /// essence is known and adds it to `flow_collection`; see
+    /// [`CollectedFlow`].
+    pub collected: Vec<CollectedFlow>,
     /// TAMS `essence_parameters` (e.g. `frame_rate`, `frame_width`), filled in from
     /// caps by the uploader before the flow is created. Empty when unknown.
     pub essence_parameters: serde_json::Map<String, serde_json::Value>,
+}
+
+/// One member of a TAMS `flow_collection`: the member flow's id, its role
+/// (free text, e.g. `video`, `PGM`, `IS`) and its `container_mapping` (where
+/// its essence is in the collecting flow's container; an empty map is left
+/// out).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectionItem {
+    pub id: String,
+    pub role: String,
+    pub container_mapping: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A member flow whose essence is one track of the collecting flow's
+/// container: it has no segments of its own. `spec` is registered with the
+/// essence detected for `track` (see `DetectedEssence::tracks`), and the
+/// collection item gets `container_mapping` plus the track's channel range.
+/// The member flow itself has no `container` or `container_mapping`: in TAMS
+/// both describe a flow's own segments (`container` MUST NOT be set on a flow
+/// that references no media objects), and the mapping into the collecting
+/// flow's container belongs on the collection item.
+#[derive(Debug, Clone)]
+pub struct CollectedFlow {
+    /// Key into `DetectedEssence::tracks` (`video`, `audio-0`, ...).
+    pub track: String,
+    pub role: String,
+    pub spec: FlowSpec,
+    pub container_mapping: serde_json::Map<String, serde_json::Value>,
+    /// The member takes the collecting flow's `essence_parameters` (the video
+    /// of a muxed flow, whose parameters the flow itself carries) under the
+    /// track's own.
+    pub inherit_parameters: bool,
 }
 
 /// Build the JSON body for `PUT /flows/{id}` from a [`FlowSpec`]. Pure (no I/O) so
@@ -239,8 +256,8 @@ pub struct FlowSpec {
 /// Wire-format contract (matches what the Eyevinn TAMS gateway accepts):
 /// - `id`, `source_id`, `format`, `essence_parameters` always present.
 /// - `codec`/`container` emitted only when `Some` (a grouping Multi-Flow omits them).
-/// - `flow_collection` members are `{ id, role, container_mapping: { track_index } }`,
-///   where `track_index` is the member's position in the collection.
+/// - `flow_collection` members are `{ id, role, container_mapping }`, the
+///   mapping left out when empty.
 /// - `label`/`description`/`tags` emitted only when present.
 fn flow_request_body(spec: &FlowSpec) -> serde_json::Value {
     let mut body = serde_json::json!({
@@ -258,20 +275,16 @@ fn flow_request_body(spec: &FlowSpec) -> serde_json::Value {
         body["container"] = serde_json::Value::String(container.clone());
     }
     if !spec.flow_collection.is_empty() {
-        // Each member is a collection-item (id + role) plus a container_mapping,
-        // which the gateway requires. A grouping Multi-Flow has no real shared
-        // container, so we use the generic, container-agnostic track_index =
-        // position in the collection (video first, then audio).
         let members: Vec<serde_json::Value> = spec
             .flow_collection
             .iter()
-            .enumerate()
-            .map(|(i, (id, role))| {
-                serde_json::json!({
-                    "id": id,
-                    "role": role,
-                    "container_mapping": { "track_index": i },
-                })
+            .map(|item| {
+                let mut member = serde_json::json!({ "id": item.id, "role": item.role });
+                if !item.container_mapping.is_empty() {
+                    member["container_mapping"] =
+                        serde_json::Value::Object(item.container_mapping.clone());
+                }
+                member
             })
             .collect();
         body["flow_collection"] = serde_json::Value::Array(members);
@@ -386,6 +399,7 @@ impl TamsClient {
         method: reqwest::Method,
         url: reqwest::Url,
         body: Option<&serde_json::Value>,
+        headers: &[(&'static str, String)],
     ) -> Result<reqwest::Response> {
         if !same_origin(&url, &self.base) {
             bail!(
@@ -400,6 +414,9 @@ impl TamsClient {
             let mut req = self.api.request(method.clone(), url.clone());
             if let Some(body) = body {
                 req = req.json(body);
+            }
+            for (name, value) in headers {
+                req = req.header(*name, value);
             }
             let resp = self
                 .auth
@@ -436,7 +453,7 @@ impl TamsClient {
         let body = flow_request_body(spec);
         let context = format!("PUT {}", redact_url(url.as_str()));
         let resp = self
-            .send_authed(reqwest::Method::PUT, url, Some(&body))
+            .send_authed(reqwest::Method::PUT, url, Some(&body), &[])
             .await?;
         if !resp.status().is_success() {
             return Err(status_error(resp, context).await);
@@ -454,7 +471,7 @@ impl TamsClient {
         let body = serde_json::json!({ "limit": 1, "content_type": content_type });
         let context = format!("POST {}", redact_url(url.as_str()));
         let resp = self
-            .send_authed(reqwest::Method::POST, url, Some(&body))
+            .send_authed(reqwest::Method::POST, url, Some(&body), &[])
             .await?;
         if !resp.status().is_success() {
             return Err(status_error(resp, context).await);
@@ -496,42 +513,121 @@ impl TamsClient {
         Ok(())
     }
 
-    /// Register a segment on the flow timeline.
+    /// Register a segment on the flow timeline. `key_round` is mixed into the
+    /// idempotency key (see [`segment_idempotency_key`]): the caller moves to
+    /// the next round after the store answered a try with a failure.
     pub async fn register_segment(
         &self,
         flow_id: &str,
         object_id: &str,
         timerange: &str,
+        key_round: u32,
     ) -> Result<()> {
         let url = self.url(&format!("/flows/{}/segments", flow_id))?;
         let body = serde_json::json!({ "object_id": object_id, "timerange": timerange });
         let context = format!("POST {}", redact_url(url.as_str()));
+        let key = segment_idempotency_key(flow_id, object_id, timerange, key_round);
         let resp = self
-            .send_authed(reqwest::Method::POST, url, Some(&body))
+            .send_authed(
+                reqwest::Method::POST,
+                url,
+                Some(&body),
+                &[(IDEMPOTENCY_KEY_HEADER, key)],
+            )
             .await?;
         let status = resp.status();
         // 201 = all registered; 200 = partial failure (failed_segments listed).
         if status.as_u16() == 200 {
-            let text = resp.text().await.unwrap_or_default();
-            let failed = serde_json::from_str::<serde_json::Value>(&text)
-                .ok()
-                .and_then(|v| v.get("failed_segments").and_then(|f| f.as_array()).cloned())
-                .unwrap_or_default();
-            if failed.is_empty() {
-                return Ok(());
-            }
-            let mut body = text;
+            let mut body = resp.text().await.unwrap_or_default();
             if let Some((cut, _)) = body.char_indices().nth(MAX_ERROR_BODY_CHARS) {
                 body.truncate(cut);
                 body.push_str("...");
             }
-            return Err(SegmentsRejected { context, body }.into());
+            return Err(PartialFailure { body }.into());
+        }
+        // 409: the store is still working on an earlier try with this key
+        // (OpenTAMS). Its outcome is unknown, so it is retried with the same
+        // key, not treated as a rejection.
+        if status == reqwest::StatusCode::CONFLICT {
+            return Err(RegistrationInFlight(status_error(resp, context).await).into());
         }
         if !status.is_success() {
             return Err(status_error(resp, context).await);
         }
         Ok(())
     }
+}
+
+/// Header that makes a segment registration safe to repeat. Not in the TAMS
+/// spec, but some stores require it (OpenTAMS, REQ-IDEM-01) and others ignore
+/// an unknown header.
+const IDEMPOTENCY_KEY_HEADER: &str = "X-Idempotency-Key";
+
+/// The idempotency key of a segment registration: derived from what is
+/// registered, so a retry of the same segment whose outcome is unknown (a
+/// timeout, a lost answer, a 5xx, a 401 retried with a new token) sends the
+/// same key, and a different registration never reuses one.
+///
+/// A store may keep the answer per key and replay it: OpenTAMS caches every
+/// answer it finishes, 200 partial failures and 4xx included (it releases the
+/// key only on a 5xx). A retry after such an answer with the same key would
+/// get the cached failure back and could never succeed, so the caller retries
+/// it in a new `round`, which gives a new key. Round 0 is the key without a
+/// round.
+fn segment_idempotency_key(flow_id: &str, object_id: &str, timerange: &str, round: u32) -> String {
+    let mut name = format!("strom:tams-segment:{}/{}/{}", flow_id, object_id, timerange);
+    if round > 0 {
+        name.push_str(&format!("#{}", round));
+    }
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, name.as_bytes()).to_string()
+}
+
+/// A segment registration that the store answered with 200: it took the
+/// request, but lists the segment as failed. Not an HTTP error, so it is
+/// retried, but in a new idempotency round (see [`segment_idempotency_key`]).
+#[derive(Debug)]
+pub struct PartialFailure {
+    pub body: String,
+}
+
+impl std::fmt::Display for PartialFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "segment registration partially failed: {}", self.body)
+    }
+}
+
+impl std::error::Error for PartialFailure {}
+
+/// A segment registration the store answered with 409: an earlier try with
+/// the same idempotency key is still in flight (OpenTAMS, e.g. after our
+/// request timed out while the store was still processing it). Not an
+/// [`HttpStatusError`], so the uploader treats it as transient: it retries
+/// with the same key (or parks the segment), and does not discard it.
+#[derive(Debug)]
+pub struct RegistrationInFlight(pub anyhow::Error);
+
+impl std::fmt::Display for RegistrationInFlight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "segment registration still in flight: {:#}", self.0)
+    }
+}
+
+impl std::error::Error for RegistrationInFlight {}
+
+/// Whether the store answered a segment registration with a failure it may
+/// keep under the idempotency key, so that a retry needs a new key: a 200
+/// partial failure, or a 4xx other than 408 and 429 (which ask to retry) and
+/// 409 (OpenTAMS: the same key is still in flight, so the same key is
+/// retried; [`TamsClient::register_segment`] returns it as
+/// [`RegistrationInFlight`]). Timeouts, network errors and 5xx keep the key.
+pub fn needs_new_idempotency_key(e: &anyhow::Error) -> bool {
+    if e.downcast_ref::<PartialFailure>().is_some() {
+        return true;
+    }
+    e.downcast_ref::<HttpStatusError>().is_some_and(|h| {
+        let code = h.status.as_u16();
+        (400..500).contains(&code) && !matches!(code, 408 | 409 | 429)
+    })
 }
 
 /// One segment as listed by `GET /flows/{id}/segments`. Timeranges and the
@@ -632,7 +728,9 @@ impl TamsClient {
     pub async fn get_flow(&self, flow_id: &str) -> Result<serde_json::Value> {
         let url = self.url(&format!("/flows/{}", flow_id))?;
         let context = format!("GET {}", redact_url(url.as_str()));
-        let resp = self.send_authed(reqwest::Method::GET, url, None).await?;
+        let resp = self
+            .send_authed(reqwest::Method::GET, url, None, &[])
+            .await?;
         if !resp.status().is_success() {
             return Err(status_error(resp, context).await);
         }
@@ -688,7 +786,9 @@ impl TamsClient {
             Some(NextPage::Key(k)) => with_query(&first, &query.params(Some(k)))?,
             Some(NextPage::Link(l)) => self.resolve(l)?,
         };
-        let resp = self.send_authed(reqwest::Method::GET, url, None).await?;
+        let resp = self
+            .send_authed(reqwest::Method::GET, url, None, &[])
+            .await?;
         if !resp.status().is_success() {
             return Err(status_error(resp, format!("GET {}", first)).await);
         }
@@ -849,6 +949,41 @@ mod tests {
     // Timerange/timestamp formatting is tested in `strom_types::tams`.
 
     #[test]
+    fn segment_idempotency_key_is_stable_per_registration() {
+        let key = |f, o, t| segment_idempotency_key(f, o, t, 0);
+        let a = key("f", "o1", "[0:0_1:0)");
+        assert_eq!(a, key("f", "o1", "[0:0_1:0)"));
+        assert_ne!(a, key("f", "o2", "[0:0_1:0)"));
+        assert_ne!(a, key("f", "o1", "[0:0_2:0)"));
+        assert_ne!(a, key("g", "o1", "[0:0_1:0)"));
+        // A new round is a new key, stable within the round.
+        let b = segment_idempotency_key("f", "o1", "[0:0_1:0)", 1);
+        assert_ne!(a, b);
+        assert_eq!(b, segment_idempotency_key("f", "o1", "[0:0_1:0)", 1));
+    }
+
+    #[test]
+    fn new_idempotency_key_only_after_an_answered_failure() {
+        let status = |code: u16| {
+            anyhow::Error::new(HttpStatusError {
+                status: reqwest::StatusCode::from_u16(code).unwrap(),
+                context: "POST x".into(),
+                body: String::new(),
+            })
+        };
+        assert!(needs_new_idempotency_key(
+            &PartialFailure { body: "{}".into() }.into()
+        ));
+        for code in [400, 403, 404] {
+            assert!(needs_new_idempotency_key(&status(code)), "{}", code);
+        }
+        for code in [408, 409, 429, 500, 503] {
+            assert!(!needs_new_idempotency_key(&status(code)), "{}", code);
+        }
+        assert!(!needs_new_idempotency_key(&anyhow!("timed out")));
+    }
+
+    #[test]
     fn base_url_trailing_slash_trimmed() {
         let c = TamsClient::new("http://localhost:8000/", AuthMethod::None).unwrap();
         assert_eq!(c.base_url, "http://localhost:8000");
@@ -865,6 +1000,7 @@ mod tests {
             description: None,
             tags: vec![],
             flow_collection: vec![],
+            collected: vec![],
             essence_parameters: Default::default(),
         }
     }
@@ -902,9 +1038,17 @@ mod tests {
         s.format = FORMAT_MULTI.into();
         s.codec = None;
         s.container = None;
+        let item = |id: &str, role: &str, track: usize| CollectionItem {
+            id: id.into(),
+            role: role.into(),
+            container_mapping: serde_json::json!({ "track_index": track })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        };
         s.flow_collection = vec![
-            ("video-flow".into(), "video".into()),
-            ("audio-flow".into(), "audio".into()),
+            item("video-flow", "video", 0),
+            item("audio-flow", "audio", 1),
         ];
         let body = flow_request_body(&s);
         let coll = body["flow_collection"].as_array().expect("array");
@@ -915,6 +1059,31 @@ mod tests {
         assert_eq!(coll[1]["id"], "audio-flow");
         assert_eq!(coll[1]["role"], "audio");
         assert_eq!(coll[1]["container_mapping"]["track_index"], 1);
+    }
+
+    #[test]
+    fn container_mappings_serialized_when_set() {
+        let mut s = spec();
+        s.flow_collection = vec![CollectionItem {
+            id: "a".into(),
+            role: "PGM".into(),
+            container_mapping: Default::default(),
+        }];
+        // An empty mapping is left out.
+        let body = flow_request_body(&s);
+        assert!(body["flow_collection"][0]
+            .get("container_mapping")
+            .is_none());
+        s.flow_collection[0]
+            .container_mapping
+            .insert("mp2ts_container".into(), serde_json::json!({ "pid": 66 }));
+        let body = flow_request_body(&s);
+        assert_eq!(
+            body["flow_collection"][0]["container_mapping"]["mp2ts_container"]["pid"],
+            66
+        );
+        // Never on the flow itself.
+        assert!(body.get("container_mapping").is_none());
     }
 
     #[test]
@@ -1246,7 +1415,7 @@ mod tests {
             let c = osc_client(&gw, token_url);
 
             // Writer path: registering a segment survives the stale SAT.
-            c.register_segment("f", "o1", "[0:0_1:0)").await.unwrap();
+            c.register_segment("f", "o1", "[0:0_1:0)", 0).await.unwrap();
             assert_eq!(
                 auths(&seen),
                 vec![Some("Bearer sat-1".into()), Some("Bearer sat-2".into())]
@@ -1255,6 +1424,48 @@ mod tests {
             c.get_flow("f").await.unwrap();
             assert_eq!(*minted.lock().unwrap(), 2);
             assert_eq!(seen.lock().unwrap().len(), 3);
+        }
+
+        /// A registration retried after a 401 with a new token (the re-mint
+        /// loop in `send_authed`) carries the same key on both tries: the
+        /// store never saw the first. A different registration gets another.
+        #[tokio::test]
+        async fn register_sends_the_same_idempotency_key_on_a_retry() {
+            type Keys = Arc<Mutex<Vec<(Option<String>, Option<String>)>>>;
+            let minted = Arc::new(Mutex::new(0));
+            let token_url = token_endpoint(minted.clone()).await;
+            let keys: Keys = Arc::default();
+            let app = Router::new()
+                .route(
+                    "/flows/f/segments",
+                    axum::routing::post(|State(keys): State<Keys>, h: HeaderMap| async move {
+                        let get = |name: &str| {
+                            h.get(name).and_then(|v| v.to_str().ok()).map(String::from)
+                        };
+                        let auth = get("authorization");
+                        keys.lock()
+                            .unwrap()
+                            .push((get("x-idempotency-key"), auth.clone()));
+                        // Only the second minted token is accepted.
+                        if auth.as_deref() == Some("Bearer sat-1") {
+                            StatusCode::UNAUTHORIZED
+                        } else {
+                            StatusCode::CREATED
+                        }
+                    }),
+                )
+                .with_state(keys.clone());
+            let c = osc_client(&serve(app).await, token_url);
+            c.register_segment("f", "o1", "[0:0_1:0)", 0).await.unwrap();
+            c.register_segment("f", "o2", "[1:0_2:0)", 0).await.unwrap();
+            let k = keys.lock().unwrap().clone();
+            assert_eq!(k.len(), 3, "{:?}", k);
+            assert_eq!(k[0].1.as_deref(), Some("Bearer sat-1"));
+            assert_eq!(k[1].1.as_deref(), Some("Bearer sat-2"));
+            assert!(k[0].0.is_some(), "no key");
+            assert_eq!(k[0].0, k[1].0, "the retry after the 401 changed the key");
+            assert_ne!(k[0].0, k[2].0);
+            assert_eq!(*minted.lock().unwrap(), 2);
         }
 
         #[tokio::test]
@@ -1356,7 +1567,7 @@ mod tests {
             )
             .unwrap();
             let resp = c
-                .send_authed(reqwest::Method::GET, url, None)
+                .send_authed(reqwest::Method::GET, url, None, &[])
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);

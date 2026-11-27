@@ -43,9 +43,9 @@
 //!   the channel closes — see [`TailSlot`].
 
 use crate::events::EventBroadcaster;
-use crate::tams::client::{FlowSpec, TamsClient};
+use crate::tams::client::{CollectionItem, FlowSpec, TamsClient};
 use gstreamer as gst;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -60,6 +60,18 @@ pub struct DetectedEssence {
     /// Codec label (e.g. `video/h264`); overrides the spec's fallback when set.
     pub codec: Option<String>,
     /// TAMS `essence_parameters`, merged over the spec's.
+    pub essence_parameters: serde_json::Map<String, serde_json::Value>,
+    /// Codec and parameters per track of a muxed flow (`video`, `audio-0`,
+    /// ...), for the member flows it collects (`FlowSpec::collected`).
+    pub tracks: BTreeMap<String, TrackEssence>,
+}
+
+/// What caps say about one track of a muxed flow.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct TrackEssence {
+    /// TAMS codec label, e.g. `audio/aac`.
+    pub codec: String,
+    /// TAMS `essence_parameters` of the track's member flow.
     pub essence_parameters: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -672,6 +684,10 @@ struct Allocation {
     /// The segment's bytes are in the object already; only the registration
     /// is left.
     uploaded: bool,
+    /// Idempotency round of the registration: moved on after the store
+    /// answered a try with a failure, so the next try is not answered from
+    /// the store's cache of the first (see `segment_idempotency_key`).
+    key_round: u32,
 }
 
 /// Failed tries of one parked segment.
@@ -824,15 +840,24 @@ async fn enforce_parked_limits(
 /// essence parameters change (caps that arrive late or renegotiate, a frame rate
 /// estimated from timestamps), so it never stays registered with what was known
 /// at the first segment, and when it was found gone (see [`Failure::FlowGone`]).
-/// Returns whether the flow is present.
-async fn ensure_flow(ctx: &mut UploadCtx<'_>, attempts: u32) -> bool {
+/// It is also registered again while a member flow it collects is missing
+/// (one whose registration failed), so the member is tried again at the next
+/// segment rather than only when the essence changes. Returns whether the flow
+/// is present.
+async fn ensure_flow(ctx: &mut UploadCtx<'_>, mut attempts: u32) -> bool {
     let detected = ctx
         .detected_codec
         .lock()
         .map(|d| d.clone())
         .unwrap_or_default();
     if ctx.registered.as_ref() == Some(&detected) {
-        return true;
+        if members_complete(ctx.flow_spec, &detected) {
+            return true;
+        }
+        // Only a member is missing, and the flow is there: one try per
+        // segment, so a member that keeps failing does not hold up the
+        // segments with backoff.
+        attempts = 1;
     }
     let exists = ctx.registered.is_some();
     if let Some(codec) = &detected.codec {
@@ -842,6 +867,9 @@ async fn ensure_flow(ctx: &mut UploadCtx<'_>, attempts: u32) -> bool {
         ctx.flow_spec
             .essence_parameters
             .insert(k.clone(), v.clone());
+    }
+    if !ctx.flow_spec.collected.is_empty() {
+        ctx.flow_spec.flow_collection = register_collected(ctx, &detected, attempts).await;
     }
     match retry(attempts, || ctx.client.ensure_flow(ctx.flow_spec)).await {
         Ok(()) => {
@@ -881,6 +909,79 @@ async fn ensure_flow(ctx: &mut UploadCtx<'_>, attempts: u32) -> bool {
     }
 }
 
+/// Whether every member flow whose track's essence is known is in the flow's
+/// collection, i.e. none failed to register (see [`register_collected`]).
+fn members_complete(spec: &FlowSpec, detected: &DetectedEssence) -> bool {
+    let known = spec
+        .collected
+        .iter()
+        .filter(|m| detected.tracks.contains_key(&m.track))
+        .count();
+    spec.flow_collection.len() >= known
+}
+
+/// Register the member flows a muxed flow collects (one per track whose
+/// essence is known), before the flow itself, since a collection lists flows
+/// that are already registered. Returns the collection items of the members
+/// that were registered: those not yet known are left out until their essence
+/// is, and those that failed until a later segment registers them (see
+/// [`members_complete`]).
+async fn register_collected(
+    ctx: &UploadCtx<'_>,
+    detected: &DetectedEssence,
+    attempts: u32,
+) -> Vec<CollectionItem> {
+    let mut items = Vec::new();
+    for member in &ctx.flow_spec.collected {
+        let Some(track) = detected.tracks.get(&member.track) else {
+            continue;
+        };
+        let mut spec = member.spec.clone();
+        spec.codec = Some(track.codec.clone());
+        if member.inherit_parameters {
+            spec.essence_parameters = detected.essence_parameters.clone();
+        }
+        for (k, v) in &track.essence_parameters {
+            spec.essence_parameters.insert(k.clone(), v.clone());
+        }
+        let mut mapping = member.container_mapping.clone();
+        // All channels of the track belong to the member.
+        if let Some(n) = track
+            .essence_parameters
+            .get("channels")
+            .and_then(|c| c.as_u64())
+            .filter(|n| *n > 0)
+        {
+            mapping.insert(
+                "audio_track".into(),
+                serde_json::json!({ "channel_range": format!("0_{}", n - 1) }),
+            );
+        }
+        match retry(attempts, || ctx.client.ensure_flow(&spec)).await {
+            Ok(()) => {
+                info!(
+                    "TAMS {}: member flow {} ({}) registered: codec {}, essence_parameters {}",
+                    ctx.block_id,
+                    spec.flow_id,
+                    member.role,
+                    track.codec,
+                    serde_json::Value::Object(spec.essence_parameters.clone())
+                );
+                items.push(CollectionItem {
+                    id: spec.flow_id.clone(),
+                    role: member.role.clone(),
+                    container_mapping: mapping,
+                });
+            }
+            Err(e) => warn!(
+                "TAMS {}: member flow {} ({}) not registered yet: {:#}",
+                ctx.block_id, spec.flow_id, member.role, e
+            ),
+        }
+    }
+    items
+}
+
 /// What became of one segment.
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
@@ -908,16 +1009,12 @@ enum Failure {
     StorageRefused,
     /// Any other 4xx: the request itself is wrong and will fail the same way.
     Rejected,
-    /// Network error, timeout, 5xx, 408, 429.
+    /// Network error, timeout, 5xx, 408, 429, and a registration still in
+    /// flight under its idempotency key (409, see `RegistrationInFlight`).
     Transient,
 }
 
 fn classify(e: &anyhow::Error) -> Failure {
-    if e.downcast_ref::<crate::tams::client::SegmentsRejected>()
-        .is_some()
-    {
-        return Failure::Rejected;
-    }
     let Some(h) = e.downcast_ref::<crate::tams::client::HttpStatusError>() else {
         return Failure::Transient;
     };
@@ -1356,6 +1453,7 @@ async fn upload_one(
             let a = Allocation {
                 object,
                 uploaded: false,
+                key_round: 0,
             };
             *lock() = Some(a.clone());
             a
@@ -1376,9 +1474,17 @@ async fn upload_one(
             a.uploaded = true;
         }
     }
-    client
-        .register_segment(tams_flow_id, &obj.object_id, &timerange)
-        .await?;
+    if let Err(e) = client
+        .register_segment(tams_flow_id, &obj.object_id, &timerange, alloc.key_round)
+        .await
+    {
+        if crate::tams::client::needs_new_idempotency_key(&e) {
+            if let Some(a) = lock().as_mut() {
+                a.key_round += 1;
+            }
+        }
+        return Err(e);
+    }
 
     debug!(
         "TAMS: registered segment {} {} on flow {}",
@@ -1820,6 +1926,7 @@ mod tests {
             description: None,
             tags: vec![],
             flow_collection: vec![],
+            collected: vec![],
             essence_parameters: Default::default(),
         };
         let detected: SharedDetected = Arc::default();
@@ -1863,6 +1970,108 @@ mod tests {
         assert_eq!(puts[1]["essence_parameters"]["frame_width"], 1280);
     }
 
+    /// A member flow that fails to register is tried again at the next
+    /// segment, although the essence stays the same, and the muxed flow is
+    /// registered again with it in its collection.
+    #[tokio::test]
+    async fn failed_member_flow_is_tried_again() {
+        use axum::extract::{Path, State};
+        use axum::http::StatusCode;
+        type Puts = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+        let puts: Puts = Arc::default();
+        // The first PUT of member `m1` fails; every other PUT succeeds.
+        let failed_once = Arc::new(AtomicBool::new(false));
+        let app = axum::Router::new()
+            .route(
+                "/flows/{id}",
+                axum::routing::put(
+                    |State((puts, failed_once)): State<(Puts, Arc<AtomicBool>)>,
+                     Path(id): Path<String>,
+                     axum::Json(body): axum::Json<serde_json::Value>| async move {
+                        if id == "m1" && !failed_once.swap(true, Ordering::SeqCst) {
+                            return StatusCode::SERVICE_UNAVAILABLE;
+                        }
+                        puts.lock().unwrap().push((id, body));
+                        StatusCode::CREATED
+                    },
+                ),
+            )
+            .with_state((puts.clone(), failed_once));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = TamsClient::new(url, crate::client_auth::AuthMethod::None).unwrap();
+        let member = |id: &str, track: &str| crate::tams::client::CollectedFlow {
+            track: track.into(),
+            role: id.into(),
+            spec: FlowSpec {
+                flow_id: id.into(),
+                source_id: format!("{}-src", id),
+                format: crate::tams::client::FORMAT_AUDIO.into(),
+                ..spec()
+            },
+            container_mapping: Default::default(),
+            inherit_parameters: false,
+        };
+        let mut spec = FlowSpec {
+            collected: vec![member("m0", "audio-0"), member("m1", "audio-1")],
+            ..spec()
+        };
+        let detected: SharedDetected = Arc::default();
+        for track in ["audio-0", "audio-1"] {
+            detected
+                .lock()
+                .unwrap()
+                .tracks
+                .insert(track.into(), TrackEssence::default());
+        }
+        let events = EventBroadcaster::default();
+        let mut registered = None;
+        let mut segments = 0;
+        let mut ctx = UploadCtx {
+            client: &client,
+            registered: &mut registered,
+            flow_spec: &mut spec,
+            detected_codec: &detected,
+            content_type: "video/mp2t",
+            events: &events,
+            strom_flow_id: FlowId::new_v4(),
+            block_id: "t",
+            segments_registered: &mut segments,
+            failing: false,
+            objects: HashMap::new(),
+            auth_reported_at: None,
+        };
+        let collection = |body: &serde_json::Value| -> Vec<String> {
+            body["flow_collection"]
+                .as_array()
+                .map(|a| a.iter().map(|m| m["id"].as_str().unwrap().into()).collect())
+                .unwrap_or_default()
+        };
+        // First segment: m1 fails, the flow is created without it.
+        assert!(ensure_flow(&mut ctx, 1).await);
+        {
+            let puts = puts.lock().unwrap();
+            let ids: Vec<_> = puts.iter().map(|(id, _)| id.as_str()).collect();
+            assert_eq!(ids, ["m0", "flow-1"]);
+            assert_eq!(collection(&puts[1].1), ["m0"]);
+        }
+        // Next segment, same essence: m1 is tried again and collected.
+        assert!(ensure_flow(&mut ctx, 1).await);
+        {
+            let puts = puts.lock().unwrap();
+            let last = puts.iter().rev().find(|(id, _)| id == "flow-1").unwrap();
+            assert!(puts.iter().any(|(id, _)| id == "m1"), "m1 not tried again");
+            assert_eq!(collection(&last.1), ["m0", "m1"]);
+        }
+        // Complete: nothing more is registered.
+        let before = puts.lock().unwrap().len();
+        assert!(ensure_flow(&mut ctx, 1).await);
+        assert_eq!(puts.lock().unwrap().len(), before);
+    }
+
     /// A TAMS gateway stub whose answers the test sets: the status of each
     /// storage allocation and registration (taken in order, then 2xx), and the
     /// segments the flow already has.
@@ -1877,6 +2086,11 @@ mod tests {
         flow_puts: Arc<AtomicU64>,
         allocations: Arc<AtomicU64>,
         registrations: Arc<Mutex<Vec<String>>>,
+        /// The `X-Idempotency-Key` of each registration try, in order.
+        keys: Arc<Mutex<Vec<String>>>,
+        /// Answer a key seen before with its first answer, as OpenTAMS does.
+        cache_by_key: bool,
+        answered: Arc<Mutex<HashMap<String, u16>>>,
     }
 
     async fn start_stub(stub: Stub) -> String {
@@ -1929,18 +2143,27 @@ mod tests {
                     Json(serde_json::Value::Array(s.listed.lock().unwrap().clone()))
                 })
                 .post(
-                    |State(s): State<Stub>, Json(body): Json<serde_json::Value>| async move {
-                        let tr = body["timerange"].as_str().unwrap_or_default().to_string();
-                        if let Some(code) = status(&s.register) {
-                            // 200 is TAMS's partial failure: the segment is
-                            // listed as failed.
-                            let failed = serde_json::json!({ "failed_segments": [
-                                { "object_id": body["object_id"], "timerange": tr }
-                            ]});
-                            return (code, Json(failed)).into_response();
+                    |State(s): State<Stub>,
+                     headers: axum::http::HeaderMap,
+                     Json(body): Json<serde_json::Value>| async move {
+                        let key = headers
+                            .get("x-idempotency-key")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        s.keys.lock().unwrap().push(key.clone());
+                        if s.cache_by_key {
+                            if let Some(code) = s.answered.lock().unwrap().get(&key) {
+                                return StatusCode::from_u16(*code).unwrap();
+                            }
                         }
-                        s.registrations.lock().unwrap().push(tr);
-                        StatusCode::CREATED.into_response()
+                        let code = status(&s.register).unwrap_or_else(|| {
+                            let tr = body["timerange"].as_str().unwrap_or_default().to_string();
+                            s.registrations.lock().unwrap().push(tr);
+                            StatusCode::CREATED
+                        });
+                        s.answered.lock().unwrap().insert(key, code.as_u16());
+                        code
                     },
                 ),
             )
@@ -1961,6 +2184,7 @@ mod tests {
             description: None,
             tags: vec![],
             flow_collection: vec![],
+            collected: vec![],
             essence_parameters: Default::default(),
         }
     }
@@ -1978,6 +2202,16 @@ mod tests {
         stub: &Stub,
         maybe_registered: bool,
         fresh: Option<bool>,
+    ) -> (Outcome, bool, PathBuf) {
+        upload_tries(stub, maybe_registered, fresh, 1).await
+    }
+
+    /// As [`upload_as`], with `attempts` tries of the upload.
+    async fn upload_tries(
+        stub: &Stub,
+        maybe_registered: bool,
+        fresh: Option<bool>,
+        attempts: u32,
     ) -> (Outcome, bool, PathBuf) {
         let url = start_stub(stub.clone()).await;
         let client = TamsClient::new(url, crate::client_auth::AuthMethod::None).unwrap();
@@ -2012,7 +2246,7 @@ mod tests {
         };
         let outcome = match fresh {
             Some(_) => process_fragment(&mut ctx, frag).await,
-            None => upload_segment(&mut ctx, &frag, 1, maybe_registered).await,
+            None => upload_segment(&mut ctx, &frag, attempts, maybe_registered).await,
         };
         (outcome, ctx.failing, path)
     }
@@ -2094,18 +2328,6 @@ mod tests {
         assert!(path.exists() && sidecar_path(&path).exists());
     }
 
-    /// A registration answered with 200 (TAMS's partial failure, the segment
-    /// listed in `failed_segments`) is a rejection, not a transient error that
-    /// parks the segment and retries it until the cap.
-    #[tokio::test]
-    async fn partially_failed_registration_is_a_rejection() {
-        let stub = Stub::default();
-        stub.register.lock().unwrap().push_back(200);
-        let (outcome, _, path) = upload_with(&stub, false).await;
-        assert_eq!(outcome, Outcome::Dropped);
-        assert!(!path.exists() && !sidecar_path(&path).exists());
-    }
-
     /// A parked segment the gateway already has (its registration went
     /// through, but the answer was lost) is not registered a second time.
     #[tokio::test]
@@ -2140,6 +2362,59 @@ mod tests {
         let (outcome, _, path) = upload_with(&stub, false).await;
         assert_eq!(outcome, Outcome::Dropped);
         assert!(!path.exists());
+    }
+
+    /// A registration the store answered with a 200 partial failure is
+    /// retried under a new idempotency key. A store that caches the answer
+    /// per key (OpenTAMS) would otherwise replay the failure to every retry.
+    #[tokio::test]
+    async fn partial_failure_is_retried_with_a_new_idempotency_key() {
+        let stub = Stub {
+            cache_by_key: true,
+            ..Stub::default()
+        };
+        stub.register.lock().unwrap().push_back(200);
+        let (outcome, _, path) = upload_tries(&stub, false, None, 2).await;
+        assert_eq!(outcome, Outcome::Registered);
+        assert!(!path.exists());
+        let keys = stub.keys.lock().unwrap().clone();
+        assert_eq!(keys.len(), 2, "{:?}", keys);
+        assert_ne!(keys[0], keys[1]);
+        // The same object is registered; only the key changes.
+        assert_eq!(stub.allocations.load(Ordering::SeqCst), 1);
+
+        // A try whose outcome is unknown (a 5xx) keeps the key.
+        let stub = Stub::default();
+        stub.register.lock().unwrap().push_back(503);
+        let (outcome, _, _) = upload_tries(&stub, false, None, 2).await;
+        assert_eq!(outcome, Outcome::Registered);
+        let keys = stub.keys.lock().unwrap().clone();
+        assert_eq!(keys.len(), 2, "{:?}", keys);
+        assert_eq!(keys[0], keys[1]);
+    }
+
+    /// A registration answered with 409 (OpenTAMS: an earlier try with the
+    /// same key is still in flight, e.g. after our request timed out) is
+    /// retried with the same key. It is not a rejection that discards the
+    /// segment while the store may still be registering it.
+    #[tokio::test]
+    async fn in_flight_registration_is_retried_with_the_same_key() {
+        let stub = Stub::default();
+        stub.register.lock().unwrap().push_back(409);
+        let (outcome, _, path) = upload_tries(&stub, false, None, 2).await;
+        assert_eq!(outcome, Outcome::Registered);
+        assert!(!path.exists());
+        let keys = stub.keys.lock().unwrap().clone();
+        assert_eq!(keys.len(), 2, "{:?}", keys);
+        assert_eq!(keys[0], keys[1]);
+        assert_eq!(stub.allocations.load(Ordering::SeqCst), 1);
+
+        // Still in flight after every try: parked for the sweep, not dropped.
+        let stub = Stub::default();
+        stub.register.lock().unwrap().extend([409, 409]);
+        let (outcome, _, path) = upload_tries(&stub, false, None, 2).await;
+        assert_eq!(outcome, Outcome::Parked);
+        assert!(path.exists());
     }
 
     /// What an [`UploadCtx`] borrows, against a gateway at `url`.

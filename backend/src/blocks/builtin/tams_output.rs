@@ -3,7 +3,10 @@
 //! Two container modes (the `container` property):
 //! - **MPEG-TS (default):** all essences are muxed by `mpegtsmux`
 //!   into TS segments and registered on a single NMOS `format:multi` flow.
-//!   Broadcast-native, inherent A/V sync, fewer objects.
+//!   Broadcast-native, inherent A/V sync, fewer objects. Each track has a
+//!   fixed PID, and the flow collects one segment-less member flow per track
+//!   (`flow_collection` with its role, PID and channel range), so a reader
+//!   finds the audio pairs (`audio_labels`, e.g. `PGM,IS`) without probing.
 //! - **MP4:** each essence goes to its own `mp4mux` segments and is
 //!   registered as a separate single-essence TAMS flow (video flow + audio flow
 //!   grouped under one Source). Canonical TAMS model, max flexibility.
@@ -20,8 +23,8 @@
 use super::refusal::{accept_input, audio_refusal, refuse_input, video_refusal};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::tams::auth::TamsAuth;
-use crate::tams::client::{FlowSpec, TamsClient};
-use crate::tams::segmenter::{OpenDecision, OpenRequest, Segmenter};
+use crate::tams::client::{CollectedFlow, CollectionItem, FlowSpec, TamsClient};
+use crate::tams::segmenter::{MuxStream, OpenDecision, OpenRequest, Segmenter};
 use crate::tams::tai_mapping::{
     first_on_grid_fragment, grid_miss_ns, reference_tai_ns, shared_pipeline_mapping, AnchorKind,
     FragmentTimeline, HostTai,
@@ -29,7 +32,7 @@ use crate::tams::tai_mapping::{
 use crate::tams::uploader::{
     channel, clear_orphans, closed_end_ns, media_end_running_time_ns, new_run, new_tail_slot,
     park_on_disk, segment_file_name, spawn_uploader, FragmentReady, MediaEnd, PadMediaEnd,
-    ParkTarget, SharedDetected, TailFragment,
+    ParkTarget, SharedDetected, TailFragment, TrackEssence,
 };
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -65,6 +68,16 @@ const DEFAULT_NUM_AUDIO_TRACKS: usize = 1;
 /// exploding into thousands of pads/uploaders. Programs rarely exceed a handful.
 const MAX_AUDIO_TRACKS: usize = 32;
 const DEFAULT_CONTAINER: &str = "mpegts";
+/// Labels of the audio tracks in track order, e.g. `PGM,IS`.
+const AUDIO_LABELS: &str = "audio_labels";
+/// ISO 639 languages of the audio tracks in track order, e.g. `swe,eng`.
+const AUDIO_LANGUAGES: &str = "audio_languages";
+/// MPEG-TS PID of the video track. Audio track `k` gets `PID_AUDIO_0 + k`.
+/// These are what `mpegtsmux` picks itself when every track is present
+/// (from 0x41 in pad order), now fixed so that a fragment that lacks a track
+/// does not move the others.
+const PID_VIDEO: u32 = 0x41;
+const PID_AUDIO_0: u32 = 0x42;
 
 /// Segment container format.
 #[derive(Clone, Copy, PartialEq)]
@@ -206,6 +219,128 @@ fn parse_tags(s: &Option<String>) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// Parse a comma-separated list that follows track order (`PGM,IS`). Blank
+/// entries stay as `None`, so `,IS` labels only the second track.
+fn parse_track_list(s: &Option<String>) -> Vec<Option<String>> {
+    s.as_deref()
+        .map(|raw| {
+            raw.split(',')
+                .map(|v| {
+                    let v = v.trim();
+                    (!v.is_empty()).then(|| v.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What the properties say about one audio track.
+struct AudioTrackMeta {
+    /// Role in the flow collection: the label, or `audio-<k>` without one.
+    role: String,
+    label: Option<String>,
+    language: Option<String>,
+}
+
+/// The audio tracks' labels and languages from the properties, checked
+/// against the track count and each other. Refused (with a message that names
+/// the property): more entries than tracks; a label that is `video` or
+/// `audio-<k>` (the roles of the video track and of unlabelled tracks); two
+/// tracks with the same role, which a reader that finds members by role could
+/// not tell apart; and a language GStreamer does not know.
+///
+/// A language is normalised to the ISO 639-2 form the container's muxer writes
+/// (`mpegtsmux`: 639-2/B, so `deu` and `de` become `ger`; `mp4mux`: 639-2/T,
+/// `deu`), so the flow's tag says what is in the container.
+fn audio_track_meta(
+    props: &HashMap<String, PropertyValue>,
+    count: usize,
+    container: Container,
+) -> Result<Vec<AudioTrackMeta>, String> {
+    let labels = parse_track_list(&prop_str(props, AUDIO_LABELS));
+    let languages = parse_track_list(&prop_str(props, AUDIO_LANGUAGES));
+    for (name, list) in [(AUDIO_LABELS, &labels), (AUDIO_LANGUAGES, &languages)] {
+        // Trailing empty entries (`PGM,IS,`) name no track.
+        let named = list.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
+        if named > count {
+            return Err(format!(
+                "{} has {} entries but there are {} audio tracks (num_audio_tracks)",
+                name, named, count
+            ));
+        }
+    }
+    let mut meta: Vec<AudioTrackMeta> = Vec::with_capacity(count);
+    for k in 0..count {
+        let label = labels.get(k).cloned().flatten();
+        if let Some(l) = &label {
+            let reserved = l == "video"
+                || l.strip_prefix("audio-")
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            if reserved {
+                return Err(format!(
+                    "{}: \"{}\" is reserved (the role of the video track or of an \
+                     unlabelled audio track); choose another label",
+                    AUDIO_LABELS, l
+                ));
+            }
+        }
+        let role = label.clone().unwrap_or_else(|| Essence::Audio(k).tag());
+        if meta.iter().any(|m| m.role == role) {
+            return Err(format!(
+                "{}: \"{}\" labels more than one audio track; each label must be unique",
+                AUDIO_LABELS, role
+            ));
+        }
+        let language = match languages.get(k).cloned().flatten() {
+            Some(code) => Some(normalise_language(&code, container).ok_or_else(|| {
+                format!(
+                    "{}: \"{}\" is not an ISO 639 language code (e.g. \"swe\", \"eng\")",
+                    AUDIO_LANGUAGES, code
+                )
+            })?),
+            None => None,
+        };
+        meta.push(AudioTrackMeta {
+            role,
+            label,
+            language,
+        });
+    }
+    Ok(meta)
+}
+
+/// `code` (ISO 639-1 or 639-2, any case) as the ISO 639-2 code the
+/// container's muxer writes, or `None` when GStreamer does not know it.
+fn normalise_language(code: &str, container: Container) -> Option<String> {
+    let code = code.to_ascii_lowercase();
+    let normalised = match container {
+        Container::MpegTs => gstreamer_tag::language_codes::language_code_iso_639_2b(&code),
+        Container::Mp4 => gstreamer_tag::language_codes::language_code_iso_639_2t(&code),
+    };
+    normalised.map(|c| c.to_string())
+}
+
+/// Tags of an audio member flow: its label and language, so the tracks can be
+/// found by tag.
+fn audio_member_tags(meta: &AudioTrackMeta) -> Vec<(String, String)> {
+    let mut tags = Vec::new();
+    if let Some(l) = &meta.label {
+        tags.push(("audio_label".to_string(), l.clone()));
+    }
+    if let Some(l) = &meta.language {
+        tags.push(("audio_language".to_string(), l.clone()));
+    }
+    tags
+}
+
+/// A `container_mapping` from JSON (an object).
+fn mapping(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    match value {
+        serde_json::Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    }
+}
+
 /// Derive a deterministic UUID (string) for a TAMS entity: UUID v5 of
 /// `"<key>:<suffix>"`, where `key` is the block's [`tams_id_key`].
 fn derive_id(key: &str, suffix: &str) -> String {
@@ -319,7 +454,6 @@ impl BlockBuilder for TamsOutputBuilder {
         let label = prop_str(properties, "label");
         let description = prop_str(properties, "description");
         let tags = parse_tags(&prop_str(properties, "tags"));
-
         let container = match prop_str(properties, "container")
             .unwrap_or_else(|| DEFAULT_CONTAINER.to_string())
             .as_str()
@@ -327,6 +461,10 @@ impl BlockBuilder for TamsOutputBuilder {
             "mpegts" => Container::MpegTs,
             _ => Container::Mp4,
         };
+        // Languages go into the container (MPEG-TS ISO 639 descriptor, MP4
+        // media language); the muxer pads are fixed per container below.
+        let audio_meta = audio_track_meta(properties, num_audio, container)
+            .map_err(|e| BlockBuildError::InvalidProperty(format!("TAMS Output: {}", e)))?;
 
         let mut elements: Vec<(String, gst::Element)> = Vec::new();
 
@@ -335,11 +473,21 @@ impl BlockBuilder for TamsOutputBuilder {
             // Multi-Flow. Canonical TAMS model (per-essence flows collected via
             // flow_collection), giving downstream consumers elemental access.
             Container::Mp4 => {
-                // Members collected by the Multi-Flow: (flow_id, role).
-                let mut members: Vec<(String, String)> = Vec::new();
+                // Members collected by the Multi-Flow; the track index is the
+                // position in the collection (video first, then audio).
+                let mut members: Vec<CollectionItem> = Vec::new();
+                let mut add_member = |id: &str, role: &str| {
+                    members.push(CollectionItem {
+                        id: id.to_string(),
+                        role: role.to_string(),
+                        container_mapping: mapping(
+                            serde_json::json!({ "track_index": members.len() }),
+                        ),
+                    })
+                };
                 if num_video >= 1 {
                     let flow_id = derive_id(&id_key, "video");
-                    members.push((flow_id.clone(), "video".to_string()));
+                    add_member(&flow_id, "video");
                     let spec = FlowSpec {
                         flow_id,
                         // Own mono-essence Source. The gateway derives the Multi-Flow's
@@ -354,6 +502,7 @@ impl BlockBuilder for TamsOutputBuilder {
                         description: description.clone(),
                         tags: tags.clone(),
                         flow_collection: vec![],
+                        collected: vec![],
                         essence_parameters: Default::default(),
                     };
                     build_flow_chain(
@@ -368,14 +517,15 @@ impl BlockBuilder for TamsOutputBuilder {
                         auth_plan.clone(),
                         spec,
                         ctx,
+                        vec![MuxStream::default()],
                         &mut elements,
                     )?;
                 }
-                for i in 0..num_audio {
+                for (i, meta) in audio_meta.iter().enumerate() {
                     let essence = Essence::Audio(i);
                     let tag = essence.tag(); // "audio-0", "audio-1", ...
                     let flow_id = derive_id(&id_key, &tag);
-                    members.push((flow_id.clone(), tag.clone()));
+                    add_member(&flow_id, &meta.role);
                     let spec = FlowSpec {
                         flow_id,
                         // Own mono-essence Source (see video above).
@@ -383,10 +533,11 @@ impl BlockBuilder for TamsOutputBuilder {
                         format: FORMAT_AUDIO.to_string(),
                         codec: Some("audio/aac".to_string()), // fallback; real codec from caps
                         container: Some(CONTENT_TYPE_MP4.to_string()),
-                        label: label.as_ref().map(|l| format!("{} ({})", l, tag)),
+                        label: label.as_ref().map(|l| format!("{} ({})", l, meta.role)),
                         description: description.clone(),
-                        tags: tags.clone(),
+                        tags: [tags.clone(), audio_member_tags(meta)].concat(),
                         flow_collection: vec![],
+                        collected: vec![],
                         essence_parameters: Default::default(),
                     };
                     build_flow_chain(
@@ -401,6 +552,10 @@ impl BlockBuilder for TamsOutputBuilder {
                         auth_plan.clone(),
                         spec,
                         ctx,
+                        vec![MuxStream {
+                            pad_name: None,
+                            language: meta.language.clone(),
+                        }],
                         &mut elements,
                     )?;
                 }
@@ -422,6 +577,7 @@ impl BlockBuilder for TamsOutputBuilder {
                         description: description.clone(),
                         tags: tags.clone(),
                         flow_collection: members,
+                        collected: vec![],
                         essence_parameters: Default::default(),
                     };
                     register_multiflow(instance_id, multi, gateway_url.clone(), auth_plan, ctx);
@@ -430,11 +586,73 @@ impl BlockBuilder for TamsOutputBuilder {
             // One muxed MPEG-TS flow carrying all essences together.
             Container::MpegTs => {
                 let mut inputs = Vec::new();
+                // Fixed PID per track, and a member flow per track that the
+                // muxed flow collects with its PID (registered by the uploader
+                // once the track's essence is known from caps).
+                let mut streams = Vec::new();
+                let mut collected = Vec::new();
+                let member_spec = |tag: &str, format: &str, role: &str, extra_tags| FlowSpec {
+                    flow_id: derive_id(&id_key, &format!("mux-{}", tag)),
+                    source_id: derive_id(&id_key, &format!("mux-{}-source", tag)),
+                    format: format.to_string(),
+                    codec: None, // from caps
+                    // No segments of its own (see `CollectedFlow`).
+                    container: None,
+                    label: Some(match &label {
+                        Some(l) => format!("{} ({})", l, role),
+                        None => role.to_string(),
+                    }),
+                    description: description.clone(),
+                    // Not the flow's own tags: the members are tracks of the
+                    // muxed flow, not recordings a tag search should list
+                    // beside it.
+                    tags: extra_tags,
+                    flow_collection: vec![],
+                    collected: vec![],
+                    essence_parameters: Default::default(),
+                };
                 if num_video >= 1 {
                     inputs.push(Essence::Video);
+                    streams.push(MuxStream {
+                        pad_name: Some(format!("sink_{}", PID_VIDEO)),
+                        language: None,
+                    });
+                    collected.push(CollectedFlow {
+                        track: Essence::Video.tag(),
+                        role: "video".to_string(),
+                        spec: member_spec("video", FORMAT_VIDEO, "video", vec![]),
+                        container_mapping: mapping(serde_json::json!({
+                            "track_index": 0,
+                            "format_track_index": 0,
+                            "mp2ts_container": { "pid": PID_VIDEO },
+                        })),
+                        inherit_parameters: true,
+                    });
                 }
-                for i in 0..num_audio {
-                    inputs.push(Essence::Audio(i));
+                for (i, meta) in audio_meta.iter().enumerate() {
+                    let essence = Essence::Audio(i);
+                    let pid = PID_AUDIO_0 + i as u32;
+                    inputs.push(essence);
+                    streams.push(MuxStream {
+                        pad_name: Some(format!("sink_{}", pid)),
+                        language: meta.language.clone(),
+                    });
+                    collected.push(CollectedFlow {
+                        track: essence.tag(),
+                        role: meta.role.clone(),
+                        spec: member_spec(
+                            &essence.tag(),
+                            FORMAT_AUDIO,
+                            &meta.role,
+                            audio_member_tags(meta),
+                        ),
+                        container_mapping: mapping(serde_json::json!({
+                            "track_index": num_video + i,
+                            "format_track_index": i,
+                            "mp2ts_container": { "pid": pid },
+                        })),
+                        inherit_parameters: false,
+                    });
                 }
                 let spec = FlowSpec {
                     flow_id: derive_id(&id_key, "mux"),
@@ -445,9 +663,11 @@ impl BlockBuilder for TamsOutputBuilder {
                     label: label.clone(),
                     description: description.clone(),
                     tags: tags.clone(),
-                    // The TS is an opaque mux; its inner essences are NOT exposed as
-                    // separate flows (per AMWA BCP-006-04), so no flow_collection.
+                    // Filled by the uploader from `collected`: one member flow
+                    // per track, mapped to its PID in this flow's segments.
+                    // The members have no segments of their own.
                     flow_collection: vec![],
+                    collected,
                     essence_parameters: Default::default(),
                 };
                 build_flow_chain(
@@ -462,6 +682,7 @@ impl BlockBuilder for TamsOutputBuilder {
                     auth_plan,
                     spec,
                     ctx,
+                    streams,
                     &mut elements,
                 )?;
             }
@@ -538,10 +759,19 @@ fn build_flow_chain(
     auth_plan: TamsAuth,
     spec: FlowSpec,
     ctx: &BlockBuildContext,
+    mux_streams: Vec<MuxStream>,
     elements: &mut Vec<(String, gst::Element)>,
 ) -> Result<(), BlockBuildError> {
     if inputs.is_empty() {
         return Ok(());
+    }
+    // One mux stream per input (the segmenter's essences).
+    if mux_streams.len() != inputs.len() {
+        return Err(BlockBuildError::InvalidConfiguration(format!(
+            "TAMS Output: {} mux streams for {} inputs",
+            mux_streams.len(),
+            inputs.len()
+        )));
     }
 
     // Temp directory for this flow's segment files, one per TAMS flow.
@@ -654,7 +884,8 @@ fn build_flow_chain(
                 None => return gst::PadProbeReturn::Ok,
             };
             if parser_inserted.load(Ordering::SeqCst) {
-                // Renegotiation: keep the flow's video parameters current.
+                // Renegotiation: keep the flow's video parameters current
+                // (audio is followed on the parser's output).
                 if essence == Essence::Video {
                     merge_video_params(&detected_codec_probe, structure, &instance_id_owned);
                 }
@@ -701,7 +932,19 @@ fn build_flow_chain(
                 // For single-essence flows, record the detected codec as the flow's codec.
                 if detect_codec {
                     d.codec = Some(codec_label.to_string());
+                } else {
+                    // A track of a muxed flow: its member flow's codec.
+                    d.tracks.entry(essence.tag()).or_default().codec = codec_label.to_string();
                 }
+            }
+            if let Essence::Audio(_) = essence {
+                merge_audio_params(
+                    &detected_codec_probe,
+                    essence,
+                    detect_codec,
+                    structure,
+                    &instance_id_owned,
+                );
             }
             // Video geometry and rate go on the flow (also a muxed TS flow), so
             // a reader can map frames to the timeline without probing segments.
@@ -759,8 +1002,19 @@ fn build_flow_chain(
             // The parser's output caps carry what the stream itself says (the
             // SPS: size, and the rate when it has VUI timing); its timestamps
             // give the rate when nothing else does.
-            if essence == Essence::Video {
-                watch_video_essence(&psrc, detected_codec_probe.clone(), &instance_id_owned);
+            match essence {
+                Essence::Video => {
+                    watch_video_essence(&psrc, detected_codec_probe.clone(), &instance_id_owned)
+                }
+                // The parser's caps add what the encoder's may lack (the
+                // AAC profile).
+                Essence::Audio(_) => watch_audio_essence(
+                    &psrc,
+                    detected_codec_probe.clone(),
+                    essence,
+                    detect_codec,
+                    &instance_id_owned,
+                ),
             }
             // Linked successfully — now consume the one-shot guard so subsequent
             // Caps events (renegotiation) don't re-insert a second parser.
@@ -1090,7 +1344,7 @@ fn build_flow_chain(
             format!("{} ({})", block_id, suffix_owned),
             mux_factory,
             container == Container::MpegTs,
-            sinks.len(),
+            mux_streams,
             0, // video comes first when there is one
             pad_ends,
             Box::new(on_open),
@@ -1358,6 +1612,125 @@ fn video_essence_parameters(
     params
 }
 
+/// Merge the audio parameters in `caps` into the detected essence: the flow's
+/// own (`single`, an MP4 audio flow) or the track's member flow (a track of a
+/// muxed flow).
+fn merge_audio_params(
+    detected: &SharedDetected,
+    essence: Essence,
+    single: bool,
+    caps: &gst::StructureRef,
+    block_id: &str,
+) {
+    let params = audio_essence_parameters(caps);
+    let Ok(mut d) = detected.lock() else {
+        return;
+    };
+    let target = if single {
+        &mut d.essence_parameters
+    } else {
+        &mut d
+            .tracks
+            .entry(essence.tag())
+            .or_insert_with(TrackEssence::default)
+            .essence_parameters
+    };
+    for (k, v) in params {
+        if target.get(&k) != Some(&v) {
+            debug!("TAMS Output {}: {} {} = {}", block_id, essence.tag(), k, v);
+            target.insert(k, v);
+        }
+    }
+}
+
+/// Follow the audio parser's output caps (an event probe, not per buffer).
+fn watch_audio_essence(
+    pad: &gst::Pad,
+    detected: SharedDetected,
+    essence: Essence,
+    single: bool,
+    block_id: &str,
+) {
+    let block_id = block_id.to_string();
+    pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+        if let Some(gst::PadProbeData::Event(e)) = info.data.as_ref() {
+            if let gst::EventView::Caps(c) = e.view() {
+                if let Some(s) = c.caps().structure(0) {
+                    merge_audio_params(&detected, essence, single, s, &block_id);
+                }
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// TAMS audio `essence_parameters` from encoded audio caps: `sample_rate` and
+/// `channels` (both required by the TAMS audio flow schema), and
+/// `codec_parameters` (`coded_frame_size`, and `mp4_oti`, the MPEG-4 audio
+/// object type, for AAC) as far as the caps tell them.
+fn audio_essence_parameters(
+    caps: &gst::StructureRef,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut params = serde_json::Map::new();
+    if let Ok(rate) = caps.get::<i32>("rate") {
+        if rate > 0 {
+            params.insert("sample_rate".into(), rate.into());
+        }
+    }
+    if let Ok(channels) = caps.get::<i32>("channels") {
+        if channels > 0 {
+            params.insert("channels".into(), channels.into());
+        }
+    }
+    let mut codec = serde_json::Map::new();
+    let mpegversion = caps.get::<i32>("mpegversion").unwrap_or(0);
+    match caps.name().as_str() {
+        "audio/mpeg" if mpegversion == 1 => {
+            // Layer I frames are 384 samples and layer II 1152. Layer III is
+            // 1152 in MPEG-1 but 576 in MPEG-2 and 2.5 (the low sample rates,
+            // `mpegaudioversion` 2 and 3 in mpegaudioparse's caps; without
+            // it, a rate under 32 kHz, which MPEG-1 does not have).
+            let lsf = match caps.get::<i32>("mpegaudioversion") {
+                Ok(v) => v >= 2,
+                Err(_) => caps.get::<i32>("rate").is_ok_and(|r| r > 0 && r < 32000),
+            };
+            let frame = match caps.get::<i32>("layer") {
+                Ok(1) => Some(384),
+                Ok(2) => Some(1152),
+                Ok(3) => Some(if lsf { 576 } else { 1152 }),
+                _ => None,
+            };
+            if let Some(frame) = frame {
+                codec.insert("coded_frame_size".into(), frame.into());
+            }
+        }
+        "audio/mpeg" => {
+            // aacparse names only object types 1-4 (gst_codec_utils_aac_get_profile);
+            // HE-AAC with implicit SBR shows as `lc`, at the core rate.
+            let oti = match caps.get::<&str>("profile") {
+                Ok("main") => Some(1),
+                Ok("lc") => Some(2),
+                Ok("ssr") => Some(3),
+                Ok("ltp") => Some(4),
+                _ => None,
+            };
+            if let Some(oti) = oti {
+                codec.insert("mp4_oti".into(), oti.into());
+                // 1024 samples per frame for all four.
+                codec.insert("coded_frame_size".into(), 1024.into());
+            }
+        }
+        "audio/x-ac3" => {
+            codec.insert("coded_frame_size".into(), 1536.into());
+        }
+        _ => {}
+    }
+    if !codec.is_empty() {
+        params.insert("codec_parameters".into(), codec.into());
+    }
+    params
+}
+
 /// Get TAMS Output block definitions.
 pub fn get_blocks() -> Vec<BlockDefinition> {
     vec![tams_output_definition()]
@@ -1411,7 +1784,7 @@ fn tams_output_definition() -> BlockDefinition {
             simple_prop(
                 "label",
                 "Title",
-                "Human-readable title stored on the TAMS flow(s), e.g. \"Studio A - Camera 4\". In MP4 mode the video/audio flows get \" (video)\"/\" (audio)\" appended.",
+                "Human-readable title stored on the TAMS flow(s), e.g. \"Studio A - Camera 4\". Per-track flows get \" (video)\" or \" (<audio label>)\" appended.",
                 PropertyType::String,
                 PropertyValue::String(String::new()),
             ),
@@ -1442,6 +1815,20 @@ fn tams_output_definition() -> BlockDefinition {
                 "Number of audio tracks (0 or more; muxed into one MPEG-TS flow, or one MP4 flow each).",
                 PropertyType::Int,
                 PropertyValue::Int(1),
+            ),
+            simple_prop(
+                AUDIO_LABELS,
+                "Audio Labels",
+                "Labels of the audio tracks in track order, comma-separated, e.g. \"PGM,IS\". Used as each track's role and in its flow title. Must be unique.",
+                PropertyType::String,
+                PropertyValue::String(String::new()),
+            ),
+            simple_prop(
+                AUDIO_LANGUAGES,
+                "Audio Languages",
+                "ISO 639 language codes of the audio tracks in track order, comma-separated, e.g. \"swe,eng\". Written into the container and as a flow tag. Empty entry: none.",
+                PropertyType::String,
+                PropertyValue::String(String::new()),
             ),
             simple_prop(
                 SEGMENT_DURATION_MS,
@@ -1703,6 +2090,168 @@ mod tests {
             .field("framerate", gst::Fraction::new(0, 1))
             .build();
         assert!(video_essence_parameters(caps.structure(0).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn audio_essence_parameters_from_caps() {
+        gst::init().unwrap();
+        let params = |caps: gst::Caps| {
+            serde_json::Value::Object(audio_essence_parameters(caps.structure(0).unwrap()))
+        };
+        // AAC-LC after aacparse: profile known.
+        assert_eq!(
+            params(
+                gst::Caps::builder("audio/mpeg")
+                    .field("mpegversion", 4i32)
+                    .field("rate", 48000i32)
+                    .field("channels", 2i32)
+                    .field("profile", "lc")
+                    .build()
+            ),
+            serde_json::json!({
+                "sample_rate": 48000,
+                "channels": 2,
+                "codec_parameters": { "coded_frame_size": 1024, "mp4_oti": 2 }
+            })
+        );
+        // A profile aacparse does not name: no object type, no frame size.
+        assert_eq!(
+            params(
+                gst::Caps::builder("audio/mpeg")
+                    .field("mpegversion", 4i32)
+                    .field("rate", 48000i32)
+                    .field("channels", 2i32)
+                    .field("profile", "he-aac")
+                    .build()
+            ),
+            serde_json::json!({ "sample_rate": 48000, "channels": 2 })
+        );
+        // MPEG audio: layer I 384, layer II 1152, layer III 1152 in MPEG-1
+        // and 576 in MPEG-2/2.5 (by mpegaudioversion, else by rate).
+        let frame = |layer: i32, version: Option<i32>, rate: i32| {
+            let mut caps = gst::Caps::builder("audio/mpeg")
+                .field("mpegversion", 1i32)
+                .field("layer", layer)
+                .field("rate", rate)
+                .field("channels", 2i32);
+            if let Some(v) = version {
+                caps = caps.field("mpegaudioversion", v);
+            }
+            params(caps.build())["codec_parameters"]["coded_frame_size"].clone()
+        };
+        assert_eq!(frame(1, Some(1), 48000), 384);
+        assert_eq!(frame(2, Some(1), 48000), 1152);
+        assert_eq!(frame(2, Some(2), 24000), 1152);
+        assert_eq!(frame(3, Some(1), 48000), 1152);
+        assert_eq!(frame(3, Some(2), 24000), 576);
+        assert_eq!(frame(3, Some(3), 12000), 576);
+        assert_eq!(frame(3, None, 44100), 1152);
+        assert_eq!(frame(3, None, 22050), 576);
+        // AC-3.
+        assert_eq!(
+            params(
+                gst::Caps::builder("audio/x-ac3")
+                    .field("rate", 48000i32)
+                    .build()
+            ),
+            serde_json::json!({
+                "sample_rate": 48000,
+                "codec_parameters": { "coded_frame_size": 1536 }
+            })
+        );
+        // Encoder caps before the parser: no profile yet.
+        assert_eq!(
+            params(
+                gst::Caps::builder("audio/mpeg")
+                    .field("mpegversion", 4i32)
+                    .field("rate", 44100i32)
+                    .field("channels", 1i32)
+                    .build()
+            ),
+            serde_json::json!({ "sample_rate": 44100, "channels": 1 })
+        );
+    }
+
+    #[test]
+    fn audio_labels_and_languages_follow_track_order() {
+        let props: HashMap<String, PropertyValue> =
+            [(AUDIO_LABELS, " PGM , IS,"), (AUDIO_LANGUAGES, ",eng")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), PropertyValue::String(v.into())))
+                .collect();
+        let meta = audio_track_meta(&props, 3, Container::MpegTs).unwrap();
+        let got: Vec<_> = meta
+            .iter()
+            .map(|m| (m.role.as_str(), m.label.as_deref(), m.language.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("PGM", Some("PGM"), None),
+                ("IS", Some("IS"), Some("eng")),
+                // Unlabelled tracks keep the role they had.
+                ("audio-2", None, None),
+            ]
+        );
+        assert_eq!(
+            audio_member_tags(&meta[1]),
+            vec![
+                ("audio_label".to_string(), "IS".to_string()),
+                ("audio_language".to_string(), "eng".to_string())
+            ]
+        );
+        assert_eq!(
+            audio_track_meta(&HashMap::new(), 1, Container::MpegTs).unwrap()[0].role,
+            "audio-0"
+        );
+    }
+
+    /// Labels and languages that do not fit the tracks are refused at build
+    /// time, with a message that names the property; languages are written
+    /// in the form the container's muxer uses.
+    #[test]
+    fn audio_labels_and_languages_are_checked() {
+        let meta = |labels: &str, languages: &str, count: usize, container: Container| {
+            let props: HashMap<String, PropertyValue> =
+                [(AUDIO_LABELS, labels), (AUDIO_LANGUAGES, languages)]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), PropertyValue::String(v.into())))
+                    .collect();
+            audio_track_meta(&props, count, container)
+        };
+        let refused = |labels: &str, languages: &str, count: usize, property: &str| {
+            let err = meta(labels, languages, count, Container::MpegTs)
+                .err()
+                .unwrap_or_else(|| panic!("{:?} {:?} accepted", labels, languages));
+            assert!(err.starts_with(property), "{}", err);
+        };
+        // More entries than tracks.
+        refused("PGM,IS,EXTRA", "", 2, AUDIO_LABELS);
+        refused("", "swe,eng,fin", 2, AUDIO_LANGUAGES);
+        // Duplicates, and labels that take another track's role.
+        refused("PGM,PGM", "", 2, AUDIO_LABELS);
+        refused("video", "", 1, AUDIO_LABELS);
+        refused("audio-1", "", 2, AUDIO_LABELS);
+        refused(",audio-0", "", 2, AUDIO_LABELS);
+        // Unknown language.
+        refused("", "swe,xx9", 2, AUDIO_LANGUAGES);
+
+        // Fewer entries, and trailing empty ones, are fine.
+        assert!(meta("PGM", "", 2, Container::MpegTs).is_ok());
+        assert!(meta("PGM,IS,,", "swe,,", 2, Container::MpegTs).is_ok());
+        // A label that only looks like a fallback role is fine.
+        assert!(meta("audio-x,Audio-1", "", 2, Container::MpegTs).is_ok());
+
+        // ISO 639-2/B for MPEG-TS (as mpegtsmux writes it), 639-2/T for MP4.
+        let languages = |container| {
+            meta("", "deu,FR,swe", 3, container)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.language.unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(languages(Container::MpegTs), ["ger", "fre", "swe"]);
+        assert_eq!(languages(Container::Mp4), ["deu", "fra", "swe"]);
     }
 
     /// Caps without a frame rate (an SPS without timing): the rate comes from
