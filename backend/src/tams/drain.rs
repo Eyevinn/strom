@@ -6,19 +6,25 @@
 //!
 //! - from server start, whether or not the Strom flow that parked a segment
 //!   runs, and also when that flow was stopped or deleted;
-//! - one upload at a time, round-robin across TAMS flows (one directory each),
-//!   oldest first within a flow, so one flow's large backlog does not starve
-//!   the others;
-//! - live first ([`live`], [`LivePolicy`]): never while some live uploader
-//!   has [`LIVE_BEHIND_QUEUED`] segments waiting in its queue (live is falling
-//!   behind). One waiting segment per uploader is normal; the drainer then
-//!   waits for a moment when none waits, but at most [`DRAIN_MAX_WAIT`], so it
-//!   cannot starve. One drain upload may run alongside live uploads in flight;
+//! - up to [`DRAIN_CONCURRENCY`] segments at a time (an upload is a few round
+//!   trips to the gateway, so the drain is bound by latency, not bandwidth),
+//!   shared round-robin across TAMS flows (one directory each), oldest first
+//!   within a flow, so one flow's large backlog does not starve the others. A
+//!   flow's segments in flight go up in one job (`upload_batch`: one storage
+//!   allocation, the PUTs in parallel, one registration), and a flow has at
+//!   most one job, so it registers its segments in time order;
+//! - live first ([`live`], [`LivePolicy`]): no new job while some live
+//!   uploader has [`LIVE_BEHIND_QUEUED`] segments waiting in its queue (live
+//!   is falling behind); jobs in flight finish. One waiting segment per
+//!   uploader is normal; the drainer then waits for a moment when none waits,
+//!   but at most [`DRAIN_MAX_WAIT`] per job, so it cannot starve;
 //! - a segment is claimed (`crate::tams::uploader::Claim`) while it is uploaded,
 //!   so the cap on parked segments never deletes it and nothing uploads it
 //!   twice; on success its file, sidecar and index entry are deleted;
 //! - a gateway that fails backs off, exponentially up to
-//!   [`MAX_GATEWAY_BACKOFF`]; a segment that fails waits out its own backoff.
+//!   [`MAX_GATEWAY_BACKOFF`] (one failure per job), and gets no new job
+//!   meanwhile; other gateways go on. A segment that fails waits out its own
+//!   backoff.
 //!
 //! Each flow directory holds a `park.json` [`Manifest`], written by the live
 //! uploader, with what is needed to register a segment when no block runs:
@@ -44,12 +50,12 @@ use crate::osc::SatProvider;
 use crate::tams::client::{gateway_is_allow_listed, FlowSpec, TamsClient};
 use crate::tams::park::Parking;
 use crate::tams::uploader::{
-    collect_parked_blocking, discard_segment, enforce_parked_limits, parked_backoff,
-    upload_segment, Claim, DetectedEssence, FragmentReady, Outcome, ParkTarget, ParkedLimits,
-    Retry, SharedDetected, UploadCtx, PARKED_MAX_BACKOFF, PARKED_STUCK_FAILURES, RECOVERY_ATTEMPTS,
+    collect_parked_blocking, discard_segment, enforce_parked_limits, parked_backoff, upload_batch,
+    Claim, DetectedEssence, FragmentReady, Outcome, ParkTarget, ParkedLimits, Retry,
+    SharedDetected, UploadCtx, PARKED_MAX_BACKOFF, PARKED_STUCK_FAILURES, RECOVERY_ATTEMPTS,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -565,15 +571,124 @@ fn gateway_backoff(failures: u32) -> Duration {
     Duration::from_secs(1u64 << failures.clamp(1, 7)).min(MAX_GATEWAY_BACKOFF)
 }
 
-/// What one [`Drainer::step`] did.
+/// What one [`Drainer::fill`] did.
 #[derive(Debug, PartialEq, Eq)]
 enum Step {
-    /// Tried one segment.
+    /// Started uploads.
     Tried,
     /// Held back for live (see [`Drainer::may_upload`]).
     LiveBusy,
-    /// Nothing to try now; try again after this long, or when woken.
+    /// As many segments in flight as allowed.
+    Full,
+    /// Nothing to start now; look again after this long, when woken, or when
+    /// an upload in flight ends.
     Idle(Duration),
+}
+
+/// A parked segment picked for an upload, claimed.
+type Picked = (FragmentReady, Claim);
+
+/// What an upload job hands back: the flow it took, and what became of each
+/// of its segments, in time order.
+struct JobDone {
+    dir: PathBuf,
+    gateway: String,
+    flow: DrainFlow,
+    outcomes: Vec<(PathBuf, Outcome)>,
+}
+
+/// One flow directory's segments, uploaded together by one task (see
+/// [`upload_batch`]). The job owns the flow's state while it runs, so a flow
+/// has at most one job in flight and registers its segments in time order.
+struct Job {
+    dir: PathBuf,
+    flow: DrainFlow,
+    auth: AuthMethod,
+    /// Claimed, oldest first; the claims are released when the job ends.
+    segments: Vec<(FragmentReady, Claim)>,
+    failing: bool,
+    events: EventBroadcaster,
+    /// How long the drainer held back for live before it started the job.
+    held: Duration,
+}
+
+impl Job {
+    async fn run(self) -> JobDone {
+        let Job {
+            dir,
+            mut flow,
+            auth,
+            segments,
+            failing,
+            events,
+            held,
+        } = self;
+        let gateway = flow.manifest.gateway.clone();
+        let frags: Vec<FragmentReady> = segments
+            .iter()
+            .map(|(f, _)| FragmentReady {
+                path: f.path.clone(),
+                start_ns: f.start_ns,
+                end_ns: f.end_ns,
+            })
+            .collect();
+        let started = Instant::now();
+        let outcomes = match flow.client(auth) {
+            Err(e) => {
+                warn!(
+                    "TAMS: cannot upload parked segments to {}: {}",
+                    flow.manifest.gateway, e
+                );
+                vec![Outcome::Parked; frags.len()]
+            }
+            Ok(client) => {
+                let mut ctx = UploadCtx {
+                    client: &client,
+                    registered: &mut flow.registered,
+                    flow_spec: &mut flow.spec,
+                    detected_codec: &flow.detected,
+                    content_type: &flow.manifest.content_type,
+                    events: &events,
+                    strom_flow_id: flow.manifest.strom_flow_id,
+                    block_id: &flow.manifest.block_id,
+                    segments_registered: &mut flow.segments,
+                    failing,
+                    next_probe: None,
+                    auth_reported_at: flow.auth_reported_at,
+                    manifest: None,
+                };
+                let outcomes = upload_batch(&mut ctx, &frags, RECOVERY_ATTEMPTS).await;
+                flow.auth_reported_at = ctx.auth_reported_at;
+                outcomes
+            }
+        };
+        for (frag, outcome) in frags.iter().zip(&outcomes) {
+            if *outcome == Outcome::Unreadable {
+                // A sidecar whose segment is gone is useless. A segment that
+                // could not be read for another reason is kept and tried again.
+                discard_segment(&frag.path).await;
+            }
+        }
+        debug!(
+            "TAMS: drained {} parked segment(s) of flow {} in {} ms ({} registered; \
+             held back {} ms for live before)",
+            frags.len(),
+            flow.manifest.tams_flow_id,
+            started.elapsed().as_millis(),
+            outcomes
+                .iter()
+                .filter(|o| **o == Outcome::Registered)
+                .count(),
+            held.as_millis()
+        );
+        drop(segments);
+        JobDone {
+            dir,
+            gateway,
+            flow,
+            outcomes: frags.into_iter().map(|f| f.path).zip(outcomes).collect(),
+        }
+    }
 }
 
 /// Uploads the parked segments of one [`Parking`]; see the module docs.
@@ -581,12 +696,15 @@ pub struct Drainer {
     parking: &'static Parking,
     live: &'static LiveBusy,
     policy: LivePolicy,
+    /// Most segments in flight at once ([`DRAIN_CONCURRENCY`]).
+    concurrency: usize,
     /// Since when the drainer has held back for live, with a segment to
     /// upload; reset by an upload and when there is nothing to upload.
     held_since: Option<Instant>,
     wake: &'static Notify,
     sat: Arc<SatProvider>,
     events: EventBroadcaster,
+    /// Flows not in a job right now.
     flows: HashMap<PathBuf, DrainFlow>,
     gateways: HashMap<String, GatewayState>,
     retries: HashMap<PathBuf, Retry>,
@@ -595,6 +713,10 @@ pub struct Drainer {
     states: HashMap<PathBuf, DrainState>,
     /// Directories without a manifest, last reported.
     no_manifest_reported: HashSet<PathBuf>,
+    /// Upload jobs in flight.
+    jobs: tokio::task::JoinSet<JobDone>,
+    /// The directory and segment count of each job in flight.
+    busy: HashMap<tokio::task::Id, (PathBuf, usize)>,
 }
 
 impl Drainer {
@@ -609,6 +731,7 @@ impl Drainer {
             parking,
             live,
             policy: LivePolicy::from_env(),
+            concurrency: concurrency_from_env(),
             held_since: None,
             wake,
             sat,
@@ -619,14 +742,17 @@ impl Drainer {
             cursor: None,
             states: HashMap::new(),
             no_manifest_reported: HashSet::new(),
+            jobs: tokio::task::JoinSet::new(),
+            busy: HashMap::new(),
         }
     }
 
     /// Upload parked segments, forever.
     pub async fn run(mut self) {
         info!(
-            "TAMS: draining parked segments under {} in the background",
-            self.parking.root().display()
+            "TAMS: draining parked segments under {} in the background, up to {} at a time",
+            self.parking.root().display(),
+            self.concurrency
         );
         // The rescan runs beside the uploads, not between them.
         let _sync = AbortOnDrop(tokio::spawn(sync_loop(
@@ -642,18 +768,35 @@ impl Drainer {
                 self.retries.retain(|p, _| parking.contains(p));
                 next_prune = Instant::now() + SYNC_INTERVAL;
             }
-            match self.step().await {
-                Step::Tried => tokio::task::yield_now().await,
-                Step::LiveBusy => tokio::time::sleep(LIVE_POLL).await,
-                Step::Idle(wait) => {
-                    let wait = wait.max(MIN_IDLE_WAIT);
-                    tokio::select! {
-                        _ = self.wake.notified() => {}
-                        _ = tokio::time::sleep(wait) => {}
-                    }
+            while let Some(done) = self.jobs.try_join_next_with_id() {
+                self.finish(done);
+            }
+            let wait = match self.fill().await {
+                Step::Tried => {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                Step::LiveBusy => LIVE_POLL,
+                Step::Full => SYNC_INTERVAL,
+                Step::Idle(wait) => wait.max(MIN_IDLE_WAIT),
+            };
+            tokio::select! {
+                _ = self.wake.notified() => {}
+                _ = tokio::time::sleep(wait) => {}
+                Some(done) = self.jobs.join_next_with_id(), if !self.jobs.is_empty() => {
+                    self.finish(done);
                 }
             }
         }
+    }
+
+    /// Segments in flight.
+    fn in_flight(&self) -> usize {
+        self.busy.values().map(|(_, n)| n).sum()
+    }
+
+    fn is_busy(&self, dir: &Path) -> bool {
+        self.busy.values().any(|(d, _)| d == dir)
     }
 
     /// The flow of `dir`, its manifest read again when it changed. `None`
@@ -678,6 +821,11 @@ impl Drainer {
             if let Some(old) = self.flows.remove(dir) {
                 flow.segments = old.segments;
                 flow.auth_reported_at = old.auth_reported_at;
+                // The same gateway and credentials keep their client, and
+                // with it its connections.
+                if old.manifest.gateway == flow.manifest.gateway {
+                    flow.client = old.client;
+                }
             }
             self.flows.insert(dir.to_path_buf(), flow);
         }
@@ -748,10 +896,12 @@ impl Drainer {
         }
     }
 
-    /// Upload the next segment: the oldest due one of the next flow
-    /// directory, round-robin, that has credentials and whose gateway is not
-    /// backing off.
-    async fn step(&mut self) -> Step {
+    /// Start uploads, up to [`Drainer::concurrency`] segments in flight: the
+    /// oldest due segments of each flow directory, taken round-robin, one at a
+    /// time from each, from directories that have credentials, whose gateway
+    /// is not backing off, and that have no job in flight. A directory's
+    /// segments go up in one job.
+    async fn fill(&mut self) -> Step {
         let now = Instant::now();
         let mut dirs = self.parking.dirs();
         let gone: Vec<PathBuf> = self
@@ -764,7 +914,12 @@ impl Drainer {
             self.clear_state(&dir);
         }
         if dirs.is_empty() {
+            self.held_since = None;
             return Step::Idle(SYNC_INTERVAL);
+        }
+        let free = self.concurrency.saturating_sub(self.in_flight());
+        if free == 0 {
+            return Step::Full;
         }
         // Round-robin: the directories after the one last served first.
         if let Some(cursor) = &self.cursor {
@@ -774,7 +929,13 @@ impl Drainer {
         let mut next_due: Option<Instant> = None;
         let mut due = |at: Instant| next_due = Some(next_due.map_or(at, |n| n.min(at)));
 
+        // The due segments of each directory that may upload, oldest first, at
+        // most `free` each, claimed (those not started are released below).
+        let mut candidates: Vec<(PathBuf, AuthMethod, VecDeque<Picked>)> = Vec::new();
         for dir in dirs {
+            if self.is_busy(&dir) {
+                continue;
+            }
             let Some(flow) = self.load_flow(&dir).await else {
                 if self.no_manifest_reported.insert(dir.clone()) {
                     warn!(
@@ -820,8 +981,9 @@ impl Drainer {
             let target = manifest.target();
             // Oldest first, a page at a time from the index: what the
             // sidecars say is in it, so none is read here.
+            let mut picked = VecDeque::new();
             let mut after: Option<(u64, PathBuf)> = None;
-            loop {
+            'pages: loop {
                 let page = self.parking.page(&dir, after.as_ref(), PAGE);
                 let full = page.len() == PAGE;
                 after = page.last().map(|p| (p.start_ns, p.path.clone()));
@@ -837,9 +999,6 @@ impl Drainer {
                         // uploader's docs).
                         continue;
                     }
-                    if !self.may_upload(Instant::now()) {
-                        return Step::LiveBusy;
-                    }
                     let Some(claim) = Claim::take(&seg.path) else {
                         continue;
                     };
@@ -848,27 +1007,98 @@ impl Drainer {
                         self.parking.forget(&seg.path);
                         continue;
                     }
-                    self.cursor = Some(dir.clone());
-                    self.set_state(&dir, DrainState::Draining);
                     let frag = FragmentReady {
-                        path: seg.path.clone(),
+                        path: seg.path,
                         start_ns: seg.start_ns,
                         end_ns: seg.end_ns,
                     };
-                    self.held_since = None;
-                    let outcome = self.upload(&dir, auth, &frag).await;
-                    drop(claim);
-                    self.after_upload(&dir, &gateway, &seg.path, outcome);
-                    return Step::Tried;
+                    picked.push_back((frag, claim));
+                    if picked.len() == free {
+                        break 'pages;
+                    }
                 }
                 if !full {
                     break;
                 }
             }
+            if !picked.is_empty() {
+                candidates.push((dir, auth, picked));
+            }
         }
-        // Nothing to upload: a wait for live starts again with the next one.
-        self.held_since = None;
-        Step::Idle(next_due.map_or(SYNC_INTERVAL, |at| at.saturating_duration_since(now)))
+        if candidates.is_empty() {
+            // Nothing to upload: a wait for live starts again with the next one.
+            self.held_since = None;
+            return Step::Idle(
+                next_due.map_or(SYNC_INTERVAL, |at| at.saturating_duration_since(now)),
+            );
+        }
+        if !self.may_upload(Instant::now()) {
+            return Step::LiveBusy;
+        }
+
+        // Round-robin, one segment per directory per turn.
+        let mut batches: Vec<Vec<(FragmentReady, Claim)>> =
+            candidates.iter().map(|_| Vec::new()).collect();
+        let mut left = free;
+        while left > 0 {
+            let mut took = false;
+            for ((_, _, picked), batch) in candidates.iter_mut().zip(batches.iter_mut()) {
+                if left == 0 {
+                    break;
+                }
+                if let Some(seg) = picked.pop_front() {
+                    batch.push(seg);
+                    left -= 1;
+                    took = true;
+                }
+            }
+            if !took {
+                break;
+            }
+        }
+
+        // One job per directory; live first before each.
+        let mut started = 0;
+        for ((dir, auth, _), batch) in candidates.into_iter().zip(batches) {
+            if batch.is_empty() {
+                continue;
+            }
+            if started > 0 && !self.may_upload(Instant::now()) {
+                // The claims of the batches not started are released here.
+                return Step::Tried;
+            }
+            let Some(flow) = self.flows.remove(&dir) else {
+                continue;
+            };
+            let failing = self
+                .gateways
+                .get(&flow.manifest.gateway)
+                .is_some_and(|g| g.failures > 0);
+            let held = self
+                .held_since
+                .take()
+                .map_or(Duration::ZERO, |since| since.elapsed());
+            self.cursor = Some(dir.clone());
+            self.set_state(&dir, DrainState::Draining);
+            let n = batch.len();
+            let job = Job {
+                dir: dir.clone(),
+                flow,
+                auth,
+                segments: batch,
+                failing,
+                events: self.events.clone(),
+                held,
+            };
+            let handle = self.jobs.spawn(job.run());
+            self.busy.insert(handle.id(), (dir, n));
+            started += 1;
+        }
+        if started == 0 {
+            self.held_since = None;
+            return Step::Idle(MIN_IDLE_WAIT);
+        }
+        Step::Tried
     }
 
     /// Whether a drain upload may start now, beside the live uploads:
@@ -888,108 +1118,104 @@ impl Drainer {
         load.queued == 0 || now.saturating_duration_since(since) >= self.policy.max_wait
     }
 
-    /// Upload one claimed segment of `dir`'s flow.
-    async fn upload(&mut self, dir: &Path, auth: AuthMethod, frag: &FragmentReady) -> Outcome {
-        let failing = self
-            .flows
-            .get(dir)
-            .and_then(|f| self.gateways.get(&f.manifest.gateway))
-            .is_some_and(|g| g.failures > 0);
-        let events = &self.events;
-        let Some(flow) = self.flows.get_mut(dir) else {
-            return Outcome::Parked;
+    /// Take back a job that ended: its flow, and what became of its segments.
+    fn finish(&mut self, done: Result<(tokio::task::Id, JobDone), tokio::task::JoinError>) {
+        let id = match &done {
+            Ok((id, _)) => *id,
+            Err(e) => e.id(),
         };
-        let client = match flow.client(auth) {
-            Ok(c) => c,
+        let busy = self.busy.remove(&id);
+        let done = match done {
+            Ok((_, done)) => done,
             Err(e) => {
+                // The flow is read again from its manifest; its segments'
+                // claims went with the task.
                 warn!(
-                    "TAMS: cannot upload parked segments to {}: {}",
-                    flow.manifest.gateway, e
+                    "TAMS: a parked-segment upload of {} ended abnormally: {}",
+                    busy.map_or_else(|| "?".to_string(), |(d, _)| d.display().to_string()),
+                    e
                 );
-                return Outcome::Parked;
+                return;
             }
         };
-        let mut ctx = UploadCtx {
-            client: &client,
-            registered: &mut flow.registered,
-            flow_spec: &mut flow.spec,
-            detected_codec: &flow.detected,
-            content_type: &flow.manifest.content_type,
-            events,
-            strom_flow_id: flow.manifest.strom_flow_id,
-            block_id: &flow.manifest.block_id,
-            segments_registered: &mut flow.segments,
-            failing,
-            next_probe: None,
-            auth_reported_at: flow.auth_reported_at,
-            manifest: None,
-        };
-        let outcome = upload_segment(&mut ctx, frag, RECOVERY_ATTEMPTS, true).await;
-        flow.auth_reported_at = ctx.auth_reported_at;
-        if outcome == Outcome::Unreadable {
-            // A sidecar whose segment is gone is useless. A segment that
-            // could not be read for another reason is kept and tried again.
-            discard_segment(&frag.path).await;
-        }
-        outcome
-    }
-
-    fn after_upload(&mut self, dir: &Path, gateway: &str, path: &Path, outcome: Outcome) {
+        let JobDone {
+            dir,
+            gateway,
+            flow,
+            outcomes,
+        } = done;
+        self.flows.entry(dir.clone()).or_insert(flow);
         let now = Instant::now();
-        match outcome {
-            Outcome::ReadFailed => {
-                // A local problem: the segment waits out its own backoff; the
-                // gateway is not to blame.
-                let retry = self.retries.entry(path.to_path_buf()).or_insert(Retry {
-                    failures: 0,
-                    next: now,
-                });
-                retry.failures += 1;
-                retry.next = now + parked_backoff(retry.failures);
-            }
-            Outcome::Parked => {
-                let retry = self.retries.entry(path.to_path_buf()).or_insert(Retry {
-                    failures: 0,
-                    next: now,
-                });
-                retry.failures += 1;
-                retry.next = now + parked_backoff(retry.failures);
-                if retry.failures == PARKED_STUCK_FAILURES {
-                    warn!(
-                        "TAMS: parked segment {} failed {} times; trying the others first, \
-                         and it again every {} s at most",
-                        path.display(),
-                        retry.failures,
-                        PARKED_MAX_BACKOFF.as_secs()
-                    );
-                }
-                let g = self.gateways.entry(gateway.to_string()).or_default();
-                g.failures += 1;
-                let wait = gateway_backoff(g.failures);
-                g.until = Some(now + wait);
-                debug!(
-                    "TAMS: parked segment upload to {} failed ({} in a row); next try in {} s",
-                    gateway,
-                    g.failures,
-                    wait.as_secs()
-                );
-                self.set_state(dir, DrainState::GatewayFailing);
-            }
-            Outcome::Registered | Outcome::Dropped | Outcome::Unreadable => {
-                self.retries.remove(path);
-                // The process-wide index is told by the uploader; this one may
-                // be another (tests).
-                self.parking.forget(path);
-                if outcome == Outcome::Registered {
-                    if let Some(g) = self.gateways.get_mut(gateway) {
-                        g.failures = 0;
-                        g.until = None;
+        let mut parked = false;
+        let mut registered = false;
+        for (path, outcome) in outcomes {
+            match outcome {
+                Outcome::ReadFailed | Outcome::Parked => {
+                    // A read failure is local: the segment waits out its own
+                    // backoff; the gateway is not to blame.
+                    parked |= outcome == Outcome::Parked;
+                    let retry = self.retries.entry(path.clone()).or_insert(Retry {
+                        failures: 0,
+                        next: now,
+                    });
+                    retry.failures += 1;
+                    retry.next = now + parked_backoff(retry.failures);
+                    if outcome == Outcome::Parked && retry.failures == PARKED_STUCK_FAILURES {
+                        warn!(
+                            "TAMS: parked segment {} failed {} times; trying the others first, \
+                             and it again every {} s at most",
+                            path.display(),
+                            retry.failures,
+                            PARKED_MAX_BACKOFF.as_secs()
+                        );
                     }
-                    debug!("TAMS: uploaded parked segment {}", path.display());
+                }
+                Outcome::Registered | Outcome::Dropped | Outcome::Unreadable => {
+                    self.retries.remove(&path);
+                    // The process-wide index is told by the uploader; this one may
+                    // be another (tests).
+                    self.parking.forget(&path);
+                    if outcome == Outcome::Registered {
+                        registered = true;
+                        debug!("TAMS: uploaded parked segment {}", path.display());
+                    }
                 }
             }
         }
+        // The gateway counts one failure per job, however many segments it
+        // held; its other jobs in flight end as they will, and no new one
+        // starts while it backs off.
+        if parked {
+            let g = self.gateways.entry(gateway.clone()).or_default();
+            g.failures += 1;
+            let wait = gateway_backoff(g.failures);
+            g.until = Some(now + wait);
+            debug!(
+                "TAMS: parked segment upload to {} failed ({} in a row); next try in {} s",
+                gateway,
+                g.failures,
+                wait.as_secs()
+            );
+            self.set_state(&dir, DrainState::GatewayFailing);
+        } else if registered {
+            if let Some(g) = self.gateways.get_mut(&gateway) {
+                g.failures = 0;
+                g.until = None;
+            }
+        }
     }
+}
+
+/// Most parked segments uploaded at once, across all flows: each upload is a
+/// few round trips to the gateway, so the drain is bound by their latency, not
+/// by bandwidth. Override with `STROM_TAMS_DRAIN_CONCURRENCY` (at least 1).
+pub const DRAIN_CONCURRENCY: usize = 8;
+
+fn concurrency_from_env() -> usize {
+    std::env::var("STROM_TAMS_DRAIN_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map_or(DRAIN_CONCURRENCY, |n| n.max(1))
 }
 
 #[cfg(test)]
@@ -1021,16 +1247,28 @@ mod tests {
         ))
     }
 
-    /// A store that records `(flow id, timerange)` per registration, and
-    /// signals each upload it gets; uploads take `upload_delay`.
+    /// A store that records `(flow id, timerange)` and the object per
+    /// registration (one or an array per request), and signals each upload it
+    /// gets; uploads take `upload_delay`, every request `latency`.
     #[derive(Clone, Default)]
     struct Store {
         base: Arc<Mutex<String>>,
         registered: Arc<Mutex<Vec<(String, String)>>>,
+        objects: Arc<Mutex<Vec<String>>>,
         uploads: Arc<AtomicUsize>,
         upload_delay: Duration,
+        latency: Duration,
         /// Storage allocations still to fail with a 500.
         fail: Arc<AtomicUsize>,
+        /// Storage requests, objects handed out, segment listings.
+        allocations: Arc<AtomicUsize>,
+        allocated: Arc<AtomicUsize>,
+        checks: Arc<AtomicUsize>,
+        /// Registration requests.
+        registrations: Arc<AtomicUsize>,
+        /// PUTs in flight now, and at most.
+        putting: Arc<AtomicUsize>,
+        max_putting: Arc<AtomicUsize>,
     }
 
     async fn start_store(store: Store) -> String {
@@ -1042,41 +1280,84 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         *store.base.lock().unwrap() = base.clone();
         let app = Router::new()
-            .route("/flows/{id}", put(|| async { StatusCode::CREATED }))
             .route(
-                "/flows/{id}/storage",
-                post(|State(s): State<Store>| async move {
-                    use axum::response::IntoResponse;
-                    if s.fail
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                        .is_ok()
-                    {
-                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-                    }
-                    let base = s.base.lock().unwrap().clone();
-                    Json(serde_json::json!({ "media_objects": [{
-                        "object_id": "obj",
-                        "put_url": { "url": format!("{}/upload", base), "content-type": "video/mp2t" }
-                    }]}))
-                    .into_response()
+                "/flows/{id}",
+                put(|State(s): State<Store>| async move {
+                    tokio::time::sleep(s.latency).await;
+                    StatusCode::CREATED
                 }),
             )
             .route(
-                "/upload",
+                "/flows/{id}/storage",
+                post(
+                    |State(s): State<Store>, Json(body): Json<serde_json::Value>| async move {
+                        use axum::response::IntoResponse;
+                        tokio::time::sleep(s.latency).await;
+                        if s.fail
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                            .is_ok()
+                        {
+                            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                        }
+                        s.allocations.fetch_add(1, Ordering::SeqCst);
+                        let base = s.base.lock().unwrap().clone();
+                        let limit = body["limit"].as_u64().unwrap_or(1) as usize;
+                        let objects: Vec<serde_json::Value> = (0..limit)
+                            .map(|_| {
+                                let n = s.allocated.fetch_add(1, Ordering::SeqCst);
+                                serde_json::json!({
+                                    "object_id": format!("obj-{}", n),
+                                    "put_url": {
+                                        "url": format!("{}/upload/obj-{}", base, n),
+                                        "content-type": "video/mp2t"
+                                    }
+                                })
+                            })
+                            .collect();
+                        (
+                            StatusCode::CREATED,
+                            Json(serde_json::json!({ "media_objects": objects })),
+                        )
+                            .into_response()
+                    },
+                ),
+            )
+            .route(
+                "/upload/{obj}",
                 put(|State(s): State<Store>| async move {
+                    let now = s.putting.fetch_add(1, Ordering::SeqCst) + 1;
+                    s.max_putting.fetch_max(now, Ordering::SeqCst);
                     s.uploads.fetch_add(1, Ordering::SeqCst);
-                    tokio::time::sleep(s.upload_delay).await;
+                    tokio::time::sleep(s.upload_delay + s.latency).await;
+                    s.putting.fetch_sub(1, Ordering::SeqCst);
                     StatusCode::OK
                 }),
             )
             .route(
                 "/flows/{id}/segments",
-                get(|| async { Json(serde_json::json!([])) }).post(
+                get(|State(s): State<Store>| async move {
+                    s.checks.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(s.latency).await;
+                    Json(serde_json::json!([]))
+                })
+                .post(
                     |State(s): State<Store>,
                      P(id): P<String>,
                      Json(body): Json<serde_json::Value>| async move {
-                        let tr = body["timerange"].as_str().unwrap_or_default().to_string();
-                        s.registered.lock().unwrap().push((id, tr));
+                        tokio::time::sleep(s.latency).await;
+                        s.registrations.fetch_add(1, Ordering::SeqCst);
+                        let segs = match body {
+                            serde_json::Value::Array(a) => a,
+                            one => vec![one],
+                        };
+                        for seg in segs {
+                            let tr = seg["timerange"].as_str().unwrap_or_default().to_string();
+                            s.registered.lock().unwrap().push((id.clone(), tr));
+                            s.objects
+                                .lock()
+                                .unwrap()
+                                .push(seg["object_id"].as_str().unwrap_or_default().to_string());
+                        }
                         StatusCode::CREATED
                     },
                 ),
@@ -1138,14 +1419,33 @@ mod tests {
         seg
     }
 
+    /// A drainer with one segment in flight at a time, as before concurrent
+    /// drain uploads.
     fn drainer(p: &'static Parking, live: &'static LiveBusy) -> Drainer {
-        Drainer::new(
+        drainer_n(p, live, 1)
+    }
+
+    fn drainer_n(p: &'static Parking, live: &'static LiveBusy, concurrency: usize) -> Drainer {
+        let mut d = Drainer::new(
             p,
             live,
             leak(Notify::new()),
             Arc::new(SatProvider::new(None, None).unwrap()),
             EventBroadcaster::default(),
-        )
+        );
+        d.concurrency = concurrency;
+        d
+    }
+
+    impl Drainer {
+        /// Start uploads, and wait for every job in flight to end.
+        async fn step(&mut self) -> Step {
+            let step = self.fill().await;
+            while let Some(done) = self.jobs.join_next_with_id().await {
+                self.finish(done);
+            }
+            step
+        }
     }
 
     fn start_s(timerange: &str) -> u64 {
@@ -1403,6 +1703,306 @@ mod tests {
             .map(|(_, tr)| start_s(tr))
             .collect();
         assert_eq!(starts, vec![10, 13, 12]);
+    }
+
+    /// Wait for the drainer `d` to have no job in flight.
+    async fn settle(d: &mut Drainer) {
+        while let Some(done) = d.jobs.join_next_with_id().await {
+            d.finish(done);
+        }
+    }
+
+    /// Never more segments in flight than allowed, across flows, and every
+    /// segment goes up once.
+    #[tokio::test]
+    async fn tams_drain_concurrency_limit_is_respected() {
+        let store = Store {
+            upload_delay: Duration::from_millis(100),
+            ..Default::default()
+        };
+        let gw = start_store(store.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        for f in ["fa", "fb", "fc"] {
+            manifest(&root, &gw, f, AuthRef::None);
+            for s in 10..20 {
+                park(p, &root, &gw, f, s);
+            }
+        }
+        let mut d = drainer_n(p, leak(LiveBusy::new()), 4);
+        while !p.dirs().is_empty() {
+            assert!(d.in_flight() <= 4);
+            match d.fill().await {
+                Step::Full | Step::Idle(_) | Step::LiveBusy => {
+                    if let Some(done) = d.jobs.join_next_with_id().await {
+                        d.finish(done);
+                    }
+                }
+                Step::Tried => assert!(d.in_flight() <= 4),
+            }
+        }
+        settle(&mut d).await;
+        let max = store.max_putting.load(Ordering::SeqCst);
+        assert!((2..=4).contains(&max), "{} PUTs at once", max);
+        let mut registered = store.registered.lock().unwrap().clone();
+        assert_eq!(registered.len(), 30);
+        registered.sort();
+        registered.dedup();
+        assert_eq!(registered.len(), 30, "a segment went up twice");
+    }
+
+    /// Two drainers over the same segments at once (as a drainer and a cap
+    /// would race): the claims let each segment go up once.
+    #[tokio::test]
+    async fn tams_drain_claims_prevent_double_upload_under_concurrency() {
+        let store = Store {
+            upload_delay: Duration::from_millis(30),
+            ..Default::default()
+        };
+        let gw = start_store(store.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        for f in ["fa", "fb"] {
+            manifest(&root, &gw, f, AuthRef::None);
+            for s in 10..25 {
+                park(p, &root, &gw, f, s);
+            }
+        }
+        let live = leak(LiveBusy::new());
+        let one = tokio::spawn(drainer_n(p, live, 8).run());
+        let two = tokio::spawn(drainer_n(p, live, 8).run());
+        let n = wait_registered(&store, 30, Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        one.abort();
+        two.abort();
+        assert_eq!(n, 30);
+        let mut registered = store.registered.lock().unwrap().clone();
+        assert_eq!(registered.len(), 30, "a segment went up twice");
+        registered.sort();
+        registered.dedup();
+        assert_eq!(registered.len(), 30);
+    }
+
+    /// The segments in flight are shared round-robin across flows, oldest
+    /// first within a flow, one job per flow.
+    #[tokio::test]
+    async fn tams_drain_concurrent_round_robin_across_flows() {
+        let store = Store::default();
+        let gw = start_store(store.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        for f in ["fa", "fb", "fc"] {
+            manifest(&root, &gw, f, AuthRef::None);
+            for s in [12, 10, 11, 13] {
+                park(p, &root, &gw, f, s);
+            }
+        }
+        let mut d = drainer_n(p, leak(LiveBusy::new()), 6);
+        assert_eq!(d.fill().await, Step::Tried);
+        let mut jobs: Vec<(PathBuf, usize)> = d.busy.values().cloned().collect();
+        jobs.sort();
+        let want: Vec<(PathBuf, usize)> = ["fa", "fb", "fc"]
+            .iter()
+            .map(|f| (root.join(f), 2))
+            .collect();
+        assert_eq!(jobs, want);
+        // A flow with a job in flight gets no second one.
+        assert_eq!(d.fill().await, Step::Full);
+        settle(&mut d).await;
+        let mut by_flow: HashMap<String, Vec<u64>> = HashMap::new();
+        for (f, tr) in store.registered.lock().unwrap().iter() {
+            by_flow.entry(f.clone()).or_default().push(start_s(tr));
+        }
+        for f in ["fa", "fb", "fc"] {
+            assert_eq!(by_flow[f], vec![10, 11], "flow {}", f);
+        }
+    }
+
+    /// Live falling behind stops new drain uploads; those in flight finish.
+    #[tokio::test]
+    async fn tams_drain_live_behind_stops_new_jobs() {
+        let store = Store {
+            upload_delay: Duration::from_millis(300),
+            ..Default::default()
+        };
+        let gw = start_store(store.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        manifest(&root, &gw, "fa", AuthRef::None);
+        park(p, &root, &gw, "fa", 10);
+        park(p, &root, &gw, "fa", 11);
+        let live: &'static LiveBusy = leak(LiveBusy::new());
+        let policy = LivePolicy {
+            behind_queued: 2,
+            max_wait: Duration::from_millis(10),
+        };
+        let mut d = drainer_n(p, live, 8);
+        d.policy = policy;
+        assert_eq!(d.fill().await, Step::Tried);
+        assert_eq!(d.in_flight(), 2);
+        // Live falls behind while they are in flight; a new flow's segment
+        // waits.
+        let _behind = live_queues(live, 1, 2).await;
+        manifest(&root, &gw, "fb", AuthRef::None);
+        let waiting = park(p, &root, &gw, "fb", 20);
+        assert_eq!(d.fill().await, Step::LiveBusy);
+        settle(&mut d).await;
+        assert_eq!(store.registered.lock().unwrap().len(), 2);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(d.fill().await, Step::LiveBusy);
+        assert!(d.jobs.is_empty() && waiting.exists());
+    }
+
+    /// A gateway that fails backs off alone: another gateway's segments go up
+    /// meanwhile.
+    #[tokio::test]
+    async fn tams_drain_failing_gateway_does_not_block_another() {
+        let bad = Store::default();
+        bad.fail.store(usize::MAX, Ordering::SeqCst);
+        let bad_gw = start_store(bad.clone()).await;
+        let good = Store::default();
+        let good_gw = start_store(good.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        let m = manifest(&root, &bad_gw, "fa", AuthRef::None);
+        manifest(&root, &good_gw, "fb", AuthRef::None);
+        for s in 10..14 {
+            park(p, &root, &bad_gw, "fa", s);
+            park(p, &root, &good_gw, "fb", s);
+        }
+        let mut d = drainer_n(p, leak(LiveBusy::new()), 8);
+        assert_eq!(d.step().await, Step::Tried);
+        assert_eq!(good.registered.lock().unwrap().len(), 4);
+        assert!(bad.registered.lock().unwrap().is_empty());
+        // One failure per job, not per segment.
+        assert_eq!(d.gateways[&m.gateway].failures, 1);
+        assert_eq!(d.states[&root.join("fa")], DrainState::GatewayFailing);
+        // The bad gateway backs off: nothing more is tried there.
+        let tried = bad.fail.load(Ordering::SeqCst);
+        assert!(matches!(d.step().await, Step::Idle(w) if w > Duration::ZERO));
+        assert_eq!(bad.fail.load(Ordering::SeqCst), tried);
+    }
+
+    /// A job of several segments allocates their objects in one request, hands
+    /// each segment its own, and registers them in one request, in time order.
+    /// Segments whose history is known are not looked up first.
+    #[tokio::test]
+    async fn tams_drain_batch_allocates_and_registers_together() {
+        let store = Store::default();
+        let gw = start_store(store.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        manifest(&root, &gw, "fa", AuthRef::None);
+        for s in [15, 11, 13, 10, 12, 14] {
+            park(p, &root, &gw, "fa", s);
+        }
+        let mut d = drainer_n(p, leak(LiveBusy::new()), 8);
+        assert_eq!(d.step().await, Step::Tried);
+        assert_eq!(store.allocations.load(Ordering::SeqCst), 1);
+        assert_eq!(store.allocated.load(Ordering::SeqCst), 6);
+        assert_eq!(store.registrations.load(Ordering::SeqCst), 1);
+        assert_eq!(store.uploads.load(Ordering::SeqCst), 6);
+        // Parked by a test, not by this process's uploader: asked once.
+        assert_eq!(store.checks.load(Ordering::SeqCst), 1);
+        let starts: Vec<u64> = store
+            .registered
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, tr)| start_s(tr))
+            .collect();
+        assert_eq!(starts, vec![10, 11, 12, 13, 14, 15]);
+        let mut objects = store.objects.lock().unwrap().clone();
+        objects.sort();
+        objects.dedup();
+        assert_eq!(objects.len(), 6, "two segments got the same object");
+        assert!(p.dirs().is_empty());
+
+        // Known history: no lookup.
+        for s in 20..23 {
+            let seg = park(p, &root, &gw, "fa", s);
+            crate::tams::uploader::mark_history_known(&seg);
+        }
+        assert_eq!(d.step().await, Step::Tried);
+        assert_eq!(store.checks.load(Ordering::SeqCst), 1);
+        assert_eq!(store.registered.lock().unwrap().len(), 9);
+    }
+
+    /// A single parked segment whose history this process knows is uploaded
+    /// without asking the store first: the round trip that made each drain
+    /// upload far slower than a live one.
+    #[tokio::test]
+    async fn tams_drain_skips_the_lookup_for_a_known_segment() {
+        let store = Store::default();
+        let gw = start_store(store.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        manifest(&root, &gw, "fa", AuthRef::None);
+        let unknown = park(p, &root, &gw, "fa", 10);
+        let known = park(p, &root, &gw, "fa", 11);
+        crate::tams::uploader::mark_history_known(&known);
+        let mut d = drainer(p, leak(LiveBusy::new()));
+        assert_eq!(d.step().await, Step::Tried);
+        assert!(!unknown.exists());
+        assert_eq!(store.checks.load(Ordering::SeqCst), 1);
+        assert_eq!(d.step().await, Step::Tried);
+        assert!(!known.exists());
+        assert_eq!(store.checks.load(Ordering::SeqCst), 1);
+    }
+
+    /// Drain time of 200 parked segments (4 flows) with 200 ms per request, one
+    /// at a time (as before) and concurrent. Slow; run by hand:
+    /// `cargo test -p strom --lib tams_drain_measure -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn tams_drain_measure_latency_bound_drain() {
+        async fn run(concurrency: usize, known: bool) -> Duration {
+            let store = Store {
+                latency: Duration::from_millis(200),
+                ..Default::default()
+            };
+            let gw = start_store(store.clone()).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().to_path_buf();
+            let p = parking(&root, u64::MAX);
+            for f in ["fa", "fb", "fc", "fd"] {
+                manifest(&root, &gw, f, AuthRef::None);
+                for s in 0..50 {
+                    let seg = park(p, &root, &gw, f, 100 + s);
+                    if known {
+                        crate::tams::uploader::mark_history_known(&seg);
+                    }
+                }
+            }
+            let started = Instant::now();
+            let task = tokio::spawn(drainer_n(p, leak(LiveBusy::new()), concurrency).run());
+            let n = wait_registered(&store, 200, Duration::from_secs(600)).await;
+            let took = started.elapsed();
+            task.abort();
+            assert_eq!(n, 200);
+            eprintln!(
+                "concurrency {}, known history {}: 200 segments in {:.1} s \
+                 ({} storage, {} listing, {} register requests)",
+                concurrency,
+                known,
+                took.as_secs_f64(),
+                store.allocations.load(Ordering::SeqCst),
+                store.checks.load(Ordering::SeqCst),
+                store.registrations.load(Ordering::SeqCst)
+            );
+            took
+        }
+        run(1, false).await;
+        run(1, true).await;
+        run(DRAIN_CONCURRENCY, false).await;
+        run(DRAIN_CONCURRENCY, true).await;
     }
 
     /// Without credentials, segments wait and nothing is sent; they are found
