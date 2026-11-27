@@ -3919,6 +3919,118 @@
         }
       }
     },
+    "/api/flows/{id}/source-offsets": {
+      "get": {
+        "tags": [
+          "replay"
+        ],
+        "summary": "The flow's time offset per source (its `source_offsets_ms`): every\nreplay player that shows a listed source, in any group and after a\nsource switch, uses the source's offset instead of its own `offset_ms`.",
+        "operationId": "get_source_offsets",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The flow's source offsets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplaySourceOffsets"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Flow not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "replay"
+        ],
+        "summary": "Set or remove (`null`) the offsets of the named sources; the others keep\ntheirs. Saved with the flow, and a running flow's players move at once.",
+        "operationId": "patch_source_offsets",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplaySourceOffsetsPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The flow's source offsets, changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplaySourceOffsets"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid: an empty source or an offset beyond 24 h",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Flow not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The flow could not be saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/flows/{id}/srt-stats": {
       "get": {
         "tags": [
@@ -8338,6 +8450,17 @@
               }
             ]
           },
+          "source_offsets_ms": {
+            "type": "object",
+            "description": "Time offset per source, ms: a source's media sits this much later on\na replay group's time axis, in every player that shows it (any group,\nbefore and after a source switch). The key is the source as a player\nshows it (`source`, the URI without credentials) or its own id\n(`source_id`, e.g. a TAMS flow id). A player's own `offset_ms` applies\nonly to a source not listed here.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "started_at": {
             "type": [
               "string",
@@ -10531,7 +10654,7 @@
           "offset_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Trim: the angle's media is moved this far on the group's axis."
+            "description": "Trim: the angle's media is moved this far on the group's axis. The\noffset of the source it shows (the flow's `source_offsets_ms`), else\nthe player's own `offset_ms`."
           },
           "pending_source": {
             "type": [
@@ -11837,6 +11960,49 @@
           }
         ],
         "description": "A command as sent: the command and an optional `client_ref`, echoed in\nthe response and in the events the command causes."
+      },
+      "ReplaySourceOffsets": {
+        "type": "object",
+        "description": "A flow's time offset per source, ms (`GET`/`PATCH\n/api/flows/{id}/source-offsets`): the flow property `source_offsets_ms`.",
+        "required": [
+          "offsets_ms"
+        ],
+        "properties": {
+          "offsets_ms": {
+            "type": "object",
+            "description": "Source (`source` or `source_id` as an angle shows it) to offset, ms.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ReplaySourceOffsetsPatch": {
+        "type": "object",
+        "description": "A change to a flow's source offsets: each key is set to its value, or\nremoved with `null`. Sources not named keep theirs.",
+        "required": [
+          "offsets_ms"
+        ],
+        "properties": {
+          "offsets_ms": {
+            "type": "object",
+            "description": "Source to offset, ms, or `null` to remove it.",
+            "additionalProperties": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
       },
       "ReplaySpan": {
         "type": "object",

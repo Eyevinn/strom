@@ -320,7 +320,7 @@ impl ReplayPlayer {
 
     /// A lane for `source`, not started, reading into stats of its own (so
     /// the group sees the shown source's extent, grid and index until it is
-    /// shown). The trim is the player's (one day, the source's own).
+    /// shown). The trim is the new source's (else the player's own).
     fn new_lane(
         &self,
         source: OpenedSource,
@@ -332,7 +332,11 @@ impl ReplayPlayer {
         let stats = Arc::new(PlayerStats::with_config(
             &self.block_id,
             PlayerConfig {
-                offset_ns: self.stats.offset_ns(),
+                source: ident.source.clone(),
+                source_id: ident.source_id.clone(),
+                store: ident.store.clone(),
+                offset_ns: self.stats.config.offset_ns,
+                flow_id: self.stats.config.flow_id,
                 ..Default::default()
             },
         ));
