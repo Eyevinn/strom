@@ -2,7 +2,25 @@
 
 use super::bridge::Decoder;
 use strom_types::block::*;
+use strom_types::mediaplayer::{
+    PlayerMode, DECODED_AHEAD_PROPERTY, DEFAULT_DECODED_AHEAD_S, GROUP_PROPERTY, MODE_PROPERTY,
+    OUTPUT_FRAMERATE_PROPERTY, READ_AHEAD_PROPERTY, SOURCE_PROPERTY,
+};
 use strom_types::{MediaType, PropertyValue};
+
+/// Show and apply a property only in these modes.
+fn in_modes(modes: &[PlayerMode]) -> Option<PropertyCondition> {
+    let values: Vec<&str> = modes.iter().map(|m| m.as_str()).collect();
+    Some(PropertyCondition::one_of_strings(MODE_PROPERTY, &values))
+}
+
+fn block_mapping(name: &str) -> PropertyMapping {
+    PropertyMapping {
+        element_id: "_block".to_string(),
+        property_name: name.to_string(),
+        transform: None,
+    }
+}
 
 /// Get metadata for Media Player blocks (for UI/API).
 pub fn get_blocks() -> Vec<BlockDefinition> {
@@ -14,9 +32,113 @@ pub fn media_player_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.media_player".to_string(),
         name: "Media Player".to_string(),
-        description: "Plays files and URLs (http(s) including HLS and DASH, rtsp, srt, udp, ...) from a playlist.".to_string(),
+        description: "Plays files and URLs (http(s) including HLS and DASH, rtsp, srt, udp, ...) from a playlist, feeds a stinger, or plays an indexed source on a timeline (replay).".to_string(),
         category: "Inputs".to_string(),
-        exposed_properties: vec![
+        exposed_properties: [
+            vec![
+            ExposedProperty {
+                name: MODE_PROPERTY.to_string(),
+                label: "Mode".to_string(),
+                description: "Playlist = files and URLs in order. Stinger clip source = feeds a Vision Mixer's stinger input: the playlist is the stinger library. The player decodes, parks the cued clip on its first frame and plays it once per take; looping, sync and playout delay are overridden. Wire video_out to the mixer's stinger input; audio_out carries the clip's sound. Timeline (replay) = an indexed source on a timeline shared by its group."
+                    .to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: PlayerMode::Playlist.as_str().to_string(),
+                            label: Some("Playlist".to_string()),
+                            visible_when: None,
+                        },
+                        EnumValue {
+                            value: PlayerMode::Stinger.as_str().to_string(),
+                            label: Some("Stinger clip source".to_string()),
+                            visible_when: None,
+                        },
+                        EnumValue {
+                            value: PlayerMode::Timeline.as_str().to_string(),
+                            label: Some("Timeline (replay)".to_string()),
+                            visible_when: None,
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String(
+                    PlayerMode::Playlist.as_str().to_string(),
+                )),
+                mapping: block_mapping(MODE_PROPERTY),
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
+            ExposedProperty {
+                name: SOURCE_PROPERTY.to_string(),
+                label: "Source".to_string(),
+                description: "Indexed source: a TAMS flow as tams+https://<gateway>/flows/<flow_id> (or tams+http://)."
+                    .to_string(),
+                property_type: PropertyType::String,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: block_mapping(SOURCE_PROPERTY),
+                live: false,
+                persist: None,
+                visible_when: in_modes(&[PlayerMode::Timeline]),
+            },
+            ExposedProperty {
+                name: GROUP_PROPERTY.to_string(),
+                label: "Group".to_string(),
+                description: "Players with the same group share one timeline: one playhead, speed and range. Empty = a group of its own."
+                    .to_string(),
+                property_type: PropertyType::String,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: block_mapping(GROUP_PROPERTY),
+                live: false,
+                persist: None,
+                visible_when: in_modes(&[PlayerMode::Timeline]),
+            },
+            ExposedProperty {
+                name: OUTPUT_FRAMERATE_PROPERTY.to_string(),
+                label: "Output Framerate".to_string(),
+                description: "Frame rate of the output. Empty = the source's own rate. Set it to the rate of what follows (e.g. the vision mixer) for slow motion from high-frame-rate sources: a 100p source at 50 % on a 50p output shows every source frame."
+                    .to_string(),
+                property_type: PropertyType::Enum {
+                    values: common_video_framerate_enum_values(true),
+                },
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: block_mapping(OUTPUT_FRAMERATE_PROPERTY),
+                live: false,
+                persist: None,
+                visible_when: in_modes(&[PlayerMode::Timeline]),
+            },
+            ExposedProperty {
+                name: READ_AHEAD_PROPERTY.to_string(),
+                label: "Read-ahead (s)".to_string(),
+                description: "Seconds of coded media fetched ahead of the playhead, in memory. \
+                              Playlist and Stinger: http(s)/HLS/DASH sources, 0 = GStreamer default. \
+                              Timeline: half as much is kept behind, minimum 2. Max 120."
+                    .to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(
+                    super::bridge::NetworkBuffer::DEFAULT_READ_AHEAD_S,
+                )),
+                mapping: block_mapping(READ_AHEAD_PROPERTY),
+                live: false,
+                persist: None,
+                // Every mode reads it: a stinger player's clips can be http(s).
+                visible_when: None,
+            },
+            ExposedProperty {
+                name: DECODED_AHEAD_PROPERTY.to_string(),
+                label: "Decoded Ahead (s)".to_string(),
+                description: "Seconds of decoded frames kept ahead of the playhead, in the direction it moves. Minimum 1."
+                    .to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(DEFAULT_DECODED_AHEAD_S)),
+                mapping: block_mapping(DECODED_AHEAD_PROPERTY),
+                live: false,
+                persist: None,
+                visible_when: in_modes(&[PlayerMode::Timeline]),
+            },
+            ],
+            // TAMS sources authenticate as TAMS Output does.
+            crate::tams::auth::auth_properties(in_modes(&[PlayerMode::Timeline])),
+            vec![
             ExposedProperty {
                 name: "decode".to_string(),
                 label: "Decode".to_string(),
@@ -31,7 +153,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
-                visible_when: None,
+                visible_when: in_modes(&[PlayerMode::Playlist]),
             },
             ExposedProperty {
                 name: "decoder".to_string(),
@@ -63,7 +185,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
-                visible_when: None,
+                visible_when: in_modes(&[PlayerMode::Playlist, PlayerMode::Stinger]),
             },
             ExposedProperty {
                 name: "sync".to_string(),
@@ -79,7 +201,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
-                visible_when: None,
+                visible_when: in_modes(&[PlayerMode::Playlist]),
             },
             ExposedProperty {
                 name: "playout_delay_ms".to_string(),
@@ -99,43 +221,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
-                visible_when: None,
-            },
-            ExposedProperty {
-                name: "read_ahead_s".to_string(),
-                label: "Read-ahead (s)".to_string(),
-                description: "Seconds of http(s)/HLS/DASH media fetched ahead of playback, \
-                              in memory. Raise for high-bitrate files on an uneven network. \
-                              0 = GStreamer default, max 120."
-                    .to_string(),
-                property_type: PropertyType::UInt,
-                default_value: Some(PropertyValue::UInt(
-                    super::bridge::NetworkBuffer::DEFAULT_READ_AHEAD_S,
-                )),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "read_ahead_s".to_string(),
-                    transform: None,
-                },
-                live: false,
-                persist: None,
-                visible_when: None,
-            },
-            ExposedProperty {
-                name: "loop_playlist".to_string(),
-                label: "Loop Playlist".to_string(),
-                description: "Loop back to the first file when reaching the end of the playlist"
-                    .to_string(),
-                property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(true)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "loop_playlist".to_string(),
-                    transform: None,
-                },
-                live: false,
-                persist: None,
-                visible_when: None,
+                visible_when: in_modes(&[PlayerMode::Playlist]),
             },
             ExposedProperty {
                 name: "num_video_tracks".to_string(),
@@ -153,7 +239,7 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
-                visible_when: None,
+                visible_when: in_modes(&[PlayerMode::Playlist, PlayerMode::Stinger]),
             },
             ExposedProperty {
                 name: "num_audio_tracks".to_string(),
@@ -172,7 +258,23 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
-                visible_when: None,
+                visible_when: in_modes(&[PlayerMode::Playlist, PlayerMode::Stinger]),
+            },
+            ExposedProperty {
+                name: "loop_playlist".to_string(),
+                label: "Loop Playlist".to_string(),
+                description: "Loop back to the first file when reaching the end of the playlist"
+                    .to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "loop_playlist".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: in_modes(&[PlayerMode::Playlist]),
             },
             ExposedProperty {
                 name: "position_update_interval".to_string(),
@@ -188,25 +290,11 @@ pub fn media_player_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
-                visible_when: None,
+                visible_when: in_modes(&[PlayerMode::Playlist, PlayerMode::Stinger]),
             },
-            ExposedProperty {
-                name: strom_types::stinger::STINGER_MODE_PROPERTY.to_string(),
-                label: "Stinger Clip Source".to_string(),
-                description: "Feed a Vision Mixer's stinger input: the playlist is the stinger library. The player decodes, parks the cued clip on its first frame and plays it once per take; looping, sync and playout delay are overridden. Wire video_out to the mixer's stinger input; audio_out carries the clip's sound."
-                    .to_string(),
-                property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(false)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: strom_types::stinger::STINGER_MODE_PROPERTY.to_string(),
-                    transform: None,
-                },
-                live: false,
-                persist: None,
-                visible_when: None,
-            },
-        ],
+            ],
+        ]
+        .concat(),
         external_pads: ExternalPads {
             inputs: vec![],
             outputs: vec![
@@ -233,5 +321,108 @@ pub fn media_player_definition() -> BlockDefinition {
             height: Some(2.5),
             ..Default::default()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{BTreeSet, HashMap};
+    use strom_types::block::effective_properties;
+
+    /// The properties a block in `mode` is built with when every exposed
+    /// property is set: what `visible_properties` leaves of a saved flow.
+    fn applied_in(mode: PlayerMode) -> BTreeSet<String> {
+        let definition = media_player_definition();
+        let mut properties: HashMap<String, PropertyValue> = definition
+            .exposed_properties
+            .iter()
+            .filter_map(|p| Some((p.name.clone(), p.default_value.clone()?)))
+            .collect();
+        properties.insert(
+            MODE_PROPERTY.to_string(),
+            PropertyValue::String(mode.as_str().to_string()),
+        );
+        let (effective, _) = effective_properties(&definition.exposed_properties, &properties);
+        effective.into_keys().collect()
+    }
+
+    fn names(list: &[&str]) -> BTreeSet<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn playlist_mode_applies_the_playlist_properties() {
+        assert_eq!(
+            applied_in(PlayerMode::Playlist),
+            names(&[
+                "mode",
+                "read_ahead_s",
+                "decode",
+                "decoder",
+                "sync",
+                "playout_delay_ms",
+                "num_video_tracks",
+                "num_audio_tracks",
+                "loop_playlist",
+                "position_update_interval",
+            ])
+        );
+    }
+
+    #[test]
+    fn stinger_mode_applies_what_a_stinger_player_reads() {
+        // Decode, sync, playout delay and looping are overridden in stinger
+        // mode. Read-ahead is honoured, as it was before `mode`.
+        assert_eq!(
+            applied_in(PlayerMode::Stinger),
+            names(&[
+                "mode",
+                "read_ahead_s",
+                "decoder",
+                "num_video_tracks",
+                "num_audio_tracks",
+                "position_update_interval",
+            ])
+        );
+    }
+
+    #[test]
+    fn timeline_mode_applies_the_timeline_properties() {
+        assert_eq!(
+            applied_in(PlayerMode::Timeline),
+            names(&[
+                "mode",
+                "source",
+                "group",
+                "output_framerate",
+                "read_ahead_s",
+                "decoded_ahead_s",
+                "auth_mode",
+                "api_token",
+                "osc_service_id",
+            ])
+        );
+    }
+
+    #[test]
+    fn a_saved_stinger_read_ahead_is_kept() {
+        let definition = media_player_definition();
+        let properties: HashMap<String, PropertyValue> = [
+            (
+                MODE_PROPERTY.to_string(),
+                PropertyValue::String("stinger".to_string()),
+            ),
+            (READ_AHEAD_PROPERTY.to_string(), PropertyValue::UInt(0)),
+        ]
+        .into();
+        let (effective, ignored) =
+            effective_properties(&definition.exposed_properties, &properties);
+        assert!(ignored.is_empty(), "{:?}", ignored);
+        let buffer = super::super::bridge::NetworkBuffer::from_properties(&effective);
+        assert_eq!(
+            buffer.read_ahead_s, 0,
+            "the saved 0 must win over the default"
+        );
     }
 }

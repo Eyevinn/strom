@@ -659,8 +659,10 @@ impl PropertyInspector {
                 crate::app::set_local_storage("open_compositor_editor", &block.id);
             }
 
-            // Edit Playlist button for media player blocks
+            // Edit Playlist button for media player blocks (a timeline player
+            // has a source, not a playlist)
             if definition.id == "builtin.media_player"
+                && !is_timeline_player(block)
                 && ui.button(format!("{} Playlist", egui_phosphor::regular::PLAYLIST)).clicked()
             {
                 crate::app::set_local_storage("open_playlist_editor", &block.id);
@@ -1166,8 +1168,9 @@ impl PropertyInspector {
                         }
                     }
 
-                    // Show media player controls for media player blocks
-                    if definition.id == "builtin.media_player" {
+                    // Show media player controls for media player blocks. They
+                    // are playlist controls; a timeline player has none here.
+                    if definition.id == "builtin.media_player" && !is_timeline_player(block) {
                         ui.separator();
                         if let Some(flow_id) = flow_id {
                             if let Some(player_data) =
@@ -3208,6 +3211,13 @@ fn devices_of(
     list.iter().filter(|d| d.category == category).collect()
 }
 
+/// Whether a Media Player block is in timeline mode, where the playlist
+/// editor and transport controls do not apply.
+pub(crate) fn is_timeline_player(block: &BlockInstance) -> bool {
+    strom_types::mediaplayer::PlayerMode::from_properties(&block.properties)
+        == Ok(strom_types::mediaplayer::PlayerMode::Timeline)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3328,5 +3338,69 @@ mod tests {
             drain_live_updates(&mut map, vec![update("x", false)]).len(),
             1
         );
+    }
+
+    fn media_player(props: &[(&str, PropertyValue)]) -> BlockInstance {
+        BlockInstance {
+            id: "mp".to_string(),
+            block_definition_id: "builtin.media_player".to_string(),
+            name: None,
+            properties: props
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+            position: strom_types::block::Position { x: 0.0, y: 0.0 },
+            runtime_data: None,
+            computed_external_pads: None,
+        }
+    }
+
+    fn string(s: &str) -> PropertyValue {
+        PropertyValue::String(s.to_string())
+    }
+
+    #[test]
+    fn only_a_timeline_player_is_a_timeline_player() {
+        assert!(is_timeline_player(&media_player(&[(
+            "mode",
+            string("timeline")
+        )])));
+        assert!(!is_timeline_player(&media_player(&[])));
+        assert!(!is_timeline_player(&media_player(&[(
+            "mode",
+            string("playlist")
+        )])));
+        assert!(!is_timeline_player(&media_player(&[(
+            "mode",
+            string("stinger")
+        )])));
+        // An unknown mode fails the build; the playlist controls stay.
+        assert!(!is_timeline_player(&media_player(&[(
+            "mode",
+            string("scrub")
+        )])));
+    }
+
+    #[test]
+    fn a_legacy_replay_player_is_a_timeline_player() {
+        // Not yet migrated (the flow has not been saved since): a non-empty
+        // replay_group selected the timeline mode.
+        assert!(is_timeline_player(&media_player(&[(
+            "replay_group",
+            string("cam")
+        )])));
+        assert!(!is_timeline_player(&media_player(&[(
+            "replay_group",
+            string("")
+        )])));
+        assert!(!is_timeline_player(&media_player(&[(
+            "stinger_mode",
+            PropertyValue::Bool(true)
+        )])));
+        // `mode` wins over the legacy properties.
+        assert!(!is_timeline_player(&media_player(&[
+            ("mode", string("playlist")),
+            ("replay_group", string("cam")),
+        ])));
     }
 }

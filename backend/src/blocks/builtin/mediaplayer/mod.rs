@@ -4,9 +4,15 @@
 //! and paces buffers through `clocksync`. An appsink→appsrc bridge feeds the main
 //! pipeline, isolating downstream from seeks, file switches, and EOS.
 //!
-//! Supports two modes:
-//! - **Decode** (`decode=true`): `uridecodebin` → raw video/audio
-//! - **Passthrough** (`decode=false`): `urisourcebin` → encoded elementary streams
+//! The `mode` property ([`strom_types::mediaplayer::PlayerMode`]) selects what
+//! the block does:
+//! - **playlist** (default): files and URLs in order. **Decode**
+//!   (`decode=true`): `uridecodebin` → raw video/audio; **passthrough**
+//!   (`decode=false`): `urisourcebin` → encoded elementary streams.
+//! - **stinger**: the playlist engine parked on a clip's first frame, played
+//!   once per take of a vision mixer's stinger.
+//! - **timeline**: an indexed source on a timeline shared by its group
+//!   (`replay`), a separate engine.
 
 mod bridge;
 mod builder;
@@ -22,7 +28,29 @@ pub use definition::get_blocks;
 pub use state::{MediaPlayerKey, MediaPlayerState, MEDIA_PLAYER_REGISTRY};
 
 use std::path::Path;
-use tracing::debug;
+use strom_types::mediaplayer::{migrate_legacy_properties, MEDIA_PLAYER_BLOCK_ID};
+use strom_types::Flow;
+use tracing::{debug, info};
+
+/// Rewrite the legacy properties of every Media Player in `flow` to the
+/// current names (see [`migrate_legacy_properties`]), logging each block that
+/// changed.
+pub fn migrate_flow(flow: &mut Flow) {
+    for block in &mut flow.blocks {
+        if block.block_definition_id != MEDIA_PLAYER_BLOCK_ID {
+            continue;
+        }
+        let changes = migrate_legacy_properties(&mut block.properties);
+        if !changes.is_empty() {
+            info!(
+                "Flow '{}', Media Player {}: migrated legacy properties: {}",
+                flow.name,
+                block.id,
+                changes.join("; ")
+            );
+        }
+    }
+}
 
 /// Normalize a file path to a proper URI.
 ///
@@ -399,5 +427,129 @@ mod tests {
 
         state.is_paused.store(true, Ordering::SeqCst);
         assert_eq!(state.state(), PlayerState::Paused);
+    }
+}
+
+/// A flow saved before `mode`: a stinger player (`stinger_mode`), a replay
+/// player (`replay_*`), a plain playlist player, and a block of another kind
+/// that happens to carry `stinger_mode`.
+#[cfg(test)]
+pub(crate) fn legacy_test_flow() -> Flow {
+    use std::collections::HashMap;
+    use strom_types::block::{BlockInstance, Position};
+    use strom_types::PropertyValue;
+
+    let block = |id: &str, definition: &str, props: Vec<(&str, PropertyValue)>| BlockInstance {
+        id: id.to_string(),
+        block_definition_id: definition.to_string(),
+        name: None,
+        properties: props
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect::<HashMap<_, _>>(),
+        position: Position { x: 0.0, y: 0.0 },
+        runtime_data: None,
+        computed_external_pads: None,
+    };
+    let mut flow = Flow::new("legacy media players");
+    flow.blocks = vec![
+        block(
+            "stinger",
+            MEDIA_PLAYER_BLOCK_ID,
+            vec![("stinger_mode", PropertyValue::Bool(true))],
+        ),
+        block(
+            "replay",
+            MEDIA_PLAYER_BLOCK_ID,
+            vec![
+                ("replay_group", PropertyValue::String("cam".to_string())),
+                (
+                    "replay_source",
+                    PropertyValue::String("tams+https://gw/flows/f".to_string()),
+                ),
+            ],
+        ),
+        block(
+            "playlist",
+            MEDIA_PLAYER_BLOCK_ID,
+            vec![("loop_playlist", PropertyValue::Bool(false))],
+        ),
+        block(
+            "other",
+            "builtin.videotestsrc",
+            vec![("stinger_mode", PropertyValue::Bool(true))],
+        ),
+    ];
+    flow
+}
+
+/// Asserts that `flow` is [`legacy_test_flow`] migrated.
+#[cfg(test)]
+pub(crate) fn assert_legacy_test_flow_migrated(flow: &Flow) {
+    use strom_types::PropertyValue;
+
+    let props = |id: &str| {
+        &flow
+            .blocks
+            .iter()
+            .find(|b| b.id == id)
+            .unwrap_or_else(|| panic!("block {} missing", id))
+            .properties
+    };
+    let string = |props: &std::collections::HashMap<String, PropertyValue>, key: &str| match props
+        .get(key)
+    {
+        Some(PropertyValue::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+
+    let stinger = props("stinger");
+    assert_eq!(string(stinger, "mode").as_deref(), Some("stinger"));
+    assert!(!stinger.contains_key("stinger_mode"), "{:?}", stinger);
+
+    let replay = props("replay");
+    assert_eq!(string(replay, "mode").as_deref(), Some("timeline"));
+    assert_eq!(string(replay, "group").as_deref(), Some("cam"));
+    assert_eq!(
+        string(replay, "source").as_deref(),
+        Some("tams+https://gw/flows/f")
+    );
+    assert!(
+        !replay.keys().any(|k| k.starts_with("replay_")),
+        "{:?}",
+        replay
+    );
+
+    // Nothing to migrate: untouched, and no `mode` written.
+    let playlist = props("playlist");
+    assert_eq!(playlist.len(), 1, "{:?}", playlist);
+    // Only Media Players are migrated.
+    assert!(matches!(
+        props("other").get("stinger_mode"),
+        Some(PropertyValue::Bool(true))
+    ));
+}
+
+#[cfg(test)]
+mod migrate_flow_tests {
+    use super::*;
+
+    #[test]
+    fn migrate_flow_rewrites_the_legacy_properties_of_media_players() {
+        let mut flow = legacy_test_flow();
+        migrate_flow(&mut flow);
+        assert_legacy_test_flow_migrated(&flow);
+    }
+
+    #[test]
+    fn migrate_flow_is_idempotent() {
+        let mut flow = legacy_test_flow();
+        migrate_flow(&mut flow);
+        let once = flow.clone();
+        migrate_flow(&mut flow);
+        assert_eq!(
+            serde_json::to_value(&flow).unwrap(),
+            serde_json::to_value(&once).unwrap()
+        );
     }
 }

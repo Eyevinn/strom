@@ -244,7 +244,7 @@ across the matte's movement for a mask). The panel marks such clips **CPU**.
 
 1. Turn on **Stinger Input** on the Vision Mixer block. It gets a
    `stinger_in` input.
-2. Add a **Media Player**, turn on **Stinger Clip Source**, and wire its
+2. Add a **Media Player**, set its **Mode** to **Stinger clip source**, and wire its
    `video_out` to `stinger_in`. Its playlist is the stinger library. Its
    `audio_out` carries the clip's sound, if you want it: wire it into your
    audio mix.

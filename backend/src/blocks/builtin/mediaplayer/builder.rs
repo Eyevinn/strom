@@ -18,8 +18,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use strom_types::block::{ExternalPad, ExternalPads};
 use strom_types::element::ElementPadRef;
+use strom_types::mediaplayer::{migrate_legacy_properties, PlayerMode};
 use strom_types::{FlowId, MediaType, PropertyValue, StromEvent};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// Media player block builder.
@@ -53,7 +54,12 @@ impl BlockBuilder for MediaPlayerBuilder {
         &self,
         properties: &HashMap<String, PropertyValue>,
     ) -> Option<ExternalPads> {
-        let (num_video, num_audio) = track_counts(properties);
+        // A timeline player has one video output and no audio (yet). An
+        // invalid mode fails the build; until then show the playlist pads.
+        let (num_video, num_audio) = match PlayerMode::from_properties(properties) {
+            Ok(PlayerMode::Timeline) => (1, 0),
+            _ => track_counts(properties),
+        };
         let mut outputs = Vec::new();
         for (count, media_type, kind, tag) in [
             (num_video, MediaType::Video, "video", "V"),
@@ -84,6 +90,25 @@ impl BlockBuilder for MediaPlayerBuilder {
     ) -> Result<BlockBuildResult, BlockBuildError> {
         info!("Building Media Player block instance: {}", instance_id);
 
+        // Flows are migrated when they are loaded or saved; a property
+        // written by other means may still carry a legacy name.
+        let mut migrated = properties.clone();
+        let changes = migrate_legacy_properties(&mut migrated);
+        if !changes.is_empty() {
+            warn!(
+                "Media Player {}: legacy properties read as current ones: {}",
+                instance_id,
+                changes.join("; ")
+            );
+        }
+        let properties = &migrated;
+
+        let mode = PlayerMode::from_properties(properties)
+            .map_err(|e| BlockBuildError::InvalidProperty(format!("Media Player: {}", e)))?;
+        if mode == PlayerMode::Timeline {
+            return super::replay::build(instance_id, properties);
+        }
+
         let loop_playlist = properties
             .get("loop_playlist")
             .and_then(|v| match v {
@@ -95,10 +120,7 @@ impl BlockBuilder for MediaPlayerBuilder {
         // A stinger clip source feeds a vision mixer's stinger input: raw
         // frames, paced, one play per take. It overrides what would get in
         // the way of that.
-        let stinger_mode = matches!(
-            properties.get(strom_types::stinger::STINGER_MODE_PROPERTY),
-            Some(PropertyValue::Bool(true))
-        );
+        let stinger_mode = mode == PlayerMode::Stinger;
         let loop_playlist = loop_playlist && !stinger_mode;
 
         let decode = stinger_mode
@@ -139,7 +161,8 @@ impl BlockBuilder for MediaPlayerBuilder {
         let position_update_interval_ms = properties
             .get("position_update_interval")
             .and_then(|v| match v {
-                PropertyValue::Int(i) => Some(*i as u64),
+                PropertyValue::Int(i) => u64::try_from(*i).ok(),
+                PropertyValue::UInt(u) => Some(*u),
                 _ => None,
             })
             .unwrap_or(200);
@@ -1040,5 +1063,73 @@ mod tests {
             1,
             "a stale EOS advanced the playlist past the file jumped to"
         );
+    }
+
+    fn props_of(list: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
+        list.iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    fn mode(m: &str) -> (&'static str, PropertyValue) {
+        ("mode", PropertyValue::String(m.to_string()))
+    }
+
+    fn build_error(props: &HashMap<String, PropertyValue>) -> String {
+        let _ = gst::init();
+        match MediaPlayerBuilder.build(
+            "mp",
+            props,
+            &crate::blocks::BlockBuildContext::new(Vec::new(), "all".to_string()),
+        ) {
+            Ok(_) => panic!("build succeeded"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_timeline_player_has_one_video_output() {
+        let names = |props: &HashMap<String, PropertyValue>| -> Vec<String> {
+            MediaPlayerBuilder
+                .get_external_pads(props)
+                .unwrap()
+                .outputs
+                .into_iter()
+                .map(|p| p.name)
+                .collect()
+        };
+        // Track counts are playlist properties; a timeline player ignores them.
+        let timeline = props_of(&[
+            mode("timeline"),
+            ("num_audio_tracks", PropertyValue::UInt(2)),
+        ]);
+        assert_eq!(names(&timeline), ["video_out"]);
+        // So does a player that only the legacy properties put in timeline mode.
+        let legacy = props_of(&[("replay_group", PropertyValue::String("g".to_string()))]);
+        assert_eq!(names(&legacy), ["video_out"]);
+        // Stinger keeps the playlist pads.
+        assert_eq!(
+            names(&props_of(&[mode("stinger")])),
+            ["video_out", "audio_out"]
+        );
+    }
+
+    #[test]
+    fn a_timeline_player_is_built_by_the_timeline_engine() {
+        // Only `replay::build` asks for a source.
+        let err = build_error(&props_of(&[mode("timeline")]));
+        assert!(err.contains("timeline mode: source is required"), "{}", err);
+        // A flow written with the legacy names, not migrated on load.
+        let err = build_error(&props_of(&[(
+            "replay_group",
+            PropertyValue::String("g".to_string()),
+        )]));
+        assert!(err.contains("timeline mode: source is required"), "{}", err);
+    }
+
+    #[test]
+    fn an_unknown_mode_fails_the_build() {
+        let err = build_error(&props_of(&[mode("scrub")]));
+        assert!(err.contains("unknown mode 'scrub'"), "{}", err);
     }
 }

@@ -5,11 +5,13 @@ All notable changes to the Strom GStreamer Flow Engine project.
 ## [Unreleased]
 
 ### Added
+- Media Player: timeline mode (replay), the timeline engine (its control API follows). A player plays an indexed source (a TAMS flow, `tams+https://<gateway>/flows/<flow_id>`) on a timeline. Players with the same `group` form a replay group with one cursor and one speed; the group shares TAI time, and each player has its own frame grid (**Output Framerate**). TAMS sources authenticate with the same properties as TAMS Output: `auth_mode`, `api_token` and `osc_service_id`. In a growing source, segments registered late are found, the live poll runs off the fetch loop, a decoder that hangs is bounded, and video that is not H.264 fails with an error that names it. See [MEDIA_LIBRARY.md](MEDIA_LIBRARY.md)
 - Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture. Branches of one flow stamp equal running times alike, also after a clock jump. A capture time set upstream wins, converted to the block's timescale. With burn-in, GPU memory and any raw pixel format are adapted, and encoded video fails the flow with an error that says so. In a non-live flow the preroll frame is not stamped
 - TAMS Output: segments are cut on a TAI grid, and `segment_duration_ms` allows segments shorter than a second. The block asks upstream for a keyframe on each grid point, warns when a boundary still leaves the grid, and writes video `essence_parameters` on its flows
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000, at most 60000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
 
 ### Changed
+- Media Player: an explicit `mode` property (`playlist`, `stinger`, `timeline`) selects what the block does, and the properties panel shows only the properties of that mode. `stinger_mode=true` becomes `mode=stinger`. The Playlist button and transport controls are hidden for a timeline player
 - TAMS Output: one segment length property, `segment_duration_ms` (default 2000, at least 200), instead of `segment_duration_secs` and `segment_duration_ms`
 - Video Encoder: the keyframe-request floor applies only to requests for a keyframe now (a WebRTC viewer's PLI). Requests for a keyframe at a given running time (TAMS Output's grid, `splitmuxsink` in a segmenting recorder) always pass. A request for a keyframe now that comes within the floor is held back and sent when the floor runs out; a keyframe forced by a scheduled request also counts towards the floor. The GStreamer base-class property `min-force-key-unit-interval` delayed both kinds, which moved TAMS Output's segment boundaries off its grid
 - TAMS Output cuts segments itself instead of with `splitmuxsink`, and registers each segment as soon as the frame after it arrives instead of one GOP later
@@ -28,10 +30,12 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ### Upgrade notes
 - TAMS Output: parked segments over `STROM_TAMS_PARKED_MAX_MB` or `STROM_TAMS_PARKED_MAX_SEGMENTS` are deleted, oldest first, on the first sweep after an upgrade
+- Saved flows and flows sent through the API with `stinger_mode` are rewritten to `mode` when they are loaded or saved, with a log line per block. The stinger API now asks for "Mode set to Stinger clip source"
 - TAMS Output: saved flows and flows sent through the API with `segment_duration_secs` are rewritten to `segment_duration_ms` (seconds × 1000) when they are loaded or saved, with a log line per block. A non-zero `segment_duration_ms` set alongside it wins, as before
 - Video Encoder: scheduled keyframe requests are no longer held back by the 1 s floor. An encoder that feeds a recorder which asks for keyframes at given times (TAMS Output, a segmenting recorder) now makes every keyframe it is asked for, so such a flow can get more keyframes than before. WebRTC PLIs are limited as before
 
 ### Documentation
+- MEDIA_LIBRARY.md: the Media Player's modes, and timeline mode
 - BLOCK_GUIDELINES.md: a block that writes files through a muxer finishes the open file when its flow stops
 - UPSTREAM_NOTES.md: `GstSystemClock` TAI on macOS, `vtdec_hw` at EOS, `splitmuxsink` closing a fragment one GOP late, `appsrc` linking to `mp4mux`'s audio pad, `min-force-key-unit-interval` delaying scheduled requests, and the WHEP signaller's panic on a second ICE `complete`
 
