@@ -144,6 +144,8 @@ pub struct PlayerStats {
     pub fetched_segments: AtomicU64,
     pub fetches: AtomicU64,
     pub fetch_errors: AtomicU64,
+    /// Segments a fetch found deleted from the store (retention).
+    pub gone_segments: AtomicU64,
     pub last_fetch_ms: AtomicU64,
     pub cached_segments: AtomicU64,
     pub decodes: AtomicU64,
@@ -215,6 +217,7 @@ impl PlayerStats {
             fetched_segments: AtomicU64::new(0),
             fetches: AtomicU64::new(0),
             fetch_errors: AtomicU64::new(0),
+            gone_segments: AtomicU64::new(0),
             last_fetch_ms: AtomicU64::new(0),
             cached_segments: AtomicU64::new(0),
             decodes: AtomicU64::new(0),
@@ -292,6 +295,12 @@ impl PlayerStats {
         let s = self.start_tai.load(Ordering::Relaxed);
         let e = self.end_tai.load(Ordering::Relaxed);
         (s != UNKNOWN && e != UNKNOWN && e > s).then_some((s, e))
+    }
+
+    /// Where the buffer starts now on the group's axis: the first media the
+    /// store still has (it follows retention).
+    pub fn available_from(&self) -> Option<i64> {
+        self.extent().map(|(s, _)| s)
     }
 
     /// The extent on the group's axis.
