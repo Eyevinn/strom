@@ -124,44 +124,31 @@ fn prop_u64(props: &HashMap<String, PropertyValue>, key: &str, default: u64) -> 
     }
 }
 
-/// Rewrite the legacy `segment_duration_secs` to `segment_duration_ms`.
-///
-/// - Seconds without milliseconds (or with `segment_duration_ms` 0, which
-///   used to mean "use the seconds"): `secs × 1000` ms, at least 1 s as
-///   before.
-/// - Both, with milliseconds non-zero: milliseconds won, so they stay.
-/// - `segment_duration_ms` 0 without seconds: the default 2000 ms.
-///
-/// The seconds key is removed. Returns a description of the change, or
-/// `None` when there was nothing to migrate.
+/// Rewrite the released `segment_duration_secs` (at least 1) to
+/// `segment_duration_ms`: `secs × 1000` ms. When `segment_duration_ms` is set
+/// too (a client that knows both), it stays. The seconds key is removed.
+/// Returns a description of the change, or `None` when there was nothing to
+/// migrate.
 pub fn migrate_legacy_properties(
     properties: &mut HashMap<String, PropertyValue>,
 ) -> Option<String> {
-    let secs = properties.remove(LEGACY_SEGMENT_DURATION_SECS);
-    let ms_set = properties.contains_key(SEGMENT_DURATION_MS);
-    let ms = prop_u64(properties, SEGMENT_DURATION_MS, 0);
-    if ms > 0 {
-        return secs.map(|_| {
-            format!(
-                "dropped {} ({} = {} wins)",
-                LEGACY_SEGMENT_DURATION_SECS, SEGMENT_DURATION_MS, ms
-            )
-        });
+    let secs = properties.remove(LEGACY_SEGMENT_DURATION_SECS)?;
+    if properties.contains_key(SEGMENT_DURATION_MS) {
+        return Some(format!(
+            "dropped {} ({} is set)",
+            LEGACY_SEGMENT_DURATION_SECS, SEGMENT_DURATION_MS
+        ));
     }
     let new_ms = match &secs {
-        Some(PropertyValue::UInt(u)) => (*u).max(1).saturating_mul(1000),
-        Some(PropertyValue::Int(i)) => (*i).max(1).unsigned_abs().saturating_mul(1000),
-        _ if ms_set || secs.is_some() => DEFAULT_SEGMENT_MS,
-        _ => return None,
+        PropertyValue::UInt(u) => (*u).max(1).saturating_mul(1000),
+        PropertyValue::Int(i) => (*i).max(1).unsigned_abs().saturating_mul(1000),
+        _ => DEFAULT_SEGMENT_MS,
     };
     properties.insert(SEGMENT_DURATION_MS.to_string(), PropertyValue::UInt(new_ms));
-    Some(match secs {
-        Some(v) => format!(
-            "{} = {:?} -> {} = {}",
-            LEGACY_SEGMENT_DURATION_SECS, v, SEGMENT_DURATION_MS, new_ms
-        ),
-        None => format!("{} = 0 -> {}", SEGMENT_DURATION_MS, new_ms),
-    })
+    Some(format!(
+        "{} = {:?} -> {} = {}",
+        LEGACY_SEGMENT_DURATION_SECS, secs, SEGMENT_DURATION_MS, new_ms
+    ))
 }
 
 /// Migrate the legacy properties of every TAMS Output in `flow` (see
@@ -1087,9 +1074,10 @@ fn build_flow_chain(
                 }
                 Err(err) => {
                     error!(
-                        "TAMS {}: uploader queue full and segment {} could not be parked \
-                         ({}); dropping it",
+                        "TAMS {}: uploader {} and segment {} could not be parked ({}); \
+                         dropping it",
                         deliver_label,
+                        if full { "queue full" } else { "stopped" },
                         ready.path.display(),
                         err
                     );
@@ -1415,7 +1403,9 @@ fn tams_output_definition() -> BlockDefinition {
                 visible_when: None,
             },
             ],
-            // Shared with the Media Player's timeline mode.
+            // Shared by every block that talks to a TAMS gateway (see
+            // `crate::tams::auth`): the env vars and allow-list are documented
+            // there.
             crate::tams::auth::auth_properties(None),
             vec![
             simple_prop(
@@ -1456,7 +1446,7 @@ fn tams_output_definition() -> BlockDefinition {
             simple_prop(
                 SEGMENT_DURATION_MS,
                 "Segment Duration (ms)",
-                "Target duration of each TAMS segment in milliseconds (at least 200). Boundaries stay on the TAI grid (multiples of this length from the TAI epoch), and segments split on a keyframe (one is requested from upstream encoders at each split), so the GOP should divide the segment length. For replay, 500 ms segments with a GOP of 500 ms or a divisor of it.",
+                "Segment length in ms (min 200). Boundaries sit on a TAI grid of this length; use a GOP that divides it.",
                 PropertyType::Int,
                 PropertyValue::Int(DEFAULT_SEGMENT_MS as i64),
             ),
@@ -1670,26 +1660,18 @@ mod tests {
             migrated(&[("segment_duration_secs", PropertyValue::Int(3))]),
             (true, Some(3000))
         );
-        // Seconds with the old "unset" 0 ms: × 1000, at least 1 s as before.
+        // At least 1 s, as the seconds property was.
         assert_eq!(
-            migrated(&[
-                ("segment_duration_secs", PropertyValue::UInt(0)),
-                ("segment_duration_ms", PropertyValue::Int(0)),
-            ]),
+            migrated(&[("segment_duration_secs", PropertyValue::UInt(0))]),
             (true, Some(1000))
         );
-        // Both set: milliseconds win.
+        // Both set: milliseconds stay.
         assert_eq!(
             migrated(&[
                 ("segment_duration_secs", PropertyValue::Int(2)),
                 ("segment_duration_ms", PropertyValue::Int(500)),
             ]),
             (true, Some(500))
-        );
-        // 0 ms alone: the default.
-        assert_eq!(
-            migrated(&[("segment_duration_ms", PropertyValue::Int(0))]),
-            (true, Some(DEFAULT_SEGMENT_MS))
         );
         // Current flows are left alone.
         assert_eq!(
