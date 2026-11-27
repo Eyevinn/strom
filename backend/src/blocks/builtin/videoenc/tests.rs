@@ -721,6 +721,189 @@ fn test_block_encoder_preference() {
     }
 }
 
+#[test]
+fn min_keyframe_request_interval_defaults_to_one_second() {
+    assert_eq!(
+        parse_min_keyframe_request_interval_ms(&HashMap::new()),
+        1000
+    );
+
+    let with = |v: PropertyValue| {
+        let mut properties = HashMap::new();
+        properties.insert("min_keyframe_request_interval_ms".to_string(), v);
+        parse_min_keyframe_request_interval_ms(&properties)
+    };
+    assert_eq!(with(PropertyValue::UInt(0)), 0);
+    assert_eq!(with(PropertyValue::UInt(250)), 250);
+    assert_eq!(with(PropertyValue::Int(500)), 500);
+    assert_eq!(with(PropertyValue::Int(-1)), 1000, "negative falls back");
+    assert_eq!(with(PropertyValue::UInt(60_000)), 60_000);
+    assert_eq!(
+        with(PropertyValue::UInt(u64::MAX)),
+        60_000,
+        "too large is clamped"
+    );
+    assert_eq!(
+        with(PropertyValue::String("x".to_string())),
+        1000,
+        "wrong type falls back"
+    );
+
+    let definition = videoenc_definition();
+    let exposed = definition
+        .exposed_properties
+        .iter()
+        .find(|p| p.name == "min_keyframe_request_interval_ms")
+        .expect("the block exposes min_keyframe_request_interval_ms");
+    assert!(
+        matches!(exposed.default_value, Some(PropertyValue::UInt(1000))),
+        "default is 1000 ms, got {:?}",
+        exposed.default_value
+    );
+}
+
+/// The block clears the encoder's `min-force-key-unit-interval`: that
+/// base-class floor also drops scheduled requests (TAMS Output's TAI grid). The
+/// block applies `min_keyframe_request_interval_ms` itself, to "now" requests
+/// only (see `keyframe_requests`).
+#[test]
+fn block_clears_base_class_keyframe_floor() {
+    if !require_element("x264enc") || !require_element("h264parse") {
+        return;
+    }
+
+    let build = |interval: Option<u64>| -> u64 {
+        let mut properties = HashMap::new();
+        properties.insert(
+            "codec".to_string(),
+            PropertyValue::String("h264".to_string()),
+        );
+        properties.insert(
+            "encoder_preference".to_string(),
+            PropertyValue::String("software".to_string()),
+        );
+        if let Some(ms) = interval {
+            properties.insert(
+                "min_keyframe_request_interval_ms".to_string(),
+                PropertyValue::UInt(ms),
+            );
+        }
+        let ctx = BlockBuildContext::new(vec![], "all".to_string());
+        let built = VideoEncBuilder
+            .build("kf_interval", &properties, &ctx)
+            .expect("videoenc block builds");
+        let encoder = built
+            .elements
+            .iter()
+            .find(|(id, _)| id == "kf_interval:encoder")
+            .map(|(_, e)| e.clone())
+            .expect("block builds an encoder");
+        encoder.property::<u64>("min-force-key-unit-interval")
+    };
+
+    assert_eq!(build(None), 0);
+    assert_eq!(build(Some(0)), 0);
+    assert_eq!(build(Some(250)), 0);
+}
+
+/// The probe the block puts on the encoder's src pad: a scheduled request
+/// passes and starts the floor, an early "now" request is held back, a second
+/// one folds into it, and the held-back one reaches the encoder once the floor
+/// runs out. Sends real force-key-unit events to the built encoder.
+#[test]
+fn block_holds_back_early_keyframe_requests() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    if !require_element("x264enc") || !require_element("h264parse") {
+        return;
+    }
+
+    let mut properties = HashMap::new();
+    properties.insert(
+        "codec".to_string(),
+        PropertyValue::String("h264".to_string()),
+    );
+    properties.insert(
+        "encoder_preference".to_string(),
+        PropertyValue::String("software".to_string()),
+    );
+    properties.insert(
+        "min_keyframe_request_interval_ms".to_string(),
+        PropertyValue::UInt(300),
+    );
+    let ctx = BlockBuildContext::new(vec![], "all".to_string());
+    let built = VideoEncBuilder
+        .build("kf_probe", &properties, &ctx)
+        .expect("videoenc block builds");
+    let encoder = built
+        .elements
+        .iter()
+        .find(|(id, _)| id == "kf_probe:encoder")
+        .map(|(_, e)| e.clone())
+        .expect("block builds an encoder");
+    let src = encoder.static_pad("src").expect("encoder has a src pad");
+    src.set_active(true).expect("src pad activates");
+
+    // Count the requests that get past the block's probe, and keep them from
+    // the encoder, which is not running.
+    let passed = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&passed);
+    src.add_probe(
+        gst::PadProbeType::EVENT_UPSTREAM,
+        move |_, info| match &info.data {
+            Some(gst::PadProbeData::Event(event))
+                if gstreamer_video::UpstreamForceKeyUnitEvent::parse(event).is_ok() =>
+            {
+                counter.fetch_add(1, Ordering::SeqCst);
+                gst::PadProbeReturn::Drop
+            }
+            _ => gst::PadProbeReturn::Ok,
+        },
+    );
+
+    let request = |running_time: Option<gst::ClockTime>| {
+        let event = gstreamer_video::UpstreamForceKeyUnitEvent::builder()
+            .running_time(running_time)
+            .all_headers(true)
+            .build();
+        src.send_event(event);
+    };
+
+    let start = Instant::now();
+    request(Some(gst::ClockTime::from_seconds(1)));
+    assert_eq!(passed.load(Ordering::SeqCst), 1, "scheduled request passes");
+    request(None);
+    request(None);
+    assert_eq!(
+        passed.load(Ordering::SeqCst),
+        1,
+        "an early now request is held back"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while passed.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        passed.load(Ordering::SeqCst),
+        2,
+        "the held-back request is sent on"
+    );
+    assert!(
+        start.elapsed() >= Duration::from_millis(290),
+        "not before the floor runs out ({:?})",
+        start.elapsed()
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        passed.load(Ordering::SeqCst),
+        2,
+        "the second early request folded into the first"
+    );
+}
+
 /// #1163: on Windows with a Core Ultra GPU and an Intel driver older than
 /// 32.0.101.9150, the QSV encoders corrupt the process heap, so once
 /// `demote_qsv_plugin` has run the block never selects one. With 9150 or
