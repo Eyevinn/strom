@@ -338,7 +338,10 @@ fn volume_space(path: &Path) -> Option<Space> {
 
 #[cfg(not(unix))]
 fn volume_space(path: &Path) -> Option<Space> {
-    let path = std::fs::canonicalize(path).ok()?;
+    // `std::fs::canonicalize` gives a verbatim path on Windows (`\\?\C:\...`),
+    // whose prefix never matches a mount point (`C:\`); `dunce` gives the
+    // plain form when one exists.
+    let path = dunce::canonicalize(path).ok()?;
     let disks = sysinfo::Disks::new_with_refreshed_list();
     disks
         .list()
@@ -981,6 +984,22 @@ mod tests {
         std::fs::write(empty.join("seg_r1_00001.ts"), "").unwrap();
         std::fs::write(tests.join("seg_r1_00001.ts.meta"), "{}").unwrap();
         assert_eq!(legacy_parked_dirs(tmp.path()), vec![parked]);
+    }
+
+    /// The real volume is found for the temp dir and for a directory under
+    /// it that does not exist yet (the park root before the first park). On
+    /// Windows a canonicalised (verbatim) path matched no mount point, so the
+    /// free-space floor was never applied.
+    #[test]
+    fn tams_park_volume_space_finds_the_real_volume() {
+        let tmp = tempfile::tempdir().unwrap();
+        for p in [tmp.path().to_path_buf(), tmp.path().join("a").join("b")] {
+            let space = VolumeSpace
+                .space(&p)
+                .unwrap_or_else(|| panic!("no volume found for {}", p.display()));
+            assert!(space.total > 0, "{}: {:?}", p.display(), space);
+            assert!(space.free <= space.total, "{}: {:?}", p.display(), space);
+        }
     }
 
     /// A [`FreeSpace`] whose value the test sets.
