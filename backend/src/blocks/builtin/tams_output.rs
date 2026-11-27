@@ -1653,74 +1653,77 @@ const RATE_SAMPLES_MIN: usize = 30;
 /// stream whose SPS has no timing (VideoToolbox) has `framerate=0/1` after a
 /// transport hop, but its timestamps still advance one frame at a time.
 fn watch_video_essence(pad: &gst::Pad, detected: SharedDetected, block_id: &str) {
-    let block_id = block_id.to_string();
-    // Timestamps seen while no rate is known; `None` once estimating gave up.
-    let samples: Mutex<Option<Vec<u64>>> = Mutex::new(Some(Vec::new()));
-    pad.add_probe(
-        gst::PadProbeType::EVENT_DOWNSTREAM | gst::PadProbeType::BUFFER,
-        move |_pad, info| {
-            match info.data.as_ref() {
-                Some(gst::PadProbeData::Event(e)) => {
-                    if let gst::EventView::Caps(c) = e.view() {
-                        if let Some(s) = c.caps().structure(0) {
-                            merge_video_params(&detected, s, &block_id);
+    let has_rate = |d: &SharedDetected| {
+        d.lock()
+            .map(|d| d.essence_parameters.contains_key("frame_rate"))
+            .unwrap_or(true)
+    };
+    // Set once the flow has a frame rate: the buffer probe is then removed.
+    let rate_known = Arc::new(AtomicBool::new(has_rate(&detected)));
+    {
+        let (detected, block_id, rate_known) =
+            (detected.clone(), block_id.to_string(), rate_known.clone());
+        pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+            if let Some(gst::PadProbeData::Event(e)) = info.data.as_ref() {
+                if let gst::EventView::Caps(c) = e.view() {
+                    if let Some(s) = c.caps().structure(0) {
+                        merge_video_params(&detected, s, &block_id);
+                        if has_rate(&detected) {
+                            rate_known.store(true, Ordering::Release);
                         }
                     }
                 }
-                Some(gst::PadProbeData::Buffer(buf)) => {
-                    let Ok(mut samples) = samples.lock() else {
-                        return gst::PadProbeReturn::Ok;
-                    };
-                    let Some(pts) = samples.as_mut() else {
-                        return gst::PadProbeReturn::Ok;
-                    };
-                    let has_rate = detected
-                        .lock()
-                        .map(|d| d.essence_parameters.contains_key("frame_rate"))
-                        .unwrap_or(true);
-                    if has_rate {
-                        pts.clear();
-                        return gst::PadProbeReturn::Ok;
-                    }
-                    let Some(t) = buf.pts() else {
-                        return gst::PadProbeReturn::Ok;
-                    };
-                    pts.push(t.nseconds());
-                    if pts.len() < RATE_SAMPLES_MIN {
-                        return gst::PadProbeReturn::Ok;
-                    }
-                    match crate::gst::frame_rate::estimate_frame_rate(pts.iter().copied()) {
-                        Some((n, d)) => {
-                            info!(
-                                "TAMS Output {}: stream has no frame rate, {}/{} estimated \
-                                 from timestamps",
-                                block_id, n, d
-                            );
-                            if let Ok(mut det) = detected.lock() {
-                                det.essence_parameters.insert(
-                                    "frame_rate".into(),
-                                    serde_json::json!({ "numerator": n, "denominator": d }),
-                                );
-                            }
-                            pts.clear();
-                        }
-                        None if pts.len() >= RATE_SAMPLES_MAX => {
-                            warn!(
-                                "TAMS Output {}: stream has no frame rate and none could be \
-                                 estimated from {} timestamps; the flow has no frame_rate",
-                                block_id,
-                                pts.len()
-                            );
-                            *samples = None;
-                        }
-                        None => {}
-                    }
-                }
-                _ => {}
             }
             gst::PadProbeReturn::Ok
-        },
-    );
+        });
+    }
+    if rate_known.load(Ordering::Acquire) {
+        return;
+    }
+    let block_id = block_id.to_string();
+    // Timestamps seen while no rate is known. Only this probe locks it.
+    let samples: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+        if rate_known.load(Ordering::Acquire) {
+            return gst::PadProbeReturn::Remove;
+        }
+        let Some(t) = info.buffer().and_then(|b| b.pts()) else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let Ok(mut pts) = samples.lock() else {
+            return gst::PadProbeReturn::Remove;
+        };
+        pts.push(t.nseconds());
+        if pts.len() < RATE_SAMPLES_MIN {
+            return gst::PadProbeReturn::Ok;
+        }
+        match crate::gst::frame_rate::estimate_frame_rate(pts.iter().copied()) {
+            Some((n, d)) => {
+                info!(
+                    "TAMS Output {}: stream has no frame rate, {}/{} estimated from \
+                     timestamps",
+                    block_id, n, d
+                );
+                if let Ok(mut det) = detected.lock() {
+                    det.essence_parameters
+                        .entry("frame_rate".to_string())
+                        .or_insert_with(|| serde_json::json!({ "numerator": n, "denominator": d }));
+                }
+                rate_known.store(true, Ordering::Release);
+                gst::PadProbeReturn::Remove
+            }
+            None if pts.len() >= RATE_SAMPLES_MAX => {
+                warn!(
+                    "TAMS Output {}: stream has no frame rate and none could be estimated \
+                     from {} timestamps; the flow has no frame_rate",
+                    block_id,
+                    pts.len()
+                );
+                gst::PadProbeReturn::Remove
+            }
+            None => gst::PadProbeReturn::Ok,
+        }
+    });
 }
 
 /// TAMS video `essence_parameters` from encoded video caps: `frame_rate`
@@ -2419,6 +2422,72 @@ mod tests {
 
     /// Caps without a frame rate (an SPS without timing): the rate comes from
     /// the buffer timestamps, and later caps add to what is known.
+    /// Once the flow has a frame rate, the buffer probe is gone: buffers no
+    /// longer take the detected-essence lock (shared with the uploader).
+    #[test]
+    fn rate_watch_leaves_buffers_alone_once_the_rate_is_known() {
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(
+            "appsrc name=src format=time ! identity name=p ! fakesink name=sink",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let src = pipeline
+            .by_name("src")
+            .unwrap()
+            .downcast::<gstreamer_app::AppSrc>()
+            .unwrap();
+        let detected: SharedDetected = Arc::default();
+        let pad = pipeline.by_name("p").unwrap().static_pad("src").unwrap();
+        watch_video_essence(&pad, detected.clone(), "test");
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let tx = Mutex::new(tx);
+        pipeline
+            .by_name("sink")
+            .unwrap()
+            .static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                let _ = tx.lock().unwrap().send(());
+                gst::PadProbeReturn::Ok
+            });
+        src.set_caps(Some(
+            &gst::Caps::builder("video/x-h264")
+                .field("stream-format", "byte-stream")
+                .field("alignment", "au")
+                .field("framerate", gst::Fraction::new(25, 1))
+                .build(),
+        ));
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let push = |i: u64| {
+            let mut buf = gst::Buffer::with_size(16).unwrap();
+            buf.get_mut()
+                .unwrap()
+                .set_pts(gst::ClockTime::from_nseconds(i * 40_000_000));
+            src.push_buffer(buf).unwrap();
+        };
+        push(0);
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("first buffer");
+        // Hold the lock the old per-buffer probe took on every buffer.
+        let guard = detected.lock().unwrap();
+        for i in 1..5 {
+            push(i);
+        }
+        src.end_of_stream().unwrap();
+        let eos = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(gst::ClockTime::from_seconds(3), &[gst::MessageType::Eos]);
+        drop(guard);
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert!(
+            eos.is_some(),
+            "buffers waited for the detected-essence lock"
+        );
+    }
+
     #[test]
     fn frame_rate_from_timestamps_when_caps_have_none() {
         gst::init().unwrap();
