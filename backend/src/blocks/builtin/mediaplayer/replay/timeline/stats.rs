@@ -272,11 +272,17 @@ impl PlayerStats {
         log.push_back(rec);
     }
 
-    /// One output tick: whether it found the frame that holds its time.
-    /// [`READY_TICKS`] in a row make the angle ready for the run.
-    pub fn note_tick(&self, in_sync: bool) {
+    /// One output tick: whether it found the frame that holds its time
+    /// `wanted` (source time). [`READY_TICKS`] in a row make the angle ready
+    /// for the run; a tick at a time the source has no media for (another
+    /// angle starts earlier) has nothing to decode and counts as in time.
+    pub fn note_tick(&self, in_sync: bool, wanted: Option<i64>) {
         self.in_sync.store(in_sync, Ordering::Relaxed);
-        if in_sync {
+        let no_media = match (wanted, self.source_extent()) {
+            (Some(t), Some((s, e))) => t < s || t >= e,
+            _ => false,
+        };
+        if in_sync || no_media {
             if self.sync_run.fetch_add(1, Ordering::Relaxed) + 1 >= READY_TICKS {
                 self.warm.store(true, Ordering::Relaxed);
             }

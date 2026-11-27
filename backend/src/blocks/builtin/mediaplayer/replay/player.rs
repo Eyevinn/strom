@@ -721,7 +721,7 @@ impl ReplayPlayer {
                 }
             }
             self.stats.set_gap(gap);
-            self.stats.note_tick(hit.is_some());
+            self.stats.note_tick(hit.is_some(), want);
             let hit = match hit {
                 Some((ft, t, b)) => {
                     let new_picture = last.as_ref().is_none_or(|(lt, _)| *lt != ft);
@@ -891,7 +891,7 @@ impl ReplayPlayer {
                     debug!("Replay {}: push stopped: {:?}", self.block_id, e);
                     None
                 })?;
-            self.stats.note_tick(true);
+            self.stats.note_tick(true, Some(t));
             self.timeline.note_pushed(rt, t_group);
             k += 1;
         }

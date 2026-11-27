@@ -522,7 +522,7 @@ fn readiness_goes_indexing_warming_ready_with_events() {
         }
     ));
     for _ in 0..READY_TICKS {
-        p.note_tick(true);
+        p.note_tick(true, None);
     }
     tl.bounds();
     assert_eq!(tl.ready(), ReplayReady::Ready);
@@ -533,7 +533,7 @@ fn readiness_goes_indexing_warming_ready_with_events() {
         }
     ));
     // Ready for the run: a miss later does not take it back.
-    p.note_tick(false);
+    p.note_tick(false, None);
     tl.bounds();
     assert!(events.try_recv().is_err());
 }
@@ -551,7 +551,7 @@ fn start_mode_live_goes_live_once_ready() {
     // Warming: paused at the start.
     assert_eq!(tl.cursor_tai(0), Some((BASE, 0.0)));
     for _ in 0..READY_TICKS {
-        p.note_tick(true);
+        p.note_tick(true, None);
     }
     tl.bounds();
     assert_eq!(tl.cursor_tai(S), Some((BASE + 58_500 * MS, 1.0)));
@@ -574,7 +574,7 @@ fn start_mode_live_goes_live_once_ready() {
     let tl = timeline_of(std::slice::from_ref(&p));
     tl.apply_at(seek_tai(BASE + 5 * S), 0).unwrap();
     for _ in 0..READY_TICKS {
-        p.note_tick(true);
+        p.note_tick(true, None);
     }
     tl.bounds();
     assert_eq!(tl.cursor_tai(S), Some((BASE + 5 * S, 0.0)));
@@ -636,4 +636,22 @@ fn discovery_names_the_angles_and_hides_credentials() {
     assert_eq!(info.source.as_deref(), Some("tams+https://gw.example.com"));
     assert_eq!(info.ready, ReplayReady::Warming);
     assert_eq!(info.time_domain, ReplayTimeDomain::Unknown);
+}
+
+/// An angle that starts later than the group has nothing to show at the
+/// group's start: ticks there count as in time, so a group paused at its
+/// start (or waiting for `start_mode: live`) still becomes ready.
+#[test]
+fn ticks_where_an_angle_has_no_media_do_not_hold_readiness_back() {
+    let late = player("cam1", BASE + 2 * S, BASE + 60 * S, Some((50, 1)));
+    for _ in 0..READY_TICKS {
+        late.note_tick(false, Some(BASE));
+    }
+    assert_eq!(late.ready(), ReplayReady::Ready);
+    // A miss where it has media does.
+    let p = player("cam2", BASE, BASE + 60 * S, Some((50, 1)));
+    for _ in 0..READY_TICKS {
+        p.note_tick(false, Some(BASE + S));
+    }
+    assert_eq!(p.ready(), ReplayReady::Warming);
 }
