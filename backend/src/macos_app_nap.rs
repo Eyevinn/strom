@@ -1,11 +1,13 @@
 //! Keep macOS from putting the server into the background QoS band.
 //!
-//! Headless Strom registers with LaunchServices as a `Foreground` app but never
-//! opens a window, and macOS App-Naps that shape ~32 s after launch: every thread
-//! drops to scheduling priority 4, which on Apple Silicon means efficiency cores
-//! at a throttled clock, and pipelines run ~7x slower for the rest of the
-//! process's life. `gst-launch-1.0` is exempt because it registers as
-//! `UIElement`; what makes Strom `Foreground` is not known.
+//! Headless Strom used to become a `Foreground` app without ever opening a
+//! window: GStreamer's GL library sets the Regular activation policy for every
+//! GL context (#1279, see `macos_dock`). macOS App-Naps that shape ~32 s after
+//! launch: every thread drops to scheduling priority 4, which on Apple Silicon
+//! means efficiency cores at a throttled clock, and pipelines run ~7x slower for
+//! the rest of the process's life. Headless Strom now returns to `UIElement`
+//! after each GL context, as `gst-launch-1.0` without GL stays, but whether that
+//! alone keeps it out of App Nap is not measured, so the assertion stays.
 //!
 //! `beginActivityWithOptions:reason:` is the documented opt-out, and works
 //! regardless of activation policy.

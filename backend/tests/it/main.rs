@@ -55,6 +55,7 @@ pub mod local_input_memory_test;
 pub mod local_input_video_latency_test;
 pub mod local_output_test;
 pub mod macos_app_nap_test;
+pub mod macos_dock_test;
 pub mod mcp_endpoint_test;
 pub mod media_download_test;
 pub mod media_player_control_test;

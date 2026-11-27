@@ -768,6 +768,10 @@ fn run_headless_entry(
         // thread -- it takes that thread for the CFRunLoop and calls us on a
         // thread it creates itself, which gets the raw pthread default stack
         // (512 KB on macOS) rather than the main thread's 8 MB.
+        //
+        // GL contexts set the Regular activation policy; put it back on the
+        // main run loop that `gst_macos_main` is about to run (#1279).
+        strom::macos_dock::keep_headless_out_of_dock();
         gstreamer::macos_main(move || {
             run_headless_on_own_thread(
                 config,
