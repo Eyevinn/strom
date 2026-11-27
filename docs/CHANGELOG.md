@@ -19,6 +19,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - TAMS Output: audio `essence_parameters` (`sample_rate`, `channels`, `codec_parameters`) as the TAMS audio flow schema requires, and `audio_labels` (e.g. `PGM,IS`) and `audio_languages` (e.g. `swe,eng`) per audio track. In MPEG-TS each track has a fixed PID (video 0x41, audio 0x42, 0x43, ...) and its ISO 639 language descriptor, and the muxed flow collects one member flow per track (`flow_collection` with role, PID and channel range); in MP4 the label is the audio flow's role
 
 ### Changed
+- TAMS Output keeps its segment files, parked ones included, in `<data_dir>/tams-park/<TAMS flow id>` instead of `<temp dir>/strom-tams-<block>-<suffix>`, so parked segments survive a reboot and a recreated Strom flow that writes the same TAMS flows finds its backlog. `STROM_TAMS_PARK_DIR` sets another root. Directories of the old layout are not migrated; a warning at startup lists those that still hold parked segments
 - Media Player: an explicit `mode` property (`playlist`, `stinger`, `timeline`) selects what the block does, and the properties panel shows only the properties of that mode. `stinger_mode=true` becomes `mode=stinger`. The Playlist button and transport controls are hidden for a timeline player
 - TAMS Output and the Media Player's timeline mode share the auth properties `auth_mode`, `api_token` and `osc_service_id`
 - TAMS Output: one segment length property, `segment_duration_ms` (default 2000, at least 200), instead of `segment_duration_secs` and `segment_duration_ms`
@@ -29,6 +30,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Replay page: the timeline window keeps the playhead in its right half. Near live the window ends at the live edge; further behind, the playhead stays in the middle and a LIVE tab at the right edge shows how far live is past the scale (click to go live). A finished recording ends the window at its last frame
 
 ### Fixed
+- TAMS Output: a flow fails to start when one of its TAMS Outputs would write to a TAMS flow that a TAMS Output of another running flow already writes to on the same gateway, with an error that names both. TAMS flow ids derive from the block id, which is only unique within a flow, so two flows with a TAMS Output of the same id used to interleave their segments in one TAMS flow
 - Replay page: the zoom buttons under the timeline, the header timecodes and the transport buttons no longer shift when a label changes (LIVE or a time, Play or Pause); the timeline row is a three-column grid and the changing labels have fixed widths
 - WHEP Output: a viewer whose ICE gathering reports `complete` a second time no longer aborts Strom. The WHEP signaller in gst-plugin-webrtc 0.15 panics on it inside a GObject callback; seen when viewers connect and drop within a second
 - TAMS Output: the last segment of a run ends at its last frame, the open segment is finished when the flow stops, the mapping from running time to TAI is re-anchored after a sleep or clock jump, and the frame rate and size written to the store follow the flow

@@ -312,6 +312,9 @@ const PARKED_STUCK_FAILURES: u32 = 5;
 /// How often refused credentials are reported while they stay refused.
 const AUTH_REPORT_INTERVAL: Duration = Duration::from_secs(300);
 
+/// The flow directories themselves live under `STROM_TAMS_PARK_DIR` (default
+/// `<data_dir>/tams-park`), one per TAMS flow; see `crate::tams::park`.
+///
 /// Default cap on parked segments per flow directory, in MiB
 /// (`STROM_TAMS_PARKED_MAX_MB`).
 const DEFAULT_PARKED_MAX_MB: u64 = 8 * 1024;
