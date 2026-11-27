@@ -41,6 +41,7 @@ mod imp {
             return;
         }
         if app.setActivationPolicy(NSApplicationActivationPolicy::Accessory) {
+            // `macos_dock_test` counts this line; keep the wording.
             tracing::debug!("macOS: reset activation policy from Regular to Accessory");
         } else {
             tracing::warn!("macOS: could not reset activation policy to Accessory");

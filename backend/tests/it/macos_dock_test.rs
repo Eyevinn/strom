@@ -3,9 +3,16 @@
 //! GStreamer's GL library sets the Regular activation policy each time it
 //! creates a GL context on macOS, which makes the process a `Foreground` app
 //! with a Dock icon. Strom creates one at startup (the GL renderer probe) and
-//! flows create more. The test checks the LaunchServices application type after
-//! both, so it fails if the observer that puts the policy back is removed, or if
-//! it is replaced by a one-off reset after the startup probe.
+//! flows create more. The test fails if the observer that puts the policy back
+//! is removed, or if it is replaced by a one-off reset after the startup probe.
+//!
+//! Two checks, after the probe and after a GL flow starts:
+//! - The observer's reset log line, counted. This runs everywhere, including the
+//!   GitHub macOS runner, where no GUI session registers the process with
+//!   LaunchServices but GL still sets the policy on `NSApp`.
+//! - The LaunchServices application type (`lsappinfo`), which is what decides
+//!   the Dock icon. It needs a GUI session, so it is checked where `lsappinfo`
+//!   knows the process (a developer's Mac) and noted as unchecked elsewhere.
 #![cfg(target_os = "macos")]
 
 use std::io::Read;
@@ -19,6 +26,8 @@ const READY: &str = "Server listening on";
 /// Logged by the startup GL probe. Without it the probe made no GL context, and
 /// the test would pass without the fix.
 const GL_PROBED: &str = "GL renderer:";
+/// Logged at debug level by `macos_dock` each time it puts the policy back.
+const RESET: &str = "reset activation policy from Regular to Accessory";
 
 struct Server {
     child: std::process::Child,
@@ -61,6 +70,7 @@ impl Server {
             .arg(port.to_string())
             .arg("--data-dir")
             .arg(dir.path())
+            .env("RUST_LOG", "info,strom::macos_dock=debug")
             .stdout(log.reopen().expect("reopen the log for stdout"))
             .stderr(log.reopen().expect("reopen the log for stderr"))
             .stdin(Stdio::null())
@@ -114,10 +124,41 @@ impl Server {
             .to_string()
     }
 
-    /// Give the main run loop time to run the observer, then read the type.
-    async fn settled_application_type(&self) -> String {
+    fn resets(&self) -> usize {
+        self.log_text().matches(RESET).count()
+    }
+
+    /// Wait until the observer has put the policy back `count` times in all.
+    async fn wait_for_resets(&self, count: usize, stage: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.resets() < count {
+            assert!(
+                Instant::now() < deadline,
+                "{stage}: the policy was put back {} time(s), expected {count}. GL \
+                 set the Regular activation policy and nothing undid it, so \
+                 headless Strom has a Dock icon",
+                self.resets()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Where LaunchServices knows the process, check the type that decides the
+    /// Dock icon. Without a GUI session `lsappinfo` returns nothing.
+    async fn check_dock(&self, stage: &str) {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        self.application_type()
+        let app_type = self.application_type();
+        if app_type.is_empty() {
+            eprintln!(
+                "{stage}: lsappinfo does not know the process (no GUI session), \
+                 so only the reset log was checked"
+            );
+            return;
+        }
+        assert_eq!(
+            app_type, "UIElement",
+            "{stage}: headless Strom is {app_type:?}, so it has a Dock icon"
+        );
     }
 }
 
@@ -155,18 +196,10 @@ async fn headless_server_stays_out_of_the_dock_after_gl() {
          startup and this test cannot tell whether GL's Regular policy is undone"
     );
 
-    let after_probe = server.settled_application_type().await;
-    assert!(
-        !after_probe.is_empty(),
-        "lsappinfo has no application type for the server: the process is not \
-         registered with LaunchServices, so this machine has no GUI session to \
-         test the Dock in. That is the environment, not the Dock fix"
-    );
-    assert_eq!(
-        after_probe, "UIElement",
-        "after the startup GL probe, headless Strom is {after_probe:?}: GL set the \
-         Regular activation policy and nothing put it back, so it has a Dock icon"
-    );
+    server
+        .wait_for_resets(1, "after the startup GL probe")
+        .await;
+    server.check_dock("after the startup GL probe").await;
 
     let base = format!("http://127.0.0.1:{}/api", server.port);
     let client = reqwest::Client::new();
@@ -217,10 +250,8 @@ async fn headless_server_stays_out_of_the_dock_after_gl() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    let after_flow = server.settled_application_type().await;
-    assert_eq!(
-        after_flow, "UIElement",
-        "with a GL flow running, headless Strom is {after_flow:?}: the policy was \
-         put back once after startup but not after the flow's GL context"
-    );
+    // One reset for the probe, one for the flow's own GL context. A fix that
+    // resets the policy once after startup stops at one.
+    server.wait_for_resets(2, "with a GL flow running").await;
+    server.check_dock("with a GL flow running").await;
 }
