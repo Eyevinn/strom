@@ -95,6 +95,9 @@ impl PipelineManager {
             bus_signal_watches: 0,
             block_message_connect_fns: Vec::new(),
             element_setup_fns: Vec::new(),
+            stop_drain_fns: Vec::new(),
+            stopping: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            flow_ended: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             thread_priority_state: None,
             thread_registry: None,
             assigned_cpus: None,
@@ -216,6 +219,7 @@ impl PipelineManager {
             );
         }
         manager.element_setup_fns = expanded.element_setups;
+        manager.stop_drain_fns = expanded.stop_drains;
 
         // Merge pad properties from blocks with existing pad properties
         info!(
