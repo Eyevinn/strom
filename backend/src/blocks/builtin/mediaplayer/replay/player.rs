@@ -759,12 +759,11 @@ impl ReplayPlayer {
             // read it each tick, as the timeline's "now" does.
             if let Some(b) = appsrc.base_time() {
                 if b != base {
-                    // Running time went back by the time spent paused: so do
-                    // the ticks, or the next one would wait that long. The
-                    // group moves onto the new base before this player asks
-                    // it for a time on it.
+                    // Running time resumes where the flow paused: the ticks
+                    // go on from there. The group moves onto the new base
+                    // before this player asks it for a time on it.
                     base = b;
-                    self.timeline.observe_base(b.nseconds() as i64);
+                    self.timeline.observe_base();
                     k = ((now_rt(base) as f64 / fd).ceil() as i64).max(0);
                 }
             }
