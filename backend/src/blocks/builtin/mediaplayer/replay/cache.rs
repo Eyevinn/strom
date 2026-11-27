@@ -2385,7 +2385,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         Arc::clone(&f).spawn(Arc::clone(&stop));
         let t0 = Instant::now();
-        while f.stats.extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
+        while f.stats().extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(5));
         }
         timeline
@@ -2411,10 +2411,10 @@ mod tests {
 
     fn wait_start(f: &Fetcher, start: i64, within: Duration) -> bool {
         let t0 = Instant::now();
-        while f.stats.extent().map(|e| e.0) != Some(start) && t0.elapsed() < within {
+        while f.stats().extent().map(|e| e.0) != Some(start) && t0.elapsed() < within {
             std::thread::sleep(Duration::from_millis(10));
         }
-        f.stats.extent().map(|e| e.0) == Some(start)
+        f.stats().extent().map(|e| e.0) == Some(start)
     }
 
     #[test]
@@ -2446,7 +2446,11 @@ mod tests {
         let fetched_new = f.store.bytes(110 * S).is_some();
         stop.store(true, Ordering::Relaxed);
         assert!(fetched, "the segment at the old start was fetched");
-        assert!(moved, "the start follows the store: {:?}", f.stats.extent());
+        assert!(
+            moved,
+            "the start follows the store: {:?}",
+            f.stats().extent()
+        );
         assert_eq!(indexed_before, 0, "no deleted segment left in the index");
         assert_eq!(bytes_before, 0, "no bytes of deleted segments kept");
         assert_eq!(
@@ -2469,10 +2473,14 @@ mod tests {
         let moved = wait_start(&f, 110 * S, Duration::from_secs(5));
         std::thread::sleep(Duration::from_millis(500));
         let tries = mock.fetches_of(105);
-        let errors = f.stats.fetch_errors.load(Ordering::Relaxed);
+        let errors = f.stats().fetch_errors.load(Ordering::Relaxed);
         let cursor = timeline.tai_at(timeline.now_rt());
         stop.store(true, Ordering::Relaxed);
-        assert!(moved, "the start follows the store: {:?}", f.stats.extent());
+        assert!(
+            moved,
+            "the start follows the store: {:?}",
+            f.stats().extent()
+        );
         assert_eq!(tries, 1, "a gone segment is fetched once");
         assert_eq!(errors, 0, "a gone segment is not a fetch error");
         assert_eq!(cursor, Some(110 * S));
