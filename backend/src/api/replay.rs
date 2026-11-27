@@ -110,9 +110,10 @@ pub async fn replay_page(Path((_flow_id, _group)): Path<(String, String)>) -> Ht
     Html(REPLAY_HTML)
 }
 
-/// A WebSocket that controls a replay group and streams its state and
-/// events. Commands are JSON text frames, as for `POST .../command`, with an
-/// optional `seq`; see docs/REPLAY_API.md for the messages.
+/// WebSocket to control a replay group and follow its state and events.
+///
+/// Commands are JSON text frames, as for `POST .../command`, with an optional
+/// `seq`. See docs/REPLAY_API.md for the messages.
 #[utoipa::path(
     get,
     path = "/api/replay/{flow_id}/{group}/ws",
