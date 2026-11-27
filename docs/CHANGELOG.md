@@ -9,6 +9,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ### Added
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000, at most 60000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
+- API: `GET /api/flows/{flow_id}/blocks/{block_id}/pgm-endpoint` returns the WHEP endpoint fed by a vision mixer's PGM output, like `multiview-endpoint`
 
 ### Fixed
 - WHEP Output: a viewer whose ICE gathering reports `complete` a second time no longer aborts Strom. The WHEP signaller in gst-plugin-webrtc 0.15 panics on it inside a GObject callback; seen when viewers connect and drop within a second
@@ -16,9 +17,12 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - OSC: the gateway host is taken from the parsed URL before a SAT is sent. User info that looks like an OSC host (`https://x.svc.auto.prod.osaas.io:pw@evil.example/`) passed the check and the SAT went to the other host
 - TAMS Output: in OSC PAT/SAT mode a SAT goes only to an HTTPS OSC instance of its service, also when the OSC Service ID is set explicitly. Before, an explicit service ID skipped the host check, so a flow could send the instance's SAT to any host. A gateway outside OSC that should get SATs is allowed with `STROM_TAMS_ALLOWED_GATEWAYS` (comma-separated URLs) or by being `STROM_TAMS_GATEWAY_URL`. A gateway URL without a scheme now fails with a message that it must be an absolute `https://` URL
 - OSC: a SAT is refreshed before its own `exp` when that comes sooner than the usual 50 minutes, and never after it
+- Vision mixer: `pgm-endpoint` and `multiview-endpoint` find a WHEP output behind a pad linked more than once or a block with several outputs (breadth first, not only the first link)
+- Vision mixer: the WHEP search stops at blocks that combine inputs (compositor, audio mixer/router, vision mixer), follows the matching output of a block with several inputs, and returns no endpoint while the nearest WHEP output is not started
 
 ### Changed
 - Video Encoder: the keyframe-request floor applies only to requests for a keyframe now (a WebRTC viewer's PLI). Requests for a keyframe at a given running time (TAMS Output's grid, `splitmuxsink` in a segmenting recorder) always pass. A request for a keyframe now that comes within the floor is held back and sent when the floor runs out; a keyframe forced by a scheduled request also counts towards the floor. The GStreamer base-class property `min-force-key-unit-interval` delayed both kinds, which moved TAMS Output's segment boundaries off its grid
+- API: `multiview-endpoint` and `pgm-endpoint` respond with `WhepEndpointResponse` (same JSON shape; `MultiviewEndpointResponse` remains as an alias)
 
 ### Documentation
 - UPSTREAM_NOTES.md: the WHEP signaller's panic on a second ICE `complete`
