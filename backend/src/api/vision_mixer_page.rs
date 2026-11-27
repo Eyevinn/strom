@@ -5,56 +5,12 @@ use axum::{
     response::Html,
     Json,
 };
-use strom_types::{Flow, FlowId};
+use strom_types::FlowId;
 
+use crate::api::whep_endpoint::endpoint_response;
 use crate::blocks::builtin::vision_mixer::overlay;
 use crate::blocks::builtin::vision_mixer::properties as vm_props;
 use crate::state::AppState;
-
-/// Follow links from a block's output pad through intermediate blocks until
-/// a WHEP output block is reached. Returns the WHEP endpoint path
-/// (e.g. `/whep/{endpoint_id}`) or an empty string if none is found.
-pub fn find_whep_endpoint_for_pad(flow: &Flow, block_id: &str, pad_name: &str) -> String {
-    let whep_block_ids: std::collections::HashSet<&str> = flow
-        .blocks
-        .iter()
-        .filter(|b| b.block_definition_id == "builtin.whep_output")
-        .map(|b| b.id.as_str())
-        .collect();
-
-    let mut current = format!("{}:{}", block_id, pad_name);
-    let mut visited = std::collections::HashSet::new();
-
-    while let Some(link) = flow.links.iter().find(|l| l.from == current) {
-        let target_block_id = link.to.split(':').next().unwrap_or("");
-        if !visited.insert(target_block_id.to_string()) {
-            break;
-        }
-        if whep_block_ids.contains(target_block_id) {
-            if let Some(eid) = flow
-                .blocks
-                .iter()
-                .find(|b| b.id == target_block_id)
-                .and_then(|b| b.runtime_data.as_ref())
-                .and_then(|rd| rd.get("whep_endpoint_id"))
-            {
-                return format!("/whep/{}", eid);
-            }
-            break;
-        }
-        // Follow through: find an output link from this intermediate block
-        match flow
-            .links
-            .iter()
-            .find(|l| l.from.starts_with(&format!("{}:", target_block_id)))
-        {
-            Some(next) => current = next.from.clone(),
-            None => break,
-        }
-    }
-
-    String::new()
-}
 
 const VISION_MIXER_HTML: &str = include_str!("../../static/vision-mixer.html");
 
@@ -220,7 +176,7 @@ async fn render_vision_mixer_page(
         ("block_id" = String, Path, description = "Vision mixer block ID"),
     ),
     responses(
-        (status = 200, description = "Multiview endpoint info", body = strom_types::api::MultiviewEndpointResponse),
+        (status = 200, description = "Multiview endpoint info", body = strom_types::api::WhepEndpointResponse),
         (status = 404, description = "Flow or block not found"),
     ),
     tag = "vision-mixer"
@@ -228,22 +184,42 @@ async fn render_vision_mixer_page(
 pub async fn get_multiview_endpoint(
     State(state): State<AppState>,
     Path((flow_id, block_id)): Path<(FlowId, String)>,
-) -> Result<Json<strom_types::api::MultiviewEndpointResponse>, axum::http::StatusCode> {
-    let flows = state.get_flows().await;
-    let flow = flows
-        .iter()
-        .find(|f| f.id == flow_id)
-        .ok_or(axum::http::StatusCode::NOT_FOUND)?;
+) -> Result<Json<strom_types::api::WhepEndpointResponse>, axum::http::StatusCode> {
+    endpoint_response(
+        &state,
+        &flow_id,
+        &block_id,
+        Some("builtin.vision_mixer"),
+        "multiview_out",
+    )
+    .await
+}
 
-    // Verify the block exists and is a vision mixer
-    flow.blocks
-        .iter()
-        .find(|b| b.id == block_id && b.block_definition_id == "builtin.vision_mixer")
-        .ok_or(axum::http::StatusCode::NOT_FOUND)?;
-
-    let endpoint = find_whep_endpoint_for_pad(flow, &block_id, "multiview_out");
-
-    Ok(Json(strom_types::api::MultiviewEndpointResponse {
-        endpoint,
-    }))
+/// Get the WHEP endpoint fed by a vision mixer's PGM output (followed through
+/// intermediate blocks such as an encoder).
+#[utoipa::path(
+    get,
+    path = "/api/flows/{flow_id}/blocks/{block_id}/pgm-endpoint",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("block_id" = String, Path, description = "Vision mixer block ID"),
+    ),
+    responses(
+        (status = 200, description = "PGM endpoint info", body = strom_types::api::WhepEndpointResponse),
+        (status = 404, description = "Flow or block not found"),
+    ),
+    tag = "vision-mixer"
+)]
+pub async fn get_pgm_endpoint(
+    State(state): State<AppState>,
+    Path((flow_id, block_id)): Path<(FlowId, String)>,
+) -> Result<Json<strom_types::api::WhepEndpointResponse>, axum::http::StatusCode> {
+    endpoint_response(
+        &state,
+        &flow_id,
+        &block_id,
+        Some("builtin.vision_mixer"),
+        "pgm_out",
+    )
+    .await
 }

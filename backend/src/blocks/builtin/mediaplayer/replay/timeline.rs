@@ -842,7 +842,7 @@ impl ReplayTimeline {
         self.events.subscribe()
     }
 
-    fn emit(&self, e: ReplayEvent) {
+    pub(crate) fn emit(&self, e: ReplayEvent) {
         // No subscriber is fine.
         let _ = self.events.send(e);
     }

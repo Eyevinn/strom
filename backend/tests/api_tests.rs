@@ -549,3 +549,148 @@ async fn test_export_gst_launch_empty() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+/// POST a replay command to the router and return the status and JSON body.
+async fn replay_command(
+    app: Router,
+    flow: &str,
+    group: &str,
+    body: &str,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/replay/{}/{}/command", flow, group))
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+/// The replay routes map a missing group to 404, a malformed command to 400
+/// and a command that does not apply now (no media) to 409, each with a JSON
+/// error body.
+#[tokio::test]
+async fn test_replay_command_status_mapping() {
+    use strom::blocks::builtin::mediaplayer::replay::timeline;
+    let (app, _dir) = create_test_app().await;
+    let flow = uuid::Uuid::new_v4();
+
+    let (status, body) =
+        replay_command(app.clone(), &flow.to_string(), "g", r#"{"cmd":"live"}"#).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body["error"].is_string(), "{}", body);
+
+    // A group without players: it exists, but has no media.
+    let _group = timeline::get_or_create(flow, "g");
+    let (status, body) =
+        replay_command(app.clone(), &flow.to_string(), "g", r#"{"cmd":"nope"}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
+    assert!(body["error"].is_string(), "{}", body);
+    let (status, body) = replay_command(
+        app.clone(),
+        &flow.to_string(),
+        "g",
+        r#"{"cmd":"jog","frames":1,"extra":1}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
+    let (status, body) = replay_command(
+        app.clone(),
+        &flow.to_string(),
+        "g",
+        r#"{"cmd":"jog","frames":1}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{}", body);
+    assert!(body["error"].is_string(), "{}", body);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/replay/{}/other/state", flow))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+async fn get_status_json(app: Router, uri: &str) -> (StatusCode, Option<serde_json::Value>) {
+    let response = app
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).ok())
+}
+
+/// `whep-endpoint` answers for any block (here a media player without a
+/// vision mixer): empty while the WHEP Output is not started, 404 for an
+/// unknown flow or block, 400 without `pad`.
+#[tokio::test]
+async fn test_whep_endpoint_for_a_player() {
+    let (app, _dir) = create_test_app().await;
+    let mut flow = Flow::new("WHEP endpoint".to_string());
+    flow.blocks = serde_json::from_value(json!([
+        {"id": "p", "block_definition_id": "builtin.media_player", "properties": {}, "position": {"x": 0.0, "y": 0.0}},
+        {"id": "w", "block_definition_id": "builtin.whep_output", "properties": {}, "position": {"x": 0.0, "y": 0.0}},
+    ]))
+    .unwrap();
+    flow.links =
+        serde_json::from_value(json!([{"from": "p:video_out", "to": "w:video_in"}])).unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/flows")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&flow).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let base = format!("/api/flows/{}/blocks", flow.id);
+    let (status, body) = get_status_json(
+        app.clone(),
+        &format!("{}/p/whep-endpoint?pad=video_out", base),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.unwrap()["endpoint"], "");
+
+    let (status, _) = get_status_json(
+        app.clone(),
+        &format!("{}/nope/whep-endpoint?pad=video_out", base),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _) = get_status_json(
+        app.clone(),
+        &format!(
+            "/api/flows/{}/blocks/p/whep-endpoint?pad=video_out",
+            uuid::Uuid::new_v4()
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _) = get_status_json(app, &format!("{}/p/whep-endpoint", base)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
