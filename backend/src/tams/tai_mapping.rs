@@ -484,12 +484,26 @@ pub struct FragmentStart {
     pub since_anchor: u32,
 }
 
-/// Fragments after the (re)anchoring one whose split could not be requested
-/// in time: the first ends at a split scheduled only when it opened, and the
-/// keyframe for the second was requested at the same moment. From this index
-/// on, a fragment's start was requested one fragment ahead and should be on
-/// the grid.
-pub const FIRST_ON_GRID_FRAGMENT: u32 = 2;
+/// How far ahead of a fragment's next split TAMS Output asks upstream for
+/// keyframes on the grid. It must exceed the upstream encoder's latency (x264
+/// with lookahead holds most of a second), or the request comes after the
+/// encoder has passed that point and forces a keyframe off the grid. With 1 s
+/// segments this is one grid point ahead, as before sub-second segments.
+pub const KEYFRAME_LEAD_NS: u64 = 1_000_000_000;
+
+/// Index (since the (re)anchoring fragment, which is 0) of the first fragment
+/// whose start keyframe was requested at least [`KEYFRAME_LEAD_NS`] ahead, so
+/// that it should be on the grid. Fragment 1 starts at a split scheduled only
+/// when fragment 0 opened. The keyframes for the splits after it were
+/// requested at that same moment, fragment `k`'s only `k - 1` segments plus
+/// part of one ahead: less than the encoder's latency until `k - 1` segments
+/// reach the lead. With 1 s segments that is fragment 2. With 500 ms segments
+/// it is fragment 3: fragment 2's keyframe is asked for only 0.5 to 1 s ahead,
+/// x264 is often past that point already and forces one at once, off the grid.
+pub fn first_on_grid_fragment(segment_ns: u64) -> u32 {
+    let lead = KEYFRAME_LEAD_NS.div_ceil(segment_ns.max(1)).max(1);
+    u32::try_from(lead).unwrap_or(u32::MAX).saturating_add(1)
+}
 
 /// How far past its grid point a fragment starting at `start_ns` lies, when that
 /// is more than `tolerance_ns` (one frame: splits land on the first keyframe at
@@ -1120,6 +1134,19 @@ mod tests {
         assert_eq!(grid_miss_ns(5_021, 1_000, 20), Some(21));
         assert_eq!(grid_miss_ns(5_480, 1_000, 20), Some(480));
         assert_eq!(grid_miss_ns(5_480, 0, 20), None);
+    }
+
+    /// The first on-grid fragment is the first whose keyframe was requested
+    /// at least `KEYFRAME_LEAD_NS` ahead: fragment 2 with 1 s segments (as
+    /// before sub-second segments), later with shorter ones.
+    #[test]
+    fn first_on_grid_fragment_follows_the_lead() {
+        const MS: u64 = 1_000_000;
+        assert_eq!(first_on_grid_fragment(2_000 * MS), 2);
+        assert_eq!(first_on_grid_fragment(1_000 * MS), 2);
+        assert_eq!(first_on_grid_fragment(600 * MS), 3);
+        assert_eq!(first_on_grid_fragment(500 * MS), 3);
+        assert_eq!(first_on_grid_fragment(200 * MS), 6);
     }
 
     #[test]

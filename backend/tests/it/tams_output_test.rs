@@ -667,7 +667,9 @@ mod shared_timeline {
     }
 
     /// 500 ms segments (`segment_duration_ms`): boundaries on the 500 ms TAI
-    /// grid, with a GOP of one segment.
+    /// grid, with a GOP of one segment, from the fourth segment on: the
+    /// keyframe for the third is asked for when the first opens, only 0.5 to
+    /// 1 s ahead, less than x264's latency in about a third of the runs.
     #[test]
     fn encoder_keyframes_follow_a_subsecond_grid() {
         keyframes_follow_a_grid(None, ("segment_duration_ms", 500), 500_000_000);
@@ -769,10 +771,19 @@ mod shared_timeline {
             "too few segments registered: {:?}",
             ranges
         );
-        // The first split is requested too late to be forced and the second may
-        // be; from the third segment on, each starts within a frame (20 ms) of a
-        // TAI grid point (a multiple of the segment length).
-        for tr in &ranges[2..] {
+        // The first split is requested too late to be forced, and those
+        // requested at the same moment less than the encoder's latency ahead
+        // may be forced off the grid (with 500 ms segments the second split).
+        // From the first fragment requested far enough ahead on, each starts
+        // within a frame (20 ms) of a TAI grid point (a multiple of the
+        // segment length).
+        let first_on_grid = strom::tams::tai_mapping::first_on_grid_fragment(segment_ns) as usize;
+        assert!(
+            ranges.len() > first_on_grid + 1,
+            "too few segments registered: {:?}",
+            ranges
+        );
+        for tr in &ranges[first_on_grid..] {
             let into_segment = timerange_start_ns(tr) % segment_ns;
             assert!(
                 into_segment < 20_000_000,
