@@ -4,8 +4,8 @@
 //! media exist and which TAI time each covers) and the bytes of a piece. A
 //! [`SourceIndex`] provides both, one implementation per protocol:
 //!
-//! - [`local::LocalIndex`]: a directory with a TAMS-like `index.json` and
-//!   segment files (the spike's test material).
+//! - [`local::LocalIndex`]: a directory with an `index.json` and segment
+//!   files inside the media path (experimental, for development and tests).
 //! - [`tams::TamsIndex`]: a TAMS flow, via `GET /flows/{id}/segments`.
 //!
 //! HLS, DASH or byte ranges of a file can plug in later behind the same trait.
@@ -192,16 +192,28 @@ where
 /// A parsed `source`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceSpec {
-    /// Directory with `index.json`.
+    /// Directory with `index.json` (experimental, see [`local`]).
     Local(PathBuf),
     /// `tams+http(s)://<gateway>/flows/<flow_id>`.
     Tams { gateway: String, flow_id: String },
 }
 
-/// Parse `source`: `tams+https://host[/prefix]/flows/<id>`,
-/// `tams+http://...`, `file:///dir`, or a plain directory path (absolute, or
-/// relative to `media_path`). A local directory must resolve to a place inside
-/// `media_path`; [`open`] checks that.
+/// Whether `s` starts with a URI scheme (`scheme://`).
+fn has_uri_scheme(s: &str) -> bool {
+    s.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
+}
+
+/// Parse `source`: `tams+https://host[/prefix]/flows/<id>` or
+/// `tams+http://...`. Experimental, for development and tests: a directory
+/// with an `index.json` (see [`local`]) as `file:///dir`,
+/// `file://localhost/dir` or a plain path, absolute or relative to
+/// `media_path`. A local directory must lie inside `media_path`; [`open`]
+/// checks that. Any other scheme is unsupported.
 pub fn parse_source(source: &str, media_path: &str) -> Result<SourceSpec, String> {
     let s = source.trim();
     if let Some(rest) = s.strip_prefix("tams+") {
@@ -220,8 +232,29 @@ pub fn parse_source(source: &str, media_path: &str) -> Result<SourceSpec, String
             flow_id: flow_id.to_string(),
         });
     }
-    let path = s.strip_prefix("file://").unwrap_or(s);
-    let p = PathBuf::from(path);
+    if let Some(rest) = s.strip_prefix("file://") {
+        let path = rest.strip_prefix("localhost").unwrap_or(rest);
+        if !path.starts_with('/') {
+            return Err(format!(
+                "unsupported file URI '{}': expected file:///<path> on this host",
+                s
+            ));
+        }
+        if path.contains('%') {
+            return Err(format!(
+                "unsupported file URI '{}': percent-escapes are not decoded, give the path as is",
+                s
+            ));
+        }
+        return Ok(SourceSpec::Local(PathBuf::from(path)));
+    }
+    if has_uri_scheme(s) {
+        return Err(format!(
+            "unsupported source '{}': expected tams+https://<gateway>/flows/<flow_id>",
+            s
+        ));
+    }
+    let p = PathBuf::from(s);
     Ok(SourceSpec::Local(if p.is_absolute() {
         p
     } else {
@@ -284,6 +317,56 @@ mod tests {
             parse_source("file:///abs/cam1", "/m").unwrap(),
             SourceSpec::Local("/abs/cam1".into())
         );
+    }
+
+    /// Another scheme is not taken for a local path: a typo of the TAMS
+    /// form or a plain URL says the source is unsupported.
+    #[test]
+    fn other_uri_schemes_are_unsupported() {
+        for uri in [
+            "https://gw.example.com/flows/x",
+            "tam+https://gw.example.com/flows/x",
+            "srt://host:9000",
+            "s3://bucket/cam1",
+        ] {
+            let err = parse_source(uri, "/m").unwrap_err();
+            assert!(err.starts_with("unsupported source"), "{uri}: {err}");
+        }
+    }
+
+    /// `file://localhost/` is the local host; another host and
+    /// percent-escapes are refused rather than taken as a different path.
+    #[test]
+    fn file_uris() {
+        assert_eq!(
+            parse_source("file://localhost/abs/cam1", "/m").unwrap(),
+            SourceSpec::Local("/abs/cam1".into())
+        );
+        assert!(parse_source("file://host/abs/cam1", "/m").is_err());
+        assert!(parse_source("file:///abs/cam%201", "/m").is_err());
+        assert!(parse_source("file://cam1", "/m").is_err());
+    }
+
+    /// `parse_source` and `open` together: a relative source that climbs
+    /// out of the media path is refused, one inside it opens.
+    #[test]
+    fn open_confines_a_relative_source_to_the_media_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index = r#"{"segments": [{"object": "seg.ts", "timerange": "[1:0_2:0)"}]}"#;
+        for dir in ["media/cam1", "outside"] {
+            std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+            std::fs::write(tmp.path().join(dir).join("index.json"), index).unwrap();
+        }
+        let media = tmp.path().join("media");
+        let media_str = media.to_str().unwrap();
+        let open_source = |source: &str| {
+            let spec = parse_source(source, media_str)?;
+            open(&spec, AuthMethod::None, &media).map(|_| ())
+        };
+        assert!(open_source("cam1").is_ok());
+        assert!(open_source("./cam1").is_ok());
+        assert!(open_source("../outside").is_err());
+        assert!(open_source("cam1/../../outside").is_err());
     }
 
     fn seg(i: i64) -> Segment {
