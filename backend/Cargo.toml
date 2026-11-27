@@ -301,6 +301,12 @@ path = "tests/vision_mixer_input_format_test.rs"
 name = "whep_fanout_bench"
 path = "tests/whep_fanout_bench.rs"
 
+# Aborts the process if its guard regresses (#1283); an abort would end every
+# test in its binary and not name this one.
+[[test]]
+name = "whep_output_repeated_ice_complete_test"
+path = "tests/whep_output_repeated_ice_complete_test.rs"
+
 # Re-ranks a factory to NONE and counts every GStreamer critical in the process.
 [[test]]
 name = "whip_slot_flush_test"

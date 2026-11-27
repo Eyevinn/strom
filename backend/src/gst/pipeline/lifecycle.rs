@@ -1,9 +1,11 @@
 use super::{PipelineError, PipelineManager};
+use crate::blocks::StopDrainFn;
 use crate::gst::{rtp_hdrext, thread_priority};
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use strom_types::PipelineState;
 use tracing::{error, info, warn};
 
@@ -49,6 +51,105 @@ where
         // The sender dropped without sending: the closure unwound.
         Err(mpsc::RecvTimeoutError::Disconnected) => Err(DeadlineError::Panicked),
     }
+}
+
+/// How long stopping a flow waits for its stop drains, all together. Each
+/// drain is meant to bound its own wait well below this.
+pub(super) const STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The stop drains of one flow, taken by [`PipelineManager::take_stop_drains`].
+pub struct StopDrains {
+    flow_name: String,
+    drains: Vec<StopDrainFn>,
+}
+
+impl StopDrains {
+    fn none(flow_name: String) -> Self {
+        Self {
+            flow_name,
+            drains: Vec::new(),
+        }
+    }
+
+    /// Whether there is nothing to run.
+    pub fn is_empty(&self) -> bool {
+        self.drains.is_empty()
+    }
+
+    /// Run the drains in parallel and wait for them, at most
+    /// [`STOP_DRAIN_TIMEOUT`] in all. Blocks the calling thread.
+    pub fn run(self) {
+        run_stop_drains(&self.flow_name, self.drains, STOP_DRAIN_TIMEOUT);
+    }
+}
+
+/// What became of a flow's stop drains.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StopDrainOutcome {
+    finished: usize,
+    panicked: usize,
+    /// Still running at the deadline. Their threads are left behind.
+    abandoned: usize,
+}
+
+/// Run `drains` each on its own thread and wait for them until `deadline`
+/// has passed in all. A drain that panics or outlives the deadline is logged
+/// with the flow name, since its block's final output was likely not written.
+fn run_stop_drains(
+    flow_name: &str,
+    drains: Vec<StopDrainFn>,
+    deadline: Duration,
+) -> StopDrainOutcome {
+    let mut outcome = StopDrainOutcome::default();
+    if drains.is_empty() {
+        return outcome;
+    }
+    let until = Instant::now() + deadline;
+    let (tx, rx) = mpsc::channel();
+    let mut running = 0usize;
+    for drain in drains {
+        let tx = tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("strom-stop-drain".into())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(drain));
+                // The receiver is gone once the deadline passed.
+                let _ = tx.send(result.is_ok());
+            });
+        match spawned {
+            Ok(_) => running += 1,
+            Err(e) => warn!(
+                "Pipeline '{}': failed to spawn a stop drain thread: {}",
+                flow_name, e
+            ),
+        }
+    }
+    drop(tx);
+    while running > 0 {
+        let left = until.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(true) => outcome.finished += 1,
+            Ok(false) => {
+                outcome.panicked += 1;
+                error!(
+                    "Pipeline '{}': a stop drain panicked, a block's final output may not be written",
+                    flow_name
+                );
+            }
+            Err(_) => break,
+        }
+        running -= 1;
+    }
+    if running > 0 {
+        outcome.abandoned = running;
+        error!(
+            "Pipeline '{}': {} stop drain(s) still running after {}s, stopping without them",
+            flow_name,
+            running,
+            deadline.as_secs()
+        );
+    }
+    outcome
 }
 
 impl PipelineManager {
@@ -237,28 +338,46 @@ impl PipelineManager {
         );
     }
 
-    /// Run the blocks' stop drains in parallel and wait for all of them. Each
-    /// drain bounds its own wait (see `BlockBuildContext::register_stop_drain`).
-    fn run_stop_drains(&mut self) {
+    /// Begin stopping the flow and take its stop drains for running.
+    ///
+    /// From here on an EOS on the bus is not reported as the flow ending on
+    /// its own. The drains are returned only if the pipeline is PLAYING and
+    /// has not posted EOS or an error: otherwise no data flows to carry a
+    /// drain's EOS through, and each drain would wait out its timeout for
+    /// nothing. Taking them a second time returns none, so `teardown_flow` can
+    /// run them before it removes the flow's sources and `stop()` still runs
+    /// them when called on its own.
+    pub fn take_stop_drains(&mut self) -> StopDrains {
+        self.stopping.store(true, Ordering::SeqCst);
         let drains = std::mem::take(&mut self.stop_drain_fns);
-        let handles: Vec<_> = drains
-            .into_iter()
-            .filter_map(|drain| {
-                std::thread::Builder::new()
-                    .name("strom-stop-drain".into())
-                    .spawn(drain)
-                    .map_err(|e| warn!("Failed to spawn a stop drain thread: {}", e))
-                    .ok()
-            })
-            .collect();
-        for handle in handles {
-            let _ = handle.join();
+        let flow_name = self.flow_name.clone();
+        if drains.is_empty() {
+            return StopDrains::none(flow_name);
         }
+        let state = self.pipeline.current_state();
+        let ended = self.flow_ended.load(Ordering::SeqCst);
+        if state != gst::State::Playing || ended {
+            info!(
+                "Pipeline '{}': skipping {} stop drain(s), the pipeline is {:?}{}",
+                self.flow_name,
+                drains.len(),
+                state,
+                if ended { " and has ended" } else { "" }
+            );
+            return StopDrains::none(flow_name);
+        }
+        StopDrains { flow_name, drains }
     }
 
     /// Stop the pipeline (set to NULL state).
     pub fn stop(&mut self) -> Result<PipelineState, PipelineError> {
         info!("Stopping pipeline: {}", self.flow_name);
+
+        // Let blocks finish their output (EOS through a muxer) first, while
+        // the bus watch is still connected: a block that registers segments
+        // from bus messages, and the flow's error reporting, must see what
+        // the drains cause. None are left if teardown_flow ran them already.
+        self.take_stop_drains().run();
 
         // Stop buffer age broadcast task and deactivate probes BEFORE
         // set_state(Null) — same order as Drop. This removes probe closures
@@ -269,11 +388,6 @@ impl PipelineManager {
 
         // Remove bus watch when stopped to free resources
         self.remove_bus_watch();
-
-        // Let blocks finish their output (EOS through a muxer) while data still
-        // flows. After the bus watch is gone, so an EOS that reaches the
-        // pipeline is not reported as the flow ending on its own.
-        self.run_stop_drains();
 
         // Stop QoS broadcast task
         self.stop_qos_broadcast_task();
@@ -371,5 +485,43 @@ mod tests {
         // loaded parallel test run. The call returns as soon as it unwinds.
         let result = run_with_deadline(|| -> u32 { panic!("boom") }, Duration::from_secs(120));
         assert_eq!(result, Err(DeadlineError::Panicked));
+    }
+
+    #[test]
+    fn stop_drains_give_up_at_the_deadline() {
+        let started = Instant::now();
+        let drains: Vec<StopDrainFn> = vec![
+            Box::new(|| {}),
+            Box::new(|| std::thread::sleep(Duration::from_secs(30))),
+        ];
+        let outcome = run_stop_drains("test", drains, Duration::from_millis(200));
+        assert_eq!(
+            outcome,
+            StopDrainOutcome {
+                finished: 1,
+                panicked: 0,
+                abandoned: 1
+            }
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "returned after {:?}, should not wait for a drain past the deadline",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn stop_drains_report_a_panic() {
+        let drains: Vec<StopDrainFn> = vec![Box::new(|| panic!("boom")), Box::new(|| {})];
+        // Generous: see run_with_deadline_reports_a_panic.
+        let outcome = run_stop_drains("test", drains, Duration::from_secs(120));
+        assert_eq!(
+            outcome,
+            StopDrainOutcome {
+                finished: 1,
+                panicked: 1,
+                abandoned: 0
+            }
+        );
     }
 }
