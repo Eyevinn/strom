@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Strom replay page, version 7 -->
+<!-- Strom replay page, version 8 (replay API v2) -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -335,21 +335,21 @@ function toast(msg) {
 }
 
 // ---------------------------------------------------------------------------
-// Time. The server sends TAI as a nanosecond string (too big for a double),
-// UTC as RFC 3339 and the frame within the second. The page keeps times as
+// Time. The server sends the group time `t` as a nanosecond string (too big
+// for a double), UTC as RFC 3339 (only when the time is real TAI) and the
+// frame within the second (on the output grid). The page keeps times as
 // nanoseconds relative to a base (BigInt) so they fit a double exactly.
 let BASE = null;                       // BigInt TAI ns
 const rel = s => { const b = BigInt(s); if (BASE == null) BASE = b; return Number(b - BASE); };
 const absStr = n => (BASE + BigInt(Math.round(n))).toString();
-const taiOfNs = ns => { const a = BigInt(ns); return `${a / 1000000000n}:${a % 1000000000n}`; };
-const taiArg = n => { const a = BASE + BigInt(Math.round(n)); return `${a / 1000000000n}:${a % 1000000000n}`; };
-let utcMinusTaiMs = null;              // from the server's own (UTC, TAI) pairs
+let utcMinusTaiMs = null;              // from the server's own (UTC, t) pairs; 0 without UTC
 let fps = 50, frameNs = 20e6, fpsKnown = false;
 const pad = (n, w = 2) => String(n).padStart(w, '0');
 // Local time of day with frames, from a server FrameTime ({utc, frame_in_second}).
 function tcOf(ft) {
   if (!ft) return '--:--:--:--';
-  const d = new Date(ft.utc);
+  // Without real TAI there is no UTC: show the clock of the time axis.
+  const d = ft.utc ? new Date(ft.utc) : new Date(Number(BigInt(ft.tai_ns) / 1000000n));
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}:${pad(ft.frame_in_second)}`;
 }
 // Local time of day for an arbitrary relative TAI time (labels, hover).
@@ -375,7 +375,8 @@ function deltaOf(ms) {
   return s >= 60 ? `${sign}${Math.floor(s / 60)}:${pad(Math.floor(s % 60))}.${Math.floor(s * 10) % 10}` : `${sign}${pad(Math.floor(s))}.${Math.floor(s * 10) % 10}`;
 }
 // A server FrameTime made relative, keeping what the page shows from it.
-const ftRel = ft => ft && ft.tai_ns ? { t: rel(ft.tai_ns), utc: ft.utc, frame_in_second: ft.frame_in_second } : null;
+// A server Frame ({t, utc, frame_in_second}) at the exact instant `at`.
+const ftRel = (at, ft) => at ? { t: rel(at.t), tai_ns: at.t, utc: ft ? ft.utc : at.utc, frame_in_second: ft ? ft.frame_in_second : 0 } : null;
 
 // ---------------------------------------------------------------------------
 // WebSocket: commands and 20 Hz state.
@@ -399,6 +400,8 @@ function connectWs() {
     const m = JSON.parse(ev.data);
     if (m.type === 'state') onState(m);
     else if (m.type === 'event') onEvent(m);
+    // Events were dropped: the next state has what matters.
+    else if (m.type === 'lagged') toast(`Missed ${m.missed} event(s)`);
     else if (m.type === 'ack' || m.type === 'error') {
       const cb = acks.get(m.seq); acks.delete(m.seq);
       if (m.type === 'error') toast('Server: ' + m.error);
@@ -444,31 +447,36 @@ const liveShown = now => live.v == null ? null : live.v + (live.grow ? (now - li
 
 function onState(m) {
   const now = performance.now();
-  // frame_ns is null until a frame rate is known; 20 ms only keeps the
-  // arithmetic going, and the header says the rate is missing.
-  frameNs = m.frame_ns || 20e6; fps = Math.round(1e9 / frameNs); fpsKnown = !!m.frame_ns;
-  const pushed = m.pushed || m.cursor;
-  if (pushed && utcMinusTaiMs == null) {
-    const taiMs = Number(BigInt(pushed.tai_ns) / 1000000n);
-    utcMinusTaiMs = Math.round((Date.parse(pushed.utc) - taiMs) / 1000) * 1000;
+  // The output grid is null until a frame rate is known; 20 ms only keeps
+  // the arithmetic going, and the header says the rate is missing.
+  const out = m.grid && m.grid.output;
+  frameNs = out ? out.frame_ns : 20e6; fps = Math.round(1e9 / frameNs); fpsKnown = !!out;
+  const motion = m.motion, range = m.range;
+  const onAir = m.on_air || (motion && { at: motion.cursor.at, frame: motion.cursor.frame });
+  if (onAir && utcMinusTaiMs == null) {
+    const tMs = Number(BigInt(onAir.at.t) / 1000000n);
+    utcMinusTaiMs = onAir.at.utc ? Math.round((Date.parse(onAir.at.utc) - tMs) / 1000) * 1000 : 0;
   }
   const s = {
-    speed: +m.speed || 0,
+    speed: motion ? +motion.speed || 0 : 0,
     domain: m.time_domain,
-    pushed: ftRel(pushed),
+    ready: m.ready,
+    pushed: onAir ? ftRel(onAir.at, onAir.frame) : null,
     // Behind the server's smooth live-edge estimate (it does not jump per segment).
-    behindMs: pushed ? (pushed.behind_live_estimate_ms ?? pushed.behind_live_ms ?? m.behind_live_ms) : null,
-    start: m.start ? rel(m.start.tai_ns) : null,
-    end: m.end ? rel(m.end.tai_ns) : null,
-    live: m.live_edge ? rel(m.live_edge.tai_ns) : null,
-    marginMs: m.live_margin_ms ?? null,
-    stepMs: m.live_edge_step_ms ?? null,
-    growing: !!m.live_growing,
-    players: (m.players || []).length,
-    noFrameRate: m.no_frame_rate || [],
+    behindMs: m.on_air ? m.on_air.behind_live_estimate_ms : null,
+    start: range ? rel(range.start.t) : null,
+    end: range ? rel(range.end.t) : null,
+    live: range ? rel(range.live_edge.t) : null,
+    marginMs: m.live_margin ? m.live_margin.ms : null,
+    marginSource: m.live_margin ? m.live_margin.source : null,
+    stepMs: diag.stepMs,
+    growing: !!(range && range.growing),
+    players: (m.angles || []).length,
+    noFrameRate: (m.angles || []).filter(a => a.frame_rate_missing).map(a => a.block),
+    followLive: !!m.follow_live,
   };
-  s.cue = m.cue || null;
-  s.following = !!m.live;
+  s.cue = motion ? motion.cue : null;
+  s.following = !!(motion && motion.live);
   S = s; recvAt = now;
   if (s.live != null) trackLive(s.live, now);
   // The server holds the clip's bounds; when it drops the cue (a seek out of
@@ -477,11 +485,23 @@ function onState(m) {
   renderHeader();
 }
 
-// What the server did by itself.
+// What the server did (by itself, or later because of a command).
 function onEvent(m) {
-  if (m.event === 'ended') toast(activeClip ? `${activeClip.clip.name}: end` : 'End of cue');
-  else if (m.event === 'live') toast(m.reason === 'caught_up' ? 'Caught up: live' : m.reason === 'edge_moved' ? 'Live edge moved: jumped to live' : 'Live');
+  if (m.event === 'ended') toast(activeClip ? `${activeClip.clip.name}: end` : m.cause === 'media_end' ? 'End of media' : 'End of cue');
+  else if (m.event === 'live' && m.cause !== 'live') toast(m.cause === 'caught_up' ? 'Caught up: live' : m.cause === 'edge_moved' ? 'Live edge moved: jumped to live' : 'Live');
+  else if (m.event === 'ready' && m.ready === 'ready') toast('Ready');
+  else if (m.event === 'range_changed' && m.cause === 'retention') toast('Start of media removed (retention)');
 }
+// The live edge's step, for the margin warning: from the diagnostics, now
+// and then (the state no longer carries engine figures).
+const diag = { stepMs: null };
+async function pollDiagnostics() {
+  try {
+    const r = await fetch(`/api/replay/${FLOW}/${encodeURIComponent(GROUP)}/diagnostics`);
+    if (r.ok) diag.stepMs = (await r.json()).live_edge_step_ms ?? null;
+  } catch (_) {}
+}
+pollDiagnostics(); setInterval(pollDiagnostics, 3000);
 
 // Playhead between state messages: the server's pushed time advanced at the
 // server's speed, kept inside the media. Only for drawing.
@@ -526,7 +546,7 @@ function renderHeader() {
   if (s) {
     $('infBuf').textContent = s.start != null && s.live != null ? `${clockOf(s.start)} → ${clockOf(s.live)} (${durOf(s.live - s.start).slice(0, -3)})` : 'no media yet';
     $('infLive').textContent = live.grow ? 'growing (live ingest)' : s.live != null ? 'not growing (recording)' : '-';
-    $('infAngles').textContent = `${s.players} player(s) · ${fpsKnown ? fps : 'unknown'} fps · time ${s.domain || '?'}`;
+    $('infAngles').textContent = `${s.players} player(s) · ${fpsKnown ? fps : 'unknown'} fps · time ${s.domain || '?'} · ${s.ready || '?'}${s.followLive ? '' : ' · review (no follow live)'}`;
     $('infClip').textContent = activeClip ? `${activeClip.clip.name} (${s.cue ? s.cue.end_action : 'cueing'})` : s.cue ? `cue (${s.cue.end_action})` : '-';
   }
 }
@@ -559,7 +579,7 @@ $('marginSel').onchange = e => {
 function renderMargin() {
   const s = S, info = $('marginInfo');
   const parts = [];
-  if (s && s.marginMs != null && s.marginMs !== liveMargin) parts.push(`in use ${(s.marginMs / 1000).toFixed(1)} s`);
+  if (s && s.marginMs != null && s.marginMs !== liveMargin) parts.push(`in use ${(s.marginMs / 1000).toFixed(1)} s${s.marginSource === 'computed' ? ' (computed)' : ''}`);
   const risky = s && s.stepMs != null && liveMargin < s.stepMs + 300;
   if (risky) parts.push('⚠ may freeze');
   info.textContent = parts.join(' · ');
@@ -567,11 +587,8 @@ function renderMargin() {
   info.title = risky ? `The live edge moves in steps of ${s.stepMs} ms. A margin under about ${s.stepMs + 300} ms lets the cursor reach the edge between steps, and the picture freezes.` : '';
 }
 const jog = n => send({ cmd: 'jog', frames: n });
-const seekRel = ms => send({ cmd: 'seek_rel', ms });
-const seekTo = (t, cb) => BASE != null && send({ cmd: 'seek', tai: taiArg(t) }, cb);
-// A stored point is a frame's start time: seek to the middle of that frame so
-// the server's floor to the frame grid lands on it, whatever the rounding.
-const seekFrame = (t, cb) => seekTo(t + frameNs / 2, cb);
+const seekRel = ms => send({ cmd: 'seek', to: { rel_ms: ms } });
+const seekTo = (t, cb) => BASE != null && send({ cmd: 'seek', to: { t: absStr(t) } }, cb);
 // J/L: shuttle 1x, 2x, 4x in each direction; the other key first stops.
 function shuttle(dir) {
   const v = S ? S.speed : 0;
@@ -583,7 +600,7 @@ function shuttle(dir) {
 // Replay the last 8 s at 50 %: one seek relative to the live edge, with speed.
 function replayLast(sec = 8, speed = 0.5) {
   activeClip = null; renderClips();
-  send({ cmd: 'seek', from_live_ms: sec * 1000, speed });
+  send({ cmd: 'seek', to: { from_live_ms: sec * 1000 }, speed });
 }
 
 $('liveBtn').onclick = goLive;
@@ -627,8 +644,10 @@ function pointNow() {
   return new Promise(res => {
     const ok = send({ cmd: 'mark' }, m => {
       if (m.type !== 'ack' || !m.mark) { res(null); return; }
-      const t = m.mark.time;
-      res({ tai_ns: t.tai_ns, utc: t.utc, frame_in_second: t.frame_in_second });
+      // The exact time of the picture (a cue or seek to it shows the same
+      // frames), with its output-grid frame for the timecode.
+      const at = m.mark.at, f = m.mark.frame;
+      res({ tai_ns: at.t, utc: f ? f.utc : at.utc, frame_in_second: f ? f.frame_in_second : 0 });
     });
     if (!ok) res(null);
   });
@@ -645,7 +664,7 @@ function renameLastMark() {
   const v = prompt('Mark name', m.name); if (v == null) return;
   m.name = v.trim() || m.name; persist(); renderMarks();
 }
-function gotoMark(m, preroll = 0) { activeClip = null; renderClips(); pause(); seekFrame(tOf(m) - preroll * 1e9); }
+function gotoMark(m, preroll = 0) { activeClip = null; renderClips(); pause(); seekTo(tOf(m) - preroll * 1e9); }
 let lastMarkIdx = null;
 function lastMark() {
   if (!marks.length) return;
@@ -663,8 +682,8 @@ function stepMark(dir) {
 async function setIn() { const p = await pointNow(); if (!p) return; inPt = p; if (outPt && tOf(outPt) <= tOf(inPt)) outPt = null; persist(); renderInOut(); }
 async function setOut() { const p = await pointNow(); if (!p) return; outPt = p; if (inPt && tOf(inPt) >= tOf(outPt)) inPt = null; persist(); renderInOut(); }
 function clearInOut() { inPt = outPt = null; persist(); renderInOut(); }
-function goIn() { if (inPt) { pause(); seekFrame(tOf(inPt)); } }
-function goOut() { if (outPt) { pause(); seekFrame(tOf(outPt)); } }
+function goIn() { if (inPt) { pause(); seekTo(tOf(inPt)); } }
+function goOut() { if (outPt) { pause(); seekTo(tOf(outPt)); } }
 function renderInOut() {
   $('tcIn').textContent = inPt ? tcOf(inPt) : '--:--:--:--';
   $('tcOut').textContent = outPt ? tcOf(outPt) : '--:--:--:--';
@@ -723,7 +742,7 @@ function cueClip(c, play) {
   const drop = () => { if (activeClip === cue) { activeClip = null; renderClips(); } };
   activeClip = cue;
   renderClips();
-  const sent = send({ cmd: 'cue', in: { tai: taiOfNs(c.in_tai) }, out: { tai: taiOfNs(c.out_tai) }, end_action: 'freeze' }, async m => {
+  const sent = send({ cmd: 'cue', in: { t: String(c.in_tai) }, out: { t: String(c.out_tai) }, end_action: 'freeze', client_ref: String(c.id).slice(0, 64) }, async m => {
     if (activeClip !== cue) return;
     if (m.type !== 'ack') { drop(); return; }
     if (c.angle != null && !(await cutTo({ input: c.angle }))) { drop(); return; }

@@ -120,6 +120,12 @@ pub async fn expand_blocks(
             "_block_id".to_string(),
             PropertyValue::String(block_instance.id.clone()),
         );
+        if let Some(name) = &block_instance.name {
+            properties.insert(
+                "_block_name".to_string(),
+                PropertyValue::String(name.clone()),
+            );
+        }
         properties.insert(
             "_media_path".to_string(),
             PropertyValue::String(canonical_media_str.clone()),

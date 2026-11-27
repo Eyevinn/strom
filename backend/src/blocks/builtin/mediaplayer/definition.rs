@@ -7,6 +7,10 @@ use strom_types::mediaplayer::{
     GROUP_PROPERTY, MODE_PROPERTY, OUTPUT_FRAMERATE_PROPERTY, PACING_OFFLINE, PACING_PROPERTY,
     PACING_REALTIME, SOURCE_PROPERTY,
 };
+use strom_types::mediaplayer::{
+    FOLLOW_LIVE_PROPERTY, JOG_GRID_PROPERTY, LIVE_MARGIN_PROPERTY, OFFSET_MS_PROPERTY,
+    START_MODE_PROPERTY,
+};
 use strom_types::{MediaType, PropertyValue};
 
 /// Default of `decoded_ahead_s`.
@@ -201,6 +205,84 @@ pub fn media_player_definition() -> BlockDefinition {
                 property_type: PropertyType::UInt,
                 default_value: Some(PropertyValue::UInt(DEFAULT_DECODED_AHEAD_S)),
                 mapping: block_mapping(DECODED_AHEAD_PROPERTY),
+                live: false,
+                persist: None,
+                visible_when: in_modes(&[PlayerMode::Timeline]),
+            },
+            ExposedProperty {
+                name: LIVE_MARGIN_PROPERTY.to_string(),
+                label: "Live Margin (ms)".to_string(),
+                description: "Replay group: how far behind the live edge the group plays when live. Empty = the live edge's measured step + 400 ms, at least 800 and at most 3000. The group takes the largest value of its players."
+                    .to_string(),
+                property_type: PropertyType::String,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: block_mapping(LIVE_MARGIN_PROPERTY),
+                live: false,
+                persist: None,
+                visible_when: in_modes(&[PlayerMode::Timeline]),
+            },
+            ExposedProperty {
+                name: FOLLOW_LIVE_PROPERTY.to_string(),
+                label: "Follow Live".to_string(),
+                description: "Replay group: forward play without a cue that reaches the live point goes live by itself. Off = review mode: play stops on the last frame every angle has. Off on any player turns it off for the group."
+                    .to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: block_mapping(FOLLOW_LIVE_PROPERTY),
+                live: false,
+                persist: None,
+                visible_when: in_modes(&[PlayerMode::Timeline]),
+            },
+            ExposedProperty {
+                name: JOG_GRID_PROPERTY.to_string(),
+                label: "Jog Grid".to_string(),
+                description: "Replay group: the frames jog steps. Source = the finest source rate (every source frame in slow motion), Output = the output rate. Source on any player wins."
+                    .to_string(),
+                property_type: PropertyType::Enum {
+                    values: ["source", "output"]
+                        .iter()
+                        .map(|v| EnumValue {
+                            value: v.to_string(),
+                            label: None,
+                            visible_when: None,
+                        })
+                        .collect(),
+                },
+                default_value: Some(PropertyValue::String("source".to_string())),
+                mapping: block_mapping(JOG_GRID_PROPERTY),
+                live: false,
+                persist: None,
+                visible_when: in_modes(&[PlayerMode::Timeline]),
+            },
+            ExposedProperty {
+                name: START_MODE_PROPERTY.to_string(),
+                label: "Start Mode".to_string(),
+                description: "Replay group: how the group starts. Paused (or First) = paused at the start of the media; Live = live as soon as every angle is ready. The group's first player decides."
+                    .to_string(),
+                property_type: PropertyType::Enum {
+                    values: ["paused", "first", "live"]
+                        .iter()
+                        .map(|v| EnumValue {
+                            value: v.to_string(),
+                            label: None,
+                            visible_when: None,
+                        })
+                        .collect(),
+                },
+                default_value: Some(PropertyValue::String("paused".to_string())),
+                mapping: block_mapping(START_MODE_PROPERTY),
+                live: false,
+                persist: None,
+                visible_when: in_modes(&[PlayerMode::Timeline]),
+            },
+            ExposedProperty {
+                name: OFFSET_MS_PROPERTY.to_string(),
+                label: "Offset (ms)".to_string(),
+                description: "Trim: moves this angle's media on the group's time axis, positive later. For cameras without a common time, or to adjust one. The times in the store do not change."
+                    .to_string(),
+                property_type: PropertyType::Int,
+                default_value: Some(PropertyValue::Int(0)),
+                mapping: block_mapping(OFFSET_MS_PROPERTY),
                 live: false,
                 persist: None,
                 visible_when: in_modes(&[PlayerMode::Timeline]),

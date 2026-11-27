@@ -120,6 +120,21 @@ pub const PACING_OFFLINE: &str = "offline";
 pub const CLIP_IN_PROPERTY: &str = "clip_in";
 pub const CLIP_OUT_PROPERTY: &str = "clip_out";
 pub const CLIP_SPEED_PROPERTY: &str = "clip_speed";
+/// Timeline mode, replay group: distance behind the live edge when live, ms
+/// (empty = computed from the live edge's steps).
+pub const LIVE_MARGIN_PROPERTY: &str = "live_margin_ms";
+/// Timeline mode, replay group: forward play that reaches the live point goes
+/// live by itself.
+pub const FOLLOW_LIVE_PROPERTY: &str = "follow_live";
+/// Timeline mode, replay group: the grid `jog` steps on, `source` or
+/// `output`.
+pub const JOG_GRID_PROPERTY: &str = "jog_grid";
+/// Timeline mode, replay group: how the group starts, `paused`, `first` or
+/// `live`.
+pub const START_MODE_PROPERTY: &str = "start_mode";
+/// Timeline mode: trim, ms; the angle's media moves this much on the group's
+/// axis, positive later.
+pub const OFFSET_MS_PROPERTY: &str = "offset_ms";
 /// TAMS source auth, named as on TAMS Output.
 pub const AUTH_MODE_PROPERTY: &str = "auth_mode";
 pub const API_TOKEN_PROPERTY: &str = "api_token";
