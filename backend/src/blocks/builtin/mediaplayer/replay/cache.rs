@@ -732,7 +732,11 @@ impl Fetcher {
             let grows = self.source.may_grow() && on_clock;
             // Where the group is, or this angle's start before it knows.
             let rt = self.timeline.now_rt();
-            let (cursor, speed) = self.timeline.cursor_tai(rt).unwrap_or((start, 0.0));
+            // In this source's own time (the group's minus the trim).
+            let (cursor, speed) = self
+                .timeline
+                .cursor_tai(rt)
+                .map_or((start, 0.0), |(t, v)| (t - self.stats.offset_ns(), v));
             let forward = speed >= 0.0;
             // Offline play only goes forward: nothing behind the cursor is
             // needed again.
@@ -1424,13 +1428,13 @@ mod tests {
         }
         if let Some(t) = seek_s {
             timeline
-                .apply(super::super::timeline::Command::Seek {
-                    frame: None,
-                    utc: None,
-                    tai: Some(format!("{}:0", t)),
-                    from_live_ms: None,
-                    speed: None,
-                })
+                .apply_at(
+                    super::super::timeline::Command::Seek {
+                        to: strom_types::replay::ReplayTarget::t(t * 1_000_000_000),
+                        speed: None,
+                    },
+                    timeline.now_rt(),
+                )
                 .unwrap();
         }
         std::thread::sleep(run);
@@ -1546,13 +1550,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         timeline
-            .apply(super::super::timeline::Command::Seek {
-                frame: None,
-                utc: None,
-                tai: Some("150:0".into()),
-                from_live_ms: None,
-                speed: None,
-            })
+            .apply_at(
+                super::super::timeline::Command::Seek {
+                    to: strom_types::replay::ReplayTarget::t(150 * 1_000_000_000),
+                    speed: None,
+                },
+                timeline.now_rt(),
+            )
             .unwrap();
         let t0 = Instant::now();
         // The hole's end comes as the listing reaches it.
@@ -1919,13 +1923,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         timeline
-            .apply(super::super::timeline::Command::Seek {
-                frame: None,
-                utc: None,
-                tai: Some(format!("{}:0", seek_s)),
-                from_live_ms: None,
-                speed: None,
-            })
+            .apply_at(
+                super::super::timeline::Command::Seek {
+                    to: strom_types::replay::ReplayTarget::t(seek_s * 1_000_000_000),
+                    speed: None,
+                },
+                timeline.now_rt(),
+            )
             .unwrap();
         (mock, fetcher, stop)
     }

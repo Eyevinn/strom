@@ -1,16 +1,17 @@
-//! Replay control: commands and state per replay group, over REST and a
-//! WebSocket, plus the operator page and the diagnostics page (latency from
-//! command to screen, live edge, gaps, decoding and per-angle telemetry, for
-//! measuring the engine).
+//! Replay control (API version 2): discovery, commands, state and
+//! diagnostics per replay group, over REST and a WebSocket, plus the operator
+//! page and the diagnostics page.
 //!
-//! Both transports take the same commands ([`ReplayCommand`], JSON tagged by
-//! `cmd`) and return the same result ([`ReplayCommandResult`]). A malformed
-//! command or a value out of range is refused as invalid (HTTP 400), a
-//! command that does not apply to the group now as a conflict (HTTP 409).
-//! On the WebSocket a command may carry a `seq`, echoed in its `ack` or
-//! `error`; the socket also streams the group state every 50 ms (the same
-//! object as `GET .../state`) and sends what the group does by itself as
-//! `{"type": "event", ...}` ([`strom_types::replay::ReplayEvent`]).
+//! Both transports take the same commands ([`ReplayRequest`], JSON tagged by
+//! `cmd`, with an optional `client_ref`) and return the same result
+//! ([`ReplayCommandResult`]). A malformed command or a value out of range is
+//! refused as `invalid` (HTTP 400), a command that does not apply to the
+//! group now as `conflict` (HTTP 409), a range wholly outside the media as
+//! `out_of_range` (HTTP 409). On REST the code is the error's `error` field.
+//! The WebSocket sends [`ReplayWsMessage`]s: the state every 50 ms (or
+//! `?state_ms=`), events, `lagged` when it dropped events, diagnostics with
+//! `?diagnostics=1`, and an `ack` or `error` for each command, carrying the
+//! command's `seq`.
 //!
 //! A socket does not keep its group alive: it holds the group weakly and
 //! closes once the group's players are gone (the flow stopped or was deleted)
@@ -20,15 +21,20 @@ use crate::blocks::builtin::mediaplayer::replay::timeline::{self, CommandError};
 use crate::json_rejection::JsonBody;
 use crate::state::AppState;
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Json;
 use futures::{SinkExt, StreamExt};
+use serde::Deserialize;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use strom_types::api::ErrorResponse;
-use strom_types::replay::{ReplayCommand, ReplayCommandResult};
+use strom_types::replay::{
+    ReplayAck, ReplayCommandResult, ReplayDiagnostics, ReplayErrorCode, ReplayEvent,
+    ReplayGroupInfo, ReplayIndex, ReplayRequest, ReplayState, ReplayWsError, ReplayWsMessage,
+    MAX_STATE_MS, MIN_STATE_MS,
+};
 use strom_types::FlowId;
 
 type ApiError = (StatusCode, Json<ErrorResponse>);
@@ -40,23 +46,76 @@ fn not_found() -> ApiError {
     )
 }
 
+/// A refused command: the code (`invalid`, `conflict`, `out_of_range`) as
+/// `error`, the reason as `details`.
 fn command_error(e: CommandError) -> ApiError {
-    let status = match e {
-        CommandError::Invalid(_) => StatusCode::BAD_REQUEST,
-        CommandError::Conflict(_) => StatusCode::CONFLICT,
-    };
-    let title = match e {
-        CommandError::Invalid(_) => "Invalid command",
-        CommandError::Conflict(_) => "Command does not apply now",
+    let status = match e.code() {
+        ReplayErrorCode::Invalid => StatusCode::BAD_REQUEST,
+        ReplayErrorCode::Conflict | ReplayErrorCode::OutOfRange => StatusCode::CONFLICT,
     };
     (
         status,
-        Json(ErrorResponse::with_details(title, e.message())),
+        Json(ErrorResponse::with_details(e.code().as_str(), e.message())),
     )
 }
 
 fn group(flow_id: FlowId, group: &str) -> Result<Arc<timeline::ReplayTimeline>, ApiError> {
     timeline::get(flow_id, group).ok_or_else(not_found)
+}
+
+fn index(flow: Option<FlowId>) -> ReplayIndex {
+    ReplayIndex::new(
+        timeline::running(flow)
+            .iter()
+            .map(|(f, g, tl)| tl.info(*f, g))
+            .collect(),
+    )
+}
+
+/// The replay groups of every running flow, with the API version and
+/// features.
+#[utoipa::path(
+    get,
+    path = "/api/replay",
+    tag = "replay",
+    responses((status = 200, description = "Replay groups", body = ReplayIndex))
+)]
+pub async fn replay_index() -> Json<ReplayIndex> {
+    Json(index(None))
+}
+
+/// The replay groups of a flow (empty when it does not run).
+#[utoipa::path(
+    get,
+    path = "/api/replay/{flow_id}",
+    tag = "replay",
+    params(("flow_id" = String, Path, description = "Flow ID (UUID)")),
+    responses((status = 200, description = "The flow's replay groups", body = ReplayIndex))
+)]
+pub async fn replay_flow_index(Path(flow_id): Path<FlowId>) -> Json<ReplayIndex> {
+    Json(index(Some(flow_id)))
+}
+
+/// One replay group, for discovery.
+#[utoipa::path(
+    get,
+    path = "/api/replay/{flow_id}/{group}",
+    tag = "replay",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("group" = String, Path, description = "Replay group")
+    ),
+    responses(
+        (status = 200, description = "The group", body = ReplayGroupInfo),
+        (status = 404, description = "Replay group not found", body = ErrorResponse)
+    )
+)]
+pub async fn replay_group(
+    Path((flow_id, group_name)): Path<(FlowId, String)>,
+) -> Result<Json<ReplayGroupInfo>, ApiError> {
+    Ok(Json(
+        group(flow_id, &group_name)?.info(flow_id, &group_name),
+    ))
 }
 
 /// Send a command to a replay group.
@@ -68,12 +127,12 @@ fn group(flow_id: FlowId, group: &str) -> Result<Arc<timeline::ReplayTimeline>, 
         ("flow_id" = String, Path, description = "Flow ID (UUID)"),
         ("group" = String, Path, description = "Replay group")
     ),
-    request_body = ReplayCommand,
+    request_body = ReplayRequest,
     responses(
         (status = 200, description = "Command applied", body = ReplayCommandResult),
-        (status = 400, description = "Malformed command or value out of range", body = ErrorResponse),
+        (status = 400, description = "invalid: malformed command or value out of range", body = ErrorResponse),
         (status = 404, description = "Replay group not found", body = ErrorResponse),
-        (status = 409, description = "The command does not apply to the group now", body = ErrorResponse)
+        (status = 409, description = "conflict: the command does not apply now; out_of_range: the range is outside the media", body = ErrorResponse)
     )
 )]
 pub async fn replay_command(
@@ -81,12 +140,12 @@ pub async fn replay_command(
     JsonBody(body): JsonBody<serde_json::Value>,
 ) -> Result<Json<ReplayCommandResult>, ApiError> {
     let tl = group(flow_id, &group_name)?;
-    let cmd = timeline::parse_command(body).map_err(command_error)?;
-    let applied = tl.apply(cmd).map_err(command_error)?;
+    let req = timeline::parse_command(body).map_err(command_error)?;
+    let applied = tl.apply(req).map_err(command_error)?;
     Ok(Json(tl.result(&applied)))
 }
 
-/// The state of a replay group (the object the WebSocket streams).
+/// The state of a replay group (what the WebSocket streams as `state`).
 #[utoipa::path(
     get,
     path = "/api/replay/{flow_id}/{group}/state",
@@ -96,14 +155,34 @@ pub async fn replay_command(
         ("group" = String, Path, description = "Replay group")
     ),
     responses(
-        (status = 200, description = "Group state", body = Object),
+        (status = 200, description = "Group state", body = ReplayState),
         (status = 404, description = "Replay group not found", body = ErrorResponse)
     )
 )]
 pub async fn replay_state(
     Path((flow_id, group_name)): Path<(FlowId, String)>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    Ok(Json(group(flow_id, &group_name)?.telemetry()))
+) -> Result<Json<ReplayState>, ApiError> {
+    Ok(Json(group(flow_id, &group_name)?.state()))
+}
+
+/// Engine diagnostics of a replay group.
+#[utoipa::path(
+    get,
+    path = "/api/replay/{flow_id}/{group}/diagnostics",
+    tag = "replay",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("group" = String, Path, description = "Replay group")
+    ),
+    responses(
+        (status = 200, description = "Group diagnostics", body = ReplayDiagnostics),
+        (status = 404, description = "Replay group not found", body = ErrorResponse)
+    )
+)]
+pub async fn replay_diagnostics(
+    Path((flow_id, group_name)): Path<(FlowId, String)>,
+) -> Result<Json<ReplayDiagnostics>, ApiError> {
+    Ok(Json(group(flow_id, &group_name)?.diagnostics()))
 }
 
 const REPLAY_HTML: &str = include_str!("../../static/replay.html");
@@ -131,11 +210,35 @@ pub async fn replay_lab_page(Path((flow_id, group)): Path<(String, String)>) -> 
     ))
 }
 
-/// GET /api/replay/{flow_id}/{group}/ws
+/// What a socket asks for.
+#[derive(Debug, Default, Deserialize)]
+pub struct WsParams {
+    /// `1` or `true`: send `diagnostics` with each state.
+    pub diagnostics: Option<String>,
+    /// State every this many ms, 50 .. 1000 (clamped).
+    pub state_ms: Option<u64>,
+}
+
+impl WsParams {
+    fn diagnostics(&self) -> bool {
+        matches!(self.diagnostics.as_deref(), Some("1") | Some("true"))
+    }
+
+    fn state_every(&self) -> Duration {
+        Duration::from_millis(
+            self.state_ms
+                .unwrap_or(MIN_STATE_MS)
+                .clamp(MIN_STATE_MS, MAX_STATE_MS),
+        )
+    }
+}
+
+/// GET /api/replay/{flow_id}/{group}/ws?diagnostics=1&state_ms=200
 pub async fn replay_ws(
     ws: WebSocketUpgrade,
     State(_state): State<AppState>,
     Path((flow_id, group)): Path<(FlowId, String)>,
+    Query(params): Query<WsParams>,
 ) -> Response {
     let Some(tl) = timeline::get(flow_id, &group) else {
         return (StatusCode::NOT_FOUND, "replay group not found").into_response();
@@ -143,7 +246,7 @@ pub async fn replay_ws(
     let events = tl.subscribe();
     let held = Arc::downgrade(&tl);
     drop(tl);
-    ws.on_upgrade(move |socket| handle(socket, flow_id, group, held, events))
+    ws.on_upgrade(move |socket| handle(socket, flow_id, group, held, events, params))
 }
 
 /// The group the socket was opened on, while it is still the group's live
@@ -160,29 +263,37 @@ fn current(
 }
 
 /// A command from the socket: the reply to send.
-fn ws_reply(tl: &timeline::ReplayTimeline, text: &str) -> serde_json::Value {
-    let value: serde_json::Value = match serde_json::from_str(text) {
+fn ws_reply(tl: &timeline::ReplayTimeline, text: &str) -> ReplayWsMessage {
+    let mut value: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(e) => {
-            return serde_json::json!({
-                "type": "error", "seq": null, "code": "invalid",
-                "error": format!("not JSON: {}", e),
+            return ReplayWsMessage::Error(ReplayWsError {
+                seq: serde_json::Value::Null,
+                code: ReplayErrorCode::Invalid,
+                error: format!("not JSON: {}", e),
+                client_ref: None,
             })
         }
     };
     let seq = value.get("seq").cloned().unwrap_or(serde_json::Value::Null);
-    let applied = timeline::parse_command(value).and_then(|cmd| tl.apply(cmd));
+    let client_ref = timeline::take_client_ref(&mut value.clone()).ok().flatten();
+    let applied = timeline::parse_command(std::mem::take(&mut value)).and_then(|r| tl.apply(r));
     match applied {
-        Ok(a) => {
-            let mut ack = serde_json::to_value(tl.result(&a)).unwrap_or_default();
-            ack["type"] = "ack".into();
-            ack["seq"] = seq;
-            ack
-        }
-        Err(e) => serde_json::json!({
-            "type": "error", "seq": seq, "code": e.code(), "error": e.message(),
+        Ok(a) => ReplayWsMessage::Ack(ReplayAck {
+            seq,
+            result: tl.result(&a),
+        }),
+        Err(e) => ReplayWsMessage::Error(ReplayWsError {
+            seq,
+            code: e.code(),
+            error: e.message().to_string(),
+            client_ref,
         }),
     }
+}
+
+fn text(m: &ReplayWsMessage) -> Message {
+    Message::Text(serde_json::to_string(m).unwrap_or_default().into())
 }
 
 /// The close frame sent when the socket's group is gone.
@@ -198,16 +309,21 @@ async fn handle(
     flow_id: FlowId,
     group: String,
     held: Weak<timeline::ReplayTimeline>,
-    mut events: tokio::sync::broadcast::Receiver<strom_types::replay::ReplayEvent>,
+    mut events: tokio::sync::broadcast::Receiver<ReplayEvent>,
+    params: WsParams,
 ) {
     let (mut tx, mut rx) = socket.split();
-    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    let mut tick = tokio::time::interval(params.state_every());
+    let diagnostics = params.diagnostics();
     loop {
         tokio::select! {
             ev = events.recv() => {
-                let ev = match ev {
-                    Ok(ev) => ev,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                let msg = match ev {
+                    Ok(ev) => ReplayWsMessage::Event(ev),
+                    // The socket fell behind: say so, the client reads state.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        ReplayWsMessage::Lagged { missed: n }
+                    }
                     // The timeline was dropped (its flow stopped): close
                     // the socket the same way as when a new run replaced it.
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -215,9 +331,7 @@ async fn handle(
                         break;
                     }
                 };
-                let mut msg = serde_json::to_value(ev).unwrap_or_default();
-                msg["type"] = "event".into();
-                if tx.send(Message::Text(msg.to_string().into())).await.is_err() {
+                if tx.send(text(&msg)).await.is_err() {
                     break;
                 }
             }
@@ -226,18 +340,26 @@ async fn handle(
                     let _ = tx.send(group_ended()).await;
                     break;
                 };
-                let msg = tl.telemetry().to_string();
-                if tx.send(Message::Text(msg.into())).await.is_err() {
+                let state = text(&ReplayWsMessage::State(tl.state()));
+                let diag = diagnostics.then(|| text(&ReplayWsMessage::Diagnostics(tl.diagnostics())));
+                drop(tl);
+                if tx.send(state).await.is_err() {
                     break;
+                }
+                if let Some(d) = diag {
+                    if tx.send(d).await.is_err() {
+                        break;
+                    }
                 }
             }
             msg = rx.next() => {
                 let Some(Ok(msg)) = msg else { break };
-                let Message::Text(text) = msg else { continue };
+                let Message::Text(t) = msg else { continue };
                 // The next tick closes the socket if the group is gone.
                 let Some(tl) = current(flow_id, &group, &held) else { continue };
-                let reply = ws_reply(&tl, &text);
-                if tx.send(Message::Text(reply.to_string().into())).await.is_err() {
+                let reply = ws_reply(&tl, &t);
+                drop(tl);
+                if tx.send(text(&reply)).await.is_err() {
                     break;
                 }
             }
@@ -273,6 +395,55 @@ mod tests {
         let second = timeline::get_or_create(flow, "g");
         assert!(current(flow, "g", &held).is_none());
         assert!(current(flow, "g", &Arc::downgrade(&second)).is_some());
+    }
+
+    #[test]
+    fn ws_params_clamp_the_state_rate() {
+        let p = |state_ms, diagnostics: Option<&str>| WsParams {
+            state_ms,
+            diagnostics: diagnostics.map(str::to_string),
+        };
+        assert_eq!(p(None, None).state_every(), Duration::from_millis(50));
+        assert_eq!(p(Some(10), None).state_every(), Duration::from_millis(50));
+        assert_eq!(p(Some(200), None).state_every(), Duration::from_millis(200));
+        assert_eq!(
+            p(Some(60_000), None).state_every(),
+            Duration::from_millis(1000)
+        );
+        assert!(p(None, Some("1")).diagnostics());
+        assert!(!p(None, Some("0")).diagnostics());
+        assert!(!p(None, None).diagnostics());
+    }
+
+    /// A socket's reply is a typed message: `ack` with the motion, `seq` and
+    /// `client_ref`, or `error` with its code, `seq` and `client_ref`.
+    #[test]
+    fn ws_replies_echo_seq_and_client_ref() {
+        let flow = uuid::Uuid::new_v4();
+        let tl = timeline::get_or_create(flow, "g");
+        // No media: a conflict.
+        let r = ws_reply(&tl, r#"{"cmd":"pause","seq":4,"client_ref":"a"}"#);
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["seq"], 4);
+        assert_eq!(v["code"], "conflict");
+        assert_eq!(v["client_ref"], "a");
+        let r = ws_reply(&tl, "not json");
+        assert!(matches!(
+            r,
+            ReplayWsMessage::Error(ReplayWsError {
+                code: ReplayErrorCode::Invalid,
+                ..
+            })
+        ));
+        assert_eq!(
+            command_error(CommandError::OutOfRange("x".into())).0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            command_error(CommandError::OutOfRange("x".into())).1.error,
+            "out_of_range"
+        );
     }
 
     #[test]

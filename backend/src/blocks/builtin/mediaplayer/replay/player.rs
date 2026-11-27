@@ -29,7 +29,7 @@ use super::decode::{
     SegmentDecoder,
 };
 use super::source::{Segment, SourceIndex};
-use super::timeline::{tick_rt, Clip, DecodeRecord, PlayerStats, ReplayTimeline};
+use super::timeline::{tick_rt, Clip, DecodeRecord, PlayerConfig, PlayerStats, ReplayTimeline};
 use crate::gst::frame_rate::estimate_frame_rate;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -167,6 +167,8 @@ pub struct Output {
     /// Offline: the clip to play once, on the frame counter. `None` = live,
     /// on the flow clock.
     pub clip: Option<Clip>,
+    /// The player's replay properties and identity.
+    pub config: PlayerConfig,
 }
 
 pub struct ReplayPlayer {
@@ -218,8 +220,12 @@ impl ReplayPlayer {
         let Output {
             rate: output_rate,
             clip,
+            config,
         } = output;
-        let stats = Arc::new(PlayerStats::new(block_id));
+        let stats = Arc::new(PlayerStats::with_config(block_id, config));
+        if let Some((n, d)) = output_rate {
+            stats.set_output_rate(n, d);
+        }
         timeline.register_player(&stats);
         if clip.is_some() {
             timeline.use_counter();
@@ -507,7 +513,10 @@ impl ReplayPlayer {
 
     fn scheduler(self: Arc<Self>, tx: mpsc::Sender<Arc<Segment>>) {
         while self.alive() {
-            if let Some((cursor, speed)) = self.timeline.cursor_now() {
+            // The group's cursor, in this source's own time.
+            let offset = self.stats.offset_ns();
+            if let Some((cursor, speed)) = self.timeline.cursor_now().map(|(t, v)| (t - offset, v))
+            {
                 let forward = speed >= 0.0;
                 let (lo, hi) = if forward {
                     (
@@ -693,12 +702,13 @@ impl ReplayPlayer {
             }
 
             // The group's time at this tick, and this angle's frame for it.
-            let want = self.timeline.tai_at(rt);
-            if let Some(t) = want {
-                self.stats
-                    .wanted_frame
-                    .store(grid.floor_frame(t), Ordering::Relaxed);
+            // The group's time at this tick, in this source's own time.
+            let offset = self.stats.offset_ns();
+            let want_group = self.timeline.tai_at(rt);
+            if let Some(t) = want_group {
+                self.stats.wanted_tai.store(t, Ordering::Relaxed);
             }
+            let want = want_group.map(|t| t - offset);
             let mut hit =
                 want.and_then(|t| self.frame_holding(t, period_ns).map(|(ft, b)| (ft, t, b)));
             // No frame holds the time: in a hole of the recording, the last
@@ -711,7 +721,7 @@ impl ReplayPlayer {
                 }
             }
             self.stats.set_gap(gap);
-            self.stats.in_sync.store(hit.is_some(), Ordering::Relaxed);
+            self.stats.note_tick(hit.is_some());
             let hit = match hit {
                 Some((ft, t, b)) => {
                     let new_picture = last.as_ref().is_none_or(|(lt, _)| *lt != ft);
@@ -747,7 +757,7 @@ impl ReplayPlayer {
                 let out = out_buffer(b, rt, fd as i64, *shown_tai, &grid, &tai_caps);
                 let pushed = appsrc.push_buffer(out);
                 if let Some(t) = hit {
-                    self.timeline.note_pushed(rt, t);
+                    self.timeline.note_pushed(rt, t + offset);
                 }
                 if let Err(e) = pushed {
                     debug!("Replay {}: push stopped: {:?}", self.block_id, e);
@@ -855,12 +865,11 @@ impl ReplayPlayer {
         loop {
             let rt = tick_rt(k, on, od);
             self.timeline.set_counter(rt);
-            let Some(t) = self.timeline.playing_at(rt) else {
+            let Some(t_group) = self.timeline.playing_at(rt) else {
                 return Ok(k as u64);
             };
-            self.stats
-                .wanted_frame
-                .store(grid.floor_frame(t), Ordering::Relaxed);
+            self.stats.wanted_tai.store(t_group, Ordering::Relaxed);
+            let t = t_group - self.stats.offset_ns();
             let (ft, b, gap) = self.wait_frame(t, period_ns)?;
             self.stats.set_gap(gap);
             if self.read_strip && gap.is_none() && last_frame != Some(ft) {
@@ -882,7 +891,8 @@ impl ReplayPlayer {
                     debug!("Replay {}: push stopped: {:?}", self.block_id, e);
                     None
                 })?;
-            self.timeline.note_pushed(rt, t);
+            self.stats.note_tick(true);
+            self.timeline.note_pushed(rt, t_group);
             k += 1;
         }
     }

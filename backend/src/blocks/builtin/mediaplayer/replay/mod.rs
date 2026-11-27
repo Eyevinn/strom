@@ -42,10 +42,12 @@ use std::collections::HashMap;
 use strom_types::element::ElementPadRef;
 use strom_types::mediaplayer::{
     timeline_group, CLIP_IN_PROPERTY, CLIP_OUT_PROPERTY, CLIP_SPEED_PROPERTY,
-    DECODED_AHEAD_PROPERTY, GROUP_PROPERTY, OUTPUT_FRAMERATE_PROPERTY, PACING_OFFLINE,
+    DECODED_AHEAD_PROPERTY, FOLLOW_LIVE_PROPERTY, GROUP_PROPERTY, JOG_GRID_PROPERTY,
+    LIVE_MARGIN_PROPERTY, OFFSET_MS_PROPERTY, OUTPUT_FRAMERATE_PROPERTY, PACING_OFFLINE,
     PACING_PROPERTY, PACING_REALTIME, PRIVATE_GROUP_PREFIX, READ_AHEAD_PROPERTY, SOURCE_PROPERTY,
+    START_MODE_PROPERTY,
 };
-use strom_types::replay::ReplayTimeRef;
+use strom_types::replay::{ReplayJogGrid, ReplayTarget};
 use strom_types::{FlowId, PropertyValue};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -67,28 +69,112 @@ pub fn parse_frame_rate(s: &str) -> Result<Option<(u32, u32)>, String> {
     }
 }
 
-/// A clip's in or out point: UTC (RFC 3339, has a `T`) or TAI
-/// (`"<seconds>:<nanoseconds>"`).
-pub fn parse_time_ref(s: &str) -> Result<ReplayTimeRef, String> {
+/// A clip's in or out point: UTC (RFC 3339, has a `T`), TAI as TAMS
+/// `"<seconds>:<nanoseconds>"`, or the group time `t` (integer ns).
+pub fn parse_time_ref(s: &str) -> Result<ReplayTarget, String> {
     let s = s.trim();
     if s.contains('T') {
         strom_types::tai::parse_utc(s).ok_or_else(|| format!("bad UTC time '{}'", s))?;
-        Ok(ReplayTimeRef {
+        return Ok(ReplayTarget {
             utc: Some(s.to_string()),
             ..Default::default()
-        })
-    } else {
-        strom_types::tams::parse_timestamp_signed(s).ok_or_else(|| {
-            format!(
-                "bad time '{}', want UTC (2026-11-24T13:21:56.080Z) or TAI (<s>:<ns>)",
-                s
-            )
-        })?;
-        Ok(ReplayTimeRef {
-            tai: Some(s.to_string()),
-            ..Default::default()
-        })
+        });
     }
+    let t = if s.contains(':') {
+        strom_types::tams::parse_timestamp_signed(s)
+    } else {
+        s.parse::<i64>().ok()
+    };
+    t.map(ReplayTarget::t).ok_or_else(|| {
+        format!(
+            "bad time '{}', want UTC (2026-11-24T13:21:56.080Z), TAI (<s>:<ns>) or ns",
+            s
+        )
+    })
+}
+
+/// A player's replay properties and identity.
+fn player_config(
+    properties: &HashMap<String, PropertyValue>,
+    source: &str,
+    spec: &source::SourceSpec,
+) -> Result<timeline::PlayerConfig, String> {
+    let live_margin_ms = match prop_str(properties, LIVE_MARGIN_PROPERTY) {
+        None => match properties.get(LIVE_MARGIN_PROPERTY) {
+            Some(PropertyValue::UInt(u)) => Some(*u),
+            Some(PropertyValue::Int(i)) if *i >= 0 => Some(*i as u64),
+            _ => None,
+        },
+        Some(s) => Some(
+            s.parse::<u64>()
+                .map_err(|_| format!("bad {} '{}', want ms or empty", LIVE_MARGIN_PROPERTY, s))?,
+        ),
+    };
+    let follow_live = match properties.get(FOLLOW_LIVE_PROPERTY) {
+        None => true,
+        Some(PropertyValue::Bool(b)) => *b,
+        Some(PropertyValue::String(s)) => s.trim() != "false",
+        Some(v) => return Err(format!("bad {} {:?}", FOLLOW_LIVE_PROPERTY, v)),
+    };
+    let jog_grid = match prop_str(properties, JOG_GRID_PROPERTY).as_deref() {
+        None | Some("source") => ReplayJogGrid::Source,
+        Some("output") => ReplayJogGrid::Output,
+        Some(o) => {
+            return Err(format!(
+                "bad {} '{}', want source or output",
+                JOG_GRID_PROPERTY, o
+            ))
+        }
+    };
+    let start_mode = match prop_str(properties, START_MODE_PROPERTY).as_deref() {
+        None | Some("paused") | Some("first") => timeline::StartMode::Paused,
+        Some("live") => timeline::StartMode::Live,
+        Some(o) => {
+            return Err(format!(
+                "bad {} '{}', want paused, first or live",
+                START_MODE_PROPERTY, o
+            ))
+        }
+    };
+    let offset_ms = match properties.get(OFFSET_MS_PROPERTY) {
+        None => 0,
+        Some(PropertyValue::Int(i)) => *i,
+        Some(PropertyValue::UInt(u)) => i64::try_from(*u).unwrap_or(i64::MAX),
+        Some(PropertyValue::String(s)) if s.trim().is_empty() => 0,
+        Some(PropertyValue::String(s)) => s
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| format!("bad {} '{}'", OFFSET_MS_PROPERTY, s))?,
+        Some(v) => return Err(format!("bad {} {:?}", OFFSET_MS_PROPERTY, v)),
+    };
+    let (store, source_id, source) = match spec {
+        source::SourceSpec::Tams { gateway, flow_id } => {
+            let store = format!(
+                "tams+{}",
+                crate::client_auth::redact_url(gateway).trim_end_matches('/')
+            );
+            let uri = format!("{}/flows/{}", store, flow_id);
+            (Some(store), Some(flow_id.clone()), Some(uri))
+        }
+        // Local: the property as given (relative to the media path, or a
+        // path inside it); the directory's name is its id.
+        source::SourceSpec::Local(dir) => (
+            None,
+            dir.file_name().map(|n| n.to_string_lossy().into_owned()),
+            Some(source.to_string()),
+        ),
+    };
+    Ok(timeline::PlayerConfig {
+        name: prop_str(properties, "_block_name"),
+        source,
+        source_id,
+        store,
+        follow_live,
+        jog_grid,
+        start_mode,
+        live_margin_ms,
+        offset_ns: offset_ms.saturating_mul(1_000_000),
+    })
 }
 
 /// The clip of an offline player, from its properties; `None` when the
@@ -205,6 +291,7 @@ pub fn build(
             .map_err(invalid)?;
     let clip = clip_of(properties).map_err(invalid)?;
     let spec = source::parse_source(&source, &media_path).map_err(invalid)?;
+    let config = player_config(properties, &source, &spec).map_err(invalid)?;
     // Gateway auth is checked against the gateway it goes to (env token and
     // OSC SAT only to allowed gateways).
     let auth = match &spec {
@@ -261,6 +348,7 @@ pub fn build(
         player::Output {
             rate: output_rate,
             clip,
+            config,
         },
     );
 
@@ -332,7 +420,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(c.in_point.utc.as_deref(), Some("2026-11-26T10:00:00.000Z"));
-        assert_eq!(c.out.tai.as_deref(), Some("1795600000:500000000"));
+        assert_eq!(c.out.t.as_deref(), Some("1795600000500000000"));
         assert_eq!(c.speed, 0.5);
         // Offline needs both ends; real time takes no clip.
         assert!(clip_of(&props(&[(PACING_PROPERTY, st("offline"))])).is_err());

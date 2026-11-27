@@ -5673,6 +5673,110 @@
         }
       }
     },
+    "/api/replay": {
+      "get": {
+        "tags": [
+          "replay"
+        ],
+        "summary": "The replay groups of every running flow, with the API version and\nfeatures.",
+        "operationId": "replay_index",
+        "responses": {
+          "200": {
+            "description": "Replay groups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayIndex"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/replay/{flow_id}": {
+      "get": {
+        "tags": [
+          "replay"
+        ],
+        "summary": "The replay groups of a flow (empty when it does not run).",
+        "operationId": "replay_flow_index",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The flow's replay groups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayIndex"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/replay/{flow_id}/{group}": {
+      "get": {
+        "tags": [
+          "replay"
+        ],
+        "summary": "One replay group, for discovery.",
+        "operationId": "replay_group",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group",
+            "in": "path",
+            "description": "Replay group",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayGroupInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Replay group not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/replay/{flow_id}/{group}/command": {
       "post": {
         "tags": [
@@ -5704,7 +5808,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ReplayCommand"
+                "$ref": "#/components/schemas/ReplayRequest"
               }
             }
           },
@@ -5722,7 +5826,7 @@
             }
           },
           "400": {
-            "description": "Malformed command or value out of range",
+            "description": "invalid: malformed command or value out of range",
             "content": {
               "application/json": {
                 "schema": {
@@ -5742,7 +5846,58 @@
             }
           },
           "409": {
-            "description": "The command does not apply to the group now",
+            "description": "conflict: the command does not apply now; out_of_range: the range is outside the media",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/replay/{flow_id}/{group}/diagnostics": {
+      "get": {
+        "tags": [
+          "replay"
+        ],
+        "summary": "Engine diagnostics of a replay group.",
+        "operationId": "replay_diagnostics",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group",
+            "in": "path",
+            "description": "Replay group",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Group diagnostics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayDiagnostics"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Replay group not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -5759,7 +5914,7 @@
         "tags": [
           "replay"
         ],
-        "summary": "The state of a replay group (the object the WebSocket streams).",
+        "summary": "The state of a replay group (what the WebSocket streams as `state`).",
         "operationId": "replay_state",
         "parameters": [
           {
@@ -5787,7 +5942,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "$ref": "#/components/schemas/ReplayState"
                 }
               }
             }
@@ -10064,11 +10219,375 @@
           }
         }
       },
+      "ReplayAck": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ReplayCommandResult"
+          },
+          {
+            "type": "object",
+            "required": [
+              "seq"
+            ],
+            "properties": {
+              "seq": {
+                "type": "object",
+                "description": "The command's `seq`, as sent."
+              }
+            }
+          }
+        ],
+        "description": "The reply to a command on the WebSocket."
+      },
+      "ReplayAngleDiagnostics": {
+        "type": "object",
+        "description": "One angle's engine counters.",
+        "required": [
+          "block",
+          "indexed",
+          "strip_frame",
+          "strip_mismatches",
+          "code_utc_us",
+          "time_checked",
+          "time_errors",
+          "repeated_ticks",
+          "skipped_frames",
+          "misses",
+          "late_ticks",
+          "index_segments",
+          "fetched_segments",
+          "fetches",
+          "fetch_errors",
+          "last_fetch_ms",
+          "cached_segments",
+          "decodes",
+          "last_decode_ms",
+          "decode_failures",
+          "decode_ms_max",
+          "recent_decodes"
+        ],
+        "properties": {
+          "block": {
+            "type": "string"
+          },
+          "cached_segments": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "code_utc_us": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Burned-in UTC (µs) of the last new pushed picture, -1 if none."
+          },
+          "decode_failures": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "decode_ms_avg": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "decode_ms_max": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "decode_workers": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "decoder": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decodes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "fetch_errors": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "fetched_segments": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "fetches": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "index_segments": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "indexed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplaySpan"
+            },
+            "description": "What the index has listed, on the group's axis."
+          },
+          "last_decode_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "last_fetch_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "late_ticks": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "misses": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "output_fps": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recent_decodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplayDecodeRecord"
+            }
+          },
+          "repeated_ticks": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "skipped_frames": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "strip_frame": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Frame number read from the pushed picture's bitstrip, -1 if none."
+          },
+          "strip_mismatches": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "time_checked": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "time_errors": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "wanted": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayInstant",
+                "description": "The time the last tick asked this angle for."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ReplayAngleInfo": {
+        "type": "object",
+        "description": "An angle of a group, for discovery.",
+        "required": [
+          "block"
+        ],
+        "properties": {
+          "block": {
+            "type": "string",
+            "description": "The player block's id."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The block's name in the flow, if it has one."
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The source URI without credentials."
+          },
+          "source_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The source's own id: the TAMS flow id, or the directory name."
+          }
+        }
+      },
+      "ReplayAngleState": {
+        "type": "object",
+        "description": "One angle (player) of the group, for the operator.",
+        "required": [
+          "block",
+          "ready",
+          "frame_rate_missing",
+          "offset_ms",
+          "in_sync",
+          "gaps"
+        ],
+        "properties": {
+          "block": {
+            "type": "string",
+            "description": "The player block's id."
+          },
+          "extent": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayExtent",
+                "description": "On the group's axis."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "fps": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The source's frame rate, `N/D`."
+          },
+          "frame_rate_missing": {
+            "type": "boolean",
+            "description": "No frame rate is known (index, caps, timestamps): nothing of this\nangle can be placed on the time axis."
+          },
+          "gaps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplaySpan"
+            }
+          },
+          "in_gap": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplaySpan",
+                "description": "The hole of the recording the last tick's time was in."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "in_sync": {
+            "type": "boolean",
+            "description": "The last tick found the frame that holds its time."
+          },
+          "offset_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Trim: the angle's media is moved this far on the group's axis."
+          },
+          "ready": {
+            "$ref": "#/components/schemas/ReplayReady"
+          },
+          "shown": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayFrame",
+                "description": "The source frame last pushed, on the angle's own grid."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ReplayCause": {
+        "type": "string",
+        "description": "Why an event came: the command that caused it, or something that happened\nby itself.",
+        "enum": [
+          "seek",
+          "jog",
+          "speed",
+          "play",
+          "pause",
+          "ramp",
+          "cue",
+          "uncue",
+          "live",
+          "end",
+          "mark",
+          "follow_live",
+          "cue_end",
+          "caught_up",
+          "edge_moved",
+          "media_end",
+          "retention",
+          "media",
+          "start_mode"
+        ]
+      },
       "ReplayCommand": {
         "oneOf": [
           {
             "type": "object",
-            "description": "Pause and move by a number of reference-grid frames.",
+            "description": "Go to a point (clamped to the media). Keeps the speed (during a ramp,\nthe ramp's speed now), or sets `speed` in the same step.",
+            "required": [
+              "to",
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "seek"
+                ]
+              },
+              "speed": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "description": "-8 .. 8; omitted keeps the speed."
+              },
+              "to": {
+                "$ref": "#/components/schemas/ReplayTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Pause and move a number of frames on the group's `jog_grid`; the\ncursor rests in the middle of the frame.",
             "required": [
               "frames",
               "cmd"
@@ -10088,81 +10607,7 @@
           },
           {
             "type": "object",
-            "description": "Go to an instant: exactly one of `frame`, `utc`, `tai`,\n`from_live_ms`. Keeps the speed unless `speed` is given, in which case\nthe seek and the speed change are one step (no frame in between).",
-            "required": [
-              "cmd"
-            ],
-            "properties": {
-              "cmd": {
-                "type": "string",
-                "enum": [
-                  "seek"
-                ]
-              },
-              "frame": {
-                "type": [
-                  "integer",
-                  "null"
-                ],
-                "format": "int64",
-                "description": "Reference frame, relative to the group origin."
-              },
-              "from_live_ms": {
-                "type": [
-                  "integer",
-                  "null"
-                ],
-                "format": "int64",
-                "description": "Milliseconds before the live edge (the last instant every angle\nhas), e.g. 8000 to replay the last 8 s.",
-                "minimum": 0
-              },
-              "speed": {
-                "type": [
-                  "number",
-                  "null"
-                ],
-                "format": "double",
-                "description": "Speed from the new position, -8 .. 8; omitted keeps the speed."
-              },
-              "tai": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "TAI as TAMS `\"<seconds>:<nanoseconds>\"`."
-              },
-              "utc": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "UTC, RFC 3339, e.g. `2026-11-24T13:21:56.080Z`."
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Move by milliseconds, keeping the speed.",
-            "required": [
-              "ms",
-              "cmd"
-            ],
-            "properties": {
-              "cmd": {
-                "type": "string",
-                "enum": [
-                  "seek_rel"
-                ]
-              },
-              "ms": {
-                "type": "integer",
-                "format": "int64"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Play at a speed (negative = reverse, 0 = pause), -8 .. 8.",
+            "description": "Play at a speed where the cursor is, -8 .. 8; 0 pauses.",
             "required": [
               "speed",
               "cmd"
@@ -10182,7 +10627,7 @@
           },
           {
             "type": "object",
-            "description": "Play. Without `until`, a cue bounds the play (and a play at the cue's\nend starts again from its other end); with `until`, play runs to that\ninstant (from the cue's start, if a cue holds the cursor).",
+            "description": "Play. With a cue: from its other end when the cursor is within half a\nframe of the end play runs to. `until` sets a new cue\n`[min(cue.in, cursor), until)`.",
             "required": [
               "cmd"
             ],
@@ -10197,7 +10642,7 @@
                 "oneOf": [
                   {
                     "$ref": "#/components/schemas/ReplayEndAction",
-                    "description": "What happens at the end; default the cue's, else `freeze`."
+                    "description": "Needs `until` or a cue."
                   },
                   {
                     "type": "null"
@@ -10210,13 +10655,12 @@
                   "null"
                 ],
                 "format": "double",
-                "description": "Speed, -8 .. 8 except 0; default 1."
+                "description": "-8 .. 8 except 0; default 1."
               },
               "until": {
                 "oneOf": [
                   {
-                    "$ref": "#/components/schemas/ReplayTimeRef",
-                    "description": "Where the play ends: ahead of the cursor in the direction of play."
+                    "$ref": "#/components/schemas/ReplayTarget"
                   },
                   {
                     "type": "null"
@@ -10227,42 +10671,7 @@
           },
           {
             "type": "object",
-            "description": "Cue a clip: hold `[in, out)` as the bound of play and park, paused, at\n`in`. Seeking or jogging outside the cue, `live` and `end` drop it.",
-            "required": [
-              "in",
-              "out",
-              "cmd"
-            ],
-            "properties": {
-              "cmd": {
-                "type": "string",
-                "enum": [
-                  "cue"
-                ]
-              },
-              "end_action": {
-                "oneOf": [
-                  {
-                    "$ref": "#/components/schemas/ReplayEndAction",
-                    "description": "What happens when play reaches either end; default `freeze`."
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "in": {
-                "$ref": "#/components/schemas/ReplayTimeRef"
-              },
-              "out": {
-                "$ref": "#/components/schemas/ReplayTimeRef",
-                "description": "Exclusive: a freeze holds the last frame that starts before it."
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Drop the cue; the cursor and speed stay.",
+            "description": "Speed 0 where the cursor is.",
             "required": [
               "cmd"
             ],
@@ -10270,14 +10679,14 @@
               "cmd": {
                 "type": "string",
                 "enum": [
-                  "uncue"
+                  "pause"
                 ]
               }
             }
           },
           {
             "type": "object",
-            "description": "Change speed smoothly: linearly from the speed now to `to` over\n`duration_ms` (at most 60000), run by the server. Keeps the cue; any\nother command that sets the speed ends the ramp.",
+            "description": "Change the speed linearly to `to` over `duration_ms` (0 .. 60000),\nrun by the server.",
             "required": [
               "to",
               "duration_ms",
@@ -10303,29 +10712,41 @@
           },
           {
             "type": "object",
-            "description": "Mark the picture going out now: the server stamps the frame the\nplayers last pushed (not the cursor a client last heard of). Changes\nnothing; the result carries the mark.",
+            "description": "Hold `[in, out)` and park, paused, on `in`.",
             "required": [
+              "in",
+              "out",
               "cmd"
             ],
             "properties": {
               "cmd": {
                 "type": "string",
                 "enum": [
-                  "mark"
+                  "cue"
                 ]
               },
-              "label": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "Echoed in the mark."
+              "end_action": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ReplayEndAction"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "in": {
+                "$ref": "#/components/schemas/ReplayTarget"
+              },
+              "out": {
+                "$ref": "#/components/schemas/ReplayTarget",
+                "description": "Exclusive."
               }
             }
           },
           {
             "type": "object",
-            "description": "Pause where the cursor is.",
+            "description": "Drop the cue. The cursor, the speed and a running ramp stay.",
             "required": [
               "cmd"
             ],
@@ -10333,29 +10754,14 @@
               "cmd": {
                 "type": "string",
                 "enum": [
-                  "pause"
+                  "uncue"
                 ]
               }
             }
           },
           {
             "type": "object",
-            "description": "Go to the live edge (the last instant every angle has) and pause.",
-            "required": [
-              "cmd"
-            ],
-            "properties": {
-              "cmd": {
-                "type": "string",
-                "enum": [
-                  "end"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Play at 1x from the live edge minus a margin (default 1500 ms).",
+            "description": "Play at 1x from the live edge minus the margin. `margin_ms` sets the\nmargin for the rest of the run.",
             "required": [
               "cmd"
             ],
@@ -10375,74 +10781,104 @@
                 "minimum": 0
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "Go to the last frame every angle has, pause, drop the cue.",
+            "required": [
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "end"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Stamp the picture going out now, or the point `at`. Changes nothing.",
+            "required": [
+              "cmd"
+            ],
+            "properties": {
+              "at": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ReplayTarget"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "mark"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Whether the group goes live by itself when forward play reaches the\nlive point.",
+            "required": [
+              "on",
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "follow_live"
+                ]
+              },
+              "on": {
+                "type": "boolean"
+              }
+            }
           }
         ],
-        "description": "A command for a replay group. JSON objects tagged by `cmd`."
+        "description": "A command for a replay group, tagged by `cmd`. On the wire it may also\ncarry `client_ref` (see [`ReplayRequest`]) and, on the WebSocket, `seq`."
       },
       "ReplayCommandResult": {
-        "type": "object",
-        "description": "What a command did.",
-        "required": [
-          "speed",
-          "cursor_tai",
-          "live"
-        ],
-        "properties": {
-          "cue": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/ReplayCue",
-                "description": "The bound of play the server holds, if any."
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ReplayMotion"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "client_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
-              {
-                "type": "null"
+              "mark": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ReplayMark",
+                    "description": "For `mark`."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
-            ]
-          },
-          "cursor_tai": {
-            "$ref": "#/components/schemas/ReplayInstant",
-            "description": "The cursor after the command."
-          },
-          "frame": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The reference frame that holds the cursor, once the grid is known."
-          },
-          "live": {
-            "type": "boolean",
-            "description": "Following the live edge (after `live`, or after catching up)."
-          },
-          "mark": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/ReplayMark",
-                "description": "The mark, for `mark`."
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "speed": {
-            "type": "number",
-            "format": "double",
-            "description": "The speed after the command."
-          },
-          "time": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/ReplayFrameTime",
-                "description": "That frame's time."
-              },
-              {
-                "type": "null"
-              }
-            ]
+            }
           }
-        }
+        ],
+        "description": "What a command did: the group's motion after it."
       },
       "ReplayCue": {
         "type": "object",
@@ -10465,6 +10901,88 @@
           }
         }
       },
+      "ReplayDecodeRecord": {
+        "type": "object",
+        "description": "One segment decode.",
+        "required": [
+          "segment",
+          "ms",
+          "frames",
+          "ok"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "frames": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "segment": {
+            "$ref": "#/components/schemas/ReplaySpan"
+          }
+        }
+      },
+      "ReplayDiagnostics": {
+        "type": "object",
+        "description": "Engine diagnostics of a replay group, for measuring.",
+        "required": [
+          "now_utc",
+          "cmd_to_push_ms",
+          "angles"
+        ],
+        "properties": {
+          "angles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplayAngleDiagnostics"
+            }
+          },
+          "cmd_to_push_ms": {
+            "type": "number",
+            "format": "double",
+            "description": "From the last paused command to the first push of its target."
+          },
+          "live_edge_age_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Wall clock minus the capture time of the live edge; only `tai`."
+          },
+          "live_edge_seen_ms_ago": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "live_edge_step_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Median step of the live edge, once it has stepped twice."
+          },
+          "now_utc": {
+            "type": "string",
+            "description": "The host's wall clock."
+          }
+        }
+      },
       "ReplayEndAction": {
         "type": "string",
         "description": "What bounded play does when it reaches the end of its range.",
@@ -10474,7 +10992,49 @@
           "live"
         ]
       },
+      "ReplayErrorCode": {
+        "type": "string",
+        "description": "The WebSocket's error codes (and REST's, in the error details).",
+        "enum": [
+          "invalid",
+          "conflict",
+          "out_of_range"
+        ]
+      },
       "ReplayEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ReplayEventKind"
+          },
+          {
+            "type": "object",
+            "required": [
+              "event_seq",
+              "cause"
+            ],
+            "properties": {
+              "cause": {
+                "$ref": "#/components/schemas/ReplayCause"
+              },
+              "client_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `client_ref` of the command that caused the event."
+              },
+              "event_seq": {
+                "type": "integer",
+                "format": "int64",
+                "description": "One more than the group's previous event: a jump means a missed one.",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "Something the group did, sent on the WebSocket."
+      },
+      "ReplayEventKind": {
         "oneOf": [
           {
             "type": "object",
@@ -10497,9 +11057,8 @@
           },
           {
             "type": "object",
-            "description": "The group went live: playing at 1x behind the live edge.",
+            "description": "The group went live.",
             "required": [
-              "reason",
               "at",
               "event"
             ],
@@ -10512,93 +11071,271 @@
                 "enum": [
                   "live"
                 ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The media's start or end changed other than by the edge growing.",
+            "required": [
+              "range",
+              "event"
+            ],
+            "properties": {
+              "event": {
+                "type": "string",
+                "enum": [
+                  "range_changed"
+                ]
               },
-              "reason": {
-                "$ref": "#/components/schemas/ReplayLiveReason"
+              "range": {
+                "$ref": "#/components/schemas/ReplayRange"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The group's readiness changed.",
+            "required": [
+              "ready",
+              "event"
+            ],
+            "properties": {
+              "event": {
+                "type": "string",
+                "enum": [
+                  "ready"
+                ]
+              },
+              "ready": {
+                "$ref": "#/components/schemas/ReplayReady"
               }
             }
           }
         ],
-        "description": "Something the group did by itself, sent on the WebSocket as\n`{\"type\": \"event\", \"event\": ..., ...}`."
+        "description": "What an event says."
       },
-      "ReplayFrameTime": {
+      "ReplayExtent": {
         "type": "object",
-        "description": "A frame on a grid: where it starts.",
+        "description": "`[start, end)`.",
         "required": [
-          "frame",
-          "utc",
-          "tai",
-          "tai_ns",
-          "tai_clock",
+          "start",
+          "end"
+        ],
+        "properties": {
+          "end": {
+            "$ref": "#/components/schemas/ReplayInstant"
+          },
+          "start": {
+            "$ref": "#/components/schemas/ReplayInstant"
+          }
+        }
+      },
+      "ReplayFrame": {
+        "type": "object",
+        "description": "A frame on a grid: where it starts, and its index in its UTC second (the\n`FF` of a timecode `HH:MM:SS:FF`).",
+        "required": [
+          "t",
           "frame_in_second"
         ],
         "properties": {
-          "frame": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Frame relative to the group origin, on the same grid."
-          },
           "frame_in_second": {
             "type": "integer",
             "format": "int64",
-            "description": "Index of the frame among the frames that start in its UTC second."
+            "description": "Index of the frame among the frames of its grid that start in the\nsame UTC second (the same second of the axis when not `tai`)."
           },
-          "tai": {
+          "t": {
             "type": "string",
-            "description": "TAI of the frame start, `\"<seconds>:<nanoseconds>\"`."
-          },
-          "tai_clock": {
-            "type": "string",
-            "description": "The TAI as a calendar time (no zone), for display."
-          },
-          "tai_ns": {
-            "type": "string",
-            "description": "TAI nanoseconds of the frame start, as a string."
+            "description": "Start of the frame on the group's time axis, decimal string."
           },
           "utc": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "UTC of the frame start; `null` unless the time domain is `tai`."
+          }
+        }
+      },
+      "ReplayGrid": {
+        "type": "object",
+        "description": "The group's two grids.",
+        "properties": {
+          "output": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayGridRate",
+                "description": "The output's frame rate (`output_framerate`): timecodes and\n[`ReplayFrame`]s are on it."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayGridRate",
+                "description": "The finest frame rate among the sources."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ReplayGridRate": {
+        "type": "object",
+        "description": "A frame rate.",
+        "required": [
+          "fps",
+          "frame_ns"
+        ],
+        "properties": {
+          "fps": {
             "type": "string",
-            "description": "UTC of the frame start, RFC 3339 with milliseconds."
+            "description": "`N/D`, e.g. `50/1` or `30000/1001`."
+          },
+          "frame_ns": {
+            "type": "number",
+            "format": "double",
+            "description": "Frame period in ns (fractional for NTSC rates)."
+          }
+        }
+      },
+      "ReplayGroupInfo": {
+        "type": "object",
+        "description": "A replay group, for discovery.",
+        "required": [
+          "flow_id",
+          "group",
+          "time_domain",
+          "grid",
+          "ready",
+          "angles"
+        ],
+        "properties": {
+          "angles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplayAngleInfo"
+            }
+          },
+          "flow_id": {
+            "type": "string"
+          },
+          "grid": {
+            "$ref": "#/components/schemas/ReplayGrid"
+          },
+          "group": {
+            "type": "string"
+          },
+          "ready": {
+            "$ref": "#/components/schemas/ReplayReady"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The store the angles play from, without credentials (e.g.\n`tams+https://gateway.example.com`), when they share one."
+          },
+          "time_domain": {
+            "$ref": "#/components/schemas/ReplayTimeDomain"
+          }
+        }
+      },
+      "ReplayIndex": {
+        "type": "object",
+        "description": "The replay groups of the server (or of a flow).",
+        "required": [
+          "api_version",
+          "features",
+          "groups"
+        ],
+        "properties": {
+          "api_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "[`REPLAY_API_VERSION`].",
+            "minimum": 0
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "[`REPLAY_FEATURES`]."
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplayGroupInfo"
+            }
           }
         }
       },
       "ReplayInstant": {
         "type": "object",
-        "description": "An instant on the group's timeline.",
+        "description": "An exact point on the group's time axis.",
         "required": [
-          "utc",
-          "tai",
-          "tai_ns"
+          "t"
         ],
         "properties": {
-          "tai": {
+          "t": {
             "type": "string",
-            "description": "TAI as TAMS `\"<seconds>:<nanoseconds>\"`."
-          },
-          "tai_ns": {
-            "type": "string",
-            "description": "TAI nanoseconds as a string (does not fit in a JavaScript number)."
+            "description": "Nanoseconds on the group's time axis, as a decimal string.",
+            "example": "1795526557010000000"
           },
           "utc": {
-            "type": "string",
-            "description": "UTC, RFC 3339 with milliseconds."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339 with milliseconds; `null` unless the time domain is `tai`."
           }
         }
       },
-      "ReplayLiveReason": {
+      "ReplayJogGrid": {
         "type": "string",
-        "description": "Why the group went live.",
+        "description": "Which grid `jog` steps on.",
         "enum": [
-          "end_action",
-          "caught_up",
-          "edge_moved"
+          "source",
+          "output"
+        ]
+      },
+      "ReplayLiveMargin": {
+        "type": "object",
+        "description": "The distance behind the live edge the group plays at when live.",
+        "required": [
+          "ms",
+          "source"
+        ],
+        "properties": {
+          "ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "source": {
+            "$ref": "#/components/schemas/ReplayLiveMarginSource"
+          }
+        }
+      },
+      "ReplayLiveMarginSource": {
+        "type": "string",
+        "description": "Where the live margin comes from.",
+        "enum": [
+          "computed",
+          "set"
         ]
       },
       "ReplayMark": {
         "type": "object",
-        "description": "The picture going out when a `mark` came.",
+        "description": "A stamped point.",
         "required": [
-          "cursor_tai",
-          "time",
+          "at",
           "angles"
         ],
         "properties": {
@@ -10607,21 +11344,27 @@
             "items": {
               "$ref": "#/components/schemas/ReplayMarkAngle"
             },
-            "description": "What each angle pushed."
+            "description": "Without `at`: what each angle pushed. With `at`: the frame each angle\nholds there."
           },
-          "cursor_tai": {
+          "at": {
             "$ref": "#/components/schemas/ReplayInstant",
-            "description": "The group time of the last pushed tick."
+            "description": "Without `at`: the group time of the last pushed tick. A cue from\n`{\"t\": at.t}` shows the same pictures."
+          },
+          "frame": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayFrame"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "label": {
             "type": [
               "string",
               "null"
             ]
-          },
-          "time": {
-            "$ref": "#/components/schemas/ReplayFrameTime",
-            "description": "The reference frame that holds it, and its time."
           }
         }
       },
@@ -10634,52 +11377,520 @@
         ],
         "properties": {
           "block": {
-            "type": "string",
-            "description": "The player block."
+            "type": "string"
           },
           "shown": {
-            "$ref": "#/components/schemas/ReplayFrameTime",
-            "description": "The source frame it last pushed, on its own grid."
+            "$ref": "#/components/schemas/ReplayFrame",
+            "description": "The angle's source frame, on its own grid."
           }
         }
       },
-      "ReplayTimeRef": {
+      "ReplayMotion": {
         "type": "object",
-        "description": "A point on the group's timeline, as a command gives it: exactly one\nfield.",
+        "description": "How the group moves: cursor, speed, live, cue, ramp.",
+        "required": [
+          "cursor",
+          "speed",
+          "live"
+        ],
         "properties": {
-          "frame": {
+          "cue": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayCue"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cursor": {
+            "$ref": "#/components/schemas/ReplayPosition"
+          },
+          "live": {
+            "type": "boolean",
+            "description": "Following the live edge."
+          },
+          "ramp": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayRampState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "speed": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "ReplayOnAir": {
+        "type": "object",
+        "description": "The picture going out now: what the players last pushed.",
+        "required": [
+          "at",
+          "behind_live_ms",
+          "behind_live_estimate_ms"
+        ],
+        "properties": {
+          "age_ms": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "Reference frame, relative to the group origin."
+            "description": "Wall clock minus capture time; only when the domain is `tai`."
           },
+          "at": {
+            "$ref": "#/components/schemas/ReplayInstant"
+          },
+          "behind_live_estimate_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Against `range.live_edge_estimate`: smooth. The one to show."
+          },
+          "behind_live_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Against `range.live_edge`, which steps a segment at a time: a\nsawtooth."
+          },
+          "frame": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayFrame"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ReplayPosition": {
+        "type": "object",
+        "description": "An exact instant and the output-grid frame that holds it.",
+        "required": [
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "$ref": "#/components/schemas/ReplayInstant"
+          },
+          "frame": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayFrame",
+                "description": "The frame of the output grid that holds `at`; `null` until the grid\nis known."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ReplayRampState": {
+        "type": "object",
+        "description": "A speed ramp the server is running.",
+        "required": [
+          "from",
+          "to",
+          "duration_ms",
+          "remaining_ms"
+        ],
+        "properties": {
+          "duration_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "from": {
+            "type": "number",
+            "format": "double"
+          },
+          "remaining_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "to": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "ReplayRange": {
+        "type": "object",
+        "description": "The group's media.",
+        "required": [
+          "start",
+          "live_edge",
+          "end",
+          "live_edge_estimate",
+          "growing"
+        ],
+        "properties": {
+          "end": {
+            "$ref": "#/components/schemas/ReplayInstant",
+            "description": "The last media any angle has; the cursor is clamped to `end - 1`."
+          },
+          "growing": {
+            "type": "boolean",
+            "description": "The live edge has stepped recently."
+          },
+          "live_edge": {
+            "$ref": "#/components/schemas/ReplayInstant",
+            "description": "The end of the last media every angle has."
+          },
+          "live_edge_estimate": {
+            "$ref": "#/components/schemas/ReplayInstant",
+            "description": "The live edge now, estimated between the index's steps: smooth, never\nsteps back, updated every tick."
+          },
+          "start": {
+            "$ref": "#/components/schemas/ReplayInstant",
+            "description": "The earliest start among the angles."
+          }
+        }
+      },
+      "ReplayReady": {
+        "type": "string",
+        "description": "Readiness of an angle or of the group.",
+        "enum": [
+          "indexing",
+          "warming",
+          "ready"
+        ]
+      },
+      "ReplayRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ReplayCommand"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "client_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "At most 64 characters."
+              }
+            }
+          }
+        ],
+        "description": "A command as sent: the command and an optional `client_ref`, echoed in\nthe response and in the events the command causes."
+      },
+      "ReplaySpan": {
+        "type": "object",
+        "description": "`[start, end)` and its length.",
+        "required": [
+          "start",
+          "end",
+          "duration_ms"
+        ],
+        "properties": {
+          "duration_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "end": {
+            "$ref": "#/components/schemas/ReplayInstant"
+          },
+          "start": {
+            "$ref": "#/components/schemas/ReplayInstant"
+          }
+        }
+      },
+      "ReplayState": {
+        "type": "object",
+        "description": "The state of a replay group. Unknown values are `null`, never `0`.",
+        "required": [
+          "time_domain",
+          "ready",
+          "grid",
+          "jog_grid",
+          "follow_live",
+          "live_margin",
+          "angles"
+        ],
+        "properties": {
+          "angles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplayAngleState"
+            }
+          },
+          "follow_live": {
+            "type": "boolean"
+          },
+          "grid": {
+            "$ref": "#/components/schemas/ReplayGrid"
+          },
+          "jog_grid": {
+            "$ref": "#/components/schemas/ReplayJogGrid"
+          },
+          "live_margin": {
+            "$ref": "#/components/schemas/ReplayLiveMargin"
+          },
+          "motion": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayMotion",
+                "description": "`null` until the group has media."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "on_air": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayOnAir",
+                "description": "`null` until a picture has gone out."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "range": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayRange",
+                "description": "`null` until the group has media."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ready": {
+            "$ref": "#/components/schemas/ReplayReady"
+          },
+          "time_domain": {
+            "$ref": "#/components/schemas/ReplayTimeDomain"
+          }
+        }
+      },
+      "ReplayTarget": {
+        "type": "object",
+        "description": "A point in a command: an object with exactly one field.",
+        "properties": {
           "from_live_ms": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "Milliseconds before the live edge.",
+            "description": "Milliseconds before the live edge; `0` is the last frame every angle\nhas (`range.live_edge - 1`).",
             "minimum": 0
           },
-          "tai": {
+          "rel_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Milliseconds from the cursor when the command arrives, negative is\nback."
+          },
+          "t": {
             "type": [
               "string",
               "null"
             ],
-            "description": "TAI as TAMS `\"<seconds>:<nanoseconds>\"`."
+            "description": "Group time, exact (decimal string)."
           },
           "utc": {
             "type": [
               "string",
               "null"
             ],
-            "description": "UTC, RFC 3339."
+            "description": "RFC 3339; lands on the source frame whose start is nearest (within\nhalf a frame). 409 unless the time domain is `tai`."
           }
         },
         "additionalProperties": false
+      },
+      "ReplayTimeDomain": {
+        "type": "string",
+        "description": "What `t` on the group's time axis means.",
+        "enum": [
+          "unknown",
+          "tai",
+          "unanchored"
+        ]
+      },
+      "ReplayWsError": {
+        "type": "object",
+        "description": "A refused command on the WebSocket.",
+        "required": [
+          "seq",
+          "code",
+          "error"
+        ],
+        "properties": {
+          "client_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The command's `client_ref`, when it parsed."
+          },
+          "code": {
+            "$ref": "#/components/schemas/ReplayErrorCode"
+          },
+          "error": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "object"
+          }
+        }
+      },
+      "ReplayWsMessage": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReplayState",
+                "description": "The group state, every 50 ms (or `?state_ms=`)."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "state"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "The group state, every 50 ms (or `?state_ms=`)."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReplayEvent",
+                "description": "Something the group did."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "event"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Something the group did."
+          },
+          {
+            "type": "object",
+            "description": "The socket fell behind and dropped `missed` events: read the state.",
+            "required": [
+              "missed",
+              "type"
+            ],
+            "properties": {
+              "missed": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "lagged"
+                ]
+              }
+            }
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReplayDiagnostics",
+                "description": "Engine diagnostics, with each state when the socket asked\n(`?diagnostics=1`)."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "diagnostics"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Engine diagnostics, with each state when the socket asked\n(`?diagnostics=1`)."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReplayAck",
+                "description": "A command applied."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "ack"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "A command applied."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReplayWsError",
+                "description": "A command refused; nothing changed."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "error"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "A command refused; nothing changed."
+          }
+        ],
+        "description": "Every message the replay WebSocket sends, tagged by `type`."
       },
       "RtpStreamStats": {
         "type": "object",
@@ -15818,7 +17029,7 @@
     },
     {
       "name": "replay",
-      "description": "Replay group control: commands and state"
+      "description": "Replay groups (API version 2): discovery, commands, state, diagnostics"
     },
     {
       "name": "probes",
