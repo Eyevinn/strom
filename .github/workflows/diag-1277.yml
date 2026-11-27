@@ -1,0 +1,82 @@
+# TEMPORARY: issue #1277 diag. Never merge.
+name: diag-1277
+
+on:
+  push:
+    branches: ["diag/1277"]
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  SCCACHE_BUCKET: sccache
+  SCCACHE_ENDPOINT: https://olivedev-rustcache.minio-minio.auto.prod-se.osaas.io
+  SCCACHE_REGION: us-east-1
+  SCCACHE_S3_USE_SSL: "true"
+  AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+  RUSTC_WRAPPER: sccache
+  STROM_REQUIRE_GST_PLUGINS: 1
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    outputs:
+      linux: ${{ steps.i.outputs.linux }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: i
+        run: |
+          tag=$(cat .github/ci-images/linux.Dockerfile rust-toolchain.toml | sha256sum | cut -c1-16)
+          echo "linux=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/strom-ci-linux:$tag" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: image
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ needs.image.outputs.linux }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-x86_64-ubuntu-26.04
+          save-if: false
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Build
+        run: cargo test --package strom --features efp --test it --no-run
+      - name: Run
+        run: bash .github/diag/run-1277.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diag-1277-linux
+          path: diag-out/
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install GStreamer
+        run: |
+          brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav libnice-gstreamer
+          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig:$(brew --prefix gstreamer)/lib/pkgconfig:$(brew --prefix glib)/lib/pkgconfig" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$(brew --prefix)/lib" >> $GITHUB_ENV
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Placeholder frontend dist
+        run: mkdir -p backend/dist && echo '<html></html>' > backend/dist/index.html && touch backend/dist/placeholder.wasm
+      - name: Build
+        run: cargo test --package strom --features efp --test it --no-run
+      - name: Run
+        run: bash .github/diag/run-1277.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diag-1277-macos
+          path: diag-out/
