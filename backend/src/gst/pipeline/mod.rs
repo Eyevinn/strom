@@ -202,8 +202,10 @@ pub struct PipelineManager {
     /// Set when a stop begins. The bus handler then does not report an EOS
     /// as the flow ending on its own: a stop drain may cause one.
     stopping: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Set by the bus handler on EOS or on an error. Stop drains are skipped
-    /// for a flow that already ended: there is no data left to drain.
+    /// Set by the bus handler on an EOS of the whole pipeline. Stop drains
+    /// are skipped for a flow that already ended: there is no data left to
+    /// drain. An error alone does not set it, since a flow can keep running
+    /// after one.
     flow_ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Thread priority state tracker (tracks whether priority was successfully set)
     thread_priority_state: Option<ThreadPriorityState>,
@@ -489,6 +491,39 @@ mod tests {
         .expect("EOS was not reported");
         manager.stop().unwrap();
         assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// An error the flow keeps running after does not end it: a later stop
+    /// still runs the drains, or a recorder loses its open fragment.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stop_drains_run_after_an_error_the_flow_survived() {
+        ensure_glib_main_loop();
+        let events = EventBroadcaster::default();
+        let mut rx = events.subscribe();
+        let mut manager = build_test_manager(events);
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        manager.stop_drain_fns.push(flag_drain(&ran));
+        start_playing(&mut manager);
+        manager
+            .pipeline
+            .bus()
+            .unwrap()
+            .post(
+                gst::message::Error::builder(gst::CoreError::Failed, "one branch failed")
+                    .src(&manager.pipeline)
+                    .build(),
+            )
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !matches!(rx.recv().await, Ok(StromEvent::PipelineError { .. })) {}
+        })
+        .await
+        .expect("the error was not reported");
+        manager.stop().unwrap();
+        assert!(
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the stop drain was skipped after an error the flow kept running through"
+        );
     }
 
     /// A drain runs with the bus watch connected: an error it causes is

@@ -128,7 +128,11 @@ impl PipelineManager {
                     let debug_info = err.debug();
                     let source = err.src().map(|s| s.name().to_string());
 
-                    flow_ended.store(true, Ordering::SeqCst);
+                    // Not the flow's end: a flow can post an error and keep
+                    // running (one branch fails, the rest records on), and
+                    // its stop drains must still run. An error that stops the
+                    // flow ends it with EOS (a failing source sends one) or
+                    // takes the pipeline out of PLAYING, and either skips them.
                     error!(
                         "Pipeline error in flow '{}': {} (debug: {:?}, source: {:?})",
                         flow_name, error_msg, debug_info, source

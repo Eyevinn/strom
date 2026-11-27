@@ -149,6 +149,20 @@ logging:
     max-file: "5"
 ```
 
+### Stop grace period
+
+On `docker stop` (SIGTERM) Strom lets the blocks of running flows finish their output, such
+as a recorder's open fragment, for at most 10 s, while in-flight HTTP requests finish. Docker
+kills the container after its default 10 s `stop_grace_period`, which can cut such a drain off.
+Hosts that record should give Strom at least 15 s:
+
+```yaml
+stop_grace_period: 15s
+```
+
+With `docker run`, use `--stop-timeout 15`; in Kubernetes, `terminationGracePeriodSeconds: 15`
+(the default there is 30 s). A second SIGINT or SIGTERM makes Strom exit at once.
+
 ### Backup
 
 Strom's state lives under `/data` (plus the CEF cache in `strom-full`, see Configuration):
