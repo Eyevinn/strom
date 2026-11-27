@@ -520,16 +520,25 @@ impl BlockBuildContext {
     ///   down, with the bus watch still connected: bus handlers and error
     ///   reporting see what a drain causes, and an EOS reaching the pipeline
     ///   is not reported as the flow ending.
-    /// - They run only if the pipeline is PLAYING and has not posted EOS or an
-    ///   error. A flow that never started or already ended runs none.
+    /// - They run only if the pipeline is PLAYING and has not posted EOS. A
+    ///   flow that never started or already ended runs none. An error the flow
+    ///   keeps running after does not count as its end; after one that stopped
+    ///   data without an EOS, a drain waits out its own bound.
+    /// - Stopping a flow completes even if the HTTP request that asked for it
+    ///   is dropped: the drains, and the teardown after them, are not
+    ///   cancelled with it.
     /// - Drains of one flow run in parallel, each on its own plain OS thread,
     ///   outside the tokio runtime: `Handle::current()` and `block_on` panic
     ///   there. Capture a `tokio::runtime::Handle` at build time if the drain
     ///   needs async work.
     /// - A drain must bound its own wait (a few seconds). Stopping waits for
     ///   all of them together at most 10 s, then leaves the rest behind.
-    /// - Graceful shutdown of the process does not run drains, only stopping
-    ///   a flow does.
+    /// - Graceful shutdown of the process (SIGINT/SIGTERM) runs the drains of
+    ///   every running flow in parallel, at most 10 s in all, before it exits.
+    ///   The flow is not stopped: one with auto-restart starts again with the
+    ///   next process. Once shutdown begins no flow starts, and a flow stopped
+    ///   meanwhile waits for the shutdown drains before its pipeline goes to
+    ///   NULL. A pipeline dropped any other way runs none.
     pub fn register_stop_drain(&self, drain: StopDrainFn) {
         self.stop_drains.borrow_mut().push(drain);
     }
