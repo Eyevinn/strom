@@ -52,7 +52,8 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - TAMS Output: a parked segment's `.meta` sidecar is JSON and is written to a temporary file and renamed, so a sweep never reads one half written. Sidecars in the old format are still read
 - Media Player (timeline mode): a listed stretch of a growing source that still has a hole near the cursor is listed again, with backoff, so segments registered late are found. The live poll runs off the fetch loop, a decoder that hangs is bounded, and video that is not H.264 (H.265, say) fails with an error that names it instead of hanging
 - OSC: the gateway host is taken from the parsed URL before a SAT is sent. User info that looks like an OSC host (`https://x.svc.auto.prod.osaas.io:pw@evil.example/`) passed the check and the SAT went to the other host; a gateway URL with user info is now refused
-- OSC: a SAT whose `exp` and `iat` claims give an absurd lifetime is refreshed by age instead of panicking on overflow
+- TAMS Output: in OSC PAT/SAT mode a SAT goes only to an HTTPS OSC instance of its service, also when the OSC Service ID is set explicitly. A gateway outside OSC that should get SATs is allowed with `STROM_TAMS_ALLOWED_GATEWAYS` (comma-separated URLs) or by being `STROM_TAMS_GATEWAY_URL`. A gateway URL without a scheme fails with a message that it must be an absolute `https://` URL
+- OSC: a SAT is refreshed before its own `exp` when that comes sooner than the usual 50 minutes, and never after it
 - Media Player (timeline mode): a local `source` outside `media_path` is refused, through `..` or a symlink alike
 - Vision mixer: `pgm-endpoint` and `multiview-endpoint` find a WHEP output behind a pad linked more than once or a block with several outputs (breadth first, not only the first link)
 - Replay WebSocket: the socket is closed with a close frame when its group's flow stops, not dropped
