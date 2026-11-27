@@ -9,8 +9,9 @@
 //! - one upload at a time, round-robin across TAMS flows (one directory each),
 //!   oldest first within a flow, so one flow's large backlog does not starve
 //!   the others;
-//! - never while a live uploader has a segment queued or in flight
-//!   ([`live`]): live first, the backlog goes in the gaps;
+//! - never while a live uploader has segments waiting in its queue
+//!   ([`live`]): live first. One drain upload may run alongside a live upload
+//!   in flight;
 //! - a segment is claimed (`crate::tams::uploader::Claim`) while it is uploaded,
 //!   so the cap on parked segments never deletes it and nothing uploads it
 //!   twice; on success its file, sidecar and index entry are deleted;
@@ -49,7 +50,6 @@ use crate::tams::uploader::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use strom_types::FlowId;
@@ -72,42 +72,60 @@ const MIN_IDLE_WAIT: Duration = Duration::from_millis(100);
 
 // --- Live first ------------------------------------------------------------------
 
-/// How many live uploaders have a segment queued or in flight. The drainer
-/// uploads only while there is none.
+/// How often [`LiveBusy::wait_idle`] looks again while live is behind.
+const LIVE_POLL: Duration = Duration::from_millis(50);
+
+/// Whether live uploads are falling behind: some live uploader has segments
+/// waiting in its queue, not yet started. A segment in flight does not count,
+/// so one drain upload runs alongside steady live uploads; with many cameras
+/// some uploader nearly always has one in flight, and the backlog would never
+/// drain. The drainer uploads only while nothing is queued.
 pub struct LiveBusy {
-    busy: AtomicUsize,
-    idle: Notify,
+    /// The live uploaders' queues (see [`crate::tams::uploader::channel`]),
+    /// weak, so a queue closes when its producer goes.
+    queues: Mutex<Vec<tokio::sync::mpsc::WeakSender<FragmentReady>>>,
 }
 
 impl LiveBusy {
     pub const fn new() -> Self {
         Self {
-            busy: AtomicUsize::new(0),
-            idle: Notify::const_new(),
+            queues: Mutex::new(Vec::new()),
         }
     }
 
-    /// Whether some live uploader has a segment queued or in flight. One
-    /// atomic load.
-    pub fn is_busy(&self) -> bool {
-        self.busy.load(Ordering::Acquire) > 0
+    /// Count the segments waiting in `tx`'s queue.
+    pub fn watch(&self, tx: &tokio::sync::mpsc::Sender<FragmentReady>) {
+        self.lock().push(tx.downgrade());
     }
 
-    /// Mark one live uploader busy until the guard is dropped.
-    pub fn enter(&'static self) -> LiveBusyGuard {
-        self.busy.fetch_add(1, Ordering::AcqRel);
-        LiveBusyGuard(self)
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<tokio::sync::mpsc::WeakSender<FragmentReady>>> {
+        self.queues.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Wait until no live uploader is busy.
-    pub async fn wait_idle(&self) {
-        loop {
-            // Created before the check, so a release in between is not missed.
-            let idle = self.idle.notified();
-            if !self.is_busy() {
-                return;
+    /// Live segments waiting in the queues of all live uploaders, not yet
+    /// started. Queues whose producer is gone are dropped.
+    pub fn queued(&self) -> usize {
+        let mut queues = self.lock();
+        let mut queued = 0;
+        queues.retain(|weak| match weak.upgrade() {
+            Some(tx) => {
+                queued += tx.max_capacity() - tx.capacity();
+                true
             }
-            idle.await;
+            None => false,
+        });
+        queued
+    }
+
+    /// Whether some live uploader has a segment waiting in its queue.
+    pub fn is_busy(&self) -> bool {
+        self.queued() > 0
+    }
+
+    /// Wait until no live segment is waiting.
+    pub async fn wait_idle(&self) {
+        while self.is_busy() {
+            tokio::time::sleep(LIVE_POLL).await;
         }
     }
 }
@@ -115,17 +133,6 @@ impl LiveBusy {
 impl Default for LiveBusy {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// One live uploader's busy mark; see [`LiveBusy::enter`].
-pub struct LiveBusyGuard(&'static LiveBusy);
-
-impl Drop for LiveBusyGuard {
-    fn drop(&mut self) {
-        if self.0.busy.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.0.idle.notify_waiters();
-        }
     }
 }
 
@@ -838,6 +845,7 @@ mod tests {
     use super::*;
     use crate::tams::park::{FreeSpace, ParkLimits, Space};
     use crate::tams::uploader::sidecar_contents;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Unlimited;
     impl FreeSpace for Unlimited {
@@ -1035,10 +1043,18 @@ mod tests {
         assert_eq!(std::fs::read_dir(root.join("fa")).unwrap().count(), 1); // park.json
     }
 
-    /// Nothing is uploaded while a live uploader is busy; it goes as soon as
-    /// none is.
+    fn live_fragment(n: u64) -> FragmentReady {
+        FragmentReady {
+            path: PathBuf::from(format!("live-{}", n)),
+            start_ns: n,
+            end_ns: n + 1,
+        }
+    }
+
+    /// A live segment in flight (taken off the queue) does not hold the
+    /// drainer back; one waiting in the queue does, until it is taken.
     #[tokio::test]
-    async fn tams_drain_pauses_while_live_is_busy() {
+    async fn tams_drain_pauses_only_while_live_segments_wait() {
         let store = Store::default();
         let gw = start_store(store.clone()).await;
         let tmp = tempfile::tempdir().unwrap();
@@ -1046,21 +1062,42 @@ mod tests {
         let p = parking(&root, u64::MAX);
         manifest(&root, &gw, "fa", AuthRef::None);
         park(p, &root, &gw, "fa", 10);
+        park(p, &root, &gw, "fa", 11);
         let live: &'static LiveBusy = leak(LiveBusy::new());
-        let busy = live.enter();
-        assert!(live.is_busy());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        live.watch(&tx);
         let mut d = drainer(p, live);
+
+        // One live segment in flight, none queued: the drainer goes on.
+        tx.try_send(live_fragment(0)).unwrap();
+        let in_flight = rx.recv().await.unwrap();
+        assert!(!live.is_busy());
+        assert_eq!(d.step().await, Step::Tried);
+        assert_eq!(store.registered.lock().unwrap().len(), 1);
+
+        // A live segment waits behind it: the drainer waits too.
+        tx.try_send(live_fragment(1)).unwrap();
+        assert_eq!(live.queued(), 1);
         assert_eq!(d.step().await, Step::LiveBusy);
         let task = tokio::spawn(d.run());
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(store.registered.lock().unwrap().is_empty());
-        drop(busy);
+        assert_eq!(store.registered.lock().unwrap().len(), 1);
+
+        // The live uploader takes it (now in flight): the drainer resumes.
+        drop(in_flight);
+        let _in_flight = rx.recv().await.unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while store.registered.lock().unwrap().is_empty() && Instant::now() < deadline {
+        while store.registered.lock().unwrap().len() < 2 && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         task.abort();
-        assert_eq!(store.registered.lock().unwrap().len(), 1);
+        assert_eq!(store.registered.lock().unwrap().len(), 2);
+
+        // A queue whose producer is gone no longer counts.
+        tx.try_send(live_fragment(2)).unwrap();
+        assert!(live.is_busy());
+        drop(tx);
+        assert!(!live.is_busy());
     }
 
     /// The segment being uploaded is never deleted to make room, and a claimed

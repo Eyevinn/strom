@@ -19,7 +19,7 @@
 //!   a backlog never holds back the live edge: the server-wide drainer
 //!   ([`crate::tams::drain`]) uploads parked segments, from server start and
 //!   whether or not their flow runs, and pauses while any live uploader is
-//!   busy (see [`crate::tams::drain::live`]);
+//!   has segments waiting in its queue (see [`crate::tams::drain::live`]);
 //! - a parked segment keeps its bytes plus a `.meta` sidecar holding its TAI
 //!   timerange and the gateway and TAMS flow it belongs to, and its directory
 //!   a `park.json` manifest (see [`crate::tams::drain::Manifest`]) with what the
@@ -323,8 +323,11 @@ const AUTH_REPORT_INTERVAL: Duration = Duration::from_secs(300);
 const SEGMENT_PREFIX: &str = "seg_";
 
 /// Create the fragment channel for one flow.
+/// The drainer watches its queue (see [`crate::tams::drain::LiveBusy`]).
 pub fn channel() -> (mpsc::Sender<FragmentReady>, mpsc::Receiver<FragmentReady>) {
-    mpsc::channel(CHANNEL_CAPACITY)
+    let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+    crate::tams::drain::live().watch(&tx);
+    (tx, rx)
 }
 
 /// The gateway and TAMS flow a parked segment is meant for, stored in its
@@ -585,14 +588,9 @@ pub fn spawn_uploader(
         write_manifest(&mut ctx).await;
 
         // Only new segments: the drainer uploads parked ones, and pauses while
-        // this uploader has a segment in hand or queued.
-        let mut busy: Option<crate::tams::drain::LiveBusyGuard> = None;
+        // segments wait in this uploader's queue.
         while let Some(frag) = rx.recv().await {
-            busy.get_or_insert_with(|| crate::tams::drain::live().enter());
             process_fragment(&mut ctx, frag).await;
-            if rx.is_empty() {
-                busy = None;
-            }
         }
 
         // Channel closed: the pipeline is tearing down. The segmenter has finalized
@@ -600,7 +598,6 @@ pub fn spawn_uploader(
         // flush it as the final segment.
         if let Some(tf) = tail.lock().ok().and_then(|mut t| t.take()) {
             if tokio::fs::try_exists(&tf.path).await.unwrap_or(false) {
-                let _busy = busy.get_or_insert_with(|| crate::tams::drain::live().enter());
                 debug!("TAMS {}: flushing final segment on shutdown", block_id);
                 let end_ns =
                     tail_end_ns(&tf, media_end_running_time_ns(&media_end), tail_segment_ns);
@@ -612,7 +609,6 @@ pub fn spawn_uploader(
                 process_fragment(&mut ctx, frag).await;
             }
         }
-        drop(busy);
 
         info!(
             "TAMS {}: uploader stopped for flow {}",
