@@ -183,6 +183,7 @@ pub(super) fn build_whepsrc(
         .property_from_str("start-time-selection", "first")
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("liveadder: {}", e)))?;
+    crate::gst::aggregator_qos::report_late_input_drops(&liveadder);
 
     // Set min-upstream-latency so liveadder accounts for jitterbuffer buffering delay
     if liveadder.find_property("min-upstream-latency").is_some() {

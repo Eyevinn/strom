@@ -1,3 +1,4 @@
+use super::qos::{DropLogGate, DropLogLine, DROP_LOG_INTERVAL};
 use super::warning_gate::{mask_digits, WarningGate, WARNING_REPEAT_INTERVAL};
 use super::PipelineManager;
 use gstreamer as gst;
@@ -248,22 +249,10 @@ impl PipelineManager {
                     }
                 }
                 MessageView::Qos(qos) => {
-                    // Quality of Service message - collect for aggregation and periodic broadcast
-                    if let Some(source_name) = qos.src().map(|s| s.name().to_string()) {
-                        let (jitter, proportion, _quality) = qos.values();
-                        let (_format, processed) = qos.stats();
-
-                        // Extract processed count as u64 from GenericFormattedValue
-                        let processed_count = processed.value() as u64;
-
-                        // Add to aggregator (will be logged and broadcast periodically)
-                        // Note: jitter is already i64 from qos.values()
-                        qos_aggregator.add_event(
-                            source_name,
-                            proportion,
-                            jitter,
-                            processed_count,
-                        );
+                    // An element (or one input pad of it) dropped late data.
+                    // Collected per source, logged and broadcast once a second.
+                    if let Some(sample) = super::qos::parse_qos(qos) {
+                        qos_aggregator.add(sample);
                     }
                 }
                 MessageView::Latency(_) => {
@@ -337,24 +326,32 @@ impl PipelineManager {
         // Spawn task that wakes up every 1 second to broadcast aggregated QoS stats
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+            let mut drop_log = DropLogGate::default();
             loop {
                 interval.tick().await;
+                let now = Instant::now();
+
+                // Drops held back by the log gate for a full interval.
+                for line in drop_log.flush(now) {
+                    log_drops(&flow_name, &line);
+                }
 
                 // Extract and reset aggregated stats
                 let stats = aggregator.extract_and_reset();
 
                 if !stats.is_empty() {
                     debug!(
-                        "Broadcasting QoS stats for {} element(s) in flow '{}'",
+                        "Broadcasting QoS stats for {} source(s) in flow '{}'",
                         stats.len(),
                         flow_name
                     );
                 }
 
-                // Broadcast stats for each element
-                for (element_name, element_stats) in stats {
+                // Broadcast stats for each element, or each input pad of one
+                for (source, element_stats) in stats {
+                    let element_name = source.element_name.clone();
                     let avg_proportion = element_stats.avg_proportion();
-                    let is_falling_behind = avg_proportion < 1.0;
+                    let is_falling_behind = element_stats.is_falling_behind();
 
                     // Parse element name to determine if it's part of a block or standalone
                     // Format: "block_id:element_type" for block elements, "element_id" for standalone
@@ -370,34 +367,53 @@ impl PipelineManager {
                             (None, element_name.clone(), None)
                         };
 
-                    // Log aggregated stats. An element posts a QoS message
-                    // when it drops a late buffer, so the count is the number
-                    // of drops, whatever the proportion. A proportion below
-                    // 1.0 means the element keeps up with time to spare, so
-                    // it is no drop rate.
-                    warn!(
-                        "QoS: '{}' in flow '{}' dropped {} late buffer(s) in the last second (avg jitter {:.1} ms, avg proportion {:.3})",
+                    debug!(
+                        "QoS: '{}' pad {:?} in flow '{}': {} message(s), {} dropped in the period (avg jitter {:.1} ms, avg proportion {:.3})",
                         element_name,
+                        source.pad_name,
                         flow_name,
                         element_stats.event_count,
+                        element_stats.dropped_in_period,
                         element_stats.avg_jitter() as f64 / 1_000_000.0,
                         avg_proportion
                     );
+
+                    // Drops are logged at once, then summed per interval.
+                    let description = describe_source(
+                        &element_name,
+                        source.pad_name.as_deref(),
+                        element_stats.upstream_element.as_deref(),
+                        element_stats.stats_format.as_deref(),
+                    );
+                    if let Some(line) = drop_log.record(
+                        &source,
+                        description,
+                        element_stats.dropped_in_period,
+                        element_stats.event_count,
+                        now,
+                    ) {
+                        log_drops(&flow_name, &line);
+                    }
 
                     // Broadcast QoS event to frontend
                     events.broadcast(StromEvent::QoSStats {
                         flow_id,
                         block_id,
                         element_id,
-                        element_name: element_name.clone(),
+                        element_name,
                         internal_element_type,
                         event_count: element_stats.event_count,
                         avg_proportion,
                         min_proportion: element_stats.min_proportion,
                         max_proportion: element_stats.max_proportion,
                         avg_jitter: element_stats.avg_jitter(),
-                        total_processed: element_stats.total_processed,
+                        total_processed: element_stats.processed.unwrap_or(0),
                         is_falling_behind,
+                        pad_name: source.pad_name,
+                        upstream_element: element_stats.upstream_element,
+                        total_dropped: element_stats.dropped,
+                        dropped_in_period: element_stats.dropped_in_period,
+                        stats_format: element_stats.stats_format,
                     });
                 }
             }
@@ -411,5 +427,41 @@ impl PipelineManager {
         if let Some(task) = self.qos_broadcast_task.take() {
             task.abort();
         }
+    }
+}
+
+/// Who dropped: "'mixer:audiomixer' input 'sink_1' (fed by 'mixer:to_main_queue_1')".
+fn describe_source(
+    element: &str,
+    pad: Option<&str>,
+    upstream: Option<&str>,
+    unit: Option<&str>,
+) -> String {
+    let mut text = format!("'{element}'");
+    if let Some(pad) = pad {
+        text.push_str(&format!(" input '{pad}'"));
+    }
+    if let Some(upstream) = upstream {
+        text.push_str(&format!(" (fed by '{upstream}')"));
+    }
+    text.push_str(&format!(", counted in {}", unit.unwrap_or("QoS messages")));
+    text
+}
+
+fn log_drops(flow_name: &str, line: &DropLogLine) {
+    if line.first {
+        warn!(
+            "QoS: {} in flow '{}' started dropping late data: {} dropped ({} QoS message(s))",
+            line.description, flow_name, line.dropped, line.events
+        );
+    } else {
+        warn!(
+            "QoS: {} in flow '{}' dropped {} more late since the last report, at most {} s apart ({} QoS message(s))",
+            line.description,
+            flow_name,
+            line.dropped,
+            DROP_LOG_INTERVAL.as_secs(),
+            line.events
+        );
     }
 }

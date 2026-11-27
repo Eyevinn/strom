@@ -69,6 +69,9 @@ pub(crate) fn make_audiomixer(
         mixer.set_property("ignore-inactive-pads", true);
     }
 
+    // A late input is dropped silently unless its pad posts QoS (#1265).
+    crate::gst::aggregator_qos::report_late_input_drops(&mixer);
+
     Ok(mixer)
 }
 

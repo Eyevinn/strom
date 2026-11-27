@@ -244,9 +244,11 @@ pub enum StromEvent {
         element_name: String,
         /// Internal element type if part of a block (e.g., "videoconvert")
         internal_element_type: Option<String>,
-        /// Number of QoS events in aggregation period
+        /// Number of QoS messages in the aggregation period (about one per second).
+        /// An element posts one when it drops late data or lowers its quality.
         event_count: u64,
-        /// Average proportion (< 1.0 = falling behind)
+        /// Average proportion the element reported. Above 1.0 it is too slow,
+        /// below 1.0 it keeps up with time to spare. Not a drop rate.
         avg_proportion: f64,
         /// Minimum proportion seen
         min_proportion: f64,
@@ -254,10 +256,34 @@ pub enum StromEvent {
         max_proportion: f64,
         /// Average jitter in nanoseconds
         avg_jitter: i64,
-        /// Total buffers processed
+        /// Cumulative amount the element processed, in `stats_format` units
+        /// (0 when the element does not report it). In Strom 0.8.4 and earlier
+        /// this field carried the dropped count by mistake.
         total_processed: u64,
-        /// Whether pipeline is falling behind (avg_proportion < 1.0)
+        /// Whether the element dropped late data in the period
+        /// (`dropped_in_period > 0`). In Strom 0.8.4 and earlier this was
+        /// `avg_proportion < 1.0`, which is true when an element keeps up.
         is_falling_behind: bool,
+        /// Input pad the QoS message came from, when a pad posted it: an
+        /// aggregator (`audiomixer`) reports drops per input, e.g. `sink_1`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pad_name: Option<String>,
+        /// Element linked to `pad_name`, which tells which input was late
+        /// (e.g. `mixer:to_main_queue_1`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        upstream_element: Option<String>,
+        /// Cumulative amount the element (or pad) dropped, in `stats_format`
+        /// units. None when the element does not report it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_dropped: Option<u64>,
+        /// Amount dropped in the period, in `stats_format` units. Falls back to
+        /// `event_count` when the element does not report a dropped count.
+        #[serde(default)]
+        dropped_in_period: u64,
+        /// Unit of the processed and dropped counts: `buffers`, `samples`,
+        /// `frames`, `bytes` or `default`. None when not reported.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stats_format: Option<String>,
     },
     /// A new AES67 stream was discovered via SAP or mDNS
     StreamDiscovered {
@@ -659,8 +685,10 @@ impl StromEvent {
                 element_id,
                 internal_element_type,
                 event_count,
-                avg_proportion,
                 is_falling_behind,
+                pad_name,
+                dropped_in_period,
+                stats_format,
                 ..
             } => {
                 let target = if let Some(block_id) = block_id {
@@ -673,15 +701,21 @@ impl StromEvent {
                     format!("element {}", element_id)
                 };
 
+                let target = match pad_name {
+                    Some(pad) => format!("{} input {}", target, pad),
+                    None => target,
+                };
+                let unit = stats_format.as_deref().unwrap_or("units");
+
                 if *is_falling_behind {
                     format!(
-                        "QoS: {} in flow {} falling behind ({} events, avg proportion {:.3})",
-                        target, flow_id, event_count, avg_proportion
+                        "QoS: {} in flow {} dropped {} {} of late data ({} events)",
+                        target, flow_id, dropped_in_period, unit, event_count
                     )
                 } else {
                     format!(
-                        "QoS: {} in flow {} OK ({} events, avg proportion {:.3})",
-                        target, flow_id, event_count, avg_proportion
+                        "QoS: {} in flow {} OK ({} events, no drops)",
+                        target, flow_id, event_count
                     )
                 }
             }
@@ -1484,6 +1518,11 @@ mod event_accessor_tests {
                 avg_jitter: 0,
                 total_processed: 0,
                 is_falling_behind: false,
+                pad_name: None,
+                upstream_element: None,
+                total_dropped: None,
+                dropped_in_period: 0,
+                stats_format: None,
             },
             StromEvent::StreamDiscovered {
                 stream_id: "s1".to_string(),
@@ -1727,5 +1766,39 @@ mod event_accessor_tests {
         assert!(progress.is_high_frequency());
         assert!(!media_download_event(MediaDownloadState::Done).is_high_frequency());
         assert!(!media_download_event(MediaDownloadState::Failed).is_high_frequency());
+    }
+
+    /// A QoSStats event from before the drop fields were added still parses.
+    #[test]
+    fn qos_stats_without_the_drop_fields_still_parses() {
+        let wire = serde_json::json!({
+            "type": "QoSStats",
+            "data": {
+                "flow_id": uuid::Uuid::nil(),
+                "block_id": null,
+                "element_id": "e0",
+                "element_name": "e0",
+                "internal_element_type": null,
+                "event_count": 3,
+                "avg_proportion": 1.0,
+                "min_proportion": 1.0,
+                "max_proportion": 1.0,
+                "avg_jitter": 0,
+                "total_processed": 10,
+                "is_falling_behind": true
+            }
+        });
+        let StromEvent::QoSStats {
+            pad_name,
+            total_dropped,
+            dropped_in_period,
+            ..
+        } = serde_json::from_value(wire).unwrap()
+        else {
+            panic!("not a QoSStats event");
+        };
+        assert_eq!(pad_name, None);
+        assert_eq!(total_dropped, None);
+        assert_eq!(dropped_in_period, 0);
     }
 }
