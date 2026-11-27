@@ -763,7 +763,7 @@ fn min_keyframe_request_interval_defaults_to_one_second() {
 }
 
 /// The block clears the encoder's `min-force-key-unit-interval`: that
-/// base-class floor also drops scheduled requests (TAMS Output's TAI grid). The
+/// base-class floor also delays scheduled requests (TAMS Output's TAI grid). The
 /// block applies `min_keyframe_request_interval_ms` itself, to "now" requests
 /// only (see `keyframe_requests`).
 #[test]
