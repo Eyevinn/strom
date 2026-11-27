@@ -5,7 +5,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 ## [Unreleased]
 
 ### Added
-- Media Player: timeline mode (replay). A player plays an indexed source (a TAMS flow, `tams+https://<gateway>/flows/<flow_id>`) on a timeline that can be scrubbed, jogged and played at any speed, from -8x to 8x. Players with the same `group` form a replay group with one cursor and one speed; the group shares TAI time, and each player has its own frame grid (**Output Framerate**). See [MEDIA_LIBRARY.md](MEDIA_LIBRARY.md)
+- Media Player: timeline mode (replay). A player plays an indexed source (a TAMS flow, `tams+https://<gateway>/flows/<flow_id>`, or a directory with `index.json`) on a timeline that can be scrubbed, jogged and played at any speed, from -8x to 8x. Players with the same `group` form a replay group with one cursor and one speed; the group shares TAI time, and each player has its own frame grid (**Output Framerate**). See [MEDIA_LIBRARY.md](MEDIA_LIBRARY.md)
 - Replay control API: `POST /api/replay/{flow_id}/{group}/command`, `GET /api/replay/{flow_id}/{group}/state` and a WebSocket at `/api/replay/{flow_id}/{group}/ws`, with one command schema for REST and WebSocket (seek by frame, UTC, TAI or distance from live, jog, speed, ramps, cue and bounded play, live, marks). See [REPLAY_API.md](REPLAY_API.md)
 - Replay page: an operator page for a replay group at `/player/replay/{flow_id}/{group}` (transport, angles through the vision mixer, marks and clips)
 - Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture
@@ -20,6 +20,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - TAMS Output: one segment length property, `segment_duration_ms` (default 2000, at least 200), instead of `segment_duration_secs` and `segment_duration_ms`
 - Video Encoder: the keyframe-request floor applies only to requests for a keyframe now (a WebRTC viewer's PLI). Requests for a keyframe at a given running time (TAMS Output's grid, `splitmuxsink` in a segmenting recorder) always pass. The GStreamer base-class property `min-force-key-unit-interval` dropped both kinds, which moved TAMS Output's segment boundaries off its grid
 - TAMS Output cuts segments itself instead of with `splitmuxsink`, and registers each segment as soon as the frame after it arrives instead of one GOP later
+- Media Player, timeline mode: decoded frames stay in GPU memory when the decoder and the flow downstream both take it: CUDA memory from `nvh264dec` (a GL consumer such as the vision mixer brings it into GL with `cudadownload`, by CUDA-GL interop), GL memory from `vtdec_hw` (sharing the flow's GL context). The frame store holds those buffers, so a frame is no longer downloaded to RAM, copied and uploaded again. Other decoders and system-memory consumers keep NV12 in system memory. `STROM_REPLAY_FRAME_MEMORY` (`auto`, `system`, `cuda`, `gl`) narrows the choice, and `STROM_REPLAY_DECODED_MB` budgets the memory the frames are in
 - TAMS Output: segment files carry a per-run id in their name (`seg_<run>_<n>`), so a new run in the same directory never overwrites segments an earlier run left parked
 
 ### Fixed
@@ -31,6 +32,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Media Player (timeline mode): a listed stretch of a growing source that still has a hole near the cursor is listed again, with backoff, so segments registered late are found. The live poll runs off the fetch loop, a decoder that hangs is bounded, and video that is not H.264 (H.265, say) fails with an error that names it instead of hanging
 - OSC: the gateway host is taken from the parsed URL before a SAT is sent. User info that looks like an OSC host (`https://x.svc.auto.prod.osaas.io:pw@evil.example/`) passed the check and the SAT went to the other host; a gateway URL with user info is now refused
 - OSC: a SAT whose `exp` and `iat` claims give an absurd lifetime is refreshed by age instead of panicking on overflow
+- Media Player (timeline mode): a local `source` outside `media_path` is refused, through `..` or a symlink alike
 - Vision mixer: `pgm-endpoint` and `multiview-endpoint` find a WHEP output behind a pad linked more than once or a block with several outputs (breadth first, not only the first link)
 - Replay WebSocket: the socket is closed with a close frame when its group's flow stops, not dropped
 
