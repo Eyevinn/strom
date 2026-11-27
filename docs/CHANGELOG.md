@@ -9,6 +9,10 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ### Fixed
 - Vision mixer: `pgm-endpoint` and `multiview-endpoint` find a WHEP output behind a pad linked more than once or a block with several outputs (breadth first, not only the first link)
+- Vision mixer: the WHEP search stops at blocks that combine inputs (compositor, audio mixer/router, vision mixer), follows the matching output of a block with several inputs, and returns no endpoint while the nearest WHEP output is not started
+
+### Changed
+- API: `multiview-endpoint` and `pgm-endpoint` respond with `WhepEndpointResponse` (same JSON shape; `MultiviewEndpointResponse` remains as an alias)
 
 ---
 

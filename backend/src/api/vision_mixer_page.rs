@@ -11,52 +11,127 @@ use crate::blocks::builtin::vision_mixer::overlay;
 use crate::blocks::builtin::vision_mixer::properties as vm_props;
 use crate::state::AppState;
 
+/// Block types that combine several inputs into one picture or sound. Their
+/// outputs no longer carry the picture of the pad being searched from, so the
+/// WHEP search stops at them.
+const COMBINING_BLOCKS: &[&str] = &[
+    "builtin.vision_mixer",
+    "builtin.compositor",
+    "builtin.mixer",
+    "builtin.audiorouter",
+    "builtin.liveaudiorouter",
+];
+
+/// GStreamer elements that combine several inputs (see [`COMBINING_BLOCKS`]).
+const COMBINING_ELEMENTS: &[&str] = &[
+    "compositor",
+    "glvideomixer",
+    "glvideomixerelement",
+    "videomixer",
+    "audiomixer",
+    "liveadder",
+    "adder",
+];
+
+/// Whether an output pad is the counterpart of an input pad on a block with
+/// several inputs: same trailing index (`in_1` / `out_1`), or the same name
+/// with `in` replaced by `out` (`video_in` / `video_out`).
+fn output_matches_input(input: &str, output: &str) -> bool {
+    let index = |s: &str| {
+        let digits = s.len() - s.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+        (digits > 0).then(|| s[s.len() - digits..].to_string())
+    };
+    match (index(input), index(output)) {
+        (Some(a), Some(b)) => a == b,
+        _ => input.replace("in", "out") == output,
+    }
+}
+
 /// The nearest WHEP output downstream of a block's output pad. Returns the
-/// WHEP endpoint path (e.g. `/whep/{endpoint_id}`) or an empty string if none
-/// is found.
+/// WHEP endpoint path (e.g. `/whep/{endpoint_id}`), or an empty string if
+/// none is found or the nearest WHEP output has no endpoint yet.
 ///
-/// Searches breadth first through every link of a pad and every output of the
-/// blocks on the way, so a pad linked twice (a tee) or an intermediate block
-/// with several outputs cannot hide the endpoint. Stops at another vision
-/// mixer, whose outputs no longer carry this pad's picture. A page that
-/// resolves WHEP endpoints in the browser should walk the flow the same way.
+/// Searches breadth first, so a pad linked twice (a tee) or an intermediate
+/// block with several outputs cannot hide the endpoint. The rule for which
+/// blocks the picture passes through:
+///
+/// - A block or element that combines inputs (vision mixer, compositor,
+///   audio mixer or router) stops the search: its outputs show something else.
+/// - A block with one linked input passes it to all its outputs (an encoder,
+///   a tee).
+/// - A block with several linked inputs passes the input reached to the
+///   outputs that match it by index or name (`in_1` -> `out_1`,
+///   `video_in` -> `video_out`). If none match (a muxer with one output),
+///   it passes to all outputs.
+/// - The nearest WHEP output is the answer. If it has no endpoint id yet (not
+///   started), the result is empty rather than a farther WHEP output, so a
+///   client does not lock on to the wrong stream.
+///
+/// Browser pages should call the `pgm-endpoint` / `multiview-endpoint` API
+/// rather than walk the flow themselves.
 pub fn find_whep_endpoint_for_pad(flow: &Flow, block_id: &str, pad_name: &str) -> String {
     use std::collections::{HashSet, VecDeque};
 
     let block_of = |id: &str| flow.blocks.iter().find(|b| b.id == id);
-    let outputs_of = |blk: &str| {
+    let is_combining = |id: &str| match block_of(id) {
+        Some(b) => COMBINING_BLOCKS.contains(&b.block_definition_id.as_str()),
+        None => flow
+            .elements
+            .iter()
+            .any(|e| e.id == id && COMBINING_ELEMENTS.contains(&e.element_type.as_str())),
+    };
+    let pads_of = |blk: &str, outputs: bool| {
         let prefix = format!("{}:", blk);
         let mut pads: Vec<&str> = Vec::new();
         for l in &flow.links {
-            if l.from.starts_with(&prefix) && !pads.contains(&l.from.as_str()) {
-                pads.push(l.from.as_str());
+            let pad = if outputs { &l.from } else { &l.to };
+            if pad.starts_with(&prefix) && !pads.contains(&pad.as_str()) {
+                pads.push(pad.as_str());
             }
         }
         pads
     };
+    let pad_name_of = |pad: &str| pad.split_once(':').map_or("", |(_, p)| p).to_string();
 
     let start = format!("{}:{}", block_id, pad_name);
     let mut queue: VecDeque<&str> = VecDeque::from([start.as_str()]);
-    let mut seen: HashSet<&str> = HashSet::from([block_id]);
+    // Input pads already reached. Keyed per pad, not per block, so a block
+    // reached on two inputs passes on both.
+    let mut seen: HashSet<&str> = HashSet::new();
 
     while let Some(pad) = queue.pop_front() {
         for link in flow.links.iter().filter(|l| l.from == pad) {
             let target = link.to.split(':').next().unwrap_or("");
-            if !seen.insert(target) {
+            if target == block_id || !seen.insert(link.to.as_str()) {
                 continue;
             }
-            match block_of(target).map(|b| b.block_definition_id.as_str()) {
-                Some("builtin.whep_output") => {
-                    if let Some(eid) = block_of(target)
-                        .and_then(|b| b.runtime_data.as_ref())
+            if let Some(b) = block_of(target) {
+                if b.block_definition_id == "builtin.whep_output" {
+                    return b
+                        .runtime_data
+                        .as_ref()
                         .and_then(|rd| rd.get("whep_endpoint_id"))
-                    {
-                        return format!("/whep/{}", eid);
-                    }
+                        .map(|eid| format!("/whep/{}", eid))
+                        .unwrap_or_default();
                 }
-                Some("builtin.vision_mixer") => {}
-                _ => queue.extend(outputs_of(target)),
             }
+            if is_combining(target) {
+                continue;
+            }
+            let outputs = pads_of(target, true);
+            if pads_of(target, false).len() > 1 {
+                let input = pad_name_of(&link.to);
+                let matching: Vec<&str> = outputs
+                    .iter()
+                    .copied()
+                    .filter(|o| output_matches_input(&input, &pad_name_of(o)))
+                    .collect();
+                if !matching.is_empty() {
+                    queue.extend(matching);
+                    continue;
+                }
+            }
+            queue.extend(outputs);
         }
     }
 
@@ -227,7 +302,7 @@ async fn render_vision_mixer_page(
         ("block_id" = String, Path, description = "Vision mixer block ID"),
     ),
     responses(
-        (status = 200, description = "Multiview endpoint info", body = strom_types::api::MultiviewEndpointResponse),
+        (status = 200, description = "Multiview endpoint info", body = strom_types::api::WhepEndpointResponse),
         (status = 404, description = "Flow or block not found"),
     ),
     tag = "vision-mixer"
@@ -235,7 +310,7 @@ async fn render_vision_mixer_page(
 pub async fn get_multiview_endpoint(
     State(state): State<AppState>,
     Path((flow_id, block_id)): Path<(FlowId, String)>,
-) -> Result<Json<strom_types::api::MultiviewEndpointResponse>, axum::http::StatusCode> {
+) -> Result<Json<strom_types::api::WhepEndpointResponse>, axum::http::StatusCode> {
     let flows = state.get_flows().await;
     let flow = flows
         .iter()
@@ -250,9 +325,7 @@ pub async fn get_multiview_endpoint(
 
     let endpoint = find_whep_endpoint_for_pad(flow, &block_id, "multiview_out");
 
-    Ok(Json(strom_types::api::MultiviewEndpointResponse {
-        endpoint,
-    }))
+    Ok(Json(strom_types::api::WhepEndpointResponse { endpoint }))
 }
 
 /// Get the WHEP endpoint fed by a vision mixer's PGM output (followed through
@@ -265,7 +338,7 @@ pub async fn get_multiview_endpoint(
         ("block_id" = String, Path, description = "Vision mixer block ID"),
     ),
     responses(
-        (status = 200, description = "PGM endpoint info", body = strom_types::api::MultiviewEndpointResponse),
+        (status = 200, description = "PGM endpoint info", body = strom_types::api::WhepEndpointResponse),
         (status = 404, description = "Flow or block not found"),
     ),
     tag = "vision-mixer"
@@ -273,7 +346,7 @@ pub async fn get_multiview_endpoint(
 pub async fn get_pgm_endpoint(
     State(state): State<AppState>,
     Path((flow_id, block_id)): Path<(FlowId, String)>,
-) -> Result<Json<strom_types::api::MultiviewEndpointResponse>, axum::http::StatusCode> {
+) -> Result<Json<strom_types::api::WhepEndpointResponse>, axum::http::StatusCode> {
     let flows = state.get_flows().await;
     let flow = flows
         .iter()
@@ -284,9 +357,7 @@ pub async fn get_pgm_endpoint(
         .find(|b| b.id == block_id && b.block_definition_id == "builtin.vision_mixer")
         .ok_or(axum::http::StatusCode::NOT_FOUND)?;
     let endpoint = find_whep_endpoint_for_pad(flow, &block_id, "pgm_out");
-    Ok(Json(strom_types::api::MultiviewEndpointResponse {
-        endpoint,
-    }))
+    Ok(Json(strom_types::api::WhepEndpointResponse { endpoint }))
 }
 
 #[cfg(test)]
@@ -393,5 +464,97 @@ mod tests {
             find_whep_endpoint_for_pad(&f, "vm", "pgm_out"),
             "/whep/near"
         );
+    }
+
+    #[test]
+    fn stops_at_compositing_blocks_and_elements() {
+        // PGM also feeds a compositor (PiP on a monitor) and an audio mixer;
+        // their outputs are not PGM even though they are reached first.
+        let mut f = flow(
+            &[
+                ("vm", "builtin.vision_mixer", None),
+                ("comp", "builtin.compositor", None),
+                ("mon", "builtin.whep_output", Some("mon")),
+                ("enc", "builtin.videoenc", None),
+                ("pgm", "builtin.whep_output", Some("pgm")),
+            ],
+            &[
+                ("vm:pgm_out", "comp:video_in_1"),
+                ("vm:pgm_out", "gst_mix:sink_0"),
+                ("comp:video_out", "mon:video_in"),
+                ("gst_mix:src", "mon:video_in"),
+                ("vm:pgm_out", "enc:video_in"),
+                ("enc:video_out", "pgm:video_in"),
+            ],
+        );
+        f.elements.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "gst_mix",
+                "element_type": "compositor",
+                "position": [0.0, 0.0],
+            }))
+            .unwrap(),
+        );
+        assert_eq!(find_whep_endpoint_for_pad(&f, "vm", "pgm_out"), "/whep/pgm");
+    }
+
+    #[test]
+    fn follows_the_output_matching_the_input_reached() {
+        let f = flow(
+            &[
+                ("vm", "builtin.vision_mixer", None),
+                ("x", "builtin.videoformat", None),
+                ("pgm", "builtin.whep_output", Some("pgm")),
+                ("mv", "builtin.whep_output", Some("mv")),
+            ],
+            &[
+                ("vm:pgm_out", "x:in_0"),
+                ("vm:multiview_out", "x:in_1"),
+                ("x:out_0", "pgm:video_in"),
+                ("x:out_1", "mv:video_in"),
+            ],
+        );
+        assert_eq!(
+            find_whep_endpoint_for_pad(&f, "vm", "multiview_out"),
+            "/whep/mv"
+        );
+        assert_eq!(find_whep_endpoint_for_pad(&f, "vm", "pgm_out"), "/whep/pgm");
+    }
+
+    #[test]
+    fn multi_input_block_without_matching_output_passes_to_all() {
+        // A muxer: video and audio in, one output.
+        let f = flow(
+            &[
+                ("vm", "builtin.vision_mixer", None),
+                ("aud", "builtin.audioenc", None),
+                ("mux", "builtin.videoenc", None),
+                ("pgm", "builtin.whep_output", Some("pgm")),
+            ],
+            &[
+                ("vm:pgm_out", "mux:video_in"),
+                ("aud:out", "mux:audio_in"),
+                ("mux:out", "pgm:video_in"),
+            ],
+        );
+        assert_eq!(find_whep_endpoint_for_pad(&f, "vm", "pgm_out"), "/whep/pgm");
+    }
+
+    #[test]
+    fn nearest_endpoint_not_ready_gives_empty() {
+        let f = flow(
+            &[
+                ("vm", "builtin.vision_mixer", None),
+                ("enc", "builtin.videoenc", None),
+                ("far", "builtin.whep_output", Some("far")),
+                ("near", "builtin.whep_output", None),
+            ],
+            &[
+                ("vm:pgm_out", "enc:in"),
+                ("enc:out", "far:video_in"),
+                ("vm:pgm_out", "near:video_in"),
+            ],
+        );
+        assert_eq!(find_whep_endpoint_for_pad(&f, "vm", "pgm_out"), "");
     }
 }
