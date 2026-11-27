@@ -2,6 +2,16 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [Unreleased]
+
+### Fixed
+- WHEP Output: a viewer whose ICE gathering reports `complete` a second time no longer aborts Strom. The WHEP signaller in gst-plugin-webrtc 0.15 panics on it inside a GObject callback; seen when viewers connect and drop within a second
+
+### Documentation
+- UPSTREAM_NOTES.md: the WHEP signaller's panic on a second ICE `complete`
+
+---
+
 ## [0.8.4] - 2026-11-18
 
 ### Fixed
