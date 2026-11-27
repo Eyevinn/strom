@@ -707,11 +707,15 @@ fn run_with_gui(
         // Graceful shutdown via axum_server::Handle
         let handle = axum_server::Handle::new();
         let handle_for_signal = handle.clone();
+        let state_for_signal = state.clone();
         tokio::spawn(async move {
             wait_for_shutdown_signal().await;
+            handle_for_signal.graceful_shutdown(Some(Duration::from_secs(10)));
+            // Before the GUI closes: the process exits right after, and the
+            // flows' blocks must finish their output first. Bounded.
+            state_for_signal.run_stop_drains_for_shutdown().await;
             info!("Signaling GUI to close...");
             shutdown_flag.store(true, Ordering::SeqCst);
-            handle_for_signal.graceful_shutdown(Some(Duration::from_secs(10)));
         });
 
         serve_with_tls(addr, app, handle, tls_config)
@@ -972,16 +976,28 @@ async fn run_headless(
         info!("Auto-restart disabled by --no-auto-restart flag");
     }
 
-    // Graceful shutdown via axum_server::Handle
+    // Graceful shutdown via axum_server::Handle. The flows' stop drains run
+    // alongside the HTTP shutdown, bounded by STOP_DRAIN_TIMEOUT, so blocks
+    // finish their output (a recorder's open fragment) before the process exits.
     let handle = axum_server::Handle::new();
     let handle_for_signal = handle.clone();
-    tokio::spawn(async move {
+    let state_for_signal = state.clone();
+    let shutdown_task = tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         info!("Server shutting down");
         handle_for_signal.graceful_shutdown(Some(Duration::from_secs(10)));
+        state_for_signal.run_stop_drains_for_shutdown().await;
     });
 
     let serve_result = serve_with_tls(addr, app, handle, tls_config).await;
+    if serve_result.is_ok() {
+        // The server only returns Ok after a shutdown signal: wait for the drains.
+        if let Err(e) = shutdown_task.await {
+            error!("Shutdown task failed: {}", e);
+        }
+    } else {
+        shutdown_task.abort();
+    }
 
     // Must run before library destructors; see `shutdown_overlay_timers`.
     strom::blocks::builtin::vision_mixer::overlay::shutdown_overlay_timers();

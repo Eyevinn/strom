@@ -4,7 +4,8 @@ mod bus;
 mod construction;
 pub(crate) mod effects;
 mod lifecycle;
-pub use lifecycle::StopDrains;
+pub(crate) use lifecycle::STOP_DRAIN_TIMEOUT;
+pub use lifecycle::{StopDrainOutcome, StopDrains};
 mod linking;
 pub(crate) mod properties;
 mod srt;
@@ -21,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use strom_types::{BlockDefinition, BlockInstance, FlowId, Link, PipelineState, PropertyValue};
 use thiserror::Error;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 /// Result of processing links with automatic tee insertion.
 struct ProcessedLinks {
@@ -273,6 +274,20 @@ impl Drop for PipelineManager {
         self.probe_manager.deactivate_all();
         self.stop_qos_broadcast_task();
 
+        // Graceful shutdown and teardown_flow take the drains first. Any left
+        // here belong to a pipeline dropped some other way, and the block's
+        // final output (an open recording fragment) is lost.
+        if !self.stop_drain_fns.is_empty()
+            && self.pipeline.current_state() == gst::State::Playing
+            && !self.flow_ended.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            warn!(
+                "Pipeline '{}': dropped while playing without running {} stop drain(s)",
+                self.flow_name,
+                self.stop_drain_fns.len()
+            );
+        }
+
         // Ensure pipeline is in Null state before releasing references.
         // If stop() was already called this is a no-op. If stop() gave up on
         // it, trying again would only block on the same wedged transition.
@@ -291,6 +306,14 @@ impl Drop for PipelineManager {
                 lifecycle::NULL_STATE_TIMEOUT.as_secs()
             );
         }
+    }
+}
+
+#[cfg(test)]
+impl PipelineManager {
+    /// Queue a stop drain, as a block does at build time.
+    pub(crate) fn push_stop_drain_for_test(&mut self, drain: crate::blocks::StopDrainFn) {
+        self.stop_drain_fns.push(drain);
     }
 }
 

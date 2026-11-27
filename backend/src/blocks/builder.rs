@@ -528,8 +528,10 @@ impl BlockBuildContext {
     ///   needs async work.
     /// - A drain must bound its own wait (a few seconds). Stopping waits for
     ///   all of them together at most 10 s, then leaves the rest behind.
-    /// - Graceful shutdown of the process does not run drains, only stopping
-    ///   a flow does.
+    /// - Graceful shutdown of the process (SIGINT/SIGTERM) runs the drains of
+    ///   every running flow in parallel, at most 10 s in all, before it exits.
+    ///   The flow is not stopped: one with auto-restart starts again with the
+    ///   next process. A pipeline dropped any other way runs none.
     pub fn register_stop_drain(&self, drain: StopDrainFn) {
         self.stop_drains.borrow_mut().push(drain);
     }

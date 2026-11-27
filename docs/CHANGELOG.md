@@ -11,6 +11,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000, at most 60000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
 
 ### Fixed
+- Graceful shutdown (SIGINT/SIGTERM): blocks of running flows get to finish their output before Strom exits, the same as when a flow is stopped, so a restart or deploy no longer cuts off a recorder's last fragment. The flows' stop drains run in parallel, at most 10 s in all; a flow with auto-restart still starts again with the next process
 - WHEP Output: a viewer whose ICE gathering reports `complete` a second time no longer aborts Strom. The WHEP signaller in gst-plugin-webrtc 0.15 panics on it inside a GObject callback; seen when viewers connect and drop within a second
 
 ### Changed
