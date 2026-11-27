@@ -14,6 +14,8 @@
 //! Frames come out as NV12 in presentation order with their container PTS,
 //! which [`map_to_grid`] turns into frames on the group's TAI grid. The PTS
 //! are those the demuxer gave, as with a pipeline per segment.
+//! `STROM_REPLAY_DECODER_PER_SEGMENT=1` goes back to one pipeline per segment
+//! (diagnostics, A/B).
 
 use super::grid::FrameGrid;
 use super::source::Segment;
@@ -21,12 +23,20 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
-/// Pick the best available H.264 decoder.
+/// Pick the best available H.264 decoder. `STROM_REPLAY_DECODER` overrides
+/// the choice (diagnostics), when that element exists.
 pub fn pick_decoder() -> &'static str {
+    static OVERRIDE: OnceLock<Option<String>> = OnceLock::new();
+    let wanted = OVERRIDE.get_or_init(|| strom_types::env::var_opt("STROM_REPLAY_DECODER"));
+    if let Some(name) = wanted {
+        if gst::ElementFactory::find(name).is_some() {
+            return name;
+        }
+    }
     // vtdec_hw comes after avdec_h264: in replay it sometimes drops the
     // last frame of a segment (docs/UPSTREAM_NOTES.md), and per-segment
     // decodes were slower with it (seek outside cache p50 235 vs 134 ms).
@@ -36,6 +46,16 @@ pub fn pick_decoder() -> &'static str {
         }
     }
     "decodebin"
+}
+
+/// Whether to go back to one pipeline per segment
+/// (`STROM_REPLAY_DECODER_PER_SEGMENT=1`).
+fn per_segment_pipelines() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        strom_types::env::var_opt("STROM_REPLAY_DECODER_PER_SEGMENT")
+            .is_some_and(|v| v == "1" || v == "true")
+    })
 }
 
 /// Demuxer and appsrc caps for a container MIME type. A source that does
@@ -135,7 +155,7 @@ impl SegmentDecoder {
         timeout: Duration,
     ) -> Result<Decoded, String> {
         // decodebin has no sink pad to feed: one pipeline per segment.
-        if self.decoder == "decodebin" {
+        if per_segment_pipelines() || self.decoder == "decodebin" {
             refuse_while_wedged()?;
             return decode_bytes(bytes, container, self.decoder, timeout);
         }
