@@ -716,6 +716,10 @@ impl Fetcher {
         let mut poll_job: Job<anyhow::Result<Since>> = Job::default();
         let mut hole_job: Job<(i64, i64, i64, anyhow::Result<Vec<Segment>>)> = Job::default();
         let mut first_job: Job<anyhow::Result<Option<Segment>>> = Job::default();
+        // The listing of one index chunk, and that chunk (for a task that
+        // panics).
+        let mut list_job: Job<(i64, anyhow::Result<Vec<Segment>>)> = Job::default();
+        let mut list_job_chunk: i64 = 0;
         let mut next_view = Instant::now();
         // Coded bytes per second of media, over the recent fetches: the
         // size estimate of a segment not fetched yet.
@@ -819,55 +823,59 @@ impl Fetcher {
                 }
             }
 
-            // Index chunks covering the window.
-            let mut listing_ok = true;
-            for c in chunk_of(lo.max(start))..=chunk_of(hi.min(end - 1)) {
-                if chunks.listed.contains(&c) && !chunks.dirty.contains(&c) {
-                    // A listed chunk is listed again only while it has a
-                    // hole that may still fill: a source that grows can
-                    // register media late, or a live poll that fell behind
-                    // skipped a stretch of it.
-                    let (a, b) = ((c * CHUNK_NS).max(start), ((c + 1) * CHUNK_NS).min(end));
-                    if !(grows && coverage.has_hole(a, b) && chunks.relist_due(c, Instant::now())) {
-                        continue;
-                    }
-                }
-                if !list_failed.ready(&c, Instant::now()) {
-                    continue;
-                }
-                if !self
-                    .list_chunk(
-                        c,
-                        (start, end),
-                        &mut chunks,
-                        &mut list_failed,
-                        &mut coverage,
-                    )
-                    .await
-                {
-                    listing_ok = false;
-                    break;
-                }
+            // Index chunks: one listing at a time, as a task of its own, so a
+            // slow or hanging gateway holds up neither the live poll nor the
+            // fetches (a listing awaited here stopped the edge for as long
+            // as it took, up to the client's timeout).
+            if let Some(r) = list_job.finished().await {
+                let (c, r) = match r {
+                    Ok((c, r)) => (c, r),
+                    Err(e) => (list_job_chunk, Err(anyhow::anyhow!("listing task: {}", e))),
+                };
+                self.apply_listing(
+                    c,
+                    r,
+                    (start, end),
+                    &mut chunks,
+                    &mut list_failed,
+                    &mut coverage,
+                );
             }
-            // A hole near the window whose other end the index has not
-            // reached: list one more chunk towards it.
-            let resolve = on_clock
-                || coverage
-                    .hole_at(cursor, (start, end))
-                    .is_some_and(|h| h.start.is_none() || h.end.is_none());
-            if listing_ok && resolve {
-                if let Some(p) = coverage.to_resolve(cursor, lo, hi, (start, end)) {
-                    let c = chunk_of(p);
-                    if list_failed.ready(&c, Instant::now()) {
-                        self.list_chunk(
-                            c,
-                            (start, end),
-                            &mut chunks,
-                            &mut list_failed,
-                            &mut coverage,
-                        )
-                        .await;
+            if list_job.is_idle() {
+                let now = Instant::now();
+                // The chunks covering the window first.
+                let in_window = (chunk_of(lo.max(start))..=chunk_of(hi.min(end - 1))).find(|&c| {
+                    if chunks.listed.contains(&c) && !chunks.dirty.contains(&c) {
+                        // A listed chunk is listed again only while it has a
+                        // hole that may still fill: a source that grows can
+                        // register media late, or a live poll that fell
+                        // behind skipped a stretch of it.
+                        let (a, b) = ((c * CHUNK_NS).max(start), ((c + 1) * CHUNK_NS).min(end));
+                        if !(grows && coverage.has_hole(a, b) && chunks.relist_due(c, now)) {
+                            return false;
+                        }
                     }
+                    list_failed.ready(&c, now)
+                });
+                // Else a hole near the window whose other end the index has
+                // not reached: one more chunk towards it.
+                let resolve = on_clock
+                    || coverage
+                        .hole_at(cursor, (start, end))
+                        .is_some_and(|h| h.start.is_none() || h.end.is_none());
+                let next = in_window.or_else(|| {
+                    resolve
+                        .then(|| coverage.to_resolve(cursor, lo, hi, (start, end)))
+                        .flatten()
+                        .map(chunk_of)
+                        .filter(|c| list_failed.ready(c, now))
+                });
+                if let Some(c) = next {
+                    list_job_chunk = c;
+                    let source = Arc::clone(&self.source);
+                    list_job.spawn(async move {
+                        (c, source.list(c * CHUNK_NS, (c + 1) * CHUNK_NS).await)
+                    });
                 }
             }
 
@@ -1125,15 +1133,17 @@ impl Fetcher {
     /// List index chunk `c` (the source is `extent`, start to end): its
     /// segments go into the index and the coverage. False if the listing
     /// failed.
-    async fn list_chunk(
+    /// Take the listing `r` of chunk `c` into the index, or note its failure.
+    fn apply_listing(
         &self,
         c: i64,
+        r: anyhow::Result<Vec<Segment>>,
         extent: (i64, i64),
         chunks: &mut ChunkState,
         list_failed: &mut Backoff<i64>,
         coverage: &mut Coverage,
-    ) -> bool {
-        match self.source.list(c * CHUNK_NS, (c + 1) * CHUNK_NS).await {
+    ) {
+        match r {
             Ok(segs) => {
                 // The listing knows the source up to its end then, not the
                 // rest of the chunk: media written there later is not a hole.
@@ -1153,7 +1163,6 @@ impl Fetcher {
                 chunks.dirty.remove(&c);
                 chunks.listed_at.insert(c, Instant::now());
                 list_failed.succeed(&c);
-                true
             }
             Err(e) => {
                 let attempts = list_failed.fail(c, Instant::now());
@@ -1168,7 +1177,6 @@ impl Fetcher {
                         self.block_id, attempts, e
                     );
                 }
-                false
             }
         }
     }
@@ -1269,6 +1277,8 @@ mod tests {
         fetch_fails: bool,
         fetch_panics: bool,
         fetch_hangs: bool,
+        /// Listings by time take this long (a slow or hanging gateway).
+        list_delay: Duration,
         /// Listings by time (`list`): the expensive query on a TAMS gateway.
         lists: AtomicU64,
         /// Pages of newest-first listings (`newest`): the cheap one.
@@ -1302,6 +1312,7 @@ mod tests {
                 fetch_fails,
                 fetch_panics: false,
                 fetch_hangs: false,
+                list_delay: Duration::ZERO,
                 lists: AtomicU64::new(0),
                 pages: AtomicU64::new(0),
                 fetches: Mutex::new(HashMap::new()),
@@ -1357,6 +1368,9 @@ mod tests {
         }
         async fn list(&self, start: i64, end: i64) -> anyhow::Result<Vec<Segment>> {
             self.lists.fetch_add(1, Ordering::Relaxed);
+            if !self.list_delay.is_zero() {
+                tokio::time::sleep(self.list_delay).await;
+            }
             if self.list_fails {
                 anyhow::bail!("gateway down");
             }
@@ -1700,6 +1714,45 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn a_hanging_listing_holds_up_neither_the_live_poll_nor_the_fetches() {
+        // Every listing by time hangs (a gateway that does not answer, up
+        // to the client's 30 s timeout). The live poll still indexes the
+        // edge, and the segment at the cursor (known from the start) is
+        // fetched.
+        let mock = Arc::new(Mock {
+            grows: true,
+            list_delay: Duration::from_secs(30),
+            ..Mock::build(0, 1, false, false)
+        });
+        mock.register(0, 200);
+        mock.register(LIVE0, 200);
+        let timeline = super::super::timeline::get_or_create(uuid::Uuid::new_v4(), "g");
+        let stats = Arc::new(PlayerStats::new("p"));
+        timeline.register_player(&stats);
+        let f = Arc::new(Fetcher::new("p", mock.clone(), timeline, stats, 2));
+        let stop = Arc::new(AtomicBool::new(false));
+        Arc::clone(&f).spawn(Arc::clone(&stop));
+        assert_eq!(wait_indexed(&f, 1, 200).len(), 1);
+        std::thread::sleep(Duration::from_millis(300));
+        for i in 1..4 {
+            mock.register(LIVE0 + i, 200);
+        }
+        let have = wait_indexed(&f, 4, 200);
+        let t0 = Instant::now();
+        while f.store.bytes(100 * S).is_none() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let fetched = f.store.bytes(100 * S).is_some();
+        stop.store(true, Ordering::Relaxed);
+        assert!(
+            mock.lists.load(Ordering::Relaxed) >= 1,
+            "a listing was started"
+        );
+        assert_eq!(have, (0..4).collect::<Vec<_>>());
+        assert!(fetched, "the segment at the cursor was fetched");
     }
 
     #[test]
