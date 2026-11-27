@@ -523,7 +523,7 @@ fn post_problem(
                 media
             ),
             [
-                "Arrived: {}. {} encodes raw video. Connect a decoded video output to it, \
+                "Arrived: {}. {} takes raw video only. Connect a decoded video output to it, \
                  or link the encoded stream past it.",
                 caps,
                 consumer
