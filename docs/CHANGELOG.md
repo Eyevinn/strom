@@ -2,6 +2,15 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [Unreleased]
+
+### Fixed
+- OSC: SAT freshness is judged on the wall clock, and a request that gets 401 is retried once with a new SAT
+- OSC: the gateway host is taken from the parsed URL before a SAT is sent. User info that looks like an OSC host (`https://x.svc.auto.prod.osaas.io:pw@evil.example/`) passed the check and the SAT went to the other host; a gateway URL with user info is now refused
+- OSC: a SAT whose `exp` and `iat` claims give an absurd lifetime is refreshed by age instead of panicking on overflow
+
+---
+
 ## [0.8.4] - 2026-11-18
 
 ### Fixed
