@@ -24,9 +24,9 @@
 //! - each parked segment that fails waits longer before it is tried again, and
 //!   the sweep moves on to the next one meanwhile, so one segment that always
 //!   fails never holds back the others;
-//! - what is parked is capped in count and bytes per flow directory
-//!   ([`ParkedLimits`]); past the cap the oldest segments are deleted, with an
-//!   error event. Every segment is parked through
+//! - what is parked can be capped in count and bytes per flow directory
+//!   ([`ParkedLimits`], off unless set); past the cap the oldest segments are
+//!   deleted, with an error event. Every segment is parked through
 //!   [`crate::tams::park::Parking::park`], which also caps all parked segments
 //!   of the server and keeps free space on the volume;
 //! - a retry reuses the storage object an earlier try allocated (and uploaded
@@ -315,18 +315,6 @@ const PARKED_STUCK_FAILURES: u32 = 5;
 /// How often refused credentials are reported while they stay refused.
 const AUTH_REPORT_INTERVAL: Duration = Duration::from_secs(300);
 
-/// The flow directories themselves live under `STROM_TAMS_PARK_DIR` (default
-/// `<data_dir>/tams-park`), one per TAMS flow; see `crate::tams::park`.
-///
-/// Default cap on parked segments per flow directory, in MiB
-/// (`STROM_TAMS_PARKED_MAX_MB`).
-const DEFAULT_PARKED_MAX_MB: u64 = 4 * 1024;
-
-/// Default cap on the number of parked segments per flow directory
-/// (`STROM_TAMS_PARKED_MAX_SEGMENTS`). Every sweep reads each sidecar, so the
-/// count is capped as well as the bytes.
-const DEFAULT_PARKED_MAX_SEGMENTS: usize = 20_000;
-
 /// Prefix of every segment file name.
 const SEGMENT_PREFIX: &str = "seg_";
 
@@ -360,6 +348,12 @@ impl ParkTarget {
 
 /// Cap on what one flow directory keeps parked. Past it, the oldest parked
 /// segments are deleted.
+///
+/// The flow directories live under `STROM_TAMS_PARK_DIR` (default
+/// `<data_dir>/tams-park`), one per TAMS flow; see `crate::tams::park`, which
+/// also caps all parked segments of the server together. That cap deletes the
+/// oldest of the whole server, so every flow keeps the same window back in
+/// time; a per-flow cap would only shorten it, so there is none by default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParkedLimits {
     pub max_bytes: u64,
@@ -367,18 +361,23 @@ pub struct ParkedLimits {
 }
 
 impl ParkedLimits {
-    /// The defaults, overridden by `STROM_TAMS_PARKED_MAX_MB` and
-    /// `STROM_TAMS_PARKED_MAX_SEGMENTS`.
+    /// `STROM_TAMS_PARKED_MAX_MB` and `STROM_TAMS_PARKED_MAX_SEGMENTS`; one
+    /// that is not set does not cap.
     pub fn from_env() -> Self {
         fn env<T: std::str::FromStr>(name: &str) -> Option<T> {
             std::env::var(name).ok()?.trim().parse().ok()
         }
+        Self::new(
+            env("STROM_TAMS_PARKED_MAX_MB"),
+            env("STROM_TAMS_PARKED_MAX_SEGMENTS"),
+        )
+    }
+
+    /// A cap of `max_mb` MiB and `max_segments` segments; `None` does not cap.
+    pub fn new(max_mb: Option<u64>, max_segments: Option<usize>) -> Self {
         Self {
-            max_bytes: env::<u64>("STROM_TAMS_PARKED_MAX_MB")
-                .unwrap_or(DEFAULT_PARKED_MAX_MB)
-                .saturating_mul(1024 * 1024),
-            max_segments: env("STROM_TAMS_PARKED_MAX_SEGMENTS")
-                .unwrap_or(DEFAULT_PARKED_MAX_SEGMENTS),
+            max_bytes: max_mb.map_or(u64::MAX, |mb| mb.saturating_mul(1024 * 1024)),
+            max_segments: max_segments.unwrap_or(usize::MAX),
         }
     }
 }
@@ -2281,6 +2280,19 @@ mod tests {
             max_bytes: u64::MAX,
             max_segments: usize::MAX,
         }
+    }
+
+    /// No per-flow cap unless one is set.
+    #[test]
+    fn tams_per_flow_cap_is_off_unless_set() {
+        assert_eq!(ParkedLimits::new(None, None), no_limits());
+        assert_eq!(
+            ParkedLimits::new(Some(2), Some(7)),
+            ParkedLimits {
+                max_bytes: 2 * 1024 * 1024,
+                max_segments: 7,
+            }
+        );
     }
 
     /// A parked segment that fails waits out a backoff, and the sweep moves on

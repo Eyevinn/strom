@@ -25,8 +25,7 @@
 //! whichever flow they belong to:
 //!
 //! - a cap on their total size ([`ParkLimits::max_total_bytes`],
-//!   `STROM_TAMS_PARK_MAX_TOTAL_MB`; default 10 % of the volume, at most
-//!   32 GiB);
+//!   `STROM_TAMS_PARK_MAX_TOTAL_MB`; default 25 % of the volume);
 //! - a floor on the free space of the root's volume
 //!   ([`ParkLimits::min_free_bytes`], `STROM_TAMS_PARK_MIN_FREE_MB`; default
 //!   the larger of 5 GiB and 10 % of the volume).
@@ -36,8 +35,10 @@
 //! enough (the volume is filled by something else), the new segment is not
 //! parked; the caller drops it. Parking never stops a live flow.
 //!
-//! The per-flow cap (`STROM_TAMS_PARKED_MAX_MB`, `STROM_TAMS_PARKED_MAX_SEGMENTS`)
-//! is enforced by each uploader's sweep, see `crate::tams::uploader`.
+//! Deleting the oldest of the whole server gives every flow the same window
+//! back in time. A per-flow cap (`STROM_TAMS_PARKED_MAX_MB`,
+//! `STROM_TAMS_PARKED_MAX_SEGMENTS`) is off unless set; each uploader's sweep
+//! enforces it, see `crate::tams::uploader`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -162,10 +163,10 @@ pub const MIN_FREE_MB_ENV: &str = "STROM_TAMS_PARK_MIN_FREE_MB";
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
 
-/// Default cap on all parked segments: this share of the volume ...
-const DEFAULT_MAX_TOTAL_PERCENT: u64 = 10;
-/// ... but never more than this.
-const DEFAULT_MAX_TOTAL_CEILING: u64 = 32 * GIB;
+/// Default cap on all parked segments: this share of the volume.
+const DEFAULT_MAX_TOTAL_PERCENT: u64 = 25;
+/// Default cap on all parked segments when the volume's size is unknown.
+const DEFAULT_MAX_TOTAL_UNKNOWN_VOLUME: u64 = 32 * GIB;
 /// Default free space kept: this share of the volume ...
 const DEFAULT_MIN_FREE_PERCENT: u64 = 10;
 /// ... but never less than this.
@@ -193,18 +194,17 @@ pub struct ParkLimits {
 }
 
 impl ParkLimits {
-    /// The defaults for a volume of `volume_bytes` (unknown: the ceiling and
-    /// the floor): the cap is 10 % of the volume, at most 32 GiB; the free
-    /// space kept is 10 % of the volume, at least 5 GiB.
+    /// The defaults for a volume of `volume_bytes`: the cap is 25 % of the
+    /// volume; the free space kept is 10 % of the volume, at least 5 GiB.
+    /// When the volume's size is unknown: a 32 GiB cap and 5 GiB free.
     pub fn defaults(volume_bytes: Option<u64>) -> Self {
         match volume_bytes {
             Some(v) => Self {
-                max_total_bytes: percent_of(v, DEFAULT_MAX_TOTAL_PERCENT)
-                    .min(DEFAULT_MAX_TOTAL_CEILING),
+                max_total_bytes: percent_of(v, DEFAULT_MAX_TOTAL_PERCENT),
                 min_free_bytes: percent_of(v, DEFAULT_MIN_FREE_PERCENT).max(DEFAULT_MIN_FREE_FLOOR),
             },
             None => Self {
-                max_total_bytes: DEFAULT_MAX_TOTAL_CEILING,
+                max_total_bytes: DEFAULT_MAX_TOTAL_UNKNOWN_VOLUME,
                 min_free_bytes: DEFAULT_MIN_FREE_FLOOR,
             },
         }
@@ -836,19 +836,19 @@ mod tests {
     #[test]
     fn tams_park_default_limits_follow_the_volume() {
         let d = |v| ParkLimits::defaults(v);
-        // Large volume: the cap stops at 32 GiB, 10 % stays free.
+        // Large volume: a quarter of it, with no upper limit; 10 % stays free.
         assert_eq!(
-            d(Some(1000 * GIB)),
+            d(Some(4000 * GIB)),
             ParkLimits {
-                max_total_bytes: 32 * GIB,
-                min_free_bytes: 100 * GIB,
+                max_total_bytes: 1000 * GIB,
+                min_free_bytes: 400 * GIB,
             }
         );
-        // 100 GiB: 10 % each.
+        // 100 GiB: a quarter, and 10 % free.
         assert_eq!(
             d(Some(100 * GIB)),
             ParkLimits {
-                max_total_bytes: 10 * GIB,
+                max_total_bytes: 25 * GIB,
                 min_free_bytes: 10 * GIB,
             }
         );
@@ -856,11 +856,11 @@ mod tests {
         assert_eq!(
             d(Some(20 * GIB)),
             ParkLimits {
-                max_total_bytes: 2 * GIB,
+                max_total_bytes: 5 * GIB,
                 min_free_bytes: 5 * GIB,
             }
         );
-        // Unknown volume: the ceiling and the floor.
+        // Unknown volume: a fixed cap and the floor.
         assert_eq!(
             d(None),
             ParkLimits {
