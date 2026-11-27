@@ -272,8 +272,10 @@ struct Anchor {
     /// Following the live edge: playing at 1x behind it (after `live`, or
     /// after catching up with it).
     live: bool,
-    /// The cursor was behind the live point at `rt`: forward play that
-    /// reaches it catches up and goes live (with `follow_live`).
+    /// The cursor was behind the live point at `rt`: forward play at any
+    /// speed that reaches it catches up and goes live (with `follow_live`).
+    /// Play at or ahead of the live point catches up when it runs at 1x or
+    /// faster (see [`eval`]).
     catch_up: bool,
 }
 
@@ -329,6 +331,9 @@ struct Eval {
 struct Live {
     /// Where the group plays from when live: the live edge minus the margin.
     from: i64,
+    /// The same on the edge's smooth estimate (see [`EdgeTracker`]): where a
+    /// group that goes live from ahead of `from` is put back to.
+    smooth_from: i64,
     /// Following live, a cursor more than this behind `from` has lost the
     /// edge.
     slack: i64,
@@ -371,11 +376,17 @@ fn eval(a: &Anchor, rt: i64, b: &Bounds, l: Live) -> Eval {
             }
         }
     } else if !a.live && speed > 0.0 {
-        if l.follow && a.catch_up && pos >= l.from as i128 {
+        // Play that started behind the live point catches up when it gets
+        // there. Play at or ahead of it catches up at once if it runs at 1x
+        // or faster (a ramp: and ramps towards that), since it would run into
+        // the edge; slower play falls behind the edge and stays slow motion.
+        let settles = a.ramp.map_or(speed, |r| r.to);
+        let reaches = a.catch_up || (speed >= 1.0 && settles >= 1.0);
+        if l.follow && reaches && pos >= l.from as i128 {
             hit = Some(Hit::CaughtUp);
-        } else if !l.follow {
-            // Not following live: forward play stops on the last frame every
-            // angle has (or where it started, past it) until media grows.
+        } else {
+            // Forward play stops on the last frame every angle has (or where
+            // it started, past it) until media grows.
             pos = pos.min((b.live_end as i128 - 1).max(from));
         }
     }
@@ -448,14 +459,21 @@ pub struct Applied {
 
 /// Lock order: `clock_source`, then `anchor`, then the others. `players`,
 /// `first_extent_at`, `created`, `last_cmd`, `last_pushed`, `edge`,
-/// `anchor_ref`, `follow_live_set`, `watch` and `event_seq` are leaves:
+/// `anchor_ref`, `cue_ref`, `follow_live_set`, `watch` and `event_seq` are
+/// leaves:
 /// nothing else is taken while one of them is held, except that `watch`
 /// takes `edge` and `event_seq`.
 pub struct ReplayTimeline {
     anchor: Mutex<Anchor>,
-    /// The `client_ref` of the command that drew the anchor's line: events
-    /// the line runs into carry it.
+    /// The `client_ref` of the command that drew the anchor's line: the
+    /// events the line runs into that are not about the cue (`caught_up`,
+    /// `edge_moved`) carry it.
     anchor_ref: Mutex<Option<String>>,
+    /// The `client_ref` of the cue the anchor holds (of the `cue` or
+    /// `play {until}` that set it, or a later `play` with a ref that plays
+    /// it): the cue's ends (`cue_end`, `media_end`) carry it. Goes with the
+    /// cue.
+    cue_ref: Mutex<Option<String>>,
     /// The group's start once every angle has reported its extent (see
     /// [`ReplayTimeline::bounds`]): numbers the bitstrip of test material.
     origin_tai: AtomicI64,
@@ -551,6 +569,7 @@ impl ReplayTimeline {
         Self {
             anchor: Mutex::new(START_ANCHOR),
             anchor_ref: Mutex::new(None),
+            cue_ref: Mutex::new(None),
             origin_tai: AtomicI64::new(UNKNOWN),
             first_extent_at: Mutex::new(None),
             clock_source: Mutex::new(None),
@@ -610,6 +629,7 @@ impl ReplayTimeline {
             *lock(&self.first_extent_at) = None;
             *anchor = START_ANCHOR;
             *lock(&self.anchor_ref) = None;
+            *lock(&self.cue_ref) = None;
             *lock(&self.last_pushed) = None;
             *lock(&self.last_cmd) = None;
             *src = None;
@@ -872,7 +892,7 @@ impl ReplayTimeline {
         if let Some(b) = &b {
             lock(&self.edge).observe(mono_ns(), b.live_end);
         }
-        self.watch_changes(&players, b.as_ref(), extents.len());
+        self.watch_changes(&players, b.as_ref());
         let b = b?;
         if self.origin_tai.load(Ordering::Relaxed) == UNKNOWN {
             let first = *lock(&self.first_extent_at).get_or_insert(now);
@@ -913,10 +933,13 @@ impl ReplayTimeline {
 
     /// What [`eval`] needs besides the anchor and bounds.
     fn live_params(&self, b: &Bounds) -> Live {
+        let (est, growing) = lock(&self.edge).estimate(mono_ns(), b.live_end);
+        let margin = self.live_margin().0;
         Live {
-            from: self.live_target(b),
+            from: b.live_end.saturating_sub(margin),
+            smooth_from: est.saturating_sub(margin),
             slack: self.live_slack(),
-            growing: self.growing(b),
+            growing,
             follow: self.follow_live(),
         }
     }
@@ -961,7 +984,13 @@ impl ReplayTimeline {
             // A tick from before the last command: report, do not commit.
             return (e.tai, e.speed);
         }
-        let client_ref = lock(&self.anchor_ref).take();
+        let client_ref = match hit {
+            // The cue stays: so does its ref, for the next play of it.
+            Hit::Freeze { .. } => lock(&self.cue_ref).clone(),
+            // The cue is dropped.
+            Hit::Live { .. } => lock(&self.cue_ref).take(),
+            Hit::CaughtUp | Hit::EdgeMoved => lock(&self.anchor_ref).take(),
+        };
         let (to, speed, live, region, cause, kind_live) = match hit {
             Hit::Freeze { media_end } => (
                 e.tai,
@@ -996,8 +1025,25 @@ impl ReplayTimeline {
                 ReplayCause::EdgeMoved,
                 true,
             ),
-            // Go on from where play is, at 1x: no jump back.
-            Hit::CaughtUp => (e.tai, 1.0, true, None, ReplayCause::CaughtUp, true),
+            // Go on from where play is, at 1x: no jump back. Unless play is
+            // well ahead of the live point (it started there, e.g. `end`
+            // then `play`): live from there would hold at the edge on every
+            // step, so it goes back to the live point on the smooth edge.
+            Hit::CaughtUp => {
+                let to = if l.growing && e.tai > l.smooth_from.saturating_add(LIVE_SLACK_NS) {
+                    l.smooth_from.max(l.from)
+                } else {
+                    e.tai
+                };
+                (
+                    to.clamp(b.start, (b.live_end - 1).max(b.start)),
+                    1.0,
+                    true,
+                    None,
+                    ReplayCause::CaughtUp,
+                    true,
+                )
+            }
         };
         *a = Anchor {
             rt,

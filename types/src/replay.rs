@@ -31,6 +31,12 @@ pub const REPLAY_FEATURES: &[&str] = &[
 /// Longest `client_ref` a command may carry.
 pub const MAX_CLIENT_REF_LEN: usize = 64;
 
+/// Longest `label` a `mark` may carry, in characters.
+pub const MAX_MARK_LABEL_LEN: usize = 256;
+
+/// Largest margin a `live {margin_ms}` may set.
+pub const MAX_LIVE_MARGIN_SET_MS: u64 = 60_000;
+
 /// Lowest and highest `state_ms` for the WebSocket's state rate.
 pub const MIN_STATE_MS: u64 = 50;
 pub const MAX_STATE_MS: u64 = 1000;

@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 use strom_types::replay::{
     ReplayCause, ReplayErrorCode, ReplayEventKind, ReplayMark, ReplayMarkAngle, ReplayTarget,
-    MAX_CLIENT_REF_LEN,
+    MAX_CLIENT_REF_LEN, MAX_LIVE_MARGIN_SET_MS, MAX_MARK_LABEL_LEN,
 };
 use strom_types::tai::{parse_utc, utc_to_tai_ns};
 
@@ -117,14 +117,15 @@ pub fn parse_command(mut value: serde_json::Value) -> Result<Request, CommandErr
 
 impl ReplayTimeline {
     /// The instant a command names. Exactly one field; `rel_ms` counts from
-    /// `cursor`. Not clamped to the media.
+    /// `cursor`; `utc` names the start of the frame of `output` (the grid
+    /// the API's timecodes are on) nearest it. Not clamped to the media.
     fn resolve(
         &self,
         at: &ReplayTarget,
         b: &Bounds,
         cursor: i64,
         domain: TimeDomain,
-        reference: Option<FrameGrid>,
+        output: Option<FrameGrid>,
         what: &str,
     ) -> Result<i64, CommandError> {
         let given = [
@@ -161,7 +162,7 @@ impl ReplayTimeline {
                     domain.as_str()
                 )));
             }
-            return Ok(reference.map_or(t, |g| nearest_frame_start(&g, t)));
+            return Ok(output.map_or(t, |g| nearest_frame_start(&g, t)));
         }
         if let Some(ms) = at.from_live_ms {
             return Ok((b.live_end - 1).saturating_sub(ms_to_ns(ms)));
@@ -201,11 +202,21 @@ impl ReplayTimeline {
         let reference = self.reference();
         let domain = self.time_domain();
         if let Command::Mark { label, at } = cmd {
+            if label
+                .as_ref()
+                .is_some_and(|l| l.chars().count() > MAX_MARK_LABEL_LEN)
+            {
+                return Err(invalid(format!(
+                    "mark: label longer than {} characters",
+                    MAX_MARK_LABEL_LEN
+                )));
+            }
             // Before the anchor is locked: a mark reads the players.
             let at = {
                 let a = lock(&self.anchor);
                 let cur = eval(&a, now, &b, self.live_params(&b)).tai;
-                at.map(|at| self.resolve(&at, &b, cur, domain, reference, "mark at"))
+                let output = self.output_grid();
+                at.map(|at| self.resolve(&at, &b, cur, domain, output, "mark at"))
                     .transpose()?
             };
             if at.is_some_and(|t| t < b.start || t >= b.end) {
@@ -244,8 +255,9 @@ impl ReplayTimeline {
             Set(Region),
             Drop,
         }
+        let output = self.output_grid();
         let resolve =
-            |at: &ReplayTarget, what: &str| self.resolve(at, &b, cur, domain, reference, what);
+            |at: &ReplayTarget, what: &str| self.resolve(at, &b, cur, domain, output, what);
         let (tai, speed, cue) = match &cmd {
             Command::Jog { frames } => {
                 let g = self
@@ -341,9 +353,13 @@ impl ReplayTimeline {
                                 ..r
                             };
                             // At the end the play runs to: start again from
-                            // the other end.
+                            // the other end. An out past media that still
+                            // grows is where play runs to (it holds at the
+                            // edge until the media gets there).
                             let half = reference.map_or(1, |g| (g.frame_ns() / 2.0) as i64).max(1);
-                            let from = if forward && cur >= r.end.min(b.end) - half {
+                            let growing = r.end > b.end && self.growing(&b);
+                            let r_end = if growing { r.end } else { r.end.min(b.end) };
+                            let from = if forward && cur >= r_end - half {
                                 r.start
                             } else if !forward && cur < r.start + half {
                                 r.end.min(b.end) - 1
@@ -363,6 +379,12 @@ impl ReplayTimeline {
             Command::End {} => (b.live_end - 1, 0.0, Cue::Drop),
             Command::Live { margin_ms } => {
                 if let Some(ms) = margin_ms {
+                    if *ms > MAX_LIVE_MARGIN_SET_MS {
+                        return Err(invalid(format!(
+                            "live: margin_ms {} is over {}",
+                            ms, MAX_LIVE_MARGIN_SET_MS
+                        )));
+                    }
                     self.margin_set_ns.store(ms_to_ns(*ms), Ordering::Relaxed);
                 }
                 (self.live_target(&b), 1.0, Cue::Drop)
@@ -402,6 +424,7 @@ impl ReplayTimeline {
         // Clamp to the media, so later moves start from what is shown, then
         // keep the cue only if it holds the cursor.
         let tai = tai.clamp(b.start, b.end - 1);
+        let sets_cue = matches!(cue, Cue::Set(_));
         let region = match cue {
             Cue::Keep => a.region,
             Cue::Set(r) => Some(r),
@@ -417,7 +440,25 @@ impl ReplayTimeline {
             live,
             catch_up: tai < self.live_target(&b),
         };
-        *lock(&self.anchor_ref) = client_ref.clone();
+        // The cue's ref: a new cue takes the command's; a play of the held
+        // cue with a ref takes that; any other command leaves it.
+        let cue_ref = match &cmd {
+            Command::Cue { .. } | Command::Play { until: Some(_), .. } => Some(client_ref.clone()),
+            Command::Play { .. } if sets_cue && client_ref.is_some() => Some(client_ref.clone()),
+            _ => None,
+        };
+        {
+            let mut r = lock(&self.cue_ref);
+            if region.is_none() {
+                *r = None;
+            } else if let Some(new) = cue_ref {
+                *r = new;
+            }
+        }
+        // `follow_live` does not change the motion: the line's ref stays.
+        if !matches!(cmd, Command::FollowLive { .. }) {
+            *lock(&self.anchor_ref) = client_ref.clone();
+        }
         self.commanded.store(true, Ordering::Relaxed);
         *lock(&self.last_cmd) = (speed == 0.0 && ramp.is_none()).then(|| (Instant::now(), tai));
         if matches!(cmd, Command::Live { .. }) {

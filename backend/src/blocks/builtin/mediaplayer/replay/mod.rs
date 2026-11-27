@@ -93,6 +93,10 @@ pub fn parse_time_ref(s: &str) -> Result<ReplayTarget, String> {
     })
 }
 
+/// Largest `offset_ms` either way: a day. Keeps every time moved by it far
+/// from overflow.
+const MAX_OFFSET_MS: i64 = 86_400_000;
+
 /// A player's replay properties and identity.
 fn player_config(
     properties: &HashMap<String, PropertyValue>,
@@ -147,14 +151,23 @@ fn player_config(
             .map_err(|_| format!("bad {} '{}'", OFFSET_MS_PROPERTY, s))?,
         Some(v) => return Err(format!("bad {} {:?}", OFFSET_MS_PROPERTY, v)),
     };
+    if !(-MAX_OFFSET_MS..=MAX_OFFSET_MS).contains(&offset_ms) {
+        return Err(format!(
+            "bad {} {}, want -{} .. {} (24 h)",
+            OFFSET_MS_PROPERTY, offset_ms, MAX_OFFSET_MS, MAX_OFFSET_MS
+        ));
+    }
     let (store, source_id, source) = match spec {
         source::SourceSpec::Tams { gateway, flow_id } => {
             let store = format!(
                 "tams+{}",
                 crate::client_auth::redact_url(gateway).trim_end_matches('/')
             );
+            // A query or fragment (a token, say) is not part of the id, and
+            // discovery must not show it.
+            let flow_id = flow_id.split(['?', '#']).next().unwrap_or_default();
             let uri = format!("{}/flows/{}", store, flow_id);
-            (Some(store), Some(flow_id.clone()), Some(uri))
+            (Some(store), Some(flow_id.to_string()), Some(uri))
         }
         // Local: the property as given (relative to the media path, or a
         // path inside it); the directory's name is its id.
@@ -173,7 +186,7 @@ fn player_config(
         jog_grid,
         start_mode,
         live_margin_ms,
-        offset_ns: offset_ms.saturating_mul(1_000_000),
+        offset_ns: offset_ms * 1_000_000,
     })
 }
 
@@ -406,6 +419,37 @@ mod tests {
 
     fn st(s: &str) -> PropertyValue {
         PropertyValue::String(s.to_string())
+    }
+
+    /// Discovery never shows a TAMS URI's query, fragment or credentials:
+    /// not in the store, the source id or the source.
+    #[test]
+    fn a_tams_source_shows_no_query_or_credentials() {
+        let uri = "tams+https://user:pw@gw.example.com/flows/abc?api_key=SECRET#frag";
+        let spec = source::parse_source(uri, "/tmp").unwrap();
+        let c = player_config(&props(&[]), uri, &spec).unwrap();
+        assert_eq!(c.store.as_deref(), Some("tams+https://gw.example.com"));
+        assert_eq!(c.source_id.as_deref(), Some("abc"));
+        assert_eq!(
+            c.source.as_deref(),
+            Some("tams+https://gw.example.com/flows/abc")
+        );
+    }
+
+    /// `offset_ms` is kept within a day either way, so no time moved by it
+    /// can overflow.
+    #[test]
+    fn offset_ms_is_bounded() {
+        let spec = source::parse_source("/tmp/x", "/tmp").unwrap();
+        let cfg = |v: PropertyValue| player_config(&props(&[(OFFSET_MS_PROPERTY, v)]), "x", &spec);
+        assert_eq!(
+            cfg(PropertyValue::Int(-MAX_OFFSET_MS)).unwrap().offset_ns,
+            -MAX_OFFSET_MS * 1_000_000
+        );
+        assert!(cfg(PropertyValue::Int(MAX_OFFSET_MS + 1)).is_err());
+        assert!(cfg(PropertyValue::Int(i64::MIN)).is_err());
+        assert!(cfg(PropertyValue::UInt(u64::MAX)).is_err());
+        assert!(cfg(st("9223372036854775807")).is_err());
     }
 
     #[test]

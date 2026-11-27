@@ -237,7 +237,11 @@ impl PlayerStats {
         if self.offset_ns() == 0 {
             return Some(g);
         }
-        FrameGrid::new(g.fps_n, g.fps_d, g.phase_ns + self.offset_ns())
+        FrameGrid::new(
+            g.fps_n,
+            g.fps_d,
+            g.phase_ns.saturating_add(self.offset_ns()),
+        )
     }
 
     /// Set the player's grid from its source's frame rate, anchored at an
@@ -316,7 +320,11 @@ impl PlayerStats {
     pub fn group_index_view(&self) -> IndexView {
         let o = self.offset_ns();
         let v = self.index_view();
-        let shift = |r: Vec<(i64, i64)>| r.into_iter().map(|(s, e)| (s + o, e + o)).collect();
+        let shift = |r: Vec<(i64, i64)>| {
+            r.into_iter()
+                .map(|(s, e)| (s.saturating_add(o), e.saturating_add(o)))
+                .collect()
+        };
         IndexView {
             listed: shift(v.listed),
             gaps: shift(v.gaps),
@@ -341,7 +349,7 @@ impl PlayerStats {
     /// The hole the last tick was in, on the group's axis.
     pub fn group_gap(&self) -> Option<(i64, i64)> {
         let o = self.offset_ns();
-        lock(&self.gap_now).map(|(s, e)| (s + o, e + o))
+        lock(&self.gap_now).map(|(s, e)| (s.saturating_add(o), e.saturating_add(o)))
     }
 
     pub fn set_output_rate(&self, fps_n: u32, fps_d: u32) {
@@ -362,6 +370,6 @@ impl PlayerStats {
     /// The source frame last pushed, its own time on the group's axis.
     pub fn shown_group_tai(&self) -> Option<i64> {
         let t = self.shown_tai.load(Ordering::Relaxed);
-        (t != UNKNOWN).then(|| t + self.offset_ns())
+        (t != UNKNOWN).then(|| t.saturating_add(self.offset_ns()))
     }
 }
