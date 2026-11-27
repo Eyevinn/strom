@@ -30,6 +30,7 @@ pub mod mpegtssrt;
 pub mod mpegtssrt_input;
 pub mod ndi;
 pub mod recorder;
+pub mod reference_timestamp;
 pub(crate) mod refusal;
 pub mod rtmp;
 pub mod spectrum;
@@ -153,6 +154,9 @@ pub fn get_all_builtin_blocks() -> Vec<BlockDefinition> {
     // Add Thumbnail blocks
     blocks.extend(thumbnail::get_blocks());
 
+    // Add Reference Timestamp block (capture-time meta, optional burn-in)
+    blocks.extend(reference_timestamp::get_blocks());
+
     // Add Time Offset block (generic timestamp shifter)
     blocks.extend(time_offset::get_blocks());
 
@@ -224,6 +228,9 @@ pub fn get_builder(block_definition_id: &str) -> Option<Arc<dyn BlockBuilder>> {
         "builtin.spectrum" => Some(Arc::new(spectrum::SpectrumBuilder)),
         "builtin.tams_output" => Some(Arc::new(tams_output::TamsOutputBuilder)),
         "builtin.thumbnail" => Some(Arc::new(thumbnail::ThumbnailBuilder)),
+        reference_timestamp::BLOCK_ID => {
+            Some(Arc::new(reference_timestamp::ReferenceTimestampBuilder))
+        }
         "builtin.time_offset" => Some(Arc::new(time_offset::TimeOffsetBuilder)),
         "builtin.videoenc" => Some(Arc::new(videoenc::VideoEncBuilder)),
         "builtin.videoformat" => Some(Arc::new(videoformat::VideoFormatBuilder)),

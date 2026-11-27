@@ -5,6 +5,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 ## [Unreleased]
 
 ### Added
+- Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
 
 ### Changed
@@ -14,7 +15,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Video Encoder: scheduled keyframe requests are no longer held back by the 1 s floor. An encoder that feeds a recorder which asks for keyframes at given times (TAMS Output, a segmenting recorder) now makes every keyframe it is asked for, so such a flow can get more keyframes than before. WebRTC PLIs are limited as before
 
 ### Documentation
-- UPSTREAM_NOTES.md: `min-force-key-unit-interval` dropping scheduled requests
+- UPSTREAM_NOTES.md: `GstSystemClock` TAI on macOS and `min-force-key-unit-interval` dropping scheduled requests
 
 ---
 
