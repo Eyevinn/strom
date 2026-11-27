@@ -1,20 +1,25 @@
 //! Reference Timestamp block: stamps each buffer with its wall-clock time as a
 //! `GstReferenceTimestampMeta`, and optionally burns that time into the picture.
 //!
-//! The meta is the carrier for capture time in a flow: TAMS Output anchors its
-//! timeline on it, and other consumers can read it. The stamp is the pipeline
-//! clock's time for the buffer (see [`stamper`]), so place the block where the
-//! stream runs on the clock: after a live source, or after `clocksync`.
+//! The meta is the carrier for capture time in a flow, for any consumer that
+//! reads it. The stamp is the pipeline clock's time for the buffer (see
+//! [`stamper`]), so place the block where the stream runs on the clock: after a
+//! live source, or after `clocksync`. In a non-live flow the preroll frame
+//! passes before the pipeline has a clock, and gets no stamp.
 //!
 //! With `burn_in`, the same meta is rendered into the frame as UTC text and a
 //! machine-readable code row (see [`burn_in`]). That makes the time a store gives
-//! a frame checkable against the picture. Burn-in needs raw video; the block
-//! converts what arrives to a format it can draw on.
+//! a frame checkable against the picture. Burn-in needs raw video. The block
+//! adapts what arrives (BLOCK_GUIDELINES): GPU memory is downloaded, from the
+//! negotiated caps (`gst::download_front`, in front of the stamper), and a
+//! `videoconvert` turns the pixel format into one it can draw on. Encoded video fails the flow with an
+//! element error that says what arrived.
 
 pub mod burn_in;
 pub mod stamper;
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+use crate::gst::download_front;
 use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -32,6 +37,7 @@ use tracing::info;
 
 pub const BLOCK_ID: &str = "builtin.reference_timestamp";
 const STAMP_SUFFIX: &str = "stamp";
+const INPUT_SUFFIX: &str = "input";
 const CONVERT_SUFFIX: &str = "convert";
 const BURN_IN_SUFFIX: &str = "burn_in";
 
@@ -74,16 +80,42 @@ impl BlockBuilder for ReferenceTimestampBuilder {
             }
         }));
 
-        let mut elements = vec![(stamp_id.clone(), stamper.upcast::<gst::Element>())];
+        let mut elements = Vec::new();
         let mut internal_links = Vec::new();
         if burn_in {
+            // input (identity, downloads spliced in after it) ! stamp !
+            // videoconvert ! burn_in. The front goes before the stamper: the
+            // stamper takes any caps and would itself refuse encoded video with
+            // a bare not-negotiated, before the front could say why.
+            let input_id = format!("{}:{}", instance_id, INPUT_SUFFIX);
             let convert_id = format!("{}:{}", instance_id, CONVERT_SUFFIX);
             let burn_id = format!("{}:{}", instance_id, BURN_IN_SUFFIX);
+            let input = gst::ElementFactory::make("identity")
+                .name(&input_id)
+                .property("silent", true)
+                .build()
+                .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {}", e)))?;
             let convert = gst::ElementFactory::make(VIDEO_CONVERT_FACTORY)
                 .name(&convert_id)
                 .build()
-                .map_err(|e| BlockBuildError::ElementCreation(format!("videoconvert: {}", e)))?;
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("{}: {}", VIDEO_CONVERT_FACTORY, e))
+                })?;
+            crate::gpu::configure_video_convert(&convert);
+            let stamp_sink = stamper.static_pad("sink").ok_or_else(|| {
+                BlockBuildError::ElementCreation("stamper has no sink pad".to_string())
+            })?;
+            download_front::install(
+                &input,
+                &stamp_sink,
+                &input_id,
+                "Reference Timestamp burn-in",
+            );
             let burn = burn_in::TimestampBurnIn::new(&burn_id);
+            internal_links.push((
+                ElementPadRef::pad(&input_id, "src"),
+                ElementPadRef::pad(&stamp_id, "sink"),
+            ));
             internal_links.push((
                 ElementPadRef::pad(&stamp_id, "src"),
                 ElementPadRef::pad(&convert_id, "sink"),
@@ -92,8 +124,12 @@ impl BlockBuilder for ReferenceTimestampBuilder {
                 ElementPadRef::pad(&convert_id, "src"),
                 ElementPadRef::pad(&burn_id, "sink"),
             ));
+            elements.push((input_id, input));
+            elements.push((stamp_id, stamper.upcast::<gst::Element>()));
             elements.push((convert_id, convert));
             elements.push((burn_id, burn.upcast()));
+        } else {
+            elements.push((stamp_id, stamper.upcast::<gst::Element>()));
         }
 
         Ok(BlockBuildResult {
@@ -113,17 +149,17 @@ impl BlockBuilder for ReferenceTimestampBuilder {
 }
 
 fn external_pads(burn_in: bool) -> ExternalPads {
-    let (media_type, out_element) = if burn_in {
-        (MediaType::Video, BURN_IN_SUFFIX)
+    let (media_type, in_element, out_element) = if burn_in {
+        (MediaType::Video, INPUT_SUFFIX, BURN_IN_SUFFIX)
     } else {
-        (MediaType::Generic, STAMP_SUFFIX)
+        (MediaType::Generic, STAMP_SUFFIX, STAMP_SUFFIX)
     };
     ExternalPads {
         inputs: vec![ExternalPad {
             label: None,
             name: "in".to_string(),
             media_type,
-            internal_element_id: STAMP_SUFFIX.to_string(),
+            internal_element_id: in_element.to_string(),
             internal_pad_name: "sink".to_string(),
         }],
         outputs: vec![ExternalPad {
@@ -164,7 +200,7 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
     vec![BlockDefinition {
         id: BLOCK_ID.to_string(),
         name: "Reference Timestamp".to_string(),
-        description: "Stamps each buffer with its wall-clock time (pipeline clock) as a reference timestamp meta, which TAMS Output uses as capture time. Optionally burns the time into the video as UTC text and a machine-readable code.".to_string(),
+        description: "Stamps each buffer with its wall-clock time (pipeline clock) as a reference timestamp meta. Optionally burns the time into the video as UTC text and a machine-readable code.".to_string(),
         category: "Video".to_string(),
         exposed_properties: vec![
             block_prop(
