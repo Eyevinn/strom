@@ -762,8 +762,52 @@ impl AppState {
             let mut flows = self.inner.flows.write().await;
             flows.insert(flow.id, flow.clone()).is_none()
         };
+        // Running replay players follow the flow's source offsets at once.
+        crate::blocks::builtin::mediaplayer::replay::source_offsets::set_flow(
+            flow.id,
+            &flow.properties.source_offsets_ms,
+        );
 
         self.persist_flow(&flow, is_new).await
+    }
+
+    /// Change the flow's source offsets (`source_offsets_ms`): set each
+    /// `Some`, remove each `None`, keep the others. The read, the change and
+    /// the save happen under one `flows` write lock, so two concurrent
+    /// changes (or a change racing a flow save) cannot lose one another.
+    /// Entries must be checked by the caller. `Ok(None)`: no such flow.
+    pub async fn patch_source_offsets(
+        &self,
+        id: &FlowId,
+        changes: std::collections::BTreeMap<String, Option<i64>>,
+    ) -> anyhow::Result<Option<std::collections::BTreeMap<String, i64>>> {
+        let mut flows = self.inner.flows.write().await;
+        let Some(flow) = flows.get_mut(id) else {
+            return Ok(None);
+        };
+        let offsets = &mut flow.properties.source_offsets_ms;
+        for (key, value) in changes {
+            match value {
+                Some(ms) => {
+                    offsets.insert(key, ms);
+                }
+                None => {
+                    offsets.remove(&key);
+                }
+            }
+        }
+        let offsets_ms = offsets.clone();
+        flow.properties.last_modified = Some(Local::now().to_rfc3339());
+        let flow = flow.clone();
+        crate::blocks::builtin::mediaplayer::replay::source_offsets::set_flow(
+            flow.id,
+            &flow.properties.source_offsets_ms,
+        );
+        // Saved while the lock is held, so saves land in the order of the
+        // changes.
+        self.persist_flow(&flow, false).await?;
+        drop(flows);
+        Ok(Some(offsets_ms))
     }
 
     /// Insert a flow only if its id is not already taken.
@@ -876,6 +920,7 @@ impl AppState {
 
         // Unregister from PTP monitor
         self.inner.ptp_monitor.unregister_flow(*id);
+        crate::blocks::builtin::mediaplayer::replay::source_offsets::remove_flow(*id);
 
         // The flow is stopped, so its pages are closed. Their profiles hold
         // whatever they were logged in to; nothing would use them again. A
@@ -983,6 +1028,11 @@ impl AppState {
             error!("Flow not found: {}", id);
             return Err(PipelineError::FlowNotFound(id.to_string()));
         };
+        // The players built below take their sources' offsets from here.
+        crate::blocks::builtin::mediaplayer::replay::source_offsets::set_flow(
+            *id,
+            &flow.properties.source_offsets_ms,
+        );
 
         // Check if pipeline is already running
         info!("Checking if pipeline is already running...");

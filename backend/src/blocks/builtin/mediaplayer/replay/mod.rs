@@ -26,6 +26,7 @@ pub mod decode;
 pub mod grid;
 pub mod player;
 pub mod source;
+pub mod source_offsets;
 pub mod timeline;
 
 use super::bridge::NetworkBuffer;
@@ -96,7 +97,7 @@ pub fn parse_time_ref(s: &str) -> Result<ReplayTarget, String> {
 
 /// Largest `offset_ms` either way: a day. Keeps every time moved by it far
 /// from overflow.
-const MAX_OFFSET_MS: i64 = 86_400_000;
+const MAX_OFFSET_MS: i64 = strom_types::replay::MAX_SOURCE_OFFSET_MS;
 
 /// A player's replay properties and identity.
 fn player_config(
@@ -104,6 +105,7 @@ fn player_config(
     source: &str,
     spec: &source::SourceSpec,
 ) -> Result<timeline::PlayerConfig, String> {
+    let flow_id = prop_str(properties, "_flow_id").and_then(|s| Uuid::parse_str(&s).ok());
     let live_margin_ms = match prop_str(properties, LIVE_MARGIN_PROPERTY) {
         None => match properties.get(LIVE_MARGIN_PROPERTY) {
             Some(PropertyValue::UInt(u)) => Some(*u),
@@ -173,6 +175,7 @@ fn player_config(
         start_mode,
         live_margin_ms,
         offset_ns: offset_ms * 1_000_000,
+        flow_id,
     })
 }
 
@@ -759,7 +762,8 @@ mod tests {
     /// A running player switches source with the `source` command, without
     /// a rebuild: the same pipeline goes on, and the picture changes from
     /// the old source to the new one. A switch to a source that is not on
-    /// real TAI gives up and the old source stays.
+    /// real TAI gives up and the old source stays. Each source has the
+    /// flow's offset for it, not the player's own.
     #[test]
     fn a_running_player_switches_source_without_a_rebuild() {
         use strom_types::replay::{ReplayEventKind, ReplayTimeDomain};
@@ -770,11 +774,16 @@ mod tests {
         write_segments_as(root.path(), "white", "white", true);
         write_segments_as(root.path(), "loose", "white", false);
         let flow_id = Uuid::new_v4();
+        source_offsets::set_flow(
+            flow_id,
+            &[("black".to_string(), 80), ("white".to_string(), 40)].into(),
+        );
         let props = props(&[
             ("_media_path", st(root.path().to_str().unwrap())),
             ("_flow_id", st(&flow_id.to_string())),
             (SOURCE_PROPERTY, st("black")),
             (GROUP_PROPERTY, st("g")),
+            (OFFSET_MS_PROPERTY, PropertyValue::Int(500)),
         ]);
         let built = build("switch_test", &props).unwrap();
         let pipeline = gst::Pipeline::new();
@@ -818,6 +827,7 @@ mod tests {
             assert!(t0.elapsed().as_secs() < 20, "no black picture");
         }
         assert_eq!(tl.state().time_domain, ReplayTimeDomain::Tai);
+        assert_eq!(tl.state().angles[0].offset_ms, 80);
         let switch = |source: &str, client_ref: &str| {
             tl.apply(
                 timeline::parse_command(serde_json::json!({
@@ -878,12 +888,14 @@ mod tests {
         let state = tl.state();
         assert_eq!(state.angles[0].source.as_deref(), Some("white"));
         assert_eq!(state.angles[0].pending_source, None);
+        assert_eq!(state.angles[0].offset_ms, 40);
         assert_eq!(
             tl.info(flow_id, "g").angles[0].source_id.as_deref(),
             Some("white")
         );
         pipeline.set_state(gst::State::Null).unwrap();
         bus.disconnect(handler);
+        source_offsets::remove_flow(flow_id);
     }
 
     /// A running player plays a queue of clips: the first from a `cue`, the
@@ -891,7 +903,9 @@ mod tests {
     /// then shown. Each clip is prepared while the one before plays and is
     /// shown from the tick its turn comes: the last frame before the out,
     /// then the next clip's in point, no frame dropped or repeated, each
-    /// frame from the right source. The last clip freezes at its out.
+    /// frame from the right source. The last clip freezes at its out. The
+    /// white source sits 200 ms later on the group's axis (the flow's offset
+    /// for it): its clips show the frames 200 ms before their points.
     #[test]
     fn a_running_player_plays_queued_clips_back_to_back() {
         use strom_types::replay::ReplayEventKind;
@@ -903,6 +917,7 @@ mod tests {
         write_segments_as(root.path(), "black", "black", true);
         write_segments_as(root.path(), "white", "white", true);
         let flow_id = Uuid::new_v4();
+        source_offsets::set_flow(flow_id, &[("white".to_string(), 200)].into());
         let props = props(&[
             ("_media_path", st(root.path().to_str().unwrap())),
             ("_flow_id", st(&flow_id.to_string())),
@@ -987,7 +1002,7 @@ mod tests {
             .iter()
             .rev()
             .take(10)
-            .filter(|(tai, _)| *tai == BASE + 560 * MS)
+            .filter(|(tai, _)| *tai == BASE + 360 * MS)
             .count()
             < 10
         {
@@ -1005,8 +1020,8 @@ mod tests {
         let shown: Vec<(u64, u8)> = frames[first..].to_vec();
         let mut want: Vec<(u64, bool)> = Vec::new();
         want.extend((0..25).map(|k| (BASE + 480 * MS + k * FRAME, false)));
-        want.extend((0..25).map(|k| (BASE + 2000 * MS + k * FRAME, true)));
-        want.extend((0..10).map(|k| (BASE + 200 * MS + k * FRAME, true)));
+        want.extend((0..25).map(|k| (BASE + 1800 * MS + k * FRAME, true)));
+        want.extend((0..10).map(|k| (BASE + k * FRAME, true)));
         let got: Vec<(u64, bool)> = shown
             .iter()
             .take(want.len())
@@ -1063,7 +1078,9 @@ mod tests {
         assert_eq!(state.angles[0].source.as_deref(), Some("white"));
         assert_eq!(state.queue.clip_ref.as_deref(), Some("c"));
         assert_eq!(state.queue.waiting, 0);
+        assert_eq!(state.angles[0].offset_ms, 200);
         pipeline.set_state(gst::State::Null).unwrap();
         bus.disconnect(handler);
+        source_offsets::remove_flow(flow_id);
     }
 }

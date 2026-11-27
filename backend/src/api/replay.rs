@@ -17,6 +17,7 @@
 //! closes once the group's players are gone (the flow stopped or was deleted)
 //! or a new run replaced the group. A client reconnects to follow the next run.
 
+use crate::blocks::builtin::mediaplayer::replay::source_offsets;
 use crate::blocks::builtin::mediaplayer::replay::timeline::{self, CommandError};
 use crate::json_rejection::JsonBody;
 use crate::state::AppState;
@@ -32,8 +33,8 @@ use std::time::Duration;
 use strom_types::api::ErrorResponse;
 use strom_types::replay::{
     ReplayAck, ReplayCommandResult, ReplayDiagnostics, ReplayErrorCode, ReplayEvent,
-    ReplayGroupInfo, ReplayIndex, ReplayRequest, ReplayState, ReplayWsError, ReplayWsMessage,
-    MAX_STATE_MS, MIN_STATE_MS,
+    ReplayGroupInfo, ReplayIndex, ReplayRequest, ReplaySourceOffsets, ReplaySourceOffsetsPatch,
+    ReplayState, ReplayWsError, ReplayWsMessage, MAX_STATE_MS, MIN_STATE_MS,
 };
 use strom_types::FlowId;
 
@@ -183,6 +184,86 @@ pub async fn replay_diagnostics(
     Path((flow_id, group_name)): Path<(FlowId, String)>,
 ) -> Result<Json<ReplayDiagnostics>, ApiError> {
     Ok(Json(group(flow_id, &group_name)?.diagnostics()))
+}
+
+fn flow_not_found() -> ApiError {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse::new("Flow not found")),
+    )
+}
+
+/// The flow's time offset per source (its `source_offsets_ms`): every
+/// replay player that shows a listed source, in any group and after a
+/// source switch, uses the source's offset instead of its own `offset_ms`.
+#[utoipa::path(
+    get,
+    path = "/api/flows/{id}/source-offsets",
+    tag = "replay",
+    params(("id" = String, Path, description = "Flow ID (UUID)")),
+    responses(
+        (status = 200, description = "The flow's source offsets", body = ReplaySourceOffsets),
+        (status = 404, description = "Flow not found", body = ErrorResponse)
+    )
+)]
+pub async fn get_source_offsets(
+    State(state): State<AppState>,
+    Path(id): Path<FlowId>,
+) -> Result<Json<ReplaySourceOffsets>, ApiError> {
+    let flow = state.get_flow(&id).await.ok_or_else(flow_not_found)?;
+    Ok(Json(ReplaySourceOffsets {
+        offsets_ms: flow.properties.source_offsets_ms,
+    }))
+}
+
+/// Set or remove (`null`) the offsets of the named sources; the others keep
+/// theirs. Saved with the flow, and a running flow's players move at once.
+#[utoipa::path(
+    patch,
+    path = "/api/flows/{id}/source-offsets",
+    tag = "replay",
+    params(("id" = String, Path, description = "Flow ID (UUID)")),
+    request_body = ReplaySourceOffsetsPatch,
+    responses(
+        (status = 200, description = "The flow's source offsets, changed", body = ReplaySourceOffsets),
+        (status = 400, description = "invalid: an empty source or an offset beyond 24 h", body = ErrorResponse),
+        (status = 404, description = "Flow not found", body = ErrorResponse),
+        (status = 500, description = "The flow could not be saved", body = ErrorResponse)
+    )
+)]
+pub async fn patch_source_offsets(
+    State(state): State<AppState>,
+    Path(id): Path<FlowId>,
+    JsonBody(patch): JsonBody<ReplaySourceOffsetsPatch>,
+) -> Result<Json<ReplaySourceOffsets>, ApiError> {
+    // Checked whole first: a bad entry changes nothing.
+    let mut changes = std::collections::BTreeMap::new();
+    for (key, value) in patch.offsets_ms {
+        let key = key.trim().to_string();
+        if let Some(ms) = value {
+            source_offsets::check(&key, ms).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::with_details("invalid", e)),
+                )
+            })?;
+        }
+        changes.insert(key, value);
+    }
+    let offsets_ms = state
+        .patch_source_offsets(&id, changes)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::with_details(
+                    "Failed to save the flow",
+                    e.to_string(),
+                )),
+            )
+        })?
+        .ok_or_else(flow_not_found)?;
+    Ok(Json(ReplaySourceOffsets { offsets_ms }))
 }
 
 const REPLAY_HTML: &str = include_str!("../../static/replay.html");
