@@ -80,12 +80,7 @@ impl TamsOutput {
 
     /// The directory the block writes its MPEG-TS segments to.
     fn segment_dir(&self) -> PathBuf {
-        let safe_id: String = self
-            .instance_id
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { '_' })
-            .collect();
-        std::env::temp_dir().join(format!("strom-tams-{}-mux", safe_id))
+        strom::blocks::builtin::tams_output::segment_dir(&self.instance_id, "mux")
     }
 
     /// Drop the block's elements but keep its segment directory, so the

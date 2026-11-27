@@ -299,6 +299,13 @@ fn derive_id(instance_id: &str, suffix: &str) -> String {
     .to_string()
 }
 
+/// The segment directory of the TAMS flow chain `suffix` (`video`, `audio-0`,
+/// `mux`) of block `instance_id`: [`crate::tams::park::flow_dir`] of the TAMS
+/// flow that chain writes.
+pub fn segment_dir(instance_id: &str, suffix: &str) -> std::path::PathBuf {
+    crate::tams::park::flow_dir(&derive_id(instance_id, suffix))
+}
+
 /// The TAMS flow ids a block writes to (registers, or uploads segments to),
 /// as `build` derives them below: per essence in MP4 plus the Multi-Flow when
 /// there are two or more; in MPEG-TS the muxed flow and one member per track.
@@ -764,15 +771,13 @@ fn build_flow_chain(
         return Ok(());
     }
 
-    // Temp directory for this flow's segment files.
-    let safe_id: String = instance_id
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '_' })
-        .collect();
-    let temp_dir = std::env::temp_dir().join(format!("strom-tams-{}-{}", safe_id, suffix));
+    // Directory for this TAMS flow's segment files, parked ones included. Keyed
+    // by the TAMS flow id, so a backlog survives a restart of Strom and a
+    // recreated Strom flow (see `crate::tams::park`).
+    let temp_dir = crate::tams::park::flow_dir(&spec.flow_id);
     if let Err(e) = std::fs::create_dir_all(&temp_dir) {
         return Err(BlockBuildError::InvalidConfiguration(format!(
-            "TAMS Output: cannot create temp dir {}: {}",
+            "TAMS Output: cannot create segment dir {} (STROM_TAMS_PARK_DIR): {}",
             temp_dir.display(),
             e
         )));

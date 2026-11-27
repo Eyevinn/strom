@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod client;
 pub mod flow_claims;
+pub mod park;
 pub mod segmenter;
 pub mod tai_mapping;
 pub mod uploader;
