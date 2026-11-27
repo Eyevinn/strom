@@ -26,6 +26,25 @@ workaround can go once we move past that version.
 
 ---
 
+## Clocks
+
+### `GstSystemClock` with `clock-type=tai` reads monotonic time on macOS
+- **Seen on:** GStreamer 1.28.6 (Homebrew, macOS). Linux not affected (it has CLOCK_TAI).
+- **Symptom:** a `GstSystemClock` set to `GST_CLOCK_TYPE_TAI` returns the same value as the
+  monotonic clock (seconds since boot, e.g. 393075 s), not TAI and not UTC. Measured in a unit
+  test: TAI clock 393075748386958 ns, monotonic 393075748392041 ns, realtime
+  1795522589320130000 ns. Nothing warns. Code that treats the reading as TAI writes timestamps
+  near 1970.
+- **Repro:** untested as `gst-launch`; in Rust, build a `gst::SystemClock` with
+  `.property("clock-type", gst::ClockType::Tai)` and compare `time()` with a `Realtime` one.
+- **Hint:** macOS has no `CLOCK_TAI`; `gstsystemclock.c` seems to fall back to the monotonic
+  clock id for unknown clock types instead of the realtime one. Not read in detail.
+- **Tests:** `tams::tai_mapping::tests::clock_domains` and
+  `host_clocks_without_tai_offset_fall_back_to_37s` cover Strom's check for it.
+- **Upstream:** not searched.
+- **Found in:** TAMS Output shared timeline work (#966). Strom treats a TAI reading that is not
+  1-100 s ahead of UTC as "no TAI" and uses UTC + 37 s.
+
 ## Video
 
 ### `videoscale`: borders are pink in YUV formats deeper than 8 bits

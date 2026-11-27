@@ -10,6 +10,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 ### Added
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000, at most 60000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
 - API: `GET /api/flows/{flow_id}/blocks/{block_id}/pgm-endpoint` returns the WHEP endpoint fed by a vision mixer's PGM output, like `multiview-endpoint`
+- Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture. Branches of one flow stamp equal running times alike, also after a clock jump. A capture time set upstream wins, converted to the block's timescale. With burn-in, GPU memory and any raw pixel format are adapted, and encoded video fails the flow with an error that says so. In a non-live flow the preroll frame is not stamped
 
 ### Fixed
 - WHEP Output: a viewer whose ICE gathering reports `complete` a second time no longer aborts Strom. The WHEP signaller in gst-plugin-webrtc 0.15 panics on it inside a GObject callback; seen when viewers connect and drop within a second
@@ -27,6 +28,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 ### Documentation
 - UPSTREAM_NOTES.md: the WHEP signaller's panic on a second ICE `complete`
 - UPSTREAM_NOTES.md: `min-force-key-unit-interval` delaying scheduled requests
+- UPSTREAM_NOTES.md: `GstSystemClock` TAI on macOS
 
 ---
 
