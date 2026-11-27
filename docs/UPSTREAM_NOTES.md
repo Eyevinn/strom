@@ -39,7 +39,7 @@ workaround can go once we move past that version.
   `.property("clock-type", gst::ClockType::Tai)` and compare `time()` with a `Realtime` one.
 - **Hint:** macOS has no `CLOCK_TAI`; `gstsystemclock.c` seems to fall back to the monotonic
   clock id for unknown clock types instead of the realtime one. Not read in detail.
-- **Tests:** `tams::timeline::tests::clock_domains` and
+- **Tests:** `tams::tai_mapping::tests::clock_domains` and
   `host_clocks_without_tai_offset_fall_back_to_37s` cover Strom's check for it.
 - **Upstream:** not searched.
 - **Found in:** TAMS Output shared timeline work (#966). Strom treats a TAI reading that is not
@@ -511,6 +511,34 @@ workaround can go once we move past that version.
   (`backend/src/blocks/builtin/whep/output/ice_complete_guard.rs`).
 - **Upstream:** not searched.
 - **Found in:** #1283.
+
+### `whepserversink` (webrtcsink): a viewer that never connects keeps its session forever
+- **Seen on:** gst-plugin-webrtc 0.15.4, GStreamer 1.28.2 (Linux, Docker), GLib 2.88; leak
+  measured on macOS with GStreamer 1.28.
+- **Symptom:** a viewer that POSTs an offer, gets its answer and goes away without DELETE
+  before its connection comes up keeps its session (webrtcbin, ICE agent, two threads, about 20
+  file descriptors measured on macOS) for the life of the pipeline: 10 such viewers held 200 fds
+  after 60 s. In production, viewers that connected and dropped within a second piled these up
+  until the process hit its fd limit. The next viewer's webrtcbin thread then ended the process:
+  `trap int3 ... in libglib-2.0.so.0.8800.0` on a thread named `webrtcbin-<session id>`, three
+  times in 20 minutes. Resolved (Ubuntu 26.04 libglib 2.88.0, build id c26be71d...): the
+  offset is the `G_BREAKPOINT` in `_g_log_abort` (`gmessages.c:452`), a fatal `g_log`. That
+  the fatal message was `g_error ("Creating pipes for GWakeup: ...")` (EMFILE from
+  `g_main_context_new()`, the first call on webrtcbin's `:pc` and `:ice` threads) is a guess:
+  stderr was lost and the fd count at the time was not recorded.
+- **Repro:** POST a WHEP offer whose SDP has no candidates (browsers send one when they POST
+  before gathering) to `whepserversink` and never connect; count the process's open fds.
+- **Hint:** webrtcsink removes a session only on `session-ended` from the signaller (DELETE) or
+  on peer `connection-state` `failed` (`src/webrtcsink/imp.rs`, around line 3290). The server
+  never learned a candidate of the viewer, so its ICE agent has no pair to check and never
+  fails. There is no connect timeout.
+- **Tests:** `whep_output_unconnected_viewer_test::viewer_that_never_connects_is_ended`. Strom
+  works around it: WHEP Output ends every session whose peer connection has not come up 30 s
+  after its answer went out (60 s after the offer if no answer went out) by emitting
+  `session-ended` on the signaller, as DELETE does. Strom also raises its soft `RLIMIT_NOFILE`
+  towards the hard limit at startup.
+- **Upstream:** not searched.
+- **Found in:** [#1290](https://github.com/Eyevinn/strom/pull/1290)
 
 ## Muxing
 
