@@ -1674,6 +1674,56 @@ mod flow_claims {
         state.stop_flow(&second_id).await.expect("stop second");
     }
 
+    /// Two TAMS Outputs in one Strom flow with the same `tams_key` (a copied
+    /// block keeps its properties) would write the same TAMS flows: the flow
+    /// must not start, with an error that names the other block. A restart of
+    /// the flow with one of them is fine.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tams_two_blocks_with_the_same_key_in_one_flow_fail() {
+        gst::init().unwrap();
+        common::init_static_plugins();
+        if !plugins_available() {
+            return;
+        }
+        let state = common::state::new();
+        let gateway = format!(
+            "http://127.0.0.1:9/claims-same-flow-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let key = format!("prod-{}/cam1", uuid::Uuid::new_v4().simple());
+        let mut flow = flow_with_keyed_tams_output("tams_key_copied", &gateway, "cam1", Some(&key));
+        let mut copy = flow.blocks[0].clone();
+        copy.id = "cam1_copy".to_string();
+        flow.blocks.push(copy);
+        let flow_id = flow.id;
+        state.upsert_flow(flow.clone()).await.expect("upsert");
+
+        let err = state
+            .start_flow(&flow_id)
+            .await
+            .expect_err("two blocks with the same key must not both write the TAMS flows");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cam1") && msg.contains("cam1_copy"),
+            "the error names both blocks: {msg}"
+        );
+
+        // Without the copy, the flow starts (its failed start released the
+        // claims), and again after a stop.
+        flow.blocks.truncate(1);
+        state
+            .upsert_flow(flow)
+            .await
+            .expect("upsert without the copy");
+        for _ in 0..2 {
+            state.start_flow(&flow_id).await.expect("flow starts");
+            state.stop_flow(&flow_id).await.expect("stop");
+        }
+        let _ = std::fs::remove_dir_all(strom::blocks::builtin::tams_output::segment_dir(
+            &key, "mux",
+        ));
+    }
+
     /// A product that creates a new Strom flow, with new random block ids, for
     /// each run (Open Live on every activation) keeps writing to the same TAMS
     /// flows by setting the same `tams_key`: while the old run is up, the new
