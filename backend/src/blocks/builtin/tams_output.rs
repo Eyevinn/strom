@@ -193,15 +193,12 @@ impl BlockBuilder for TamsOutputBuilder {
         let auth_plan = match auth_mode.as_str() {
             "osc" => {
                 let provider = crate::osc::sat_provider();
-                let service_id = prop_str(properties, "osc_service_id")
-                    .or_else(|| crate::osc::derive_service_id(&gateway_url))
-                    .ok_or_else(|| {
-                        BlockBuildError::InvalidProperty(
-                            "TAMS Output: OSC mode could not derive the service id from \
-                             gateway_url — set the OSC Service ID property"
-                                .to_string(),
-                        )
-                    })?;
+                let explicit = prop_str(properties, "osc_service_id");
+                let service_id =
+                    crate::tams::client::osc_service_id(&gateway_url, explicit.as_deref())
+                        .map_err(|e| {
+                            BlockBuildError::InvalidProperty(format!("TAMS Output: {e}"))
+                        })?;
                 info!(
                     "TAMS Output {}: OSC PAT/SAT auth for service {}",
                     instance_id, service_id
@@ -1073,7 +1070,7 @@ fn tams_output_definition() -> BlockDefinition {
             simple_prop(
                 "osc_service_id",
                 "OSC Service ID",
-                "OSC PAT/SAT mode only. The OSC service type the SAT is scoped to. Leave empty to derive it from the gateway URL (the service-type label of an *.osaas.io host).",
+                "OSC PAT/SAT mode only. The OSC service type the SAT is scoped to. Leave empty to derive it from the gateway URL (the service-type label of an https://*.osaas.io host). The SAT is only sent to an OSC host of this service, or to a gateway listed in STROM_TAMS_ALLOWED_GATEWAYS.",
                 PropertyType::String,
                 PropertyValue::String(String::new()),
             ),
