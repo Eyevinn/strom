@@ -599,8 +599,14 @@ fn clamp_to_property_range(encoder: &gst::Element, property_name: &str, value: u
 /// second at most, which keeps WebRTC viewers' PLIs from driving the bitrate.
 const DEFAULT_MIN_KEYFRAME_REQUEST_INTERVAL_MS: u64 = 1000;
 
+/// Upper bound for `min_keyframe_request_interval_ms`. A longer floor would
+/// leave a new WebRTC viewer without a picture for longer than the default
+/// GOP, and keeps the value well inside the clock's range.
+const MAX_MIN_KEYFRAME_REQUEST_INTERVAL_MS: u64 = 60_000;
+
 /// `min_keyframe_request_interval_ms` from the block properties, in ms.
-/// Missing or negative falls back to the default; 0 means no limit.
+/// Missing or negative falls back to the default; 0 means no limit. Values
+/// above 60000 are clamped to it.
 fn parse_min_keyframe_request_interval_ms(properties: &HashMap<String, PropertyValue>) -> u64 {
     properties
         .get("min_keyframe_request_interval_ms")
@@ -610,6 +616,7 @@ fn parse_min_keyframe_request_interval_ms(properties: &HashMap<String, PropertyV
             _ => None,
         })
         .unwrap_or(DEFAULT_MIN_KEYFRAME_REQUEST_INTERVAL_MS)
+        .min(MAX_MIN_KEYFRAME_REQUEST_INTERVAL_MS)
 }
 
 /// Rate-limit keyframes forced by downstream requests. WebRTC viewers send a
@@ -621,11 +628,11 @@ fn parse_min_keyframe_request_interval_ms(properties: &HashMap<String, PropertyV
 /// viewers and genuine recoveries still get their keyframe quickly, but a PLI
 /// storm can no longer drive the output to many times the target bitrate.
 ///
-/// Only requests without a running time ("now") are limited. Scheduled
-/// requests, such as TAMS Output's keyframe on every point of its TAI
-/// segment grid, always pass: the base-class `min-force-key-unit-interval`
-/// dropped them too and moved segment boundaries off the grid. See
-/// `keyframe_requests`.
+/// Only requests without a running time ("now") are limited; an early one is
+/// held back until the floor runs out, not lost. Scheduled requests, such as
+/// TAMS Output's keyframe on every point of its TAI segment grid, always
+/// pass: the base-class `min-force-key-unit-interval` delayed them too and
+/// moved segment boundaries off the grid. See `keyframe_requests`.
 fn set_min_keyframe_request_interval(encoder: &gst::Element, interval_ms: u64) {
     keyframe_requests::install(encoder, interval_ms);
 }
@@ -1571,7 +1578,7 @@ fn videoenc_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "min_keyframe_request_interval_ms".to_string(),
                 label: "Min Keyframe Request Interval (ms)".to_string(),
-                description: "Shortest time between keyframes forced by downstream requests, in milliseconds. Requests that come sooner are dropped. The default 1000 protects WebRTC/WHEP output from PLI storms, where each viewer's picture-loss report would force another large keyframe. Only immediate requests are limited: requests for a keyframe at a given time (TAMS Output's segment grid, segmenting recorders) always pass. 0 = honour every request.".to_string(),
+                description: "Shortest time between keyframes forced by immediate requests (WebRTC PLIs), in ms, 0-60000. Scheduled requests always pass. 0 = no limit.".to_string(),
                 property_type: PropertyType::UInt,
                 default_value: Some(PropertyValue::UInt(DEFAULT_MIN_KEYFRAME_REQUEST_INTERVAL_MS)),
                 mapping: PropertyMapping {
