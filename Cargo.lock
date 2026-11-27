@@ -6976,6 +6976,7 @@ dependencies = [
  "gstreamer-gl",
  "gstreamer-net",
  "gstreamer-rtp",
+ "gstreamer-tag",
  "gstreamer-video",
  "gstreamer-webrtc",
  "hostname",

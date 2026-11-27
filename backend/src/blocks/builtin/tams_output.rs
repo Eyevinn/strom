@@ -254,19 +254,82 @@ struct AudioTrackMeta {
     language: Option<String>,
 }
 
-fn audio_track_meta(props: &HashMap<String, PropertyValue>, count: usize) -> Vec<AudioTrackMeta> {
+/// The audio tracks' labels and languages from the properties, checked
+/// against the track count and each other. Refused (with a message that names
+/// the property): more entries than tracks; a label that is `video` or
+/// `audio-<k>` (the roles of the video track and of unlabelled tracks); two
+/// tracks with the same role, which a reader that finds members by role could
+/// not tell apart; and a language GStreamer does not know.
+///
+/// A language is normalised to the ISO 639-2 form the container's muxer writes
+/// (`mpegtsmux`: 639-2/B, so `deu` and `de` become `ger`; `mp4mux`: 639-2/T,
+/// `deu`), so the flow's tag says what is in the container.
+fn audio_track_meta(
+    props: &HashMap<String, PropertyValue>,
+    count: usize,
+    container: Container,
+) -> Result<Vec<AudioTrackMeta>, String> {
     let labels = parse_track_list(&prop_str(props, AUDIO_LABELS));
     let languages = parse_track_list(&prop_str(props, AUDIO_LANGUAGES));
-    (0..count)
-        .map(|k| {
-            let label = labels.get(k).cloned().flatten();
-            AudioTrackMeta {
-                role: label.clone().unwrap_or_else(|| Essence::Audio(k).tag()),
-                label,
-                language: languages.get(k).cloned().flatten(),
+    for (name, list) in [(AUDIO_LABELS, &labels), (AUDIO_LANGUAGES, &languages)] {
+        // Trailing empty entries (`PGM,IS,`) name no track.
+        let named = list.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
+        if named > count {
+            return Err(format!(
+                "{} has {} entries but there are {} audio tracks (num_audio_tracks)",
+                name, named, count
+            ));
+        }
+    }
+    let mut meta: Vec<AudioTrackMeta> = Vec::with_capacity(count);
+    for k in 0..count {
+        let label = labels.get(k).cloned().flatten();
+        if let Some(l) = &label {
+            let reserved = l == "video"
+                || l.strip_prefix("audio-")
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            if reserved {
+                return Err(format!(
+                    "{}: \"{}\" is reserved (the role of the video track or of an \
+                     unlabelled audio track); choose another label",
+                    AUDIO_LABELS, l
+                ));
             }
-        })
-        .collect()
+        }
+        let role = label.clone().unwrap_or_else(|| Essence::Audio(k).tag());
+        if meta.iter().any(|m| m.role == role) {
+            return Err(format!(
+                "{}: \"{}\" labels more than one audio track; each label must be unique",
+                AUDIO_LABELS, role
+            ));
+        }
+        let language = match languages.get(k).cloned().flatten() {
+            Some(code) => Some(normalise_language(&code, container).ok_or_else(|| {
+                format!(
+                    "{}: \"{}\" is not an ISO 639 language code (e.g. \"swe\", \"eng\")",
+                    AUDIO_LANGUAGES, code
+                )
+            })?),
+            None => None,
+        };
+        meta.push(AudioTrackMeta {
+            role,
+            label,
+            language,
+        });
+    }
+    Ok(meta)
+}
+
+/// `code` (ISO 639-1 or 639-2, any case) as the ISO 639-2 code the
+/// container's muxer writes, or `None` when GStreamer does not know it.
+fn normalise_language(code: &str, container: Container) -> Option<String> {
+    let code = code.to_ascii_lowercase();
+    let normalised = match container {
+        Container::MpegTs => gstreamer_tag::language_codes::language_code_iso_639_2b(&code),
+        Container::Mp4 => gstreamer_tag::language_codes::language_code_iso_639_2t(&code),
+    };
+    normalised.map(|c| c.to_string())
 }
 
 /// Tags of an audio member flow: its label and language, so the tracks can be
@@ -388,12 +451,6 @@ impl BlockBuilder for TamsOutputBuilder {
         let label = prop_str(properties, "label");
         let description = prop_str(properties, "description");
         let tags = parse_tags(&prop_str(properties, "tags"));
-        let audio_meta = audio_track_meta(properties, num_audio);
-        // Languages go into the container (MPEG-TS ISO 639 descriptor, MP4
-        // media language); the muxer pads are fixed per container below.
-        let audio_languages: Vec<Option<String>> =
-            audio_meta.iter().map(|m| m.language.clone()).collect();
-
         let container = match prop_str(properties, "container")
             .unwrap_or_else(|| DEFAULT_CONTAINER.to_string())
             .as_str()
@@ -401,6 +458,10 @@ impl BlockBuilder for TamsOutputBuilder {
             "mpegts" => Container::MpegTs,
             _ => Container::Mp4,
         };
+        // Languages go into the container (MPEG-TS ISO 639 descriptor, MP4
+        // media language); the muxer pads are fixed per container below.
+        let audio_meta = audio_track_meta(properties, num_audio, container)
+            .map_err(|e| BlockBuildError::InvalidProperty(format!("TAMS Output: {}", e)))?;
 
         let mut elements: Vec<(String, gst::Element)> = Vec::new();
 
@@ -572,7 +633,7 @@ impl BlockBuilder for TamsOutputBuilder {
                     inputs.push(essence);
                     streams.push(MuxStream {
                         pad_name: Some(format!("sink_{}", pid)),
-                        language: audio_languages[i].clone(),
+                        language: meta.language.clone(),
                     });
                     collected.push(CollectedFlow {
                         track: essence.tag(),
@@ -1746,14 +1807,14 @@ fn tams_output_definition() -> BlockDefinition {
             simple_prop(
                 AUDIO_LABELS,
                 "Audio Labels",
-                "Optional labels of the audio tracks in track order, comma-separated, e.g. \"PGM,IS\" (program with commentary, international sound). Each label becomes the track's role in the TAMS flow collection and goes into its flow title. In MPEG-TS each track has a fixed PID (0x42, 0x43, ...) and is described by a member flow that the muxed flow collects with its PID.",
+                "Labels of the audio tracks in track order, comma-separated, e.g. \"PGM,IS\". Used as each track's role and in its flow title. Must be unique.",
                 PropertyType::String,
                 PropertyValue::String(String::new()),
             ),
             simple_prop(
                 AUDIO_LANGUAGES,
                 "Audio Languages",
-                "Optional ISO 639 language codes of the audio tracks in track order, comma-separated, e.g. \"swe,eng\". Written into the container (the ISO 639 language descriptor in MPEG-TS) and as a tag on the track's flow. Leave an entry empty to skip a track.",
+                "ISO 639 language codes of the audio tracks in track order, comma-separated, e.g. \"swe,eng\". Written into the container and as a flow tag. Empty entry: none.",
                 PropertyType::String,
                 PropertyValue::String(String::new()),
             ),
@@ -2055,7 +2116,7 @@ mod tests {
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), PropertyValue::String(v.into())))
                 .collect();
-        let meta = audio_track_meta(&props, 3);
+        let meta = audio_track_meta(&props, 3, Container::MpegTs).unwrap();
         let got: Vec<_> = meta
             .iter()
             .map(|m| (m.role.as_str(), m.label.as_deref(), m.language.as_deref()))
@@ -2076,7 +2137,58 @@ mod tests {
                 ("audio_language".to_string(), "eng".to_string())
             ]
         );
-        assert_eq!(audio_track_meta(&HashMap::new(), 1)[0].role, "audio-0");
+        assert_eq!(
+            audio_track_meta(&HashMap::new(), 1, Container::MpegTs).unwrap()[0].role,
+            "audio-0"
+        );
+    }
+
+    /// Labels and languages that do not fit the tracks are refused at build
+    /// time, with a message that names the property; languages are written
+    /// in the form the container's muxer uses.
+    #[test]
+    fn audio_labels_and_languages_are_checked() {
+        let meta = |labels: &str, languages: &str, count: usize, container: Container| {
+            let props: HashMap<String, PropertyValue> =
+                [(AUDIO_LABELS, labels), (AUDIO_LANGUAGES, languages)]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), PropertyValue::String(v.into())))
+                    .collect();
+            audio_track_meta(&props, count, container)
+        };
+        let refused = |labels: &str, languages: &str, count: usize, property: &str| {
+            let err = meta(labels, languages, count, Container::MpegTs)
+                .err()
+                .unwrap_or_else(|| panic!("{:?} {:?} accepted", labels, languages));
+            assert!(err.starts_with(property), "{}", err);
+        };
+        // More entries than tracks.
+        refused("PGM,IS,EXTRA", "", 2, AUDIO_LABELS);
+        refused("", "swe,eng,fin", 2, AUDIO_LANGUAGES);
+        // Duplicates, and labels that take another track's role.
+        refused("PGM,PGM", "", 2, AUDIO_LABELS);
+        refused("video", "", 1, AUDIO_LABELS);
+        refused("audio-1", "", 2, AUDIO_LABELS);
+        refused(",audio-0", "", 2, AUDIO_LABELS);
+        // Unknown language.
+        refused("", "swe,xx9", 2, AUDIO_LANGUAGES);
+
+        // Fewer entries, and trailing empty ones, are fine.
+        assert!(meta("PGM", "", 2, Container::MpegTs).is_ok());
+        assert!(meta("PGM,IS,,", "swe,,", 2, Container::MpegTs).is_ok());
+        // A label that only looks like a fallback role is fine.
+        assert!(meta("audio-x,Audio-1", "", 2, Container::MpegTs).is_ok());
+
+        // ISO 639-2/B for MPEG-TS (as mpegtsmux writes it), 639-2/T for MP4.
+        let languages = |container| {
+            meta("", "deu,FR,swe", 3, container)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.language.unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(languages(Container::MpegTs), ["ger", "fre", "swe"]);
+        assert_eq!(languages(Container::Mp4), ["deu", "fra", "swe"]);
     }
 
     /// Caps without a frame rate (an SPS without timing): the rate comes from

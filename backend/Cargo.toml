@@ -62,6 +62,7 @@ gio.workspace = true
 gstreamer-controller.workspace = true
 gstreamer-net.workspace = true
 gstreamer-rtp.workspace = true
+gstreamer-tag.workspace = true
 gstreamer-gl.workspace = true
 gstreamer-video.workspace = true
 gstreamer-webrtc.workspace = true
