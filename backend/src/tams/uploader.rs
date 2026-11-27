@@ -88,24 +88,19 @@ pub struct TailFragment {
     pub start_running_time_ns: u64,
 }
 
-/// Buffers a [`PadMediaEnd`] remembers between entering the muxer's pad and
-/// being consumed by it. An aggregator muxer queues far fewer.
+/// Buffers a [`PadMediaEnd`] remembers. Buffers with B-frames arrive out of
+/// presentation order, so the end is the latest of the recent ones.
 const PAD_RING: usize = 64;
 
-/// Where the media written by a muxer through one sink pad ends, as running
-/// time.
+/// Where the media of one essence written to the open fragment ends, as
+/// running time.
 ///
-/// A buffer probe on the pad reports each buffer as it enters
-/// ([`Self::add_buffer`]), with the running time from the pad's segment
-/// ([`Self::set_segment`]). When the muxer also reports each buffer it consumed
-/// ([`Self::consume`], from an aggregator pad's `buffer-consumed` signal; its
-/// queue is first in, first out), only consumed buffers count: what is still
-/// queued when the pipeline stops is never written. The consumed buffer's own
-/// timestamps are not used, since some muxers (mpegtsmux) rewrite them to
-/// running time first.
+/// The segmenter reports each buffer it writes ([`Self::add_buffer`]), with
+/// the running time from the essence's segment ([`Self::set_segment`]). Each
+/// fragment muxer is drained by EOS before its file is used, so every buffer
+/// reported is written.
 ///
-/// Updated per buffer, so it holds only atomics. The uploader reads it after
-/// the pipeline has stopped.
+/// Updated per buffer, so it holds only atomics.
 #[derive(Debug)]
 pub struct PadMediaEnd {
     seg_start_ns: AtomicU64,
@@ -116,8 +111,6 @@ pub struct PadMediaEnd {
     /// tracked (untracked segment).
     ring: [AtomicU64; PAD_RING],
     entered: AtomicU64,
-    consumed: AtomicU64,
-    counts_consumed: AtomicBool,
 }
 
 impl Default for PadMediaEnd {
@@ -128,18 +121,11 @@ impl Default for PadMediaEnd {
             seg_ok: AtomicBool::new(false),
             ring: std::array::from_fn(|_| AtomicU64::new(0)),
             entered: AtomicU64::new(0),
-            consumed: AtomicU64::new(0),
-            counts_consumed: AtomicBool::new(false),
         }
     }
 }
 
 impl PadMediaEnd {
-    /// Count only buffers reported by [`Self::consume`].
-    pub fn count_consumed(&self) {
-        self.counts_consumed.store(true, Ordering::Relaxed);
-    }
-
     /// A new segment event on the pad. Running time of a buffer in a forward,
     /// rate 1.0 segment is `pts - start + base`; any other segment is not tracked.
     pub fn set_segment(&self, segment: &gst::Segment) {
@@ -170,24 +156,11 @@ impl PadMediaEnd {
         self.entered.store(n + 1, Ordering::Release);
     }
 
-    /// The muxer consumed the oldest buffer still queued on the pad.
-    pub fn consume(&self) {
-        self.consumed.fetch_add(1, Ordering::AcqRel);
-    }
-
-    /// Latest end of the buffers written (consumed, or entered when the muxer
-    /// does not report consumption) that are still in the ring.
+    /// Latest end of the buffers written that are still in the ring.
     fn end_running_time_ns(&self) -> Option<u64> {
         let entered = self.entered.load(Ordering::Acquire);
-        let upto = if self.counts_consumed.load(Ordering::Relaxed) {
-            self.consumed.load(Ordering::Acquire).min(entered)
-        } else {
-            entered
-        };
-        // Ring slots still hold entries from `entered - PAD_RING` on; with more
-        // than that queued, the written end is unknown.
         let from = entered.saturating_sub(PAD_RING as u64);
-        (from..upto)
+        (from..entered)
             .map(|n| self.ring[n as usize % PAD_RING].load(Ordering::Relaxed))
             .max()
             .filter(|&end| end > 0)
@@ -1553,29 +1526,6 @@ mod tests {
 
     /// With a muxer that reports consumed buffers, buffers still queued in it
     /// when the pipeline stops are not counted: they are never written.
-    #[test]
-    fn only_consumed_buffers_count() {
-        gst::init().unwrap();
-        let pad = PadMediaEnd::default();
-        pad.count_consumed();
-        pad.set_segment(&time_segment(1_000, 0));
-        assert_eq!(pad.end_running_time_ns(), None);
-        for n in 0..5 {
-            pad.add_buffer(Some(1_000 + n * 20), 20);
-        }
-        assert_eq!(pad.end_running_time_ns(), None, "nothing consumed yet");
-        for _ in 0..4 {
-            pad.consume();
-        }
-        // Buffers 0..=3 written, buffer 4 still queued.
-        assert_eq!(pad.end_running_time_ns(), Some(80));
-        // More queued than the ring holds: unknown.
-        for n in 5..(5 + PAD_RING as u64) {
-            pad.add_buffer(Some(1_000 + n * 20), 20);
-        }
-        assert_eq!(pad.end_running_time_ns(), None);
-    }
-
     #[test]
     fn a_fragment_before_a_stall_ends_at_its_media() {
         let frag = TailFragment {
