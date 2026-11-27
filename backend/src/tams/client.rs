@@ -315,17 +315,27 @@ pub struct TamsClient {
     objects: reqwest::Client,
 }
 
+/// Parse a gateway URL: it must be an absolute http(s) URL.
+pub fn check_gateway_url(url: &str) -> Result<reqwest::Url> {
+    let base = reqwest::Url::parse(url).with_context(|| {
+        format!(
+            "gateway url {} is not an absolute http(s) URL",
+            redact_url(url)
+        )
+    })?;
+    if !matches!(base.scheme(), "http" | "https") {
+        bail!("gateway url must be http(s): {}", redact_url(url));
+    }
+    Ok(base)
+}
+
 impl TamsClient {
     /// A client for the gateway at `base_url`. Fails for a URL that is not
     /// http(s), and for OSC auth whose SAT may not go to this gateway (see
     /// [`osc_service_id`]).
     pub fn new(base_url: impl Into<String>, auth: AuthMethod) -> Result<Self> {
         let base_url = base_url.into().trim_end_matches('/').to_string();
-        let base = reqwest::Url::parse(&base_url)
-            .with_context(|| format!("gateway url {}", redact_url(&base_url)))?;
-        if !matches!(base.scheme(), "http" | "https") {
-            bail!("gateway url must be http(s): {}", redact_url(&base_url));
-        }
+        let base = check_gateway_url(&base_url)?;
         if let AuthMethod::Osc { service_id, .. } = &auth {
             check_osc_gateway(&base_url, service_id, gateway_is_allow_listed(&base_url))
                 .map_err(|e| anyhow!(e))?;
