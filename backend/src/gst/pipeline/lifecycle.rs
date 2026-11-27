@@ -356,7 +356,7 @@ impl PipelineManager {
     ///
     /// From here on an EOS on the bus is not reported as the flow ending on
     /// its own. The drains are returned only if the pipeline is PLAYING and
-    /// has not posted EOS or an error: otherwise no data flows to carry a
+    /// has not posted EOS: otherwise no data flows to carry a
     /// drain's EOS through, and each drain would wait out its timeout for
     /// nothing. Taking them a second time returns none, so `teardown_flow` can
     /// run them before it removes the flow's sources and `stop()` still runs

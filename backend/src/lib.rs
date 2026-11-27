@@ -53,6 +53,7 @@ pub mod relay;
 pub mod rtsp_server;
 pub mod server_hardening;
 pub mod sharing;
+pub mod shutdown;
 pub mod state;
 pub mod stats;
 pub mod stinger;
