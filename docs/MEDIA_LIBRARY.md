@@ -24,7 +24,7 @@ that mode:
 - **Stinger clip source**: the playlist is a stinger library for a Vision Mixer's stinger
   input (see [VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md)).
 - **Timeline (replay)**: plays an indexed **Source** (a TAMS flow,
-  `tams+https://<gateway>/flows/<flow_id>`, or a directory with `index.json`) on a timeline
+  `tams+https://<gateway>/flows/<flow_id>`) on a timeline
   you can scrub, jog and play at any speed. Players with the same **Group** share one timeline;
   an empty group is a group of its own. **Output Framerate** (empty = the source's rate) sets
   the player's own frame grid, e.g. the mixer's rate for slow motion from a 100p source. TAMS
