@@ -500,7 +500,6 @@ impl BlockBuilder for TamsOutputBuilder {
                         tags: tags.clone(),
                         flow_collection: vec![],
                         collected: vec![],
-                        container_mapping: Default::default(),
                         essence_parameters: Default::default(),
                     };
                     build_flow_chain(
@@ -535,7 +534,6 @@ impl BlockBuilder for TamsOutputBuilder {
                         tags: [tags.clone(), audio_member_tags(meta)].concat(),
                         flow_collection: vec![],
                         collected: vec![],
-                        container_mapping: Default::default(),
                         essence_parameters: Default::default(),
                     };
                     build_flow_chain(
@@ -575,7 +573,6 @@ impl BlockBuilder for TamsOutputBuilder {
                         tags: tags.clone(),
                         flow_collection: members,
                         collected: vec![],
-                        container_mapping: Default::default(),
                         essence_parameters: Default::default(),
                     };
                     register_multiflow(instance_id, multi, gateway_url.clone(), auth_plan, ctx);
@@ -594,7 +591,8 @@ impl BlockBuilder for TamsOutputBuilder {
                     source_id: derive_id(instance_id, &format!("mux-{}-source", tag)),
                     format: format.to_string(),
                     codec: None, // from caps
-                    container: Some(CONTENT_TYPE_MPEGTS.to_string()),
+                    // No segments of its own (see `CollectedFlow`).
+                    container: None,
                     label: Some(match &label {
                         Some(l) => format!("{} ({})", l, role),
                         None => role.to_string(),
@@ -606,7 +604,6 @@ impl BlockBuilder for TamsOutputBuilder {
                     tags: extra_tags,
                     flow_collection: vec![],
                     collected: vec![],
-                    container_mapping: Default::default(),
                     essence_parameters: Default::default(),
                 };
                 if num_video >= 1 {
@@ -666,7 +663,6 @@ impl BlockBuilder for TamsOutputBuilder {
                     // The members have no segments of their own.
                     flow_collection: vec![],
                     collected,
-                    container_mapping: Default::default(),
                     essence_parameters: Default::default(),
                 };
                 build_flow_chain(

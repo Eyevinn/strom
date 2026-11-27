@@ -213,9 +213,6 @@ pub struct FlowSpec {
     /// essence is known and adds it to `flow_collection`; see
     /// [`CollectedFlow`].
     pub collected: Vec<CollectedFlow>,
-    /// The flow's own `container_mapping` (where a member flow's essence is in
-    /// the container of the flow that collects it). Left out when empty.
-    pub container_mapping: serde_json::Map<String, serde_json::Value>,
     /// TAMS `essence_parameters` (e.g. `frame_rate`, `frame_width`), filled in from
     /// caps by the uploader before the flow is created. Empty when unknown.
     pub essence_parameters: serde_json::Map<String, serde_json::Value>,
@@ -236,6 +233,10 @@ pub struct CollectionItem {
 /// container: it has no segments of its own. `spec` is registered with the
 /// essence detected for `track` (see `DetectedEssence::tracks`), and the
 /// collection item gets `container_mapping` plus the track's channel range.
+/// The member flow itself has no `container` or `container_mapping`: in TAMS
+/// both describe a flow's own segments (`container` MUST NOT be set on a flow
+/// that references no media objects), and the mapping into the collecting
+/// flow's container belongs on the collection item.
 #[derive(Debug, Clone)]
 pub struct CollectedFlow {
     /// Key into `DetectedEssence::tracks` (`video`, `audio-0`, ...).
@@ -287,9 +288,6 @@ fn flow_request_body(spec: &FlowSpec) -> serde_json::Value {
             })
             .collect();
         body["flow_collection"] = serde_json::Value::Array(members);
-    }
-    if !spec.container_mapping.is_empty() {
-        body["container_mapping"] = serde_json::Value::Object(spec.container_mapping.clone());
     }
     if let Some(label) = &spec.label {
         body["label"] = serde_json::Value::String(label.clone());
@@ -970,7 +968,6 @@ mod tests {
             tags: vec![],
             flow_collection: vec![],
             collected: vec![],
-            container_mapping: Default::default(),
             essence_parameters: Default::default(),
         }
     }
@@ -1039,18 +1036,21 @@ mod tests {
             role: "PGM".into(),
             container_mapping: Default::default(),
         }];
+        // An empty mapping is left out.
         let body = flow_request_body(&s);
-        // An empty mapping is left out, on the member and on the flow.
         assert!(body["flow_collection"][0]
             .get("container_mapping")
             .is_none());
-        assert!(body.get("container_mapping").is_none());
-        s.container_mapping
+        s.flow_collection[0]
+            .container_mapping
             .insert("mp2ts_container".into(), serde_json::json!({ "pid": 66 }));
+        let body = flow_request_body(&s);
         assert_eq!(
-            flow_request_body(&s)["container_mapping"]["mp2ts_container"]["pid"],
+            body["flow_collection"][0]["container_mapping"]["mp2ts_container"]["pid"],
             66
         );
+        // Never on the flow itself.
+        assert!(body.get("container_mapping").is_none());
     }
 
     #[test]

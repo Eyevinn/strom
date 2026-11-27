@@ -1561,7 +1561,10 @@ mod audio_pairs {
             );
             assert_eq!(member["format"], "urn:x-nmos:format:audio");
             assert_eq!(member["codec"], "audio/aac");
-            assert_eq!(member["container"], "video/mp2t");
+            // Segment-less: no container or mapping of its own; the mapping
+            // is on the collection item.
+            assert!(member.get("container").is_none(), "{}", member);
+            assert!(member.get("container_mapping").is_none(), "{}", member);
             assert_eq!(member["label"], format!("Cam 1 ({})", role));
             assert_eq!(member["tags"]["audio_label"], role);
             assert_eq!(member["tags"]["audio_language"], lang);
@@ -1579,7 +1582,6 @@ mod audio_pairs {
                 "mp2ts_container": { "pid": pid },
                 "audio_track": { "channel_range": "0_1" }
             });
-            assert_eq!(member["container_mapping"], mapping);
             assert_eq!(
                 mux["flow_collection"][k],
                 serde_json::json!({ "id": id(&format!("mux-audio-{}", k)), "role": role, "container_mapping": mapping })
