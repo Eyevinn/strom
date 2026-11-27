@@ -382,11 +382,11 @@ pub fn by_urgency(segs: &[Arc<Segment>], cursor: i64, forward: bool) -> Vec<Arc<
     v
 }
 
-/// The most urgent of `order` (ordered by urgency) whose bytes fit in
-/// `budget`, counting `size_of` each. The first `min_keep` always fit. Stops
-/// at the first that does not, so what is kept is never less urgent than
-/// what is left out.
-fn within_budget(
+/// The most urgent of `order` (ordered by urgency) whose bytes (coded here,
+/// decoded in the player) fit in `budget`, counting `size_of` each. The
+/// first `min_keep` always fit. Stops at the first that does not, so what is
+/// kept is never less urgent than what is left out.
+pub(super) fn within_budget(
     order: &[Arc<Segment>],
     size_of: impl Fn(&Segment) -> u64,
     budget: u64,
@@ -563,6 +563,9 @@ pub struct Fetcher {
     behind_ns: i64,
     /// Most coded bytes to hold.
     coded_budget: u64,
+    /// Why the source cannot be played at all (a codec or container replay
+    /// does not decode), once known. The player fails the flow with it.
+    unplayable: Mutex<Option<String>>,
 }
 
 impl Fetcher {
@@ -587,7 +590,32 @@ impl Fetcher {
                 .filter(|mb| *mb > 0)
                 .unwrap_or(DEFAULT_CODED_BUDGET_MB)
                 .saturating_mul(1 << 20),
+            unplayable: Mutex::new(None),
         }
+    }
+
+    /// Note that the source cannot be played (`why`); the first reason is
+    /// kept.
+    pub fn mark_unplayable(&self, why: &str) {
+        let mut u = lock(&self.unplayable);
+        if u.is_none() {
+            warn!(
+                "Replay {}: {} cannot be played: {}",
+                self.block_id,
+                self.source.describe(),
+                why
+            );
+            *u = Some(format!(
+                "{} cannot be played: {}",
+                self.source.describe(),
+                why
+            ));
+        }
+    }
+
+    /// Why the source cannot be played, if it cannot.
+    pub fn unplayable(&self) -> Option<String> {
+        lock(&self.unplayable).clone()
     }
 
     /// Run on a dedicated thread until `stop` is set.
@@ -637,16 +665,12 @@ impl Fetcher {
                 anyhow::Ok((info, first, last))
             }
             .await;
-            // A source replay cannot decode is one clear error, not a decode
-            // failure per segment and a picture that never comes.
+            // A source replay cannot decode is one clear error (the player
+            // fails the flow with it), not a decode failure per segment and a
+            // picture that never comes.
             if let Ok((info, _, _)) = &r {
                 if let Err(e) = check_supported(info.container.as_deref(), info.codec.as_deref()) {
-                    warn!(
-                        "Replay {}: {} cannot be played: {}; nothing is fetched or shown",
-                        self.block_id,
-                        self.source.describe(),
-                        e
-                    );
+                    self.mark_unplayable(&e);
                     return None;
                 }
             }
