@@ -2,7 +2,7 @@
 
 > Code is the source of truth — this may have drifted; read the code for the current implementation.
 
-Media players in timeline mode (`mode = timeline`) that share a `group` form a **replay group**: one cursor and one speed for all angles. The group shares time, not frame numbers. The cursor is a TAI instant, and each angle shows its latest frame that starts at or before it. This page describes how to drive a group from outside: the commands, what they return, the events, and the state.
+Media players in timeline mode (`mode = timeline`) that share a `group` form a **replay group**: one cursor and one speed for all angles. The group shares time, not frame numbers. The cursor is an instant on the group's time axis, and each angle shows its latest frame that starts at or before it. This page describes how to drive a group from outside: discovery, the commands, what they return, the events, and the state. This is **API version 2**.
 
 The built-in operator page `/player/replay/{flow_id}/{group}` drives the group with this API only. Around it, the page also:
 
@@ -11,132 +11,225 @@ The built-in operator page `/player/replay/{flow_id}/{group}` drives the group w
 - finds its monitors with `GET .../blocks/{mixer}/pgm-endpoint` and `multiview-endpoint`, or without a mixer the nearest WHEP Output downstream of a player, and plays them over WHEP;
 - keeps marks and clips in the browser's `localStorage`, so they belong to that browser.
 
+The diagnostics page `/player/replay-diagnostics/{flow_id}/{group}` shows the state and the engine diagnostics, and measures the time from a command to the picture on screen.
+
 ## Endpoints
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
+| `GET` | `/api/replay` | | every replay group of the server, with `api_version` and `features` |
+| `GET` | `/api/replay/{flow_id}` | | the flow's groups, same shape |
+| `GET` | `/api/replay/{flow_id}/{group}` | | one group |
 | `POST` | `/api/replay/{flow_id}/{group}/command` | a command | the command result |
 | `GET` | `/api/replay/{flow_id}/{group}/state` | | the group state |
-| `GET` (WebSocket) | `/api/replay/{flow_id}/{group}/ws` | commands | acks, errors, events, state every 50 ms |
+| `GET` | `/api/replay/{flow_id}/{group}/diagnostics` | | engine diagnostics |
+| `GET` (WebSocket) | `/api/replay/{flow_id}/{group}/ws` | commands | state, events, acks, errors |
 
-A WebSocket ends with its group: it closes (code 1001) once the group's players are gone, when the flow stops or is deleted, or when a new run of the flow makes a new group. Reconnect to follow the next run. An open socket does not keep the group alive.
+The schema is in the OpenAPI spec under the `replay` tag. Every WebSocket message is one `ReplayWsMessage`, tagged by `type`.
 
-The schema is in the OpenAPI spec (`ReplayCommand`, `ReplayCommandResult`, `ReplayEvent`, under the `replay` tag).
-
-REST and the WebSocket take the same commands and return the same result. On the WebSocket a command may carry a `seq`. It is echoed in the reply: `{"type": "ack", "seq": 7, ...result}` or `{"type": "error", "seq": 7, "code": "...", "error": "..."}`.
-
-### Errors
-
-| HTTP | WS `code` | When |
-|---|---|---|
-| 400 | `invalid` | Malformed command, unknown `cmd` or field, a value out of range (speed outside ±8, bad UTC/TAI text, more than one target, `out` before `in`). |
-| 404 | | No replay group with that name in that flow (the flow is not running). |
-| 409 | `conflict` | The command is valid but does not apply now: no media yet, frame numbers before the frame rate is known or frame 0 is fixed, `until` behind the cursor, a cue outside the media, a mark before any picture has gone out. |
-
-A refused command changes nothing.
-
-## Naming an instant
-
-Commands name a point on the timeline in one of four ways. Give exactly one.
-
-| Field | Meaning | Example |
-|---|---|---|
-| `frame` | Frame of the group's reference grid (its finest source rate), counted from the group origin: frame 0 holds the start of the earliest angle, fixed once every angle has reported its range (or after 10 s, without an angle whose source has not answered). It then stays put for the run, so frame numbers do not depend on which source answered first. | `{"frame": 1250}` |
-| `utc` | UTC, RFC 3339. Names the reference frame whose start is nearest (within half a frame), and goes to that start: frame times come in UTC to the millisecond, while a frame can start anywhere inside its millisecond, so a UTC the API gave seeks back to the same frame. | `{"utc": "2026-11-24T13:21:56.080Z"}` |
-| `tai` | TAI as TAMS `"<seconds>:<nanoseconds>"`. Exact, to the nanosecond. | `{"tai": "1795526553:80598792"}` |
-| `from_live_ms` | Milliseconds before the live edge (the last instant every angle has). | `{"from_live_ms": 8000}` |
-
-`seek` takes these fields directly. `cue` and `play` take them as objects (`"in": {...}`, `"out": {...}`, `"until": {...}`).
-
-## Commands
-
-| `cmd` | Fields | What it does |
-|---|---|---|
-| `seek` | one target, `speed?` | Go to the instant. Keeps the speed, or sets `speed` in the same step. |
-| `seek_rel` | `ms` | Move by milliseconds, keeping the speed. |
-| `jog` | `frames` | Pause and move by reference frames. |
-| `speed` | `speed` | Play at a speed, −8 to 8 (negative is reverse, 0 pauses). |
-| `ramp` | `to`, `duration_ms` | Change the speed linearly from the speed now to `to` over `duration_ms` (at most 60000). The server runs it. |
-| `play` | `speed?`, `until?`, `end_action?` | Play (default 1x). A held cue bounds it. `until` bounds a play without a cue. |
-| `pause` | | Pause where the cursor is. |
-| `cue` | `in`, `out`, `end_action?` | Hold `[in, out)` as the bound of play and park, paused, at `in`. |
-| `uncue` | | Drop the cue. The cursor and speed stay. |
-| `live` | `margin_ms?` | Play at 1x from the live edge minus the margin (default 1500 ms). |
-| `end` | | Go to the live edge and pause. |
-| `mark` | `label?` | Stamp the picture going out now. Changes nothing. |
-
-### Cue and bounded play
-
-- `out` is exclusive. `freeze` holds the last frame that starts before `out` (or `in` when playing in reverse).
-- `end_action` is one of:
-  - `freeze` (default): pause at the end and send an `ended` event;
-  - `loop`: wrap to the other end;
-  - `live`: go live at the `live` margin, drop the cue, and send a `live` event.
-- `play` at the end of a cue starts again from its other end, so pressing play after a clip has frozen plays it again.
-- `speed`, `ramp`, `pause` and moves inside the cue keep it. A seek or jog outside the cue drops it, and so do `live`, `end` and `uncue`.
-- `play {until}` without a cue plays from the cursor to `until`. With a cue that holds the cursor, it plays from the cue's `in` to `until`.
-
-### Going live by itself
-
-Forward play without a cue that started behind the live point (the live edge minus the `live` margin) and reaches it goes on from there at 1x. It follows the edge and sends a `live` event with reason `caught_up`. It does not jump back and does not stop. Slow motion started inside the margin stays slow motion.
-
-A group that follows live keeps to the margin. If the live point moves ahead of the cursor by more than one step of the edge (plus 250 ms), the group jumps forward to it and sends a `live` event with reason `edge_moved`. This happens when `live` came while an angle's index still lagged, for example right after a start, when one angle's index still ends where the previous run ended.
-
-### Ramps
-
-A ramp keeps the cue, so a ramp into `out` still freezes there. Any other command that sets the speed ends the ramp where it is.
-
-## Command result
+### Discovery
 
 ```json
 {
-  "speed": 0.5,
-  "live": false,
-  "cursor_tai": {"utc": "2026-11-24T13:22:00.000Z", "tai": "1795526557:0", "tai_ns": "1795526557000000000"},
-  "frame": 195,
-  "time": {"frame": 195, "utc": "2026-11-24T13:21:59.980Z", "tai": "...", "tai_ns": "...", "tai_clock": "...", "frame_in_second": 49},
-  "cue": {"in": {...}, "out": {...}, "end_action": "freeze"},
-  "mark": {...}
+  "api_version": 2,
+  "features": ["follow_live", "client_ref", "mark_at", "offset_ms", "jog_grid", "start_mode", "diagnostics"],
+  "groups": [
+    {
+      "flow_id": "...", "group": "r1", "time_domain": "tai", "ready": "ready",
+      "grid": {"output": {"fps": "50/1", "frame_ns": 20000000.0}, "source": {"fps": "50/1", "frame_ns": 20000000.0}},
+      "angles": [{"block": "cam1", "name": "Camera 1", "source_id": "<TAMS flow id>", "source": "tams+https://gateway.example.com/flows/<id>"}],
+      "source": "tams+https://gateway.example.com"
+    }
+  ]
 }
 ```
 
-- `frame` and `time` give the reference frame that holds the cursor, once the frame rate is known.
-- `cue` is the bound the server holds, if any.
-- `mark` is only present for `mark`:
-  - `cursor_tai`: the group time of the last tick the players pushed;
-  - `time`: the reference frame that holds it;
-  - `angles`: each player's last pushed source frame (`block`, `shown`).
+- A group exists only while its flow runs. A group that does not run is 404, or missing from the lists.
+- `source` is a URI without credentials. The group's `source` is the store the angles share, if they share one.
+- A player without a `group` has a group of its own, `@<block id>`.
+- `GET /api/version` has `process_started_at`. A client that sees a new value knows the server restarted.
 
-`tai_ns` is always a string, because it does not fit in a JavaScript number.
+### The WebSocket
+
+- The socket sends the state every 50 ms. `?state_ms=200` sets another rate (50 to 1000).
+- `?diagnostics=1` adds a `{"type": "diagnostics", ...}` after each state.
+- A command may carry a `seq`. It is echoed in the reply: `{"type": "ack", "seq": 7, ...result}` or `{"type": "error", "seq": 7, "code": "...", "error": "...", "client_ref": "..."}`.
+- When the socket falls behind and drops events, it sends `{"type": "lagged", "missed": 3}`. Read the state then. The `event_seq` of the events also shows the jump.
+- A WebSocket ends with its group: it closes (code 1001) once the group's players are gone, when the flow stops or is deleted, or when a new run of the flow makes a new group. Reconnect to follow the next run. An open socket does not keep the group alive.
+
+### Errors
+
+| HTTP | Code | When |
+|---|---|---|
+| 400 | `invalid` | Malformed command, unknown `cmd` or field, a value out of range (speed outside ±8, bad `t` or UTC text, not exactly one field in a target, `out` before `in`, a `client_ref` over 64 characters, a `margin_ms` over 60000, a mark `label` over 256 characters). |
+| 404 | | No replay group with that name in that flow (the flow is not running). |
+| 409 | `conflict` | The command is valid but does not apply now: no media yet, a jog before the frame rate is known, a `utc` target when the time domain is not `tai`, `until` behind the cursor, a mark before any picture has gone out. |
+| 409 | `out_of_range` | A cue or `mark {at}` wholly outside the media. |
+
+On REST the code is the error body's `error` field, the reason its `details`. On the WebSocket it is `code`. A refused command changes nothing.
+
+## Time
+
+- **`t`** is the group's time: integer nanoseconds, always as a decimal string (it does not fit in a JavaScript number; read it with `BigInt`). It is exact and stable over restarts and retention. It is what a client stores.
+- **`time_domain`** says once per group what `t` is:
+
+| `time_domain` | `t` | `utc` |
+|---|---|---|
+| `tai` | TAI ns since 1970-01-01 TAI: the same number as a TAMS timestamp `"<s>:<ns>"` | given (RFC 3339, ms) |
+| `unanchored` | ns synced between the angles, but no real time (test material) | `null` |
+| `unknown` | an angle has not read its index yet | `null` |
+
+- An **instant** is `{"t": "...", "utc": "..."|null}`: the cursor, marks, the cue's `in` and `out`, the media's edges, extents and gaps.
+- A **frame** is `{"t": "...", "utc": ..., "frame_in_second": 24}`: the frame of the **output** grid (the output's frame rate) that holds an instant. `t` is the frame's start, `frame_in_second` is the `FF` of a timecode `HH:MM:SS:FF`. A frame is `null` until the grid is known. Where both are given they stand side by side, `{"at": instant, "frame": frame}`; the exact `t` is never replaced by the frame's start.
+- The group has two grids: `output` (timecodes) and `source` (the finest source rate). `jog` steps on the group's `jog_grid`, `source` by default, so slow motion from a high-frame-rate source shows every source frame.
+- There are no absolute frame numbers. Positions are `t`, lengths milliseconds, and frames only relative steps (`jog`). A position in ms is `(t − range.start.t) / 1e6`, computed with `BigInt`.
+
+### Targets
+
+A command names a point with an object of **exactly one** field:
+
+| Field | Meaning | Example |
+|---|---|---|
+| `t` | Group time, exact. | `{"t": "1795526557010000000"}` |
+| `utc` | RFC 3339. Lands on the start of the **output** frame (the grid of `frame` and timecodes) nearest it, within half an output frame. So a frame's UTC from the API, or a timecode typed in, seeks back to that frame whatever the sources' rates; each angle then shows its source frame that holds that point. 409 unless the domain is `tai`. | `{"utc": "2026-11-24T13:21:56.080Z"}` |
+| `from_live_ms` | Milliseconds before the live edge. `0` is the last frame every angle has (`range.live_edge − 1`). | `{"from_live_ms": 8000}` |
+| `rel_ms` | Milliseconds from the cursor when the command arrives, negative is back. In `cue` and `play {until}` every field counts from the same cursor. | `{"rel_ms": -2000}` |
+
+Targets outside the media:
+
+- `seek` and `jog` clamp to what is there (`range.start` to `range.end − 1`).
+- `cue` gives 409 `out_of_range` when the range is wholly outside. A range partly outside is clamped. `play {until}` is never wholly outside: `until` must be ahead of the cursor (behind it in reverse), else 409 `conflict`.
+- `mark {at}` outside the media gives 409 `out_of_range`.
+
+## Commands
+
+Every command may carry `client_ref` (a string of at most 64 characters). It is echoed in the response and in the events the command causes, also later ones such as `ended` when a clip ends:
+
+- The end of a cue (`ended`, or `live` with `end_action: live`; cause `cue_end` or `media_end`) carries the **cue's** ref: the one of the `cue` or `play {until}` that set it, or of a later `play` with a ref that plays it. Other commands while the cue is held (`speed`, `ramp`, `follow_live`, `play` without a ref) do not change it; a new cue replaces it, and it goes when the cue does.
+- `caught_up` and `edge_moved` carry the ref of the last command that changed the motion (not `follow_live` or `mark`).
+- `live` with cause `live` carries the `live` command's ref.
+
+| `cmd` | Fields | What it does |
+|---|---|---|
+| `seek` | `to`, `speed?` | Go to the point. Keeps the speed (during a ramp, the ramp's speed now), or sets `speed` in the same step. |
+| `jog` | `frames` | Pause and move a number of frames on `jog_grid`. The cursor rests in the middle of the frame. |
+| `speed` | `speed` (−8..8) | Set the speed where the cursor is. `0` pauses. |
+| `play` | `speed?` (default 1), `until?`, `end_action?` | Play. With a cue: within half a frame of the end play runs to, play starts again from the other end. `until` sets a new cue `[min(cue.in, cursor), until)`. `end_action` without `until` and without a cue is 400. |
+| `pause` | | Speed 0 where the cursor is. |
+| `ramp` | `to`, `duration_ms` (0–60000) | Change the speed linearly from the speed now to `to`; the server runs the ramp. |
+| `cue` | `in`, `out`, `end_action?` | Hold `[in, out)` and park, paused, on `in`. |
+| `uncue` | | Drop the cue. The cursor, the speed and a running ramp stay. |
+| `live` | `margin_ms?` (0–60000) | Play at 1x from the live edge minus the margin. `margin_ms` sets the margin for the whole group for the rest of the run; leave it out to keep the group's margin. |
+| `end` | | Go to the last frame every angle has, pause, drop the cue. |
+| `mark` | `label?` (≤ 256 characters), `at?` | Stamp the picture going out now, or the point `at`. Changes nothing. |
+| `follow_live` | `on` | Whether the group goes live by itself (`false`: review mode). |
+
+`end_action` is `freeze` (default), `loop` or `live`.
+
+### What each command does to the motion
+
+`=` is unchanged. **Live\*** means: off, but with `follow_live` on the group goes live by itself (cause `caught_up`) when it plays forward without a cue and reaches the live point; the speed becomes 1x and a ramp ends. Play that starts at or ahead of the live point (`end` then `play`, a seek near the edge, `play {speed: 2}` while live) has reached it once it runs at 1x or faster (with a ramp: and ramps to 1x or faster): it goes live at once. If it is then more than 250 ms ahead of the live point on the smooth edge estimate, it goes back to that point, since 1x from closer to the edge would hold at the edge on every step. Slower play from there stays slow motion: the edge runs away from it. Forward play that has not gone live stops on the last frame every angle has, at its speed, until media grows. With `follow_live` off it never goes live.
+
+| `cmd` | cursor | speed | cue | live | ramp |
+|---|---|---|---|---|---|
+| `seek` | → `to` (clamped) | `=` (the ramp's now), or `speed` | kept if it holds `to` | Live\* | ends |
+| `jog` | ± frames on `jog_grid` | 0 | kept if it holds the target | off | ends |
+| `speed` | `=` | `speed` | kept | Live\* | ends |
+| `play` | `=`, at the cue's end → the other end | `speed` (1) | kept; `until` sets a new one | Live\* | ends |
+| `pause` | `=` | 0 | kept | off | ends |
+| `ramp` | `=` | → `to` over the time | kept | Live\* (the ramp is cut at live) | starts |
+| `cue` | → `in` | 0 | set | off | ends |
+| `uncue` | `=` | `=` | dropped | as before (a group with a cue is not live); Live\* when playing forward | goes on |
+| `live` | → edge − margin | 1 | dropped | **on** | ends |
+| `end` | → last common frame | 0 | dropped | off | ends |
+| `mark` | `=` | `=` | `=` | `=` | `=` |
+| `follow_live` | `=` | `=` | `=` | `=` (off if `on: false` and live) | `=` |
+
+**Note:** with `follow_live` on, `play {speed: 2}` or a ramp towards 2x while the group is live reaches the live point almost at once and is 1x live again. A cue or `follow_live: false` stops that.
+
+### Cue and bounded play
+
+- `out` is exclusive. `freeze` holds the last frame that starts before `out` (or `in` when playing in reverse) and sends an `ended` event.
+- `loop` wraps to the other end. `live` goes live at the margin, drops the cue, and sends a `live` event.
+- On media that no longer grows, an `out` past the media ends play where the media does (cause `media_end`). While the media grows, play holds at the edge until the media reaches `out`.
+
+### Going live by itself
+
+A group that follows live keeps to the margin. If the live point moves ahead of the cursor by more than one step of the edge (plus 250 ms), the group jumps forward to it and sends a `live` event with cause `edge_moved`. This happens when `live` came while an angle's index still lagged, for example right after a start.
+
+## Command result
+
+The result is the group's motion after the command, the command's `client_ref`, and the mark for `mark`:
+
+```json
+{
+  "cursor": {"at": {"t": "1795526557010000000", "utc": "2026-11-24T13:21:20.010Z"},
+             "frame": {"t": "1795526556980000000", "utc": "2026-11-24T13:21:19.980Z", "frame_in_second": 24}},
+  "speed": 0.5,
+  "live": false,
+  "cue": {"in": {...}, "out": {...}, "end_action": "freeze"},
+  "ramp": null,
+  "client_ref": "clip-17",
+  "mark": {"label": "goal", "at": {...}, "frame": {...}, "angles": [{"block": "cam1", "shown": {...}}]}
+}
+```
+
+- `mark.at` without `at` in the command is the group time of the last tick the players pushed. A cue from `{"t": mark.at.t}` shows the same pictures.
+- `mark.angles[].shown` is each angle's source frame, on the angle's own grid: the one it pushed, or with `at` the one that holds that point.
 
 ## Events (WebSocket)
 
-Things the group does by itself, as `{"type": "event", "event": ..., ...}`:
+```json
+{"type": "event", "event_seq": 41, "event": "ended", "cause": "cue_end", "client_ref": "clip-17", "at": {...}}
+{"type": "event", "event_seq": 42, "event": "live", "cause": "caught_up", "at": {...}}
+{"type": "event", "event_seq": 43, "event": "range_changed", "cause": "retention", "range": {...}}
+{"type": "event", "event_seq": 44, "event": "ready", "cause": "media", "ready": "ready"}
+```
 
 | `event` | Fields | When |
 |---|---|---|
 | `ended` | `at` | Bounded play reached its end with `freeze`. |
-| `live` | `reason` (`end_action`, `caught_up` or `edge_moved`), `at` | The group went live by itself. |
+| `live` | `at` | The group went live (by `live`, an end action, catching up, the edge moving, or `start_mode: live`). |
+| `range_changed` | `range` | The start or end of the media changed other than by the edge growing: retention removed the start, an angle came, went or was replaced by another, a hole filled, the end or the live edge went back. The edge growing is in the state. |
+| `ready` | `ready` | The group's readiness changed. |
+
+- `event_seq` goes up by one per event of the group. A jump means a missed event.
+- `cause` is the command that caused the event (`seek`, `play`, `live`, ...), or what happened by itself: `cue_end`, `media_end`, `caught_up`, `edge_moved`, `retention`, `media` (the media changed otherwise, or readiness changed), `start_mode`.
+- `client_ref` is there when a command with a `client_ref` caused the event.
 
 ## State
 
-`GET .../state` and the WebSocket's `{"type": "state"}` carry the same object. The main fields:
+`GET .../state` and the WebSocket's `{"type": "state"}` carry the same `ReplayState`. Unknown values are `null`, never `0`.
 
 | Field | Meaning |
 |---|---|
-| `speed`, `live`, `cue`, `ramp` | Motion now. `ramp` is present while a ramp runs (`from`, `to`, `duration_ms`, `remaining_ms`). |
-| `cursor`, `frame` | The cursor's reference frame. |
-| `pushed` | The picture going out: frame time, `behind_live_ms`, `behind_live_estimate_ms`, and `age_ms` when the source has real TAI. |
-| `start`, `end`, `live_edge` | The group's range. The live edge is where every angle has media. |
-| `live_edge_estimate`, `live_growing`, `behind_live_estimate_ms` | The live edge between index steps, estimated from when the steps arrived. It equals `live_edge` when the media does not grow. |
-| `reference_fps`, `frame_ns`, `time_domain` | Grid and time base (`tai`, `unanchored`, `unknown`). |
-| `players[]` | Per angle: `block`, `fps`, `output_fps`, `extent`, `indexed`, `gaps`, `shown` (the source frame going out, at its own capture time: a source that restarts can change its frame phase, and each frame keeps its own time), `in_sync` (the last tick found the frame that holds the group time), `in_gap` (see below), and counters. |
+| `time_domain` | `tai`, `unanchored` or `unknown`. |
+| `ready` | `indexing` (an index is not read), `warming` (read, but frames are not decoded in time yet), `ready`. The group is ready when every angle is; an angle is ready for the run once ten ticks in a row found their frame. |
+| `grid` | `output` and `source`, each `{fps, frame_ns}` or `null`. |
+| `jog_grid`, `follow_live` | As the properties and commands set them. |
+| `live_margin` | `{ms, source}`: `computed` (the edge's step + 400 ms, clamped to 800–3000 ms) or `set` (a property, or `live {margin_ms}`). |
+| `motion` | `cursor` (`at`, `frame`), `speed`, `live`, `cue`, `ramp` (`from`, `to`, `duration_ms`, `remaining_ms`). `null` until there is media. |
+| `on_air` | The picture going out: `at`, `frame`, `behind_live_ms` (against `live_edge`, a sawtooth), `behind_live_estimate_ms` (against the estimate, smooth: the one to show), `age_ms` (only `tai`). `null` until a picture went out. |
+| `range` | `start` (the earliest angle's start), `live_edge` (the end of what every angle has), `end` (the last any angle has; the cursor is clamped to `end − 1`), `live_edge_estimate` (the edge between the index's steps: smooth, updated every tick, never steps back, not even when `live_edge` does, e.g. an angle with less media comes; it then holds until the edge passes it), `growing`. Instants, not floored to frames. |
+| `angles[]` | Per angle: `block`, `ready`, `fps`, `frame_rate_missing`, `offset_ms`, `extent`, `shown` (the source frame going out, at its own time: a source that restarts can change its frame phase), `in_sync` (the last tick found the frame that holds the group time), `in_gap`, `gaps`. |
 
-`indexed` and `gaps` describe the recording as far as the player's index has seen it:
+`gaps` are holes in the recording, each with `duration_ms`. A hole is reported once the index has listed it from the media before it to the media after it, so a long hole is one gap. Seams shorter than one frame period are not gaps; a single missing frame is. `in_gap` is the hole the group time is in: the angle shows the last frame before it.
 
-- `indexed`: the stretches of the source the index has listed so far. It lists around the cursor (and follows a hole to its other end), so this grows as the cursor moves. It says what the player knows, not where the media is.
-- `gaps`: holes in the recording, between two pieces of media, each with `duration_ms`. A hole is reported once the index has listed it from the media before it to the media after it, however many listings that took, so a long hole is one gap, never pieces of it. Seams shorter than one frame period are not gaps; a single missing frame is.
-- `in_gap`: the hole the group time is in, if any (`start`, `end`, `duration_ms`). An angle shows the last frame before the hole there, whether play ran into it or a seek landed in it; `shown` is that frame. Until the hole's end has been listed, `end` is as far as the index has looked.
+### Diagnostics
+
+`GET .../diagnostics` (and `{"type": "diagnostics"}` with `?diagnostics=1`) gives the engine's figures: the host clock, command-to-push latency, the live edge's step, age and when it last stepped, and per angle the decoder and its workers, decode times and the latest decodes, fetches, cache, misses, late ticks, the indexed ranges, and the bitstrip and burned-in time checks of test material.
+
+## Player properties
+
+Set in the flow, on each player. The group takes its value from its players as below.
+
+| Property | Default | Group takes | Meaning |
+|---|---|---|---|
+| `live_margin_ms` | empty (computed) | the largest | Empty: the live edge's measured step + 400 ms, clamped to 800–3000 ms. Set: used as is. `live {margin_ms}` overrides it for the run (the built-in pages send one only when the operator picks a margin). The margin also governs `end_action: live`, `caught_up` and `edge_moved`. |
+| `follow_live` | `true` | `false` if any is `false` | See the table above. |
+| `jog_grid` | `source` | `source` if any is `source` | The grid `jog` steps on. |
+| `start_mode` | `paused` | the first player's | `paused` (and `first`): paused at `range.start`. `live`: live as soon as the group is ready, unless a command came first. |
+| `offset_ms` | `0` | per angle | Trim, within ±86400000 (a day): the angle's media moves this far on the group's axis, positive later. For cameras without a common time, or to adjust one. The times in the store do not change. |
 
 ## Examples
 
@@ -145,22 +238,26 @@ G=http://localhost:8080/api/replay/$FLOW/r1
 
 # Replay the last 8 s at 50 %, in one step
 curl -XPOST $G/command -H 'content-type: application/json' \
-  -d '{"cmd":"seek","from_live_ms":8000,"speed":0.5}'
+  -d '{"cmd":"seek","to":{"from_live_ms":8000},"speed":0.5}'
 
-# Cue a clip and play it at 50 %; it freezes on its last frame
+# Cue a clip by its stored times and play it at 50 %; it freezes on its last frame
 curl -XPOST $G/command -H 'content-type: application/json' \
-  -d '{"cmd":"cue","in":{"utc":"2026-11-24T13:22:00Z"},"out":{"utc":"2026-11-24T13:22:06Z"}}'
-curl -XPOST $G/command -H 'content-type: application/json' -d '{"cmd":"play","speed":0.5}'
+  -d '{"cmd":"cue","in":{"t":"1795526557000000000"},"out":{"t":"1795526563000000000"},"client_ref":"clip-17"}'
+curl -XPOST $G/command -H 'content-type: application/json' -d '{"cmd":"play","speed":0.5,"client_ref":"clip-17"}'
 
-# Play to an instant, then go live
+# Play to a point, then go live
 curl -XPOST $G/command -H 'content-type: application/json' \
   -d '{"cmd":"play","until":{"from_live_ms":2000},"end_action":"live"}'
+
+# Review mode: never go live by itself
+curl -XPOST $G/command -H 'content-type: application/json' -d '{"cmd":"follow_live","on":false}'
 
 # Ease from 1x to 25 % over 800 ms
 curl -XPOST $G/command -H 'content-type: application/json' -d '{"cmd":"ramp","to":0.25,"duration_ms":800}'
 
-# Mark what is on air
+# Mark what is on air, or 2 s ago
 curl -XPOST $G/command -H 'content-type: application/json' -d '{"cmd":"mark","label":"goal"}'
+curl -XPOST $G/command -H 'content-type: application/json' -d '{"cmd":"mark","at":{"rel_ms":-2000}}'
 ```
 
 Over the WebSocket, send the same objects with a `seq`: `{"cmd":"jog","frames":-1,"seq":12}`.

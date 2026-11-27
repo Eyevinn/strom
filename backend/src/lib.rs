@@ -418,7 +418,15 @@ pub async fn create_app_with_config(
         .route("/devtools/links", get(api::devtools::list_links))
         .route("/devtools/links", delete(api::devtools::revoke_all_links))
         .route("/devtools/links/{id}", delete(api::devtools::revoke_link))
-        // Replay control per replay group: commands and state, REST and WS
+        // Replay control per replay group: discovery, commands, state and
+        // diagnostics, REST and WS
+        .route("/replay", get(api::replay::replay_index))
+        .route("/replay/{flow_id}", get(api::replay::replay_flow_index))
+        .route("/replay/{flow_id}/{group}", get(api::replay::replay_group))
+        .route(
+            "/replay/{flow_id}/{group}/diagnostics",
+            get(api::replay::replay_diagnostics),
+        )
         .route(
             "/replay/{flow_id}/{group}/command",
             post(api::replay::replay_command),

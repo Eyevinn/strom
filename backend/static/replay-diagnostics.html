@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- Strom replay diagnostics page, version 3 (replay API v2) -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -79,7 +80,7 @@
     <span class="mut" id="zone">UTC</span>
     <span class="tc" id="tcTime">--:--:--<span class="ms">.---</span></span>
     <span class="fr num w8" id="tcFrame">f--</span>
-    <div class="mut" style="font:12px var(--mono)"><span id="tcDate">-</span> · frame <span class="num w8" id="tcAbs">-</span> · <span id="tcTai">TAI -</span></div>
+    <div class="mut" style="font:12px var(--mono)"><span id="tcDate">-</span> · t <span class="num" id="tcAbs">-</span> · <span id="tcTai">TAI -</span></div>
   </div>
   <div class="kv" style="min-width:300px">
     <span>time domain</span><span id="domain">-</span>
@@ -115,7 +116,7 @@
     <h2>Commands</h2>
     <div class="row">
       <span>speed</span><span class="big num w8" id="curSpeed">-</span>
-      <span>frame</span><span class="big num w8" id="curFrame">-</span><span class="mut">/ <span id="total">-</span></span>
+      <span>position</span><span class="big num w8" id="curFrame">-</span><span class="mut">/ <span id="total">-</span></span>
     </div>
     <div id="jog">JOG: drag or scroll · <kbd>←</kbd><kbd>→</kbd> frame · <kbd>Shift</kbd> 10 · <kbd>Space</kbd> 1×/pause · <kbd>K</kbd> pause</div>
     <div class="row">
@@ -131,7 +132,7 @@
       <button id="startBtn">⏮ start</button>
       <button id="endBtn" title="the live edge, paused">end ⏭</button>
       <button id="liveBtn" title="1× from the live edge minus the margin">LIVE</button>
-      margin <input class="n" id="marginMs" type="number" value="1500" min="0" step="100"> ms
+      margin <input class="n" id="marginMs" type="number" placeholder="auto" min="0" max="60000" step="100" title="Empty: the server's margin. A value sets it for the group for the rest of the run."> ms
     </div>
     <div class="row">
       <input id="gotoUtc" placeholder="HH:MM:SS.mmm or ISO UTC" style="width:220px">
@@ -186,7 +187,7 @@
     <h2>Angles</h2>
     <div class="scroll"><table id="players"><thead><tr>
       <th>player</th><th>fps</th><th class="l">shown UTC</th><th class="l">shown TAI</th><th title="shown TAI minus the first angle's">Δ ms</th>
-      <th>frame</th><th>wanted</th><th>sync</th><th class="l">gap now</th><th>gaps</th><th>gap ms</th>
+      <th title="shown frame within its second">f</th><th class="l" title="group time the last tick asked for">wanted</th><th>sync</th><th class="l">gap now</th><th>gaps</th><th>gap ms</th>
       <th>misses</th><th>late</th><th>rep</th><th>skip</th>
       <th>index</th><th>fetched</th><th>fetch ms</th><th>fetch err</th><th>cached</th>
       <th>strip</th><th>strip ≠</th><th title="burned-in times read on the server / not holding the tick">time chk / err</th>
@@ -235,11 +236,62 @@ const taiOf = t => t && t.tai_ns != null ? taiPad(`${BigInt(t.tai_ns) / 10000000
 // Signed milliseconds with one decimal, the sign always shown.
 const fmtSigned = ms => `${ms < 0 ? '−' : '+'}${Math.abs(ms).toFixed(1)}`.padStart(7, '\u2007');
 const fmtS = v => v == null ? '-' : `${(v / 1000).toFixed(2)} s`;
-const hms = utc => utc ? utc.slice(11, 23) : '-';
+const hms = utc => utc ? utc.slice(11, 23) : '-';  // also takes a tai_clock
 function log(line) {
   const el = $('log');
   const t = new Date().toISOString().slice(11, 23);
   el.textContent = `${t} ${line}\n` + el.textContent.split('\n').slice(0, 200).join('\n');
+}
+
+// ---- The API's state and diagnostics, as the panels below read them.
+// An instant {t, utc} as {tai_ns, utc, tai_clock}; utc is null unless the
+// time is real TAI.
+const inst = i => i ? { tai_ns: i.t, utc: i.utc, tai_clock: new Date(Number(BigInt(i.t) / 1000000n)).toISOString().slice(0, 23) } : null;
+const span = g => g && { start: inst(g.start), end: inst(g.end), duration_ms: g.duration_ms };
+const periodOf = fps => { if (!fps) return null; const [n, d = '1'] = fps.split('/'); return 1e9 * +d / +n; };
+let lastDiag = null;
+function view(st, dg) {
+  const mo = st.motion, r = st.range, oa = st.on_air;
+  const dAngles = new Map(((dg && dg.angles) || []).map(a => [a.block, a]));
+  const pos = p => p && { ...inst(p.at), frame_in_second: p.frame ? p.frame.frame_in_second : 0 };
+  const startT = r ? BigInt(r.start.t) : null;
+  return {
+    time_domain: st.time_domain, ready: st.ready,
+    speed: mo ? mo.speed : 0, live: mo ? mo.live : false,
+    cue: mo && mo.cue ? { in: inst(mo.cue.in), out: inst(mo.cue.out), end_action: mo.cue.end_action } : null,
+    ramp: mo ? mo.ramp : null,
+    reference_fps: st.grid.source ? st.grid.source.fps : null,
+    frame_ns: st.grid.source ? st.grid.source.frame_ns : null,
+    output_fps: st.grid.output ? st.grid.output.fps : null,
+    no_frame_rate: st.angles.filter(a => a.frame_rate_missing).map(a => a.block),
+    now_utc: dg ? dg.now_utc : null,
+    cmd_to_push_ms: dg ? dg.cmd_to_push_ms : null,
+    live_edge_age_ms: dg ? dg.live_edge_age_ms : null,
+    live_edge_step_ms: dg ? dg.live_edge_step_ms : null,
+    live_edge_seen_ms_ago: dg ? dg.live_edge_seen_ms_ago : null,
+    live_margin_ms: st.live_margin.ms, live_margin_source: st.live_margin.source,
+    follow_live: st.follow_live, jog_grid: st.jog_grid,
+    start: r ? inst(r.start) : null, end: r ? inst(r.end) : null,
+    live_edge: r ? inst(r.live_edge) : null, live_edge_estimate: r ? inst(r.live_edge_estimate) : null,
+    live_growing: r ? r.growing : false,
+    // Seconds from the start of the media: the API has no frame numbers.
+    pos_s: mo && startT != null ? Number(BigInt(mo.cursor.at.t) - startT) / 1e9 : null,
+    total_s: r ? Number(BigInt(r.end.t) - startT) / 1e9 : null,
+    cursor: mo ? pos(mo.cursor) : null,
+    pushed: oa ? { ...pos(oa), behind_live_ms: oa.behind_live_ms, behind_live_estimate_ms: oa.behind_live_estimate_ms, age_ms: oa.age_ms } : null,
+    players: st.angles.map(a => {
+      const d = dAngles.get(a.block) || {};
+      return {
+        ...d, block: a.block, fps: a.fps, frame_ns: periodOf(a.fps), ready: a.ready, offset_ms: a.offset_ms,
+        extent: a.extent && { start: inst(a.extent.start), end: inst(a.extent.end) },
+        gaps: (a.gaps || []).map(span), indexed: (d.indexed || []).map(span),
+        in_gap: span(a.in_gap), in_sync: a.in_sync,
+        shown: a.shown ? { tai_ns: a.shown.t, utc: a.shown.utc, frame_in_second: a.shown.frame_in_second } : null,
+        wanted: inst(d.wanted),
+        recent_decodes: (d.recent_decodes || []).map(x => ({ ...x, segment: span(x.segment) })),
+      };
+    }),
+  };
 }
 
 // ---- WebSocket control
@@ -247,7 +299,7 @@ let ws, seq = 0, last = null;
 const sentAt = new Map();
 function connectWs() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/api/replay/${FLOW}/${encodeURIComponent(GROUP)}/ws`);
+  ws = new WebSocket(`${proto}://${location.host}/api/replay/${FLOW}/${encodeURIComponent(GROUP)}/ws?diagnostics=1`);
   ws.onopen = () => { $('wsState').textContent = 'ws: connected'; $('wsState').className = 'good'; log('ws connected'); };
   ws.onclose = ev => {
     $('wsState').textContent = `ws: closed${ev.reason ? ' (' + ev.reason + ')' : ''}, retrying`; $('wsState').className = 'warn';
@@ -255,10 +307,12 @@ function connectWs() {
   };
   ws.onmessage = ev => {
     const m = JSON.parse(ev.data);
-    if (m.type === 'state') onState(m);
+    if (m.type === 'state') onState(view(m, lastDiag));
+    else if (m.type === 'diagnostics') lastDiag = m;
     else if (m.type === 'ack') onAck(m);
     else if (m.type === 'error') { sentAt.delete(m.seq); log(`error (${m.code}): ${m.error}`); }
-    else if (m.type === 'event') log(`event ${m.event}${m.reason ? ' (' + m.reason + ')' : ''} at ${m.at ? m.at.utc : '-'}`);
+    else if (m.type === 'event') log(`event #${m.event_seq} ${m.event} (${m.cause}${m.client_ref ? ', ' + m.client_ref : ''})${m.at ? ' at ' + (m.at.utc || m.at.t) : ''}${m.ready ? ' ' + m.ready : ''}`);
+    else if (m.type === 'lagged') log(`lagged: missed ${m.missed} event(s)`);
   };
 }
 function send(cmd, measure) {
@@ -275,16 +329,17 @@ function onAck(m) {
   const rtt = performance.now() - s.t0;
   rttEma = rttEma == null ? rtt : rttEma * 0.8 + rtt * 0.2;
   $('rtt').textContent = rttEma.toFixed(1);
-  if (s.cmd !== 'jog') log(`ack ${s.cmd}: speed ${m.speed} cursor ${m.cursor_tai ? m.cursor_tai.utc : '-'}${m.frame != null ? ' frame ' + m.frame : ''}${m.live ? ' live' : ''}`);
+  const at = m.cursor && m.cursor.at;
+  if (s.cmd !== 'jog') log(`ack ${s.cmd}: speed ${m.speed} cursor ${at ? (at.utc || at.t) : '-'}${m.live ? ' live' : ''}`);
   // Only paused positions have a definite target picture.
-  if (s.measure && m.speed === 0 && m.cursor_tai) {
-    armMeasure({ t0: s.t0, tai: BigInt(m.cursor_tai.tai_ns), frame: m.frame });
+  if (s.measure && m.speed === 0 && at) {
+    armMeasure({ t0: s.t0, tai: BigInt(at.t) });
   }
 }
 
 // ---- state
 let showTai = store.get('tai', false);
-let lastDate = null, startFrame = 0, liveFrame = 0, curSpeed = 0;
+let lastDate = null, curSpeed = 0;
 let frameNs = null;          // reference period; null until a player has a rate
 let refPeriodNs = 20000000n; // for matching: the longest period among the angles
 let pushedTai = null;        // BigInt
@@ -294,10 +349,9 @@ function onState(m) {
   frameNs = m.frame_ns;
   const periods = m.players.map(p => p.frame_ns).filter(x => x);
   refPeriodNs = BigInt(periods.length ? Math.max(...periods) : (frameNs || 20000000));
-  startFrame = m.start_frame || 0; liveFrame = m.live_frame || m.total_frames || 0;
   $('curSpeed').textContent = (+m.speed).toFixed(2) + '×';
-  $('curFrame').textContent = m.frame ?? '-';
-  $('total').textContent = m.total_frames ?? '-';
+  $('curFrame').textContent = m.pos_s == null ? '-' : m.pos_s.toFixed(2) + ' s';
+  $('total').textContent = m.total_s == null ? '-' : m.total_s.toFixed(2) + ' s';
   if (m.cmd_to_push_ms) $('c2p').textContent = (+m.cmd_to_push_ms).toFixed(1);
   clock(m);
   noteTargetStrip(m);
@@ -312,30 +366,30 @@ function clock(m) {
   $('zone').textContent = showTai ? 'TAI' : 'UTC';
   $('domain').innerHTML = anchored ? '<span class="good">tai</span>'
     : `<span class="warn">${esc(m.time_domain)}</span>${m.time_domain === 'unanchored' ? ' (no absolute time)' : ''}`;
-  $('refFps').innerHTML = m.reference_fps ? esc(m.reference_fps) + (frameNs ? ` · ${(frameNs / 1e6).toFixed(3)} ms` : '')
+  $('refFps').innerHTML = m.reference_fps ? esc(m.reference_fps) + (frameNs ? ` · ${(frameNs / 1e6).toFixed(3)} ms` : '') + (m.output_fps ? ` · out ${esc(m.output_fps)}` : '') + ` · jog ${esc(m.jog_grid)}`
     : `<span class="warn">unknown${m.no_frame_rate && m.no_frame_rate.length ? ' (no rate: ' + esc(m.no_frame_rate.join(', ')) + ')' : ''}</span>`;
   $('nowUtc').textContent = m.now_utc || '-';
-  $('cursorInfo').textContent = m.cursor ? `${hms(m.cursor.utc)} · f${m.frame} · ${taiPad(m.tai)}` : '-';
+  $('cursorInfo').textContent = m.cursor ? `${hms(m.cursor.utc)} · ${taiOf(m.cursor)} · ${m.ready}` : '-';
   pushedTai = m.pushed ? BigInt(m.pushed.tai_ns) : null;
   if (t) {
-    const s = showTai ? t.tai_clock : t.utc;
-    lastDate = t.utc.slice(0, 10);
+    const s = showTai || !t.utc ? t.tai_clock : t.utc;
+    lastDate = s.slice(0, 10);
     const fps = frameNs ? Math.round(1e9 / frameNs) : '?';
     $('tcTime').innerHTML = `${esc(s.slice(11, 19))}<span class="ms">${esc(s.slice(19, 23))}</span>`;
     $('tcFrame').textContent = `f${String(t.frame_in_second).padStart(2, '0')}/${fps}`;
     $('tcDate').textContent = s.slice(0, 10);
-    $('tcAbs').textContent = t.frame;
+    $('tcAbs').textContent = t.tai_ns;
     $('tcTai').textContent = showTai ? `UTC ${t.utc}` : `TAI ${taiOf(t)}`;
   }
   const e = m.live_edge;
-  $('edgeUtc').textContent = e ? `${hms(showTai ? e.tai_clock : e.utc)} · f${m.live_frame ?? '-'}` : '-';
+  $('edgeUtc').textContent = e ? hms(showTai || !e.utc ? e.tai_clock : e.utc) : '-';
   $('edgeEst').innerHTML = m.live_edge_estimate
-    ? `${esc(hms(m.live_edge_estimate.utc))} ${m.live_growing ? '<span class="good">growing</span>' : '<span class="mut">not growing</span>'}` : '-';
+    ? `${esc(hms(m.live_edge_estimate.utc || m.live_edge_estimate.tai_clock))} ${m.live_growing ? '<span class="good">growing</span>' : '<span class="mut">not growing</span>'}` : '-';
   const ageCls = m.live_edge_age_ms > 5000 ? 'warn' : '';
   $('edgeAge').innerHTML = `<span class="${ageCls}">${esc(fmtS(m.live_edge_age_ms))}</span> · ${esc(fmtMs(m.live_edge_step_ms))} · ${m.live_edge_seen_ms_ago == null ? '-' : esc(fmtS(m.live_edge_seen_ms_ago)) + ' ago'}`;
   const p = m.pushed || {};
-  $('behind').textContent = `${fmtS(p.behind_live_ms ?? m.behind_live_ms)} (est ${fmtS(p.behind_live_estimate_ms ?? m.behind_live_estimate_ms)}) · ${fmtMs(m.live_margin_ms)}`;
-  $('liveFlag').innerHTML = m.live ? '<span class="good">following live</span>' : 'no';
+  $('behind').textContent = `${fmtS(p.behind_live_ms ?? m.behind_live_ms)} (est ${fmtS(p.behind_live_estimate_ms ?? m.behind_live_estimate_ms)}) · ${fmtMs(m.live_margin_ms)} ${m.live_margin_source}`;
+  $('liveFlag').innerHTML = (m.live ? '<span class="good">following live</span>' : 'no') + (m.follow_live ? '' : ' <span class="warn">(follow_live off)</span>');
   $('cueInfo').textContent = m.cue ? `${hms(m.cue.in.utc)} → ${hms(m.cue.out.utc)} (${m.cue.end_action})` : '-';
   $('rampInfo').textContent = m.ramp ? `${m.ramp.from} → ${m.ramp.to}, ${m.ramp.remaining_ms}/${m.ramp.duration_ms} ms` : '-';
   $('picAge').innerHTML = p.age_ms == null ? '<span class="mut">n/a</span>'
@@ -361,7 +415,7 @@ function players(m) {
       <td class="l">${p.shown ? esc(hms(p.shown.utc)) + ' f' + String(p.shown.frame_in_second).padStart(2, '0') : '-'}</td>
       <td class="l">${p.shown ? esc(taiOf(p.shown)) : '-'}</td>
       <td class="${dc}">${d}</td>
-      <td>${p.shown_frame}</td><td>${p.wanted_frame}</td>
+      <td>${p.shown ? 'f' + String(p.shown.frame_in_second).padStart(2, '0') : '-'}</td><td class="l">${p.wanted ? esc(hms(p.wanted.utc || p.wanted.tai_clock)) : '-'}</td>
       <td class="${p.in_sync ? 'good' : 'bad'}">${p.in_sync ? 'yes' : 'no'}</td>
       <td class="l ${p.in_gap ? 'warn' : ''}">${p.in_gap ? esc(hms(p.in_gap.start.utc)) + ' +' + p.in_gap.duration_ms + ' ms' : '-'}</td>
       <td class="${cls((p.gaps || []).length)}">${(p.gaps || []).length}</td><td>${gapMs}</td>
@@ -377,7 +431,7 @@ function players(m) {
 }
 function extents(m) {
   $('extents').innerHTML = m.players.map(p => {
-    const ex = p.extent ? `${esc(p.extent.start.utc)} → ${esc(hms(p.extent.end.utc))}` : '-';
+    const ex = p.extent ? `${esc(p.extent.start.utc || p.extent.start.tai_clock)} → ${esc(hms(p.extent.end.utc || p.extent.end.tai_clock))}` : '-';
     const gaps = (p.gaps || []);
     const list = gaps.slice(-6).map(g => `<div>${esc(hms(g.start.utc))} → ${esc(hms(g.end.utc))} <span class="mut">${g.duration_ms} ms</span></div>`).join('');
     return `<div><strong>${esc(p.block)}</strong>
@@ -409,7 +463,7 @@ function gotoUtc() {
     const [h, mi, rest = '00'] = v.split(':');
     v = `${lastDate}T${h.padStart(2, '0')}:${mi}:${rest.padStart(2, '0')}Z`;
   } else if (!/(Z|[+-]\d{2}:\d{2})$/i.test(v)) v += 'Z';
-  send({ cmd: 'seek', utc: v }, true);
+  send({ cmd: 'seek', to: { utc: v } }, true);
 }
 $('gotoBtn').onclick = gotoUtc;
 $('gotoUtc').addEventListener('keydown', e => { if (e.key === 'Enter') { gotoUtc(); e.preventDefault(); } });
@@ -417,10 +471,15 @@ const jog = frames => send({ cmd: 'jog', frames }, true);
 const speed = s => send({ cmd: 'speed', speed: s }, s === 0);
 document.querySelectorAll('[data-s]').forEach(b => b.onclick = () => speed(+b.dataset.s));
 document.querySelectorAll('[data-jog]').forEach(b => b.onclick = () => jog(+b.dataset.jog));
-document.querySelectorAll('[data-rel]').forEach(b => b.onclick = () => send({ cmd: 'seek_rel', ms: +b.dataset.rel }, true));
-$('startBtn').onclick = () => send({ cmd: 'seek', frame: startFrame }, true);
+document.querySelectorAll('[data-rel]').forEach(b => b.onclick = () => send({ cmd: 'seek', to: { rel_ms: +b.dataset.rel } }, true));
+$('startBtn').onclick = () => last && last.start && send({ cmd: 'seek', to: { t: last.start.tai_ns } }, true);
 $('endBtn').onclick = () => send({ cmd: 'end' }, true);
-$('liveBtn').onclick = () => send({ cmd: 'live', margin_ms: Math.max(0, +$('marginMs').value || 0) });
+// A margin only when one is typed in: `live {margin_ms}` sets it for the
+// whole group for the rest of the run.
+$('liveBtn').onclick = () => {
+  const v = $('marginMs').value.trim();
+  send(v === '' ? { cmd: 'live' } : { cmd: 'live', margin_ms: Math.min(60000, Math.max(0, Math.round(+v) || 0)) });
+};
 
 // A random paused position with media in every angle: inside the common
 // indexed range, away from the gaps.
@@ -438,7 +497,7 @@ function randomTarget() {
 function randomSeek() {
   const t = randomTarget();
   if (t == null) { log('random seek: no media range yet'); return false; }
-  send({ cmd: 'seek', tai: taiPad(`${t / 1000000000n}:${t % 1000000000n}`), speed: 0 }, true);
+  send({ cmd: 'seek', to: { t: t.toString() }, speed: 0 }, true);
   return true;
 }
 $('randBtn').onclick = randomSeek;
