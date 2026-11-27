@@ -34,8 +34,9 @@ that mode:
   other cleaner), the timeline's start follows it within seconds: a paused cursor or a seek in
   what was deleted lands on the new start, and a deleted segment is skipped, not retried.
 
-Flows saved before **Mode** existed keep working: `stinger_mode` and the `replay_*`
-properties are rewritten to the current names when a flow is loaded or saved.
+Flows saved before **Mode** existed keep working: `stinger_mode` is rewritten to **Mode**
+when a flow is loaded or saved.
+
 **Video Tracks** and **Audio Tracks** (default 1, 0 discards that kind) set how many tracks of a file get an
 output: `video_out`, `video_out_1`, … and `audio_out`, `audio_out_1`, ….
 
