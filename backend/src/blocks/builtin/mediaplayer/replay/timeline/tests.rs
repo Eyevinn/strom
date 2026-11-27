@@ -1749,4 +1749,33 @@ fn a_clip_must_play_forward() {
         .is_err());
 }
 
+#[test]
+fn a_clip_in_point_in_utc_starts_on_the_frame_that_covers_it() {
+    let (tl, _p) = one_player(INGEST, TimeDomain::Tai);
+    // Frames start at .000598792, .020598792, ... in each second.
+    let start = utc_to_tai_ns(parse_utc("2026-11-24T13:22:00Z").unwrap()) + 598_792;
+    let clip_at = |utc: &str| Clip {
+        in_point: ReplayTarget {
+            utc: Some(utc.to_string()),
+            ..Default::default()
+        },
+        out: ReplayTarget::t(start + 10 * S),
+        speed: 1.0,
+    };
+    // Late in a frame: that frame, not the next (a seek would round).
+    let a = tl
+        .start_clip(&clip_at("2026-11-24T13:22:00.019Z"), 0)
+        .unwrap();
+    assert_eq!(a.tai, start);
+    // A frame time as the API gives it names its own frame.
+    let a = tl
+        .start_clip(&clip_at("2026-11-24T13:22:00.000Z"), 0)
+        .unwrap();
+    assert_eq!(a.tai, start);
+    let a = tl
+        .start_clip(&clip_at("2026-11-24T13:22:00.020Z"), 0)
+        .unwrap();
+    assert_eq!(a.tai, start + 20 * MS);
+}
+
 mod v2;
