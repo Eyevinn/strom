@@ -49,6 +49,8 @@ fn plugins_available() -> bool {
 /// A TAMS Output block built through the real builder and added to a pipeline.
 struct TamsOutput {
     instance_id: String,
+    /// The `gateway_url` it was built with: its segment directory depends on it.
+    gateway_url: String,
     /// Holds the element-setup hooks; see [`TamsOutput::run_setups`].
     ctx: BlockBuildContext,
     elements: HashMap<String, gst::Element>,
@@ -80,7 +82,11 @@ impl TamsOutput {
 
     /// The directory the block writes its MPEG-TS segments to.
     fn segment_dir(&self) -> PathBuf {
-        strom::blocks::builtin::tams_output::segment_dir(&self.instance_id, "mux")
+        strom::blocks::builtin::tams_output::segment_dir(
+            &self.gateway_url,
+            &self.instance_id,
+            "mux",
+        )
     }
 
     /// Drop the block's elements but keep its segment directory, so the
@@ -217,8 +223,13 @@ fn add_tams_output_props(
             .expect("internal TAMS Output link");
     }
 
+    let gateway_url = match properties.get("gateway_url") {
+        Some(PropertyValue::String(g)) => g.clone(),
+        _ => String::new(),
+    };
     TamsOutput {
         instance_id,
+        gateway_url,
         ctx,
         elements,
     }
@@ -1158,6 +1169,7 @@ mod close_at_boundary {
             .expect("TAMS Output block builds");
         let mut out = TamsOutput {
             instance_id,
+            gateway_url: gateway.clone(),
             ctx,
             elements: HashMap::new(),
         };
@@ -1746,7 +1758,7 @@ mod flow_claims {
         state.stop_flow(&other_id).await.expect("stop other key");
         for k in [key.clone(), format!("{key}-other")] {
             let _ = std::fs::remove_dir_all(strom::blocks::builtin::tams_output::segment_dir(
-                &k, "mux",
+                &gateway, &k, "mux",
             ));
         }
     }
