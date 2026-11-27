@@ -205,6 +205,12 @@ path = "tests/api_tests.rs"
 name = "bus_signal_watch_balance_test"
 path = "tests/bus_signal_watch_balance_test.rs"
 
+# CEF initialises once per process and starts Chromium, and these tests run
+# serially against it. It also needs GST_PLUGIN_PATH and the CEF environment.
+[[test]]
+name = "cefsrc_test"
+path = "tests/cefsrc_test.rs"
+
 # The GStreamer floor job (check-floor) builds and runs only this one.
 [[test]]
 name = "gst_floor_smoke_test"
