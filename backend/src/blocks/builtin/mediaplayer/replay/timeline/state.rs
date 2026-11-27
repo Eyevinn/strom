@@ -277,6 +277,7 @@ impl ReplayTimeline {
                 start: v.instant(s),
                 end: v.instant(e),
             }),
+            available_from: p.available_from().map(|t| v.instant(t)),
             shown: grid
                 .zip(p.shown_group_tai())
                 .map(|(g, t)| v.frame_at(&g, t)),
@@ -371,6 +372,7 @@ impl ReplayTimeline {
             fetched_segments: p.fetched_segments.load(Ordering::Relaxed),
             fetches: p.fetches.load(Ordering::Relaxed),
             fetch_errors: p.fetch_errors.load(Ordering::Relaxed),
+            gone_segments: p.gone_segments.load(Ordering::Relaxed),
             last_fetch_ms: p.last_fetch_ms.load(Ordering::Relaxed),
             cached_segments: p.cached_segments.load(Ordering::Relaxed),
             decodes,

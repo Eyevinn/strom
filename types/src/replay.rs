@@ -457,6 +457,10 @@ pub struct ReplayAngleState {
     pub offset_ms: i64,
     /// On the group's axis.
     pub extent: Option<ReplayExtent>,
+    /// Where the angle's buffer starts now, on the group's axis: the first
+    /// media the store still has. It moves later when the store deletes old
+    /// media (retention); nothing before it can be shown.
+    pub available_from: Option<ReplayInstant>,
     /// The source frame last pushed, on the angle's own grid.
     pub shown: Option<ReplayFrame>,
     /// The last tick found the frame that holds its time.
@@ -524,6 +528,9 @@ pub struct ReplayAngleDiagnostics {
     pub fetched_segments: u64,
     pub fetches: u64,
     pub fetch_errors: u64,
+    /// Segments a fetch found deleted from the store (retention): not
+    /// errors, not retried.
+    pub gone_segments: u64,
     pub last_fetch_ms: u64,
     pub cached_segments: u64,
     pub decodes: u64,

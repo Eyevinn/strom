@@ -1279,8 +1279,17 @@ fn state_lists_extents_gaps_and_the_estimate() {
     assert_eq!(a0.gaps[0].start.t, (INGEST + 10 * S).to_string());
     assert_eq!(a0.offset_ms, 0);
     assert_eq!(a0.ready, ReplayReady::Warming);
+    let from = a0.available_from.as_ref().unwrap();
+    assert_eq!(from.t, INGEST.to_string());
+    assert!(from.utc.is_some(), "an instant: utc on real TAI");
     let d = tl.diagnostics();
     assert_eq!(d.angles[0].indexed[0].duration_ms, 60_000);
+    assert_eq!(d.angles[0].gone_segments, 0);
+    // Retention deletes the first 5 s: the buffer starts later.
+    p.start_tai.store(INGEST + 5 * S, Ordering::Relaxed);
+    let s2 = tl.state();
+    let from = s2.angles[0].available_from.as_ref().unwrap();
+    assert_eq!(from.t, (INGEST + 5 * S).to_string());
     // A recording that does not grow: the estimate is the known edge.
     let r = s.range.unwrap();
     assert!(!r.growing);

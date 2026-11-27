@@ -1028,6 +1028,7 @@ impl Fetcher {
                                     self.block_id, seg.object_id, e
                                 );
                                 failed.succeed(&seg.start_ns);
+                                stats.gone_segments.fetch_add(1, Ordering::Relaxed);
                                 gone.insert(seg.start_ns);
                                 lock(&self.store.index).remove(&seg.start_ns);
                                 start_moved = true;
@@ -2474,6 +2475,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(500));
         let tries = mock.fetches_of(105);
         let errors = f.stats().fetch_errors.load(Ordering::Relaxed);
+        let gone = f.stats().gone_segments.load(Ordering::Relaxed);
         let cursor = timeline.tai_at(timeline.now_rt());
         stop.store(true, Ordering::Relaxed);
         assert!(
@@ -2483,6 +2485,9 @@ mod tests {
         );
         assert_eq!(tries, 1, "a gone segment is fetched once");
         assert_eq!(errors, 0, "a gone segment is not a fetch error");
+        // The fetches ahead of the cursor find the rest of the deleted 10 s
+        // gone too; each is counted once.
+        assert!((1..=10).contains(&gone), "gone segments counted: {}", gone);
         assert_eq!(cursor, Some(110 * S));
     }
 }

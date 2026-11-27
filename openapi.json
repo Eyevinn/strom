@@ -10245,6 +10245,7 @@
           "fetched_segments",
           "fetches",
           "fetch_errors",
+          "gone_segments",
           "last_fetch_ms",
           "cached_segments",
           "decodes",
@@ -10315,6 +10316,12 @@
           "fetches": {
             "type": "integer",
             "format": "int64",
+            "minimum": 0
+          },
+          "gone_segments": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Segments a fetch found deleted from the store (retention): not\nerrors, not retried.",
             "minimum": 0
           },
           "index_segments": {
@@ -10450,6 +10457,17 @@
           "gaps"
         ],
         "properties": {
+          "available_from": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplayInstant",
+                "description": "Where the angle's buffer starts now, on the group's axis: the first\nmedia the store still has. It moves later when the store deletes old\nmedia (retention); nothing before it can be shown."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "block": {
             "type": "string",
             "description": "The player block's id."
