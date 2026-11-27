@@ -1750,6 +1750,76 @@ mod flow_claims {
         state.stop_flow(&second_id).await.expect("stop second");
     }
 
+    /// A flow stopped and started again at once: the new run takes the claims
+    /// over while the old run's teardown still waits for its uploader. That
+    /// teardown must not release the new run's claims (another flow could
+    /// then write the same TAMS flows) nor wait for the new run's uploaders.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tams_restart_keeps_the_new_runs_claims() {
+        use strom::tams::flow_claims::Writer;
+
+        gst::init().unwrap();
+        common::init_static_plugins();
+        if !plugins_available() {
+            return;
+        }
+        let state = common::state::new();
+        let gateway = format!(
+            "http://127.0.0.1:9/claims-restart-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let block = format!("tams_claim_restart_{}", uuid::Uuid::new_v4().simple());
+        let first = flow_with_keyed_tams_output("tams_claim_restart_first", &gateway, &block, None);
+        let other = flow_with_keyed_tams_output("tams_claim_restart_other", &gateway, &block, None);
+        let (first_id, other_id) = (first.id, other.id);
+        state.upsert_flow(first).await.expect("upsert first");
+        state.upsert_flow(other).await.expect("upsert other");
+        state.start_flow(&first_id).await.expect("first run starts");
+
+        // An uploader of the first run, still flushing after its pipeline has
+        // stopped.
+        let flushing = Writer::new(first_id);
+        let stopping = {
+            let state = state.app();
+            tokio::spawn(async move { state.stop_flow(&first_id).await })
+        };
+        let t0 = Instant::now();
+        while state.pipelines_read().await.contains_key(&first_id)
+            && t0.elapsed() < Duration::from_secs(10)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!stopping.is_finished(), "stop waits for the uploader");
+
+        // The same flow starts again while the old run is torn down, and
+        // its new run counts a writer of its own.
+        state
+            .start_flow(&first_id)
+            .await
+            .expect("second run starts");
+        let new_writer = Writer::new(first_id);
+
+        drop(flushing);
+        let stopped = tokio::time::timeout(Duration::from_secs(3), stopping)
+            .await
+            .expect("the old teardown does not wait for the new run's writer");
+        stopped.expect("stop task").expect("first run stops");
+
+        state
+            .start_flow(&other_id)
+            .await
+            .expect_err("the second run still holds the TAMS flows");
+
+        drop(new_writer);
+        state.stop_flow(&first_id).await.expect("stop second run");
+        state
+            .start_flow(&other_id)
+            .await
+            .expect("the other flow starts once the flow has stopped");
+        state.stop_flow(&other_id).await.expect("stop other");
+    }
+
     /// A product that creates a new Strom flow, with new random block ids, for
     /// each run (Open Live on every activation) keeps writing to the same TAMS
     /// flows by setting the same `tams_key`: while the old run is up, the new

@@ -1000,6 +1000,11 @@ impl AppState {
         }
         info!("Pipeline not running, proceeding with start");
 
+        // TAMS claims and uploaders taken from here on belong to this run, so
+        // the teardown of a previous run still waiting for its uploaders
+        // leaves them alone.
+        let tams_run = crate::tams::flow_claims::begin_run(*id);
+
         info!("Starting flow: {} ({})", flow.name, id);
 
         // Compute external pads for all block instances based on their properties
@@ -1054,7 +1059,7 @@ impl AppState {
                 // There is no pipeline to stop, but blocks built before the
                 // failing one may already have registered themselves.
                 error!("Failed to build pipeline for flow {}: {}", id, e);
-                let _ = self.teardown_flow(id, None, None).await;
+                let _ = self.teardown_flow(id, tams_run, None, None).await;
                 return Err(e);
             }
         };
@@ -1080,7 +1085,12 @@ impl AppState {
                 error!("Failed to start flow {}: {}", id, e);
                 // No endpoints are registered yet, so the flow owns none.
                 if let Err(teardown_err) = self
-                    .teardown_flow(id, Some(manager), Some(RegisteredEndpoints::default()))
+                    .teardown_flow(
+                        id,
+                        tams_run,
+                        Some(manager),
+                        Some(RegisteredEndpoints::default()),
+                    )
                     .await
                 {
                     warn!(
@@ -1142,7 +1152,9 @@ impl AppState {
                     };
                     drop(pipelines_guard);
                     let manager = self.inner.pipelines.write().await.remove(id);
-                    if let Err(teardown_err) = self.teardown_flow(id, manager, Some(owned)).await {
+                    if let Err(teardown_err) =
+                        self.teardown_flow(id, tams_run, manager, Some(owned)).await
+                    {
                         warn!(
                             "Cleanup after WHEP endpoint conflict on flow {} could not stop the pipeline: {}",
                             id, teardown_err
@@ -1183,7 +1195,9 @@ impl AppState {
                     };
                     drop(pipelines_guard);
                     let manager = self.inner.pipelines.write().await.remove(id);
-                    if let Err(teardown_err) = self.teardown_flow(id, manager, Some(owned)).await {
+                    if let Err(teardown_err) =
+                        self.teardown_flow(id, tams_run, manager, Some(owned)).await
+                    {
                         warn!(
                             "Cleanup after WHIP endpoint conflict on flow {} could not stop the pipeline: {}",
                             id, teardown_err
@@ -1535,6 +1549,7 @@ impl AppState {
     async fn teardown_flow(
         &self,
         id: &FlowId,
+        tams_run: crate::tams::flow_claims::Run,
         manager: Option<PipelineManager>,
         endpoints: Option<RegisteredEndpoints>,
     ) -> Result<PipelineState, PipelineError> {
@@ -1552,7 +1567,7 @@ impl AppState {
             // may already be held; deallocate() ignores an id it does not know.
             Self::unregister_media_players(*id).await;
             self.inner.affinity_manager.deallocate(id);
-            Self::release_tams_claims(id).await;
+            Self::release_tams_claims(tams_run).await;
             return Ok(PipelineState::Null);
         };
 
@@ -1640,7 +1655,7 @@ impl AppState {
         // fails to stop would otherwise hold them until the process restarts.
         self.inner.affinity_manager.deallocate(id);
         // Only now: the pipeline has stopped writing segments.
-        Self::release_tams_claims(id).await;
+        Self::release_tams_claims(tams_run).await;
 
         match stopped {
             Ok((result, flow_name, pipeline_survived, leaked_elements)) => {
@@ -1662,23 +1677,25 @@ impl AppState {
         }
     }
 
-    /// Release the TAMS Output claims of flow `id` on TAMS flow ids (see
-    /// `crate::tams::flow_claims`), on every teardown path, so a failed start
+    /// Release the TAMS Output claims run `run` of a flow holds on TAMS flow
+    /// ids (see `crate::tams::flow_claims`), on every teardown path, so a failed start
     /// never blocks another flow. Called once the pipeline has stopped, and
     /// after its uploaders have sent their queue and final segment: a flow
     /// that claimed the ids before then would write next to them. An
     /// uploader that takes longer than [`TAMS_WRITERS_WAIT`] (a gateway that
     /// does not answer) does not keep the ids from other flows any longer.
-    async fn release_tams_claims(id: &FlowId) {
-        if !crate::tams::flow_claims::writers_done(id, TAMS_WRITERS_WAIT).await {
+    /// Only this run's uploaders and claims: a new run of the same flow,
+    /// started while this one waits, keeps its own.
+    async fn release_tams_claims(run: crate::tams::flow_claims::Run) {
+        if !crate::tams::flow_claims::writers_done(run, TAMS_WRITERS_WAIT).await {
             warn!(
                 "Flow {}: TAMS uploads still running {} s after stop; releasing its TAMS \
                  flow ids anyway",
-                id,
+                run.flow_id,
                 TAMS_WRITERS_WAIT.as_secs()
             );
         }
-        crate::tams::flow_claims::release_flow(id);
+        crate::tams::flow_claims::release_run(run);
     }
 
     pub async fn stop_flow(&self, id: &FlowId) -> Result<PipelineState, PipelineError> {
@@ -1695,10 +1712,12 @@ impl AppState {
         // alone.
         stinger::forget_flow(id);
 
-        // Get and remove the pipeline
-        let manager = {
+        // Get and remove the pipeline, with the run it belongs to. Read under
+        // the lock: a new start begins its run only once it finds no pipeline.
+        let (manager, tams_run) = {
             let mut pipelines = self.inner.pipelines.write().await;
-            pipelines.remove(id)
+            let manager = pipelines.remove(id);
+            (manager, crate::tams::flow_claims::current_run(*id))
         };
 
         let Some(manager) = manager else {
@@ -1725,7 +1744,9 @@ impl AppState {
         };
 
         // Endpoints, Media Player registry, pipeline, leak check, CPU cores.
-        let state = self.teardown_flow(id, Some(manager), None).await?;
+        let state = self
+            .teardown_flow(id, tams_run, Some(manager), None)
+            .await?;
         crate::cef_pages::report_leftover_pages(id).await;
         crate::cef_pages::forget_flow(id);
 
