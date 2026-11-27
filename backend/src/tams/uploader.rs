@@ -801,15 +801,24 @@ pub(crate) async fn enforce_parked_limits(
 /// essence parameters change (caps that arrive late or renegotiate, a frame rate
 /// estimated from timestamps), so it never stays registered with what was known
 /// at the first segment, and when it was found gone (see [`Failure::FlowGone`]).
-/// Returns whether the flow is present.
-async fn ensure_flow(ctx: &mut UploadCtx<'_>, attempts: u32) -> bool {
+/// It is also registered again while a member flow it collects is missing
+/// (one whose registration failed), so the member is tried again at the next
+/// segment rather than only when the essence changes. Returns whether the flow
+/// is present.
+async fn ensure_flow(ctx: &mut UploadCtx<'_>, mut attempts: u32) -> bool {
     let detected = ctx
         .detected_codec
         .lock()
         .map(|d| d.clone())
         .unwrap_or_default();
     if ctx.registered.as_ref() == Some(&detected) {
-        return true;
+        if members_complete(ctx.flow_spec, &detected) {
+            return true;
+        }
+        // Only a member is missing, and the flow is there: one try per
+        // segment, so a member that keeps failing does not hold up the
+        // segments with backoff.
+        attempts = 1;
     }
     let exists = ctx.registered.is_some();
     if let Some(codec) = &detected.codec {
@@ -861,11 +870,23 @@ async fn ensure_flow(ctx: &mut UploadCtx<'_>, attempts: u32) -> bool {
     }
 }
 
+/// Whether every member flow whose track's essence is known is in the flow's
+/// collection, i.e. none failed to register (see [`register_collected`]).
+fn members_complete(spec: &FlowSpec, detected: &DetectedEssence) -> bool {
+    let known = spec
+        .collected
+        .iter()
+        .filter(|m| detected.tracks.contains_key(&m.track))
+        .count();
+    spec.flow_collection.len() >= known
+}
+
 /// Register the member flows a muxed flow collects (one per track whose
 /// essence is known), before the flow itself, since a collection lists flows
 /// that are already registered. Returns the collection items of the members
-/// that were registered: those not yet known, or that failed, are left out
-/// and tried again when the essence changes or the flow is registered again.
+/// that were registered: those not yet known are left out until their essence
+/// is, and those that failed until a later segment registers them (see
+/// [`members_complete`]).
 async fn register_collected(
     ctx: &UploadCtx<'_>,
     detected: &DetectedEssence,
@@ -2264,6 +2285,108 @@ mod tests {
         assert!(puts[0]["essence_parameters"].get("frame_rate").is_none());
         assert_eq!(puts[1]["essence_parameters"]["frame_rate"]["numerator"], 30);
         assert_eq!(puts[1]["essence_parameters"]["frame_width"], 1280);
+    }
+
+    /// A member flow that fails to register is tried again at the next
+    /// segment, although the essence stays the same, and the muxed flow is
+    /// registered again with it in its collection.
+    #[tokio::test]
+    async fn failed_member_flow_is_tried_again() {
+        use axum::extract::{Path, State};
+        use axum::http::StatusCode;
+        type Puts = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+        let puts: Puts = Arc::default();
+        // The first PUT of member `m1` fails; every other PUT succeeds.
+        let failed_once = Arc::new(AtomicBool::new(false));
+        let app = axum::Router::new()
+            .route(
+                "/flows/{id}",
+                axum::routing::put(
+                    |State((puts, failed_once)): State<(Puts, Arc<AtomicBool>)>,
+                     Path(id): Path<String>,
+                     axum::Json(body): axum::Json<serde_json::Value>| async move {
+                        if id == "m1" && !failed_once.swap(true, Ordering::SeqCst) {
+                            return StatusCode::SERVICE_UNAVAILABLE;
+                        }
+                        puts.lock().unwrap().push((id, body));
+                        StatusCode::CREATED
+                    },
+                ),
+            )
+            .with_state((puts.clone(), failed_once));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = TamsClient::new(url, crate::client_auth::AuthMethod::None).unwrap();
+        let member = |id: &str, track: &str| crate::tams::client::CollectedFlow {
+            track: track.into(),
+            role: id.into(),
+            spec: FlowSpec {
+                flow_id: id.into(),
+                source_id: format!("{}-src", id),
+                format: crate::tams::client::FORMAT_AUDIO.into(),
+                ..spec()
+            },
+            container_mapping: Default::default(),
+            inherit_parameters: false,
+        };
+        let mut spec = FlowSpec {
+            collected: vec![member("m0", "audio-0"), member("m1", "audio-1")],
+            ..spec()
+        };
+        let detected: SharedDetected = Arc::default();
+        for track in ["audio-0", "audio-1"] {
+            detected
+                .lock()
+                .unwrap()
+                .tracks
+                .insert(track.into(), TrackEssence::default());
+        }
+        let events = EventBroadcaster::default();
+        let mut registered = None;
+        let mut segments = 0;
+        let mut ctx = UploadCtx {
+            client: &client,
+            registered: &mut registered,
+            flow_spec: &mut spec,
+            detected_codec: &detected,
+            content_type: "video/mp2t",
+            events: &events,
+            strom_flow_id: FlowId::new_v4(),
+            block_id: "t",
+            segments_registered: &mut segments,
+            failing: false,
+            objects: HashMap::new(),
+            auth_reported_at: None,
+        };
+        let collection = |body: &serde_json::Value| -> Vec<String> {
+            body["flow_collection"]
+                .as_array()
+                .map(|a| a.iter().map(|m| m["id"].as_str().unwrap().into()).collect())
+                .unwrap_or_default()
+        };
+        // First segment: m1 fails, the flow is created without it.
+        assert!(ensure_flow(&mut ctx, 1).await);
+        {
+            let puts = puts.lock().unwrap();
+            let ids: Vec<_> = puts.iter().map(|(id, _)| id.as_str()).collect();
+            assert_eq!(ids, ["m0", "flow-1"]);
+            assert_eq!(collection(&puts[1].1), ["m0"]);
+        }
+        // Next segment, same essence: m1 is tried again and collected.
+        assert!(ensure_flow(&mut ctx, 1).await);
+        {
+            let puts = puts.lock().unwrap();
+            let last = puts.iter().rev().find(|(id, _)| id == "flow-1").unwrap();
+            assert!(puts.iter().any(|(id, _)| id == "m1"), "m1 not tried again");
+            assert_eq!(collection(&last.1), ["m0", "m1"]);
+        }
+        // Complete: nothing more is registered.
+        let before = puts.lock().unwrap().len();
+        assert!(ensure_flow(&mut ctx, 1).await);
+        assert_eq!(puts.lock().unwrap().len(), before);
     }
 
     /// A TAMS gateway stub whose answers the test sets: the status of each
