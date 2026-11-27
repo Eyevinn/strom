@@ -20,7 +20,7 @@
 use super::backoff::{worth_warning, Backoff};
 use super::decode::check_supported;
 use super::source::{Segment, Since, SourceIndex, SourceInfo};
-use super::timeline::{IndexView, PlayerStats, ReplayTimeline, TimeDomain};
+use super::timeline::{IndexView, PlayerStats, ReplayTimeline, TimeDomain, TimeSource};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -724,12 +724,22 @@ impl Fetcher {
         let mut prune_above = MAX_COVERAGE_INTERVALS;
 
         while !stop.load(Ordering::Relaxed) {
+            // Offline (an export on the frame counter) plays a closed range
+            // of what is recorded, forward: no live poll, no relisting of
+            // holes that might still fill, no listing towards the far end of
+            // a hole the cursor is not in. Each listing holds up the fetches.
+            let on_clock = self.timeline.time_source() == TimeSource::Clock;
+            let grows = self.source.may_grow() && on_clock;
             // Where the group is, or this angle's start before it knows.
             let rt = self.timeline.now_rt();
             let (cursor, speed) = self.timeline.cursor_tai(rt).unwrap_or((start, 0.0));
             let forward = speed >= 0.0;
+            // Offline play only goes forward: nothing behind the cursor is
+            // needed again.
             let lo = cursor
-                - if forward {
+                - if !on_clock {
+                    0
+                } else if forward {
                     self.behind_ns
                 } else {
                     self.ahead_ns
@@ -792,7 +802,7 @@ impl Fetcher {
                 start = f.start_ns;
                 self.publish_extent(start, end);
             }
-            if self.source.may_grow() && poll_job.is_idle() && Instant::now() >= next_poll {
+            if grows && poll_job.is_idle() && Instant::now() >= next_poll {
                 next_poll = Instant::now() + Duration::from_nanos(seg_ns as u64);
                 let source = Arc::clone(&self.source);
                 poll_job.spawn(
@@ -814,10 +824,7 @@ impl Fetcher {
                     // register media late, or a live poll that fell behind
                     // skipped a stretch of it.
                     let (a, b) = ((c * CHUNK_NS).max(start), ((c + 1) * CHUNK_NS).min(end));
-                    if !(self.source.may_grow()
-                        && coverage.has_hole(a, b)
-                        && chunks.relist_due(c, Instant::now()))
-                    {
+                    if !(grows && coverage.has_hole(a, b) && chunks.relist_due(c, Instant::now())) {
                         continue;
                     }
                 }
@@ -840,7 +847,11 @@ impl Fetcher {
             }
             // A hole near the window whose other end the index has not
             // reached: list one more chunk towards it.
-            if listing_ok {
+            let resolve = on_clock
+                || coverage
+                    .hole_at(cursor, (start, end))
+                    .is_some_and(|h| h.start.is_none() || h.end.is_none());
+            if listing_ok && resolve {
                 if let Some(p) = coverage.to_resolve(cursor, lo, hi, (start, end)) {
                     let c = chunk_of(p);
                     if list_failed.ready(&c, Instant::now()) {
