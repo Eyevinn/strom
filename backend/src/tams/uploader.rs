@@ -734,6 +734,10 @@ pub(crate) struct Allocation {
     /// The segment's bytes are in the object already; only the registration
     /// is left.
     uploaded: bool,
+    /// Idempotency round of the registration: moved on after the store
+    /// answered a try with a failure, so the next try is not answered from
+    /// the store's cache of the first (see `segment_idempotency_key`).
+    key_round: u32,
 }
 
 /// Failed tries of one parked segment.
@@ -1269,6 +1273,7 @@ async fn batch_requests(
                     *a = objects.next().map(|object| Allocation {
                         object,
                         uploaded: false,
+                        key_round: 0,
                     });
                 }
             }
@@ -1709,6 +1714,7 @@ async fn upload_one(
             let a = Allocation {
                 object,
                 uploaded: false,
+                key_round: 0,
             };
             *lock() = Some(a.clone());
             a
@@ -1732,9 +1738,17 @@ async fn upload_one(
         }
     }
     let t = Instant::now();
-    client
-        .register_segment(tams_flow_id, &obj.object_id, &timerange)
-        .await?;
+    if let Err(e) = client
+        .register_segment(tams_flow_id, &obj.object_id, &timerange, alloc.key_round)
+        .await
+    {
+        if crate::tams::client::needs_new_idempotency_key(&e) {
+            if let Some(a) = lock().as_mut() {
+                a.key_round += 1;
+            }
+        }
+        return Err(e);
+    }
     timing.register = Some(t.elapsed());
 
     debug!(
@@ -2401,6 +2415,11 @@ mod tests {
         flow_puts: Arc<AtomicU64>,
         allocations: Arc<AtomicU64>,
         registrations: Arc<Mutex<Vec<String>>>,
+        /// The `X-Idempotency-Key` of each registration try, in order.
+        keys: Arc<Mutex<Vec<String>>>,
+        /// Answer a key seen before with its first answer, as OpenTAMS does.
+        cache_by_key: bool,
+        answered: Arc<Mutex<HashMap<String, u16>>>,
     }
 
     async fn start_stub(stub: Stub) -> String {
@@ -2448,13 +2467,27 @@ mod tests {
                     Json(serde_json::Value::Array(s.listed.lock().unwrap().clone()))
                 })
                 .post(
-                    |State(s): State<Stub>, Json(body): Json<serde_json::Value>| async move {
-                        if let Some(code) = status(&s.register) {
-                            return code;
+                    |State(s): State<Stub>,
+                     headers: axum::http::HeaderMap,
+                     Json(body): Json<serde_json::Value>| async move {
+                        let key = headers
+                            .get("x-idempotency-key")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        s.keys.lock().unwrap().push(key.clone());
+                        if s.cache_by_key {
+                            if let Some(code) = s.answered.lock().unwrap().get(&key) {
+                                return StatusCode::from_u16(*code).unwrap();
+                            }
                         }
-                        let tr = body["timerange"].as_str().unwrap_or_default().to_string();
-                        s.registrations.lock().unwrap().push(tr);
-                        StatusCode::CREATED
+                        let code = status(&s.register).unwrap_or_else(|| {
+                            let tr = body["timerange"].as_str().unwrap_or_default().to_string();
+                            s.registrations.lock().unwrap().push(tr);
+                            StatusCode::CREATED
+                        });
+                        s.answered.lock().unwrap().insert(key, code.as_u16());
+                        code
                     },
                 ),
             )
@@ -2495,6 +2528,16 @@ mod tests {
         maybe_registered: bool,
         fresh: Option<bool>,
     ) -> (Outcome, bool, PathBuf) {
+        upload_tries(stub, maybe_registered, fresh, 1).await
+    }
+
+    /// As [`upload_as`], with `attempts` tries of the upload.
+    async fn upload_tries(
+        stub: &Stub,
+        maybe_registered: bool,
+        fresh: Option<bool>,
+        attempts: u32,
+    ) -> (Outcome, bool, PathBuf) {
         let url = start_stub(stub.clone()).await;
         let client = TamsClient::new(url, crate::client_auth::AuthMethod::None).unwrap();
         let mut spec = spec();
@@ -2532,7 +2575,7 @@ mod tests {
         };
         let outcome = match fresh {
             Some(_) => process_fragment(&mut ctx, frag).await,
-            None => upload_segment(&mut ctx, &frag, 1, maybe_registered).await,
+            None => upload_segment(&mut ctx, &frag, attempts, maybe_registered).await,
         };
         (outcome, ctx.failing, path)
     }
@@ -2646,6 +2689,35 @@ mod tests {
         let (outcome, _, path) = upload_with(&stub, false).await;
         assert_eq!(outcome, Outcome::Dropped);
         assert!(!path.exists());
+    }
+
+    /// A registration the store answered with a 200 partial failure is
+    /// retried under a new idempotency key. A store that caches the answer
+    /// per key (OpenTAMS) would otherwise replay the failure to every retry.
+    #[tokio::test]
+    async fn partial_failure_is_retried_with_a_new_idempotency_key() {
+        let stub = Stub {
+            cache_by_key: true,
+            ..Stub::default()
+        };
+        stub.register.lock().unwrap().push_back(200);
+        let (outcome, _, path) = upload_tries(&stub, false, None, 2).await;
+        assert_eq!(outcome, Outcome::Registered);
+        assert!(!path.exists());
+        let keys = stub.keys.lock().unwrap().clone();
+        assert_eq!(keys.len(), 2, "{:?}", keys);
+        assert_ne!(keys[0], keys[1]);
+        // The same object is registered; only the key changes.
+        assert_eq!(stub.allocations.load(Ordering::SeqCst), 1);
+
+        // A try whose outcome is unknown (a 5xx) keeps the key.
+        let stub = Stub::default();
+        stub.register.lock().unwrap().push_back(503);
+        let (outcome, _, _) = upload_tries(&stub, false, None, 2).await;
+        assert_eq!(outcome, Outcome::Registered);
+        let keys = stub.keys.lock().unwrap().clone();
+        assert_eq!(keys.len(), 2, "{:?}", keys);
+        assert_eq!(keys[0], keys[1]);
     }
 
     /// What an [`UploadCtx`] borrows, against a gateway at `url`.

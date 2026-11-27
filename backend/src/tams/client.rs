@@ -524,17 +524,20 @@ impl TamsClient {
         Ok(())
     }
 
-    /// Register a segment on the flow timeline.
+    /// Register a segment on the flow timeline. `key_round` is mixed into the
+    /// idempotency key (see [`segment_idempotency_key`]): the caller moves to
+    /// the next round after the store answered a try with a failure.
     pub async fn register_segment(
         &self,
         flow_id: &str,
         object_id: &str,
         timerange: &str,
+        key_round: u32,
     ) -> Result<()> {
         let url = self.url(&format!("/flows/{}/segments", flow_id))?;
         let body = serde_json::json!({ "object_id": object_id, "timerange": timerange });
         let context = format!("POST {}", redact_url(url.as_str()));
-        let key = segment_idempotency_key(flow_id, object_id, timerange);
+        let key = segment_idempotency_key(flow_id, object_id, timerange, key_round);
         let resp = self
             .send_authed(
                 reqwest::Method::POST,
@@ -546,8 +549,12 @@ impl TamsClient {
         let status = resp.status();
         // 201 = all registered; 200 = partial failure (failed_segments listed).
         if status.as_u16() == 200 {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("segment registration partially failed: {}", text));
+            let mut body = resp.text().await.unwrap_or_default();
+            if let Some((cut, _)) = body.char_indices().nth(MAX_ERROR_BODY_CHARS) {
+                body.truncate(cut);
+                body.push_str("...");
+            }
+            return Err(PartialFailure { body }.into());
         }
         if !status.is_success() {
             return Err(status_error(resp, context).await);
@@ -626,12 +633,53 @@ impl TamsClient {
 const IDEMPOTENCY_KEY_HEADER: &str = "X-Idempotency-Key";
 
 /// The idempotency key of a segment registration: derived from what is
-/// registered, so a retry of the same segment (after a 401, a timeout or a
-/// restart from a parked segment) sends the same key, and a different
-/// registration never reuses one.
-fn segment_idempotency_key(flow_id: &str, object_id: &str, timerange: &str) -> String {
-    let name = format!("strom:tams-segment:{}/{}/{}", flow_id, object_id, timerange);
+/// registered, so a retry of the same segment whose outcome is unknown (a
+/// timeout, a lost answer, a 5xx, a 401 retried with a new token) sends the
+/// same key, and a different registration never reuses one.
+///
+/// A store may keep the answer per key and replay it: OpenTAMS caches every
+/// answer it finishes, 200 partial failures and 4xx included (it releases the
+/// key only on a 5xx). A retry after such an answer with the same key would
+/// get the cached failure back and could never succeed, so the caller retries
+/// it in a new `round`, which gives a new key. Round 0 is the key without a
+/// round.
+fn segment_idempotency_key(flow_id: &str, object_id: &str, timerange: &str, round: u32) -> String {
+    let mut name = format!("strom:tams-segment:{}/{}/{}", flow_id, object_id, timerange);
+    if round > 0 {
+        name.push_str(&format!("#{}", round));
+    }
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, name.as_bytes()).to_string()
+}
+
+/// A segment registration that the store answered with 200: it took the
+/// request, but lists the segment as failed. Not an HTTP error, so it is
+/// retried, but in a new idempotency round (see [`segment_idempotency_key`]).
+#[derive(Debug)]
+pub struct PartialFailure {
+    pub body: String,
+}
+
+impl std::fmt::Display for PartialFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "segment registration partially failed: {}", self.body)
+    }
+}
+
+impl std::error::Error for PartialFailure {}
+
+/// Whether the store answered a segment registration with a failure it may
+/// keep under the idempotency key, so that a retry needs a new key: a 200
+/// partial failure, or a 4xx other than 408 and 429 (which ask to retry) and
+/// 409 (OpenTAMS: the same key is still in flight, so the same key is
+/// retried). Timeouts, network errors and 5xx keep the key.
+pub fn needs_new_idempotency_key(e: &anyhow::Error) -> bool {
+    if e.downcast_ref::<PartialFailure>().is_some() {
+        return true;
+    }
+    e.downcast_ref::<HttpStatusError>().is_some_and(|h| {
+        let code = h.status.as_u16();
+        (400..500).contains(&code) && !matches!(code, 408 | 409 | 429)
+    })
 }
 
 /// One segment as listed by `GET /flows/{id}/segments`. Timeranges and the
@@ -990,11 +1038,37 @@ mod tests {
 
     #[test]
     fn segment_idempotency_key_is_stable_per_registration() {
-        let a = segment_idempotency_key("f", "o1", "[0:0_1:0)");
-        assert_eq!(a, segment_idempotency_key("f", "o1", "[0:0_1:0)"));
-        assert_ne!(a, segment_idempotency_key("f", "o2", "[0:0_1:0)"));
-        assert_ne!(a, segment_idempotency_key("f", "o1", "[0:0_2:0)"));
-        assert_ne!(a, segment_idempotency_key("g", "o1", "[0:0_1:0)"));
+        let key = |f, o, t| segment_idempotency_key(f, o, t, 0);
+        let a = key("f", "o1", "[0:0_1:0)");
+        assert_eq!(a, key("f", "o1", "[0:0_1:0)"));
+        assert_ne!(a, key("f", "o2", "[0:0_1:0)"));
+        assert_ne!(a, key("f", "o1", "[0:0_2:0)"));
+        assert_ne!(a, key("g", "o1", "[0:0_1:0)"));
+        // A new round is a new key, stable within the round.
+        let b = segment_idempotency_key("f", "o1", "[0:0_1:0)", 1);
+        assert_ne!(a, b);
+        assert_eq!(b, segment_idempotency_key("f", "o1", "[0:0_1:0)", 1));
+    }
+
+    #[test]
+    fn new_idempotency_key_only_after_an_answered_failure() {
+        let status = |code: u16| {
+            anyhow::Error::new(HttpStatusError {
+                status: reqwest::StatusCode::from_u16(code).unwrap(),
+                context: "POST x".into(),
+                body: String::new(),
+            })
+        };
+        assert!(needs_new_idempotency_key(
+            &PartialFailure { body: "{}".into() }.into()
+        ));
+        for code in [400, 403, 404] {
+            assert!(needs_new_idempotency_key(&status(code)), "{}", code);
+        }
+        for code in [408, 409, 429, 500, 503] {
+            assert!(!needs_new_idempotency_key(&status(code)), "{}", code);
+        }
+        assert!(!needs_new_idempotency_key(&anyhow!("timed out")));
     }
 
     #[test]
@@ -1427,7 +1501,7 @@ mod tests {
             let c = osc_client(&gw, token_url);
 
             // Writer path: registering a segment survives the stale SAT.
-            c.register_segment("f", "o1", "[0:0_1:0)").await.unwrap();
+            c.register_segment("f", "o1", "[0:0_1:0)", 0).await.unwrap();
             assert_eq!(
                 auths(&seen),
                 vec![Some("Bearer sat-1".into()), Some("Bearer sat-2".into())]
@@ -1438,35 +1512,46 @@ mod tests {
             assert_eq!(seen.lock().unwrap().len(), 3);
         }
 
+        /// A registration retried after a 401 with a new token (the re-mint
+        /// loop in `send_authed`) carries the same key on both tries: the
+        /// store never saw the first. A different registration gets another.
         #[tokio::test]
         async fn register_sends_the_same_idempotency_key_on_a_retry() {
-            let keys: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+            type Keys = Arc<Mutex<Vec<(Option<String>, Option<String>)>>>;
+            let minted = Arc::new(Mutex::new(0));
+            let token_url = token_endpoint(minted.clone()).await;
+            let keys: Keys = Arc::default();
             let app = Router::new()
                 .route(
                     "/flows/f/segments",
-                    axum::routing::post(
-                        |State(keys): State<Arc<Mutex<Vec<Option<String>>>>>, h: HeaderMap| async move {
-                            let k = h
-                                .get("x-idempotency-key")
-                                .and_then(|v| v.to_str().ok())
-                                .map(String::from);
-                            keys.lock().unwrap().push(k);
+                    axum::routing::post(|State(keys): State<Keys>, h: HeaderMap| async move {
+                        let get = |name: &str| {
+                            h.get(name).and_then(|v| v.to_str().ok()).map(String::from)
+                        };
+                        let auth = get("authorization");
+                        keys.lock()
+                            .unwrap()
+                            .push((get("x-idempotency-key"), auth.clone()));
+                        // Only the second minted token is accepted.
+                        if auth.as_deref() == Some("Bearer sat-1") {
+                            StatusCode::UNAUTHORIZED
+                        } else {
                             StatusCode::CREATED
-                        },
-                    ),
+                        }
+                    }),
                 )
                 .with_state(keys.clone());
-            let c = TamsClient::new(serve(app).await, AuthMethod::None).unwrap();
-            c.register_segment("f", "o1", "[0:0_1:0)").await.unwrap();
-            c.register_segment("f", "o1", "[0:0_1:0)").await.unwrap();
-            c.register_segment("f", "o2", "[1:0_2:0)").await.unwrap();
+            let c = osc_client(&serve(app).await, token_url);
+            c.register_segment("f", "o1", "[0:0_1:0)", 0).await.unwrap();
+            c.register_segment("f", "o2", "[1:0_2:0)", 0).await.unwrap();
             let k = keys.lock().unwrap().clone();
-            assert!(
-                k.iter().all(Option::is_some),
-                "every registration has a key"
-            );
-            assert_eq!(k[0], k[1]);
-            assert_ne!(k[0], k[2]);
+            assert_eq!(k.len(), 3, "{:?}", k);
+            assert_eq!(k[0].1.as_deref(), Some("Bearer sat-1"));
+            assert_eq!(k[1].1.as_deref(), Some("Bearer sat-2"));
+            assert!(k[0].0.is_some(), "no key");
+            assert_eq!(k[0].0, k[1].0, "the retry after the 401 changed the key");
+            assert_ne!(k[0].0, k[2].0);
+            assert_eq!(*minted.lock().unwrap(), 2);
         }
 
         #[tokio::test]
