@@ -22,6 +22,10 @@ interests you, open a GitHub issue or discussion.
   HLS server, transcoder, etc.) and savable element presets.
 - **Scheduling & automation** — cron-style start/stop, webhook triggers, recording windows,
   and retention policies.
+- **Clips that survive TAMS retention** — TAMS Output's `retention_s` deletes everything
+  behind its window. The retention code takes protected ranges (clips with handles) that it
+  leaves out of its deletions, but nothing provides them yet: a clip API, or a clip flow the
+  block can look up.
 - **Batch processing** — file queue / folder-watch for bulk transcoding with concurrency
   limits and progress tracking.
 - **Undo/redo** and **drag-drop flow import** in the editor.

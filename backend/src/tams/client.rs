@@ -682,6 +682,15 @@ impl SegmentQuery {
     }
 }
 
+/// The answer to [`TamsClient::delete_segments`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    /// The store took the request (it may delete later).
+    Accepted,
+    /// The store has no such flow (nothing registered yet, or deleted).
+    NoFlow,
+}
+
 /// Where the next page of a paged listing is, from the response headers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NextPage {
@@ -805,6 +814,28 @@ impl TamsClient {
         );
         let page: Vec<ListedSegment> = resp.json().await.context("parsing segments")?;
         Ok((page, next))
+    }
+
+    /// Ask the store to delete the segments of `flow_id` that lie wholly
+    /// within `timerange` (TAMS `DELETE /flows/{id}/segments?timerange=`).
+    /// The store removes the media objects no other segment references. A
+    /// store may do the work later (202 with a Flow Delete Request) or at
+    /// once (200/204); both are [`DeleteOutcome::Accepted`]. A flow the
+    /// store does not have (404) is [`DeleteOutcome::NoFlow`].
+    pub async fn delete_segments(&self, flow_id: &str, timerange: &str) -> Result<DeleteOutcome> {
+        let path = format!("{}/flows/{}/segments", self.base_url, flow_id);
+        let url = with_query(&path, &[("timerange", timerange.to_string())])?;
+        let resp = self
+            .send_authed(reqwest::Method::DELETE, url, None, &[])
+            .await?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(DeleteOutcome::NoFlow);
+        }
+        if !status.is_success() {
+            return Err(status_error(resp, format!("DELETE {}", redact_url(&path))).await);
+        }
+        Ok(DeleteOutcome::Accepted)
     }
 
     /// Resolve a `Link` target against the gateway base URL. A target outside
@@ -1578,6 +1609,46 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(!format!("{:#}", err).contains("topsecret"), "{:#}", err);
+        }
+
+        #[tokio::test]
+        async fn delete_segments_sends_the_timerange_with_auth() {
+            let seen: Seen = Arc::default();
+            let app = Router::new()
+                .route(
+                    "/flows/f/segments",
+                    axum::routing::delete(
+                        |State(seen): State<Seen>,
+                         Query(q): Query<HashMap<String, String>>,
+                         h: HeaderMap| async move {
+                            record(&seen, q.get("timerange").cloned().unwrap_or_default(), &h);
+                            StatusCode::ACCEPTED
+                        },
+                    ),
+                )
+                .route(
+                    "/flows/bad/segments",
+                    axum::routing::delete(|| async { (StatusCode::BAD_GATEWAY, "down") }),
+                )
+                .with_state(seen.clone());
+            let base = serve(app).await;
+            let c = client(&base);
+            assert_eq!(
+                c.delete_segments("f", "_100:0)").await.unwrap(),
+                DeleteOutcome::Accepted
+            );
+            assert_eq!(
+                seen.lock().unwrap()[0],
+                ("_100:0)".to_string(), Some("Bearer secret".to_string()))
+            );
+            // No such flow (nothing registered yet): not an error.
+            assert_eq!(
+                c.delete_segments("missing", "_1:0)").await.unwrap(),
+                DeleteOutcome::NoFlow
+            );
+            let err = c.delete_segments("bad", "_1:0)").await.unwrap_err();
+            let status = err.downcast_ref::<HttpStatusError>().map(|e| e.status);
+            assert_eq!(status, Some(StatusCode::BAD_GATEWAY));
         }
     }
 }

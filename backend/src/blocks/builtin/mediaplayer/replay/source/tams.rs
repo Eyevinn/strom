@@ -1,7 +1,7 @@
 //! TAMS flow as a replay source: `GET /flows/{id}/segments` for the index and
 //! the segments' `get_urls` for the bytes.
 
-use super::{read_newest, Location, Segment, Since, SourceIndex, SourceInfo};
+use super::{is_gone, read_newest, Gone, Location, Segment, Since, SourceIndex, SourceInfo};
 use crate::client_auth::AuthMethod;
 use crate::tams::client::{ListedSegment, NextPage, SegmentQuery, TamsClient};
 use anyhow::{anyhow, Result};
@@ -166,13 +166,17 @@ impl SourceIndex for TamsIndex {
             return Err(anyhow!("TAMS segment without get_urls"));
         };
         let mut last_err = anyhow!("segment {} has no get_urls", segment.object_id);
+        let mut gone = None;
         for url in urls {
             match self.client.fetch_object(url).await {
                 Ok(b) => return Ok(b),
+                Err(e) if is_gone(&e) => gone = Some(e),
                 Err(e) => last_err = e,
             }
         }
-        Err(last_err)
+        // A URL whose object is deleted says more than another that failed
+        // otherwise: the store deleted the segment (retention).
+        Err(gone.map_or(last_err, |e| e.context(Gone(segment.object_id.clone()))))
     }
 }
 

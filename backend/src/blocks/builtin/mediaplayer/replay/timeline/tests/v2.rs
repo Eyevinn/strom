@@ -580,6 +580,27 @@ fn start_mode_live_goes_live_once_ready() {
     assert_eq!(tl.cursor_tai(S), Some((BASE + 5 * S, 0.0)));
 }
 
+/// Retention removes the start under a paused cursor: the cursor shows the
+/// new start, and a seek into what was removed lands on it.
+#[test]
+fn a_cursor_in_what_retention_removed_moves_to_the_start() {
+    let (tl, p) = timeline_with(&[(BASE, BASE + 60 * S)]);
+    tl.apply_at(Command::FollowLive { on: false }, 0).unwrap();
+    assert_eq!(
+        tl.apply_at(seek_tai(BASE + 5 * S), 0).unwrap().tai,
+        BASE + 5 * S
+    );
+    p[0].start_tai.store(BASE + 10 * S, Ordering::Relaxed);
+    assert_eq!(tl.tai_at(0), Some(BASE + 10 * S));
+    assert_eq!(
+        tl.apply_at(seek_tai(BASE + 2 * S), 0).unwrap().tai,
+        BASE + 10 * S
+    );
+    // Play from there goes on from the new start.
+    tl.apply_at(Command::Speed { speed: 1.0 }, 0).unwrap();
+    assert_eq!(tl.tai_at(S), Some(BASE + 11 * S));
+}
+
 #[test]
 fn range_changed_on_retention_and_angles_not_on_growth() {
     let (tl, p) = timeline_with(&[(BASE, BASE + 60 * S)]);
