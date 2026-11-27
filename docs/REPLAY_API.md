@@ -24,6 +24,8 @@ The diagnostics page `/player/replay-diagnostics/{flow_id}/{group}` shows the st
 | `GET` | `/api/replay/{flow_id}/{group}/state` | | the group state |
 | `GET` | `/api/replay/{flow_id}/{group}/diagnostics` | | engine diagnostics |
 | `GET` (WebSocket) | `/api/replay/{flow_id}/{group}/ws` | commands | state, events, acks, errors |
+| `GET` | `/api/flows/{flow_id}/source-offsets` | | the flow's offset per source (see [Source offsets](#source-offsets)) |
+| `PATCH` | `/api/flows/{flow_id}/source-offsets` | offsets to set or remove | the flow's offsets after the change |
 
 The schema is in the OpenAPI spec under the `replay` tag. Every WebSocket message is one `ReplayWsMessage`, tagged by `type`.
 
@@ -32,7 +34,7 @@ The schema is in the OpenAPI spec under the `replay` tag. Every WebSocket messag
 ```json
 {
   "api_version": 2,
-  "features": ["follow_live", "client_ref", "mark_at", "offset_ms", "jog_grid", "start_mode", "diagnostics", "source_switch", "cue_next"],
+  "features": ["follow_live", "client_ref", "mark_at", "offset_ms", "jog_grid", "start_mode", "diagnostics", "source_switch", "cue_next", "source_offsets"],
   "groups": [
     {
       "flow_id": "...", "group": "r1", "time_domain": "tai", "ready": "ready",
@@ -169,7 +171,7 @@ Every command may carry `client_ref` (a string of at most 64 characters). It is 
 - While it switches, the angle state has `pending_source`, and the player holds two sources' frames, each within half the decoded budget.
 - The switch gives up, and the old source stays, when the new source is not on real TAI, cannot be decoded, decodes into another layout (size, format) than the output, or gives no picture within 10 s. It sends `source_failed` with the reason. A later switch replaces one still pending (`source_failed`, "replaced").
 - Both events carry the `client_ref` of the command that asked for the switch. After the switch the group's range follows the new source (`range_changed`), and discovery shows the new `source`.
-- `offset_ms` stays the player's and applies to the new source too.
+- The angle takes the new source's offset (see [Source offsets](#source-offsets)), else its own `offset_ms`.
 
 ### The clip queue
 
@@ -183,6 +185,15 @@ Every command may carry `client_ref` (a string of at most 64 characters). It is 
 - `replace: true` empties the queue before the clip is added. `clear_queue` empties it. `live` and `end` leave clip play and empty it too; other commands keep it (pause a clip, play on, and the queue goes on at its out).
 - Events: `ended` with the ref of the clip that ended, then `item_started` with the ref of the clip that started, both with cause `cue_end`. The state's `queue` has the clip's ref (`clip_ref`) and how many clips wait (`waiting`).
 - `play {speed}` changes the clip playing only; the next clip plays at its own `speed`. Transitions other than a cut (a mix, a wipe) take two clip groups, A/B, through the mixer.
+
+### Source offsets
+
+A time offset belongs to the source (the camera), not to the player that shows it. A flow has one offset per source, the flow property `source_offsets_ms`: every player that shows the source uses it, in every group of the flow, after a `source` switch and for a queued clip on that source. A player's own `offset_ms` applies only to a source the flow does not list (and is how flows from before this worked).
+
+- The key is the source as the angle shows it: its `source` (the URI without credentials, e.g. `tams+https://<gateway>/flows/<flow_id>`) or its `source_id` (the TAMS flow id, or the directory name). The URI wins when both are listed.
+- The value is ms, within ±86400000 (a day), positive later on the group's axis, as `offset_ms`.
+- `PATCH /api/flows/{flow_id}/source-offsets` with `{"offsets_ms": {"<source>": 2500, "<other>": null}}` sets the named sources and removes those given `null`; the others stay. An empty source or a value out of range refuses the whole change (400 `invalid`). The flow is saved, and a running flow's players move at once (the state's `offset_ms` per angle shows the offset in use). `GET` returns `{"offsets_ms": {...}}`.
+- Saving the flow's properties (`PATCH /api/flows/{id}/properties`, or the flow itself) sets them too; there, an entry out of range is left out with a warning.
 
 ### Going live by itself
 
@@ -264,7 +275,7 @@ Set in the flow, on each player. The group takes its value from its players as b
 | `follow_live` | `true` | `false` if any is `false` | See the table above. |
 | `jog_grid` | `source` | `source` if any is `source` | The grid `jog` steps on. |
 | `start_mode` | `paused` | the first player's | `paused` (and `first`): paused at `range.start`. `live`: live as soon as the group is ready, unless a command came first. |
-| `offset_ms` | `0` | per angle | Trim, within ±86400000 (a day): the angle's media moves this far on the group's axis, positive later. For cameras without a common time, or to adjust one. The times in the store do not change. |
+| `offset_ms` | `0` | per angle | Trim, within ±86400000 (a day): the angle's media moves this far on the group's axis, positive later. For cameras without a common time, or to adjust one. The times in the store do not change. Deprecated in favour of the flow's [source offsets](#source-offsets), which win for a listed source; this is the fallback for any other. |
 
 ## Examples
 
@@ -294,6 +305,10 @@ curl -XPOST $G/command -H 'content-type: application/json' \
 curl -XPOST $G/command -H 'content-type: application/json' -d '{"cmd":"play"}'
 curl -XPOST $G/command -H 'content-type: application/json' \
   -d '{"cmd":"cue_next","in":{"t":"1795526570000000000"},"out":{"t":"1795526574000000000"},"speed":0.5,"source":"tams+https://gateway.example.com/flows/<cam2>","client_ref":"clip-19"}'
+
+# Camera 2 runs 2.5 s late: move it on every player that shows it
+curl -XPATCH http://localhost:8080/api/flows/$FLOW/source-offsets -H 'content-type: application/json' \
+  -d '{"offsets_ms":{"<cam2>":2500}}'
 
 # Review mode: never go live by itself
 curl -XPOST $G/command -H 'content-type: application/json' -d '{"cmd":"follow_live","on":false}'
