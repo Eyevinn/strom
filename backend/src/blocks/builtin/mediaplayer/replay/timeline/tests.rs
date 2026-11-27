@@ -1514,30 +1514,109 @@ fn an_out_past_growing_media_holds_at_the_edge_until_the_media_reaches_it() {
     assert_eq!(next(&mut events).unwrap().cause, ReplayCause::CueEnd);
 }
 
+/// A live test pipeline, and its source as the clock source of `tl` (as a
+/// player's `appsrc` is).
+fn clock_pipeline(tl: &ReplayTimeline) -> gst::Pipeline {
+    gst::init().unwrap();
+    let pipeline = gst::parse::launch("videotestsrc name=src is-live=true ! fakesink")
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+    set_state(&pipeline, gst::State::Playing);
+    tl.set_clock_source(&pipeline.by_name("src").unwrap());
+    pipeline
+}
+
+fn set_state(pipeline: &gst::Pipeline, state: gst::State) {
+    pipeline.set_state(state).unwrap();
+    let (res, now, _) = pipeline.state(gst::ClockTime::from_seconds(5));
+    res.unwrap();
+    assert_eq!(now, state);
+}
+
+fn sleep_ms(ms: u64) {
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
+
 #[test]
-fn a_resume_after_a_pause_keeps_the_cursor_going() {
+fn a_pause_of_the_flow_pauses_the_cursor() {
     let (tl, _p) = timeline_with(&[(BASE, BASE + 600 * S)]);
-    let base = 1000 * S;
-    *lock(&tl.clock_source) = Some(ClockSource {
-        element: gst::glib::WeakRef::new(),
-        base: Some(base),
-    });
-    tl.apply_at(seek_tai(BASE + 10 * S), 10 * S).unwrap();
-    tl.apply_at(Command::Speed { speed: 1.0 }, 10 * S).unwrap();
-    tl.note_pushed(20 * S, BASE + 20 * S);
-    // Paused at 20 s for 30 s: the running time read from the clock kept
-    // growing, and a command given during the pause is on that time.
-    tl.apply_at(seek_tai(BASE + 100 * S), 35 * S).unwrap();
-    tl.apply_at(Command::Speed { speed: 1.0 }, 35 * S).unwrap();
-    // PLAYING again: the base moves 30 s on, running time falls back by 30 s.
-    tl.observe_base(base + 30 * S);
-    tl.observe_base(base + 30 * S);
-    // Resumed at 20 s: 15 s after the command, going forward.
-    assert_eq!(tl.cursor_tai(20 * S), Some((BASE + 115 * S, 1.0)));
-    assert_eq!(tl.tai_at(21 * S), Some(BASE + 116 * S));
-    // The first tick after the resume is the latest pushed.
-    tl.note_pushed(21 * S, BASE + 116 * S);
-    assert_eq!(tl.pushed_tai(), Some(BASE + 116 * S));
+    let pipeline = clock_pipeline(&tl);
+    let at = |cmd| {
+        tl.apply(Request {
+            command: cmd,
+            client_ref: None,
+        })
+        .unwrap()
+    };
+    at(seek_tai(BASE + 10 * S));
+    at(Command::Speed { speed: 1.0 });
+    sleep_ms(100);
+    set_state(&pipeline, gst::State::Paused);
+    let paused = tl.cursor_now().unwrap().0;
+    assert!(paused >= BASE + 10 * S + 50 * MS, "played before the pause");
+    // Paused: the cursor stands still.
+    sleep_ms(500);
+    assert_eq!(tl.cursor_now().unwrap().0, paused);
+    // Playing again: on from where it stopped, not 500 ms on, and not from
+    // the start mode's place.
+    set_state(&pipeline, gst::State::Playing);
+    tl.observe_base();
+    let (resumed, speed) = tl.cursor_now().unwrap();
+    assert_eq!(speed, 1.0);
+    assert!(
+        resumed >= paused && resumed < paused + 200 * MS,
+        "resumed {} ms after the pause point",
+        (resumed - paused) / MS
+    );
+    sleep_ms(100);
+    assert!(tl.cursor_now().unwrap().0 >= resumed + 50 * MS, "plays on");
+    // A command given during a pause is on the paused running time.
+    set_state(&pipeline, gst::State::Paused);
+    sleep_ms(300);
+    at(seek_tai(BASE + 100 * S));
+    at(Command::Speed { speed: 1.0 });
+    sleep_ms(300);
+    set_state(&pipeline, gst::State::Playing);
+    let t = tl.cursor_now().unwrap().0;
+    assert!(
+        (BASE + 100 * S..BASE + 100 * S + 200 * MS).contains(&t),
+        "resumed at {} ms past the seek",
+        (t - BASE - 100 * S) / MS
+    );
+    set_state(&pipeline, gst::State::Null);
+}
+
+#[test]
+fn a_pause_of_the_flow_while_following_live_resumes_live() {
+    let p = player("cam0", BASE, BASE + 600 * S, Some((50, 1)));
+    let tl = timeline_of(std::slice::from_ref(&p));
+    let pipeline = clock_pipeline(&tl);
+    tl.apply(Request {
+        command: Command::Live { margin_ms: None },
+        client_ref: None,
+    })
+    .unwrap();
+    let live = tl.cursor_now().unwrap().0;
+    assert!((BASE + 600 * S - 1500 * MS..BASE + 600 * S - 1400 * MS).contains(&live));
+    let mut events = tl.subscribe();
+    set_state(&pipeline, gst::State::Paused);
+    // The edge moves on 1 s during the pause: less than a group following
+    // live may lag before it jumps forward by itself.
+    p.end_tai.store(BASE + 601 * S, Ordering::Relaxed);
+    sleep_ms(300);
+    set_state(&pipeline, gst::State::Playing);
+    let (t, speed) = tl.cursor_now().unwrap();
+    assert_eq!(speed, 1.0);
+    assert!(
+        (BASE + 601 * S - 1500 * MS..BASE + 601 * S - 1400 * MS).contains(&t),
+        "resumed {} ms behind the live point",
+        (BASE + 601 * S - 1500 * MS - t) / MS
+    );
+    let e = next(&mut events).unwrap();
+    assert_eq!(e.cause, ReplayCause::EdgeMoved);
+    assert!(matches!(e.kind, ReplayEventKind::Live { .. }));
+    set_state(&pipeline, gst::State::Null);
 }
 
 #[test]
@@ -1546,7 +1625,7 @@ fn a_base_is_only_observed_on_a_clock_source() {
     tl.apply_at(seek_tai(BASE + 10 * S), 10 * S).unwrap();
     tl.apply_at(Command::Speed { speed: 1.0 }, 10 * S).unwrap();
     // On the stand-in there is no base to move from.
-    tl.observe_base(5 * S);
+    tl.observe_base();
     assert_eq!(tl.tai_at(20 * S), Some(BASE + 20 * S));
 }
 
