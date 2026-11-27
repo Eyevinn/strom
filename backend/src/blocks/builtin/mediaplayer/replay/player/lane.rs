@@ -1,7 +1,11 @@
-//! Source switching (`cue {source}`, `source`): the [`Lane`] behind the
-//! player, one per source, and how a switch settles. The player keeps its
-//! decoders and output; a switch puts a second lane beside the first, and
-//! the tick shows it once it has the picture.
+//! Source switching (`cue {source}`, `source`) and the next clip of the
+//! queue (`cue_next`): the [`Lane`] behind the player, one per source, and
+//! how a switch settles. The player keeps its decoders and output; a switch
+//! puts a second lane beside the first, and the tick shows it once it has
+//! the picture. For a queued clip the second lane is fetched and decoded at
+//! the clip's in point while the current clip plays (with the clip's source
+//! for the angle it names, else the source shown), and the tick shows it
+//! from the tick the queue starts the clip on.
 
 use super::*;
 
@@ -34,6 +38,14 @@ pub(super) struct Lane {
     pub(super) created: Instant,
     /// The `client_ref` of the command that switched to it.
     pub(super) client_ref: Option<String>,
+    /// The queued clip the lane is prepared for (its `seq`), 0 for a
+    /// switch.
+    pub(super) item: u64,
+    /// A switch of source the client hears about (`source_changed`,
+    /// `source_failed`, `pending_source`): a switch, or a queued clip with
+    /// another source for this angle. Not a queued clip's lane on the
+    /// source shown.
+    pub(super) announce: bool,
 }
 
 impl Lane {
@@ -42,6 +54,8 @@ impl Lane {
         uri: Option<String>,
         ident: SourceIdent,
         client_ref: Option<String>,
+        item: u64,
+        announce: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             fetcher: Arc::new(fetcher),
@@ -58,6 +72,8 @@ impl Lane {
             error: Mutex::new(None),
             created: Instant::now(),
             client_ref,
+            item,
+            announce,
         })
     }
 
@@ -107,10 +123,24 @@ impl ReplayPlayer {
     /// Where a switch stands for the tick that wants group time `want`:
     /// shows the new source once it has the picture (or has none to show
     /// there), gives up on an error or after [`SWITCH_TIMEOUT`].
-    pub(super) fn settle_switch(&self, want: Option<i64>) -> Settle {
+    ///
+    /// A lane prepared for a queued clip is shown from the tick on which
+    /// the queue plays that clip (`item`), with whatever it has decoded by
+    /// then; until then the current lane is shown.
+    pub(super) fn settle_switch(&self, want: Option<i64>, item: u64) -> Settle {
         let Some(p) = lock(&self.lanes).pending.clone() else {
             return Settle::None;
         };
+        if p.item != 0 {
+            if p.item == item {
+                self.commit(&p);
+                return Settle::Committed;
+            }
+            if let Err(e) = usable(&p) {
+                self.abandon(&p, e);
+            }
+            return Settle::None;
+        }
         match switch_ready(&p, want) {
             Ok(true) => {
                 self.commit(&p);
@@ -134,6 +164,8 @@ impl ReplayPlayer {
             lanes.pending = None;
             std::mem::replace(&mut lanes.current, Arc::clone(p))
         };
+        // From now on it follows the cursor.
+        p.fetcher.set_aim(None);
         // The old fetcher reports nowhere from now on; then the new one
         // hands what it knows to the player's stats and reports there.
         old.fetcher
@@ -148,8 +180,16 @@ impl ReplayPlayer {
             p.ident.source.as_deref().unwrap_or("?"),
             old.ident.source.as_deref().unwrap_or("?")
         );
-        self.timeline
-            .source_changed(&self.block_id, p.ident.source.clone(), p.client_ref.clone());
+        if p.announce {
+            self.timeline.source_changed(
+                &self.block_id,
+                p.ident.source.clone(),
+                p.client_ref.clone(),
+            );
+        } else {
+            // The source shown stays; only the stretch of it changed.
+            self.stats.set_pending_source(None);
+        }
         // Freed outside every lock.
         let doomed = std::mem::take(&mut *lock(&old.decoded));
         drop(doomed);
@@ -173,13 +213,150 @@ impl ReplayPlayer {
             self.stats.source_ident().source.as_deref().unwrap_or("?"),
             error
         );
-        self.timeline.source_failed(
-            &self.block_id,
-            p.ident.source.clone(),
-            error,
-            p.client_ref.clone(),
-        );
+        self.lane_failed(p, error);
     }
+
+    /// Tell the client a lane will not be shown, if it is a switch it
+    /// heard of.
+    fn lane_failed(&self, p: &Lane, error: String) {
+        if p.announce {
+            self.timeline.source_failed(
+                &self.block_id,
+                p.ident.source.clone(),
+                error,
+                p.client_ref.clone(),
+            );
+        }
+    }
+
+    /// Prepare the queue's next clip: a lane at its in point, with the
+    /// clip's source for this angle or else the source shown. Once per
+    /// clip, while no other switch is under way; a prepared lane whose clip
+    /// left the queue (cleared, replaced) is dropped. Called by the
+    /// scheduler.
+    pub(super) fn prepare_queued(&self) {
+        let Some(open) = self.switching.as_ref() else {
+            return;
+        };
+        let (playing, next) = self.timeline.queue_view();
+        let (current, pending) = self.lanes();
+        if let Some(p) = pending {
+            let wanted = p.item == playing || next.as_ref().is_some_and(|i| i.seq == p.item);
+            if p.item != 0 && !wanted {
+                self.drop_pending(&p, "its clip left the queue");
+            }
+            return;
+        }
+        let Some(item) = next else {
+            return;
+        };
+        if self.prepared.swap(item.seq, Ordering::Relaxed) == item.seq {
+            return;
+        }
+        let (opened, announce) = match item.source_for(&self.block_id) {
+            Some(s) => (
+                Ok(s.clone()),
+                current.uri.as_deref() != Some(s.uri.as_str()),
+            ),
+            None => match &current.uri {
+                Some(uri) => (open(uri), false),
+                None => return,
+            },
+        };
+        let opened = match opened {
+            Ok(o) => o,
+            Err(e) => {
+                warn!(
+                    "Replay {}: the clip queued next cannot be prepared: {}",
+                    self.block_id, e
+                );
+                return;
+            }
+        };
+        let lane = self.new_lane(opened, item.client_ref.clone(), item.seq, announce);
+        lane.fetcher.set_aim(Some(item.start));
+        debug!(
+            "Replay {}: preparing queued clip {} on {}",
+            self.block_id,
+            item.seq,
+            lane.ident.source.as_deref().unwrap_or("?")
+        );
+        {
+            let mut lanes = lock(&self.lanes);
+            if lanes.pending.is_some() {
+                // A switch came in meanwhile: it goes first.
+                drop(lanes);
+                lane.halt();
+                self.prepared.store(0, Ordering::Relaxed);
+                return;
+            }
+            lanes.pending = Some(Arc::clone(&lane));
+        }
+        lane.spawn();
+        if announce {
+            self.stats.set_pending_source(lane.ident.source.clone());
+        }
+        if !self.alive() {
+            lane.halt();
+        }
+    }
+
+    /// Drop the pending lane `p` without showing it.
+    fn drop_pending(&self, p: &Arc<Lane>, why: &str) {
+        {
+            let mut lanes = lock(&self.lanes);
+            if !lanes.pending.as_ref().is_some_and(|q| Arc::ptr_eq(q, p)) {
+                return;
+            }
+            lanes.pending = None;
+        }
+        p.halt();
+        if p.announce {
+            self.stats.set_pending_source(None);
+        }
+        debug!("Replay {}: prepared lane dropped: {}", self.block_id, why);
+        self.lane_failed(p, why.to_string());
+    }
+
+    /// A lane for `source`, not started, reading into stats of its own (so
+    /// the group sees the shown source's extent, grid and index until it is
+    /// shown). The trim is the player's (one day, the source's own).
+    fn new_lane(
+        &self,
+        source: OpenedSource,
+        client_ref: Option<String>,
+        item: u64,
+        announce: bool,
+    ) -> Arc<Lane> {
+        let OpenedSource { index, uri, ident } = source;
+        let stats = Arc::new(PlayerStats::with_config(
+            &self.block_id,
+            PlayerConfig {
+                offset_ns: self.stats.offset_ns(),
+                ..Default::default()
+            },
+        ));
+        let fetcher = Fetcher::new(
+            &self.block_id,
+            index,
+            Arc::clone(&self.timeline),
+            stats,
+            self.prefetch_s,
+        );
+        Lane::new(fetcher, Some(uri), ident, client_ref, item, announce)
+    }
+}
+
+/// Whether lane `p` can be shown at all: an error says why not (see
+/// [`switch_ready`]).
+fn usable(p: &Lane) -> Result<(), String> {
+    if let Some(e) = p.error() {
+        return Err(e);
+    }
+    if p.store().info().is_some_and(|i| !i.absolute_time) {
+        return Err("the source is not on real TAI (no common time with the group)".into());
+    }
+    Ok(())
 }
 
 /// Whether lane `p`, being switched to, can be shown at group time `want`:
@@ -189,12 +366,7 @@ impl ReplayPlayer {
 /// on real TAI (it would not line up with the group), or no picture came
 /// within [`SWITCH_TIMEOUT`].
 fn switch_ready(p: &Lane, want: Option<i64>) -> Result<bool, String> {
-    if let Some(e) = p.error() {
-        return Err(e);
-    }
-    if p.store().info().is_some_and(|i| !i.absolute_time) {
-        return Err("the source is not on real TAI (no common time with the group)".into());
-    }
+    usable(p)?;
     if p.created.elapsed() > SWITCH_TIMEOUT {
         return Err(format!(
             "no picture from the source within {} s",
@@ -247,24 +419,7 @@ impl SourceControl for ReplayPlayer {
                 .source_changed(&self.block_id, ident.source, client_ref);
             return;
         }
-        // The new source is read into stats of its own, so the group sees
-        // the old source's extent, grid and index until the switch. The trim
-        // is the player's (one day, the source's own).
-        let stats = Arc::new(PlayerStats::with_config(
-            &self.block_id,
-            PlayerConfig {
-                offset_ns: self.stats.offset_ns(),
-                ..Default::default()
-            },
-        ));
-        let fetcher = Fetcher::new(
-            &self.block_id,
-            index,
-            Arc::clone(&self.timeline),
-            stats,
-            self.prefetch_s,
-        );
-        let lane = Lane::new(fetcher, Some(uri), ident, client_ref);
+        let lane = self.new_lane(OpenedSource { index, uri, ident }, client_ref, 0, true);
         info!(
             "Replay {}: switching from {} to {}",
             self.block_id,
@@ -276,12 +431,7 @@ impl SourceControl for ReplayPlayer {
         self.stats.set_pending_source(lane.ident.source.clone());
         if let Some(old) = replaced {
             old.halt();
-            self.timeline.source_failed(
-                &self.block_id,
-                old.ident.source.clone(),
-                "replaced by a later switch".into(),
-                old.client_ref.clone(),
-            );
+            self.lane_failed(&old, "replaced by a later switch".into());
         }
         // Shut down meanwhile: the shutdown may not have seen the new lane.
         if !self.alive() {

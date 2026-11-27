@@ -453,6 +453,49 @@ mod tests {
         drop((tl, tl2));
     }
 
+    /// `cue_next` and `clear_queue` over REST: the feature is announced, a
+    /// clip is queued (200, the motion unchanged, the state counts it), a
+    /// backward speed is 400, and the queue is emptied.
+    #[tokio::test]
+    async fn cue_next_over_rest() {
+        use timeline::switch_tests::angle;
+        use timeline::TimeDomain;
+        assert!(replay_index()
+            .await
+            .0
+            .features
+            .contains(&"cue_next".to_string()));
+        let flow = uuid::Uuid::new_v4();
+        let tl = timeline::get_or_create(flow, "g");
+        let (_a, _ra) = angle(&tl, "a", TimeDomain::Tai);
+        let post = |body: serde_json::Value| async move {
+            replay_command(Path((flow, "g".to_string())), JsonBody(body)).await
+        };
+        let next = serde_json::json!({"cmd": "cue_next", "in": {"rel_ms": 1000},
+            "out": {"rel_ms": 2000}, "speed": 0.5, "client_ref": "q1"});
+        let Json(res) = post(next).await.unwrap();
+        assert_eq!(res.client_ref.as_deref(), Some("q1"));
+        assert_eq!(res.motion.speed, 0.0);
+        assert_eq!(tl.state().queue.waiting, 1);
+        let back = serde_json::json!({"cmd": "cue_next", "in": {"rel_ms": 1000},
+            "out": {"rel_ms": 2000}, "speed": -1.0});
+        match post(back).await {
+            Err((status, Json(e))) => {
+                assert_eq!(
+                    (status, e.error.as_str()),
+                    (StatusCode::BAD_REQUEST, "invalid")
+                )
+            }
+            Ok(_) => panic!("a backward clip was queued"),
+        }
+        let Json(cleared) = post(serde_json::json!({"cmd": "clear_queue"}))
+            .await
+            .unwrap();
+        assert_eq!(cleared.motion.speed, 0.0);
+        assert_eq!(tl.state().queue.waiting, 0);
+        drop(tl);
+    }
+
     /// A new run makes a new group: a socket on the old one does not follow
     /// it with the old run's subscription.
     #[test]

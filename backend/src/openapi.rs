@@ -353,6 +353,7 @@ use utoipa::OpenApi;
             strom_types::replay::ReplayExtent,
             strom_types::replay::ReplaySpan,
             strom_types::replay::ReplayAngleState,
+            strom_types::replay::ReplayQueueState,
             strom_types::replay::ReplayState,
             strom_types::replay::ReplayDecodeRecord,
             strom_types::replay::ReplayAngleDiagnostics,
