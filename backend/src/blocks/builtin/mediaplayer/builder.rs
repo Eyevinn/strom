@@ -1064,4 +1064,72 @@ mod tests {
             "a stale EOS advanced the playlist past the file jumped to"
         );
     }
+
+    fn props_of(list: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
+        list.iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    fn mode(m: &str) -> (&'static str, PropertyValue) {
+        ("mode", PropertyValue::String(m.to_string()))
+    }
+
+    fn build_error(props: &HashMap<String, PropertyValue>) -> String {
+        let _ = gst::init();
+        match MediaPlayerBuilder.build(
+            "mp",
+            props,
+            &crate::blocks::BlockBuildContext::new(Vec::new(), "all".to_string()),
+        ) {
+            Ok(_) => panic!("build succeeded"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_timeline_player_has_one_video_output() {
+        let names = |props: &HashMap<String, PropertyValue>| -> Vec<String> {
+            MediaPlayerBuilder
+                .get_external_pads(props)
+                .unwrap()
+                .outputs
+                .into_iter()
+                .map(|p| p.name)
+                .collect()
+        };
+        // Track counts are playlist properties; a timeline player ignores them.
+        let timeline = props_of(&[
+            mode("timeline"),
+            ("num_audio_tracks", PropertyValue::UInt(2)),
+        ]);
+        assert_eq!(names(&timeline), ["video_out"]);
+        // So does a player that only the legacy properties put in timeline mode.
+        let legacy = props_of(&[("replay_group", PropertyValue::String("g".to_string()))]);
+        assert_eq!(names(&legacy), ["video_out"]);
+        // Stinger keeps the playlist pads.
+        assert_eq!(
+            names(&props_of(&[mode("stinger")])),
+            ["video_out", "audio_out"]
+        );
+    }
+
+    #[test]
+    fn a_timeline_player_is_built_by_the_timeline_engine() {
+        // Only `replay::build` asks for a source.
+        let err = build_error(&props_of(&[mode("timeline")]));
+        assert!(err.contains("timeline mode: source is required"), "{}", err);
+        // A flow written with the legacy names, not migrated on load.
+        let err = build_error(&props_of(&[(
+            "replay_group",
+            PropertyValue::String("g".to_string()),
+        )]));
+        assert!(err.contains("timeline mode: source is required"), "{}", err);
+    }
+
+    #[test]
+    fn an_unknown_mode_fails_the_build() {
+        let err = build_error(&props_of(&[mode("scrub")]));
+        assert!(err.contains("unknown mode 'scrub'"), "{}", err);
+    }
 }
