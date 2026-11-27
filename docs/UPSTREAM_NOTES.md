@@ -138,6 +138,40 @@ workaround can go once we move past that version.
   measured capture delay.
 - **Found in:** #1183.
 
+### `avfdeviceprovider` / `avfvideosrc`: a camera is bound by list position, and the list reorders
+- **Seen on:** GStreamer 1.28.9 (bundled in a macOS app), Apple Silicon MacBook Pro,
+  macOS 27.2.1, with the built-in camera and a USB camera (Logitech). The 1.28 branch source
+  reads the same. 1.22 not checked.
+- **Symptom:** a `GstDevice` from `avfdeviceprovider` opens a different camera than the
+  one it describes. In Strom, a Local Input bound to the USB camera streamed the built-in
+  camera, and the running element reported `device-name` "MacBook Pro Camera". Measured
+  by the reporter: the first start after Strom started always opened the right camera (8 of
+  8). Later starts in the same process opened the wrong one 7 of 9 times, but only when the
+  built-in camera was listed first at discovery. No device was added or removed in between.
+- **Repro:** untested sketch, on a Mac with two cameras: list `Video/Source` devices with a
+  `GstDeviceMonitor` and keep them; create an element from the second device, run it to
+  PLAYING and stop it; create an element from the same `GstDevice` again and read
+  `device-name` once it runs.
+- **Hint:** the provider has no start/stop, so it only probes. `gst_avf_device_provider_probe`
+  stores each camera's position in `[AVCaptureDevice devicesWithMediaType:]` as
+  `device-index`; `gst_avf_device_create_element` sets only that index. `avfvideosrc`
+  calls `devicesWithMediaType:` again when it opens the device and takes the device at that
+  index. On current macOS the order of that deprecated list is not stable during the
+  lifetime of a process (upstream #4318 and #1761 say so). That a capture session reorders
+  it is our guess from the counts above, not measured. The provider already puts the stable
+  id in the device properties as `avf.unique_id`, but the element cannot be opened by it.
+- **Tests:** none: CI runners have no cameras.
+- **Upstream:** fixed in 1.29.2 (so 1.30):
+  [gstreamer!11158](https://gitlab.freedesktop.org/gstreamer/gstreamer/-/merge_requests/11158)
+  adds a `unique-id` property to `avfvideosrc`, makes the provider select by it and deprecates
+  `device-index`; it fixes
+  [gstreamer#1761](https://gitlab.freedesktop.org/gstreamer/gstreamer/-/issues/1761)
+  (see also [gstreamer#4318](https://gitlab.freedesktop.org/gstreamer/gstreamer/-/issues/4318)).
+  [gstreamer!11452](https://gitlab.freedesktop.org/gstreamer/gstreamer/-/merge_requests/11452)
+  (1.29.3) makes the provider report devices added and removed. Not in the 1.28 branch as of
+  2026-11-27.
+- **Found in:** [#1278](https://github.com/Eyevinn/strom/issues/1278).
+
 ## HTTP
 
 ### libsoup HTTP/2: a paused download reads the whole file into memory
