@@ -31,7 +31,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ### Documentation
 - BLOCK_GUIDELINES.md: a block that writes files through a muxer finishes the open file when its flow stops
-- UPSTREAM_NOTES.md: `GstSystemClock` TAI on macOS, `splitmuxsink` closing a fragment one GOP late, `appsrc` linking to `mp4mux`'s audio pad, and `min-force-key-unit-interval` dropping scheduled requests
+- UPSTREAM_NOTES.md: `GstSystemClock` TAI on macOS, `vtdec_hw` at EOS, `splitmuxsink` closing a fragment one GOP late, `appsrc` linking to `mp4mux`'s audio pad, and `min-force-key-unit-interval` dropping scheduled requests
 
 ---
 

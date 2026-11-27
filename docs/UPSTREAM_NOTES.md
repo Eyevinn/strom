@@ -139,6 +139,24 @@ workaround can go once we move past that version.
   accepting caps, so autoplugging moves on to the next decoder.
 - **Upstream:** not searched.
 
+### `vtdec_hw`: sometimes drops the last frame of a short stream at EOS
+- **Seen on:** GStreamer 1.28.6, macOS 27.2 (Apple silicon). Other versions not checked.
+- **Symptom:** the replay mode of the media player decodes 1 s MPEG-TS segments (50 frames,
+  1080p50 H.264, closed GOP, no B-frames) in one short pipeline each, up to 8 at a time in
+  one process. About 2 % of segment decodes with `vtdec_hw` gave 49 frames; the missing
+  frame was always the last one (15 of 15 logged cases). The same segment decodes to 50
+  frames on other runs. With `avdec_h264` in the same setup: 0 of about 740 decodes short.
+- **Repro:** not reproduced outside Strom: `filesrc ! tsdemux ! h264parse ! vtdec_hw !
+  videoconvert ! fakesink` gave 50 frames in 16 of 16 runs, and in 32 of 32 with 8
+  `gst-launch-1.0` processes in parallel. So it may need several VideoToolbox sessions in
+  one process.
+- **Hint:** a guess: the frame still in flight in VideoToolbox when EOS arrives is not
+  always output by the drain in `finish`/`drain` (`gst_vtdec_drain` /
+  `VTDecompressionSessionWaitForAsynchronousFrames`).
+- **Tests:** none; seen in the replay spike's warning "segment ... gave 49 frames".
+- **Upstream:** not searched.
+- **Found in:** the replay spike (branch `feat/replay-tams`, not merged).
+
 ### `vtenc`: ABR rate control ignores the bitrate target
 - **Seen on:** GStreamer 1.28 on Apple Silicon (720p30, 5 Mbit/s target).
 - **Symptom:** in ABR mode the encoder ran at about 95 Mbit/s against a 5 Mbit/s target.

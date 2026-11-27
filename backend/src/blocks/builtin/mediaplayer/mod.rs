@@ -11,6 +11,7 @@
 mod bridge;
 mod builder;
 mod definition;
+pub mod replay;
 mod state;
 mod timing;
 
