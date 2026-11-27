@@ -86,6 +86,8 @@
 //! `GstDeviceMonitor` (PipeWire, third-party ASIO, ...) is picked up
 //! without changes here.
 
+mod avf_camera;
+
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gst::{latency, video_adapt};
 use gstreamer as gst;
@@ -487,6 +489,10 @@ pub(super) fn make_device_element(
             e
         ))
     })?;
+    // An AVFoundation camera is bound by its place in a list macOS reorders.
+    if let Some(unique_id) = avf_camera::unique_id(&device) {
+        avf_camera::bind(block, &device, &unique_id, &element)?;
+    }
 
     info!(
         "{}: bound {} device '{}' (id={}, factory={})",
