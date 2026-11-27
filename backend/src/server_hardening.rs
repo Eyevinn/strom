@@ -203,6 +203,109 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for FirstByteTimeoutStream<S> {
 #[cfg(target_os = "linux")]
 const FD_WATCHDOG_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Upper bound for the raised soft `RLIMIT_NOFILE`. Where the hard limit is
+/// effectively unlimited (`LimitNOFILE=infinity` gives about 2^30), children
+/// inherit the soft limit, and tools that size tables from it or `close()` every
+/// fd up to it get slow or allocate gigabytes. 2^20 is far above what Strom
+/// needs.
+#[cfg(unix)]
+const FD_LIMIT_CAP: libc::rlim_t = 1 << 20;
+
+/// Raise the soft `RLIMIT_NOFILE` towards the hard limit, capped at
+/// [`FD_LIMIT_CAP`] (and on macOS at `kern.maxfilesperproc`, since setrlimit
+/// rejects anything above it).
+///
+/// Every WebRTC viewer holds file descriptors (its ICE sockets, the event fds
+/// of webrtcbin's and the ICE agent's main contexts), and so does every
+/// connection and pipeline. Containers commonly start with a soft limit of
+/// 1024, macOS with 256. When it runs out, a new webrtcbin's thread cannot
+/// create its main context and GLib ends the process with `g_error`
+/// ("Creating pipes for GWakeup"): a `trap int3` in libglib, without a Rust
+/// panic or a log line from Strom.
+#[cfg(unix)]
+pub fn raise_fd_limit() {
+    use tracing::{info, warn};
+
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes into the struct it is given.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        warn!(
+            "Could not read the file descriptor limit: {}",
+            io::Error::last_os_error()
+        );
+        return;
+    }
+    let target = fd_limit_target(limit.rlim_max);
+    if limit.rlim_cur >= target {
+        info!("File descriptor limit: {}", limit.rlim_cur);
+        return;
+    }
+    let previous = limit.rlim_cur;
+    limit.rlim_cur = target;
+    // SAFETY: setrlimit only reads the struct.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } == 0 {
+        info!(
+            "File descriptor limit raised from {} to {}",
+            previous, limit.rlim_cur
+        );
+    } else {
+        warn!(
+            "Could not raise the file descriptor limit from {} to {}: {}",
+            previous,
+            target,
+            io::Error::last_os_error()
+        );
+    }
+}
+
+/// The soft limit to raise to: the hard limit, capped.
+#[cfg(unix)]
+fn fd_limit_target(hard: libc::rlim_t) -> libc::rlim_t {
+    hard.min(FD_LIMIT_CAP).min(platform_fd_max())
+}
+
+/// The most this platform lets setrlimit set, below the hard limit.
+#[cfg(target_os = "macos")]
+fn platform_fd_max() -> libc::rlim_t {
+    max_files_per_proc().unwrap_or(MACOS_OPEN_MAX)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_fd_max() -> libc::rlim_t {
+    libc::RLIM_INFINITY
+}
+
+/// `OPEN_MAX` from `<sys/syslimits.h>`, the fallback when
+/// `kern.maxfilesperproc` cannot be read (the libc crate does not export it).
+#[cfg(target_os = "macos")]
+const MACOS_OPEN_MAX: libc::rlim_t = 10240;
+
+/// `kern.maxfilesperproc`, the most macOS lets setrlimit set.
+#[cfg(target_os = "macos")]
+fn max_files_per_proc() -> Option<libc::rlim_t> {
+    let mut value: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    // SAFETY: the name is NUL-terminated, and `value` and `size` describe a
+    // c_int buffer that sysctlbyname writes into.
+    let ret = unsafe {
+        libc::sysctlbyname(
+            c"kern.maxfilesperproc".as_ptr(),
+            (&mut value as *mut libc::c_int).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (ret == 0 && value > 0).then_some(value as libc::rlim_t)
+}
+
+/// No-op outside Unix.
+#[cfg(not(unix))]
+pub fn raise_fd_limit() {}
+
 /// Usage ratio above which a warning is logged (once per excursion).
 #[cfg(target_os = "linux")]
 const FD_WARN_RATIO: f64 = 0.80;
@@ -333,6 +436,14 @@ mod tests {
             pending.is_err(),
             "read should still be pending, not TimedOut"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fd_limit_target_is_capped() {
+        assert_eq!(fd_limit_target(4096), 4096);
+        assert!(fd_limit_target(libc::RLIM_INFINITY) <= FD_LIMIT_CAP);
+        assert!(fd_limit_target(libc::RLIM_INFINITY) >= 256);
     }
 
     #[cfg(target_os = "linux")]
