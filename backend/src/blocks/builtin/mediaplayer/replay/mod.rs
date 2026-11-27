@@ -6,7 +6,7 @@
 //! of the flow clock. Jog, scrub, slow motion and reverse move the cursor.
 //!
 //! Modules, from source to output:
-//! - `source`: a `SourceIndex` per protocol (TAMS);
+//! - `source`: a `SourceIndex` per protocol (TAMS; an experimental local `index.json`);
 //! - `cache`: index window and coded bytes around the cursor, fetched async;
 //! - `decode`: segment bytes to frames on the player's own TAI frame grid
 //!   (`grid`, the source's rate);
@@ -27,6 +27,7 @@ use crate::blocks::{
     live_bridge_appsrc, BlockBuildError, BlockBuildResult, BusMessageConnectFn,
     APPSRC_MAX_BYTES_VIDEO,
 };
+use crate::client_auth::AuthMethod;
 use crate::tams::auth::TamsAuth;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -73,6 +74,7 @@ pub fn build(
     let flow_id: FlowId = prop_str(properties, "_flow_id")
         .and_then(|s| Uuid::parse_str(&s).ok())
         .unwrap_or_else(Uuid::nil);
+    let media_path = prop_str(properties, "_media_path").unwrap_or_else(|| "./media".to_string());
     let invalid =
         |e: String| BlockBuildError::InvalidProperty(format!("Media Player timeline mode: {}", e));
     let source = prop_str(properties, SOURCE_PROPERTY).ok_or_else(|| {
@@ -112,15 +114,16 @@ pub fn build(
     let output_rate =
         parse_frame_rate(&prop_str(properties, OUTPUT_FRAMERATE_PROPERTY).unwrap_or_default())
             .map_err(invalid)?;
-    let spec = source::parse_source(&source).map_err(invalid)?;
+    let spec = source::parse_source(&source, &media_path).map_err(invalid)?;
     // Gateway auth is checked against the gateway it goes to (env token and
     // OSC SAT only to allowed gateways).
     let auth = match &spec {
         source::SourceSpec::Tams { gateway, .. } => TamsAuth::from_properties(properties, gateway)
             .map_err(invalid)?
             .method(&flow_id.to_string()),
+        source::SourceSpec::Local(_) => AuthMethod::None,
     };
-    let index = source::open(&spec, auth).map_err(invalid)?;
+    let index = source::open(&spec, auth, std::path::Path::new(&media_path)).map_err(invalid)?;
     info!(
         "Media Player {}: timeline mode, group '{}', source {}",
         instance_id,

@@ -4,17 +4,20 @@
 //! media exist and which TAI time each covers) and the bytes of a piece. A
 //! [`SourceIndex`] provides both, one implementation per protocol:
 //!
+//! - [`local::LocalIndex`]: a directory with an `index.json` and segment
+//!   files inside the media path (experimental, for development and tests).
 //! - [`tams::TamsIndex`]: a TAMS flow, via `GET /flows/{id}/segments`.
 //!
 //! HLS, DASH or byte ranges of a file can plug in later behind the same trait.
 //! The source is chosen by URI, see [`open`].
 
+pub mod local;
 pub mod tams;
 
 use crate::client_auth::AuthMethod;
 use anyhow::Result;
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use strom_types::tams::{parse_timerange, parse_timestamp_signed};
 
@@ -189,13 +192,29 @@ where
 /// A parsed `source`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceSpec {
+    /// Directory with `index.json` (experimental, see [`local`]).
+    Local(PathBuf),
     /// `tams+http(s)://<gateway>/flows/<flow_id>`.
     Tams { gateway: String, flow_id: String },
 }
 
+/// Whether `s` starts with a URI scheme (`scheme://`).
+fn has_uri_scheme(s: &str) -> bool {
+    s.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
+}
+
 /// Parse `source`: `tams+https://host[/prefix]/flows/<id>` or
-/// `tams+http://...`.
-pub fn parse_source(source: &str) -> Result<SourceSpec, String> {
+/// `tams+http://...`. Experimental, for development and tests: a directory
+/// with an `index.json` (see [`local`]) as `file:///dir`,
+/// `file://localhost/dir` or a plain path, absolute or relative to
+/// `media_path`. A local directory must lie inside `media_path`; [`open`]
+/// checks that. Any other scheme is unsupported.
+pub fn parse_source(source: &str, media_path: &str) -> Result<SourceSpec, String> {
     let s = source.trim();
     if let Some(rest) = s.strip_prefix("tams+") {
         if !(rest.starts_with("http://") || rest.starts_with("https://")) {
@@ -213,16 +232,46 @@ pub fn parse_source(source: &str) -> Result<SourceSpec, String> {
             flow_id: flow_id.to_string(),
         });
     }
-    Err(format!(
-        "unsupported source '{}': expected tams+https://<gateway>/flows/<flow_id>",
-        s
-    ))
+    if let Some(rest) = s.strip_prefix("file://") {
+        let path = rest.strip_prefix("localhost").unwrap_or(rest);
+        if !path.starts_with('/') {
+            return Err(format!(
+                "unsupported file URI '{}': expected file:///<path> on this host",
+                s
+            ));
+        }
+        if path.contains('%') {
+            return Err(format!(
+                "unsupported file URI '{}': percent-escapes are not decoded, give the path as is",
+                s
+            ));
+        }
+        return Ok(SourceSpec::Local(PathBuf::from(path)));
+    }
+    if has_uri_scheme(s) {
+        return Err(format!(
+            "unsupported source '{}': expected tams+https://<gateway>/flows/<flow_id>",
+            s
+        ));
+    }
+    let p = PathBuf::from(s);
+    Ok(SourceSpec::Local(if p.is_absolute() {
+        p
+    } else {
+        PathBuf::from(media_path).join(p)
+    }))
 }
 
 /// Open the index for a source. `auth` is used for a TAMS gateway, already
-/// checked against it (see [`crate::tams::auth::TamsAuth`]).
-pub fn open(spec: &SourceSpec, auth: AuthMethod) -> Result<Arc<dyn SourceIndex>, String> {
+/// checked against it (see [`crate::tams::auth::TamsAuth`]). A local directory
+/// must lie inside `media_path`.
+pub fn open(
+    spec: &SourceSpec,
+    auth: AuthMethod,
+    media_path: &Path,
+) -> Result<Arc<dyn SourceIndex>, String> {
     match spec {
+        SourceSpec::Local(dir) => Ok(Arc::new(local::LocalIndex::load(dir, media_path)?)),
         SourceSpec::Tams { gateway, flow_id } => Ok(Arc::new(
             tams::TamsIndex::new(gateway, flow_id, auth).map_err(|e| e.to_string())?,
         )),
@@ -236,23 +285,88 @@ mod tests {
     #[test]
     fn parses_tams_uri() {
         assert_eq!(
-            parse_source("tams+https://gw.example.com/flows/abc-1").unwrap(),
+            parse_source("tams+https://gw.example.com/flows/abc-1", "/m").unwrap(),
             SourceSpec::Tams {
                 gateway: "https://gw.example.com".into(),
                 flow_id: "abc-1".into()
             }
         );
         assert_eq!(
-            parse_source("tams+http://localhost:18000/api/flows/x/").unwrap(),
+            parse_source("tams+http://localhost:18000/api/flows/x/", "/m").unwrap(),
             SourceSpec::Tams {
                 gateway: "http://localhost:18000/api".into(),
                 flow_id: "x".into()
             }
         );
-        assert!(parse_source("tams+ftp://h/flows/x").is_err());
-        assert!(parse_source("tams+http://h/x").is_err());
-        assert!(parse_source("tams+http://h/flows/").is_err());
-        assert!(parse_source("/abs/cam1").is_err());
+        assert!(parse_source("tams+ftp://h/flows/x", "/m").is_err());
+        assert!(parse_source("tams+http://h/x", "/m").is_err());
+        assert!(parse_source("tams+http://h/flows/", "/m").is_err());
+    }
+
+    #[test]
+    fn parses_local_paths() {
+        assert_eq!(
+            parse_source("/abs/cam1", "/m").unwrap(),
+            SourceSpec::Local("/abs/cam1".into())
+        );
+        assert_eq!(
+            parse_source("gop10/cam1", "/m").unwrap(),
+            SourceSpec::Local("/m/gop10/cam1".into())
+        );
+        assert_eq!(
+            parse_source("file:///abs/cam1", "/m").unwrap(),
+            SourceSpec::Local("/abs/cam1".into())
+        );
+    }
+
+    /// Another scheme is not taken for a local path: a typo of the TAMS
+    /// form or a plain URL says the source is unsupported.
+    #[test]
+    fn other_uri_schemes_are_unsupported() {
+        for uri in [
+            "https://gw.example.com/flows/x",
+            "tam+https://gw.example.com/flows/x",
+            "srt://host:9000",
+            "s3://bucket/cam1",
+        ] {
+            let err = parse_source(uri, "/m").unwrap_err();
+            assert!(err.starts_with("unsupported source"), "{uri}: {err}");
+        }
+    }
+
+    /// `file://localhost/` is the local host; another host and
+    /// percent-escapes are refused rather than taken as a different path.
+    #[test]
+    fn file_uris() {
+        assert_eq!(
+            parse_source("file://localhost/abs/cam1", "/m").unwrap(),
+            SourceSpec::Local("/abs/cam1".into())
+        );
+        assert!(parse_source("file://host/abs/cam1", "/m").is_err());
+        assert!(parse_source("file:///abs/cam%201", "/m").is_err());
+        assert!(parse_source("file://cam1", "/m").is_err());
+    }
+
+    /// `parse_source` and `open` together: a relative source that climbs
+    /// out of the media path is refused, one inside it opens.
+    #[test]
+    fn open_confines_a_relative_source_to_the_media_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index = r#"{"segments": [{"object": "seg.ts", "timerange": "[1:0_2:0)"}]}"#;
+        for dir in ["media/cam1", "outside"] {
+            std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+            std::fs::write(tmp.path().join(dir).join("index.json"), index).unwrap();
+        }
+        let media = tmp.path().join("media");
+        let media_str = media.to_str().unwrap();
+        let open_source = |source: &str| {
+            let spec = parse_source(source, media_str)?;
+            open(&spec, AuthMethod::None, &media).map(|_| ())
+        };
+        assert!(open_source("cam1").is_ok());
+        assert!(open_source("./cam1").is_ok());
+        assert!(open_source("../outside").is_err());
+        assert!(open_source("cam1/../../outside").is_err());
     }
 
     fn seg(i: i64) -> Segment {
