@@ -10580,6 +10580,8 @@
           "mark",
           "follow_live",
           "source",
+          "cue_next",
+          "clear_queue",
           "cue_end",
           "caught_up",
           "edge_moved",
@@ -10815,6 +10817,84 @@
               "source": {
                 "type": "string",
                 "description": "A source URI, as the player's `source` property takes it."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Queue a clip `[in, out)` to play when the clip playing reaches its\nout point: the engine prepares it while the current clip plays and\nswaps it in on the tick where the out point is reached, at its own\n`speed`. With `source`, angle `block` shows that source for the\nclip. The clip's `end_action` applies when it ends with nothing\nqueued after it. `replace` empties the queue first. The motion does\nnot change.",
+            "required": [
+              "in",
+              "out",
+              "cmd"
+            ],
+            "properties": {
+              "block": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The angle that switches; may be left out when the group has one."
+              },
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "cue_next"
+                ]
+              },
+              "end_action": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ReplayEndAction"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "in": {
+                "$ref": "#/components/schemas/ReplayTarget"
+              },
+              "out": {
+                "$ref": "#/components/schemas/ReplayTarget",
+                "description": "Exclusive."
+              },
+              "replace": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "Empty the queue before this clip is added."
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "A source URI for angle `block` to show for this clip."
+              },
+              "speed": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "description": "Forward, 0 .. 8 (not 0); default 1."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Empty the queue. The clip playing goes on to its out point.",
+            "required": [
+              "cmd"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "enum": [
+                  "clear_queue"
+                ]
               }
             }
           },
@@ -11240,6 +11320,30 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "The queue started its next clip at `at` (its in point); the event's\n`client_ref` is the clip's. `waiting`: clips still queued after it.",
+            "required": [
+              "at",
+              "waiting",
+              "event"
+            ],
+            "properties": {
+              "at": {
+                "$ref": "#/components/schemas/ReplayInstant"
+              },
+              "event": {
+                "type": "string",
+                "enum": [
+                  "item_started"
+                ]
+              },
+              "waiting": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
           }
         ],
         "description": "What an event says."
@@ -11621,6 +11725,27 @@
           }
         }
       },
+      "ReplayQueueState": {
+        "type": "object",
+        "description": "The group's clip queue (`cue_next`).",
+        "required": [
+          "waiting"
+        ],
+        "properties": {
+          "clip_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `client_ref` of the clip the group holds (its cue), whether a\n`cue` or the queue started it."
+          },
+          "waiting": {
+            "type": "integer",
+            "description": "Clips waiting in the queue.",
+            "minimum": 0
+          }
+        }
+      },
       "ReplayRampState": {
         "type": "object",
         "description": "A speed ramp the server is running.",
@@ -11744,7 +11869,8 @@
           "jog_grid",
           "follow_live",
           "live_margin",
-          "angles"
+          "angles",
+          "queue"
         ],
         "properties": {
           "angles": {
@@ -11786,6 +11912,9 @@
                 "type": "null"
               }
             ]
+          },
+          "queue": {
+            "$ref": "#/components/schemas/ReplayQueueState"
           },
           "range": {
             "oneOf": [
