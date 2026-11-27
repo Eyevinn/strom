@@ -66,6 +66,13 @@ struct AppStateInner {
     cached_elements: RwLock<Vec<ElementInfo>>,
     /// Active pipelines
     pipelines: RwLock<HashMap<FlowId, PipelineManager>>,
+    /// Set once a graceful shutdown of the process begins. No flow starts
+    /// after that: its stop drains would never run.
+    shutting_down: std::sync::atomic::AtomicBool,
+    /// Held while graceful shutdown runs the flows' stop drains. A flow
+    /// stopped meanwhile waits for it before its pipeline goes to NULL, so a
+    /// stop cannot pull the pipeline out from under a running shutdown drain.
+    shutdown_drains: tokio::sync::Mutex<()>,
     /// Event broadcaster for real-time updates
     events: EventBroadcaster,
     /// Block registry
@@ -167,6 +174,8 @@ impl AppState {
                 element_discovery: RwLock::new(ElementDiscovery::new()),
                 cached_elements: RwLock::new(Vec::new()),
                 pipelines: RwLock::new(HashMap::new()),
+                shutting_down: std::sync::atomic::AtomicBool::new(false),
+                shutdown_drains: tokio::sync::Mutex::new(()),
                 events: events.clone(),
                 block_registry: BlockRegistry::new(blocks_path),
                 system_monitor: SystemMonitor::new(num_cores),
@@ -954,6 +963,10 @@ impl AppState {
     pub async fn start_flow(&self, id: &FlowId) -> Result<PipelineState, PipelineError> {
         info!("start_flow called for flow ID: {}", id);
 
+        if self.is_shutting_down() {
+            return Err(Self::shutting_down_error(id));
+        }
+
         // Get the flow definition
         info!("Acquiring flows read lock...");
         let flow = {
@@ -1072,14 +1085,37 @@ impl AppState {
         };
         info!("manager.start() returned with state: {:?}", state);
 
-        // Store pipeline manager and keep a reference for SDP generation
-        let pipelines_guard = {
+        // Store pipeline manager and keep a reference for SDP generation.
+        // Shutdown sets its flag before it takes this lock to collect the
+        // flows' drains, so a flow inserted here is either seen by it or
+        // refused: one inserted after the take would exit without its drains.
+        let refused = {
             let mut pipelines = self.inner.pipelines.write().await;
-            pipelines.insert(*id, manager);
-            // Drop write lock and get read lock
-            drop(pipelines);
-            self.inner.pipelines.read().await
+            if self.is_shutting_down() {
+                Some(manager)
+            } else {
+                pipelines.insert(*id, manager);
+                None
+            }
         };
+        if let Some(manager) = refused {
+            warn!(
+                "Flow {} started while Strom is shutting down, stopping it",
+                id
+            );
+            // No endpoints are registered yet, so the flow owns none.
+            if let Err(e) = self
+                .teardown_flow(id, Some(manager), Some(RegisteredEndpoints::default()))
+                .await
+            {
+                warn!(
+                    "Cleanup of flow {} started during shutdown could not stop the pipeline: {}",
+                    id, e
+                );
+            }
+            return Err(Self::shutting_down_error(id));
+        }
+        let pipelines_guard = self.inner.pipelines.read().await;
 
         // Get PTP clock identity from pipeline if available (for SDP generation)
         let ptp_clock_identity = pipelines_guard
@@ -1511,7 +1547,32 @@ impl AppState {
     /// Returns the state the pipeline reached, or the error `stop()` gave. The
     /// rest of the teardown runs either way — a pipeline that refuses to stop
     /// is exactly when leaking its cores and its registry entries hurts most.
+    ///
+    /// Runs on a task of its own: a caller dropped halfway (an HTTP client
+    /// that disconnects during a stop) does not cancel it. Cancelled during
+    /// the drains, the teardown would skip everything after them and leak the
+    /// overlay thread, endpoints, the bus watch and the CPU cores.
     async fn teardown_flow(
+        &self,
+        id: &FlowId,
+        manager: Option<PipelineManager>,
+        endpoints: Option<RegisteredEndpoints>,
+    ) -> Result<PipelineState, PipelineError> {
+        let this = self.clone();
+        let id = *id;
+        tokio::spawn(async move { this.teardown_flow_now(&id, manager, endpoints).await })
+            .await
+            .unwrap_or_else(|e| {
+                Err(PipelineError::StateChange(format!(
+                    "Teardown task failed: {}",
+                    e
+                )))
+            })
+    }
+
+    /// The body of [`Self::teardown_flow`]. Call that instead, unless already
+    /// on a task no request can cancel.
+    async fn teardown_flow_now(
         &self,
         id: &FlowId,
         mut manager: Option<PipelineManager>,
@@ -1528,6 +1589,14 @@ impl AppState {
                     warn!("Stop drains for flow {} did not complete: {}", id, e);
                 }
             }
+        }
+
+        // Graceful shutdown may have taken this flow's drains before it was
+        // removed, and be running them now. Wait for them (bounded by
+        // STOP_DRAIN_TIMEOUT): going on would take away the drains' sources
+        // and set the pipeline to NULL under them.
+        if self.is_shutting_down() {
+            drop(self.inner.shutdown_drains.lock().await);
         }
 
         // Before anything else but the drains, and on every path including the
@@ -1651,7 +1720,107 @@ impl AppState {
         }
     }
 
+    /// Run the stop drains of every running flow, for a graceful shutdown of
+    /// the process (SIGINT/SIGTERM).
+    ///
+    /// Without this a restart or deploy truncates the output a block finishes
+    /// in its drain, such as a recorder's open fragment. All flows' drains run
+    /// in parallel and are waited for at most [`STOP_DRAIN_TIMEOUT`] in all,
+    /// so a hung drain cannot hold up exit. The pipelines stay in place and
+    /// the flows' saved state is not touched: a flow with auto-restart starts
+    /// again with the next process.
+    ///
+    /// [`STOP_DRAIN_TIMEOUT`]: crate::gst::pipeline::STOP_DRAIN_TIMEOUT
+    pub async fn run_stop_drains_for_shutdown(&self) {
+        self.run_stop_drains_for_shutdown_within(crate::gst::pipeline::STOP_DRAIN_TIMEOUT)
+            .await;
+    }
+
+    pub(crate) async fn run_stop_drains_for_shutdown_within(
+        &self,
+        deadline: std::time::Duration,
+    ) -> crate::gst::pipeline::StopDrainOutcome {
+        // Before the take below: a flow that starts from here on is refused,
+        // and one stopped from here on waits for the drains taken below.
+        self.inner
+            .shutting_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let _draining = self.inner.shutdown_drains.lock().await;
+        let flows: Vec<_> = {
+            let mut pipelines = self.inner.pipelines.write().await;
+            // This sets `stopping` on every pipeline, also those with no
+            // drains, so an EOS posted from here on is not reported as the
+            // flow ending. Right for a process about to exit; a caller that
+            // keeps the flows running would have to clear it again.
+            pipelines
+                .values_mut()
+                .map(PipelineManager::take_stop_drains)
+                .filter(|drains| !drains.is_empty())
+                .collect()
+        };
+        if flows.is_empty() {
+            return Default::default();
+        }
+        info!(
+            "Shutdown: running the stop drains of {} flow(s), at most {:.1}s",
+            flows.len(),
+            deadline.as_secs_f64()
+        );
+        // Every drain runs on its own plain thread and run_all returns by the
+        // deadline, so this blocking task cannot outlive it.
+        match tokio::task::spawn_blocking(move || {
+            crate::gst::pipeline::StopDrains::run_all(flows, deadline)
+        })
+        .await
+        {
+            Ok(outcome) => {
+                info!(
+                    "Shutdown: stop drains done ({} finished, {} panicked, {} abandoned)",
+                    outcome.finished, outcome.panicked, outcome.abandoned
+                );
+                outcome
+            }
+            Err(e) => {
+                warn!("Shutdown: stop drains did not complete: {}", e);
+                Default::default()
+            }
+        }
+    }
+
+    /// Whether a graceful shutdown of the process has begun.
+    pub fn is_shutting_down(&self) -> bool {
+        self.inner
+            .shutting_down
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn shutting_down_error(id: &FlowId) -> PipelineError {
+        PipelineError::StateChange(format!(
+            "Strom is shutting down, flow {} was not started",
+            id
+        ))
+    }
+
+    /// Stop a flow: run its stop drains, tear its pipeline down and save it
+    /// as stopped.
+    ///
+    /// Runs on a task of its own, so dropping the caller (an HTTP client that
+    /// disconnects during the drains) does not cancel the stop halfway: the
+    /// pipeline is removed, torn down and saved as stopped all the same.
     pub async fn stop_flow(&self, id: &FlowId) -> Result<PipelineState, PipelineError> {
+        let this = self.clone();
+        let id = *id;
+        tokio::spawn(async move { this.stop_flow_now(&id).await })
+            .await
+            .unwrap_or_else(|e| {
+                Err(PipelineError::StateChange(format!(
+                    "Stop task failed: {}",
+                    e
+                )))
+            })
+    }
+
+    async fn stop_flow_now(&self, id: &FlowId) -> Result<PipelineState, PipelineError> {
         info!("Stopping flow: {}", id);
 
         // Drop any cached mixer solo intent — PFL/AFL bools are `persist: false`
@@ -1695,7 +1864,8 @@ impl AppState {
         };
 
         // Endpoints, Media Player registry, pipeline, leak check, CPU cores.
-        let state = self.teardown_flow(id, Some(manager), None).await?;
+        // Already on stop_flow's own task, which no request can cancel.
+        let state = self.teardown_flow_now(id, Some(manager), None).await?;
         crate::cef_pages::report_leftover_pages(id).await;
         crate::cef_pages::forget_flow(id);
 
@@ -3403,5 +3573,289 @@ mod ramp_ms_resolution_tests {
             resolve_ramp_ms("ch1_fader_db", Some(&overrides), None),
             Some(500)
         );
+    }
+}
+
+#[cfg(test)]
+mod shutdown_drain_tests {
+    use super::*;
+    use crate::storage::JsonFileStorage;
+    use gstreamer::prelude::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    use strom_types::{Element, Link};
+    use tempfile::NamedTempFile;
+
+    fn new_state() -> AppState {
+        gstreamer::init().expect("gstreamer init failed in test");
+        let storage_file = NamedTempFile::new().unwrap();
+        let blocks_file = NamedTempFile::new().unwrap();
+        AppState::new(
+            JsonFileStorage::new(storage_file.path()),
+            blocks_file.path(),
+            std::env::temp_dir(),
+            vec![],
+            "all".to_string(),
+            vec![],
+            false,
+            false,
+        )
+    }
+
+    /// A playing videotestsrc ! fakesink pipeline, with `drains` queued as a
+    /// block would queue them at build time.
+    fn playing_manager(
+        state: &AppState,
+        drains: Vec<crate::blocks::StopDrainFn>,
+    ) -> PipelineManager {
+        let mut flow = Flow::new("Shutdown drain test");
+        flow.elements = vec![
+            Element {
+                id: "src".to_string(),
+                element_type: "videotestsrc".to_string(),
+                properties: HashMap::from([(
+                    "is-live".to_string(),
+                    strom_types::PropertyValue::Bool(true),
+                )]),
+                pad_properties: HashMap::new(),
+                position: (0.0, 0.0),
+            },
+            Element {
+                id: "sink".to_string(),
+                element_type: "fakesink".to_string(),
+                properties: HashMap::new(),
+                pad_properties: HashMap::new(),
+                position: (100.0, 0.0),
+            },
+        ];
+        flow.links = vec![Link {
+            from: "src".to_string(),
+            to: "sink".to_string(),
+        }];
+        let mut manager = PipelineManager::new(
+            &flow,
+            state.inner.events.clone(),
+            &state.inner.block_registry,
+            vec![],
+            "all".to_string(),
+            None,
+            std::env::temp_dir(),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            Vec::new(),
+        )
+        .unwrap();
+        for drain in drains {
+            manager.push_stop_drain_for_test(drain);
+        }
+        manager.start().unwrap();
+        let (result, current, _) = manager
+            .pipeline_weak()
+            .upgrade()
+            .unwrap()
+            .state(gstreamer::ClockTime::from_seconds(10));
+        assert!(
+            result.is_ok() && current == gstreamer::State::Playing,
+            "{current:?}"
+        );
+        manager
+    }
+
+    fn flag_drain(ran: &Arc<AtomicBool>) -> crate::blocks::StopDrainFn {
+        let ran = ran.clone();
+        Box::new(move || ran.store(true, Ordering::SeqCst))
+    }
+
+    /// Stop every pipeline still in `state`, off the runtime.
+    async fn stop_all(state: &AppState) {
+        let managers: Vec<_> = state.inner.pipelines.write().await.drain().collect();
+        tokio::task::spawn_blocking(move || {
+            for (_, mut manager) in managers {
+                manager.stop().unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    /// The shutdown sequence both signal paths in main.rs run: it runs the
+    /// flows' stop drains, and no flow starts after it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_drains_run_from_the_shared_sequence() {
+        let state = new_state();
+        let ran = Arc::new(AtomicBool::new(false));
+        let manager = playing_manager(&state, vec![flag_drain(&ran)]);
+        state
+            .inner
+            .pipelines
+            .write()
+            .await
+            .insert(FlowId::new_v4(), manager);
+
+        let handle = axum_server::Handle::new();
+        crate::shutdown::shutdown(&handle, &state).await;
+
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "the shutdown sequence did not run the stop drains"
+        );
+        assert!(state.is_shutting_down());
+        let started = state.start_flow(&FlowId::new_v4()).await;
+        assert!(
+            matches!(&started, Err(PipelineError::StateChange(m)) if m.contains("shutting down")),
+            "a flow start during shutdown was not refused: {started:?}"
+        );
+        stop_all(&state).await;
+    }
+
+    /// A client that disconnects while its stop request waits for the drains
+    /// drops the request future. The stop still completes: drains, teardown,
+    /// and the flow reported as stopped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stop_drains_and_teardown_survive_a_dropped_stop_request() {
+        let state = new_state();
+        let mut rx = state.inner.events.subscribe();
+        let drained = Arc::new(AtomicBool::new(false));
+        let drained_in_drain = drained.clone();
+        let manager = playing_manager(
+            &state,
+            vec![Box::new(move || {
+                std::thread::sleep(Duration::from_millis(700));
+                drained_in_drain.store(true, Ordering::SeqCst);
+            })],
+        );
+        let id = FlowId::new_v4();
+        state.inner.pipelines.write().await.insert(id, manager);
+
+        let dropped = tokio::time::timeout(Duration::from_millis(200), state.stop_flow(&id)).await;
+        assert!(dropped.is_err(), "the stop returned before its drain did");
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match rx.recv().await {
+                    Ok(StromEvent::FlowStopped { flow_id }) if flow_id == id => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        panic!("event channel closed")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the teardown did not complete after the stop request was dropped");
+        assert!(drained.load(Ordering::SeqCst), "the drain did not finish");
+        assert!(state.inner.pipelines.read().await.is_empty());
+    }
+
+    /// A flow stopped while graceful shutdown runs its drains waits for them:
+    /// its pipeline stays PLAYING until the drain is done.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_drain_is_not_cut_off_by_a_concurrent_stop() {
+        let state = new_state();
+        let pipeline: Arc<std::sync::Mutex<Option<gstreamer::glib::WeakRef<gstreamer::Pipeline>>>> =
+            Arc::default();
+        let still_playing = Arc::new(AtomicBool::new(false));
+        let (pipeline_in_drain, playing_in_drain) = (pipeline.clone(), still_playing.clone());
+        let manager = playing_manager(
+            &state,
+            vec![Box::new(move || {
+                std::thread::sleep(Duration::from_millis(800));
+                let pipeline = pipeline_in_drain
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .upgrade();
+                let playing =
+                    pipeline.is_some_and(|p| p.current_state() == gstreamer::State::Playing);
+                playing_in_drain.store(playing, Ordering::SeqCst);
+            })],
+        );
+        *pipeline.lock().unwrap() = Some(manager.pipeline_weak());
+        let id = FlowId::new_v4();
+        state.inner.pipelines.write().await.insert(id, manager);
+
+        let shutdown = tokio::spawn({
+            let state = state.clone();
+            async move {
+                state
+                    .run_stop_drains_for_shutdown_within(Duration::from_secs(5))
+                    .await
+            }
+        });
+        // Let shutdown take the drains, then stop the flow while they run.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.inner.shutdown_drains.try_lock().is_ok() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        state.stop_flow(&id).await.unwrap();
+
+        let outcome = shutdown.await.unwrap();
+        assert_eq!(outcome.finished, 1, "{outcome:?}");
+        assert!(
+            still_playing.load(Ordering::SeqCst),
+            "a concurrent stop set the pipeline to NULL under a running shutdown drain"
+        );
+    }
+
+    /// Graceful shutdown runs the stop drains of every running flow, and a
+    /// hung drain in one flow does not keep shutdown waiting past the deadline.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_runs_the_stop_drains_of_every_flow() {
+        let state = new_state();
+        let ran_a = Arc::new(AtomicBool::new(false));
+        let ran_b = Arc::new(AtomicBool::new(false));
+        let a = playing_manager(&state, vec![flag_drain(&ran_a)]);
+        let b = playing_manager(
+            &state,
+            vec![
+                flag_drain(&ran_b),
+                Box::new(|| std::thread::sleep(Duration::from_secs(30))),
+            ],
+        );
+        {
+            let mut pipelines = state.inner.pipelines.write().await;
+            pipelines.insert(FlowId::new_v4(), a);
+            pipelines.insert(FlowId::new_v4(), b);
+        }
+
+        let started = Instant::now();
+        let outcome = state
+            .run_stop_drains_for_shutdown_within(Duration::from_millis(500))
+            .await;
+
+        assert!(ran_a.load(Ordering::SeqCst), "flow A's drain did not run");
+        assert!(ran_b.load(Ordering::SeqCst), "flow B's drain did not run");
+        assert_eq!(
+            outcome,
+            crate::gst::pipeline::StopDrainOutcome {
+                finished: 2,
+                panicked: 0,
+                abandoned: 1
+            }
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "shutdown waited {:?} for a hung drain",
+            started.elapsed()
+        );
+
+        // Taken once: stopping the pipelines afterwards runs none again.
+        let again = state
+            .run_stop_drains_for_shutdown_within(Duration::from_millis(500))
+            .await;
+        assert_eq!(again, Default::default());
+
+        let managers: Vec<_> = state.inner.pipelines.write().await.drain().collect();
+        tokio::task::spawn_blocking(move || {
+            for (_, mut manager) in managers {
+                manager.stop().unwrap();
+            }
+        })
+        .await
+        .unwrap();
     }
 }
