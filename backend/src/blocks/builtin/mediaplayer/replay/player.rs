@@ -12,8 +12,9 @@
 //!   carrying its TAI as a reference timestamp. Pause repeats a frame, slow
 //!   motion repeats frames, reverse walks backwards: the output never stops,
 //!   flushes or seeks, and never waits on the network.
-//! - Offline (a [`Clip`] to export), the group runs on a frame counter
-//!   instead ([`super::timeline::TimeSource::Counter`]): the tick is output
+//! - Offline (a [`Clip`] to export), the player's own group (never shared)
+//!   runs on a frame counter instead
+//!   ([`super::timeline::TimeSource::Counter`]): the tick is output
 //!   frame `k`, running time `k * period`. It waits for the frame to be
 //!   decoded instead of repeating the last one, pushes with backpressure
 //!   (a blocking, non-live appsrc), and ends the stream at the clip's out

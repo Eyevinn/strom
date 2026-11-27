@@ -87,7 +87,7 @@ pub fn media_player_definition() -> BlockDefinition {
             ExposedProperty {
                 name: GROUP_PROPERTY.to_string(),
                 label: "Group".to_string(),
-                description: "Players with the same group share one timeline: one playhead, speed and range. Empty = a group of its own."
+                description: "Players with the same group share one timeline: one playhead, speed and range. Empty = a group of its own (required for offline pacing)."
                     .to_string(),
                 property_type: PropertyType::String,
                 default_value: Some(PropertyValue::String(String::new())),
@@ -99,7 +99,7 @@ pub fn media_player_definition() -> BlockDefinition {
             ExposedProperty {
                 name: PACING_PROPERTY.to_string(),
                 label: "Pacing".to_string(),
-                description: "Realtime: output on the flow clock, steered by the replay API. Offline: play the clip (Clip In to Clip Out) once, as fast as downstream takes it, then end the stream: export to a file with an encoder, a muxer and a sink with sync=false."
+                description: "Realtime = on the flow clock, driven by the replay API. Offline = play Clip In to Clip Out once, as fast as downstream takes it, then end of stream (export)."
                     .to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![

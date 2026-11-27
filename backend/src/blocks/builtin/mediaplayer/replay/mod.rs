@@ -18,6 +18,8 @@
 //! the same player on a frame counter instead of the flow clock, with a
 //! non-live, blocking appsrc, ending the stream at the out point. Follow it
 //! with an encoder, a muxer and a sink with `sync=false` (e.g. `filesink`).
+//! An offline player always has a group of its own (`group` must be empty):
+//! export each angle with its own player over the same clip in and out.
 
 pub mod backoff;
 pub mod cache;
@@ -109,6 +111,18 @@ fn clip_of(properties: &HashMap<String, PropertyValue>) -> Result<Option<timelin
             Ok(None)
         }
         PACING_OFFLINE => {
+            // The frame counter, the clip's anchor and its end are group
+            // state, but each offline player drives them from its own loop:
+            // a second player in the group would be cut short when the first
+            // reaches the out point. Clip in and out are absolute times, so
+            // angles line up without a shared group.
+            if prop_str(properties, GROUP_PROPERTY).is_some() {
+                return Err(format!(
+                    "{}={} plays on a group of its own: leave {} empty (clip in and out \
+                     are absolute times, so exports of several angles line up)",
+                    PACING_PROPERTY, PACING_OFFLINE, GROUP_PROPERTY
+                ));
+            }
             let (Some(i), Some(o)) = (clip_in, clip_out) else {
                 return Err(format!(
                     "{}={} needs {} and {}",
@@ -346,6 +360,25 @@ mod tests {
         assert!(clip_of(&bad_speed).is_err());
         assert!(parse_time_ref("yesterday").is_err());
         assert!(clip_of(&props(&[(PACING_PROPERTY, st("fast"))])).is_err());
+    }
+
+    #[test]
+    fn an_offline_player_refuses_a_shared_group() {
+        // Two offline players in one group would share the frame counter and
+        // the clip's end: the slower one would end its file early.
+        let grouped = props(&[
+            (PACING_PROPERTY, st("offline")),
+            (CLIP_IN_PROPERTY, st("1:0")),
+            (CLIP_OUT_PROPERTY, st("2:0")),
+            (GROUP_PROPERTY, st("angles")),
+            (SOURCE_PROPERTY, st("segs")),
+        ]);
+        let err = clip_of(&grouped).unwrap_err();
+        assert!(err.contains(GROUP_PROPERTY), "{}", err);
+        let err = build("offline_grouped", &grouped).err().unwrap();
+        assert!(err.to_string().contains(GROUP_PROPERTY), "{}", err);
+        // Real time still shares a group.
+        assert_eq!(clip_of(&props(&[(GROUP_PROPERTY, st("angles"))])), Ok(None));
     }
 
     /// Four 1 s segments of 25p H.264 (with B-frames) in MPEG-TS and an
