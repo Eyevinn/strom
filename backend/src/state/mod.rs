@@ -517,6 +517,15 @@ impl AppState {
                     }
                 }
 
+                // TAMS Outputs saved with segment_duration_secs. Written back
+                // below, so the migration (and its log line) runs once.
+                let mut migrated = Vec::new();
+                for flow in flows.values_mut() {
+                    if crate::blocks::builtin::tams_output::migrate_flow(flow) {
+                        migrated.push(flow.id);
+                    }
+                }
+
                 // Reset all flow states to None on server restart since pipelines aren't running
                 // This prevents showing stale "Playing" states from before the server stopped
                 for flow in flows.values_mut() {
@@ -526,6 +535,18 @@ impl AppState {
                             flow.name, flow.gst_state
                         );
                         flow.set_gst_state(None);
+                    }
+                }
+
+                for id in &migrated {
+                    if let Some(flow) = flows.get(id) {
+                        if let Err(e) = self.inner.storage.save_flow(flow).await {
+                            warn!(
+                                "Failed to save migrated flow '{}': {} (migrated again on \
+                                 the next start)",
+                                flow.name, e
+                            );
+                        }
                     }
                 }
 
@@ -741,6 +762,8 @@ impl AppState {
         // this, an explicit save from the frontend would re-engage transient
         // state (e.g. PFL/AFL solo) on the next restart.
         self.strip_transient_properties(&mut flow).await;
+        // A client may still send legacy TAMS Output properties.
+        crate::blocks::builtin::tams_output::migrate_flow(&mut flow);
 
         // Update in-memory state. `insert` reports whether the id was already
         // taken, so newness is decided under the same lock that writes it.
@@ -760,6 +783,7 @@ impl AppState {
     /// cannot both succeed and overwrite one another.
     pub async fn insert_flow_if_absent(&self, mut flow: Flow) -> anyhow::Result<bool> {
         self.strip_transient_properties(&mut flow).await;
+        crate::blocks::builtin::tams_output::migrate_flow(&mut flow);
 
         {
             let mut flows = self.inner.flows.write().await;

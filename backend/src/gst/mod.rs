@@ -8,6 +8,7 @@ pub(crate) mod control_bindings;
 pub(crate) mod crop;
 pub mod discovery;
 pub mod download_front;
+pub mod frame_rate;
 pub mod gl_input_front;
 pub mod gl_link;
 pub mod ice_preflight;

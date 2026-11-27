@@ -1,14 +1,15 @@
 //! TAMS Output block: records pre-encoded streams into a TAMS store.
 //!
 //! Two container modes (the `container` property):
-//! - **MPEG-TS (default):** all essences are muxed by one `mpegtsmux`/`splitmuxsink`
+//! - **MPEG-TS (default):** all essences are muxed by `mpegtsmux`
 //!   into TS segments and registered on a single NMOS `format:multi` flow.
 //!   Broadcast-native, inherent A/V sync, fewer objects.
-//! - **MP4:** each essence goes to its own `splitmuxsink` (mp4mux) and is
+//! - **MP4:** each essence goes to its own `mp4mux` segments and is
 //!   registered as a separate single-essence TAMS flow (video flow + audio flow
 //!   grouped under one Source). Canonical TAMS model, max flexibility.
 //!
-//! Each split file is a complete, GOP-aligned, independently decodable container =
+//! The segmenter ([`crate::tams::segmenter`]) cuts the streams on the TAI grid,
+//! one muxer per fragment. Each split file is a complete, GOP-aligned, independently decodable container =
 //! one TAMS segment. Files are written to a temp dir; the uploader uploads each as a
 //! media object, registers it with its timerange, then deletes it (kept on disk if
 //! upload ultimately fails — see the uploader module).
@@ -18,16 +19,23 @@
 
 use super::refusal::{accept_input, audio_refusal, refuse_input, video_refusal};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
-use crate::client_auth::AuthMethod;
-use crate::osc::SatProvider;
+use crate::tams::auth::TamsAuth;
 use crate::tams::client::{FlowSpec, TamsClient};
-use crate::tams::uploader::{channel, new_tail_slot, spawn_uploader, FragmentReady, TailFragment};
-use gst::glib;
-use gst::glib::prelude::ToValue;
+use crate::tams::segmenter::{OpenDecision, OpenRequest, Segmenter};
+use crate::tams::tai_mapping::{
+    first_on_grid_fragment, grid_miss_ns, reference_tai_ns, shared_pipeline_mapping, AnchorKind,
+    FragmentTimeline, HostTai,
+};
+use crate::tams::uploader::{
+    channel, clear_orphans, closed_end_ns, media_end_running_time_ns, new_run, new_tail_slot,
+    park_on_disk, segment_file_name, spawn_uploader, FragmentReady, MediaEnd, PadMediaEnd,
+    ParkTarget, SharedDetected, TailFragment,
+};
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_app as gst_app;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use strom_types::tams::{
     CONTENT_TYPE_MP4, CONTENT_TYPE_MPEGTS, FORMAT_AUDIO, FORMAT_MULTI, FORMAT_VIDEO,
@@ -39,7 +47,17 @@ use uuid::Uuid;
 pub struct TamsOutputBuilder;
 
 const BLOCK_NAME: &str = "TAMS Output";
-const DEFAULT_SEGMENT_SECS: u64 = 2;
+/// Block definition id of TAMS Output.
+pub const TAMS_OUTPUT_BLOCK_ID: &str = "builtin.tams_output";
+/// Segment length property, in milliseconds.
+const SEGMENT_DURATION_MS: &str = "segment_duration_ms";
+/// Whole-second segment length, replaced by [`SEGMENT_DURATION_MS`]. Flows
+/// that still carry it are migrated (see [`migrate_legacy_properties`]).
+const LEGACY_SEGMENT_DURATION_SECS: &str = "segment_duration_secs";
+const DEFAULT_SEGMENT_MS: u64 = 2000;
+/// Shortest segment `segment_duration_ms` accepts. Every segment is one HTTP
+/// upload and one TAMS segment registration, so the rate is bounded.
+const MIN_SEGMENT_MS: u64 = 200;
 const DEFAULT_NUM_VIDEO_TRACKS: usize = 1;
 const DEFAULT_NUM_AUDIO_TRACKS: usize = 1;
 /// Sanity bound on audio tracks: a flow can carry several audio essences (muxed
@@ -78,8 +96,9 @@ impl Container {
     }
 }
 
-/// Fixed namespace for deriving deterministic TAMS source/flow UUIDs from a block
-/// instance id, so restarting a flow appends to the same TAMS timeline.
+/// Fixed namespace for deriving deterministic TAMS source/flow UUIDs from a
+/// block's [`tams_id_key`], so restarting a flow appends to the same TAMS
+/// timeline.
 const TAMS_NAMESPACE: Uuid = Uuid::from_u128(0x7a3f_2b10_5c84_4e6d_9f12_a8b7_c6d5_e4f3);
 
 fn prop_str(props: &HashMap<String, PropertyValue>, key: &str) -> Option<String> {
@@ -105,6 +124,68 @@ fn prop_u64(props: &HashMap<String, PropertyValue>, key: &str, default: u64) -> 
     }
 }
 
+/// Rewrite the released `segment_duration_secs` (at least 1) to
+/// `segment_duration_ms`: `secs × 1000` ms. When `segment_duration_ms` is set
+/// too (a client that knows both), it stays. The seconds key is removed.
+/// Returns a description of the change, or `None` when there was nothing to
+/// migrate.
+pub fn migrate_legacy_properties(
+    properties: &mut HashMap<String, PropertyValue>,
+) -> Option<String> {
+    let secs = properties.remove(LEGACY_SEGMENT_DURATION_SECS)?;
+    if properties.contains_key(SEGMENT_DURATION_MS) {
+        return Some(format!(
+            "dropped {} ({} is set)",
+            LEGACY_SEGMENT_DURATION_SECS, SEGMENT_DURATION_MS
+        ));
+    }
+    let new_ms = match &secs {
+        PropertyValue::UInt(u) => (*u).max(1).saturating_mul(1000),
+        PropertyValue::Int(i) => (*i).max(1).unsigned_abs().saturating_mul(1000),
+        _ => DEFAULT_SEGMENT_MS,
+    };
+    properties.insert(SEGMENT_DURATION_MS.to_string(), PropertyValue::UInt(new_ms));
+    Some(format!(
+        "{} = {:?} -> {} = {}",
+        LEGACY_SEGMENT_DURATION_SECS, secs, SEGMENT_DURATION_MS, new_ms
+    ))
+}
+
+/// Migrate the legacy properties of every TAMS Output in `flow` (see
+/// [`migrate_legacy_properties`]), logging each block that changed. Returns
+/// whether anything changed.
+pub fn migrate_flow(flow: &mut Flow) -> bool {
+    let mut changed = false;
+    for block in &mut flow.blocks {
+        if block.block_definition_id != TAMS_OUTPUT_BLOCK_ID {
+            continue;
+        }
+        if let Some(change) = migrate_legacy_properties(&mut block.properties) {
+            info!(
+                "Flow '{}', TAMS Output {}: migrated legacy properties: {}",
+                flow.name, block.id, change
+            );
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Segment length in nanoseconds, from `segment_duration_ms` (default
+/// [`DEFAULT_SEGMENT_MS`]) clamped to [`MIN_SEGMENT_MS`]. Flows are migrated
+/// when they are loaded or saved; a legacy `segment_duration_secs` written by
+/// other means is still read through [`migrate_legacy_properties`].
+fn segment_duration_ns(props: &HashMap<String, PropertyValue>) -> u64 {
+    let ms = if props.contains_key(LEGACY_SEGMENT_DURATION_SECS) {
+        let mut migrated = props.clone();
+        migrate_legacy_properties(&mut migrated);
+        prop_u64(&migrated, SEGMENT_DURATION_MS, DEFAULT_SEGMENT_MS)
+    } else {
+        prop_u64(props, SEGMENT_DURATION_MS, DEFAULT_SEGMENT_MS)
+    };
+    ms.max(MIN_SEGMENT_MS).saturating_mul(1_000_000)
+}
+
 /// Parse a `key=value, key=value` string into TAMS flow tags. Blank/keyless
 /// entries are skipped.
 fn parse_tags(s: &Option<String>) -> Vec<(String, String)> {
@@ -125,13 +206,23 @@ fn parse_tags(s: &Option<String>) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// Derive a deterministic UUID (string) for a TAMS entity belonging to a block.
-fn derive_id(instance_id: &str, suffix: &str) -> String {
-    Uuid::new_v5(
-        &TAMS_NAMESPACE,
-        format!("{}:{}", instance_id, suffix).as_bytes(),
-    )
-    .to_string()
+/// Derive a deterministic UUID (string) for a TAMS entity: UUID v5 of
+/// `"<key>:<suffix>"`, where `key` is the block's [`tams_id_key`].
+fn derive_id(key: &str, suffix: &str) -> String {
+    Uuid::new_v5(&TAMS_NAMESPACE, format!("{}:{}", key, suffix).as_bytes()).to_string()
+}
+
+/// What every TAMS id of block `instance_id`, and its segment directory,
+/// derive from: `"<flow id>/<block id>"`. A block id is only unique within a
+/// Strom flow, so two flows with a TAMS Output of the same id would otherwise
+/// write to the same TAMS flows and share one directory of parked segments.
+/// Without a flow id (`_flow_id`, injected by block expansion; a bare builder
+/// in a test) it is the block id alone.
+pub fn tams_id_key(instance_id: &str, properties: &HashMap<String, PropertyValue>) -> String {
+    match prop_str(properties, "_flow_id") {
+        Some(flow_id) => format!("{}/{}", flow_id, instance_id),
+        None => instance_id.to_string(),
+    }
 }
 
 impl BlockBuilder for TamsOutputBuilder {
@@ -139,8 +230,8 @@ impl BlockBuilder for TamsOutputBuilder {
         &self,
         properties: &HashMap<String, PropertyValue>,
     ) -> Option<ExternalPads> {
-        // Video is a single track (splitmuxsink has one `video` pad); audio can be
-        // several (splitmuxsink `audio_%u`), e.g. multiple language/commentary tracks.
+        // Video is a single track (it decides where segments split); audio can be
+        // several, e.g. multiple language/commentary tracks.
         let num_video = prop_usize(properties, "num_video_tracks", DEFAULT_NUM_VIDEO_TRACKS).min(1);
         let num_audio = prop_usize(properties, "num_audio_tracks", DEFAULT_NUM_AUDIO_TRACKS)
             .min(MAX_AUDIO_TRACKS);
@@ -185,42 +276,34 @@ impl BlockBuilder for TamsOutputBuilder {
                         .to_string(),
                 )
             })?;
+        // Checked here, not first in the element setup: a gateway client that
+        // cannot be built there leaves the run recording nowhere.
+        crate::tams::client::check_gateway_url(gateway_url.trim_end_matches('/'))
+            .map_err(|e| BlockBuildError::InvalidProperty(format!("TAMS Output: {:#}", e)))?;
         // Auth mode selects how the gateway is authenticated. "static" (default) uses
         // a long-lived bearer token (for TAMS gateways run outside OSC); "osc" mints
         // short-lived Service Access Tokens from the OSC PAT configured on this Strom
         // instance (STROM_OSC_PAT / OSC_ACCESS_TOKEN).
-        let auth_mode = prop_str(properties, "auth_mode").unwrap_or_else(|| "static".to_string());
-        let auth_plan = match auth_mode.as_str() {
-            "osc" => {
-                let provider = crate::osc::sat_provider();
-                let explicit = prop_str(properties, "osc_service_id");
-                let service_id =
-                    crate::tams::client::osc_service_id(&gateway_url, explicit.as_deref())
-                        .map_err(|e| {
-                            BlockBuildError::InvalidProperty(format!("TAMS Output: {e}"))
-                        })?;
-                info!(
-                    "TAMS Output {}: OSC PAT/SAT auth for service {}",
-                    instance_id, service_id
-                );
-                AuthPlan::Osc {
-                    provider,
-                    service_id,
-                }
-            }
-            _ => {
-                let auth = match prop_str(properties, "api_token")
-                    .or_else(|| strom_types::env::var_opt("STROM_TAMS_API_TOKEN"))
-                {
-                    Some(t) => AuthMethod::Bearer(t),
-                    None => AuthMethod::None,
-                };
-                AuthPlan::Fixed(auth)
-            }
-        };
+        let auth = crate::tams::auth::TamsAuth::from_properties(properties, &gateway_url).map_err(
+            |e| {
+                BlockBuildError::InvalidProperty(format!(
+                    "TAMS Output: {} (set the OSC Service ID property if it cannot be \
+                     derived from gateway_url)",
+                    e
+                ))
+            },
+        )?;
+        // OSC mode keys its PAT by the flow id, which is only known in the
+        // element-setup closure, so the concrete AuthMethod is made there.
+        if let TamsAuth::Osc { service_id } = &auth {
+            info!(
+                "TAMS Output {}: OSC PAT/SAT auth for service {}",
+                instance_id, service_id
+            );
+        }
+        let auth_plan = auth;
 
-        let segment_secs =
-            prop_u64(properties, "segment_duration_secs", DEFAULT_SEGMENT_SECS).max(1);
+        let segment_ns = segment_duration_ns(properties);
         let num_video = prop_usize(properties, "num_video_tracks", DEFAULT_NUM_VIDEO_TRACKS).min(1);
         let num_audio = prop_usize(properties, "num_audio_tracks", DEFAULT_NUM_AUDIO_TRACKS)
             .min(MAX_AUDIO_TRACKS);
@@ -230,8 +313,9 @@ impl BlockBuilder for TamsOutputBuilder {
             ));
         }
 
-        let source_id = prop_str(properties, "tams_source_id")
-            .unwrap_or_else(|| derive_id(instance_id, "source"));
+        let id_key = tams_id_key(instance_id, properties);
+        let source_id =
+            prop_str(properties, "tams_source_id").unwrap_or_else(|| derive_id(&id_key, "source"));
         let label = prop_str(properties, "label");
         let description = prop_str(properties, "description");
         let tags = parse_tags(&prop_str(properties, "tags"));
@@ -254,14 +338,14 @@ impl BlockBuilder for TamsOutputBuilder {
                 // Members collected by the Multi-Flow: (flow_id, role).
                 let mut members: Vec<(String, String)> = Vec::new();
                 if num_video >= 1 {
-                    let flow_id = derive_id(instance_id, "video");
+                    let flow_id = derive_id(&id_key, "video");
                     members.push((flow_id.clone(), "video".to_string()));
                     let spec = FlowSpec {
                         flow_id,
                         // Own mono-essence Source. The gateway derives the Multi-Flow's
                         // source_collection by resolving each member flow to its
                         // source_id, so members must NOT share the program source.
-                        source_id: derive_id(instance_id, "video-source"),
+                        source_id: derive_id(&id_key, "video-source"),
                         format: FORMAT_VIDEO.to_string(),
                         codec: Some("video/h264".to_string()), // fallback; real codec from caps
                         container: Some(CONTENT_TYPE_MP4.to_string()),
@@ -270,12 +354,14 @@ impl BlockBuilder for TamsOutputBuilder {
                         description: description.clone(),
                         tags: tags.clone(),
                         flow_collection: vec![],
+                        essence_parameters: Default::default(),
                     };
                     build_flow_chain(
                         instance_id,
+                        &id_key,
                         "video",
                         Container::Mp4,
-                        segment_secs,
+                        segment_ns,
                         &[Essence::Video],
                         true,
                         gateway_url.clone(),
@@ -288,12 +374,12 @@ impl BlockBuilder for TamsOutputBuilder {
                 for i in 0..num_audio {
                     let essence = Essence::Audio(i);
                     let tag = essence.tag(); // "audio-0", "audio-1", ...
-                    let flow_id = derive_id(instance_id, &tag);
+                    let flow_id = derive_id(&id_key, &tag);
                     members.push((flow_id.clone(), tag.clone()));
                     let spec = FlowSpec {
                         flow_id,
                         // Own mono-essence Source (see video above).
-                        source_id: derive_id(instance_id, &format!("{}-source", tag)),
+                        source_id: derive_id(&id_key, &format!("{}-source", tag)),
                         format: FORMAT_AUDIO.to_string(),
                         codec: Some("audio/aac".to_string()), // fallback; real codec from caps
                         container: Some(CONTENT_TYPE_MP4.to_string()),
@@ -301,12 +387,14 @@ impl BlockBuilder for TamsOutputBuilder {
                         description: description.clone(),
                         tags: tags.clone(),
                         flow_collection: vec![],
+                        essence_parameters: Default::default(),
                     };
                     build_flow_chain(
                         instance_id,
+                        &id_key,
                         &tag,
                         Container::Mp4,
-                        segment_secs,
+                        segment_ns,
                         &[essence],
                         true,
                         gateway_url.clone(),
@@ -321,7 +409,7 @@ impl BlockBuilder for TamsOutputBuilder {
                 // flows — so it is registered once at startup, not via an uploader.
                 if members.len() >= 2 {
                     let multi = FlowSpec {
-                        flow_id: derive_id(instance_id, "mux"),
+                        flow_id: derive_id(&id_key, "mux"),
                         source_id: source_id.clone(),
                         format: FORMAT_MULTI.to_string(),
                         // The Multi-Flow carries no segments of its own — its members
@@ -334,6 +422,7 @@ impl BlockBuilder for TamsOutputBuilder {
                         description: description.clone(),
                         tags: tags.clone(),
                         flow_collection: members,
+                        essence_parameters: Default::default(),
                     };
                     register_multiflow(instance_id, multi, gateway_url.clone(), auth_plan, ctx);
                 }
@@ -348,7 +437,7 @@ impl BlockBuilder for TamsOutputBuilder {
                     inputs.push(Essence::Audio(i));
                 }
                 let spec = FlowSpec {
-                    flow_id: derive_id(instance_id, "mux"),
+                    flow_id: derive_id(&id_key, "mux"),
                     source_id: source_id.clone(),
                     format: FORMAT_MULTI.to_string(),
                     codec: Some(CONTENT_TYPE_MPEGTS.to_string()),
@@ -359,12 +448,14 @@ impl BlockBuilder for TamsOutputBuilder {
                     // The TS is an opaque mux; its inner essences are NOT exposed as
                     // separate flows (per AMWA BCP-006-04), so no flow_collection.
                     flow_collection: vec![],
+                    essence_parameters: Default::default(),
                 };
                 build_flow_chain(
                     instance_id,
+                    &id_key,
                     "mux",
                     Container::MpegTs,
-                    segment_secs,
+                    segment_ns,
                     &inputs,
                     false, // codec is the container; no per-essence detection
                     gateway_url.clone(),
@@ -377,13 +468,13 @@ impl BlockBuilder for TamsOutputBuilder {
         }
 
         info!(
-            "TAMS Output {}: built ({} video, {} audio, {}), gateway {}, segment {}s",
+            "TAMS Output {}: built ({} video, {} audio, {}), gateway {}, segment {} ms",
             instance_id,
             num_video,
             num_audio,
             container.content_type(),
             gateway_url,
-            segment_secs
+            segment_ns / 1_000_000
         );
 
         Ok(BlockBuildResult {
@@ -395,41 +486,9 @@ impl BlockBuilder for TamsOutputBuilder {
     }
 }
 
-/// Auth configuration resolved per flow at pipeline start.
-///
-/// OSC mode keys its PAT by the flow id, which is only known in the element-setup
-/// closure — not at block-build time. So we carry the recipe and finalize the
-/// concrete [`AuthMethod`] once the flow id is available.
-#[derive(Clone)]
-enum AuthPlan {
-    /// Flow-id-independent auth (static bearer token, or none).
-    Fixed(AuthMethod),
-    /// OSC PAT/SAT; the credential key is the flow id, filled in at setup.
-    Osc {
-        provider: Arc<SatProvider>,
-        service_id: String,
-    },
-}
-
-impl AuthPlan {
-    fn resolve(&self, credential_key: &str) -> AuthMethod {
-        match self {
-            AuthPlan::Fixed(auth) => auth.clone(),
-            AuthPlan::Osc {
-                provider,
-                service_id,
-            } => AuthMethod::Osc {
-                provider: provider.clone(),
-                service_id: service_id.clone(),
-                credential_key: credential_key.to_string(),
-            },
-        }
-    }
-}
-
 /// One essence input on a flow. Audio carries its track index so a flow can mux
-/// (MPEG-TS) or group (MP4) several audio tracks. `splitmuxsink` exposes a single
-/// `video` pad but `audio_%u`, so video is always a single track.
+/// (MPEG-TS) or group (MP4) several audio tracks. Video is always a single
+/// track: it decides where segments split.
 #[derive(Clone, Copy, PartialEq)]
 enum Essence {
     Video,
@@ -455,8 +514,11 @@ impl Essence {
     }
 }
 
-/// Build one TAMS flow chain: N identity inputs -> (dynamic parsers) -> shared
-/// muxer/splitmuxsink -> segment files. For MP4 each chain has a single essence
+/// Queue bound of each essence's `appsink` (see `build_flow_chain`).
+const APPSINK_MAX_BUFFERS: u32 = 64;
+
+/// Build one TAMS flow chain: N identity inputs -> (dynamic parsers) -> appsinks
+/// -> segmenter (one muxer per fragment) -> segment files. For MP4 each chain has a single essence
 /// (one flow per essence); for MPEG-TS a single chain muxes all essences into one
 /// `format:multi` flow. Wires the per-fragment timerange capture + uploader at start.
 ///
@@ -466,13 +528,14 @@ impl Essence {
 #[allow(clippy::too_many_arguments)]
 fn build_flow_chain(
     instance_id: &str,
+    id_key: &str,
     suffix: &str,
     container: Container,
-    segment_secs: u64,
+    segment_ns: u64,
     inputs: &[Essence],
     detect_codec: bool,
     gateway_url: String,
-    auth_plan: AuthPlan,
+    auth_plan: TamsAuth,
     spec: FlowSpec,
     ctx: &BlockBuildContext,
     elements: &mut Vec<(String, gst::Element)>,
@@ -481,8 +544,8 @@ fn build_flow_chain(
         return Ok(());
     }
 
-    // Temp directory for this flow's segment files.
-    let safe_id: String = instance_id
+    // Temp directory for this flow's segment files, one per TAMS flow.
+    let safe_id: String = id_key
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();
@@ -495,45 +558,67 @@ fn build_flow_chain(
         )));
     }
 
-    // One muxer per fragment => each split file is a complete, decodable container.
-    let mux_factory = container.muxer_factory();
-    let mux_id = format!("{}:{}_mux", instance_id, suffix);
-    let mux = gst::ElementFactory::make(mux_factory)
-        .name(&mux_id)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", mux_factory, e)))?;
-    if container == Container::MpegTs && mux.has_property("alignment") {
-        mux.set_property("alignment", 7i32);
+    // Each essence ends in an appsink; the segmenter cuts the streams into
+    // fragment files on the TAI grid and closes each file as soon as the
+    // first frame after it has arrived (see `crate::tams::segmenter`, and why
+    // not `splitmuxsink` there). The appsinks neither sync nor preroll, so an
+    // input that carries no data never holds the pipeline short of PLAYING.
+    let mux_caps = muxer_sink_caps(container.muxer_factory())?;
+    let mut sinks: Vec<gst_app::AppSink> = Vec::with_capacity(inputs.len());
+    for &essence in inputs {
+        let sink_id = format!("{}:{}_{}_sink", instance_id, suffix, essence.tag());
+        let sink = gst::ElementFactory::make("appsink")
+            .name(&sink_id)
+            .property("sync", false)
+            .property("async", false)
+            .property("qos", false)
+            .property("enable-last-sample", false)
+            // Bounded and leaky: the segmenter pulls every sample in the
+            // callback, so the queue stays short. When no callback is
+            // installed (the element setup failed), buffers are dropped
+            // instead of piling up in memory for the whole run.
+            .property("max-buffers", APPSINK_MAX_BUFFERS)
+            .property("drop", true)
+            // What the fragment muxer takes, so that the parser converts to it
+            // (mpegtsmux takes H.264 only as byte-stream).
+            .property("caps", &mux_caps)
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("appsink: {}", e)))?
+            .downcast::<gst_app::AppSink>()
+            .map_err(|_| BlockBuildError::ElementCreation("appsink: wrong type".into()))?;
+        elements.push((sink_id, sink.clone().upcast()));
+        sinks.push(sink);
     }
-
-    let sink_id = format!("{}:{}_splitmuxsink", instance_id, suffix);
-    let splitmuxsink = gst::ElementFactory::make("splitmuxsink")
-        .name(&sink_id)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("splitmuxsink: {}", e)))?;
-    splitmuxsink.set_property("muxer", &mux);
-    splitmuxsink.set_property("max-size-time", segment_secs.saturating_mul(1_000_000_000));
-    // Fallback location template; the format-location-full signal overrides it.
-    let fallback = temp_dir.join(format!("seg_%05d.{}", container.file_ext()));
-    splitmuxsink.set_property("location", fallback.to_string_lossy().as_ref());
-    // Ask upstream for keyframes at split points so segments are GOP-aligned.
-    if splitmuxsink.has_property("send-keyframe-requests") {
-        splitmuxsink.set_property("send-keyframe-requests", true);
-    }
-    // A sink completes READY->PAUSED only once it has prerolled a buffer, so an
-    // input that carries no data would hold the whole pipeline short of PLAYING.
-    // Locked, the sink stays in NULL until the first essence's caps probe links a
-    // parser to it and brings it in.
-    splitmuxsink.set_locked_state(true);
 
     // Codec label for the TAMS flow, derived from caps at runtime by the probes and
     // read by the uploader when it creates the flow.
-    let detected_codec: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let detected_codec: SharedDetected = Arc::default();
+    // Where the media written to the open fragment ends, per essence: for the
+    // timerange of the last fragment of a run (no next fragment closes it),
+    // and, read when a fragment closes, for a fragment before a stall.
+    let pad_ends: Vec<Arc<PadMediaEnd>> = inputs
+        .iter()
+        .map(|_| Arc::new(PadMediaEnd::default()))
+        .collect();
+    let media_end: MediaEnd = Arc::new(Mutex::new(pad_ends.clone()));
+    let media_end_at_split = media_end.clone();
+    // On a stop, the open fragment is finished before the pipeline goes down.
+    let segmenter_slot: Arc<Mutex<Option<std::sync::Weak<Segmenter>>>> = Arc::default();
+    {
+        let slot = segmenter_slot.clone();
+        ctx.register_stop_drain(Box::new(move || {
+            let seg = slot
+                .lock()
+                .ok()
+                .and_then(|s| s.as_ref().and_then(|w| w.upgrade()));
+            if let Some(seg) = seg {
+                seg.drain();
+            }
+        }));
+    }
 
     // One identity input + caps probe per essence, each requesting its own sink pad.
-    for &essence in inputs {
-        let sink_pad_name = request_sink_pad(&splitmuxsink, essence)?;
-
+    for (essence_idx, &essence) in inputs.iter().enumerate() {
         let input_id = format!("{}:{}", instance_id, essence.input_id());
         let input = gst::ElementFactory::make("identity")
             .name(&input_id)
@@ -544,7 +629,7 @@ fn build_flow_chain(
             .ok_or_else(|| BlockBuildError::ElementCreation("identity has no src pad".into()))?;
 
         let parser_inserted = Arc::new(AtomicBool::new(false));
-        let splitmuxsink_weak = splitmuxsink.downgrade();
+        let sink_weak = sinks[essence_idx].downgrade();
         let instance_id_owned = instance_id.to_string();
         let detected_codec_probe = detected_codec.clone();
         src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
@@ -560,9 +645,6 @@ fn build_flow_chain(
             // load/store needs no CAS. Crucially we do NOT set the flag here — a
             // first Caps event that is rejected (raw/unsupported) or whose parser
             // insertion fails must not permanently disable a later, valid Caps event.
-            if parser_inserted.load(Ordering::SeqCst) {
-                return gst::PadProbeReturn::Ok;
-            }
             let caps = match event.view() {
                 gst::EventView::Caps(c) => c.caps().to_owned(),
                 _ => return gst::PadProbeReturn::Ok,
@@ -571,6 +653,13 @@ fn build_flow_chain(
                 Some(s) => s,
                 None => return gst::PadProbeReturn::Ok,
             };
+            if parser_inserted.load(Ordering::SeqCst) {
+                // Renegotiation: keep the flow's video parameters current.
+                if essence == Essence::Video {
+                    merge_video_params(&detected_codec_probe, structure, &instance_id_owned);
+                }
+                return gst::PadProbeReturn::Ok;
+            }
             let caps_name = structure.name().to_string();
 
             // (GStreamer parser factory, TAMS codec label) derived from caps.
@@ -608,21 +697,23 @@ fn build_flow_chain(
                 }
             };
 
-            // For single-essence flows, record the detected codec as the flow's codec.
-            if detect_codec {
-                if let Ok(mut c) = detected_codec_probe.lock() {
-                    *c = Some(codec_label.to_string());
+            if let Ok(mut d) = detected_codec_probe.lock() {
+                // For single-essence flows, record the detected codec as the flow's codec.
+                if detect_codec {
+                    d.codec = Some(codec_label.to_string());
                 }
             }
+            // Video geometry and rate go on the flow (also a muxed TS flow), so
+            // a reader can map frames to the timeline without probing segments.
+            if essence == Essence::Video {
+                merge_video_params(&detected_codec_probe, structure, &instance_id_owned);
+            }
 
-            let splitmuxsink = match splitmuxsink_weak.upgrade() {
+            let sink = match sink_weak.upgrade() {
                 Some(e) => e,
                 None => return gst::PadProbeReturn::Ok,
             };
-            let bin = match splitmuxsink
-                .parent()
-                .and_then(|p| p.downcast::<gst::Bin>().ok())
-            {
+            let bin = match sink.parent().and_then(|p| p.downcast::<gst::Bin>().ok()) {
                 Some(b) => b,
                 None => return gst::PadProbeReturn::Ok,
             };
@@ -654,7 +745,7 @@ fn build_flow_chain(
                 (Some(a), Some(b)) => (a, b),
                 _ => return gst::PadProbeReturn::Ok,
             };
-            let sink_pad = match splitmuxsink.static_pad(&sink_pad_name) {
+            let sink_pad = match sink.static_pad("sink") {
                 Some(p) => p,
                 None => return gst::PadProbeReturn::Ok,
             };
@@ -665,14 +756,11 @@ fn build_flow_chain(
                 );
                 return gst::PadProbeReturn::Ok;
             }
-            // Bring the sink in before the caps event reaches it. Idempotent across
-            // essences sharing one muxed sink.
-            splitmuxsink.set_locked_state(false);
-            if let Err(e) = splitmuxsink.sync_state_with_parent() {
-                error!(
-                    "TAMS Output {}: failed to sync splitmuxsink with pipeline state: {}",
-                    instance_id_owned, e
-                );
+            // The parser's output caps carry what the stream itself says (the
+            // SPS: size, and the rate when it has VUI timing); its timestamps
+            // give the rate when nothing else does.
+            if essence == Essence::Video {
+                watch_video_essence(&psrc, detected_codec_probe.clone(), &instance_id_owned);
             }
             // Linked successfully — now consume the one-shot guard so subsequent
             // Caps events (renegotiation) don't re-insert a second parser.
@@ -693,56 +781,32 @@ fn build_flow_chain(
         elements.push((input_id, input));
     }
 
-    elements.push((sink_id, splitmuxsink.clone()));
-
     // Wire timerange capture + uploader at pipeline start (flow_id + events available).
     let block_id = instance_id.to_string();
     let temp_dir_for_setup = temp_dir.clone();
     let chain_tag = suffix.to_string();
     let content_type = container.content_type().to_string();
     let file_ext = container.file_ext().to_string();
-    let tail_segment_ns = segment_secs.saturating_mul(1_000_000_000);
+    let suffix_owned = suffix.to_string();
+    let mux_factory = container.muxer_factory();
     ctx.register_element_setup(Box::new(move |flow_id, events| {
-        // Remove only orphan segment files left by a previous run — plain `seg_*`
-        // files with no `.meta` sidecar. Their timerange is lost so they cannot be
-        // re-registered (e.g. a fragment mid-write when the process was killed, or
-        // one already uploaded but not yet deleted). Parked segments (those WITH a
-        // sidecar) and the sidecars are kept: the uploader's recovery sweep
-        // re-registers them, even across a full restart. Safe here: the new run has
-        // not written yet.
-        if let Ok(entries) = std::fs::read_dir(&temp_dir_for_setup) {
-            let mut removed = 0u32;
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default();
-                if !name.starts_with("seg_") || name.ends_with(".meta") {
-                    continue;
-                }
-                let mut sidecar = path.clone().into_os_string();
-                sidecar.push(".meta");
-                if std::path::Path::new(&sidecar).exists() {
-                    continue; // parked for recovery — leave it
-                }
-                if std::fs::remove_file(&path).is_ok() {
-                    removed += 1;
-                }
-            }
-            if removed > 0 {
-                info!(
-                    "TAMS {}: cleared {} orphan segment(s) from a previous run",
-                    block_id, removed
-                );
-            }
+        // Remove orphan segment files left by a previous run (no `.meta`
+        // sidecar, so their timerange is lost). Parked segments are kept for the
+        // uploader's recovery sweep, even across a full restart, and so are the
+        // files of a previous run whose uploader still runs.
+        let removed = clear_orphans(&temp_dir_for_setup);
+        if removed > 0 {
+            info!(
+                "TAMS {}: cleared {} orphan segment(s) from a previous run",
+                block_id, removed
+            );
         }
 
         // OSC auth keys its PAT by the flow id (tenant isolation on a shared
         // instance), which is only known here — so finalize the gateway client now.
         let credential_key = flow_id.to_string();
-        if let AuthPlan::Osc { provider, .. } = &auth_plan {
-            if !provider.has_pat_for(&credential_key) {
+        if let TamsAuth::Osc { .. } = &auth_plan {
+            if !crate::osc::sat_provider().has_pat_for(&credential_key) {
                 warn!(
                     "TAMS {}: OSC mode but no PAT for flow {} yet — uploads will fail \
                      until one is configured (STROM_OSC_PAT / OSC_ACCESS_TOKEN, or push \
@@ -751,7 +815,7 @@ fn build_flow_chain(
                 );
             }
         }
-        let client = match TamsClient::new(&gateway_url, auth_plan.resolve(&credential_key)) {
+        let client = match TamsClient::new(&gateway_url, auth_plan.method(&credential_key)) {
             Ok(c) => c,
             Err(e) => {
                 error!("TAMS {}: failed to build gateway client: {:#}", block_id, e);
@@ -762,6 +826,12 @@ fn build_flow_chain(
         let (tx, rx) = channel();
         // Holds the currently-open (not-yet-rotated) fragment; flushed on shutdown.
         let tail = new_tail_slot();
+        // Segment files of this run carry its id, so they never overwrite what an
+        // earlier run parked in the same directory.
+        let run = new_run();
+        let run_id = run.id().to_string();
+        // What a segment parked from the streaming side is meant for.
+        let park_target = ParkTarget::new(client.base_url(), &spec.flow_id);
         spawn_uploader(
             client,
             spec,
@@ -773,105 +843,195 @@ fn build_flow_chain(
             events,
             rx,
             tail.clone(),
-            tail_segment_ns,
+            media_end,
+            segment_ns,
+            run,
         );
 
-        // Per-fragment timeline state: maps GStreamer PTS to an absolute TAI timeline.
-        let state = Arc::new(Mutex::new(FragState::default()));
+        // Per-block timeline: TAI = running time + offset. A fragment whose first
+        // buffer carries a reference timestamp starts at that capture time and
+        // re-anchors the timeline on it. Otherwise the timeline is anchored on the
+        // first fragment by the running time -> TAI mapping shared by
+        // every TAMS Output of this pipeline run, so equal running time gives equal
+        // TAI across blocks (#966). See `crate::tams::tai_mapping`.
+        let timeline = Arc::new(Mutex::new(FragmentTimeline::default()));
+        let tai = Arc::new(HostTai::new());
         let temp_dir = temp_dir_for_setup;
         let tag = chain_tag;
-        let block_id_sig = block_id;
+        let block_id_sig = block_id.clone();
+        // Fragments that started off the grid although their keyframe was
+        // requested in time (see `warn_off_grid`).
+        let off_grid = AtomicU64::new(0);
 
-        // A fresh GStreamer TAI clock (CLOCK_TAI on Linux). The kernel maintains the
-        // current TAI-UTC offset when ntp/chrony disciplines it, so we never hardcode
-        // leap seconds. This is independent of the pipeline's own clock (which is
-        // often Monotonic): we only sample TAI once to anchor the timeline, then
-        // advance it by buffer-PTS deltas, so segments stay contiguous.
-        let tai_clock: gst::Clock = glib::Object::builder::<gst::SystemClock>()
-            .property("clock-type", gst::ClockType::Tai)
-            .build()
-            .upcast();
-        let realtime_clock: gst::Clock = glib::Object::builder::<gst::SystemClock>()
-            .property("clock-type", gst::ClockType::Realtime)
-            .build()
-            .upcast();
+        let on_open = move |req: OpenRequest<'_>| -> OpenDecision {
+            let element = Some(req.element.clone());
+            let fragment_id = req.fragment_id;
+            let buffer = req.sample.buffer_owned();
+            // Running time of the fragment's first buffer.
+            let running_time_ns = req.running_time_ns;
 
-        let _ = splitmuxsink.connect("format-location-full", false, move |args| {
-            let fragment_id = args.get(1).and_then(|v| v.get::<u32>().ok()).unwrap_or(0);
-            let pts_ns = args
-                .get(2)
-                .and_then(|v| v.get::<gst::Sample>().ok())
-                .and_then(|s| s.buffer().and_then(|b| b.pts()))
-                .map(|t| t.nseconds())
-                .unwrap_or(0);
+            // Where the closing fragment's media ends: the new fragment's
+            // buffers have not entered the muxer yet.
+            let closing_media_end = media_end_running_time_ns(&media_end_at_split);
 
-            let location = temp_dir.join(format!("seg_{:05}.{}", fragment_id, file_ext));
+            let location = temp_dir.join(segment_file_name(&run_id, fragment_id, &file_ext));
             let location_str = location.to_string_lossy().to_string();
 
-            // Anchor the timeline once, then advance by PTS deltas.
-            let abs_start = {
-                let mut st = state.lock().unwrap();
-                if !st.initialized {
-                    st.initialized = true;
-                    st.pts0_ns = pts_ns;
-                    st.last_pts_ns = pts_ns;
-                    // If CLOCK_TAI has no offset set (ntp/chrony not disciplining it),
-                    // it equals CLOCK_REALTIME — timestamps would be UTC, ~tens of
-                    // seconds off true TAI. Warn rather than silently mislabel.
-                    let tai_now = tai_clock.time().nseconds();
-                    let rt_now = realtime_clock.time().nseconds();
-                    if tai_now.abs_diff(rt_now) < 1_000_000_000 {
-                        warn!(
-                            "TAMS {} ({}): CLOCK_TAI offset appears unset (TAI == UTC); \
-                             segment timestamps will not be true TAI. Ensure ntp/chrony \
-                             sets the system TAI offset.",
-                            block_id_sig, tag
-                        );
-                    }
-                    st.t0_tai_ns = tai_now;
-                }
-                // A backward PTS jump (live-source reconnect, encoder/clock restart)
-                // would make `t0 + (pts - pts0)` move backward and overlap the
-                // previous segment. Detect it and re-anchor the timeline to the
-                // current TAI so segments stay monotonic — the real-time gap maps
-                // to a forward jump on the timeline rather than an overlap.
-                if pts_ns < st.last_pts_ns {
-                    let tai_now = tai_clock.time().nseconds();
-                    warn!(
-                        "TAMS {} ({}): PTS went backward ({} -> {} ns), re-anchoring \
-                         segment timeline to current TAI",
-                        block_id_sig, tag, st.last_pts_ns, pts_ns
-                    );
-                    st.t0_tai_ns = tai_now;
-                    st.pts0_ns = pts_ns;
-                }
-                st.last_pts_ns = pts_ns;
-                st.t0_tai_ns + pts_ns.saturating_sub(st.pts0_ns)
+            // Capture time of the fragment's first buffer, when it carries one.
+            let reference_ns = buffer
+                .as_ref()
+                .and_then(|b| reference_tai_ns(b.as_ref(), tai.tai_minus_utc_ns()));
+            // One frame: a capture time this close to where running time puts
+            // the buffer continues the previous fragment.
+            let frame_ns = buffer
+                .as_ref()
+                .and_then(|b| b.duration())
+                .map_or(50_000_000, |d| d.nseconds() + 1_000_000);
+            // The shared mapping is asked for every fragment without a capture
+            // time, so a jump (the pipeline clock stopped during a sleep) is
+            // noticed and the timeline re-anchors on the re-sampled mapping.
+            let pipeline = if reference_ns.is_none() {
+                element.as_ref().and_then(|el| {
+                    let (clock, base) = (el.clock()?, el.base_time()?.nseconds());
+                    Some((shared_pipeline_mapping(flow_id, &clock, base, &tai), base))
+                })
+            } else {
+                None
             };
+            let placed = {
+                let mut tl = timeline.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some((m, _)) = pipeline {
+                    tl.note_pipeline_epoch(m.epoch);
+                }
+                tl.place(
+                    running_time_ns,
+                    segment_ns,
+                    reference_ns,
+                    frame_ns,
+                    || match pipeline {
+                        Some((m, base)) => (m.tai_ns(base, running_time_ns), AnchorKind::Pipeline),
+                        None => (tai.now_ns(), AnchorKind::Arrival),
+                    },
+                )
+            };
+            if placed.went_backward {
+                warn!(
+                    "TAMS {} ({}): running time went backward (to {} ns), re-anchored \
+                     ({:?}) at TAI {} ns",
+                    block_id_sig,
+                    tag,
+                    running_time_ns,
+                    placed.anchored.unwrap_or(AnchorKind::Arrival),
+                    placed.start_ns
+                );
+                if let Some(by) = placed.clamped_by_ns {
+                    warn!(
+                        "TAMS {} ({}): moved the segment start {} ms later so it does not \
+                         overlap the previous segment's planned end",
+                        block_id_sig,
+                        tag,
+                        by / 1_000_000
+                    );
+                }
+            } else if placed.jumped {
+                warn!(
+                    "TAMS {} ({}): pipeline clock jumped against TAI (sleep or clock step), \
+                     re-anchored at TAI {} ns",
+                    block_id_sig, tag, placed.start_ns
+                );
+            } else if let Some(kind) = placed.anchored {
+                info!(
+                    "TAMS {} ({}): timeline anchored ({:?}): running time {} ns -> TAI {} ns",
+                    block_id_sig, tag, kind, running_time_ns, placed.start_ns
+                );
+            }
+            let abs_start = placed.start_ns;
+            if placed.since_anchor >= first_on_grid_fragment(segment_ns) {
+                // Splits land on the first keyframe at or after the grid point,
+                // so up to one frame past it is on the grid.
+                if let Some(miss) = grid_miss_ns(abs_start, segment_ns, frame_ns) {
+                    warn_off_grid(&block_id_sig, &tag, &off_grid, miss);
+                }
+            }
 
-            // The previously open fragment is now complete: [its start, this start).
+            // Schedule the split that ends this fragment on the next grid point.
+            // The segmenter splits on the first keyframe at or after it. Ask
+            // upstream for keyframes on the grid points after it, up to
+            // `KEYFRAME_LEAD_NS` ahead. The encoder's input runs ahead of its
+            // output (where this fragment opens) by its latency, which can be
+            // most of a segment, so the encoder is often past the split
+            // already; a request for a time already passed would force a
+            // keyframe off the grid. The split itself was requested by an
+            // earlier fragment, except right after the timeline was anchored
+            // (see `FragmentTimeline::keyframe_requests`).
+            let (next_split, ahead) = {
+                let mut tl = timeline.lock().unwrap_or_else(|e| e.into_inner());
+                let ahead = tl.keyframe_requests(running_time_ns, segment_ns);
+                (
+                    tl.next_split_running_time(running_time_ns, segment_ns),
+                    ahead,
+                )
+            };
+            if let (Some(_), Some(el)) = (next_split, element.as_ref()) {
+                // Sent from GStreamer's thread pool, not from this streaming
+                // thread with the segmenter locked.
+                el.call_async(move |el| {
+                    for rt in &ahead {
+                        let rt = gst::ClockTime::from_nseconds(*rt);
+                        for pad in el.sink_pads() {
+                            let event = gstreamer_video::UpstreamForceKeyUnitEvent::builder()
+                                .running_time(rt)
+                                .all_headers(true)
+                                .build();
+                            pad.push_event(event);
+                        }
+                    }
+                });
+            }
+
+            // The previously open fragment ends here: [its start, this start),
+            // or [its start, its planned end) after a backward jump. It is
+            // uploaded once the segmenter has finished its file.
             // The just-opened one becomes the new tail (flushed on shutdown).
+            let mut prev_ready = None;
             if let Ok(mut tail) = tail.lock() {
                 if let Some(prev) = tail.take() {
-                    let ready = FragmentReady {
+                    let end_ns = closed_end_ns(
+                        &prev,
+                        placed.prev_end_ns,
+                        closing_media_end,
+                        running_time_ns,
+                        frame_ns,
+                    );
+                    // A fragment that spans more than one segment although
+                    // it was not cut short: its split was missed (the
+                    // keyframe asked for it never came, or came before it).
+                    let span = end_ns.saturating_sub(prev.start_ns);
+                    if placed.since_anchor > first_on_grid_fragment(segment_ns)
+                        && end_ns >= placed.prev_end_ns
+                        && span > segment_ns + frame_ns
+                    {
+                        warn_off_grid(&block_id_sig, &tag, &off_grid, span - segment_ns);
+                    }
+                    if end_ns < placed.prev_end_ns {
+                        info!(
+                            "TAMS {} ({}): the input stalled; the segment before it ends \
+                             at its media, {} ms before the next starts",
+                            block_id_sig,
+                            tag,
+                            (placed.prev_end_ns - end_ns) / 1_000_000
+                        );
+                    }
+                    prev_ready = Some(FragmentReady {
                         path: prev.path,
                         start_ns: prev.start_ns,
-                        end_ns: abs_start,
-                    };
-                    if let Err(e) = tx.try_send(ready) {
-                        warn!(
-                            "TAMS {} ({}): dropping segment, uploader channel full: {}",
-                            block_id_sig, tag, e
-                        );
-                        // The dropped fragment will never be uploaded; remove its
-                        // file so it doesn't leak in the temp dir under sustained
-                        // backpressure. (Cheap unlink at rotation cadence, not per-buffer.)
-                        let _ = std::fs::remove_file(e.into_inner().path);
-                    }
+                        end_ns: end_ns.max(prev.start_ns + 1),
+                    });
                 }
                 *tail = Some(TailFragment {
                     path: location.clone(),
                     start_ns: abs_start,
+                    start_running_time_ns: running_time_ns,
                 });
             }
 
@@ -879,11 +1039,126 @@ fn build_flow_chain(
                 "TAMS {} ({}): opening segment {}",
                 block_id_sig, tag, location_str
             );
-            Some(location_str.to_value())
-        });
+            OpenDecision {
+                location,
+                prev_ready,
+                next_split_ns: next_split,
+            }
+        };
+
+        // Hands a finished fragment to the uploader. When its channel is full
+        // (or closed), the fragment is parked on disk instead, for the recovery
+        // sweep of this run or the next; only when that fails too (the disk is
+        // full) is it dropped.
+        let deliver_label = format!("{} ({})", block_id, suffix_owned);
+        let overflowed = AtomicU64::new(0);
+        let deliver = move |ready: FragmentReady| {
+            let Err(e) = tx.try_send(ready) else {
+                return;
+            };
+            let full = matches!(e, tokio::sync::mpsc::error::TrySendError::Full(_));
+            let ready = e.into_inner();
+            match park_on_disk(&ready, &park_target) {
+                Ok(()) => {
+                    let n = overflowed.fetch_add(1, Ordering::Relaxed);
+                    if n.is_multiple_of(100) {
+                        warn!(
+                            "TAMS {}: uploader {}, parked segment {} on disk for the \
+                             recovery sweep ({} so far)",
+                            deliver_label,
+                            if full { "queue full" } else { "stopped" },
+                            ready.path.display(),
+                            n + 1
+                        );
+                    }
+                }
+                Err(err) => {
+                    error!(
+                        "TAMS {}: uploader {} and segment {} could not be parked ({}); \
+                         dropping it",
+                        deliver_label,
+                        if full { "queue full" } else { "stopped" },
+                        ready.path.display(),
+                        err
+                    );
+                    let _ = std::fs::remove_file(&ready.path);
+                }
+            }
+        };
+
+        let segmenter = Segmenter::new(
+            format!("{} ({})", block_id, suffix_owned),
+            mux_factory,
+            container == Container::MpegTs,
+            sinks.len(),
+            0, // video comes first when there is one
+            pad_ends,
+            Box::new(on_open),
+            Box::new(deliver),
+        );
+        if let Ok(mut slot) = segmenter_slot.lock() {
+            *slot = Some(Arc::downgrade(&segmenter));
+        }
+        for (idx, sink) in sinks.iter().enumerate() {
+            let on_sample = segmenter.clone();
+            let on_eos = segmenter.clone();
+            sink.set_callbacks(
+                gst_app::AppSinkCallbacks::builder()
+                    .new_sample(move |sink| {
+                        let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                        on_sample.push(idx, sample, sink.upcast_ref());
+                        Ok(gst::FlowSuccess::Ok)
+                    })
+                    .eos(move |_| on_eos.eos(idx))
+                    .build(),
+            );
+        }
     }));
 
     Ok(())
+}
+
+/// Everything the sink pads of `factory` accept, for the appsinks in front
+/// of the fragment muxer.
+fn muxer_sink_caps(factory: &str) -> Result<gst::Caps, BlockBuildError> {
+    let f = gst::ElementFactory::find(factory)
+        .ok_or_else(|| BlockBuildError::ElementCreation(format!("{} not found", factory)))?;
+    let mut caps = gst::Caps::new_empty();
+    for tmpl in f.static_pad_templates() {
+        if tmpl.direction() == gst::PadDirection::Sink {
+            caps.merge(tmpl.caps());
+        }
+    }
+    Ok(caps)
+}
+
+/// Report a segment boundary `miss_ns` off its TAI grid point, or a segment
+/// `miss_ns` longer than one segment (a missed split), although its keyframe
+/// was requested one fragment ahead: the encoder did not honour the request. Boundaries then follow the encoder's own keyframes, off the grid and
+/// differently on each angle. Logged on the first miss and every 30th after.
+fn warn_off_grid(block_id: &str, tag: &str, count: &AtomicU64, miss_ns: u64) {
+    let n = count.fetch_add(1, Ordering::Relaxed) + 1;
+    if n == 1 || n.is_multiple_of(30) {
+        warn!(
+            "TAMS {} ({}): segment boundary {} ms off the TAI grid ({} so far): the \
+             upstream encoder did not make the keyframe requested for it. Check that it \
+             honours force-keyunit requests on time: a Video Encoder block applies \
+             min_keyframe_request_interval_ms only to immediate requests, but other \
+             encoders may drop requests (e.g. min-force-key-unit-interval) or need a GOP \
+             that divides the segment duration.",
+            block_id,
+            tag,
+            miss_ns / 1_000_000,
+            n
+        );
+    } else {
+        debug!(
+            "TAMS {} ({}): segment boundary {} ms off the TAI grid",
+            block_id,
+            tag,
+            miss_ns / 1_000_000
+        );
+    }
 }
 
 /// Register a metadata-only Multi-Flow that groups the per-essence flows via
@@ -897,14 +1172,14 @@ fn register_multiflow(
     instance_id: &str,
     spec: FlowSpec,
     gateway_url: String,
-    auth_plan: AuthPlan,
+    auth_plan: TamsAuth,
     ctx: &BlockBuildContext,
 ) {
     let block_id = instance_id.to_string();
     ctx.register_element_setup(Box::new(move |flow_id, _events| {
         // OSC auth keys its PAT by the flow id, matching the essence uploaders.
         let credential_key = flow_id.to_string();
-        let client = match TamsClient::new(&gateway_url, auth_plan.resolve(&credential_key)) {
+        let client = match TamsClient::new(&gateway_url, auth_plan.method(&credential_key)) {
             Ok(c) => c,
             Err(e) => {
                 error!(
@@ -961,36 +1236,126 @@ fn register_multiflow(
     }));
 }
 
-/// Request the splitmuxsink sink pad for a given essence (`video` or `audio_%u`).
-fn request_sink_pad(
-    splitmuxsink: &gst::Element,
-    essence: Essence,
-) -> Result<String, BlockBuildError> {
-    let pad = match essence {
-        Essence::Video => splitmuxsink.request_pad_simple("video").ok_or_else(|| {
-            BlockBuildError::ElementCreation("splitmuxsink: failed to request video pad".into())
-        })?,
-        Essence::Audio(_) => {
-            let tmpl = splitmuxsink.pad_template("audio_%u").ok_or_else(|| {
-                BlockBuildError::ElementCreation("splitmuxsink: no audio_%u template".into())
-            })?;
-            splitmuxsink.request_pad(&tmpl, None, None).ok_or_else(|| {
-                BlockBuildError::ElementCreation("splitmuxsink: failed to request audio pad".into())
-            })?
-        }
+/// Merge the video parameters in `caps` into the detected essence. A key the
+/// caps lack keeps its value (a `0/1` rate does not erase a known one).
+fn merge_video_params(detected: &SharedDetected, caps: &gst::StructureRef, block_id: &str) {
+    let params = video_essence_parameters(caps);
+    let Ok(mut d) = detected.lock() else {
+        return;
     };
-    Ok(pad.name().to_string())
+    for (k, v) in params {
+        if d.essence_parameters.get(&k) != Some(&v) {
+            debug!("TAMS Output {}: video {} = {}", block_id, k, v);
+            d.essence_parameters.insert(k, v);
+        }
+    }
 }
 
-#[derive(Default)]
-struct FragState {
-    initialized: bool,
-    /// PTS of the very first fragment, used as the timeline origin.
-    pts0_ns: u64,
-    /// Absolute TAI time (ns) corresponding to `pts0_ns`.
-    t0_tai_ns: u64,
-    /// PTS of the previously-opened fragment, to detect a backward PTS jump.
-    last_pts_ns: u64,
+/// Timestamps collected before giving up on estimating a frame rate.
+const RATE_SAMPLES_MAX: usize = 150;
+/// Timestamps an estimate is first tried from.
+const RATE_SAMPLES_MIN: usize = 30;
+
+/// Watch the parser's output for the flow's video parameters: its caps, and,
+/// while the caps give no frame rate, the buffer timestamps, from which the
+/// rate is estimated ([`crate::gst::frame_rate::estimate_frame_rate`]). A
+/// stream whose SPS has no timing (VideoToolbox) has `framerate=0/1` after a
+/// transport hop, but its timestamps still advance one frame at a time.
+fn watch_video_essence(pad: &gst::Pad, detected: SharedDetected, block_id: &str) {
+    let has_rate = |d: &SharedDetected| {
+        d.lock()
+            .map(|d| d.essence_parameters.contains_key("frame_rate"))
+            .unwrap_or(true)
+    };
+    // Set once the flow has a frame rate: the buffer probe is then removed.
+    let rate_known = Arc::new(AtomicBool::new(has_rate(&detected)));
+    {
+        let (detected, block_id, rate_known) =
+            (detected.clone(), block_id.to_string(), rate_known.clone());
+        pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+            if let Some(gst::PadProbeData::Event(e)) = info.data.as_ref() {
+                if let gst::EventView::Caps(c) = e.view() {
+                    if let Some(s) = c.caps().structure(0) {
+                        merge_video_params(&detected, s, &block_id);
+                        if has_rate(&detected) {
+                            rate_known.store(true, Ordering::Release);
+                        }
+                    }
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+    }
+    if rate_known.load(Ordering::Acquire) {
+        return;
+    }
+    let block_id = block_id.to_string();
+    // Timestamps seen while no rate is known. Only this probe locks it.
+    let samples: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+        if rate_known.load(Ordering::Acquire) {
+            return gst::PadProbeReturn::Remove;
+        }
+        let Some(t) = info.buffer().and_then(|b| b.pts()) else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let Ok(mut pts) = samples.lock() else {
+            return gst::PadProbeReturn::Remove;
+        };
+        pts.push(t.nseconds());
+        if pts.len() < RATE_SAMPLES_MIN {
+            return gst::PadProbeReturn::Ok;
+        }
+        match crate::gst::frame_rate::estimate_frame_rate(pts.iter().copied()) {
+            Some((n, d)) => {
+                info!(
+                    "TAMS Output {}: stream has no frame rate, {}/{} estimated from \
+                     timestamps",
+                    block_id, n, d
+                );
+                if let Ok(mut det) = detected.lock() {
+                    det.essence_parameters
+                        .entry("frame_rate".to_string())
+                        .or_insert_with(|| serde_json::json!({ "numerator": n, "denominator": d }));
+                }
+                rate_known.store(true, Ordering::Release);
+                gst::PadProbeReturn::Remove
+            }
+            None if pts.len() >= RATE_SAMPLES_MAX => {
+                warn!(
+                    "TAMS Output {}: stream has no frame rate and none could be estimated \
+                     from {} timestamps; the flow has no frame_rate",
+                    block_id,
+                    pts.len()
+                );
+                gst::PadProbeReturn::Remove
+            }
+            None => gst::PadProbeReturn::Ok,
+        }
+    });
+}
+
+/// TAMS video `essence_parameters` from encoded video caps: `frame_rate`
+/// (`{numerator, denominator}`), `frame_width` and `frame_height`, as far as the
+/// caps carry them. A variable frame rate (`0/1`) is left out.
+fn video_essence_parameters(
+    caps: &gst::StructureRef,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut params = serde_json::Map::new();
+    if let Ok(fr) = caps.get::<gst::Fraction>("framerate") {
+        if fr.numer() > 0 && fr.denom() > 0 {
+            params.insert(
+                "frame_rate".into(),
+                serde_json::json!({ "numerator": fr.numer(), "denominator": fr.denom() }),
+            );
+        }
+    }
+    for (field, key) in [("width", "frame_width"), ("height", "frame_height")] {
+        if let Ok(v) = caps.get::<i32>(field) {
+            params.insert(key.into(), v.into());
+        }
+    }
+    params
 }
 
 /// Get TAMS Output block definitions.
@@ -1000,11 +1365,12 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 
 fn tams_output_definition() -> BlockDefinition {
     BlockDefinition {
-        id: "builtin.tams_output".to_string(),
+        id: TAMS_OUTPUT_BLOCK_ID.to_string(),
         name: BLOCK_NAME.to_string(),
         description: "Records pre-encoded video/audio into a TAMS store (Time-Addressable Media Store) via an Eyevinn TAMS Gateway. Either separate single-essence MP4 flows or one muxed MPEG-TS flow.".to_string(),
         category: "Outputs".to_string(),
-        exposed_properties: vec![
+        exposed_properties: [
+            vec![
             simple_prop(
                 "gateway_url",
                 "Gateway URL",
@@ -1036,44 +1402,12 @@ fn tams_output_definition() -> BlockDefinition {
                 persist: None,
                 visible_when: None,
             },
-            ExposedProperty {
-                name: "auth_mode".to_string(),
-                label: "Authentication".to_string(),
-                description: "How to authenticate to the gateway. Static API Token = a bearer token. OSC PAT/SAT = mint short-lived Service Access Tokens from the OSC Personal Access Token configured on this Strom instance (STROM_OSC_PAT / OSC_ACCESS_TOKEN).".to_string(),
-                property_type: PropertyType::Enum {
-                    values: vec![
-                        EnumValue {
-                            value: "static".to_string(),
-                            label: Some("Static API Token".to_string()),
-                            visible_when: None,
-                        },
-                        EnumValue {
-                            value: "osc".to_string(),
-                            label: Some("OSC PAT/SAT".to_string()),
-                            visible_when: None,
-                        },
-                    ],
-                },
-                default_value: Some(PropertyValue::String("static".to_string())),
-                mapping: block_mapping("auth_mode"),
-                live: false,
-                persist: None,
-                visible_when: None,
-            },
-            simple_prop(
-                "api_token",
-                "API Token",
-                "Static bearer token for the gateway (Static API Token mode only). Leave empty when behind an access gate. Ignored in OSC PAT/SAT mode.",
-                PropertyType::String,
-                PropertyValue::String(String::new()),
-            ),
-            simple_prop(
-                "osc_service_id",
-                "OSC Service ID",
-                "OSC PAT/SAT mode only. The OSC service type the SAT is scoped to. Leave empty to derive it from the gateway URL (the service-type label of an https://*.osaas.io host). The SAT is only sent to an OSC host of this service, or to a gateway listed in STROM_TAMS_ALLOWED_GATEWAYS.",
-                PropertyType::String,
-                PropertyValue::String(String::new()),
-            ),
+            ],
+            // Shared by every block that talks to a TAMS gateway (see
+            // `crate::tams::auth`): the env vars and allow-list are documented
+            // there.
+            crate::tams::auth::auth_properties(None),
+            vec![
             simple_prop(
                 "label",
                 "Title",
@@ -1110,11 +1444,11 @@ fn tams_output_definition() -> BlockDefinition {
                 PropertyValue::Int(1),
             ),
             simple_prop(
-                "segment_duration_secs",
-                "Segment Duration (s)",
-                "Target duration of each TAMS segment in seconds.",
+                SEGMENT_DURATION_MS,
+                "Segment Duration (ms)",
+                "Segment length in ms (min 200). Boundaries sit on a TAI grid of this length; use a GOP that divides it.",
                 PropertyType::Int,
-                PropertyValue::Int(DEFAULT_SEGMENT_SECS as i64),
+                PropertyValue::Int(DEFAULT_SEGMENT_MS as i64),
             ),
             simple_prop(
                 "tams_source_id",
@@ -1123,7 +1457,9 @@ fn tams_output_definition() -> BlockDefinition {
                 PropertyType::String,
                 PropertyValue::String(String::new()),
             ),
-        ],
+            ],
+        ]
+        .concat(),
         external_pads: ExternalPads {
             inputs: vec![
                 ExternalPad {
@@ -1178,5 +1514,310 @@ fn simple_prop(
         live: false,
         persist: None,
         visible_when: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_with(gateway: &str) -> Result<BlockBuildResult, BlockBuildError> {
+        gst::init().unwrap();
+        let properties: HashMap<String, PropertyValue> = [(
+            "gateway_url".to_string(),
+            PropertyValue::String(gateway.into()),
+        )]
+        .into_iter()
+        .collect();
+        let ctx = BlockBuildContext::new(vec![], "all".to_string());
+        TamsOutputBuilder.build("gw_test", &properties, &ctx)
+    }
+
+    /// A gateway URL the client cannot use fails the build. Before, the
+    /// element setup gave up on it at start, and the appsinks queued the
+    /// whole run in memory.
+    #[test]
+    fn gateway_url_without_scheme_fails_the_build() {
+        for gateway in ["gw.example.com", "ftp://gw.example.com", "not a url"] {
+            match build_with(gateway) {
+                Err(BlockBuildError::InvalidProperty(msg)) => {
+                    assert!(msg.contains("gateway url"), "{gateway}: {msg}")
+                }
+                Err(e) => panic!("{gateway}: unexpected error {e}"),
+                Ok(_) => panic!("{gateway}: built"),
+            }
+        }
+        assert!(build_with("http://gw.example.com/").is_ok());
+    }
+
+    /// Two Strom flows with a TAMS Output of the same block id write to their
+    /// own TAMS flows and segment directories; block ids are only unique
+    /// within a flow. Without a flow id the ids are those of the block id.
+    #[test]
+    fn tams_ids_and_segment_dir_are_per_strom_flow() {
+        gst::init().unwrap();
+        let build = |flow: &str| {
+            let properties: HashMap<String, PropertyValue> = [
+                ("gateway_url", "http://gw.example.com"),
+                ("container", "mpegts"),
+                ("_flow_id", flow),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), PropertyValue::String(v.into())))
+            .collect();
+            let ctx = BlockBuildContext::new(vec![], "all".to_string());
+            TamsOutputBuilder
+                .build("tams", &properties, &ctx)
+                .map(|_| ())
+                .unwrap();
+            std::env::temp_dir().join(format!("strom-tams-{}_tams-mux", flow.replace('-', "_")))
+        };
+        let (a, b) = (
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        let (dir_a, dir_b) = (build(&a), build(&b));
+        assert!(dir_a.is_dir(), "{}", dir_a.display());
+        assert!(dir_b.is_dir(), "{}", dir_b.display());
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
+        let with_flow = |f: &str| {
+            let p = HashMap::from([("_flow_id".to_string(), PropertyValue::String(f.into()))]);
+            derive_id(&tams_id_key("tams", &p), "mux")
+        };
+        assert_ne!(with_flow(&a), with_flow(&b));
+        // No flow id: the block id alone, as before.
+        assert_eq!(
+            derive_id(&tams_id_key("tams", &HashMap::new()), "mux"),
+            Uuid::new_v5(&TAMS_NAMESPACE, b"tams:mux").to_string()
+        );
+    }
+
+    /// The appsinks are bounded and leaky, so nothing piles up in memory
+    /// when no callback drains them.
+    #[test]
+    fn appsinks_are_bounded() {
+        let built = build_with("http://gw.example.com").unwrap();
+        let sinks: Vec<_> = built
+            .elements
+            .iter()
+            .filter(|(_, e)| e.factory().is_some_and(|f| f.name() == "appsink"))
+            .collect();
+        assert!(!sinks.is_empty());
+        for (id, sink) in sinks {
+            let max: u32 = sink.property("max-buffers");
+            assert!(max > 0, "{id}: unbounded");
+            assert!(sink.property::<bool>("drop"), "{id}: not leaky");
+        }
+    }
+
+    #[test]
+    fn segment_length_from_seconds_or_milliseconds() {
+        let props = |pairs: &[(&str, PropertyValue)]| -> HashMap<String, PropertyValue> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect()
+        };
+        const MS: u64 = 1_000_000;
+        // Unset: the default.
+        assert_eq!(segment_duration_ns(&props(&[])), DEFAULT_SEGMENT_MS * MS);
+        assert_eq!(
+            segment_duration_ns(&props(&[("segment_duration_ms", PropertyValue::Int(500))])),
+            500 * MS
+        );
+        // Clamped to the minimum.
+        assert_eq!(
+            segment_duration_ns(&props(&[("segment_duration_ms", PropertyValue::Int(40))])),
+            MIN_SEGMENT_MS * MS
+        );
+        // A legacy seconds value not yet migrated is still read.
+        assert_eq!(
+            segment_duration_ns(&props(&[("segment_duration_secs", PropertyValue::Int(1))])),
+            1000 * MS
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_segment_duration() {
+        let props = |pairs: &[(&str, PropertyValue)]| -> HashMap<String, PropertyValue> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect()
+        };
+        let migrated = |pairs: &[(&str, PropertyValue)]| {
+            let mut p = props(pairs);
+            let change = migrate_legacy_properties(&mut p);
+            assert!(!p.contains_key("segment_duration_secs"));
+            let ms = p
+                .contains_key("segment_duration_ms")
+                .then(|| prop_u64(&p, "segment_duration_ms", u64::MAX));
+            (change.is_some(), ms)
+        };
+        // Seconds only: × 1000.
+        assert_eq!(
+            migrated(&[("segment_duration_secs", PropertyValue::Int(3))]),
+            (true, Some(3000))
+        );
+        // At least 1 s, as the seconds property was.
+        assert_eq!(
+            migrated(&[("segment_duration_secs", PropertyValue::UInt(0))]),
+            (true, Some(1000))
+        );
+        // Both set: milliseconds stay.
+        assert_eq!(
+            migrated(&[
+                ("segment_duration_secs", PropertyValue::Int(2)),
+                ("segment_duration_ms", PropertyValue::Int(500)),
+            ]),
+            (true, Some(500))
+        );
+        // Current flows are left alone.
+        assert_eq!(
+            migrated(&[("segment_duration_ms", PropertyValue::Int(500))]),
+            (false, Some(500))
+        );
+        assert_eq!(migrated(&[]), (false, None));
+    }
+
+    #[test]
+    fn video_essence_parameters_from_caps() {
+        gst::init().unwrap();
+        let caps = gst::Caps::builder("video/x-h264")
+            .field("framerate", gst::Fraction::new(50, 1))
+            .field("width", 1920i32)
+            .field("height", 1080i32)
+            .build();
+        let params = video_essence_parameters(caps.structure(0).unwrap());
+        assert_eq!(
+            serde_json::Value::Object(params),
+            serde_json::json!({
+                "frame_rate": { "numerator": 50, "denominator": 1 },
+                "frame_width": 1920,
+                "frame_height": 1080
+            })
+        );
+        // Variable frame rate and missing fields are left out.
+        let caps = gst::Caps::builder("video/x-h264")
+            .field("framerate", gst::Fraction::new(0, 1))
+            .build();
+        assert!(video_essence_parameters(caps.structure(0).unwrap()).is_empty());
+    }
+
+    /// Caps without a frame rate (an SPS without timing): the rate comes from
+    /// the buffer timestamps, and later caps add to what is known.
+    /// Once the flow has a frame rate, the buffer probe is gone: buffers no
+    /// longer take the detected-essence lock (shared with the uploader).
+    #[test]
+    fn rate_watch_leaves_buffers_alone_once_the_rate_is_known() {
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(
+            "appsrc name=src format=time ! identity name=p ! fakesink name=sink",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let src = pipeline
+            .by_name("src")
+            .unwrap()
+            .downcast::<gstreamer_app::AppSrc>()
+            .unwrap();
+        let detected: SharedDetected = Arc::default();
+        let pad = pipeline.by_name("p").unwrap().static_pad("src").unwrap();
+        watch_video_essence(&pad, detected.clone(), "test");
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let tx = Mutex::new(tx);
+        pipeline
+            .by_name("sink")
+            .unwrap()
+            .static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                let _ = tx.lock().unwrap().send(());
+                gst::PadProbeReturn::Ok
+            });
+        src.set_caps(Some(
+            &gst::Caps::builder("video/x-h264")
+                .field("stream-format", "byte-stream")
+                .field("alignment", "au")
+                .field("framerate", gst::Fraction::new(25, 1))
+                .build(),
+        ));
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let push = |i: u64| {
+            let mut buf = gst::Buffer::with_size(16).unwrap();
+            buf.get_mut()
+                .unwrap()
+                .set_pts(gst::ClockTime::from_nseconds(i * 40_000_000));
+            src.push_buffer(buf).unwrap();
+        };
+        push(0);
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("first buffer");
+        // Hold the lock the old per-buffer probe took on every buffer.
+        let guard = detected.lock().unwrap();
+        for i in 1..5 {
+            push(i);
+        }
+        src.end_of_stream().unwrap();
+        let eos = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(gst::ClockTime::from_seconds(3), &[gst::MessageType::Eos]);
+        drop(guard);
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert!(
+            eos.is_some(),
+            "buffers waited for the detected-essence lock"
+        );
+    }
+
+    #[test]
+    fn frame_rate_from_timestamps_when_caps_have_none() {
+        gst::init().unwrap();
+        let pipeline =
+            gst::parse::launch("appsrc name=src format=time ! identity name=p ! fakesink")
+                .unwrap()
+                .downcast::<gst::Pipeline>()
+                .unwrap();
+        let src = pipeline
+            .by_name("src")
+            .unwrap()
+            .downcast::<gstreamer_app::AppSrc>()
+            .unwrap();
+        let detected: SharedDetected = Arc::default();
+        let pad = pipeline.by_name("p").unwrap().static_pad("src").unwrap();
+        watch_video_essence(&pad, detected.clone(), "test");
+        src.set_caps(Some(
+            &gst::Caps::builder("video/x-h264")
+                .field("stream-format", "byte-stream")
+                .field("alignment", "au")
+                .field("width", 640i32)
+                .field("height", 360i32)
+                .field("framerate", gst::Fraction::new(0, 1))
+                .build(),
+        ));
+        pipeline.set_state(gst::State::Playing).unwrap();
+        for i in 0..40u64 {
+            let mut buf = gst::Buffer::with_size(16).unwrap();
+            buf.get_mut()
+                .unwrap()
+                .set_pts(gst::ClockTime::from_nseconds(i * 1_000_000_000 / 30));
+            src.push_buffer(buf).unwrap();
+        }
+        src.end_of_stream().unwrap();
+        let bus = pipeline.bus().unwrap();
+        bus.timed_pop_filtered(gst::ClockTime::from_seconds(5), &[gst::MessageType::Eos])
+            .expect("eos");
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert_eq!(
+            serde_json::Value::Object(detected.lock().unwrap().essence_parameters.clone()),
+            serde_json::json!({
+                "frame_rate": { "numerator": 30, "denominator": 1 },
+                "frame_width": 640,
+                "frame_height": 360
+            })
+        );
     }
 }

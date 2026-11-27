@@ -6,11 +6,15 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ### Upgrade notes
 - Video Encoder: scheduled keyframe requests are no longer held back by the 1 s floor. An encoder that feeds a recorder which asks for keyframes at given times (TAMS Output, a segmenting recorder) now makes every keyframe it is asked for, so such a flow can get more keyframes than before. WebRTC PLIs are limited as before
+- TAMS Output: the TAMS source and flow ids now derive from the Strom flow id and the block id, not the block id alone, so a running TAMS Output continues its recording in new TAMS flows after the upgrade. The earlier flows stay in the store as they are
+- TAMS Output: parked segments over `STROM_TAMS_PARKED_MAX_MB` or `STROM_TAMS_PARKED_MAX_SEGMENTS` are deleted, oldest first, on the first sweep after an upgrade
+- TAMS Output: saved flows and flows sent through the API with `segment_duration_secs` are rewritten to `segment_duration_ms` (seconds × 1000) when they are loaded or saved, with a log line per block
 
 ### Added
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000, at most 60000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
 - API: `GET /api/flows/{flow_id}/blocks/{block_id}/pgm-endpoint` returns the WHEP endpoint fed by a vision mixer's PGM output, like `multiview-endpoint`
 - Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture. Branches of one flow stamp equal running times alike, also after a clock jump. A capture time set upstream wins, converted to the block's timescale. With burn-in, GPU memory and any raw pixel format are adapted, and encoded video fails the flow with an error that says so. In a non-live flow the preroll frame is not stamped
+- TAMS Output: segments are cut on a TAI grid, and `segment_duration_ms` allows segments shorter than a second. The block asks upstream for a keyframe on each grid point, warns when a boundary still leaves the grid, and writes video `essence_parameters` on its flows
 
 ### Fixed
 - WHEP Output: a viewer whose ICE gathering reports `complete` a second time no longer aborts Strom. The WHEP signaller in gst-plugin-webrtc 0.15 panics on it inside a GObject callback; seen when viewers connect and drop within a second
@@ -20,15 +24,26 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - OSC: a SAT is refreshed before its own `exp` when that comes sooner than the usual 50 minutes, and never after it
 - Vision mixer: `pgm-endpoint` and `multiview-endpoint` find a WHEP output behind a pad linked more than once or a block with several outputs (breadth first, not only the first link)
 - Vision mixer: the WHEP search stops at blocks that combine inputs (compositor, audio mixer/router, vision mixer), follows the matching output of a block with several inputs, and returns no endpoint while the nearest WHEP output is not started
+- TAMS Output: the last segment of a run ends at its last frame, the open segment is finished when the flow stops, the mapping from running time to TAI is re-anchored after a sleep or clock jump, and the frame rate and size written to the store follow the flow
+- TAMS Output: segments are parked on disk instead of dropped when the store is unreachable, a channel is full, or the store answers 401/403, and are uploaded later without holding back new segments. A 404 for the flow creates the flow again, registration is idempotent, and slow clock drift no longer re-anchors the TAI mapping
+- OSC: a request that gets 401 is retried once with a new SAT
+- TAMS Output: what is parked on disk is capped per flow directory, by `STROM_TAMS_PARKED_MAX_MB` (default 8192) and `STROM_TAMS_PARKED_MAX_SEGMENTS` (default 20000); past the cap the oldest parked segments are deleted, with an error. A parked segment that keeps failing waits longer before its next try (backoff per segment), so it no longer holds back the others
+- TAMS Output: two Strom flows with a TAMS Output of the same block id wrote to the same TAMS flows and shared one directory of segment files. The TAMS ids and the directory now derive from the Strom flow id and the block id
+- TAMS Output: a parked segment's `.meta` sidecar is JSON and is written to a temporary file and renamed, so a sweep never reads one half written. Sidecars in the old format are still read
 
 ### Changed
 - Video Encoder: the keyframe-request floor applies only to requests for a keyframe now (a WebRTC viewer's PLI). Requests for a keyframe at a given running time (TAMS Output's grid, `splitmuxsink` in a segmenting recorder) always pass. A request for a keyframe now that comes within the floor is held back and sent when the floor runs out; a keyframe forced by a scheduled request also counts towards the floor. The GStreamer base-class property `min-force-key-unit-interval` delayed both kinds, which moved TAMS Output's segment boundaries off its grid
 - API: `multiview-endpoint` and `pgm-endpoint` respond with `WhepEndpointResponse` (same JSON shape; `MultiviewEndpointResponse` remains as an alias)
+- TAMS Output: `segment_duration_ms` (default 2000, at least 200) replaces `segment_duration_secs`
+- TAMS Output cuts segments itself instead of with `splitmuxsink`, and registers each segment as soon as the frame after it arrives instead of one GOP later
+- TAMS Output: segment files carry a per-run id in their name (`seg_<run>_<n>`), so a new run in the same directory never overwrites segments an earlier run left parked
 
 ### Documentation
 - UPSTREAM_NOTES.md: the WHEP signaller's panic on a second ICE `complete`
 - UPSTREAM_NOTES.md: `min-force-key-unit-interval` delaying scheduled requests
 - UPSTREAM_NOTES.md: `GstSystemClock` TAI on macOS
+- BLOCK_GUIDELINES.md: a block that writes files through a muxer finishes the open file when its flow stops
+- UPSTREAM_NOTES.md: `splitmuxsink` closing a fragment one GOP late, and `appsrc` linking to `mp4mux`'s audio pad
 
 ---
 

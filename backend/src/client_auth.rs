@@ -58,4 +58,101 @@ impl AuthMethod {
             }
         })
     }
+
+    /// The service rejected the credentials `apply` attached (HTTP 401). Drop
+    /// any cached token so the next `apply` gets a new one, and return whether
+    /// retrying the request once could help. Only schemes with a cached,
+    /// refreshable token (OSC) say yes; a static token would fail the same way.
+    pub async fn invalidate_after_rejection(&self) -> bool {
+        match self {
+            AuthMethod::None | AuthMethod::Bearer(_) => false,
+            AuthMethod::Osc {
+                provider,
+                service_id,
+                credential_key,
+            } => provider.invalidate(credential_key, service_id).await,
+        }
+    }
+}
+
+/// Whether two URLs have the same origin (scheme, host and port).
+pub fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+    a.origin() == b.origin()
+}
+
+/// Redirect policy for requests that carry credentials: follow a redirect only
+/// within the origin of the first request (at most 10 hops). reqwest strips the
+/// standard `Authorization`/`Cookie` headers on a cross-origin redirect, but not
+/// a custom header a future scheme may use, and the redirect target still sees
+/// the request; refusing to leave the origin keeps credentials with the service
+/// they were meant for. A refused redirect comes back as the 3xx response.
+pub fn same_origin_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let leaves_origin = attempt
+            .previous()
+            .first()
+            .is_some_and(|first| !same_origin(first, attempt.url()));
+        if leaves_origin || attempt.previous().len() >= 10 {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
+/// A URL for logs: scheme, host, port and path, without the query string or
+/// user info. Presigned object URLs carry their signature in the query.
+pub fn redact_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(mut u) => {
+            u.set_query(None);
+            u.set_fragment(None);
+            let _ = u.set_username("");
+            let _ = u.set_password(None);
+            u.to_string()
+        }
+        Err(_) => url.split(['?', '#']).next().unwrap_or_default().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn url(s: &str) -> reqwest::Url {
+        reqwest::Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn origins() {
+        assert!(same_origin(
+            &url("https://gw.example.com/a"),
+            &url("https://gw.example.com:443/b?x=1")
+        ));
+        assert!(!same_origin(
+            &url("https://gw.example.com/a"),
+            &url("http://gw.example.com/a")
+        ));
+        assert!(!same_origin(
+            &url("https://gw.example.com/a"),
+            &url("https://gw.example.com:8443/a")
+        ));
+        assert!(!same_origin(
+            &url("https://gw.example.com/a"),
+            &url("https://evil.example.net/a")
+        ));
+    }
+
+    #[test]
+    fn redaction_drops_query_and_user_info() {
+        assert_eq!(
+            redact_url("https://s3.example.com/b/o.ts?X-Amz-Signature=abc&X-Amz-Credential=k"),
+            "https://s3.example.com/b/o.ts"
+        );
+        assert_eq!(
+            redact_url("https://user:pw@s3.example.com/b/o.ts#f"),
+            "https://s3.example.com/b/o.ts"
+        );
+        assert_eq!(redact_url("not a url?secret=1"), "not a url");
+    }
 }
