@@ -54,6 +54,27 @@ impl std::fmt::Display for HttpStatusError {
 
 impl std::error::Error for HttpStatusError {}
 
+/// A segment registration answered 200: TAMS's partial failure, with the
+/// segments the store refused in `failed_segments`. Sending the same request
+/// again fails the same way.
+#[derive(Debug)]
+pub struct SegmentsRejected {
+    pub context: String,
+    pub body: String,
+}
+
+impl std::fmt::Display for SegmentsRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: segment registration failed: {}",
+            self.context, self.body
+        )
+    }
+}
+
+impl std::error::Error for SegmentsRejected {}
+
 /// Longest response body kept in an error. Error bodies are logged, and the
 /// server that sent them is not always trusted.
 const MAX_ERROR_BODY_CHARS: usize = 300;
@@ -492,7 +513,19 @@ impl TamsClient {
         // 201 = all registered; 200 = partial failure (failed_segments listed).
         if status.as_u16() == 200 {
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("segment registration partially failed: {}", text));
+            let failed = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("failed_segments").and_then(|f| f.as_array()).cloned())
+                .unwrap_or_default();
+            if failed.is_empty() {
+                return Ok(());
+            }
+            let mut body = text;
+            if let Some((cut, _)) = body.char_indices().nth(MAX_ERROR_BODY_CHARS) {
+                body.truncate(cut);
+                body.push_str("...");
+            }
+            return Err(SegmentsRejected { context, body }.into());
         }
         if !status.is_success() {
             return Err(status_error(resp, context).await);
