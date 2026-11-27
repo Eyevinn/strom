@@ -481,7 +481,9 @@ impl Parking {
     /// limits: past the cap, or short of free space, the oldest parked
     /// segments of the whole server are deleted first; if that is not
     /// enough, nothing is written and [`ParkError::Refused`] is returned. The
-    /// caller then drops the segment. Blocking.
+    /// caller then drops the segment. A segment the index holds already (a
+    /// drain retry that failed) takes no new space: neither limit is checked
+    /// and nothing is deleted for it. Blocking.
     pub fn park(
         &self,
         segment: &Path,
@@ -491,10 +493,30 @@ impl Parking {
         let bytes = std::fs::metadata(segment).map_err(ParkError::Io)?.len();
         let mut st = self.lock();
         self.ensure_scanned(&mut st);
+        if st.entries.contains_key(segment) {
+            // Parked again (a drain retry that failed): it is on disk and
+            // counted already, so it takes no new space. Neither limit is
+            // checked, or a volume filled by something else would delete the
+            // older backlog and then this segment too.
+            if std::fs::read_to_string(crate::tams::uploader::sidecar_path(segment))
+                .ok()
+                .as_deref()
+                != Some(sidecar_contents)
+            {
+                write_sidecar(segment, sidecar_contents)?;
+            }
+            st.insert(
+                segment.to_path_buf(),
+                Entry {
+                    start_ns,
+                    bytes,
+                    seen: Instant::now(),
+                },
+            );
+            return Ok(());
+        }
         let space = self.space(&mut st);
         let limits = self.limits(space);
-        // A segment parked again (a retry that failed) is counted once.
-        st.remove(segment);
 
         let freed = self.make_room(&mut st, segment, bytes, space, &limits);
         if let Some((_, Some(s))) = st.space.as_mut() {
@@ -523,14 +545,7 @@ impl Parking {
             }
         }
 
-        let sidecar = crate::tams::uploader::sidecar_path(segment);
-        let tmp = crate::tams::uploader::sidecar_tmp_path(segment);
-        let written =
-            std::fs::write(&tmp, sidecar_contents).and_then(|()| std::fs::rename(&tmp, &sidecar));
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(ParkError::Io(e));
-        }
+        write_sidecar(segment, sidecar_contents)?;
         st.insert(
             segment.to_path_buf(),
             Entry {
@@ -711,6 +726,18 @@ impl Parking {
     }
 }
 
+/// Write the sidecar of `segment` through a temporary file renamed into place.
+fn write_sidecar(segment: &Path, contents: &str) -> Result<(), ParkError> {
+    let sidecar = crate::tams::uploader::sidecar_path(segment);
+    let tmp = crate::tams::uploader::sidecar_tmp_path(segment);
+    let written = std::fs::write(&tmp, contents).and_then(|()| std::fs::rename(&tmp, &sidecar));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(ParkError::Io(e));
+    }
+    Ok(())
+}
+
 fn has_sidecar(dir: &Path) -> bool {
     std::fs::read_dir(dir).is_ok_and(|rd| {
         rd.filter_map(|e| e.ok())
@@ -855,6 +882,33 @@ mod tests {
         assert!(!b20.exists() && !a30.exists());
         assert!(!crate::tams::uploader::sidecar_path(&b40).exists());
         assert_eq!(p.total_bytes(), 0);
+    }
+
+    /// A segment parked again (a drain retry that failed) is on disk and
+    /// counted already: short of free space, it deletes no older segment and
+    /// is not refused.
+    #[test]
+    fn tams_park_again_needs_no_new_space() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let limits = ParkLimits {
+            max_total_bytes: u64::MAX,
+            min_free_bytes: 2_000,
+        };
+        let space = fake(10_000);
+        let p = Parking::new(root.into(), Some(limits), Box::new(space.clone()));
+        let (a10, _) = park_one(&p, root, "a", 10);
+        let (b20, _) = park_one(&p, root, "b", 20);
+
+        // The volume fills with something else.
+        space.0.lock().unwrap().free = 500;
+        std::thread::sleep(SPACE_CACHE);
+        let start_ns = 20 * 1_000_000_000;
+        let contents = format!("{} {}", start_ns, start_ns + 1_000_000_000);
+        let r = p.park(&b20, start_ns, &contents);
+        assert!(r.is_ok(), "{:?}", r);
+        assert!(parked(&a10) && parked(&b20));
+        assert_eq!(p.total_bytes(), 200);
     }
 
     #[test]
