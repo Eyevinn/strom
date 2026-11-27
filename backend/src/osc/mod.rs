@@ -64,40 +64,41 @@ fn jwt_exp(token: &str) -> Option<SystemTime> {
     jwt_time(token, "exp")
 }
 
-/// Never schedule a refresh sooner than this after a fetch. A host clock that
-/// is ahead of the token server's would otherwise put `exp` in the past, and
-/// every request would mint a new SAT. A SAT that really is rejected is
-/// dropped on the 401 (see [`SatProvider::invalidate`]).
+/// When a SAT seems to have expired already at the moment it was fetched, keep
+/// it this long anyway. Only a host clock ahead of the token server's does that
+/// (the server just minted it), and without the floor every request would mint
+/// a new SAT. A SAT that really is rejected is dropped on the 401 (see
+/// [`SatProvider::invalidate`]).
 const SAT_MIN_REFRESH: Duration = Duration::from_secs(60);
 
-/// When a SAT fetched at `fetched_at` should be refreshed: after
-/// [`SAT_REFRESH_AFTER`], or [`SAT_EXPIRY_MARGIN`] before its own expiry,
-/// whichever comes first, but no sooner than [`SAT_MIN_REFRESH`].
+/// When a SAT fetched at `fetched_at` should be refreshed. Never later than
+/// [`SAT_REFRESH_AFTER`], and never after the SAT's own expiry.
 ///
 /// `exp` is on the token server's clock and `fetched_at` on ours, so the two
-/// are not compared directly. With an `iat` claim the token's lifetime
-/// (`exp - iat`, both on the server's clock) is applied to `fetched_at`. Without
-/// one, `exp` is compared with our clock, and the floor bounds what a skewed
-/// clock can do.
+/// are not compared directly when they need not be:
+/// - With an `iat` claim the lifetime `exp - iat` (both on the server's clock)
+///   is applied to `fetched_at`, and the SAT is refreshed [`SAT_EXPIRY_MARGIN`]
+///   before it ends, or halfway through a lifetime too short for the margin.
+/// - Without one, the time left is `exp` minus our clock, and the SAT is
+///   refreshed halfway through it. A clock behind the server's makes that look
+///   longer than it is; halfway still comes before the real expiry for any
+///   skew smaller than the lifetime.
+/// - An `exp` already past by our clock (no `iat`) means our clock is ahead:
+///   [`SAT_MIN_REFRESH`].
 fn sat_refresh_at(token: &str, fetched_at: SystemTime) -> SystemTime {
     let by_age = fetched_at + SAT_REFRESH_AFTER;
-    let floor = fetched_at + SAT_MIN_REFRESH;
     let Some(exp) = jwt_time(token, "exp") else {
         return by_age;
     };
-    // The claims come from the token server: an absurd lifetime that does not
-    // fit in a `SystemTime` refreshes by age instead of panicking.
-    let expires_at = match jwt_time(token, "iat").and_then(|iat| exp.duration_since(iat).ok()) {
-        Some(lifetime) => match fetched_at.checked_add(lifetime) {
-            Some(t) => t,
-            None => return by_age,
+    let lifetime = jwt_time(token, "iat").and_then(|iat| exp.duration_since(iat).ok());
+    let refresh_in = match lifetime {
+        Some(lifetime) => lifetime.saturating_sub(SAT_EXPIRY_MARGIN).max(lifetime / 2),
+        None => match exp.duration_since(fetched_at) {
+            Ok(left) if !left.is_zero() => left / 2,
+            _ => SAT_MIN_REFRESH,
         },
-        None => exp,
     };
-    match expires_at.checked_sub(SAT_EXPIRY_MARGIN) {
-        Some(by_exp) => by_age.min(by_exp).max(floor),
-        None => floor,
-    }
+    fetched_at + refresh_in.min(SAT_REFRESH_AFTER)
 }
 
 /// Whether a cached SAT is still usable at wall-clock `now`. A clock that
@@ -472,7 +473,8 @@ mod tests {
         assert!(p.configured_keys().is_empty());
     }
 
-    /// A JWT-shaped token with the given claims (unsigned; only `exp` is read).
+    /// A JWT-shaped token with the given claims, unsigned. `sat_refresh_at`
+    /// reads its `exp` and `iat`.
     fn jwt(claims: serde_json::Value) -> String {
         use base64::Engine;
         let enc = |v: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
@@ -507,12 +509,12 @@ mod tests {
     #[test]
     fn sat_refresh_honours_an_earlier_exp_claim() {
         let t0 = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
-        // exp in 20 minutes: refresh 5 minutes before it, not after 50.
+        // exp in 20 minutes, no iat: refresh halfway, not after 50.
         let short = jwt(serde_json::json!({ "exp": 1_800_000_000u64 + 20 * 60 }));
         let sat = cached(&short, t0);
-        assert_eq!(sat.refresh_at, t0 + Duration::from_secs(15 * 60));
-        assert!(sat_is_fresh(&sat, t0 + Duration::from_secs(14 * 60)));
-        assert!(!sat_is_fresh(&sat, t0 + Duration::from_secs(16 * 60)));
+        assert_eq!(sat.refresh_at, t0 + Duration::from_secs(10 * 60));
+        assert!(sat_is_fresh(&sat, t0 + Duration::from_secs(9 * 60)));
+        assert!(!sat_is_fresh(&sat, t0 + Duration::from_secs(11 * 60)));
         // exp further out than the age limit: the age limit wins.
         let long = jwt(serde_json::json!({ "exp": 1_800_000_000u64 + 3 * 3600 }));
         assert_eq!(cached(&long, t0).refresh_at, t0 + SAT_REFRESH_AFTER);
@@ -543,6 +545,39 @@ mod tests {
         let sat = cached(&tok, t0);
         assert_eq!(sat.refresh_at, t0 + SAT_MIN_REFRESH);
         assert!(sat_is_fresh(&sat, t0 + Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn a_short_lived_sat_is_refreshed_before_it_expires() {
+        let t0 = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = 1_800_000_000u64;
+        // The review's case: a 45 s SAT was kept until a 60 s floor, so
+        // requests 45-60 s after each mint went out with an expired SAT.
+        for tok in [
+            jwt(serde_json::json!({ "iat": now, "exp": now + 45 })),
+            jwt(serde_json::json!({ "exp": now + 45 })),
+        ] {
+            let sat = cached(&tok, t0);
+            assert!(sat.refresh_at < t0 + Duration::from_secs(45), "{tok}");
+            assert!(sat.refresh_at > t0, "{tok}");
+            assert!(!sat_is_fresh(&sat, t0 + Duration::from_secs(45)), "{tok}");
+        }
+        // A lifetime just above the margin: halfway, not 5 minutes before.
+        let tok = jwt(serde_json::json!({ "iat": now, "exp": now + 6 * 60 }));
+        assert_eq!(
+            cached(&tok, t0).refresh_at,
+            t0 + Duration::from_secs(3 * 60)
+        );
+    }
+
+    #[test]
+    fn a_host_clock_behind_the_server_does_not_outlive_the_sat() {
+        // 20 min SATs without iat, host 10 min behind the token server: by our
+        // clock exp is 30 min away, but the SAT dies 20 min after the fetch.
+        let t0 = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let server_now = 1_800_000_000u64 + 10 * 60;
+        let tok = jwt(serde_json::json!({ "exp": server_now + 20 * 60 }));
+        assert!(cached(&tok, t0).refresh_at < t0 + Duration::from_secs(20 * 60));
     }
 
     #[test]

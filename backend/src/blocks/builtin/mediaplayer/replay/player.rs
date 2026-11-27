@@ -1092,7 +1092,7 @@ fn read_code_utc_us(buf: &gst::Buffer, info: &gst_video::VideoInfo) -> Option<u6
     let frame = gst_video::VideoFrameRef::from_buffer_ref_readable(buf.as_ref(), info).ok()?;
     let y = frame.plane_data(0).ok()?;
     let stride = info.stride()[0] as usize;
-    let l = Layout::for_frame(info.width(), info.height());
+    let l = Layout::for_frame(info.width(), info.height())?;
     let row = (l.code_y + l.cell_h / 2) as usize;
     let cells: Vec<bool> = (0..CODE_CELLS)
         .map(|c| {
