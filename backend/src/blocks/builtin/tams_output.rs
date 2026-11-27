@@ -1685,28 +1685,37 @@ fn audio_essence_parameters(
     let mpegversion = caps.get::<i32>("mpegversion").unwrap_or(0);
     match caps.name().as_str() {
         "audio/mpeg" if mpegversion == 1 => {
-            // Layer I frames are 384 samples, layers II and III 1152.
-            let frame = match caps.get::<i32>("layer") {
-                Ok(1) => 384,
-                _ => 1152,
+            // Layer I frames are 384 samples and layer II 1152. Layer III is
+            // 1152 in MPEG-1 but 576 in MPEG-2 and 2.5 (the low sample rates,
+            // `mpegaudioversion` 2 and 3 in mpegaudioparse's caps; without
+            // it, a rate under 32 kHz, which MPEG-1 does not have).
+            let lsf = match caps.get::<i32>("mpegaudioversion") {
+                Ok(v) => v >= 2,
+                Err(_) => caps.get::<i32>("rate").is_ok_and(|r| r > 0 && r < 32000),
             };
-            codec.insert("coded_frame_size".into(), frame.into());
+            let frame = match caps.get::<i32>("layer") {
+                Ok(1) => Some(384),
+                Ok(2) => Some(1152),
+                Ok(3) => Some(if lsf { 576 } else { 1152 }),
+                _ => None,
+            };
+            if let Some(frame) = frame {
+                codec.insert("coded_frame_size".into(), frame.into());
+            }
         }
         "audio/mpeg" => {
+            // aacparse names only object types 1-4 (gst_codec_utils_aac_get_profile);
+            // HE-AAC with implicit SBR shows as `lc`, at the core rate.
             let oti = match caps.get::<&str>("profile") {
                 Ok("main") => Some(1),
                 Ok("lc") => Some(2),
                 Ok("ssr") => Some(3),
                 Ok("ltp") => Some(4),
-                Ok("he-aac") => Some(5),
-                Ok("he-aac-v2") => Some(29),
                 _ => None,
             };
             if let Some(oti) = oti {
                 codec.insert("mp4_oti".into(), oti.into());
-            }
-            // 1024 samples per frame, except HE-AAC (2048 at the output rate).
-            if oti.is_some_and(|o| o <= 4) {
+                // 1024 samples per frame for all four.
                 codec.insert("coded_frame_size".into(), 1024.into());
             }
         }
@@ -2057,7 +2066,7 @@ mod tests {
                 "codec_parameters": { "coded_frame_size": 1024, "mp4_oti": 2 }
             })
         );
-        // HE-AAC: object type, but no fixed 1024-sample frame.
+        // A profile aacparse does not name: no object type, no frame size.
         assert_eq!(
             params(
                 gst::Caps::builder("audio/mpeg")
@@ -2067,24 +2076,30 @@ mod tests {
                     .field("profile", "he-aac")
                     .build()
             ),
-            serde_json::json!({
-                "sample_rate": 48000,
-                "channels": 2,
-                "codec_parameters": { "mp4_oti": 5 }
-            })
+            serde_json::json!({ "sample_rate": 48000, "channels": 2 })
         );
-        // MPEG-1 layer II and AC-3.
-        assert_eq!(
-            params(
-                gst::Caps::builder("audio/mpeg")
-                    .field("mpegversion", 1i32)
-                    .field("layer", 2i32)
-                    .field("rate", 48000i32)
-                    .field("channels", 2i32)
-                    .build()
-            )["codec_parameters"]["coded_frame_size"],
-            1152
-        );
+        // MPEG audio: layer I 384, layer II 1152, layer III 1152 in MPEG-1
+        // and 576 in MPEG-2/2.5 (by mpegaudioversion, else by rate).
+        let frame = |layer: i32, version: Option<i32>, rate: i32| {
+            let mut caps = gst::Caps::builder("audio/mpeg")
+                .field("mpegversion", 1i32)
+                .field("layer", layer)
+                .field("rate", rate)
+                .field("channels", 2i32);
+            if let Some(v) = version {
+                caps = caps.field("mpegaudioversion", v);
+            }
+            params(caps.build())["codec_parameters"]["coded_frame_size"].clone()
+        };
+        assert_eq!(frame(1, Some(1), 48000), 384);
+        assert_eq!(frame(2, Some(1), 48000), 1152);
+        assert_eq!(frame(2, Some(2), 24000), 1152);
+        assert_eq!(frame(3, Some(1), 48000), 1152);
+        assert_eq!(frame(3, Some(2), 24000), 576);
+        assert_eq!(frame(3, Some(3), 12000), 576);
+        assert_eq!(frame(3, None, 44100), 1152);
+        assert_eq!(frame(3, None, 22050), 576);
+        // AC-3.
         assert_eq!(
             params(
                 gst::Caps::builder("audio/x-ac3")
