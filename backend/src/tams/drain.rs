@@ -24,7 +24,10 @@
 //! - a gateway that fails backs off, exponentially up to
 //!   [`MAX_GATEWAY_BACKOFF`] (one failure per job), and gets no new job
 //!   meanwhile; other gateways go on. A segment that fails waits out its own
-//!   backoff.
+//!   backoff. Refused credentials (401/403) are the flow's, not the gateway's:
+//!   that flow directory alone backs off the same way
+//!   ([`DrainState::WaitingForCredentials`]), and the gateway's other flows go
+//!   on.
 //!
 //! Each flow directory holds a `park.json` [`Manifest`], written by the live
 //! uploader, with what is needed to register a segment when no block runs:
@@ -451,7 +454,8 @@ impl Drop for AbortOnDrop {
 pub enum DrainState {
     /// Uploading.
     Draining,
-    /// No credentials for the gateway yet.
+    /// No credentials for the gateway yet, or the gateway refused them;
+    /// waiting out the flow's backoff.
     WaitingForCredentials,
     /// The gateway failed; waiting out its backoff.
     GatewayFailing,
@@ -565,6 +569,14 @@ struct GatewayState {
     waiting: Option<String>,
 }
 
+/// A flow directory whose credentials the gateway refused: no new job until
+/// `until`, unless its credentials change.
+struct Refused {
+    failures: u32,
+    until: Instant,
+    auth: AuthKey,
+}
+
 /// Wait before a gateway that failed `failures` times in a row is tried again:
 /// 2 s, doubling, up to [`MAX_GATEWAY_BACKOFF`].
 fn gateway_backoff(failures: u32) -> Duration {
@@ -595,6 +607,9 @@ struct JobDone {
     gateway: String,
     flow: DrainFlow,
     outcomes: Vec<(PathBuf, Outcome)>,
+    /// The job's segments were parked because the gateway refused the flow's
+    /// credentials.
+    auth_refused: bool,
 }
 
 /// One flow directory's segments, uploaded together by one task (see
@@ -633,6 +648,7 @@ impl Job {
             })
             .collect();
         let started = Instant::now();
+        let mut auth_refused = false;
         let outcomes = match flow.client(auth) {
             Err(e) => {
                 warn!(
@@ -655,10 +671,12 @@ impl Job {
                     failing,
                     next_probe: None,
                     auth_reported_at: flow.auth_reported_at,
+                    auth_refused: false,
                     manifest: None,
                 };
                 let outcomes = upload_batch(&mut ctx, &frags, RECOVERY_ATTEMPTS).await;
                 flow.auth_reported_at = ctx.auth_reported_at;
+                auth_refused = ctx.auth_refused;
                 outcomes
             }
         };
@@ -687,6 +705,7 @@ impl Job {
             gateway,
             flow,
             outcomes: frags.into_iter().map(|f| f.path).zip(outcomes).collect(),
+            auth_refused,
         }
     }
 }
@@ -712,6 +731,8 @@ pub struct Drainer {
     /// Flows not in a job right now.
     flows: HashMap<PathBuf, DrainFlow>,
     gateways: HashMap<String, GatewayState>,
+    /// Flow directories whose credentials the gateway refused.
+    refused: HashMap<PathBuf, Refused>,
     retries: HashMap<PathBuf, Retry>,
     /// The directory last served, for the round-robin.
     cursor: Option<PathBuf>,
@@ -744,6 +765,7 @@ impl Drainer {
             events,
             flows: HashMap::new(),
             gateways: HashMap::new(),
+            refused: HashMap::new(),
             retries: HashMap::new(),
             cursor: None,
             states: HashMap::new(),
@@ -917,6 +939,7 @@ impl Drainer {
             .cloned()
             .collect();
         for dir in gone {
+            self.refused.remove(&dir);
             self.clear_state(&dir);
         }
         if dirs.is_empty() {
@@ -982,6 +1005,15 @@ impl Drainer {
             if let Some(g) = self.gateways.get_mut(&gateway) {
                 if g.waiting.take().is_some() {
                     info!("TAMS: credentials for {} found; uploading", gateway);
+                }
+            }
+            if let Some(r) = self.refused.get(&dir) {
+                // Refused credentials back off this flow only; changed ones
+                // are tried at once.
+                if r.until > now && r.auth == AuthKey::of(&auth) {
+                    due(r.until);
+                    self.set_state(&dir, DrainState::WaitingForCredentials);
+                    continue;
                 }
             }
             let target = manifest.target();
@@ -1163,6 +1195,7 @@ impl Drainer {
             gateway,
             flow,
             outcomes,
+            auth_refused,
         } = done;
         self.flows.entry(dir.clone()).or_insert(flow);
         let now = Instant::now();
@@ -1202,6 +1235,36 @@ impl Drainer {
                 }
             }
         }
+        // Refused credentials are the flow's own (a block's token, or the PAT
+        // of its credential key): this directory backs off, the gateway's
+        // other flows go on.
+        if parked && auth_refused {
+            let auth = flow_auth_key(&self.flows, &dir);
+            let r = self.refused.entry(dir.clone()).or_insert(Refused {
+                failures: 0,
+                until: now,
+                auth: auth.clone(),
+            });
+            r.failures = if r.auth == auth { r.failures + 1 } else { 1 };
+            r.auth = auth;
+            let wait = gateway_backoff(r.failures);
+            r.until = now + wait;
+            debug!(
+                "TAMS: {} refused the credentials of {} ({} in a row); next try in {} s",
+                gateway,
+                dir.display(),
+                r.failures,
+                wait.as_secs()
+            );
+            self.set_state(&dir, DrainState::WaitingForCredentials);
+            if registered {
+                self.gateway_ok(&gateway);
+            }
+            return;
+        }
+        if registered {
+            self.refused.remove(&dir);
+        }
         // The gateway counts one failure per job, however many segments it
         // held; its other jobs in flight end as they will, and no new one
         // starts while it backs off.
@@ -1218,12 +1281,25 @@ impl Drainer {
             );
             self.set_state(&dir, DrainState::GatewayFailing);
         } else if registered {
-            if let Some(g) = self.gateways.get_mut(&gateway) {
-                g.failures = 0;
-                g.until = None;
-            }
+            self.gateway_ok(&gateway);
         }
     }
+
+    /// `gateway` took a segment: its backoff is over.
+    fn gateway_ok(&mut self, gateway: &str) {
+        if let Some(g) = self.gateways.get_mut(gateway) {
+            g.failures = 0;
+            g.until = None;
+        }
+    }
+}
+
+/// The credentials the client of `dir`'s flow was built with.
+fn flow_auth_key(flows: &HashMap<PathBuf, DrainFlow>, dir: &Path) -> AuthKey {
+    flows
+        .get(dir)
+        .and_then(|f| f.client.as_ref())
+        .map_or(AuthKey::None, |(k, _)| k.clone())
 }
 
 /// Most parked segments uploaded at once, across all flows: each upload is a
@@ -1280,6 +1356,11 @@ mod tests {
         latency: Duration,
         /// Storage allocations still to fail with a 500.
         fail: Arc<AtomicUsize>,
+        /// A flow whose storage allocations are refused with a 401, after
+        /// `refuse_delay`.
+        refuse: Arc<Mutex<Option<String>>>,
+        refuse_delay: Duration,
+        refused: Arc<AtomicUsize>,
         /// Storage requests, objects handed out, segment listings.
         allocations: Arc<AtomicUsize>,
         allocated: Arc<AtomicUsize>,
@@ -1310,9 +1391,16 @@ mod tests {
             .route(
                 "/flows/{id}/storage",
                 post(
-                    |State(s): State<Store>, Json(body): Json<serde_json::Value>| async move {
+                    |State(s): State<Store>,
+                     P(id): P<String>,
+                     Json(body): Json<serde_json::Value>| async move {
                         use axum::response::IntoResponse;
                         tokio::time::sleep(s.latency).await;
+                        if s.refuse.lock().unwrap().as_deref() == Some(id.as_str()) {
+                            s.refused.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(s.refuse_delay).await;
+                            return StatusCode::UNAUTHORIZED.into_response();
+                        }
                         if s.fail
                             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                             .is_ok()
@@ -1943,6 +2031,61 @@ mod tests {
         let tried = bad.fail.load(Ordering::SeqCst);
         assert!(matches!(d.step().await, Step::Idle(w) if w > Duration::ZERO));
         assert_eq!(bad.fail.load(Ordering::SeqCst), tried);
+    }
+
+    /// Credentials are per flow: a flow whose credentials the gateway refuses
+    /// backs off alone, and another flow on the same gateway goes on, even
+    /// when the refused job ends last.
+    #[tokio::test]
+    async fn tams_drain_refused_credentials_do_not_block_the_gateway() {
+        let store = Store {
+            refuse_delay: Duration::from_millis(300),
+            ..Default::default()
+        };
+        *store.refuse.lock().unwrap() = Some("fa".into());
+        let gw = start_store(store.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        let m = manifest(&root, &gw, "fa", AuthRef::None);
+        manifest(&root, &gw, "fb", AuthRef::None);
+        let a = park(p, &root, &gw, "fa", 10);
+        for s in 10..12 {
+            park(p, &root, &gw, "fb", s);
+        }
+        let mut d = drainer_n(p, leak(LiveBusy::new()), 8);
+        assert_eq!(d.step().await, Step::Tried);
+        assert_eq!(store.registered.lock().unwrap().len(), 2);
+        assert!(a.exists());
+        assert_eq!(
+            d.states[&root.join("fa")],
+            DrainState::WaitingForCredentials
+        );
+        // The gateway is not to blame.
+        let g = d.gateways.get(&m.gateway);
+        assert!(g.is_none_or(|g| g.failures == 0 && g.until.is_none()));
+
+        // B's new backlog goes up at once; A waits out its own backoff.
+        for s in 12..14 {
+            park(p, &root, &gw, "fb", s);
+        }
+        park(p, &root, &gw, "fa", 11);
+        let tried = store.refused.load(Ordering::SeqCst);
+        assert_eq!(d.step().await, Step::Tried);
+        assert_eq!(store.registered.lock().unwrap().len(), 4);
+        assert_eq!(store.refused.load(Ordering::SeqCst), tried);
+        assert_eq!(
+            d.states[&root.join("fa")],
+            DrainState::WaitingForCredentials
+        );
+
+        // Once the credentials are accepted, A goes up and its backoff ends.
+        *store.refuse.lock().unwrap() = None;
+        d.refused.get_mut(&root.join("fa")).unwrap().until = Instant::now();
+        d.retries.clear();
+        assert_eq!(d.step().await, Step::Tried);
+        assert!(!a.exists());
+        assert!(!d.refused.contains_key(&root.join("fa")));
     }
 
     /// A job of several segments allocates their objects in one request, hands

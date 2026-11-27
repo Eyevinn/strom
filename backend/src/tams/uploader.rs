@@ -609,6 +609,7 @@ pub fn spawn_uploader(
             failing: false,
             next_probe: None,
             auth_reported_at: None,
+            auth_refused: false,
             manifest: Some(ManifestState {
                 dir: temp_dir.clone(),
                 written: None,
@@ -671,6 +672,10 @@ pub(crate) struct UploadCtx<'a> {
     /// When refused credentials were last reported (error log and event);
     /// `None` once a segment goes through again.
     pub(crate) auth_reported_at: Option<Instant>,
+    /// The last segment parked was parked because the gateway refused the
+    /// credentials (401/403), not for a transient failure. The drainer backs
+    /// off that flow alone, not the gateway: credentials are per flow.
+    pub(crate) auth_refused: bool,
     /// The live uploader keeps its directory's park manifest up to date; the
     /// drainer (`None`) does not write it.
     pub(crate) manifest: Option<ManifestState>,
@@ -1054,6 +1059,7 @@ pub(crate) async fn upload_segment(
                     debug!("TAMS {}: {}", ctx.block_id, msg);
                 }
                 ctx.set_failing(true);
+                ctx.auth_refused = true;
                 return park_kept(ctx, frag, slot, "credentials refused").await;
             }
             Failure::Rejected => {
@@ -1086,6 +1092,7 @@ pub(crate) async fn upload_segment(
                     );
                 }
                 ctx.set_failing(true);
+                ctx.auth_refused = false;
                 return park_kept(ctx, frag, slot, &format!("{:#}", e)).await;
             }
         }
@@ -2240,6 +2247,7 @@ mod tests {
             failing: false,
             next_probe: None,
             auth_reported_at: None,
+            auth_refused: false,
             manifest: None,
         };
         assert!(ensure_flow(&mut ctx, 1).await);
@@ -2389,6 +2397,7 @@ mod tests {
                 .filter(|f| *f)
                 .map(|_| Instant::now() + RECOVERY_SWEEP_INTERVAL),
             auth_reported_at: None,
+            auth_refused: false,
             manifest: None,
         };
         let dir =
@@ -2555,6 +2564,7 @@ mod tests {
                 failing: false,
                 next_probe: None,
                 auth_reported_at: None,
+                auth_refused: false,
                 manifest: None,
             }
         }
