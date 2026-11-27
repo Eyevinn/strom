@@ -1389,3 +1389,36 @@ mod osc_auth {
         }
     }
 }
+
+/// A flow saved with the released `segment_duration_secs` is migrated on
+/// load and written back, so the migration and its log line run once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_segment_duration_is_migrated_and_saved_on_load() {
+    use strom_types::block::{BlockInstance, Position};
+    use strom_types::Flow;
+    gst::init().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut flow = Flow::new("tams-migrate");
+    flow.blocks.push(BlockInstance {
+        id: "tams".to_string(),
+        block_definition_id: "builtin.tams_output".to_string(),
+        name: None,
+        properties: HashMap::from([("segment_duration_secs".to_string(), PropertyValue::UInt(3))]),
+        position: Position { x: 0.0, y: 0.0 },
+        runtime_data: None,
+        computed_external_pads: None,
+    });
+    let file = dir.path().join("flows.json");
+    std::fs::write(
+        &file,
+        serde_json::json!({ "version": 1, "flows": [flow] }).to_string(),
+    )
+    .unwrap();
+    let state = common::state::in_dir(dir.path(), &std::env::temp_dir());
+    state.load_from_storage().await.unwrap();
+    let on_disk: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let props = &on_disk["flows"][0]["blocks"][0]["properties"];
+    assert!(props.get("segment_duration_secs").is_none(), "{props}");
+    assert!(props.get("segment_duration_ms").is_some(), "{props}");
+}

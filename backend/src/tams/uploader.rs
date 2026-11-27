@@ -67,7 +67,7 @@ pub struct DetectedEssence {
 pub type SharedDetected = Arc<Mutex<DetectedEssence>>;
 
 /// A finished segment file ready to be uploaded and registered.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FragmentReady {
     /// Path to the complete segment file in the temp directory.
     pub path: PathBuf,
@@ -1176,14 +1176,11 @@ async fn on_registered(
 /// recovered: it is deleted, to free the space, with an error.
 async fn park_segment(ctx: &UploadCtx<'_>, frag: &FragmentReady, reason: &str) -> Outcome {
     let target = ParkTarget::new(ctx.client.base_url(), &ctx.flow_spec.flow_id);
-    let contents = sidecar_contents(frag.start_ns, frag.end_ns, &target);
-    let (sidecar, tmp) = (sidecar_path(&frag.path), sidecar_tmp_path(&frag.path));
-    let written = match tokio::fs::write(&tmp, contents).await {
-        Ok(()) => tokio::fs::rename(&tmp, &sidecar).await,
-        Err(e) => Err(e),
-    };
+    let parked = frag.clone();
+    let written = tokio::task::spawn_blocking(move || park_on_disk(&parked, &target))
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)));
     if let Err(e) = written {
-        let _ = tokio::fs::remove_file(&tmp).await;
         let msg = format!(
             "could not park segment {} ({}), dropping it: {}",
             frag.path.display(),
@@ -1209,10 +1206,27 @@ async fn park_segment(ctx: &UploadCtx<'_>, frag: &FragmentReady, reason: &str) -
 /// the recovery sweep of this run or a later one uploads it to `target`.
 /// Blocking; a small write. On an error (the disk is full) the caller drops the
 /// segment.
+///
+/// Durable: the segment and the sidecar are synced before the sidecar is
+/// renamed into place, and the directory after, so a crash or power loss
+/// never leaves a sidecar for a segment that is not on disk whole.
 pub fn park_on_disk(frag: &FragmentReady, target: &ParkTarget) -> std::io::Result<()> {
+    use std::io::Write;
     let tmp = sidecar_tmp_path(&frag.path);
-    let written = std::fs::write(&tmp, sidecar_contents(frag.start_ns, frag.end_ns, target))
-        .and_then(|()| std::fs::rename(&tmp, sidecar_path(&frag.path)));
+    let written = (|| {
+        std::fs::File::open(&frag.path)?.sync_all()?;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(sidecar_contents(frag.start_ns, frag.end_ns, target).as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, sidecar_path(&frag.path))?;
+        if let Some(dir) = frag.path.parent() {
+            // Not every platform can open a directory to sync it.
+            if let Ok(d) = std::fs::File::open(dir) {
+                let _ = d.sync_all();
+            }
+        }
+        Ok(())
+    })();
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
