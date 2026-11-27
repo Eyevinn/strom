@@ -22,7 +22,8 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - TAMS Output: what is parked on disk is capped per flow directory, by `STROM_TAMS_PARKED_MAX_MB` (default 8192) and `STROM_TAMS_PARKED_MAX_SEGMENTS` (default 20000); past the cap the oldest parked segments are deleted, with an error. A parked segment that keeps failing waits longer before its next try (backoff per segment), so it no longer holds back the others
 - TAMS Output: a parked segment's `.meta` sidecar is JSON and is written to a temporary file and renamed, so a sweep never reads one half written. Sidecars in the old format are still read
 - OSC: the gateway host is taken from the parsed URL before a SAT is sent. User info that looks like an OSC host (`https://x.svc.auto.prod.osaas.io:pw@evil.example/`) passed the check and the SAT went to the other host; a gateway URL with user info is now refused
-- OSC: a SAT whose `exp` and `iat` claims give an absurd lifetime is refreshed by age instead of panicking on overflow
+- TAMS Output: in OSC PAT/SAT mode a SAT goes only to an HTTPS OSC instance of its service, also when the OSC Service ID is set explicitly. A gateway outside OSC that should get SATs is allowed with `STROM_TAMS_ALLOWED_GATEWAYS` (comma-separated URLs) or by being `STROM_TAMS_GATEWAY_URL`. A gateway URL without a scheme fails with a message that it must be an absolute `https://` URL
+- OSC: a SAT is refreshed before its own `exp` when that comes sooner than the usual 50 minutes, and never after it
 
 ### Upgrade notes
 - TAMS Output: parked segments over `STROM_TAMS_PARKED_MAX_MB` or `STROM_TAMS_PARKED_MAX_SEGMENTS` are deleted, oldest first, on the first sweep after an upgrade
