@@ -118,7 +118,7 @@ Every command may carry `client_ref` (a string of at most 64 characters). It is 
 | `pause` | | Speed 0 where the cursor is. |
 | `ramp` | `to`, `duration_ms` (0–60000) | Change the speed linearly from the speed now to `to`; the server runs the ramp. |
 | `cue` | `in`, `out`, `end_action?`, `source?`, `block?` | Hold `[in, out)` and park, paused, on `in`. With `source`, angle `block` also switches to that source (see below). |
-| `uncue` | | Drop the cue. The cursor, the speed and a running ramp stay. |
+| `uncue` | | Drop the cue and empty the queue. The cursor, the speed and a running ramp stay. |
 | `live` | `margin_ms?` (0–60000) | Play at 1x from the live edge minus the margin. `margin_ms` sets the margin for the whole group for the rest of the run; leave it out to keep the group's margin. |
 | `end` | | Go to the last frame every angle has, pause, drop the cue. |
 | `mark` | `label?` (≤ 256 characters), `at?` | Stamp the picture going out now, or the point `at`. Changes nothing. |
@@ -142,7 +142,7 @@ Every command may carry `client_ref` (a string of at most 64 characters). It is 
 | `pause` | `=` | 0 | kept | off | ends |
 | `ramp` | `=` | → `to` over the time | kept | Live\* (the ramp is cut at live) | starts |
 | `cue` | → `in` | 0 | set | off | ends |
-| `uncue` | `=` | `=` | dropped | as before (a group with a cue is not live); Live\* when playing forward | goes on |
+| `uncue` | `=` | `=` | dropped (the queue is emptied) | as before (a group with a cue is not live); Live\* when playing forward | goes on |
 | `live` | → edge − margin | 1 | dropped | **on** | ends |
 | `end` | → last common frame | 0 | dropped | off | ends |
 | `mark` | `=` | `=` | `=` | `=` | `=` |
@@ -180,7 +180,7 @@ Every command may carry `client_ref` (a string of at most 64 characters). It is 
 - Each player prepares the next clip while the current one plays: a second lane, fetched and decoded at the clip's `in` with the clip's `source` for angle `block`, else with the source the angle shows. It is shown from the tick the clip starts on, with what is decoded by then (the last picture holds until the rest is). One clip ahead is prepared at a time; while it is, each lane gets half the decoded budget.
 - `source` and `block` are checked as for `source` (409 without a common time, 400 for an unknown angle or a source that does not open); `source_changed` (or `source_failed`) comes with the clip's `client_ref` when the angle shows it. A clip on the source the angle shows sends no source event.
 - `rel_ms` targets count from the cursor when `cue_next` arrives. `out` not after `in`, or a speed that is not forward, is 400; a range outside the media is 409 `out_of_range`; a full queue (64 clips) is 409 `conflict`.
-- `replace: true` empties the queue before the clip is added. `clear_queue` empties it. `live` and `end` leave clip play and empty it too; other commands keep it (pause a clip, play on, and the queue goes on at its out).
+- `replace: true` empties the queue before the clip is added. `clear_queue` empties it. `live` and `end` leave clip play and empty it too, and so does `uncue` (a queue without a clip to follow means nothing); other commands keep it (pause a clip, play on, and the queue goes on at its out).
 - Events: `ended` with the ref of the clip that ended, then `item_started` with the ref of the clip that started, both with cause `cue_end`. The state's `queue` has the clip's ref (`clip_ref`) and how many clips wait (`waiting`).
 - `play {speed}` changes the clip playing only; the next clip plays at its own `speed`. Transitions other than a cut (a mix, a wipe) take two clip groups, A/B, through the mixer.
 
