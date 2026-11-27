@@ -23,8 +23,7 @@ pub mod source;
 pub mod timeline;
 
 use super::bridge::NetworkBuffer;
-/// Default of `decoded_ahead_s` (the property comes with the mode).
-const DEFAULT_DECODED_AHEAD_S: u64 = 3;
+use super::definition::DEFAULT_DECODED_AHEAD_S;
 use crate::blocks::{
     live_bridge_appsrc, BlockBuildError, BlockBuildResult, BusMessageConnectFn,
     APPSRC_MAX_BYTES_VIDEO,

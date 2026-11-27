@@ -2079,7 +2079,10 @@ impl StromApp {
                         .graph
                         .blocks
                         .iter()
-                        .filter(|b| b.block_definition_id == "builtin.media_player")
+                        .filter(|b| {
+                            b.block_definition_id == "builtin.media_player"
+                                && !crate::properties::is_timeline_player(b)
+                        })
                         .map(|b| b.id.clone())
                         .collect();
 

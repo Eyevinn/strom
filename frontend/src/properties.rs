@@ -659,8 +659,10 @@ impl PropertyInspector {
                 crate::app::set_local_storage("open_compositor_editor", &block.id);
             }
 
-            // Edit Playlist button for media player blocks
+            // Edit Playlist button for media player blocks (a timeline player
+            // has a source, not a playlist)
             if definition.id == "builtin.media_player"
+                && !is_timeline_player(block)
                 && ui.button(format!("{} Playlist", egui_phosphor::regular::PLAYLIST)).clicked()
             {
                 crate::app::set_local_storage("open_playlist_editor", &block.id);
@@ -1166,8 +1168,9 @@ impl PropertyInspector {
                         }
                     }
 
-                    // Show media player controls for media player blocks
-                    if definition.id == "builtin.media_player" {
+                    // Show media player controls for media player blocks. A
+                    // timeline player is controlled through its group's page.
+                    if definition.id == "builtin.media_player" && !is_timeline_player(block) {
                         ui.separator();
                         if let Some(flow_id) = flow_id {
                             if let Some(player_data) =
@@ -3206,6 +3209,13 @@ fn devices_of(
     category: strom_types::discovery::DeviceCategory,
 ) -> Vec<&strom_types::discovery::DeviceResponse> {
     list.iter().filter(|d| d.category == category).collect()
+}
+
+/// Whether a Media Player block is in timeline mode, where the playlist
+/// editor and transport controls do not apply.
+pub(crate) fn is_timeline_player(block: &BlockInstance) -> bool {
+    strom_types::mediaplayer::PlayerMode::from_properties(&block.properties)
+        == Ok(strom_types::mediaplayer::PlayerMode::Timeline)
 }
 
 #[cfg(test)]

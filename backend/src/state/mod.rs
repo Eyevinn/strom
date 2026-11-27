@@ -517,6 +517,11 @@ impl AppState {
                     }
                 }
 
+                // Media Players saved before `mode`: stinger_mode and replay_*.
+                for flow in flows.values_mut() {
+                    crate::blocks::builtin::mediaplayer::migrate_flow(flow);
+                }
+
                 // TAMS Outputs saved with segment_duration_secs.
                 for flow in flows.values_mut() {
                     crate::blocks::builtin::tams_output::migrate_flow(flow);
@@ -746,7 +751,9 @@ impl AppState {
         // this, an explicit save from the frontend would re-engage transient
         // state (e.g. PFL/AFL solo) on the next restart.
         self.strip_transient_properties(&mut flow).await;
-        // A client may still send legacy TAMS Output properties.
+        // A client may still send legacy Media Player or TAMS Output
+        // properties.
+        crate::blocks::builtin::mediaplayer::migrate_flow(&mut flow);
         crate::blocks::builtin::tams_output::migrate_flow(&mut flow);
 
         // Update in-memory state. `insert` reports whether the id was already
@@ -767,6 +774,7 @@ impl AppState {
     /// cannot both succeed and overwrite one another.
     pub async fn insert_flow_if_absent(&self, mut flow: Flow) -> anyhow::Result<bool> {
         self.strip_transient_properties(&mut flow).await;
+        crate::blocks::builtin::mediaplayer::migrate_flow(&mut flow);
         crate::blocks::builtin::tams_output::migrate_flow(&mut flow);
 
         {
