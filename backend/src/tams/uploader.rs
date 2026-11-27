@@ -1337,10 +1337,21 @@ async fn batch_requests(
         })
         .collect();
     if !segments.is_empty() {
-        let pairs: Vec<(String, String)> = segments
+        // Each segment's idempotency round goes into the batch key: a segment
+        // the store answered as failed moves to its next round, so a batch
+        // that is tried again is not answered from the store's cache.
+        let pairs: Vec<(String, String, u32)> = segments
             .iter()
-            .map(|(_, o, t)| (o.clone(), t.clone()))
+            .map(|(k, o, t)| {
+                let round = allocs[*k].as_ref().map_or(0, |a| a.key_round);
+                (o.clone(), t.clone(), round)
+            })
             .collect();
+        let next_round = |allocs: &mut Vec<Option<Allocation>>, k: usize| {
+            if let Some(a) = allocs[k].as_mut() {
+                a.key_round += 1;
+            }
+        };
         let t = Instant::now();
         match client.register_segments(&flow_id, &pairs).await {
             Ok(failed) => {
@@ -1348,6 +1359,7 @@ async fn batch_requests(
                 let failed: HashSet<String> = failed.into_iter().map(|(o, _)| o).collect();
                 for (k, object_id, tr) in segments {
                     if failed.contains(&object_id) {
+                        next_round(&mut allocs, k);
                         continue;
                     }
                     let i = todo[k];
@@ -1357,13 +1369,20 @@ async fn batch_requests(
                     registered += 1;
                 }
             }
-            Err(e) => debug!(
-                "TAMS {}: batch registration of {} segments on flow {} failed: {:#}",
-                ctx.block_id,
-                pairs.len(),
-                flow_id,
-                e
-            ),
+            Err(e) => {
+                if crate::tams::client::needs_new_idempotency_key(&e) {
+                    for (k, _, _) in &segments {
+                        next_round(&mut allocs, *k);
+                    }
+                }
+                debug!(
+                    "TAMS {}: batch registration of {} segments on flow {} failed: {:#}",
+                    ctx.block_id,
+                    pairs.len(),
+                    flow_id,
+                    e
+                )
+            }
         }
     }
     if registered > 0 {
@@ -2370,8 +2389,9 @@ mod tests {
             block_id: "t",
             segments_registered: &mut segments,
             failing: false,
-            objects: HashMap::new(),
+            next_probe: None,
             auth_reported_at: None,
+            manifest: None,
         };
         let collection = |body: &serde_json::Value| -> Vec<String> {
             body["flow_collection"]

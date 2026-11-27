@@ -563,11 +563,12 @@ impl TamsClient {
     /// Register several segments in one request (a JSON array, as the TAMS
     /// spec allows). Returns the `(object_id, timerange)` of each segment the
     /// store reports as failed (a 200 with `failed_segments`); empty when all
-    /// are registered (201).
+    /// are registered (201). Each segment is `(object_id, timerange, round)`,
+    /// its idempotency round (see [`segment_idempotency_key`]).
     pub async fn register_segments(
         &self,
         flow_id: &str,
-        segments: &[(String, String)],
+        segments: &[(String, String, u32)],
     ) -> Result<Vec<(String, Option<String>)>> {
         #[derive(Deserialize)]
         struct Failed {
@@ -584,20 +585,25 @@ impl TamsClient {
         let body = serde_json::Value::Array(
             segments
                 .iter()
-                .map(|(o, t)| serde_json::json!({ "object_id": o, "timerange": t }))
+                .map(|(o, t, _)| serde_json::json!({ "object_id": o, "timerange": t }))
                 .collect(),
         );
         let context = format!("POST {}", redact_url(url.as_str()));
         // One key for the whole batch, derived from what it registers, so a
-        // retry of the same batch sends the same key.
+        // retry of the same batch sends the same key; a segment in a later
+        // round changes it.
         let key = segment_idempotency_key(
             flow_id,
             &segments
                 .iter()
-                .map(|(o, t)| format!("{}@{}", o, t))
+                .map(|(o, t, round)| match round {
+                    0 => format!("{}@{}", o, t),
+                    r => format!("{}@{}#{}", o, t, r),
+                })
                 .collect::<Vec<_>>()
                 .join(","),
             "batch",
+            0,
         );
         let resp = self
             .send_authed(
