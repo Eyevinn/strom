@@ -1374,10 +1374,16 @@ pub struct FadeToBlackResponse {
     pub active: bool,
 }
 
-/// Response for a vision mixer multiview endpoint query.
+/// Response for a query for the WHEP endpoint fed by a block output (e.g. a
+/// vision mixer's `pgm-endpoint` and `multiview-endpoint`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct MultiviewEndpointResponse {
-    /// WHEP endpoint path (e.g. "/whep/my-endpoint"), empty if not connected.
+pub struct WhepEndpointResponse {
+    /// WHEP endpoint path (e.g. "/whep/my-endpoint"), empty if not connected
+    /// or not started yet.
     pub endpoint: String,
 }
+
+/// Former name of [`WhepEndpointResponse`], kept for existing clients. The
+/// JSON shape is the same.
+pub type MultiviewEndpointResponse = WhepEndpointResponse;

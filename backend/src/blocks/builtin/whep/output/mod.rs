@@ -4,6 +4,7 @@
 
 mod caps_change;
 pub(crate) mod definition;
+mod ice_complete_guard;
 mod whepserversink;
 
 use crate::blocks::builtin::inputs::explicit_track_count;
