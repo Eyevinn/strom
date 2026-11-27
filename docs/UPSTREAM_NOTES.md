@@ -39,7 +39,7 @@ workaround can go once we move past that version.
   `.property("clock-type", gst::ClockType::Tai)` and compare `time()` with a `Realtime` one.
 - **Hint:** macOS has no `CLOCK_TAI`; `gstsystemclock.c` seems to fall back to the monotonic
   clock id for unknown clock types instead of the realtime one. Not read in detail.
-- **Tests:** `tams::tai_mapping::tests::clock_domains` and
+- **Tests:** `tams::timeline::tests::clock_domains` and
   `host_clocks_without_tai_offset_fall_back_to_37s` cover Strom's check for it.
 - **Upstream:** not searched.
 - **Found in:** TAMS Output shared timeline work (#966). Strom treats a TAI reading that is not
@@ -481,3 +481,47 @@ workaround can go once we move past that version.
   (`srt_uri_key_without_value_test`).
 - **Upstream:** not searched.
 - **Found in:** #1257 (capabilities review).
+
+## Muxing
+
+### `splitmuxsink`: a fragment is closed one GOP after its last frame
+- **Seen on:** GStreamer 1.28.2 (Linux, Docker) and 1.28.6 (Homebrew, macOS); the code is
+  the same in both.
+- **Symptom:** with `split-at-running-time` scheduled and a keyframe forced at the split, the
+  file that ends at the split is finalized only when the keyframe *after* the next GOP has
+  arrived. With 500 ms segments and a 0.5 s GOP, `format-location-full` for the next fragment
+  (emitted after the previous file is finalized) came p50 510 ms after the end of the segment
+  (n = 564, four angles, macOS). Registration in TAMS followed at p50 541 ms. The data is
+  complete at the split; nothing more is written to the file in that GOP.
+- **Repro:** untested as `gst-launch`. A live H.264 source with `key-int-max=25` at 50 fps into
+  `splitmuxsink` with `split-at-running-time` on each 500 ms; log the wall time of
+  `format-location-full` against the running time of the first buffer.
+- **Hint:** read in `gst/multifile/gstsplitmuxsink.c` (1.28.2). The reference pad collects a
+  GOP until the next keyframe (`handle_mq_input`, `SPLITMUX_INPUT_STATE_COLLECTING_GOP_START`,
+  around line 3310). `check_completed_gop` (around line 2788) needs both the GOP and the start
+  of the one after it (`gop && next_gop`) before it calls `handle_gathered_gop` (line 2668).
+  Only there `need_new_fragment` (line 2521) compares `gop->start_time` with the requested
+  split time. So the GOP that *starts* at the split is judged when it is complete, one GOP
+  after the split, and only then `SPLITMUX_OUTPUT_COMMAND_FINISH_FRAGMENT` is queued and the
+  output side (`SPLITMUX_OUTPUT_STATE_ENDING_FILE`, around line 1363) sends EOS to the muxer.
+  `split-now` and `split-after` set flags that are also read only in `need_new_fragment`, so
+  they do not help. `max-size-time` is judged in the same place. `mpegtsmux` is not the cause:
+  `gst_base_ts_mux_aggregate_buffer` writes each buffer's packets at once and holds back at
+  most `alignment` packets (`gst_base_ts_mux_push_packets`, `gstbasetsmux.c`); `filesink` has
+  `sync=false`.
+- **Tests:** `tams_output_test::close_at_boundary::a_segment_is_registered_as_soon_as_it_ends`
+  (fails with `splitmuxsink`: median 510 ms).
+- **Upstream:** not searched.
+- **Found in:** TAMS Output now cuts segments itself (`backend/src/tams/segmenter.rs`).
+
+### `gst_element_link`: `appsrc` with H.264 caps links to `mp4mux`'s `audio_%u` pad
+- **Seen on:** GStreamer 1.28.6 (Homebrew, macOS).
+- **Symptom:** `appsrc` (caps `video/x-h264, stream-format=avc`) linked to `mp4mux` with
+  `gst_element_link` gets an `audio_0` pad. The caps event is then refused and the source
+  stops with `not-negotiated`.
+- **Repro:** untested as `gst-launch`; in Rust, `appsrc.link(&mp4mux)` with H.264 caps set on
+  the `appsrc`.
+- **Hint:** not read. Requesting the pad from the template whose caps intersect works.
+- **Tests:** `tams_output_test::close_at_boundary::mp4_segments_are_complete_files`.
+- **Upstream:** not searched.
+- **Found in:** TAMS Output segmenter.

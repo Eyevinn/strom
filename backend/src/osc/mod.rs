@@ -66,7 +66,8 @@ fn jwt_exp(token: &str) -> Option<SystemTime> {
 
 /// Never schedule a refresh sooner than this after a fetch. A host clock that
 /// is ahead of the token server's would otherwise put `exp` in the past, and
-/// every request would mint a new SAT.
+/// every request would mint a new SAT. A SAT that really is rejected is
+/// dropped on the 401 (see [`SatProvider::invalidate`]).
 const SAT_MIN_REFRESH: Duration = Duration::from_secs(60);
 
 /// When a SAT fetched at `fetched_at` should be refreshed: after
@@ -247,6 +248,24 @@ impl SatProvider {
             },
         );
         Ok(token)
+    }
+
+    /// Drop the cached SAT for `(credential_key, service_id)`, so the next
+    /// [`Self::token`] mints a new one. Called when a service rejects the SAT
+    /// (HTTP 401) although the cache still held it as fresh. Returns whether a
+    /// PAT exists to mint a new SAT from, i.e. whether a retry could help.
+    pub async fn invalidate(&self, credential_key: &str, service_id: &str) -> bool {
+        let Some(pat) = self.resolve_pat(credential_key) else {
+            return false;
+        };
+        let cache_key = (pat_fingerprint(&pat), service_id.to_string());
+        if self.cache.lock().await.remove(&cache_key).is_some() {
+            info!(
+                "OSC: dropped rejected SAT for service {} (credential {})",
+                service_id, credential_key
+            );
+        }
+        true
     }
 
     /// The PAT for a credential key: its own if registered, else the default.

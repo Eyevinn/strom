@@ -6,21 +6,32 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ### Added
 - Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture
+- TAMS Output: segments are cut on a TAI grid, and `segment_duration_ms` allows segments shorter than a second. The block asks upstream for a keyframe on each grid point, warns when a boundary still leaves the grid, and writes video `essence_parameters` on its flows
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
 
 ### Changed
+- TAMS Output: one segment length property, `segment_duration_ms` (default 2000, at least 200), instead of `segment_duration_secs` and `segment_duration_ms`
 - Video Encoder: the keyframe-request floor applies only to requests for a keyframe now (a WebRTC viewer's PLI). Requests for a keyframe at a given running time (TAMS Output's grid, `splitmuxsink` in a segmenting recorder) always pass. The GStreamer base-class property `min-force-key-unit-interval` dropped both kinds, which moved TAMS Output's segment boundaries off its grid
+- TAMS Output cuts segments itself instead of with `splitmuxsink`, and registers each segment as soon as the frame after it arrives instead of one GOP later
+- TAMS Output: segment files carry a per-run id in their name (`seg_<run>_<n>`), so a new run in the same directory never overwrites segments an earlier run left parked
 
 ### Fixed
-- OSC: SAT freshness is judged on the wall clock, so a cached SAT no longer looks fresh for hours after a macOS sleep
-- OSC: the gateway host is taken from the parsed URL before a SAT is sent. User info that looks like an OSC host (`https://x.svc.auto.prod.osaas.io:pw@evil.example/`) passed the check and the SAT went to the other host. Only the real host decides now; user info never makes a URL count as OSC-hosted
+- TAMS Output: the last segment of a run ends at its last frame, the open segment is finished when the flow stops, the mapping from running time to TAI is re-anchored after a sleep or clock jump, and the frame rate and size written to the store follow the flow
+- TAMS Output: segments are parked on disk instead of dropped when the store is unreachable, a channel is full, or the store answers 401/403, and are uploaded later without holding back new segments. A 404 for the flow creates the flow again, registration is idempotent, and slow clock drift no longer re-anchors the TAI mapping
+- OSC: SAT freshness is judged on the wall clock, and a request that gets 401 is retried once with a new SAT
+- TAMS Output: what is parked on disk is capped per flow directory, by `STROM_TAMS_PARKED_MAX_MB` (default 8192) and `STROM_TAMS_PARKED_MAX_SEGMENTS` (default 20000); past the cap the oldest parked segments are deleted, with an error. A parked segment that keeps failing waits longer before its next try (backoff per segment), so it no longer holds back the others
+- TAMS Output: a parked segment's `.meta` sidecar is JSON and is written to a temporary file and renamed, so a sweep never reads one half written. Sidecars in the old format are still read
+- OSC: the gateway host is taken from the parsed URL before a SAT is sent. User info that looks like an OSC host (`https://x.svc.auto.prod.osaas.io:pw@evil.example/`) passed the check and the SAT went to the other host; a gateway URL with user info is now refused
 - OSC: a SAT whose `exp` and `iat` claims give an absurd lifetime is refreshed by age instead of panicking on overflow
 
 ### Upgrade notes
+- TAMS Output: parked segments over `STROM_TAMS_PARKED_MAX_MB` or `STROM_TAMS_PARKED_MAX_SEGMENTS` are deleted, oldest first, on the first sweep after an upgrade
+- TAMS Output: saved flows and flows sent through the API with `segment_duration_secs` are rewritten to `segment_duration_ms` (seconds × 1000) when they are loaded or saved, with a log line per block. A non-zero `segment_duration_ms` set alongside it wins, as before
 - Video Encoder: scheduled keyframe requests are no longer held back by the 1 s floor. An encoder that feeds a recorder which asks for keyframes at given times (TAMS Output, a segmenting recorder) now makes every keyframe it is asked for, so such a flow can get more keyframes than before. WebRTC PLIs are limited as before
 
 ### Documentation
-- UPSTREAM_NOTES.md: `GstSystemClock` TAI on macOS and `min-force-key-unit-interval` dropping scheduled requests
+- BLOCK_GUIDELINES.md: a block that writes files through a muxer finishes the open file when its flow stops
+- UPSTREAM_NOTES.md: `GstSystemClock` TAI on macOS, `splitmuxsink` closing a fragment one GOP late, `appsrc` linking to `mp4mux`'s audio pad, and `min-force-key-unit-interval` dropping scheduled requests
 
 ---
 
