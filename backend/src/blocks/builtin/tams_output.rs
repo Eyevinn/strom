@@ -24,7 +24,7 @@ use crate::tams::client::{FlowSpec, TamsClient};
 use crate::tams::segmenter::{OpenDecision, OpenRequest, Segmenter};
 use crate::tams::tai_mapping::{
     first_on_grid_fragment, grid_miss_ns, reference_tai_ns, shared_pipeline_mapping, AnchorKind,
-    FragmentTimeline, HostTai, KEYFRAME_LEAD_NS,
+    FragmentTimeline, HostTai,
 };
 use crate::tams::uploader::{
     channel, clear_orphans, closed_end_ns, media_end_running_time_ns, new_run, new_tail_slot,
@@ -859,8 +859,6 @@ fn build_flow_chain(
         // Fragments that started off the grid although their keyframe was
         // requested in time (see `warn_off_grid`).
         let off_grid = AtomicU64::new(0);
-        // Running time of the last grid point a keyframe was requested for.
-        let requested_until: Mutex<Option<u64>> = Mutex::new(None);
 
         let on_open = move |req: OpenRequest<'_>| -> OpenDecision {
             let element = Some(req.element.clone());
@@ -954,25 +952,24 @@ fn build_flow_chain(
             }
 
             // Schedule the split that ends this fragment on the next grid point.
-            let next_split = timeline
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .next_split_running_time(running_time_ns, segment_ns);
-            if let (Some(next), Some(el)) = (next_split, element.as_ref()) {
-                // The segmenter splits at `next`, on the first keyframe at or
-                // after it. Ask upstream for keyframes on the grid points after `next`, up
-                // to `KEYFRAME_LEAD_NS` ahead. The encoder's input runs ahead of
-                // its output (where this fragment opens) by its latency, which
-                // can be most of a segment, so the encoder is often past `next`
-                // already; a request for a time already passed would force a
-                // keyframe off the grid. The split at `next` itself was requested
-                // by an earlier fragment.
-                let ahead = {
-                    let mut until = requested_until.lock().unwrap_or_else(|e| e.into_inner());
-                    let (points, last) = keyframe_request_points(next, segment_ns, *until);
-                    *until = Some(last);
-                    points
-                };
+            // The segmenter splits on the first keyframe at or after it. Ask
+            // upstream for keyframes on the grid points after it, up to
+            // `KEYFRAME_LEAD_NS` ahead. The encoder's input runs ahead of its
+            // output (where this fragment opens) by its latency, which can be
+            // most of a segment, so the encoder is often past the split
+            // already; a request for a time already passed would force a
+            // keyframe off the grid. The split itself was requested by an
+            // earlier fragment, except right after the timeline was anchored
+            // (see `FragmentTimeline::keyframe_requests`).
+            let (next_split, ahead) = {
+                let mut tl = timeline.lock().unwrap_or_else(|e| e.into_inner());
+                let ahead = tl.keyframe_requests(running_time_ns, segment_ns);
+                (
+                    tl.next_split_running_time(running_time_ns, segment_ns),
+                    ahead,
+                )
+            };
+            if let (Some(_), Some(el)) = (next_split, element.as_ref()) {
                 // Sent from GStreamer's thread pool, not from this streaming
                 // thread with the segmenter locked.
                 el.call_async(move |el| {
@@ -1003,6 +1000,16 @@ fn build_flow_chain(
                         running_time_ns,
                         frame_ns,
                     );
+                    // A fragment that spans more than one segment although
+                    // it was not cut short: its split was missed (the
+                    // keyframe asked for it never came, or came before it).
+                    let span = end_ns.saturating_sub(prev.start_ns);
+                    if placed.since_anchor > first_on_grid_fragment(segment_ns)
+                        && end_ns >= placed.prev_end_ns
+                        && span > segment_ns + frame_ns
+                    {
+                        warn_off_grid(&block_id_sig, &tag, &off_grid, span - segment_ns);
+                    }
                     if end_ns < placed.prev_end_ns {
                         info!(
                             "TAMS {} ({}): the input stalled; the segment before it ends \
@@ -1121,43 +1128,15 @@ fn muxer_sink_caps(factory: &str) -> Result<gst::Caps, BlockBuildError> {
     Ok(caps)
 }
 
-/// Grid points (running time) to ask upstream for keyframes at when a fragment
-/// whose next split is `next` opens: every grid point after `next` up to
-/// `KEYFRAME_LEAD_NS` past it (at least one), skipping those already requested
-/// (`requested_until`, the last one asked for). Returns the points and the new
-/// `requested_until`. After a gap or a backward jump it starts over from the
-/// grid point after `next`.
-fn keyframe_request_points(
-    next: u64,
-    segment_ns: u64,
-    requested_until: Option<u64>,
-) -> (Vec<u64>, u64) {
-    let segment_ns = segment_ns.max(1);
-    let lead = KEYFRAME_LEAD_NS.div_ceil(segment_ns).max(1);
-    let last = next.saturating_add(lead.saturating_mul(segment_ns));
-    let first_new = next.saturating_add(segment_ns);
-    let first = match requested_until {
-        Some(r) if r >= first_new && r <= last && (r - next).is_multiple_of(segment_ns) => {
-            r + segment_ns
-        }
-        _ => first_new,
-    };
-    let points = (0..)
-        .map(|i: u64| first.saturating_add(i * segment_ns))
-        .take_while(|p| *p <= last)
-        .collect();
-    (points, last)
-}
-
-/// Report a segment that started `miss_ns` past its TAI grid point although its
-/// keyframe was requested one fragment ahead: the encoder did not honour the
-/// request. Boundaries then follow the encoder's own keyframes, off the grid and
+/// Report a segment boundary `miss_ns` off its TAI grid point, or a segment
+/// `miss_ns` longer than one segment (a missed split), although its keyframe
+/// was requested one fragment ahead: the encoder did not honour the request. Boundaries then follow the encoder's own keyframes, off the grid and
 /// differently on each angle. Logged on the first miss and every 30th after.
 fn warn_off_grid(block_id: &str, tag: &str, count: &AtomicU64, miss_ns: u64) {
     let n = count.fetch_add(1, Ordering::Relaxed) + 1;
     if n == 1 || n.is_multiple_of(30) {
         warn!(
-            "TAMS {} ({}): segment boundary {} ms past the TAI grid ({} so far): the \
+            "TAMS {} ({}): segment boundary {} ms off the TAI grid ({} so far): the \
              upstream encoder did not make the keyframe requested for it. Check that it \
              honours force-keyunit requests on time: a Video Encoder block applies \
              min_keyframe_request_interval_ms only to immediate requests, but other \
@@ -1170,7 +1149,7 @@ fn warn_off_grid(block_id: &str, tag: &str, count: &AtomicU64, miss_ns: u64) {
         );
     } else {
         debug!(
-            "TAMS {} ({}): segment boundary {} ms past the TAI grid",
+            "TAMS {} ({}): segment boundary {} ms off the TAI grid",
             block_id,
             tag,
             miss_ns / 1_000_000
@@ -1578,43 +1557,6 @@ mod tests {
             assert!(max > 0, "{id}: unbounded");
             assert!(sink.property::<bool>("drop"), "{id}: not leaky");
         }
-    }
-
-    #[test]
-    fn keyframes_requested_a_second_ahead_once_each() {
-        const MS: u64 = 1_000_000;
-        // 1 s segments: one grid point ahead, as before.
-        assert_eq!(
-            keyframe_request_points(10_000 * MS, 1000 * MS, None),
-            (vec![11_000 * MS], 11_000 * MS)
-        );
-        assert_eq!(
-            keyframe_request_points(11_000 * MS, 1000 * MS, Some(11_000 * MS)),
-            (vec![12_000 * MS], 12_000 * MS)
-        );
-        // 500 ms: the first fragment asks for both points within the second,
-        // the next one only for the new point.
-        assert_eq!(
-            keyframe_request_points(10_000 * MS, 500 * MS, None),
-            (vec![10_500 * MS, 11_000 * MS], 11_000 * MS)
-        );
-        assert_eq!(
-            keyframe_request_points(10_500 * MS, 500 * MS, Some(11_000 * MS)),
-            (vec![11_500 * MS], 11_500 * MS)
-        );
-        // A fragment that spans grid points (a missed keyframe) leaves a gap:
-        // start over after `next`.
-        assert_eq!(
-            keyframe_request_points(12_500 * MS, 500 * MS, Some(11_500 * MS)),
-            (vec![13_000 * MS, 13_500 * MS], 13_500 * MS)
-        );
-        // A backward jump in running time starts over too.
-        assert_eq!(
-            keyframe_request_points(1_000 * MS, 500 * MS, Some(11_500 * MS)),
-            (vec![1_500 * MS, 2_000 * MS], 2_000 * MS)
-        );
-        // 200 ms: five points within the second.
-        assert_eq!(keyframe_request_points(0, 200 * MS, None).0.len(), 5);
     }
 
     #[test]
