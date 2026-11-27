@@ -29,7 +29,7 @@ use super::decode::{
     SegmentDecoder,
 };
 use super::source::{Segment, SourceIndex};
-use super::timeline::{tick_rt, Clip, PlayerStats, ReplayTimeline};
+use super::timeline::{tick_rt, Clip, DecodeRecord, PlayerStats, ReplayTimeline};
 use crate::gst::frame_rate::estimate_frame_rate;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -52,6 +52,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// 3 MB a frame), in the memory they are decoded into: GPU memory when the
 /// frames are in CUDA or GL memory. `STROM_REPLAY_DECODED_MB` overrides it.
 const DEFAULT_DECODED_BUDGET_MB: u64 = 768;
+/// Decode workers per player, each with its own long-lived decoder.
+const DECODE_WORKERS: usize = 2;
 /// Segments kept decoded whatever the budget: the one under the cursor and
 /// the next.
 const MIN_DECODED_SEGMENTS: usize = 2;
@@ -223,6 +225,7 @@ impl ReplayPlayer {
             timeline.use_counter();
         }
         let decoder = pick_decoder();
+        stats.set_decoder(decoder, DECODE_WORKERS);
         info!("Replay player {}: decoder {}", block_id, decoder);
         let fetcher = Arc::new(Fetcher::new(
             block_id,
@@ -250,7 +253,7 @@ impl ReplayPlayer {
             caps: Mutex::new(None),
             decoder,
             memory: OnceLock::new(),
-            workers: 2,
+            workers: DECODE_WORKERS,
             decode_behind_ns: 2 * S,
             decode_ahead_ns: cache_ahead_s.clamp(1, MAX_DECODE_AHEAD_S) as i64 * S,
             decoded_budget: strom_types::env::var_opt("STROM_REPLAY_DECODED_MB")
@@ -332,9 +335,17 @@ impl ReplayPlayer {
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
+            let started = Instant::now();
             match self.decode_one(&seg, &mut decoder) {
                 Ok(()) => lock(&self.failed).succeed(&seg.start_ns),
                 Err(e) => {
+                    self.stats.note_decode(DecodeRecord {
+                        start_ns: seg.start_ns,
+                        end_ns: seg.end_ns,
+                        ms: started.elapsed().as_millis() as u64,
+                        frames: 0,
+                        error: Some(e.clone()),
+                    });
                     let attempts = lock(&self.failed).fail(seg.start_ns, Instant::now());
                     if worth_warning(attempts) {
                         warn!(
@@ -364,6 +375,11 @@ impl ReplayPlayer {
                 self.block_id,
                 memory.name(),
                 self.decoder
+            );
+            // The diagnostics show where the frames are kept.
+            self.stats.set_decoder(
+                &format!("{} ({})", self.decoder, memory.name()),
+                self.workers,
             );
             memory
         })
@@ -425,6 +441,7 @@ impl ReplayPlayer {
                 n_decoded
             ));
         }
+        let n_frames = frames.len();
         let expected = ((seg.end_ns - seg.start_ns) as f64 / grid.frame_ns()).round() as usize;
         if frames.len() != expected {
             let first = frames[0].0;
@@ -478,8 +495,13 @@ impl ReplayPlayer {
             store.frames.extend(frames);
             self.frame_ready.notify_all();
         }
-        self.stats.decodes.fetch_add(1, Ordering::Relaxed);
-        self.stats.last_decode_ms.store(ms, Ordering::Relaxed);
+        self.stats.note_decode(DecodeRecord {
+            start_ns: seg.start_ns,
+            end_ns: seg.end_ns,
+            ms,
+            frames: n_frames,
+            error: None,
+        });
         Ok(())
     }
 
