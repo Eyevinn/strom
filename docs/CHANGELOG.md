@@ -9,6 +9,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture
 - TAMS Output: segments are cut on a TAI grid, and `segment_duration_ms` allows segments shorter than a second. The block asks upstream for a keyframe on each grid point, warns when a boundary still leaves the grid, and writes video `essence_parameters` on its flows
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
+- API: `GET /api/flows/{flow_id}/blocks/{block_id}/pgm-endpoint` returns the WHEP endpoint fed by a vision mixer's PGM output, like `multiview-endpoint`
 
 ### Changed
 - Media Player: an explicit `mode` property (`playlist`, `stinger`, `timeline`) selects what the block does, and the properties panel shows only the properties of that mode. `stinger_mode=true` becomes `mode=stinger`. The Playlist button and transport controls are hidden for a timeline player
@@ -27,6 +28,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Media Player (timeline mode): a listed stretch of a growing source that still has a hole near the cursor is listed again, with backoff, so segments registered late are found. The live poll runs off the fetch loop, a decoder that hangs is bounded, and video that is not H.264 (H.265, say) fails with an error that names it instead of hanging
 - OSC: the gateway host is taken from the parsed URL before a SAT is sent. User info that looks like an OSC host (`https://x.svc.auto.prod.osaas.io:pw@evil.example/`) passed the check and the SAT went to the other host; a gateway URL with user info is now refused
 - OSC: a SAT whose `exp` and `iat` claims give an absurd lifetime is refreshed by age instead of panicking on overflow
+- Vision mixer: `pgm-endpoint` and `multiview-endpoint` find a WHEP output behind a pad linked more than once or a block with several outputs (breadth first, not only the first link)
 
 ### Upgrade notes
 - TAMS Output: parked segments over `STROM_TAMS_PARKED_MAX_MB` or `STROM_TAMS_PARKED_MAX_SEGMENTS` are deleted, oldest first, on the first sweep after an upgrade
