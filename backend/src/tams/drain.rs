@@ -701,6 +701,11 @@ pub struct Drainer {
     /// Since when the drainer has held back for live, with a segment to
     /// upload; reset by an upload and when there is nothing to upload.
     held_since: Option<Instant>,
+    /// Since when live has kept up (no queue at
+    /// [`LivePolicy::behind_queued`]) while the drainer held back: what the
+    /// [`LivePolicy::max_wait`] floor counts. Time while live was behind does
+    /// not count, so the floor never cuts in right as live catches up.
+    floor_since: Option<Instant>,
     wake: &'static Notify,
     sat: Arc<SatProvider>,
     events: EventBroadcaster,
@@ -733,6 +738,7 @@ impl Drainer {
             policy: LivePolicy::from_env(),
             concurrency: concurrency_from_env(),
             held_since: None,
+            floor_since: None,
             wake,
             sat,
             events,
@@ -914,7 +920,7 @@ impl Drainer {
             self.clear_state(&dir);
         }
         if dirs.is_empty() {
-            self.held_since = None;
+            self.reset_hold();
             return Step::Idle(SYNC_INTERVAL);
         }
         let free = self.concurrency.saturating_sub(self.in_flight());
@@ -1027,7 +1033,7 @@ impl Drainer {
         }
         if candidates.is_empty() {
             // Nothing to upload: a wait for live starts again with the next one.
-            self.held_since = None;
+            self.reset_hold();
             return Step::Idle(
                 next_due.map_or(SYNC_INTERVAL, |at| at.saturating_duration_since(now)),
             );
@@ -1078,6 +1084,7 @@ impl Drainer {
                 .held_since
                 .take()
                 .map_or(Duration::ZERO, |since| since.elapsed());
+            self.floor_since = None;
             self.cursor = Some(dir.clone());
             self.set_state(&dir, DrainState::Draining);
             let n = batch.len();
@@ -1095,7 +1102,7 @@ impl Drainer {
             started += 1;
         }
         if started == 0 {
-            self.held_since = None;
+            self.reset_hold();
             return Step::Idle(MIN_IDLE_WAIT);
         }
         Step::Tried
@@ -1109,13 +1116,26 @@ impl Drainer {
     /// - else (one segment waits here and there, the steady state with many
     ///   live uploaders) once the drainer has held back for
     ///   [`LivePolicy::max_wait`], so it cannot starve.
+    ///
+    /// The [`LivePolicy::max_wait`] only counts while live keeps up.
     fn may_upload(&mut self, now: Instant) -> bool {
         let load = self.live.load();
-        let since = *self.held_since.get_or_insert(now);
+        self.held_since.get_or_insert(now);
         if load.max_queued >= self.policy.behind_queued {
+            self.floor_since = None;
             return false;
         }
-        load.queued == 0 || now.saturating_duration_since(since) >= self.policy.max_wait
+        if load.queued == 0 {
+            return true;
+        }
+        let since = *self.floor_since.get_or_insert(now);
+        now.saturating_duration_since(since) >= self.policy.max_wait
+    }
+
+    /// Nothing to upload: a wait for live starts again with the next segment.
+    fn reset_hold(&mut self) {
+        self.held_since = None;
+        self.floor_since = None;
     }
 
     /// Take back a job that ended: its flow, and what became of its segments.
@@ -1652,6 +1672,43 @@ mod tests {
         // The wait starts again after an upload.
         assert_eq!(d.step().await, Step::LiveBusy);
         assert_eq!(store.registered.lock().unwrap().len(), 2);
+    }
+
+    /// Time while live was behind does not count toward the
+    /// [`LivePolicy::max_wait`] floor: when live catches up to one waiting
+    /// segment, the drainer still holds back the full floor before it cuts
+    /// in.
+    #[tokio::test]
+    async fn tams_drain_floor_starts_when_live_catches_up() {
+        let store = Store::default();
+        let gw = start_store(store.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        manifest(&root, &gw, "fa", AuthRef::None);
+        park(p, &root, &gw, "fa", 10);
+        let live: &'static LiveBusy = leak(LiveBusy::new());
+        let policy = LivePolicy {
+            behind_queued: 2,
+            max_wait: Duration::from_millis(300),
+        };
+        let mut d = drainer_with(p, live, policy);
+
+        // Live is behind for longer than the floor.
+        let mut behind = live_queues(live, 1, 2).await;
+        assert_eq!(d.step().await, Step::LiveBusy);
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert_eq!(d.step().await, Step::LiveBusy);
+
+        // It catches up to one waiting: the floor starts now.
+        let _in_flight = behind[0].1.recv().await.unwrap();
+        assert_eq!(live.load().max_queued, 1);
+        assert_eq!(d.step().await, Step::LiveBusy);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(d.step().await, Step::LiveBusy);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(d.step().await, Step::Tried);
+        assert_eq!(store.registered.lock().unwrap().len(), 1);
     }
 
     /// The segment being uploaded is never deleted to make room, and a claimed
