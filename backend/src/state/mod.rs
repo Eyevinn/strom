@@ -1540,6 +1540,9 @@ impl AppState {
         // the process. Doing it first also means the thread is not pushing into
         // an appsrc while the pipeline is being taken to NULL below.
         crate::blocks::builtin::vision_mixer::overlay::unregister_flow(id);
+        // TAMS Output claims on TAMS flow ids (see `crate::tams::flow_claims`):
+        // released on every path, so a failed start never blocks another flow.
+        crate::tams::flow_claims::release_flow(id);
 
         let Some(mut manager) = manager else {
             // No pipeline was ever built. Blocks constructed before the failing

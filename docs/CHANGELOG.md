@@ -29,6 +29,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Replay page: the timeline window keeps the playhead in its right half. Near live the window ends at the live edge; further behind, the playhead stays in the middle and a LIVE tab at the right edge shows how far live is past the scale (click to go live). A finished recording ends the window at its last frame
 
 ### Fixed
+- TAMS Output: a flow fails to start when one of its TAMS Outputs would write to a TAMS flow that a TAMS Output of another running flow already writes to on the same gateway, with an error that names both. TAMS flow ids derive from the block id, which is only unique within a flow, so two flows with a TAMS Output of the same id used to interleave their segments in one TAMS flow
 - Replay page: the zoom buttons under the timeline, the header timecodes and the transport buttons no longer shift when a label changes (LIVE or a time, Play or Pause); the timeline row is a three-column grid and the changing labels have fixed widths
 - WHEP Output: a viewer whose ICE gathering reports `complete` a second time no longer aborts Strom. The WHEP signaller in gst-plugin-webrtc 0.15 panics on it inside a GObject callback; seen when viewers connect and drop within a second
 - TAMS Output: the last segment of a run ends at its last frame, the open segment is finished when the flow stops, the mapping from running time to TAI is re-anchored after a sleep or clock jump, and the frame rate and size written to the store follow the flow
