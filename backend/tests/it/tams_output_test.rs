@@ -2159,3 +2159,40 @@ mod retention {
         );
     }
 }
+
+/// OSC PAT/SAT mode mints a SAT and sends it to `gateway_url`. An explicit
+/// `osc_service_id` used to skip the host check, so a flow could name any host
+/// and collect the instance's SAT (review of #1286).
+mod osc_auth {
+    use super::*;
+
+    fn build_osc(gateway: &str, service_id: &str) -> Result<(), String> {
+        gst::init().unwrap();
+        let properties: HashMap<String, PropertyValue> = [
+            ("gateway_url", gateway),
+            ("auth_mode", "osc"),
+            ("osc_service_id", service_id),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), PropertyValue::String(v.into())))
+        .collect();
+        let ctx = BlockBuildContext::new(vec![], "all".to_string());
+        TamsOutputBuilder
+            .build("osc_auth_test", &properties, &ctx)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn explicit_service_id_does_not_send_a_sat_to_another_host() {
+        for gateway in [
+            "https://a.eyevinn-tams-gateway.auto.prod.osaas.io@evil.example/",
+            "https://evil.example/",
+            "http://a.eyevinn-tams-gateway.auto.prod.osaas.io/",
+        ] {
+            let err = build_osc(gateway, "eyevinn-tams-gateway")
+                .expect_err("OSC mode must refuse a gateway outside the service");
+            assert!(err.contains("not sending a SAT"), "{gateway}: {err}");
+        }
+    }
+}
