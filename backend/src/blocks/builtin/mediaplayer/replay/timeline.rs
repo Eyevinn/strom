@@ -201,6 +201,16 @@ pub fn nearest_frame_start(grid: &FrameGrid, t: i64) -> i64 {
     grid.tai_of_frame(grid.nearest_frame(t))
 }
 
+/// The start of the frame of `grid` that covers the millisecond a UTC with
+/// milliseconds names (`t` truncated to the millisecond): the latest frame
+/// that starts before the millisecond ends. The player's rule ("latest frame
+/// at or before `T`") for a time given to the millisecond, so a frame time
+/// the API gives names its own frame, and a time inside a frame names that
+/// frame, never the next one.
+pub fn covering_frame_start(grid: &FrameGrid, t: i64) -> i64 {
+    grid.tai_of_frame(grid.floor_frame(t.saturating_add(MS - 1)))
+}
+
 /// Frame `from + by` on `grid`, kept to one frame either side of the group's
 /// range (the cursor is clamped to the range after). Client values can be
 /// anything: this never overflows.
