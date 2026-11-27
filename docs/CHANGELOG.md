@@ -6,20 +6,21 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ### Added
 - Media Player: timeline mode (replay). A player plays an indexed source (a TAMS flow, `tams+https://<gateway>/flows/<flow_id>`, or a directory with `index.json`) on a timeline that can be scrubbed, jogged and played at any speed, from -8x to 8x. Players with the same `group` form a replay group with one cursor and one speed; the group shares TAI time, and each player has its own frame grid (**Output Framerate**). See [MEDIA_LIBRARY.md](MEDIA_LIBRARY.md)
-- Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture
+- Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture. Branches of one flow stamp equal running times alike, also after a clock jump. A capture time set upstream wins, converted to the block's timescale. With burn-in, GPU memory and any raw pixel format are adapted, and encoded video fails the flow with an error that says so. In a non-live flow the preroll frame is not stamped
 - TAMS Output: segments are cut on a TAI grid, and `segment_duration_ms` allows segments shorter than a second. The block asks upstream for a keyframe on each grid point, warns when a boundary still leaves the grid, and writes video `essence_parameters` on its flows
-- Video Encoder: `min_keyframe_request_interval_ms` (default 1000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
+- Video Encoder: `min_keyframe_request_interval_ms` (default 1000, at most 60000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
 
 ### Changed
 - Media Player: an explicit `mode` property (`playlist`, `stinger`, `timeline`) selects what the block does, and the properties panel shows only the properties of that mode. `stinger_mode=true` becomes `mode=stinger`. The Playlist button and transport controls are hidden for a timeline player
 - TAMS Output and the Media Player's timeline mode share the auth properties `auth_mode`, `api_token` and `osc_service_id`
 - TAMS Output: one segment length property, `segment_duration_ms` (default 2000, at least 200), instead of `segment_duration_secs` and `segment_duration_ms`
-- Video Encoder: the keyframe-request floor applies only to requests for a keyframe now (a WebRTC viewer's PLI). Requests for a keyframe at a given running time (TAMS Output's grid, `splitmuxsink` in a segmenting recorder) always pass. The GStreamer base-class property `min-force-key-unit-interval` dropped both kinds, which moved TAMS Output's segment boundaries off its grid
+- Video Encoder: the keyframe-request floor applies only to requests for a keyframe now (a WebRTC viewer's PLI). Requests for a keyframe at a given running time (TAMS Output's grid, `splitmuxsink` in a segmenting recorder) always pass. A request for a keyframe now that comes within the floor is held back and sent when the floor runs out; a keyframe forced by a scheduled request also counts towards the floor. The GStreamer base-class property `min-force-key-unit-interval` delayed both kinds, which moved TAMS Output's segment boundaries off its grid
 - TAMS Output cuts segments itself instead of with `splitmuxsink`, and registers each segment as soon as the frame after it arrives instead of one GOP later
 - Media Player, timeline mode: decoded frames stay in GPU memory when the decoder and the flow downstream both take it: CUDA memory from `nvh264dec` (a GL consumer such as the vision mixer brings it into GL with `cudadownload`, by CUDA-GL interop), GL memory from `vtdec_hw` (sharing the flow's GL context). The frame store holds those buffers, so a frame is no longer downloaded to RAM, copied and uploaded again. Other decoders and system-memory consumers keep NV12 in system memory. `STROM_REPLAY_FRAME_MEMORY` (`auto`, `system`, `cuda`, `gl`) narrows the choice, and `STROM_REPLAY_DECODED_MB` budgets the memory the frames are in
 - TAMS Output: segment files carry a per-run id in their name (`seg_<run>_<n>`), so a new run in the same directory never overwrites segments an earlier run left parked
 
 ### Fixed
+- WHEP Output: a viewer whose ICE gathering reports `complete` a second time no longer aborts Strom. The WHEP signaller in gst-plugin-webrtc 0.15 panics on it inside a GObject callback; seen when viewers connect and drop within a second
 - TAMS Output: the last segment of a run ends at its last frame, the open segment is finished when the flow stops, the mapping from running time to TAI is re-anchored after a sleep or clock jump, and the frame rate and size written to the store follow the flow
 - TAMS Output: segments are parked on disk instead of dropped when the store is unreachable, a channel is full, or the store answers 401/403, and are uploaded later without holding back new segments. A 404 for the flow creates the flow again, registration is idempotent, and slow clock drift no longer re-anchors the TAI mapping
 - OSC: SAT freshness is judged on the wall clock, and a request that gets 401 is retried once with a new SAT
@@ -27,7 +28,8 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - TAMS Output: a parked segment's `.meta` sidecar is JSON and is written to a temporary file and renamed, so a sweep never reads one half written. Sidecars in the old format are still read
 - Media Player (timeline mode): a listed stretch of a growing source that still has a hole near the cursor is listed again, with backoff, so segments registered late are found. The live poll runs off the fetch loop, a decoder that hangs is bounded, and video that is not H.264 (H.265, say) fails with an error that names it instead of hanging
 - OSC: the gateway host is taken from the parsed URL before a SAT is sent. User info that looks like an OSC host (`https://x.svc.auto.prod.osaas.io:pw@evil.example/`) passed the check and the SAT went to the other host; a gateway URL with user info is now refused
-- OSC: a SAT whose `exp` and `iat` claims give an absurd lifetime is refreshed by age instead of panicking on overflow
+- TAMS Output: in OSC PAT/SAT mode a SAT goes only to an HTTPS OSC instance of its service, also when the OSC Service ID is set explicitly. A gateway outside OSC that should get SATs is allowed with `STROM_TAMS_ALLOWED_GATEWAYS` (comma-separated URLs) or by being `STROM_TAMS_GATEWAY_URL`. A gateway URL without a scheme fails with a message that it must be an absolute `https://` URL
+- OSC: a SAT is refreshed before its own `exp` when that comes sooner than the usual 50 minutes, and never after it
 - Media Player (timeline mode): a local `source` outside `media_path` is refused, through `..` or a symlink alike
 
 ### Upgrade notes
@@ -39,7 +41,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 ### Documentation
 - MEDIA_LIBRARY.md: the Media Player's modes, and timeline mode
 - BLOCK_GUIDELINES.md: a block that writes files through a muxer finishes the open file when its flow stops
-- UPSTREAM_NOTES.md: `GstSystemClock` TAI on macOS, `vtdec_hw` at EOS, `splitmuxsink` closing a fragment one GOP late, `appsrc` linking to `mp4mux`'s audio pad, and `min-force-key-unit-interval` dropping scheduled requests
+- UPSTREAM_NOTES.md: `GstSystemClock` TAI on macOS, `vtdec_hw` at EOS, `splitmuxsink` closing a fragment one GOP late, `appsrc` linking to `mp4mux`'s audio pad, `min-force-key-unit-interval` delaying scheduled requests, and the WHEP signaller's panic on a second ICE `complete`
 
 ---
 
