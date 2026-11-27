@@ -1414,24 +1414,31 @@ fn build_flow_chain(
 
         // Hands a finished fragment to the uploader. When its channel is full
         // (or closed), the fragment is parked on disk instead, for the
-        // server-wide drainer; only when that fails too (the disk is
-        // full) is it dropped.
-        let deliver_label = format!("{} ({})", block_id, suffix_owned);
-        let overflowed = AtomicU64::new(0);
+        // server-wide drainer; only when that fails too (over the parking
+        // limits, or the disk is full) is it dropped. This runs on the
+        // streaming thread, so the park runs on the parking thread: it can
+        // delete older segments for space and syncs to disk.
+        let deliver_label = Arc::new(format!("{} ({})", block_id, suffix_owned));
+        let overflowed = Arc::new(AtomicU64::new(0));
         let deliver = move |ready: FragmentReady| {
             let Err(e) = tx.try_send(ready) else {
                 return;
             };
             let full = matches!(e, tokio::sync::mpsc::error::TrySendError::Full(_));
             let ready = e.into_inner();
-            match park_on_disk(&ready, &park_target) {
+            let (label, overflowed, target) = (
+                deliver_label.clone(),
+                overflowed.clone(),
+                park_target.clone(),
+            );
+            crate::tams::park::park_off_thread(move || match park_on_disk(&ready, &target) {
                 Ok(()) => {
                     let n = overflowed.fetch_add(1, Ordering::Relaxed);
                     if n.is_multiple_of(100) {
                         warn!(
                             "TAMS {}: uploader {}, parked segment {} on disk for the \
                              drainer ({} so far)",
-                            deliver_label,
+                            label,
                             if full { "queue full" } else { "stopped" },
                             ready.path.display(),
                             n + 1
@@ -1442,13 +1449,13 @@ fn build_flow_chain(
                     error!(
                         "TAMS {}: uploader queue full and segment {} could not be parked \
                          ({}); dropping it",
-                        deliver_label,
+                        label,
                         ready.path.display(),
                         err
                     );
                     let _ = std::fs::remove_file(&ready.path);
                 }
-            }
+            });
         };
 
         let segmenter = Segmenter::new(

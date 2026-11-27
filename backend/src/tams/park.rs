@@ -43,9 +43,18 @@
 //! than 32 GiB is free, not 400 GiB.
 //!
 //! Past either, the oldest parked segments of the whole server (lowest start
-//! time, whichever flow) are deleted until the new one fits. When that is not
-//! enough (the volume is filled by something else), the new segment is not
-//! parked; the caller drops it. Parking never stops a live flow.
+//! time, whichever flow) are deleted until the new one fits. When deleting
+//! every older one would not be enough (the volume is filled by something
+//! else, or the segment is larger than the cap), nothing is deleted and the
+//! new segment is not parked; the caller drops it. A segment that is parked
+//! already (a drain retry that failed) takes no new space: neither limit is
+//! checked for it. Parking never stops a live flow.
+//!
+//! The segment, its sidecar and their directory are synced to disk before a
+//! park returns, so a parked segment survives a power loss too. The index's
+//! lock is never held over a directory scan, a deletion or a sync, and a park
+//! from a GStreamer streaming thread runs on a worker thread of its own
+//! ([`park_off_thread`]).
 //!
 //! A segment being uploaded is claimed (`crate::tams::uploader::Claim`), and
 //! never deleted for space while the claim is held.
@@ -433,6 +442,10 @@ pub struct ParkedSegment {
 #[derive(Default)]
 struct State {
     entries: HashMap<PathBuf, Entry>,
+    /// Segments being parked: counted in `entries` (so a concurrent park
+    /// sees their bytes) but not parked yet, so never deleted for space nor
+    /// listed for the drainer.
+    reserved: HashSet<PathBuf>,
     /// The entries per flow directory, oldest first.
     by_dir: BTreeMap<PathBuf, BTreeSet<(u64, PathBuf)>>,
     /// The startup scan runs (without this lock); what is removed meanwhile
@@ -457,6 +470,7 @@ impl State {
         if self.scanning {
             self.removed_while_scanning.insert(path.to_path_buf());
         }
+        self.reserved.remove(path);
         if let Some(e) = self.entries.remove(path) {
             self.total = self.total.saturating_sub(e.bytes);
             self.unlist(path, e.start_ns);
@@ -480,6 +494,14 @@ impl State {
         }
     }
 
+    /// Adjust the cached free space by bytes deleted (`+`) or not deleted
+    /// after all (`-`), which the cached reading does not know of yet.
+    fn adjust_free(&mut self, freed: u64, unfreed: u64) {
+        if let Some((_, Some(s))) = self.space.as_mut() {
+            s.free = s.free.saturating_add(freed).saturating_sub(unfreed);
+        }
+    }
+
     fn unlist(&mut self, path: &Path, start_ns: u64) {
         let Some(dir) = path.parent() else {
             return;
@@ -493,11 +515,19 @@ impl State {
     }
 }
 
+/// A parked segment chosen to be deleted for space. Holds its claim, so no
+/// uploader or the drainer takes it up meanwhile.
+struct Victim {
+    path: PathBuf,
+    entry: Entry,
+    _claim: crate::tams::uploader::Claim,
+}
+
 /// The parked segments of the whole server, and the limits on them. One per
 /// process ([`parking`]); tests make their own.
 pub struct Parking {
     root: PathBuf,
-    limits: Option<ParkLimits>,
+    limits: Mutex<Option<ParkLimits>>,
     fs: Box<dyn FreeSpace>,
     state: Mutex<State>,
     /// Held while the root is scanned; `true` once it was.
@@ -510,12 +540,40 @@ pub fn parking() -> &'static Parking {
     PARKING.get_or_init(|| {
         // Unit tests park in the temp dir, whose volume is the developer's
         // disk; the limits are tested on their own `Parking`.
-        let limits = cfg!(test).then_some(ParkLimits {
-            max_total_bytes: u64::MAX,
-            min_free_bytes: 0,
-        });
+        let limits = cfg!(test).then_some(ParkLimits::UNLIMITED);
         Parking::new(root(), limits, Box::new(VolumeSpace))
     })
+}
+
+/// Run `job` (a park) on the parking worker thread, not the caller's. For a
+/// GStreamer streaming thread: a park can delete older segments and syncs to
+/// disk, which must not hold up the stream. Jobs run one at a time, in order.
+pub fn park_off_thread(job: impl FnOnce() + Send + 'static) {
+    type Job = Box<dyn FnOnce() + Send>;
+    static WORKER: OnceLock<Option<std::sync::mpsc::Sender<Job>>> = OnceLock::new();
+    let worker = WORKER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("tams-park".to_string())
+            .spawn(move || {
+                for job in rx {
+                    job();
+                }
+            })
+            .map_err(|e| error!("TAMS: cannot start the parking thread: {}", e))
+            .ok()
+            .map(|_| tx)
+    });
+    let job: Job = Box::new(job);
+    let job = match worker {
+        Some(tx) => match tx.send(job) {
+            Ok(()) => return,
+            Err(e) => e.0,
+        },
+        None => job,
+    };
+    // No worker: park here rather than lose the segment.
+    job();
 }
 
 impl Parking {
@@ -523,11 +581,18 @@ impl Parking {
     pub fn new(root: PathBuf, limits: Option<ParkLimits>, fs: Box<dyn FreeSpace>) -> Self {
         Self {
             root,
-            limits,
+            limits: Mutex::new(limits),
             fs,
             state: Mutex::new(State::default()),
             scanned: Mutex::new(false),
         }
+    }
+
+    /// Set the limits instead of [`ParkLimits::from_env`] (`None`: from the
+    /// environment again). For an embedding or a test harness that must not
+    /// depend on the host disk's free space.
+    pub fn set_limits(&self, limits: Option<ParkLimits>) {
+        *self.limits.lock().unwrap_or_else(|e| e.into_inner()) = limits;
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -558,8 +623,8 @@ impl Parking {
     }
 
     fn limits(&self, space: Option<Space>) -> ParkLimits {
-        self.limits
-            .unwrap_or_else(|| ParkLimits::from_env(space.map(|s| s.total)))
+        let set = *self.limits.lock().unwrap_or_else(|e| e.into_inner());
+        set.unwrap_or_else(|| ParkLimits::from_env(space.map(|s| s.total)))
     }
 
     /// The root volume's space, read at most once per [`SPACE_CACHE`].
@@ -607,13 +672,20 @@ impl Parking {
 
     /// Park `segment` (already written, starting at `start_ns`): write its
     /// sidecar, `sidecar_contents`, to a temporary file and rename it into
-    /// place. The only way a segment is parked, so nothing bypasses the
-    /// limits: past the cap, or short of free space, the oldest parked
-    /// segments of the whole server are deleted first; if that is not
-    /// enough, nothing is written and [`ParkError::Refused`] is returned. The
-    /// caller then drops the segment. A segment the index holds already (a
-    /// drain retry that failed) takes no new space: neither limit is checked
-    /// and nothing is deleted for it. Blocking.
+    /// place, and sync the segment, the sidecar and their directory to disk.
+    /// The only way a segment is parked, so nothing bypasses the limits: past
+    /// the cap, or short of free space, the oldest parked segments of the
+    /// whole server are deleted first. When deleting all of them would not be
+    /// enough, nothing is deleted or written and [`ParkError::Refused`] is
+    /// returned; the caller then drops the segment.
+    ///
+    /// A segment that is parked already (the index holds it, or its sidecar
+    /// exists: a drain retry that failed) takes no new space: neither limit
+    /// is checked and nothing is deleted for it, or a volume filled by
+    /// something else would delete the older backlog and then this segment
+    /// too. If its sidecar cannot be rewritten, the one it has is kept.
+    ///
+    /// Blocking; the index's lock is not held over file I/O.
     pub fn park(
         &self,
         segment: &Path,
@@ -629,116 +701,169 @@ impl Parking {
                     "sidecar contents do not parse, or do not start at the segment's start",
                 ))
             })?;
+        let sidecar = crate::tams::uploader::sidecar_path(segment);
+        let on_disk = sidecar.exists();
         self.ensure_scanned(false);
-        let mut st = self.lock();
-        if st.entries.contains_key(segment) {
-            // Parked again (a drain retry that failed): it is on disk and
-            // counted already, so it takes no new space. Neither limit is
-            // checked, or a volume filled by something else would delete the
-            // older backlog and then this segment too.
-            if std::fs::read_to_string(crate::tams::uploader::sidecar_path(segment))
+        let mut limits = None;
+        let parked_already = {
+            let mut st = self.lock();
+            let parked_already =
+                (on_disk || st.entries.contains_key(segment)) && !st.reserved.contains(segment);
+            if !parked_already {
+                let space = self.space(&mut st);
+                let l = self.limits(space);
+                let victims = self.reserve(&mut st, segment, &entry, space, &l)?;
+                drop(st);
+                self.evict(victims, &l);
+                limits = Some(l);
+            }
+            parked_already
+        };
+
+        if parked_already {
+            let same = std::fs::read_to_string(&sidecar)
                 .ok()
-                .as_deref()
-                != Some(sidecar_contents)
-            {
-                write_sidecar(segment, sidecar_contents)?;
+                .is_some_and(|s| s == sidecar_contents);
+            if !same {
+                if let Err(e) = write_sidecar(segment, sidecar_contents) {
+                    warn!(
+                        "TAMS: could not rewrite the sidecar of parked segment {} ({}); it \
+                         keeps the one it has",
+                        segment.display(),
+                        e
+                    );
+                }
             }
-            st.insert(segment.to_path_buf(), entry);
-            return Ok(());
+        } else if let Err(e) = write_sidecar(segment, sidecar_contents) {
+            self.lock().remove(segment);
+            return Err(ParkError::Io(e));
         }
-        let space = self.space(&mut st);
-        let limits = self.limits(space);
-
-        let freed = self.make_room(&mut st, segment, bytes, space, &limits);
-        if let Some((_, Some(s))) = st.space.as_mut() {
-            // The deletions are not in the cached reading yet.
-            s.free = s.free.saturating_add(freed);
-        }
-        if st.total.saturating_add(bytes) > limits.max_total_bytes {
-            return Err(ParkError::Refused(format!(
-                "parking it would pass the cap on parked segments ({} MiB, {}) and no older \
-                 segment could be deleted",
-                limits.max_total_bytes / MIB,
-                MAX_TOTAL_MB_ENV
-            )));
-        }
-        if let Some(s) = space {
-            let free = s.free.saturating_add(freed);
-            if free < limits.min_free_bytes {
-                return Err(ParkError::Refused(format!(
-                    "only {} MiB free on the volume of {}, under the {} MiB parking keeps \
-                     free ({}), even after deleting all older parked segments",
-                    free / MIB,
-                    self.root.display(),
-                    limits.min_free_bytes / MIB,
-                    MIN_FREE_MB_ENV
-                )));
-            }
-        }
-
-        write_sidecar(segment, sidecar_contents)?;
+        let mut st = self.lock();
+        st.reserved.remove(segment);
         st.insert(segment.to_path_buf(), entry);
-        self.warn_usage(&mut st, &limits);
+        if let Some(l) = limits {
+            self.warn_usage(&mut st, &l);
+        }
         drop(st);
         crate::tams::drain::wake();
         Ok(())
     }
 
-    /// Delete the oldest parked segments (never `segment`, nor one an
-    /// uploader is busy with) until `bytes` more fit the cap and the free
-    /// space. Returns the bytes freed.
-    fn make_room(
+    /// Make room for a new segment, under the lock: choose the oldest parked
+    /// segments (never `segment`, one being parked, or one an uploader or the
+    /// drainer is busy with) whose deletion brings `entry.bytes` more under
+    /// the cap and keeps the free space, take them out of the index and
+    /// reserve `segment`'s bytes. Deletes nothing: the caller deletes the
+    /// victims ([`Self::evict`]) without the lock. When even all of them
+    /// would not be enough, nothing is chosen and the park is refused.
+    fn reserve(
         &self,
         st: &mut State,
         segment: &Path,
-        bytes: u64,
+        entry: &Entry,
         space: Option<Space>,
         limits: &ParkLimits,
-    ) -> u64 {
-        let mut freed = 0u64;
-        let short = |st: &State, freed: u64| {
-            st.total.saturating_add(bytes) > limits.max_total_bytes
-                || space.is_some_and(|s| s.free.saturating_add(freed) < limits.min_free_bytes)
-        };
-        if !short(st, freed) {
-            return 0;
-        }
-        let mut oldest: Vec<(u64, PathBuf)> = st
-            .entries
-            .iter()
-            .filter(|(p, _)| p.as_path() != segment)
-            .map(|(p, e)| (e.start_ns, p.clone()))
-            .collect();
-        oldest.sort();
-        let (mut count, mut count_bytes) = (0usize, 0u64);
-        for (_, path) in oldest {
-            if !short(st, freed) {
-                break;
+    ) -> Result<Vec<Victim>, ParkError> {
+        st.remove(segment);
+        let need_cap = st
+            .total
+            .saturating_add(entry.bytes)
+            .saturating_sub(limits.max_total_bytes);
+        let need_free = space.map_or(0, |s| limits.min_free_bytes.saturating_sub(s.free));
+        let need = need_cap.max(need_free);
+        let mut victims = Vec::new();
+        if need > 0 {
+            let mut oldest: Vec<(u64, PathBuf)> = st
+                .entries
+                .iter()
+                .filter(|(p, _)| p.as_path() != segment && !st.reserved.contains(*p))
+                .map(|(p, e)| (e.start_ns, p.clone()))
+                .collect();
+            oldest.sort();
+            let mut planned = 0u64;
+            for (_, path) in oldest {
+                if planned >= need {
+                    break;
+                }
+                let Some(claim) = crate::tams::uploader::Claim::take(&path) else {
+                    continue;
+                };
+                let Some(victim) = st.entries.get(&path).cloned() else {
+                    continue;
+                };
+                planned = planned.saturating_add(victim.bytes);
+                victims.push(Victim {
+                    path,
+                    entry: victim,
+                    _claim: claim,
+                });
             }
-            let Some(_claim) = crate::tams::uploader::Claim::take(&path) else {
-                continue;
-            };
-            let gone = st.entries.get(&path).map_or(0, |e| e.bytes);
-            let existed = match std::fs::remove_file(&path) {
-                Ok(()) => true,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            if planned < need {
+                // Deleting them all would not make room: keep them (dropping
+                // the victims releases their claims) and refuse this one.
+                return Err(ParkError::Refused(if need_free > planned {
+                    let free = space.map_or(0, |s| s.free);
+                    format!(
+                        "only {} MiB free on the volume of {}, under the {} MiB parking keeps \
+                         free ({}), and deleting every older parked segment ({} MiB) would \
+                         not make up for it; none was deleted",
+                        free / MIB,
+                        self.root.display(),
+                        limits.min_free_bytes / MIB,
+                        MIN_FREE_MB_ENV,
+                        planned / MIB
+                    )
+                } else {
+                    format!(
+                        "parking it would pass the cap on parked segments ({} MiB, {}) even \
+                         after deleting every older parked segment; none was deleted",
+                        limits.max_total_bytes / MIB,
+                        MAX_TOTAL_MB_ENV
+                    )
+                }));
+            }
+            for v in &victims {
+                st.remove(&v.path);
+            }
+            st.adjust_free(planned, 0);
+        }
+        st.reserved.insert(segment.to_path_buf());
+        st.insert(segment.to_path_buf(), entry.clone());
+        Ok(victims)
+    }
+
+    /// Delete the segments [`Self::reserve`] chose, without the lock, and
+    /// report it. One that cannot be deleted goes back into the index.
+    fn evict(&self, victims: Vec<Victim>, limits: &ParkLimits) {
+        if victims.is_empty() {
+            return;
+        }
+        let (mut count, mut count_bytes) = (0usize, 0u64);
+        let mut kept = Vec::new();
+        for v in victims {
+            match std::fs::remove_file(&v.path) {
+                Ok(()) => {
+                    count += 1;
+                    count_bytes += v.entry.bytes;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
                     warn!(
                         "TAMS: could not delete parked segment {}: {}",
-                        path.display(),
+                        v.path.display(),
                         e
                     );
+                    kept.push(v);
                     continue;
                 }
-            };
-            let _ = std::fs::remove_file(crate::tams::uploader::sidecar_path(&path));
-            crate::tams::uploader::forget_allocation(&path);
-            st.remove(&path);
-            if existed {
-                freed = freed.saturating_add(gone);
-                count += 1;
-                count_bytes += gone;
             }
+            let _ = std::fs::remove_file(crate::tams::uploader::sidecar_path(&v.path));
+            crate::tams::uploader::forget_allocation(&v.path);
+        }
+        let mut st = self.lock();
+        for v in kept {
+            st.adjust_free(0, v.entry.bytes);
+            st.insert(v.path.clone(), v.entry.clone());
         }
         if count > 0 {
             st.evicted.0 += count;
@@ -762,7 +887,6 @@ impl Parking {
                 st.evicted_reported_at = Some(Instant::now());
             }
         }
-        freed
     }
 
     /// Warn when what is parked reaches 50 % or 80 % of the cap: on reaching a
@@ -814,7 +938,9 @@ impl Parking {
             .get(dir)
             .into_iter()
             .flatten()
-            .filter(|(_, p)| st.entries.get(p).is_some_and(|e| e.seen < scanned_at))
+            .filter(|(_, p)| {
+                !st.reserved.contains(p) && st.entries.get(p).is_some_and(|e| e.seen < scanned_at)
+            })
             .map(|(_, p)| p.clone())
             .collect();
         for p in stale {
@@ -863,6 +989,7 @@ impl Parking {
             None => Bound::Unbounded,
         };
         set.range((from, Bound::Unbounded))
+            .filter(|(_, path)| !st.reserved.contains(path))
             .take(limit)
             .filter_map(|(_, path)| {
                 let e = st.entries.get(path)?;
@@ -878,7 +1005,8 @@ impl Parking {
 
     /// Whether the index holds `segment`.
     pub fn contains(&self, segment: &Path) -> bool {
-        self.lock().entries.contains_key(segment)
+        let st = self.lock();
+        st.entries.contains_key(segment) && !st.reserved.contains(segment)
     }
 
     /// The root this index covers.
@@ -892,15 +1020,44 @@ impl Parking {
     }
 }
 
-/// Write the sidecar of `segment` through a temporary file renamed into place.
-fn write_sidecar(segment: &Path, contents: &str) -> Result<(), ParkError> {
+/// Write the sidecar of `segment` through a temporary file renamed into
+/// place. The segment's data, the sidecar and their directory are synced
+/// first, so a sidecar that survives a power loss never names a segment
+/// whose data did not.
+fn write_sidecar(segment: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    // Opened for writing: syncing needs it on Windows. Nothing is written.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(segment)?
+        .sync_all()?;
     let sidecar = crate::tams::uploader::sidecar_path(segment);
     let tmp = crate::tams::uploader::sidecar_tmp_path(segment);
-    let written = std::fs::write(&tmp, contents).and_then(|()| std::fs::rename(&tmp, &sidecar));
+    let written = std::fs::File::create(&tmp)
+        .and_then(|mut f| {
+            f.write_all(contents.as_bytes())?;
+            f.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&tmp, &sidecar));
     if let Err(e) = written {
         let _ = std::fs::remove_file(&tmp);
-        return Err(ParkError::Io(e));
+        return Err(e);
     }
+    if let Some(dir) = segment.parent() {
+        sync_dir(dir)?;
+    }
+    Ok(())
+}
+
+/// Sync a directory, so the names created or renamed in it survive a power
+/// loss. Unix only; elsewhere a directory cannot be opened for it.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -1084,14 +1241,91 @@ mod tests {
         assert!(r.is_ok());
         assert!(!a10.exists() && parked(&b20) && parked(&a30));
 
-        // 500 free: deleting all older segments is not enough.
+        // 500 free: deleting all older segments (200 bytes) is not enough.
+        // The backlog stays; only the new segment is refused.
         space.0.lock().unwrap().free = 500;
         std::thread::sleep(SPACE_CACHE);
         let (b40, r) = park_one(&p, root, "b", 40);
         assert!(matches!(r, Err(ParkError::Refused(_))), "{:?}", r);
-        assert!(!b20.exists() && !a30.exists());
+        assert!(
+            parked(&b20) && parked(&a30),
+            "the backlog was deleted for nothing"
+        );
         assert!(!crate::tams::uploader::sidecar_path(&b40).exists());
-        assert_eq!(p.total_bytes(), 0);
+        assert_eq!(p.total_bytes(), 200);
+    }
+
+    /// A segment larger than the cap could never fit: it is refused without
+    /// deleting what is parked.
+    #[test]
+    fn tams_park_over_the_cap_refuses_without_deleting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let limits = ParkLimits {
+            max_total_bytes: 250,
+            min_free_bytes: 0,
+        };
+        let p = Parking::new(root.into(), Some(limits), Box::new(fake(u64::MAX)));
+        let (a10, _) = park_one(&p, root, "a", 10);
+        let (b20, _) = park_one(&p, root, "b", 20);
+        let big = root.join("a").join("seg_r1_00030.ts");
+        std::fs::write(&big, [0u8; 300]).unwrap();
+        let r = p.park(&big, 30_000_000_000, "30000000000 31000000000");
+        assert!(matches!(r, Err(ParkError::Refused(_))), "{:?}", r);
+        assert!(parked(&a10) && parked(&b20));
+        assert_eq!(p.total_bytes(), 200);
+    }
+
+    /// Parks from many threads at once, with deletions for space, keep the
+    /// index and the disk in step and the total under the cap.
+    #[test]
+    fn tams_concurrent_parks_stay_under_the_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let limits = ParkLimits {
+            max_total_bytes: 1_000,
+            min_free_bytes: 0,
+        };
+        let p = std::sync::Arc::new(Parking::new(
+            root.clone(),
+            Some(limits),
+            Box::new(fake(u64::MAX)),
+        ));
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                let (p, root) = (p.clone(), root.clone());
+                std::thread::spawn(move || {
+                    for i in 0..20 {
+                        let (_, r) = park_one(&p, &root, &format!("f{t}"), 1 + i * 8 + t);
+                        assert!(r.is_ok(), "{:?}", r);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(p.total_bytes(), 1_000);
+        let again = Parking::new(root, Some(limits), Box::new(fake(u64::MAX)));
+        again.warm_up();
+        assert_eq!(again.total_bytes(), 1_000);
+    }
+
+    /// A park handed to the parking thread does not hold up the caller (a
+    /// GStreamer streaming thread), however long it takes.
+    #[test]
+    fn tams_park_off_thread_does_not_block_the_caller() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let started = Instant::now();
+        park_off_thread(move || {
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            let _ = done_tx.send(());
+        });
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(done_rx.try_recv().is_err(), "the job ran on the caller");
+        release_tx.send(()).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     }
 
     /// A rescan lists a segment, the drainer uploads and forgets it, and the
@@ -1161,6 +1395,11 @@ mod tests {
         assert!(r.is_ok(), "{:?}", r);
         assert!(parked(&a10) && parked(&b20));
         assert_eq!(p.total_bytes(), 200);
+        // Also when the index has not seen it (a new process before its scan).
+        let fresh = Parking::new(root.into(), Some(limits), Box::new(space.clone()));
+        *fresh.scanned.lock().unwrap() = true;
+        assert!(fresh.park(&b20, start_ns, &contents).is_ok());
+        assert!(parked(&a10) && parked(&b20));
     }
 
     /// A park (on a streaming thread) does not wait for the startup scan,
