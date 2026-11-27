@@ -39,7 +39,7 @@ pub fn media_player_definition() -> BlockDefinition {
             ExposedProperty {
                 name: MODE_PROPERTY.to_string(),
                 label: "Mode".to_string(),
-                description: "Playlist = files and URLs in order. Stinger clip source = feeds a Vision Mixer's stinger input: the playlist is the stinger library. The player decodes, parks the cued clip on its first frame and plays it once per take; looping, sync and playout delay are overridden. Wire video_out to the mixer's stinger input; audio_out carries the clip's sound. Timeline (replay) = an indexed source on a timeline shared by its group."
+                description: "Playlist = files and URLs in order. Stinger clip source = feeds a Vision Mixer's stinger input: the playlist is the stinger library. The player decodes, parks the cued clip on its first frame and plays it once per take; looping, sync and playout delay are overridden. Wire video_out to the mixer's stinger input; audio_out carries the clip's sound. Timeline (replay) = an indexed source on a timeline shared by its group, to scrub, jog and play at any speed."
                     .to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
