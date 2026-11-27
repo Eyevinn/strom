@@ -51,6 +51,90 @@ impl HttpStatusError {
     }
 }
 
+/// Env var listing gateways (comma separated URLs) that may receive an OSC SAT
+/// although their host is not an OSC instance of the SAT's service, besides
+/// `STROM_TAMS_GATEWAY_URL`.
+pub const ALLOWED_GATEWAYS_ENV: &str = "STROM_TAMS_ALLOWED_GATEWAYS";
+
+/// Whether `gateway` has the origin (scheme, host and port) of one of the
+/// `allowed` URLs.
+fn is_allow_listed<'a>(gateway: &str, allowed: impl IntoIterator<Item = &'a str>) -> bool {
+    let Ok(gw) = reqwest::Url::parse(gateway) else {
+        return false;
+    };
+    allowed
+        .into_iter()
+        .filter_map(|a| reqwest::Url::parse(a.trim()).ok())
+        .any(|a| a.origin() == gw.origin())
+}
+
+/// Whether the operator allowed `gateway`: it has the origin of
+/// `STROM_TAMS_GATEWAY_URL` or of an entry in [`ALLOWED_GATEWAYS_ENV`]. A flow
+/// can name any gateway, so this is set on the instance, never in a flow.
+fn gateway_is_allow_listed(gateway: &str) -> bool {
+    let configured = strom_types::env::var_opt("STROM_TAMS_GATEWAY_URL");
+    let listed = strom_types::env::var_opt(ALLOWED_GATEWAYS_ENV).unwrap_or_default();
+    is_allow_listed(
+        gateway,
+        configured.as_deref().into_iter().chain(listed.split(',')),
+    )
+}
+
+/// The host of `url` for an error message, without user info, path or query.
+fn host_for_log(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "a URL that does not parse".to_string())
+}
+
+/// Check that an OSC SAT for `service_id` may go to `gateway`: the gateway must
+/// be an HTTPS OSC instance of that service type, or allow-listed. An explicit
+/// service id would otherwise mint a SAT and hand it to any host a flow names.
+///
+/// The host is the parsed URL's, the one the request goes to, so user info, a
+/// path or a query that look like an OSC host cannot pass. A URL with user info
+/// is refused outright: an OSC gateway has no use for it.
+fn check_osc_gateway(gateway: &str, service_id: &str, allow_listed: bool) -> Result<(), String> {
+    if allow_listed {
+        return Ok(());
+    }
+    let osc_host_of_service = reqwest::Url::parse(gateway).is_ok_and(|u| {
+        u.scheme() == "https"
+            && u.username().is_empty()
+            && u.password().is_none()
+            && crate::osc::derive_service_id(u.as_str()).as_deref() == Some(service_id)
+    });
+    if osc_host_of_service {
+        Ok(())
+    } else {
+        Err(format!(
+            "OSC auth: not sending a SAT for service '{}' to {}: the gateway is not an \
+             HTTPS OSC instance of that service; add it to {} to allow it",
+            service_id,
+            host_for_log(gateway),
+            ALLOWED_GATEWAYS_ENV
+        ))
+    }
+}
+
+/// The OSC service id to mint SATs for when talking to `gateway`: `explicit`
+/// when set, else derived from the gateway host. Fails when there is none, or
+/// when the SAT may not go to that gateway (see [`check_osc_gateway`]).
+pub fn osc_service_id(gateway: &str, explicit: Option<&str>) -> Result<String, String> {
+    let service_id = match explicit {
+        Some(id) => id.to_string(),
+        None => crate::osc::derive_service_id(gateway).ok_or_else(|| {
+            "OSC auth: cannot derive the service id from the gateway URL. It must be an \
+             absolute OSC URL (https://<tenant>-<instance>.<service>.auto.prod.osaas.io); \
+             for another gateway set the OSC Service ID property"
+                .to_string()
+        })?,
+    };
+    check_osc_gateway(gateway, &service_id, gateway_is_allow_listed(gateway))?;
+    Ok(service_id)
+}
+
 /// Metadata describing a flow to create on the gateway.
 #[derive(Debug, Clone)]
 pub struct FlowSpec {
@@ -175,12 +259,19 @@ pub struct TamsClient {
 }
 
 impl TamsClient {
+    /// A client for the gateway at `base_url`. Fails for OSC auth whose SAT may
+    /// not go to this gateway (see [`osc_service_id`]).
     pub fn new(base_url: impl Into<String>, auth: AuthMethod) -> Result<Self> {
+        let base_url = base_url.into();
+        if let AuthMethod::Osc { service_id, .. } = &auth {
+            check_osc_gateway(&base_url, service_id, gateway_is_allow_listed(&base_url))
+                .map_err(|e| anyhow!(e))?;
+        }
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .context("building TAMS HTTP client")?;
-        let base_url = base_url.into().trim_end_matches('/').to_string();
+        let base_url = base_url.trim_end_matches('/').to_string();
         Ok(Self {
             base_url,
             auth,
@@ -323,6 +414,112 @@ mod tests {
     use super::*;
 
     // Timerange/timestamp formatting is tested in `strom_types::tams`.
+
+    #[test]
+    fn osc_sat_goes_only_to_hosts_of_its_service() {
+        let gw = "https://t-i.eyevinn-tams-gateway.auto.prod.osaas.io";
+        assert!(check_osc_gateway(gw, "eyevinn-tams-gateway", false).is_ok());
+        // An explicit service id for another service, a host that is not OSC,
+        // or plain HTTP: no SAT unless the gateway is allow-listed.
+        assert!(check_osc_gateway(gw, "eyevinn-intercom-manager", false).is_err());
+        assert!(
+            check_osc_gateway("https://evil.example.net", "eyevinn-tams-gateway", false).is_err()
+        );
+        assert!(check_osc_gateway(
+            "http://t-i.eyevinn-tams-gateway.auto.prod.osaas.io",
+            "eyevinn-tams-gateway",
+            false
+        )
+        .is_err());
+        assert!(
+            check_osc_gateway("https://tams.example.com", "eyevinn-tams-gateway", true).is_ok()
+        );
+        // A port on the right host is fine.
+        assert!(check_osc_gateway(
+            "https://x.eyevinn-tams-gateway.auto.prod.osaas.io:443/flows",
+            "eyevinn-tams-gateway",
+            false
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn explicit_service_id_does_not_send_a_sat_to_another_host() {
+        // The review's case: an explicit service id skipped the host check.
+        for gw in [
+            "https://a.eyevinn-tams-gateway.auto.prod.osaas.io@evil.example/",
+            "https://x.eyevinn-tams-gateway.auto.prod.osaas.io:pw@evil.example/",
+            "https://evil.example/x.eyevinn-tams-gateway.auto.prod.osaas.io",
+            "https://evil.example\\x.eyevinn-tams-gateway.auto.prod.osaas.io",
+            "https://evil.example?x.eyevinn-tams-gateway.auto.prod.osaas.io",
+            "https://x.eyevinn-tams-gateway.auto.prod.osaas.io.evil.example",
+            "https://tams.example.com",
+            // User info on the right host is refused too.
+            "https://u:p@x.eyevinn-tams-gateway.auto.prod.osaas.io",
+            // Not a URL.
+            "x.eyevinn-tams-gateway.auto.prod.osaas.io",
+        ] {
+            assert!(
+                osc_service_id(gw, Some("eyevinn-tams-gateway")).is_err(),
+                "{gw}"
+            );
+            assert!(osc_service_id(gw, None).is_err(), "{gw}");
+        }
+        assert_eq!(
+            osc_service_id(
+                "https://x.eyevinn-tams-gateway.auto.prod.osaas.io",
+                Some("eyevinn-tams-gateway")
+            ),
+            Ok("eyevinn-tams-gateway".to_string())
+        );
+        assert_eq!(
+            osc_service_id("https://x.eyevinn-tams-gateway.auto.prod.osaas.io", None),
+            Ok("eyevinn-tams-gateway".to_string())
+        );
+    }
+
+    #[test]
+    fn a_gateway_url_without_scheme_says_it_must_be_absolute() {
+        let err = osc_service_id("x.eyevinn-tams-gateway.auto.prod.osaas.io", None).unwrap_err();
+        assert!(err.contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn allow_list_matches_origins() {
+        let allowed = ["https://tams.example.com", " http://gw.example.org:8000/x "];
+        assert!(is_allow_listed("https://tams.example.com/flows", allowed));
+        assert!(is_allow_listed("http://gw.example.org:8000", allowed));
+        assert!(!is_allow_listed("http://tams.example.com", allowed));
+        assert!(!is_allow_listed("https://gw.example.org:8000", allowed));
+        assert!(!is_allow_listed("not a url", allowed));
+        assert!(!is_allow_listed("https://tams.example.com", []));
+    }
+
+    #[test]
+    fn osc_client_refuses_a_foreign_gateway() {
+        let osc = |gw: &str, service: &str| {
+            TamsClient::new(
+                gw,
+                AuthMethod::Osc {
+                    provider: std::sync::Arc::new(
+                        crate::osc::SatProvider::new(None, None).unwrap(),
+                    ),
+                    service_id: service.to_string(),
+                    credential_key: "flow".to_string(),
+                },
+            )
+        };
+        assert!(osc(
+            "https://a.eyevinn-tams-gateway.auto.prod.osaas.io@evil.example/",
+            "eyevinn-tams-gateway"
+        )
+        .is_err());
+        assert!(osc(
+            "https://a.eyevinn-tams-gateway.auto.prod.osaas.io/",
+            "eyevinn-tams-gateway"
+        )
+        .is_ok());
+    }
 
     #[test]
     fn base_url_trailing_slash_trimmed() {

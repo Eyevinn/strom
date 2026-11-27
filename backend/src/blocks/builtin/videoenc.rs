@@ -141,6 +141,8 @@ impl BlockBuilder for VideoEncBuilder {
             })
             .unwrap_or(60);
 
+        let min_keyframe_request_interval_ms = parse_min_keyframe_request_interval_ms(properties);
+
         // Create elements.
         //
         // The converter is plain `videoconvert`, never `autovideoconvert`.
@@ -178,6 +180,7 @@ impl BlockBuilder for VideoEncBuilder {
             rate_control,
             keyframe_interval,
         )?;
+        set_min_keyframe_request_interval(&encoder, min_keyframe_request_interval_ms);
 
         // VP9 and AV1 encoders do not pick their input format from a profile
         // pinned downstream, so the 4:2:0 constraint goes in front of them.
@@ -592,6 +595,48 @@ fn clamp_to_property_range(encoder: &gst::Element, property_name: &str, value: u
     value.clamp(min, max.max(min))
 }
 
+/// Default for `min_keyframe_request_interval_ms`: one forced keyframe per
+/// second at most, which keeps WebRTC viewers' PLIs from driving the bitrate.
+const DEFAULT_MIN_KEYFRAME_REQUEST_INTERVAL_MS: u64 = 1000;
+
+/// Upper bound for `min_keyframe_request_interval_ms`. A longer floor would
+/// leave a new WebRTC viewer without a picture for longer than the default
+/// GOP, and keeps the value well inside the clock's range.
+const MAX_MIN_KEYFRAME_REQUEST_INTERVAL_MS: u64 = 60_000;
+
+/// `min_keyframe_request_interval_ms` from the block properties, in ms.
+/// Missing or negative falls back to the default; 0 means no limit. Values
+/// above 60000 are clamped to it.
+fn parse_min_keyframe_request_interval_ms(properties: &HashMap<String, PropertyValue>) -> u64 {
+    properties
+        .get("min_keyframe_request_interval_ms")
+        .and_then(|v| match v {
+            PropertyValue::UInt(u) => Some(*u),
+            PropertyValue::Int(i) if *i >= 0 => Some(*i as u64),
+            _ => None,
+        })
+        .unwrap_or(DEFAULT_MIN_KEYFRAME_REQUEST_INTERVAL_MS)
+        .min(MAX_MIN_KEYFRAME_REQUEST_INTERVAL_MS)
+}
+
+/// Rate-limit keyframes forced by downstream requests. WebRTC viewers send a
+/// PLI on picture loss and webrtcsink converts each one into a force-keyunit
+/// event. With no floor, a burst-induced loss spiral (big frame -> loss ->
+/// PLI -> outsized IDR -> more loss -> more PLIs) makes the encoder emit
+/// back-to-back keyframes and multiplies the burst it started from. A 1 s
+/// floor (the block default) caps PLI-driven IDRs at one per second: new
+/// viewers and genuine recoveries still get their keyframe quickly, but a PLI
+/// storm can no longer drive the output to many times the target bitrate.
+///
+/// Only requests without a running time ("now") are limited; an early one is
+/// held back until the floor runs out, not lost. Scheduled requests, such as
+/// TAMS Output's keyframe on every point of its TAI segment grid, always
+/// pass: the base-class `min-force-key-unit-interval` delayed them too and
+/// moved segment boundaries off the grid. See `keyframe_requests`.
+fn set_min_keyframe_request_interval(encoder: &gst::Element, interval_ms: u64) {
+    keyframe_requests::install(encoder, interval_ms);
+}
+
 /// Set encoder properties based on the encoder type.
 ///
 /// Values go in through their text form, which lets GStreamer's own deserializer
@@ -850,20 +895,6 @@ fn set_encoder_properties(
         if let Some(property) = keyframe_interval_property(|name| encoder.has_property(name)) {
             set_encoder_property(encoder, property, &keyframe_str)?;
         }
-    }
-
-    // Rate-limit force-keyunit requests (GstVideoEncoder base-class property,
-    // present on all encoders; default 0 = honor every request). WebRTC
-    // viewers send a PLI on picture loss and webrtcsink converts each one
-    // into a force-keyunit event. With no floor, a burst-induced loss spiral
-    // (big frame -> loss -> PLI -> outsized IDR -> more loss -> more PLIs)
-    // makes the encoder emit back-to-back keyframes and multiplies the burst
-    // it started from. A 1 s floor caps PLI-driven IDRs at one per second:
-    // new viewers and genuine recoveries still get their keyframe quickly,
-    // but a PLI storm can no longer drive the output to many times the
-    // target bitrate.
-    if encoder.has_property("min-force-key-unit-interval") {
-        encoder.set_property("min-force-key-unit-interval", 1_000_000_000u64);
     }
 
     info!(
@@ -1544,6 +1575,21 @@ fn videoenc_definition() -> BlockDefinition {
                 persist: None,
                 visible_when: None,
             },
+            ExposedProperty {
+                name: "min_keyframe_request_interval_ms".to_string(),
+                label: "Min Keyframe Request Interval (ms)".to_string(),
+                description: "Shortest time between keyframes forced by immediate requests (WebRTC PLIs), in ms, 0-60000. Scheduled requests always pass. 0 = no limit.".to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(DEFAULT_MIN_KEYFRAME_REQUEST_INTERVAL_MS)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "min_keyframe_request_interval_ms".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+                visible_when: None,
+            },
         ],
         external_pads: ExternalPads {
             inputs: vec![ExternalPad {
@@ -1572,6 +1618,7 @@ fn videoenc_definition() -> BlockDefinition {
 }
 
 mod av1;
+mod keyframe_requests;
 mod level;
 mod mediafoundation;
 mod selection;

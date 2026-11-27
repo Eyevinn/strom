@@ -400,6 +400,19 @@ pub(super) fn build_whepserversink(
     // dropped while its ICE/DTLS came up.
     crate::blocks::builtin::webrtcsink_keyframe_gate::install(&whepserversink);
 
+    // WORKAROUND #5: a viewer whose ICE gathering completes a second time must
+    // not abort the process in the WHEP server signaller.
+    super::ice_complete_guard::install(&whepserversink, instance_id);
+
+    // WORKAROUND #6: a viewer that leaves before its connection comes up must
+    // not keep its session, and the file descriptors it holds, forever.
+    super::unconnected_viewer_reaper::install(
+        &whepserversink,
+        instance_id,
+        super::unconnected_viewer_reaper::CONNECT_TIMEOUT,
+        super::unconnected_viewer_reaper::ANSWER_TIMEOUT,
+    );
+
     // Handle consumer-removed to clean up webrtcbin from stats storage
     let dynamic_webrtcbin_store_remove = ctx.dynamic_webrtcbin_store();
     let block_id_for_remove = instance_id.to_string();
