@@ -30,16 +30,23 @@
 //!
 //! Sub-modules: `stats` (one player's knowledge and counters), `edge` (the
 //! live edge between its steps), `state` (the API's view: state,
-//! diagnostics, discovery, and the events the group sends by itself).
+//! diagnostics, discovery, and the events the group sends by itself),
+//! `switch` (the checks and events of a source switch).
 
 mod command;
 mod edge;
 mod state;
 mod stats;
+mod switch;
 
 pub use command::{parse_command, take_client_ref, Command, CommandError, Request};
 pub use edge::EdgeTracker;
-pub use stats::{DecodeRecord, IndexView, PlayerConfig, PlayerStats, StartMode, READY_TICKS};
+pub use stats::{
+    DecodeRecord, IndexView, PlayerConfig, PlayerStats, SourceIdent, StartMode, READY_TICKS,
+};
+#[cfg(test)]
+pub(crate) use switch::tests as switch_tests;
+pub use switch::{OpenedSource, SourceControl, Switch};
 
 use super::grid::FrameGrid;
 use gstreamer as gst;

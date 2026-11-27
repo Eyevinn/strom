@@ -159,6 +159,8 @@ fn angles_signature(players: &[Arc<PlayerStats>]) -> u64 {
         .fold(0u64, |acc, p| {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             p.block_id.hash(&mut h);
+            // A switch of source replaces the angle's media.
+            p.source_ident().source.hash(&mut h);
             // Order-free; the count tells one angle from the same twice.
             acc.wrapping_add(h.finish()).wrapping_add(1)
         })
@@ -265,6 +267,8 @@ impl ReplayTimeline {
         let view = p.group_index_view();
         ReplayAngleState {
             block: p.block_id.clone(),
+            source: p.source_ident().source,
+            pending_source: p.pending_source(),
             ready: p.ready(),
             fps: grid.map(|g| format!("{}/{}", g.fps_n, g.fps_d)),
             frame_rate_missing: p.frame_rate_missing.load(Ordering::Relaxed),
@@ -420,17 +424,18 @@ impl ReplayTimeline {
     /// The group for discovery.
     pub fn info(&self, flow_id: FlowId, group: &str) -> ReplayGroupInfo {
         let players = self.players();
+        let idents: Vec<_> = players.iter().map(|p| p.source_ident()).collect();
         let angles: Vec<ReplayAngleInfo> = players
             .iter()
-            .map(|p| ReplayAngleInfo {
+            .zip(&idents)
+            .map(|(p, i)| ReplayAngleInfo {
                 block: p.block_id.clone(),
                 name: p.config.name.clone(),
-                source_id: p.config.source_id.clone(),
-                source: p.config.source.clone(),
+                source_id: i.source_id.clone(),
+                source: i.source.clone(),
             })
             .collect();
-        let stores: Vec<Option<&String>> =
-            players.iter().map(|p| p.config.store.as_ref()).collect();
+        let stores: Vec<Option<&String>> = idents.iter().map(|i| i.store.as_ref()).collect();
         let source = match stores.first() {
             Some(Some(first)) if stores.iter().all(|s| *s == Some(*first)) => {
                 Some((*first).clone())
