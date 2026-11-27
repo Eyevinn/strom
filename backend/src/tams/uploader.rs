@@ -561,7 +561,8 @@ pub(crate) fn mark_history_known(segment: &Path) {
 /// essence. `flow_spec.codec` is only a fallback. `tail` is flushed on shutdown
 /// with a timerange that ends where its media ends (`media_end`), or one
 /// `tail_segment_ns` after its start when that is unknown. `run` stays live
-/// until the task ends.
+/// until the task ends. `retention_s` (0: none) goes into the park manifest, so
+/// the drainer does not upload parked segments older than the window.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_uploader(
     client: TamsClient,
@@ -577,6 +578,7 @@ pub fn spawn_uploader(
     media_end: MediaEnd,
     tail_segment_ns: u64,
     run: RunGuard,
+    retention_s: u64,
 ) {
     // Counted from now, so a teardown that has stopped the pipeline waits for
     // the queue and the final segment before it frees the TAMS flow ids.
@@ -611,6 +613,7 @@ pub fn spawn_uploader(
             auth_reported_at: None,
             manifest: Some(ManifestState {
                 dir: temp_dir.clone(),
+                retention_s,
                 written: None,
             }),
         };
@@ -679,6 +682,8 @@ pub(crate) struct UploadCtx<'a> {
 /// The park manifest a live uploader writes, and what it last wrote.
 pub(crate) struct ManifestState {
     dir: PathBuf,
+    /// The writer's retention window (s, 0: none), for the drainer.
+    retention_s: u64,
     written: Option<String>,
 }
 
@@ -1482,7 +1487,8 @@ async fn write_manifest(ctx: &mut UploadCtx<'_>) {
         ctx.content_type,
         ctx.strom_flow_id,
         ctx.block_id,
-    );
+    )
+    .with_retention(state.retention_s);
     let json = match serde_json::to_string_pretty(&manifest) {
         Ok(j) => j,
         Err(e) => {

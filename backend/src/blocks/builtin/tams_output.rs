@@ -1153,6 +1153,7 @@ fn build_flow_chain(
             media_end,
             segment_ns,
             run,
+            retention.map_or(0, |w| w.as_secs()),
         );
 
         // Per-block timeline: TAI = running time + offset. A fragment whose first
