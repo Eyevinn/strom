@@ -1,6 +1,5 @@
 //! Authentication to a TAMS gateway as block properties, shared by every block
-//! that talks to one (TAMS Output, the Media Player's timeline mode), so they
-//! have the same properties, values and meaning.
+//! that talks to one, so they have the same properties, values and meaning.
 //!
 //! - `auth_mode`: `static` (default) or `osc`;
 //! - `api_token`: the static bearer token; empty = `STROM_TAMS_API_TOKEN` when
@@ -112,7 +111,7 @@ pub fn auth_properties(visible_when: Option<PropertyCondition>) -> Vec<ExposedPr
         block_prop(
             AUTH_MODE_PROPERTY,
             "Authentication",
-            "How to authenticate to the TAMS gateway. Static API Token = a bearer token. OSC PAT/SAT = short-lived Service Access Tokens minted from the OSC Personal Access Token configured on this Strom instance (STROM_OSC_PAT / OSC_ACCESS_TOKEN).",
+            "How to authenticate to the TAMS gateway: a static bearer token, or OSC Service Access Tokens minted from this instance's OSC Personal Access Token.",
             PropertyType::Enum {
                 values: vec![
                     EnumValue {
@@ -133,7 +132,7 @@ pub fn auth_properties(visible_when: Option<PropertyCondition>) -> Vec<ExposedPr
         block_prop(
             API_TOKEN_PROPERTY,
             "API Token",
-            "Static API Token mode: bearer token for the gateway. Empty = the instance's STROM_TAMS_API_TOKEN, which is sent only to STROM_TAMS_GATEWAY_URL or a gateway listed in STROM_TAMS_ALLOWED_GATEWAYS; otherwise no token (behind an access gate).",
+            "Bearer token for the gateway. Empty = the instance's default token, sent only to an allowed gateway; otherwise no token.",
             PropertyType::String,
             PropertyValue::String(String::new()),
             visible_when.clone(),
@@ -141,7 +140,7 @@ pub fn auth_properties(visible_when: Option<PropertyCondition>) -> Vec<ExposedPr
         block_prop(
             OSC_SERVICE_ID_PROPERTY,
             "OSC Service ID",
-            "OSC PAT/SAT mode: the OSC service type the SAT is scoped to. Empty = derived from the gateway URL (the service-type label of an *.osaas.io host). A SAT is sent only to an HTTPS OSC host of that service type, or to a gateway listed in STROM_TAMS_ALLOWED_GATEWAYS.",
+            "OSC service the SAT is scoped to. Empty = derived from the gateway URL. A SAT goes only to an HTTPS OSC host of that service or an allowed gateway.",
             PropertyType::String,
             PropertyValue::String(String::new()),
             visible_when,

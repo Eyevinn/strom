@@ -67,7 +67,7 @@ pub struct DetectedEssence {
 pub type SharedDetected = Arc<Mutex<DetectedEssence>>;
 
 /// A finished segment file ready to be uploaded and registered.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FragmentReady {
     /// Path to the complete segment file in the temp directory.
     pub path: PathBuf,
@@ -88,24 +88,19 @@ pub struct TailFragment {
     pub start_running_time_ns: u64,
 }
 
-/// Buffers a [`PadMediaEnd`] remembers between entering the muxer's pad and
-/// being consumed by it. An aggregator muxer queues far fewer.
+/// Buffers a [`PadMediaEnd`] remembers. Buffers with B-frames arrive out of
+/// presentation order, so the end is the latest of the recent ones.
 const PAD_RING: usize = 64;
 
-/// Where the media written by a muxer through one sink pad ends, as running
-/// time.
+/// Where the media of one essence written to the open fragment ends, as
+/// running time.
 ///
-/// A buffer probe on the pad reports each buffer as it enters
-/// ([`Self::add_buffer`]), with the running time from the pad's segment
-/// ([`Self::set_segment`]). When the muxer also reports each buffer it consumed
-/// ([`Self::consume`], from an aggregator pad's `buffer-consumed` signal; its
-/// queue is first in, first out), only consumed buffers count: what is still
-/// queued when the pipeline stops is never written. The consumed buffer's own
-/// timestamps are not used, since some muxers (mpegtsmux) rewrite them to
-/// running time first.
+/// The segmenter reports each buffer it writes ([`Self::add_buffer`]), with
+/// the running time from the essence's segment ([`Self::set_segment`]). Each
+/// fragment muxer is drained by EOS before its file is used, so every buffer
+/// reported is written.
 ///
-/// Updated per buffer, so it holds only atomics. The uploader reads it after
-/// the pipeline has stopped.
+/// Updated per buffer, so it holds only atomics.
 #[derive(Debug)]
 pub struct PadMediaEnd {
     seg_start_ns: AtomicU64,
@@ -116,8 +111,6 @@ pub struct PadMediaEnd {
     /// tracked (untracked segment).
     ring: [AtomicU64; PAD_RING],
     entered: AtomicU64,
-    consumed: AtomicU64,
-    counts_consumed: AtomicBool,
 }
 
 impl Default for PadMediaEnd {
@@ -128,18 +121,11 @@ impl Default for PadMediaEnd {
             seg_ok: AtomicBool::new(false),
             ring: std::array::from_fn(|_| AtomicU64::new(0)),
             entered: AtomicU64::new(0),
-            consumed: AtomicU64::new(0),
-            counts_consumed: AtomicBool::new(false),
         }
     }
 }
 
 impl PadMediaEnd {
-    /// Count only buffers reported by [`Self::consume`].
-    pub fn count_consumed(&self) {
-        self.counts_consumed.store(true, Ordering::Relaxed);
-    }
-
     /// A new segment event on the pad. Running time of a buffer in a forward,
     /// rate 1.0 segment is `pts - start + base`; any other segment is not tracked.
     pub fn set_segment(&self, segment: &gst::Segment) {
@@ -170,24 +156,11 @@ impl PadMediaEnd {
         self.entered.store(n + 1, Ordering::Release);
     }
 
-    /// The muxer consumed the oldest buffer still queued on the pad.
-    pub fn consume(&self) {
-        self.consumed.fetch_add(1, Ordering::AcqRel);
-    }
-
-    /// Latest end of the buffers written (consumed, or entered when the muxer
-    /// does not report consumption) that are still in the ring.
+    /// Latest end of the buffers written that are still in the ring.
     fn end_running_time_ns(&self) -> Option<u64> {
         let entered = self.entered.load(Ordering::Acquire);
-        let upto = if self.counts_consumed.load(Ordering::Relaxed) {
-            self.consumed.load(Ordering::Acquire).min(entered)
-        } else {
-            entered
-        };
-        // Ring slots still hold entries from `entered - PAD_RING` on; with more
-        // than that queued, the written end is unknown.
         let from = entered.saturating_sub(PAD_RING as u64);
-        (from..upto)
+        (from..entered)
             .map(|n| self.ring[n as usize % PAD_RING].load(Ordering::Relaxed))
             .max()
             .filter(|&end| end > 0)
@@ -929,6 +902,10 @@ enum Failure {
     /// 401/403: the credentials are wrong or expired. Someone has to fix them;
     /// the segment is parked until then, not thrown away.
     Auth,
+    /// Storage refused the presigned PUT (401/403/404): the signature expired,
+    /// e.g. an allocation kept for a parked segment across a long outage. A
+    /// new allocation fixes it; the gateway's credentials are fine.
+    StorageRefused,
     /// Any other 4xx: the request itself is wrong and will fail the same way.
     Rejected,
     /// Network error, timeout, 5xx, 408, 429.
@@ -936,15 +913,21 @@ enum Failure {
 }
 
 fn classify(e: &anyhow::Error) -> Failure {
+    if e.downcast_ref::<crate::tams::client::SegmentsRejected>()
+        .is_some()
+    {
+        return Failure::Rejected;
+    }
     let Some(h) = e.downcast_ref::<crate::tams::client::HttpStatusError>() else {
         return Failure::Transient;
     };
     // The presigned PUT goes to storage, not the gateway: a 404 there is no
-    // missing flow, and a 403 there is an expired signature, which a new
-    // allocation fixes like an auth problem would.
+    // missing flow, and a 401/403 there is an expired signature, which a new
+    // allocation fixes. Neither says anything about the gateway's credentials.
     let gateway = !h.context.starts_with("presigned");
     match h.status.as_u16() {
-        404 if gateway => Failure::FlowGone,
+        401 | 403 | 404 if !gateway => Failure::StorageRefused,
+        404 => Failure::FlowGone,
         401 | 403 => Failure::Auth,
         _ if !h.is_retryable() => Failure::Rejected,
         _ => Failure::Transient,
@@ -981,6 +964,7 @@ async fn upload_segment(
     );
 
     let mut recreated = false;
+    let mut reallocated = false;
     // The object an earlier try of this segment allocated, if any.
     let slot = Mutex::new(ctx.objects.remove(&frag.path));
     loop {
@@ -1019,6 +1003,16 @@ async fn upload_segment(
                 *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 ctx.objects.clear();
             }
+            Failure::StorageRefused if !reallocated => {
+                // `upload_one` dropped the allocation: try once more at once
+                // with a new one.
+                debug!(
+                    "TAMS {}: storage refused the upload ({:#}); allocating again",
+                    ctx.block_id, e
+                );
+                reallocated = true;
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
             Failure::Auth => {
                 let msg = format!(
                     "gateway refused the credentials, segment parked until they are fixed: {:#}",
@@ -1055,7 +1049,7 @@ async fn upload_segment(
                 discard_segment(&frag.path).await;
                 return Outcome::Dropped;
             }
-            Failure::FlowGone | Failure::Transient => {
+            Failure::FlowGone | Failure::StorageRefused | Failure::Transient => {
                 if !ctx.failing {
                     emit_error(
                         ctx.events,
@@ -1182,14 +1176,11 @@ async fn on_registered(
 /// recovered: it is deleted, to free the space, with an error.
 async fn park_segment(ctx: &UploadCtx<'_>, frag: &FragmentReady, reason: &str) -> Outcome {
     let target = ParkTarget::new(ctx.client.base_url(), &ctx.flow_spec.flow_id);
-    let contents = sidecar_contents(frag.start_ns, frag.end_ns, &target);
-    let (sidecar, tmp) = (sidecar_path(&frag.path), sidecar_tmp_path(&frag.path));
-    let written = match tokio::fs::write(&tmp, contents).await {
-        Ok(()) => tokio::fs::rename(&tmp, &sidecar).await,
-        Err(e) => Err(e),
-    };
+    let parked = frag.clone();
+    let written = tokio::task::spawn_blocking(move || park_on_disk(&parked, &target))
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)));
     if let Err(e) = written {
-        let _ = tokio::fs::remove_file(&tmp).await;
         let msg = format!(
             "could not park segment {} ({}), dropping it: {}",
             frag.path.display(),
@@ -1215,10 +1206,27 @@ async fn park_segment(ctx: &UploadCtx<'_>, frag: &FragmentReady, reason: &str) -
 /// the recovery sweep of this run or a later one uploads it to `target`.
 /// Blocking; a small write. On an error (the disk is full) the caller drops the
 /// segment.
+///
+/// Durable: the segment and the sidecar are synced before the sidecar is
+/// renamed into place, and the directory after, so a crash or power loss
+/// never leaves a sidecar for a segment that is not on disk whole.
 pub fn park_on_disk(frag: &FragmentReady, target: &ParkTarget) -> std::io::Result<()> {
+    use std::io::Write;
     let tmp = sidecar_tmp_path(&frag.path);
-    let written = std::fs::write(&tmp, sidecar_contents(frag.start_ns, frag.end_ns, target))
-        .and_then(|()| std::fs::rename(&tmp, sidecar_path(&frag.path)));
+    let written = (|| {
+        std::fs::File::open(&frag.path)?.sync_all()?;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(sidecar_contents(frag.start_ns, frag.end_ns, target).as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, sidecar_path(&frag.path))?;
+        if let Some(dir) = frag.path.parent() {
+            // Not every platform can open a directory to sync it.
+            if let Ok(d) = std::fs::File::open(dir) {
+                let _ = d.sync_all();
+            }
+        }
+        Ok(())
+    })();
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -1532,29 +1540,6 @@ mod tests {
 
     /// With a muxer that reports consumed buffers, buffers still queued in it
     /// when the pipeline stops are not counted: they are never written.
-    #[test]
-    fn only_consumed_buffers_count() {
-        gst::init().unwrap();
-        let pad = PadMediaEnd::default();
-        pad.count_consumed();
-        pad.set_segment(&time_segment(1_000, 0));
-        assert_eq!(pad.end_running_time_ns(), None);
-        for n in 0..5 {
-            pad.add_buffer(Some(1_000 + n * 20), 20);
-        }
-        assert_eq!(pad.end_running_time_ns(), None, "nothing consumed yet");
-        for _ in 0..4 {
-            pad.consume();
-        }
-        // Buffers 0..=3 written, buffer 4 still queued.
-        assert_eq!(pad.end_running_time_ns(), Some(80));
-        // More queued than the ring holds: unknown.
-        for n in 5..(5 + PAD_RING as u64) {
-            pad.add_buffer(Some(1_000 + n * 20), 20);
-        }
-        assert_eq!(pad.end_running_time_ns(), None);
-    }
-
     #[test]
     fn a_fragment_before_a_stall_ends_at_its_media() {
         let frag = TailFragment {
@@ -1887,6 +1872,8 @@ mod tests {
         storage: Arc<Mutex<VecDeque<u16>>>,
         register: Arc<Mutex<VecDeque<u16>>>,
         listed: Arc<Mutex<Vec<serde_json::Value>>>,
+        /// Status of each presigned PUT, taken in order, then 200.
+        puts: Arc<Mutex<VecDeque<u16>>>,
         flow_puts: Arc<AtomicU64>,
         allocations: Arc<AtomicU64>,
         registrations: Arc<Mutex<Vec<String>>>,
@@ -1930,7 +1917,12 @@ mod tests {
                     .into_response()
                 }),
             )
-            .route("/upload", put(|| async { StatusCode::OK }))
+            .route(
+                "/upload",
+                put(|State(s): State<Stub>| async move {
+                    status(&s.puts).unwrap_or(StatusCode::OK)
+                }),
+            )
             .route(
                 "/flows/{id}/segments",
                 get(|State(s): State<Stub>| async move {
@@ -1938,12 +1930,17 @@ mod tests {
                 })
                 .post(
                     |State(s): State<Stub>, Json(body): Json<serde_json::Value>| async move {
-                        if let Some(code) = status(&s.register) {
-                            return code;
-                        }
                         let tr = body["timerange"].as_str().unwrap_or_default().to_string();
+                        if let Some(code) = status(&s.register) {
+                            // 200 is TAMS's partial failure: the segment is
+                            // listed as failed.
+                            let failed = serde_json::json!({ "failed_segments": [
+                                { "object_id": body["object_id"], "timerange": tr }
+                            ]});
+                            return (code, Json(failed)).into_response();
+                        }
                         s.registrations.lock().unwrap().push(tr);
-                        StatusCode::CREATED
+                        StatusCode::CREATED.into_response()
                     },
                 ),
             )
@@ -2071,6 +2068,42 @@ mod tests {
             assert!(failing);
             assert!(path.exists() && sidecar_path(&path).exists());
         }
+    }
+
+    /// Storage refusing the presigned PUT (an expired signature, e.g. an
+    /// allocation kept across a long outage) gets a new allocation at once.
+    /// It is no credential failure: the segment is not parked and the
+    /// uploader is not marked failing.
+    #[tokio::test]
+    async fn refused_presigned_put_allocates_again() {
+        for code in [401, 403, 404] {
+            let stub = Stub::default();
+            stub.puts.lock().unwrap().push_back(code);
+            let (outcome, failing, path) = upload_with(&stub, false).await;
+            assert_eq!(outcome, Outcome::Registered, "{}", code);
+            assert!(!failing, "{}", code);
+            assert_eq!(stub.allocations.load(Ordering::SeqCst), 2, "{}", code);
+            assert!(!path.exists());
+        }
+        // Refused again with the new allocation: parked for later, still
+        // without a credential error.
+        let stub = Stub::default();
+        stub.puts.lock().unwrap().extend([403, 403]);
+        let (outcome, _, path) = upload_with(&stub, false).await;
+        assert_eq!(outcome, Outcome::Parked);
+        assert!(path.exists() && sidecar_path(&path).exists());
+    }
+
+    /// A registration answered with 200 (TAMS's partial failure, the segment
+    /// listed in `failed_segments`) is a rejection, not a transient error that
+    /// parks the segment and retries it until the cap.
+    #[tokio::test]
+    async fn partially_failed_registration_is_a_rejection() {
+        let stub = Stub::default();
+        stub.register.lock().unwrap().push_back(200);
+        let (outcome, _, path) = upload_with(&stub, false).await;
+        assert_eq!(outcome, Outcome::Dropped);
+        assert!(!path.exists() && !sidecar_path(&path).exists());
     }
 
     /// A parked segment the gateway already has (its registration went

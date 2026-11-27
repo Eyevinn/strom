@@ -285,6 +285,24 @@ fn bus_error(pipeline: &gst::Pipeline) -> Option<String> {
     None
 }
 
+/// x264 with a GOP of 25 and B-frames (two per GOP gap, always used), at low
+/// latency otherwise: the segmenter routes buffers and takes where media
+/// ends from PTS, which B-frames reorder (see the repo rule on tests that
+/// read video timestamps). `tune=zerolatency` makes no B-frames.
+fn x264_with_bframes() -> gst::Element {
+    gst::ElementFactory::make("x264enc")
+        .property("key-int-max", 25u32)
+        .property("bframes", 2u32)
+        .property("b-adapt", false)
+        .property("rc-lookahead", 2i32)
+        .property("sync-lookahead", 0i32)
+        .property("sliced-threads", true)
+        .property_from_str("tune", "fastdecode")
+        .property_from_str("speed-preset", "ultrafast")
+        .build()
+        .unwrap()
+}
+
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -816,11 +834,7 @@ mod last_segment {
             )
             .build()
             .unwrap();
-        let enc = gst::ElementFactory::make("x264enc")
-            .property("key-int-max", 25u32)
-            .property_from_str("tune", "zerolatency")
-            .build()
-            .unwrap();
+        let enc = x264_with_bframes();
         pipeline.add_many([&src, &caps, &enc]).unwrap();
         gst::Element::link_many([&src, &caps, &enc]).unwrap();
         enc.link(&out.input("video_input_0")).unwrap();
@@ -929,11 +943,7 @@ mod last_segment {
             )
             .build()
             .unwrap();
-        let enc = gst::ElementFactory::make("x264enc")
-            .property("key-int-max", 25u32)
-            .property_from_str("tune", "zerolatency")
-            .build()
-            .unwrap();
+        let enc = x264_with_bframes();
         pipeline.add_many([&src, &caps, &enc]).unwrap();
         gst::Element::link_many([&src, &caps, &enc]).unwrap();
         enc.link(&out.input("video_input_0")).unwrap();
@@ -1100,7 +1110,7 @@ mod close_at_boundary {
         s.parse::<u64>().unwrap() * 1_000_000_000 + ns.parse::<u64>().unwrap()
     }
 
-    /// Live 50 fps video (x264, zerolatency, GOP 25) into a TAMS Output with
+    /// Live 50 fps video (x264 with B-frames, GOP 25) into a TAMS Output with
     /// 500 ms segments, also fed live AAC when `audio` is set. Returns each
     /// registered segment with how long after its end it was registered,
     /// and its bytes, in order.
@@ -1154,11 +1164,7 @@ mod close_at_boundary {
             )
             .build()
             .unwrap();
-        let enc = gst::ElementFactory::make("x264enc")
-            .property("key-int-max", 25u32)
-            .property_from_str("tune", "zerolatency")
-            .build()
-            .unwrap();
+        let enc = x264_with_bframes();
         pipeline.add_many([&src, &caps, &enc]).unwrap();
         gst::Element::link_many([&src, &caps, &enc]).unwrap();
         enc.link(&out.input("video_input_0")).unwrap();
@@ -1382,4 +1388,37 @@ mod osc_auth {
             assert!(err.contains("not sending a SAT"), "{gateway}: {err}");
         }
     }
+}
+
+/// A flow saved with the released `segment_duration_secs` is migrated on
+/// load and written back, so the migration and its log line run once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_segment_duration_is_migrated_and_saved_on_load() {
+    use strom_types::block::{BlockInstance, Position};
+    use strom_types::Flow;
+    gst::init().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut flow = Flow::new("tams-migrate");
+    flow.blocks.push(BlockInstance {
+        id: "tams".to_string(),
+        block_definition_id: "builtin.tams_output".to_string(),
+        name: None,
+        properties: HashMap::from([("segment_duration_secs".to_string(), PropertyValue::UInt(3))]),
+        position: Position { x: 0.0, y: 0.0 },
+        runtime_data: None,
+        computed_external_pads: None,
+    });
+    let file = dir.path().join("flows.json");
+    std::fs::write(
+        &file,
+        serde_json::json!({ "version": 1, "flows": [flow] }).to_string(),
+    )
+    .unwrap();
+    let state = common::state::in_dir(dir.path(), &std::env::temp_dir());
+    state.load_from_storage().await.unwrap();
+    let on_disk: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let props = &on_disk["flows"][0]["blocks"][0]["properties"];
+    assert!(props.get("segment_duration_secs").is_none(), "{props}");
+    assert!(props.get("segment_duration_ms").is_some(), "{props}");
 }
