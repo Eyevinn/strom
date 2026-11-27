@@ -971,6 +971,10 @@ enum Failure {
     /// 401/403: the credentials are wrong or expired. Someone has to fix them;
     /// the segment is parked until then, not thrown away.
     Auth,
+    /// Storage refused the presigned PUT (401/403/404): the signature expired,
+    /// e.g. an allocation kept for a parked segment across a long outage. A
+    /// new allocation fixes it; the gateway's credentials are fine.
+    StorageRefused,
     /// Any other 4xx: the request itself is wrong and will fail the same way.
     Rejected,
     /// Network error, timeout, 5xx, 408, 429.
@@ -982,11 +986,12 @@ fn classify(e: &anyhow::Error) -> Failure {
         return Failure::Transient;
     };
     // The presigned PUT goes to storage, not the gateway: a 404 there is no
-    // missing flow, and a 403 there is an expired signature, which a new
-    // allocation fixes like an auth problem would.
+    // missing flow, and a 401/403 there is an expired signature, which a new
+    // allocation fixes. Neither says anything about the gateway's credentials.
     let gateway = !h.context.starts_with("presigned");
     match h.status.as_u16() {
-        404 if gateway => Failure::FlowGone,
+        401 | 403 | 404 if !gateway => Failure::StorageRefused,
+        404 => Failure::FlowGone,
         401 | 403 => Failure::Auth,
         _ if !h.is_retryable() => Failure::Rejected,
         _ => Failure::Transient,
@@ -1027,6 +1032,7 @@ pub(crate) async fn upload_segment(
     );
 
     let mut recreated = false;
+    let mut reallocated = false;
     // The object an earlier try of this segment allocated, if any.
     let slot = Mutex::new(allocations().remove(&frag.path));
     loop {
@@ -1069,6 +1075,16 @@ pub(crate) async fn upload_segment(
                     allocations().retain(|p, _| p.parent() != Some(dir));
                 }
             }
+            Failure::StorageRefused if !reallocated => {
+                // `upload_one` dropped the allocation: try once more at once
+                // with a new one.
+                debug!(
+                    "TAMS {}: storage refused the upload ({:#}); allocating again",
+                    ctx.block_id, e
+                );
+                reallocated = true;
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
             Failure::Auth => {
                 let msg = format!(
                     "gateway refused the credentials, segment parked until they are fixed: {:#}",
@@ -1105,7 +1121,7 @@ pub(crate) async fn upload_segment(
                 discard_segment(&frag.path).await;
                 return Outcome::Dropped;
             }
-            Failure::FlowGone | Failure::Transient => {
+            Failure::FlowGone | Failure::StorageRefused | Failure::Transient => {
                 if !ctx.failing {
                     emit_error(
                         ctx.events,
@@ -2431,6 +2447,8 @@ mod tests {
         storage: Arc<Mutex<VecDeque<u16>>>,
         register: Arc<Mutex<VecDeque<u16>>>,
         listed: Arc<Mutex<Vec<serde_json::Value>>>,
+        /// Status of each presigned PUT, taken in order, then 200.
+        puts: Arc<Mutex<VecDeque<u16>>>,
         flow_puts: Arc<AtomicU64>,
         allocations: Arc<AtomicU64>,
         registrations: Arc<Mutex<Vec<String>>>,
@@ -2479,7 +2497,12 @@ mod tests {
                     .into_response()
                 }),
             )
-            .route("/upload", put(|| async { StatusCode::OK }))
+            .route(
+                "/upload",
+                put(|State(s): State<Stub>| async move {
+                    status(&s.puts).unwrap_or(StatusCode::OK)
+                }),
+            )
             .route(
                 "/flows/{id}/segments",
                 get(|State(s): State<Stub>| async move {
@@ -2671,6 +2694,30 @@ mod tests {
             assert!(failing);
             assert!(path.exists() && sidecar_path(&path).exists());
         }
+    }
+
+    /// Storage refusing the presigned PUT (an expired signature, e.g. an
+    /// allocation kept across a long outage) gets a new allocation at once.
+    /// It is no credential failure: the segment is not parked and the
+    /// uploader is not marked failing.
+    #[tokio::test]
+    async fn refused_presigned_put_allocates_again() {
+        for code in [401, 403, 404] {
+            let stub = Stub::default();
+            stub.puts.lock().unwrap().push_back(code);
+            let (outcome, failing, path) = upload_with(&stub, false).await;
+            assert_eq!(outcome, Outcome::Registered, "{}", code);
+            assert!(!failing, "{}", code);
+            assert_eq!(stub.allocations.load(Ordering::SeqCst), 2, "{}", code);
+            assert!(!path.exists());
+        }
+        // Refused again with the new allocation: parked for later, still
+        // without a credential error.
+        let stub = Stub::default();
+        stub.puts.lock().unwrap().extend([403, 403]);
+        let (outcome, _, path) = upload_with(&stub, false).await;
+        assert_eq!(outcome, Outcome::Parked);
+        assert!(path.exists() && sidecar_path(&path).exists());
     }
 
     /// A parked segment the gateway already has (its registration went
