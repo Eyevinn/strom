@@ -10,11 +10,16 @@
 //!   else (no data directory known, e.g. a bare builder in a test)
 //!   `<temp_dir>/strom-tams-park`.
 //! - One directory per TAMS flow the block writes to, named by its id. The
-//!   TAMS flow id is the recording's identity: it survives a restart of the
-//!   Strom flow, and a production that recreates its Strom flow (new flow id,
-//!   new random block ids) with the same TAMS ids finds its backlog again. A
-//!   Strom flow id or block id in the path would orphan that backlog. Two
-//!   running blocks never write one TAMS flow (see `crate::tams::flow_claims`).
+//!   TAMS flow id is the recording's identity: it derives from the block's
+//!   `tams_key` when set, else from the Strom flow id and the block id (see
+//!   `crate::blocks::builtin::tams_output::tams_id_key`). Without a
+//!   `tams_key` the backlog is found again only by the same Strom flow (a
+//!   restart of the flow or of Strom); a production that recreates its Strom
+//!   flow (new flow id, new random block ids) finds its backlog again only
+//!   when it sets the same `tams_key`. Otherwise no flow uploads the old
+//!   directory's segments; they count against the limits below until they
+//!   are the oldest and deleted. Two running blocks never write one TAMS
+//!   flow (see `crate::tams::flow_claims`).
 //!
 //! Directories of the old layout (`<temp_dir>/strom-tams-<block>-<suffix>`) are
 //! not migrated; [`init`] warns once at startup when they still hold parked

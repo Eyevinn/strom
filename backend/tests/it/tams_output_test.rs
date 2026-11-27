@@ -1596,8 +1596,12 @@ mod flow_claims {
 
     const BLOCK_ID: &str = "tams_claim_cam";
 
+    /// Two flows collide on their TAMS flows only through a shared
+    /// `tams_key`: without one the ids derive from the flow id too.
+    const SHARED_KEY: &str = "tams-claim-shared";
+
     fn flow_with_tams_output(name: &str, gateway_url: &str) -> Flow {
-        flow_with_keyed_tams_output(name, gateway_url, BLOCK_ID, None)
+        flow_with_keyed_tams_output(name, gateway_url, BLOCK_ID, Some(SHARED_KEY))
     }
 
     fn flow_with_keyed_tams_output(
@@ -1632,7 +1636,7 @@ mod flow_claims {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn tams_second_flow_with_same_block_id_fails_until_first_stops() {
+    async fn tams_second_flow_with_same_tams_key_fails_until_first_stops() {
         gst::init().unwrap();
         common::init_static_plugins();
         if !plugins_available() {

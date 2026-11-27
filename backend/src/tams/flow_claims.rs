@@ -1,15 +1,14 @@
 //! Which running Strom flow writes to which TAMS flow.
 //!
-//! TAMS Output derives its TAMS flow ids from the block instance id (or from
-//! its `tams_key` when set), and a block id is only unique within one Strom
-//! flow. Two Strom flows with a TAMS Output of the same block id (or key)
-//! would write to the same TAMS flows on a shared gateway, interleaving
-//! segments of two recordings. The ids stay derived that
-//! way on purpose (changing the derivation would change the TAMS ids of every
-//! existing recording), so this registry catches the collision instead: a block
-//! claims its TAMS flow ids when it is built, and a claim held by another block
-//! fails the build: a block of another Strom flow, or another block of the same
-//! one with the same `tams_key` (a copied block keeps its properties).
+//! TAMS Output derives its TAMS flow ids from its `tams_key` when set, else
+//! from the Strom flow id and the block id. Two blocks with the same
+//! `tams_key` (in two flows, or a copied block in one) would write to the same
+//! TAMS flows on a shared gateway, interleaving segments of two recordings,
+//! and so would two builds without a flow id (a bare builder). This registry
+//! catches that: a block claims its TAMS flow ids when it is built, and a
+//! claim held by another block fails the build: a block of another Strom flow,
+//! or another block of the same one with the same `tams_key` (a copied block
+//! keeps its properties).
 //!
 //! Claims are keyed by gateway (a TAMS flow id on another store is another
 //! flow), normalised like the park target (`crate::tams::uploader::ParkTarget`:
