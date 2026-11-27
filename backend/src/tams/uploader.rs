@@ -1009,7 +1009,8 @@ enum Failure {
     StorageRefused,
     /// Any other 4xx: the request itself is wrong and will fail the same way.
     Rejected,
-    /// Network error, timeout, 5xx, 408, 429.
+    /// Network error, timeout, 5xx, 408, 429, and a registration still in
+    /// flight under its idempotency key (409, see `RegistrationInFlight`).
     Transient,
 }
 
@@ -2390,6 +2391,30 @@ mod tests {
         let keys = stub.keys.lock().unwrap().clone();
         assert_eq!(keys.len(), 2, "{:?}", keys);
         assert_eq!(keys[0], keys[1]);
+    }
+
+    /// A registration answered with 409 (OpenTAMS: an earlier try with the
+    /// same key is still in flight, e.g. after our request timed out) is
+    /// retried with the same key. It is not a rejection that discards the
+    /// segment while the store may still be registering it.
+    #[tokio::test]
+    async fn in_flight_registration_is_retried_with_the_same_key() {
+        let stub = Stub::default();
+        stub.register.lock().unwrap().push_back(409);
+        let (outcome, _, path) = upload_tries(&stub, false, None, 2).await;
+        assert_eq!(outcome, Outcome::Registered);
+        assert!(!path.exists());
+        let keys = stub.keys.lock().unwrap().clone();
+        assert_eq!(keys.len(), 2, "{:?}", keys);
+        assert_eq!(keys[0], keys[1]);
+        assert_eq!(stub.allocations.load(Ordering::SeqCst), 1);
+
+        // Still in flight after every try: parked for the sweep, not dropped.
+        let stub = Stub::default();
+        stub.register.lock().unwrap().extend([409, 409]);
+        let (outcome, _, path) = upload_tries(&stub, false, None, 2).await;
+        assert_eq!(outcome, Outcome::Parked);
+        assert!(path.exists());
     }
 
     /// What an [`UploadCtx`] borrows, against a gateway at `url`.
