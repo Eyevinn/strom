@@ -885,4 +885,185 @@ mod tests {
         pipeline.set_state(gst::State::Null).unwrap();
         bus.disconnect(handler);
     }
+
+    /// A running player plays a queue of clips: the first from a `cue`, the
+    /// next on another source (`cue_next {source}`), the last on the source
+    /// then shown. Each clip is prepared while the one before plays and is
+    /// shown from the tick its turn comes: the last frame before the out,
+    /// then the next clip's in point, no frame dropped or repeated, each
+    /// frame from the right source. The last clip freezes at its out.
+    #[test]
+    fn a_running_player_plays_queued_clips_back_to_back() {
+        use strom_types::replay::ReplayEventKind;
+        const BASE: u64 = 1_800_000_000_000_000_000;
+        const MS: u64 = 1_000_000;
+        const FRAME: u64 = 40 * MS;
+        gst::init().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        write_segments_as(root.path(), "black", "black", true);
+        write_segments_as(root.path(), "white", "white", true);
+        let flow_id = Uuid::new_v4();
+        let props = props(&[
+            ("_media_path", st(root.path().to_str().unwrap())),
+            ("_flow_id", st(&flow_id.to_string())),
+            (SOURCE_PROPERTY, st("black")),
+            (GROUP_PROPERTY, st("g")),
+        ]);
+        let built = build("queue_test", &props).unwrap();
+        let pipeline = gst::Pipeline::new();
+        let mut elements = HashMap::new();
+        for (id, e) in &built.elements {
+            pipeline.add(e).unwrap();
+            elements.insert(id.clone(), e.clone());
+        }
+        for (a, b) in &built.internal_links {
+            elements[&a.element_id]
+                .link_pads(
+                    a.pad_name.as_deref(),
+                    &elements[&b.element_id],
+                    b.pad_name.as_deref(),
+                )
+                .unwrap();
+        }
+        let sink = gst_app::AppSink::builder()
+            .caps(&gst::Caps::builder("video/x-raw").build())
+            .sync(false)
+            .build();
+        pipeline.add(&sink).unwrap();
+        elements["queue_test:video_out"].link(&sink).unwrap();
+        let bus = pipeline.bus().unwrap();
+        let handler = (built.bus_message_handler.unwrap())(
+            &bus,
+            flow_id,
+            crate::events::EventBroadcaster::default(),
+        );
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let tl = timeline::get(flow_id, "g").unwrap();
+        let mut events = tl.subscribe();
+        let tai_caps = gst::Caps::builder("timestamp/x-tai").build();
+        // (TAI of the frame shown, luma)
+        let pull = || {
+            sink.try_pull_sample(gst::ClockTime::from_seconds(10))
+                .map(|s| {
+                    let tai = s
+                        .buffer()
+                        .unwrap()
+                        .iter_meta::<gst::ReferenceTimestampMeta>()
+                        .find(|m| m.reference().can_intersect(&tai_caps))
+                        .map(|m| m.timestamp().nseconds())
+                        .unwrap();
+                    (tai, luma(&s))
+                })
+        };
+        let t0 = std::time::Instant::now();
+        while pull().is_none_or(|(_, y)| y > 40) {
+            assert!(t0.elapsed().as_secs() < 20, "no black picture");
+        }
+        let cmd = |v: serde_json::Value| {
+            tl.apply(timeline::parse_command(v).unwrap()).unwrap();
+        };
+        let t = |ms: u64| (BASE + ms * MS).to_string();
+        // a: black [0.5 s, 1.5 s); b: white [2 s, 3 s); c: [0.2 s, 0.6 s),
+        // on the source shown then (white).
+        cmd(
+            serde_json::json!({"cmd": "cue", "in": {"t": t(500)}, "out": {"t": t(1500)},
+            "client_ref": "a"}),
+        );
+        cmd(
+            serde_json::json!({"cmd": "cue_next", "in": {"t": t(2000)}, "out": {"t": t(3000)},
+            "source": "white", "client_ref": "b"}),
+        );
+        cmd(
+            serde_json::json!({"cmd": "cue_next", "in": {"t": t(200)}, "out": {"t": t(600)},
+            "client_ref": "c"}),
+        );
+        // Give the first clip time to decode at its in point.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        cmd(serde_json::json!({"cmd": "play"}));
+        let mut frames = Vec::new();
+        let t0 = std::time::Instant::now();
+        // Until c has frozen at its last frame for a while.
+        while frames
+            .iter()
+            .rev()
+            .take(10)
+            .filter(|(tai, _)| *tai == BASE + 560 * MS)
+            .count()
+            < 10
+        {
+            assert!(t0.elapsed().as_secs() < 20, "the queue did not play out");
+            frames.push(pull().expect("no picture"));
+        }
+        // From the first frame of a on: 0.5 s is inside the 25p frame that
+        // starts at 0.48 s, which the cue held, paused, before play (so a
+        // starts the frame before its second one).
+        let first = frames
+            .iter()
+            .position(|(tai, _)| *tai == BASE + 520 * MS)
+            .expect("clip a not shown")
+            - 1;
+        let shown: Vec<(u64, u8)> = frames[first..].to_vec();
+        let mut want: Vec<(u64, bool)> = Vec::new();
+        want.extend((0..25).map(|k| (BASE + 480 * MS + k * FRAME, false)));
+        want.extend((0..25).map(|k| (BASE + 2000 * MS + k * FRAME, true)));
+        want.extend((0..10).map(|k| (BASE + 200 * MS + k * FRAME, true)));
+        let got: Vec<(u64, bool)> = shown
+            .iter()
+            .take(want.len())
+            .map(|(tai, y)| (*tai, *y > 200))
+            .collect();
+        let late: u64 = tl
+            .diagnostics()
+            .angles
+            .iter()
+            .map(|a| a.late_ticks + a.misses)
+            .sum();
+        assert_eq!(
+            got, want,
+            "frames shown (tai, white) differ ({} late ticks or misses)",
+            late
+        );
+        for (_, y) in &shown[..25] {
+            assert!(*y < 40, "clip a not black");
+        }
+        // The events: each clip's start and end, and the switch for b.
+        let mut seen = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            let what = match &ev.kind {
+                ReplayEventKind::ItemStarted { .. } => "item_started",
+                ReplayEventKind::Ended { .. } => "ended",
+                ReplayEventKind::SourceChanged { .. } => "source_changed",
+                ReplayEventKind::SourceFailed { error, .. } => panic!("switch failed: {}", error),
+                _ => continue,
+            };
+            seen.push((what, ev.client_ref.clone().unwrap_or_default()));
+        }
+        for e in [
+            ("ended", "a"),
+            ("item_started", "b"),
+            ("source_changed", "b"),
+            ("ended", "b"),
+            ("item_started", "c"),
+            ("ended", "c"),
+        ] {
+            assert!(
+                seen.contains(&(e.0, e.1.to_string())),
+                "{:?} not in {:?}",
+                e,
+                seen
+            );
+        }
+        assert_eq!(
+            seen.iter().filter(|e| e.0 == "source_changed").count(),
+            1,
+            "c on the source shown is no switch: {:?}",
+            seen
+        );
+        let state = tl.state();
+        assert_eq!(state.angles[0].source.as_deref(), Some("white"));
+        assert_eq!(state.queue.clip_ref.as_deref(), Some("c"));
+        assert_eq!(state.queue.waiting, 0);
+        pipeline.set_state(gst::State::Null).unwrap();
+        bus.disconnect(handler);
+    }
 }

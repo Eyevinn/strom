@@ -11,6 +11,7 @@ use std::sync::Arc;
 use strom_types::replay::{ReplayCause, ReplayEventKind};
 
 /// A source opened for a switch, not yet used.
+#[derive(Clone)]
 pub struct OpenedSource {
     pub index: Arc<dyn SourceIndex>,
     /// The URI as given (may carry credentials: never shown or logged). Tells
@@ -33,12 +34,20 @@ pub trait SourceControl: Send + Sync {
 /// A switch that passed its checks, to start once the command applied.
 pub struct Switch {
     control: Arc<dyn SourceControl>,
+    /// The angle that switches.
+    block: String,
     source: OpenedSource,
 }
 
 impl Switch {
     pub fn begin(self, client_ref: Option<String>) {
         self.control.begin_switch(self.source, client_ref);
+    }
+
+    /// The angle and the source, for a switch that waits for its clip in
+    /// the queue (the player starts it, see `cue_next`).
+    pub fn into_parts(self) -> (String, OpenedSource) {
+        (self.block, self.source)
     }
 }
 
@@ -95,7 +104,11 @@ impl ReplayTimeline {
         let source = control
             .open_source(uri.trim())
             .map_err(|e| CommandError::Invalid(format!("source: {}", e)))?;
-        Ok(Some(Switch { control, source }))
+        Ok(Some(Switch {
+            control,
+            block: player.block_id.clone(),
+            source,
+        }))
     }
 
     /// The angle `block`, or the group's only angle.

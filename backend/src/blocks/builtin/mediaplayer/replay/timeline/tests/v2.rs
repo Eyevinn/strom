@@ -90,6 +90,17 @@ fn every_command_from_every_state_does_what_the_table_says() {
             source: "cam2".into(),
             block: None,
         },
+        // The queue: the motion stays.
+        Command::CueNext {
+            in_point: ReplayTarget::t(BASE + 40 * S),
+            out: ReplayTarget::t(BASE + 50 * S),
+            speed: None,
+            end_action: None,
+            source: None,
+            block: None,
+            replace: None,
+        },
+        Command::ClearQueue {},
     ];
     let rt = S;
     for follow in [true, false] {
@@ -145,7 +156,10 @@ fn every_command_from_every_state_does_what_the_table_says() {
                     Command::Uncue {} => (cur, cur_speed, None, before.live, ramp_left),
                     Command::Live { .. } => (BASE + 58_500 * MS, 1.0, None, true, None),
                     Command::End {} => (BASE + 60 * S - 1, 0.0, None, false, None),
-                    Command::Mark { .. } | Command::Source { .. } => (
+                    Command::Mark { .. }
+                    | Command::Source { .. }
+                    | Command::CueNext { .. }
+                    | Command::ClearQueue {} => (
                         cur,
                         cur_speed,
                         held.map(|r| (r.start, r.end)),
