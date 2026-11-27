@@ -96,8 +96,9 @@ impl Container {
     }
 }
 
-/// Fixed namespace for deriving deterministic TAMS source/flow UUIDs from a block
-/// instance id, so restarting a flow appends to the same TAMS timeline.
+/// Fixed namespace for deriving deterministic TAMS source/flow UUIDs from a
+/// block's [`tams_id_key`], so restarting a flow appends to the same TAMS
+/// timeline.
 const TAMS_NAMESPACE: Uuid = Uuid::from_u128(0x7a3f_2b10_5c84_4e6d_9f12_a8b7_c6d5_e4f3);
 
 fn prop_str(props: &HashMap<String, PropertyValue>, key: &str) -> Option<String> {
@@ -218,13 +219,23 @@ fn parse_tags(s: &Option<String>) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// Derive a deterministic UUID (string) for a TAMS entity belonging to a block.
-fn derive_id(instance_id: &str, suffix: &str) -> String {
-    Uuid::new_v5(
-        &TAMS_NAMESPACE,
-        format!("{}:{}", instance_id, suffix).as_bytes(),
-    )
-    .to_string()
+/// Derive a deterministic UUID (string) for a TAMS entity: UUID v5 of
+/// `"<key>:<suffix>"`, where `key` is the block's [`tams_id_key`].
+fn derive_id(key: &str, suffix: &str) -> String {
+    Uuid::new_v5(&TAMS_NAMESPACE, format!("{}:{}", key, suffix).as_bytes()).to_string()
+}
+
+/// What every TAMS id of block `instance_id`, and its segment directory,
+/// derive from: `"<flow id>/<block id>"`. A block id is only unique within a
+/// Strom flow, so two flows with a TAMS Output of the same id would otherwise
+/// write to the same TAMS flows and share one directory of parked segments.
+/// Without a flow id (`_flow_id`, injected by block expansion; a bare builder
+/// in a test) it is the block id alone.
+pub fn tams_id_key(instance_id: &str, properties: &HashMap<String, PropertyValue>) -> String {
+    match prop_str(properties, "_flow_id") {
+        Some(flow_id) => format!("{}/{}", flow_id, instance_id),
+        None => instance_id.to_string(),
+    }
 }
 
 impl BlockBuilder for TamsOutputBuilder {
@@ -315,8 +326,9 @@ impl BlockBuilder for TamsOutputBuilder {
             ));
         }
 
-        let source_id = prop_str(properties, "tams_source_id")
-            .unwrap_or_else(|| derive_id(instance_id, "source"));
+        let id_key = tams_id_key(instance_id, properties);
+        let source_id =
+            prop_str(properties, "tams_source_id").unwrap_or_else(|| derive_id(&id_key, "source"));
         let label = prop_str(properties, "label");
         let description = prop_str(properties, "description");
         let tags = parse_tags(&prop_str(properties, "tags"));
@@ -339,14 +351,14 @@ impl BlockBuilder for TamsOutputBuilder {
                 // Members collected by the Multi-Flow: (flow_id, role).
                 let mut members: Vec<(String, String)> = Vec::new();
                 if num_video >= 1 {
-                    let flow_id = derive_id(instance_id, "video");
+                    let flow_id = derive_id(&id_key, "video");
                     members.push((flow_id.clone(), "video".to_string()));
                     let spec = FlowSpec {
                         flow_id,
                         // Own mono-essence Source. The gateway derives the Multi-Flow's
                         // source_collection by resolving each member flow to its
                         // source_id, so members must NOT share the program source.
-                        source_id: derive_id(instance_id, "video-source"),
+                        source_id: derive_id(&id_key, "video-source"),
                         format: FORMAT_VIDEO.to_string(),
                         codec: Some("video/h264".to_string()), // fallback; real codec from caps
                         container: Some(CONTENT_TYPE_MP4.to_string()),
@@ -359,6 +371,7 @@ impl BlockBuilder for TamsOutputBuilder {
                     };
                     build_flow_chain(
                         instance_id,
+                        &id_key,
                         "video",
                         Container::Mp4,
                         segment_ns,
@@ -374,12 +387,12 @@ impl BlockBuilder for TamsOutputBuilder {
                 for i in 0..num_audio {
                     let essence = Essence::Audio(i);
                     let tag = essence.tag(); // "audio-0", "audio-1", ...
-                    let flow_id = derive_id(instance_id, &tag);
+                    let flow_id = derive_id(&id_key, &tag);
                     members.push((flow_id.clone(), tag.clone()));
                     let spec = FlowSpec {
                         flow_id,
                         // Own mono-essence Source (see video above).
-                        source_id: derive_id(instance_id, &format!("{}-source", tag)),
+                        source_id: derive_id(&id_key, &format!("{}-source", tag)),
                         format: FORMAT_AUDIO.to_string(),
                         codec: Some("audio/aac".to_string()), // fallback; real codec from caps
                         container: Some(CONTENT_TYPE_MP4.to_string()),
@@ -391,6 +404,7 @@ impl BlockBuilder for TamsOutputBuilder {
                     };
                     build_flow_chain(
                         instance_id,
+                        &id_key,
                         &tag,
                         Container::Mp4,
                         segment_ns,
@@ -408,7 +422,7 @@ impl BlockBuilder for TamsOutputBuilder {
                 // flows — so it is registered once at startup, not via an uploader.
                 if members.len() >= 2 {
                     let multi = FlowSpec {
-                        flow_id: derive_id(instance_id, "mux"),
+                        flow_id: derive_id(&id_key, "mux"),
                         source_id: source_id.clone(),
                         format: FORMAT_MULTI.to_string(),
                         // The Multi-Flow carries no segments of its own — its members
@@ -436,7 +450,7 @@ impl BlockBuilder for TamsOutputBuilder {
                     inputs.push(Essence::Audio(i));
                 }
                 let spec = FlowSpec {
-                    flow_id: derive_id(instance_id, "mux"),
+                    flow_id: derive_id(&id_key, "mux"),
                     source_id: source_id.clone(),
                     format: FORMAT_MULTI.to_string(),
                     codec: Some(CONTENT_TYPE_MPEGTS.to_string()),
@@ -451,6 +465,7 @@ impl BlockBuilder for TamsOutputBuilder {
                 };
                 build_flow_chain(
                     instance_id,
+                    &id_key,
                     "mux",
                     Container::MpegTs,
                     segment_ns,
@@ -526,6 +541,7 @@ const APPSINK_MAX_BUFFERS: u32 = 64;
 #[allow(clippy::too_many_arguments)]
 fn build_flow_chain(
     instance_id: &str,
+    id_key: &str,
     suffix: &str,
     container: Container,
     segment_ns: u64,
@@ -541,8 +557,8 @@ fn build_flow_chain(
         return Ok(());
     }
 
-    // Temp directory for this flow's segment files.
-    let safe_id: String = instance_id
+    // Temp directory for this flow's segment files, one per TAMS flow.
+    let safe_id: String = id_key
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();
@@ -1542,6 +1558,49 @@ mod tests {
             }
         }
         assert!(build_with("http://gw.example.com/").is_ok());
+    }
+
+    /// Two Strom flows with a TAMS Output of the same block id write to their
+    /// own TAMS flows and segment directories; block ids are only unique
+    /// within a flow. Without a flow id the ids are those of the block id.
+    #[test]
+    fn tams_ids_and_segment_dir_are_per_strom_flow() {
+        gst::init().unwrap();
+        let build = |flow: &str| {
+            let properties: HashMap<String, PropertyValue> = [
+                ("gateway_url", "http://gw.example.com"),
+                ("container", "mpegts"),
+                ("_flow_id", flow),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), PropertyValue::String(v.into())))
+            .collect();
+            let ctx = BlockBuildContext::new(vec![], "all".to_string());
+            TamsOutputBuilder
+                .build("tams", &properties, &ctx)
+                .map(|_| ())
+                .unwrap();
+            std::env::temp_dir().join(format!("strom-tams-{}_tams-mux", flow.replace('-', "_")))
+        };
+        let (a, b) = (
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        let (dir_a, dir_b) = (build(&a), build(&b));
+        assert!(dir_a.is_dir(), "{}", dir_a.display());
+        assert!(dir_b.is_dir(), "{}", dir_b.display());
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
+        let with_flow = |f: &str| {
+            let p = HashMap::from([("_flow_id".to_string(), PropertyValue::String(f.into()))]);
+            derive_id(&tams_id_key("tams", &p), "mux")
+        };
+        assert_ne!(with_flow(&a), with_flow(&b));
+        // No flow id: the block id alone, as before.
+        assert_eq!(
+            derive_id(&tams_id_key("tams", &HashMap::new()), "mux"),
+            Uuid::new_v5(&TAMS_NAMESPACE, b"tams:mux").to_string()
+        );
     }
 
     /// The appsinks are bounded and leaky, so nothing piles up in memory

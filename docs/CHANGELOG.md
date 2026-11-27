@@ -6,6 +6,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ### Upgrade notes
 - Video Encoder: scheduled keyframe requests are no longer held back by the 1 s floor. An encoder that feeds a recorder which asks for keyframes at given times (TAMS Output, a segmenting recorder) now makes every keyframe it is asked for, so such a flow can get more keyframes than before. WebRTC PLIs are limited as before
+- TAMS Output: the TAMS source and flow ids now derive from the Strom flow id and the block id, not the block id alone, so a running TAMS Output continues its recording in new TAMS flows after the upgrade. The earlier flows stay in the store as they are
 - TAMS Output: parked segments over `STROM_TAMS_PARKED_MAX_MB` or `STROM_TAMS_PARKED_MAX_SEGMENTS` are deleted, oldest first, on the first sweep after an upgrade
 - TAMS Output: saved flows and flows sent through the API with `segment_duration_secs` are rewritten to `segment_duration_ms` (seconds × 1000) when they are loaded or saved, with a log line per block. A non-zero `segment_duration_ms` set alongside it wins, as before
 
@@ -27,6 +28,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - TAMS Output: segments are parked on disk instead of dropped when the store is unreachable, a channel is full, or the store answers 401/403, and are uploaded later without holding back new segments. A 404 for the flow creates the flow again, registration is idempotent, and slow clock drift no longer re-anchors the TAI mapping
 - OSC: a request that gets 401 is retried once with a new SAT
 - TAMS Output: what is parked on disk is capped per flow directory, by `STROM_TAMS_PARKED_MAX_MB` (default 8192) and `STROM_TAMS_PARKED_MAX_SEGMENTS` (default 20000); past the cap the oldest parked segments are deleted, with an error. A parked segment that keeps failing waits longer before its next try (backoff per segment), so it no longer holds back the others
+- TAMS Output: two Strom flows with a TAMS Output of the same block id wrote to the same TAMS flows and shared one directory of segment files. The TAMS ids and the directory now derive from the Strom flow id and the block id
 - TAMS Output: a parked segment's `.meta` sidecar is JSON and is written to a temporary file and renamed, so a sweep never reads one half written. Sidecars in the old format are still read
 
 ### Changed
