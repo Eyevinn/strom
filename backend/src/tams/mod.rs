@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod client;
+pub mod drain;
 pub mod flow_claims;
 pub mod park;
 pub mod segmenter;

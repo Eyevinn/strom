@@ -313,10 +313,11 @@ pub fn tams_id_key(instance_id: &str, properties: &HashMap<String, PropertyValue
 }
 
 /// The segment directory of the TAMS flow chain `suffix` (`video`, `audio-0`,
-/// `mux`) of the block whose TAMS ids derive from `key` (see [`tams_id_key`]):
-/// [`crate::tams::park::flow_dir`] of the TAMS flow that chain writes.
-pub fn segment_dir(key: &str, suffix: &str) -> std::path::PathBuf {
-    crate::tams::park::flow_dir(&derive_id(key, suffix))
+/// `mux`) of the block whose TAMS ids derive from `key` (see [`tams_id_key`]),
+/// writing to `gateway_url`: [`crate::tams::park::flow_dir`] of the TAMS flow
+/// that chain writes.
+pub fn segment_dir(gateway_url: &str, key: &str, suffix: &str) -> std::path::PathBuf {
+    crate::tams::park::flow_dir(gateway_url, &derive_id(key, suffix))
 }
 
 /// The TAMS flow ids a block writes to (registers, or uploads segments to),
@@ -346,9 +347,10 @@ fn written_flow_ids(
 }
 
 /// Claim the block's TAMS flows for its Strom flow (`_flow_id`, injected by
-/// block expansion), or fail the build when another running Strom flow
-/// already writes to them: the TAMS flow ids derive from the block id (or the
-/// `tams_key`), and block ids are only unique within a Strom flow. See
+/// block expansion), or fail the build when another running Strom flow, or
+/// another block of this one with the same `tams_key`, already writes to them:
+/// the TAMS flow ids derive from the block id (or the `tams_key`), and block
+/// ids are only unique within a Strom flow. See
 /// `crate::tams::flow_claims`. A build without `_flow_id` (a bare builder in a
 /// test) claims nothing.
 fn claim_tams_flows(
@@ -362,13 +364,27 @@ fn claim_tams_flows(
         return Ok(());
     };
     crate::tams::flow_claims::claim(gateway_url, tams_flow_ids, flow_id, instance_id).map_err(|c| {
+        if c.owner.flow_id == flow_id {
+            return BlockBuildError::InvalidConfiguration(format!(
+                "TAMS Output '{}': TAMS flow {} is already written by block '{}' of this \
+                 Strom flow: both blocks have the same TAMS key. Give each TAMS Output its \
+                 own TAMS key",
+                instance_id, c.tams_flow_id, c.owner.block_id
+            ));
+        }
         BlockBuildError::InvalidConfiguration(format!(
-            "TAMS Output '{}': TAMS flow {} on {} is already written by block '{}' of \
-                 running Strom flow {} (this is Strom flow {}). TAMS flow ids derive from \
-                 the TAMS key, or the block id when no key is set, which is only unique \
-                 within a Strom flow: give this block a TAMS key (or an id) that no other \
-                 running flow uses for a TAMS Output on this gateway, or stop the other flow",
-            instance_id, c.tams_flow_id, gateway_url, c.owner.block_id, c.owner.flow_id, flow_id
+            "TAMS Output '{}': TAMS flow {} is already written by block '{}' of running \
+                 Strom flow {} to {} (this is Strom flow {}). TAMS flow ids derive from the \
+                 TAMS key, or the block id when no key is set, which is only unique within a \
+                 Strom flow, and segments are parked per TAMS flow id whatever the gateway: \
+                 give this block a TAMS key (or an id) that no other running flow uses for a \
+                 TAMS Output, or stop the other flow",
+            instance_id,
+            c.tams_flow_id,
+            c.owner.block_id,
+            c.owner.flow_id,
+            c.owner.gateway,
+            flow_id
         ))
     })
 }
@@ -783,9 +799,10 @@ fn build_flow_chain(
     }
 
     // Directory for this TAMS flow's segment files, parked ones included. Keyed
-    // by the TAMS flow id, so a backlog survives a restart of Strom and a
-    // recreated Strom flow (see `crate::tams::park`).
-    let temp_dir = crate::tams::park::flow_dir(&spec.flow_id);
+    // by the TAMS flow id and the gateway, so a backlog survives a restart of
+    // Strom and a recreated Strom flow, and is never pointed at another
+    // gateway (see `crate::tams::park`).
+    let temp_dir = crate::tams::park::flow_dir(&gateway_url, &spec.flow_id);
     if let Err(e) = std::fs::create_dir_all(&temp_dir) {
         return Err(BlockBuildError::InvalidConfiguration(format!(
             "TAMS Output: cannot create segment dir {} (STROM_TAMS_PARK_DIR): {}",
@@ -1047,7 +1064,7 @@ fn build_flow_chain(
     ctx.register_element_setup(Box::new(move |flow_id, events| {
         // Remove orphan segment files left by a previous run (no `.meta`
         // sidecar, so their timerange is lost). Parked segments are kept for the
-        // uploader's recovery sweep, even across a full restart, and so are the
+        // server-wide drainer, even across a full restart, and so are the
         // files of a previous run whose uploader still runs.
         let removed = clear_orphans(&temp_dir_for_setup);
         if removed > 0 {
@@ -1295,8 +1312,8 @@ fn build_flow_chain(
         };
 
         // Hands a finished fragment to the uploader. When its channel is full
-        // (or closed), the fragment is parked on disk instead, for the recovery
-        // sweep of this run or the next; only when that fails too (the disk is
+        // (or closed), the fragment is parked on disk instead, for the
+        // server-wide drainer; only when that fails too (the disk is
         // full) is it dropped.
         let deliver_label = format!("{} ({})", block_id, suffix_owned);
         let overflowed = AtomicU64::new(0);
@@ -1312,7 +1329,7 @@ fn build_flow_chain(
                     if n.is_multiple_of(100) {
                         warn!(
                             "TAMS {}: uploader {}, parked segment {} on disk for the \
-                             recovery sweep ({} so far)",
+                             drainer ({} so far)",
                             deliver_label,
                             if full { "queue full" } else { "stopped" },
                             ready.path.display(),
@@ -1967,7 +1984,8 @@ mod tests {
                 written_flow_ids("b7c1e0f2-random-1", container, 1, 2)
             );
         }
-        assert_eq!(segment_dir(&a, "mux"), segment_dir(&b, "mux"));
+        let gw = "https://gw.example";
+        assert_eq!(segment_dir(gw, &a, "mux"), segment_dir(gw, &b, "mux"));
         assert_eq!(
             derive_id(&a, "source"),
             Uuid::new_v5(&TAMS_NAMESPACE, b"prod-42/cam1:source").to_string()

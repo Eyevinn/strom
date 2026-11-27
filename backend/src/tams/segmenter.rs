@@ -33,6 +33,7 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, warn};
@@ -132,6 +133,10 @@ pub struct Segmenter {
     mux_streams: std::sync::OnceLock<Vec<MuxStream>>,
     inner: Mutex<Inner>,
     finisher: Mutex<Option<mpsc::Sender<FinishJob>>>,
+    /// Jobs handed to the finisher and not finished yet. It takes them one
+    /// at a time, each up to [`FINISH_TIMEOUT`], so a stop drain waits for
+    /// as many of them as are queued.
+    finishing: Arc<AtomicUsize>,
 }
 
 /// Running time of a sample's PTS (or DTS when it has none).
@@ -165,11 +170,14 @@ impl Segmenter {
     ) -> Arc<Self> {
         let (tx, rx) = mpsc::channel::<FinishJob>();
         let thread_label = label.clone();
+        let finishing = Arc::new(AtomicUsize::new(0));
+        let thread_finishing = finishing.clone();
         let spawned = std::thread::Builder::new()
             .name("tams-finish".into())
             .spawn(move || {
                 for job in rx {
                     finish(&thread_label, job, &deliver);
+                    thread_finishing.fetch_sub(1, Ordering::AcqRel);
                 }
             });
         if let Err(e) = &spawned {
@@ -195,6 +203,7 @@ impl Segmenter {
                 on_open,
             }),
             finisher: Mutex::new(spawned.ok().map(|_| tx)),
+            finishing,
         })
     }
 
@@ -515,7 +524,9 @@ impl Segmenter {
         let sender = self.finisher.lock().unwrap_or_else(|e| e.into_inner());
         match sender.as_ref() {
             Some(tx) => {
+                self.finishing.fetch_add(1, Ordering::AcqRel);
                 if let Err(mpsc::SendError(job)) = tx.send(job) {
+                    self.finishing.fetch_sub(1, Ordering::AcqRel);
                     let _ = job.pipeline.set_state(gst::State::Null);
                 }
             }
@@ -569,7 +580,7 @@ impl Segmenter {
             self.close_all(&mut g, Some(&tx))
         };
         drop(tx);
-        let deadline = Instant::now() + FINISH_TIMEOUT + Duration::from_millis(500);
+        let deadline = Instant::now() + drain_wait(self.finishing.load(Ordering::Acquire).max(n));
         for _ in 0..n {
             let left = deadline.saturating_duration_since(Instant::now());
             if rx.recv_timeout(left).is_err() {
@@ -582,6 +593,14 @@ impl Segmenter {
         }
         true
     }
+}
+
+/// How long a stop drain waits when `queued` jobs are on the finisher: it
+/// takes them one at a time, each up to [`FINISH_TIMEOUT`] (a fragment whose
+/// muxer still waits for a lagging track), so one shared [`FINISH_TIMEOUT`]
+/// would cut off the last fragment behind a slow one.
+fn drain_wait(queued: usize) -> Duration {
+    FINISH_TIMEOUT * queued as u32 + Duration::from_millis(500)
 }
 
 impl Drop for Segmenter {
@@ -644,5 +663,20 @@ fn finish(label: &str, job: FinishJob, deliver: &DeliverFn) {
     }
     if let Some(done) = done {
         let _ = done.send(());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The finisher takes the closing and the open fragment in turn, each up
+    /// to FINISH_TIMEOUT: the stop drain must wait for both, not cut the last
+    /// one off after one FINISH_TIMEOUT.
+    #[test]
+    fn drain_waits_for_every_queued_fragment_in_turn() {
+        assert!(drain_wait(1) > FINISH_TIMEOUT);
+        assert!(drain_wait(2) > FINISH_TIMEOUT * 2);
+        assert!(drain_wait(3) > FINISH_TIMEOUT * 3);
     }
 }

@@ -70,6 +70,8 @@ pub async fn set_osc_pat_keyed(
     }
     crate::osc::sat_provider().set_pat(key.clone(), pat).await;
     info!("OSC PAT set via API for credential {}", key);
+    // Parked TAMS segments may have been waiting for it.
+    crate::tams::drain::wake();
     Ok(Json(status()))
 }
 

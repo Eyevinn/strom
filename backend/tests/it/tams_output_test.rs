@@ -49,6 +49,8 @@ fn plugins_available() -> bool {
 /// A TAMS Output block built through the real builder and added to a pipeline.
 struct TamsOutput {
     instance_id: String,
+    /// The `gateway_url` it was built with: its segment directory depends on it.
+    gateway_url: String,
     /// Holds the element-setup hooks; see [`TamsOutput::run_setups`].
     ctx: BlockBuildContext,
     elements: HashMap<String, gst::Element>,
@@ -80,7 +82,11 @@ impl TamsOutput {
 
     /// The directory the block writes its MPEG-TS segments to.
     fn segment_dir(&self) -> PathBuf {
-        strom::blocks::builtin::tams_output::segment_dir(&self.instance_id, "mux")
+        strom::blocks::builtin::tams_output::segment_dir(
+            &self.gateway_url,
+            &self.instance_id,
+            "mux",
+        )
     }
 
     /// Drop the block's elements but keep its segment directory, so the
@@ -217,8 +223,13 @@ fn add_tams_output_props(
             .expect("internal TAMS Output link");
     }
 
+    let gateway_url = match properties.get("gateway_url") {
+        Some(PropertyValue::String(g)) => g.clone(),
+        _ => String::new(),
+    };
     TamsOutput {
         instance_id,
+        gateway_url,
         ctx,
         elements,
     }
@@ -1158,6 +1169,7 @@ mod close_at_boundary {
             .expect("TAMS Output block builds");
         let mut out = TamsOutput {
             instance_id,
+            gateway_url: gateway.clone(),
             ctx,
             elements: HashMap::new(),
         };
@@ -1674,6 +1686,140 @@ mod flow_claims {
         state.stop_flow(&second_id).await.expect("stop second");
     }
 
+    /// After its pipeline has stopped, a flow's uploader still sends its queue
+    /// and final segment. Until it has, the TAMS flows are still written, and
+    /// another flow must not claim them: it would be a second writer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tams_claims_are_held_until_the_uploader_has_finished() {
+        use strom::tams::flow_claims::Writer;
+
+        gst::init().unwrap();
+        common::init_static_plugins();
+        if !plugins_available() {
+            return;
+        }
+        let state = common::state::new();
+        let gateway = format!(
+            "http://127.0.0.1:9/claims-drain-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        // A block id of its own: claims hold across gateways, so another
+        // test's flows with the same block id would hold these TAMS flows.
+        let block = format!("tams_claim_drain_{}", uuid::Uuid::new_v4().simple());
+        let first = flow_with_keyed_tams_output("tams_claim_drain_first", &gateway, &block, None);
+        let second = flow_with_keyed_tams_output("tams_claim_drain_second", &gateway, &block, None);
+        let (first_id, second_id) = (first.id, second.id);
+        state.upsert_flow(first).await.expect("upsert first");
+        state.upsert_flow(second).await.expect("upsert second");
+        state
+            .start_flow(&first_id)
+            .await
+            .expect("first flow starts");
+
+        // An uploader of the first flow, still flushing after its pipeline
+        // has stopped.
+        let flushing = Writer::new(first_id);
+        let stopping = {
+            let state = state.app();
+            tokio::spawn(async move { state.stop_flow(&first_id).await })
+        };
+        // The pipeline is gone from the running set at once; its teardown
+        // goes on.
+        let t0 = Instant::now();
+        while state.pipelines_read().await.contains_key(&first_id)
+            && t0.elapsed() < Duration::from_secs(10)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!stopping.is_finished(), "stop waits for the uploader");
+        state
+            .start_flow(&second_id)
+            .await
+            .expect_err("the first flow's uploader still writes the TAMS flows");
+
+        drop(flushing);
+        stopping
+            .await
+            .expect("stop task")
+            .expect("first flow stops");
+        state
+            .start_flow(&second_id)
+            .await
+            .expect("second flow starts once the uploader has finished");
+        state.stop_flow(&second_id).await.expect("stop second");
+    }
+
+    /// A flow stopped and started again at once: the new run takes the claims
+    /// over while the old run's teardown still waits for its uploader. That
+    /// teardown must not release the new run's claims (another flow could
+    /// then write the same TAMS flows) nor wait for the new run's uploaders.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tams_restart_keeps_the_new_runs_claims() {
+        use strom::tams::flow_claims::Writer;
+
+        gst::init().unwrap();
+        common::init_static_plugins();
+        if !plugins_available() {
+            return;
+        }
+        let state = common::state::new();
+        let gateway = format!(
+            "http://127.0.0.1:9/claims-restart-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let block = format!("tams_claim_restart_{}", uuid::Uuid::new_v4().simple());
+        let first = flow_with_keyed_tams_output("tams_claim_restart_first", &gateway, &block, None);
+        let other = flow_with_keyed_tams_output("tams_claim_restart_other", &gateway, &block, None);
+        let (first_id, other_id) = (first.id, other.id);
+        state.upsert_flow(first).await.expect("upsert first");
+        state.upsert_flow(other).await.expect("upsert other");
+        state.start_flow(&first_id).await.expect("first run starts");
+
+        // An uploader of the first run, still flushing after its pipeline has
+        // stopped.
+        let flushing = Writer::new(first_id);
+        let stopping = {
+            let state = state.app();
+            tokio::spawn(async move { state.stop_flow(&first_id).await })
+        };
+        let t0 = Instant::now();
+        while state.pipelines_read().await.contains_key(&first_id)
+            && t0.elapsed() < Duration::from_secs(10)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!stopping.is_finished(), "stop waits for the uploader");
+
+        // The same flow starts again while the old run is torn down, and
+        // its new run counts a writer of its own.
+        state
+            .start_flow(&first_id)
+            .await
+            .expect("second run starts");
+        let new_writer = Writer::new(first_id);
+
+        drop(flushing);
+        let stopped = tokio::time::timeout(Duration::from_secs(3), stopping)
+            .await
+            .expect("the old teardown does not wait for the new run's writer");
+        stopped.expect("stop task").expect("first run stops");
+
+        state
+            .start_flow(&other_id)
+            .await
+            .expect_err("the second run still holds the TAMS flows");
+
+        drop(new_writer);
+        state.stop_flow(&first_id).await.expect("stop second run");
+        state
+            .start_flow(&other_id)
+            .await
+            .expect("the other flow starts once the flow has stopped");
+        state.stop_flow(&other_id).await.expect("stop other");
+    }
+
     /// A product that creates a new Strom flow, with new random block ids, for
     /// each run (Open Live on every activation) keeps writing to the same TAMS
     /// flows by setting the same `tams_key`: while the old run is up, the new
@@ -1746,8 +1892,141 @@ mod flow_claims {
         state.stop_flow(&other_id).await.expect("stop other key");
         for k in [key.clone(), format!("{key}-other")] {
             let _ = std::fs::remove_dir_all(strom::blocks::builtin::tams_output::segment_dir(
-                &k, "mux",
+                &gateway, &k, "mux",
             ));
         }
+    }
+}
+
+/// Parked segments are uploaded by the server-wide drainer after their flow
+/// has stopped: the store is down while the flow runs, comes up after it
+/// stopped, and every parked segment reaches it.
+mod parked_drain {
+    use super::*;
+    use axum::extract::{Path as P, State};
+    use axum::routing::{post, put};
+    use axum::{Json, Router};
+    use std::sync::{Arc, Mutex};
+
+    type Registered = Arc<Mutex<Vec<(String, String)>>>;
+
+    /// A store on `addr` that accepts everything and records registrations.
+    fn start_store(runtime: &tokio::runtime::Runtime, addr: std::net::SocketAddr) -> Registered {
+        let registered: Registered = Arc::default();
+        let base = format!("http://{}", addr);
+        let app = Router::new()
+            .route("/flows/{id}", put(|| async { axum::http::StatusCode::CREATED }))
+            .route(
+                "/flows/{id}/storage",
+                post(move |P(id): P<String>| {
+                    let base = base.clone();
+                    async move {
+                        Json(serde_json::json!({ "media_objects": [{
+                            "object_id": format!("{}-{}", id, uuid::Uuid::new_v4()),
+                            "put_url": { "url": format!("{}/upload", base), "content-type": "video/mp2t" }
+                        }]}))
+                    }
+                }),
+            )
+            .route("/upload", put(|| async { axum::http::StatusCode::OK }))
+            .route(
+                "/flows/{id}/segments",
+                axum::routing::get(|| async { Json(serde_json::json!([])) }).post(
+                    |State(r): State<Registered>,
+                     P(id): P<String>,
+                     Json(body): Json<serde_json::Value>| async move {
+                        let tr = body["timerange"].as_str().unwrap_or_default().to_string();
+                        r.lock().unwrap().push((id, tr));
+                        axum::http::StatusCode::CREATED
+                    },
+                ),
+            )
+            .with_state(registered.clone());
+        let listener = runtime
+            .block_on(tokio::net::TcpListener::bind(addr))
+            .expect("bind the store on its old port");
+        runtime.spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        registered
+    }
+
+    fn sidecars(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".meta"))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn parked_segments_are_uploaded_after_the_flow_stopped() {
+        if !plugins_available() {
+            eprintln!("skipping: GStreamer plugins missing");
+            return;
+        }
+        gst::init().unwrap();
+        // Park whatever the free space of the developer's disk (the default
+        // keeps 10 % of the volume free).
+        std::env::set_var(strom::tams::park::MIN_FREE_MB_ENV, "0");
+        let runtime = runtime();
+        // A port nothing listens on while the flow runs.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let gateway = format!("http://{}", addr);
+
+        let pipeline = gst::Pipeline::new();
+        let mut out = add_tams_output_to(&pipeline, "tams_drain", &gateway, 1);
+        feed_audio(&pipeline, &out.input("audio_input_0"), -1);
+        out.run_setups(&runtime);
+        pipeline.set_state(gst::State::Playing).unwrap();
+        std::thread::sleep(Duration::from_millis(3500));
+        for drain in out.ctx.take_stop_drains() {
+            drain();
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        out.release_elements();
+        drop(pipeline);
+
+        // Every segment is parked once the uploader has given up on the last.
+        let dir = out.segment_dir();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let segs = out.segments().len();
+            if segs >= 2 && sidecars(&dir) == segs {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "segments not parked: {} files, {} sidecars: {:?}",
+                segs,
+                sidecars(&dir),
+                std::fs::read_dir(&dir).map(|rd| rd
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name())
+                    .collect::<Vec<_>>())
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let parked = out.segments().len();
+        assert!(dir.join(strom::tams::drain::MANIFEST_FILE).exists());
+
+        // The store comes up; nothing runs the flow any more.
+        let registered = start_store(&runtime, addr);
+        {
+            let _guard = runtime.enter();
+            strom::tams::drain::start(EventBroadcaster::with_capacity(16));
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !out.segments().is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert!(out.segments().is_empty(), "parked segments left");
+        assert_eq!(registered.lock().unwrap().len(), parked);
+        runtime.shutdown_background();
     }
 }
