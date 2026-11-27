@@ -6,6 +6,8 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ### Added
 - Media Player: timeline mode (replay). A player plays an indexed source (a TAMS flow, `tams+https://<gateway>/flows/<flow_id>`) on a timeline that can be scrubbed, jogged and played at any speed, from -8x to 8x. Players with the same `group` form a replay group with one cursor and one speed; the group shares TAI time, and each player has its own frame grid (**Output Framerate**). See [MEDIA_LIBRARY.md](MEDIA_LIBRARY.md)
+- Replay control API: `POST /api/replay/{flow_id}/{group}/command`, `GET /api/replay/{flow_id}/{group}/state` and a WebSocket at `/api/replay/{flow_id}/{group}/ws`, with one command schema for REST and WebSocket (seek by frame, UTC, TAI or distance from live, jog, speed, ramps, cue and bounded play, live, marks). See [REPLAY_API.md](REPLAY_API.md)
+- Replay page: an operator page for a replay group at `/player/replay/{flow_id}/{group}` (transport, angles through the vision mixer, marks and clips)
 - Reference Timestamp block: stamps each buffer with its clock time (UTC or TAI) as a `GstReferenceTimestampMeta`, and can burn that time into the picture
 - TAMS Output: segments are cut on a TAI grid, and `segment_duration_ms` allows segments shorter than a second. The block asks upstream for a keyframe on each grid point, warns when a boundary still leaves the grid, and writes video `essence_parameters` on its flows
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
@@ -29,6 +31,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - OSC: the gateway host is taken from the parsed URL before a SAT is sent. User info that looks like an OSC host (`https://x.svc.auto.prod.osaas.io:pw@evil.example/`) passed the check and the SAT went to the other host; a gateway URL with user info is now refused
 - OSC: a SAT whose `exp` and `iat` claims give an absurd lifetime is refreshed by age instead of panicking on overflow
 - Vision mixer: `pgm-endpoint` and `multiview-endpoint` find a WHEP output behind a pad linked more than once or a block with several outputs (breadth first, not only the first link)
+- Replay WebSocket: the socket is closed with a close frame when its group's flow stops, not dropped
 
 ### Upgrade notes
 - TAMS Output: parked segments over `STROM_TAMS_PARKED_MAX_MB` or `STROM_TAMS_PARKED_MAX_SEGMENTS` are deleted, oldest first, on the first sweep after an upgrade
@@ -37,6 +40,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Video Encoder: scheduled keyframe requests are no longer held back by the 1 s floor. An encoder that feeds a recorder which asks for keyframes at given times (TAMS Output, a segmenting recorder) now makes every keyframe it is asked for, so such a flow can get more keyframes than before. WebRTC PLIs are limited as before
 
 ### Documentation
+- REPLAY_API.md: driving a replay group over HTTP or WebSocket
 - MEDIA_LIBRARY.md: the Media Player's modes, and timeline mode
 - BLOCK_GUIDELINES.md: a block that writes files through a muxer finishes the open file when its flow stops
 - UPSTREAM_NOTES.md: `GstSystemClock` TAI on macOS, `vtdec_hw` at EOS, `splitmuxsink` closing a fragment one GOP late, `appsrc` linking to `mp4mux`'s audio pad, and `min-force-key-unit-interval` dropping scheduled requests

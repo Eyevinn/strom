@@ -418,6 +418,16 @@ pub async fn create_app_with_config(
         .route("/devtools/links", get(api::devtools::list_links))
         .route("/devtools/links", delete(api::devtools::revoke_all_links))
         .route("/devtools/links/{id}", delete(api::devtools::revoke_link))
+        // Replay control per replay group: commands and state, REST and WS
+        .route(
+            "/replay/{flow_id}/{group}/command",
+            post(api::replay::replay_command),
+        )
+        .route(
+            "/replay/{flow_id}/{group}/state",
+            get(api::replay::replay_state),
+        )
+        .route("/replay/{flow_id}/{group}/ws", get(api::replay::replay_ws))
         // Logging
         .route("/log-level", get(api::logging::get_log_level))
         .route("/log-level", put(api::logging::set_log_level))
@@ -466,6 +476,7 @@ pub async fn create_app_with_config(
         .route("/whep", get(api::whep_player::whep_player))
         .route("/whep-streams", get(api::whep_player::whep_streams_page))
         .route("/whip-ingest", get(api::whip_ingest::whip_ingest_page))
+        .route("/replay/{flow_id}/{group}", get(api::replay::replay_page))
         .route(
             "/vision-mixer/{flow_id}",
             get(api::vision_mixer_page::vision_mixer_page),

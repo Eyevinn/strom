@@ -15,6 +15,7 @@ pub mod network;
 pub mod osc;
 pub mod ports;
 pub mod probes;
+pub mod replay;
 pub mod sdp_transform;
 pub mod stinger;
 pub mod system_clock;

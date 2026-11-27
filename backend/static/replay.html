@@ -1,0 +1,1257 @@
+<!DOCTYPE html>
+<!-- Strom replay page, version 7 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Replay - Strom</title>
+<style>
+  :root {
+    --bg: #0c0e11; --panel: #14171c; --panel2: #1a1e24; --line: #262b33; --line2: #333a44;
+    --fg: #e6e8eb; --mut: #8b929d; --dim: #5d646f;
+    --blue: #3b9eff; --purple: #b48cff; --amber: #f5a524; --pink: #ff6bb5;
+    --red: #e5484d; --green: #3dd68c; --clip: #2f80c8;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         display: flex; flex-direction: column; overflow: hidden; color-scheme: dark; }
+  button { font: inherit; color: inherit; }
+  kbd { font: 600 10px var(--mono); color: var(--mut); background: #0008; border: 1px solid var(--line2); border-radius: 3px; padding: 0 4px; margin-left: 6px; }
+
+  /* ---- top bar */
+  header { display: flex; align-items: center; gap: 18px; padding: 6px 14px; background: var(--panel); border-bottom: 1px solid var(--line); min-height: 64px; }
+  .brand { display: flex; flex-direction: column; min-width: 150px; }
+  .brand b { font-size: 15px; letter-spacing: .2px; }
+  .brand span { color: var(--mut); font-size: 11px; font-family: var(--mono); }
+  .tcs { flex: 1; display: flex; justify-content: center; align-items: flex-end; gap: 26px; }
+  .tcbox { display: flex; flex-direction: column; align-items: center; }
+  .tcbox label { font: 600 10px var(--mono); letter-spacing: 1px; color: var(--mut); }
+  .tcbox .v { font: 500 17px var(--mono); color: var(--dim); }
+  .tcbox.in .v.set { color: var(--blue); } .tcbox.out .v.set { color: var(--purple); } .tcbox.dur .v.set { color: var(--fg); }
+  .tcmain label { font-size: 11px; }
+  .tcmain .v { font: 600 36px/1 var(--mono); color: var(--fg); letter-spacing: 1px; }
+  .tcmain .v.unanchored { color: var(--mut); }
+  #mode { padding: 0 6px; border-radius: 3px; }
+  #mode.live { color: #fff; background: var(--red); }
+  #mode.play { color: #111; background: var(--green); }
+  #mode.paused { color: #111; background: var(--amber); }
+  #mode.rev { color: #111; background: var(--pink); }
+  .tcbox.delta .v { color: var(--amber); }
+  .tcbox.delta .v.live { color: var(--red); }
+  .status { display: flex; gap: 8px; align-items: center; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line2); background: var(--panel2);
+          font-size: 12px; white-space: nowrap; text-decoration: none; color: var(--fg); }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+  .pill.ok .dot { background: var(--green); } .pill.warn .dot { background: var(--amber); } .pill.bad .dot { background: var(--red); }
+  .pill.tally { color: var(--mut); }
+  a.pill:hover, button.pill:hover { border-color: var(--mut); cursor: pointer; }
+
+  /* ---- main */
+  main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 330px; }
+  .stage { min-height: 0; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 10px; padding: 10px; align-content: start; align-items: start; overflow: auto; }
+  .mon { background: #000; border: 2px solid var(--line); border-radius: 4px; position: relative; aspect-ratio: 16/9; overflow: hidden; }
+  .mon.pgm { border-color: var(--red); }
+  .mon video { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .mon .tag { position: absolute; top: 6px; left: 8px; font: 700 11px var(--mono); padding: 1px 6px; border-radius: 3px; background: #000a; }
+  .mon.pgm .tag { background: var(--red); color: #fff; }
+  .mon .osd { position: absolute; top: 6px; right: 8px; font: 600 12px var(--mono); padding: 1px 6px; border-radius: 3px; background: #000a; }
+  .mon .osdb { position: absolute; bottom: 6px; left: 8px; right: 8px; display: flex; justify-content: space-between; font: 600 13px var(--mono); text-shadow: 0 1px 2px #000; }
+  .mon .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 8px; color: var(--mut); text-align: center; padding: 12px; }
+  .mon .empty button { background: var(--panel2); border: 1px solid var(--line2); border-radius: 4px; padding: 5px 12px; cursor: pointer; }
+  .mon.mv { cursor: pointer; }
+  .mon.mv .hit { position: absolute; border: 2px solid transparent; border-radius: 2px; }
+  .mon.mv .hit:hover { border-color: #fff8; }
+  .angles { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+  .angle { background: var(--panel2); border: 2px solid var(--line2); border-radius: 5px; padding: 10px 12px; text-align: left; cursor: pointer;
+           display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 6px; min-height: 62px; }
+  .angle:hover { border-color: var(--mut); }
+  .angle b { font-size: 16px; } .angle small { color: var(--mut); font: 600 10px var(--mono); letter-spacing: .5px; grid-column: 1; }
+  .angle kbd { grid-row: 1 / span 2; grid-column: 2; font-size: 12px; padding: 2px 7px; }
+  .angle.pgm small { color: #ff9a9d; } .angle.pvw small { color: var(--green); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 10px 12px; }
+  .card h3 { margin: 0 0 6px; font-size: 11px; letter-spacing: 1px; color: var(--mut); font-weight: 600; }
+  .card dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0; }
+  .card dt { color: var(--mut); } .card dd { margin: 0; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .angle.pgm { border-color: var(--red); background: #3a1416; }
+  .angle.pvw { border-color: var(--green); }
+  .hint { color: var(--mut); font-size: 12px; }
+  .note { color: var(--mut); font-size: 11px; }
+
+  /* ---- side panel */
+  aside { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+  .tabs { display: flex; border-bottom: 1px solid var(--line); }
+  .tabs button { flex: 1; background: none; border: 0; border-bottom: 2px solid transparent; padding: 10px; cursor: pointer; color: var(--mut); font-weight: 600; }
+  .tabs button.on { color: var(--fg); border-bottom-color: var(--blue); }
+  .pane { flex: 1; min-height: 0; overflow: auto; display: none; }
+  .pane.on { display: block; }
+  .form { padding: 10px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+  .form input { background: var(--bg); border: 1px solid var(--line2); border-radius: 4px; color: var(--fg); padding: 6px 8px; font: inherit; width: 100%; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line2); background: var(--panel2); cursor: pointer; color: var(--mut); }
+  .chip.on { color: #111; background: var(--amber); border-color: var(--amber); }
+  .list { list-style: none; margin: 0; padding: 0; }
+  .list li { padding: 8px 10px; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; cursor: pointer; }
+  .list li:hover { background: var(--panel2); }
+  .list li.active { background: #12273d; box-shadow: inset 3px 0 0 var(--blue); }
+  .list .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .list .meta { font: 11px var(--mono); color: var(--mut); grid-column: 1 / 2; }
+  .list .acts { grid-row: 1 / span 3; grid-column: 2; display: flex; gap: 4px; align-items: center; }
+  .list .acts button { background: var(--panel2); border: 1px solid var(--line2); border-radius: 4px; padding: 3px 7px; cursor: pointer; font-size: 12px; }
+  .list .acts button:hover { border-color: var(--mut); }
+  .list .tags { display: flex; gap: 4px; flex-wrap: wrap; grid-column: 1 / 2; }
+  .list .tags span { font-size: 10px; padding: 0 6px; border-radius: 3px; background: var(--line2); color: var(--fg); }
+  .list .empty { color: var(--mut); cursor: default; display: block; }
+  .list .empty:hover { background: none; }
+  .mark-n { color: var(--amber); font: 700 12px var(--mono); margin-right: 6px; }
+  .mark-n.ph { color: var(--pink); }
+  .sidefoot { border-top: 1px solid var(--line); padding: 8px 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .sidefoot button { background: var(--panel2); border: 1px solid var(--line2); border-radius: 4px; padding: 5px 10px; cursor: pointer; font-size: 12px; }
+
+  /* ---- control surface */
+  .surface { border-top: 1px solid var(--line); background: var(--panel); padding: 8px 14px 10px; }
+  #tlWrap { position: relative; }
+  #tl { display: block; width: 100%; height: 58px; border-radius: 4px; cursor: crosshair; touch-action: none; }
+  #tlTip { position: absolute; top: -26px; transform: translateX(-50%); pointer-events: none; font: 600 11px var(--mono); background: #000d; border: 1px solid var(--line2);
+           padding: 2px 6px; border-radius: 3px; white-space: nowrap; display: none; }
+  .tlrow { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; font: 11px var(--mono); color: var(--mut); }
+  .zoom { display: flex; gap: 4px; }
+  .zoom button { background: var(--panel2); border: 1px solid var(--line2); border-radius: 3px; padding: 1px 8px; cursor: pointer; font: 11px var(--mono); color: var(--mut); }
+  .zoom button.on { color: var(--fg); border-color: var(--blue); background: #12273d; }
+  #tlEnd.live { color: var(--red); font-weight: 700; }
+  .controls { display: flex; gap: 18px; margin-top: 8px; align-items: flex-start; flex-wrap: wrap; }
+  .tr { display: flex; flex-direction: column; gap: 6px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .b { background: var(--panel2); border: 1px solid var(--line2); border-radius: 4px; padding: 7px 11px; cursor: pointer; font-weight: 600; display: inline-flex; align-items: center; min-height: 34px; }
+  .b:hover { border-color: var(--mut); }
+  .b:active { transform: translateY(1px); }
+  .b.live { color: var(--red); border-color: #6b2326; }
+  .b.live.on { color: #fff; background: var(--red); border-color: var(--red); }
+  .b.mark { color: var(--amber); border-color: #5c4313; }
+  .b.in { color: var(--blue); } .b.out { color: var(--purple); }
+  .b.save { color: #fff; border-color: var(--blue); background: #12273d; }
+  .b.on { border-color: var(--blue); background: #12273d; }
+  .b.play { min-width: 96px; justify-content: center; }
+  .sep { width: 1px; align-self: stretch; background: var(--line); }
+  .speed { margin-left: auto; min-width: 290px; display: flex; flex-direction: column; gap: 6px; }
+  .speed .hd { display: flex; justify-content: space-between; align-items: baseline; color: var(--mut); }
+  .speed .hd b { font: 700 24px var(--mono); color: var(--fg); }
+  #speedSlider { width: 100%; accent-color: var(--blue); }
+  .presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .presets .b { justify-content: center; }
+  #inoutInfo { font: 12px var(--mono); color: var(--mut); }
+
+  /* ---- help overlay */
+  #help { position: fixed; inset: 0; background: #000b; display: none; align-items: center; justify-content: center; z-index: 50; }
+  #help.on { display: flex; }
+  #help .box { background: var(--panel); border: 1px solid var(--line2); border-radius: 6px; padding: 18px 22px; max-width: 760px; width: calc(100% - 32px); max-height: 90vh; overflow: auto; }
+  #help h2 { margin: 0 0 10px; font-size: 16px; }
+  #help table { border-collapse: collapse; width: 100%; columns: 2; }
+  #help td { padding: 3px 8px; border-bottom: 1px solid var(--line); }
+  #help td:first-child { white-space: nowrap; font: 12px var(--mono); color: var(--amber); width: 1%; }
+  #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: #000e; border: 1px solid var(--line2); border-radius: 4px; padding: 6px 14px;
+           font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 60; }
+  #toast.on { opacity: 1; }
+
+  @media (max-width: 1100px) {
+    main { grid-template-columns: 1fr; overflow: auto; }
+    aside { border-left: 0; border-top: 1px solid var(--line); min-height: 320px; }
+    body { overflow: auto; }
+    .stage { grid-template-columns: 1fr; }
+    .tcmain .v { font-size: 26px; }
+    header { flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><b>Replay</b><span id="grpName">-</span></div>
+  <div class="tcs">
+    <div class="tcbox in"><label>IN</label><span class="v" id="tcIn">--:--:--:--</span></div>
+    <div class="tcbox tcmain" title="Local time of the frame the players last pushed (from the server's UTC and frame in second)">
+      <label><span id="mode">-</span></label><span class="v" id="tcMain">--:--:--:--</span>
+    </div>
+    <div class="tcbox out"><label>OUT</label><span class="v" id="tcOut">--:--:--:--</span></div>
+    <div class="tcbox dur"><label>DUR</label><span class="v" id="tcDur">--:--:--</span></div>
+    <div class="tcbox delta" title="Distance from the live edge"><label>TO LIVE</label><span class="v" id="tcDelta">-</span></div>
+  </div>
+  <div class="status">
+    <span class="pill" id="connPill" title="WebSocket to the replay group"><span class="dot"></span><span id="connText">Connecting</span></span>
+    <span class="pill tally" id="tallyPill" title="Tally in from the live system is not wired yet"><span class="dot"></span>Tally n/a</span>
+    <button class="pill" id="helpBtn" title="Keyboard shortcuts">? Keys</button>
+  </div>
+</header>
+
+<main>
+  <div class="stage">
+      <div class="mon pgm" id="pgmMon">
+        <video id="pgmVid" autoplay muted playsinline></video>
+        <span class="tag">PGM</span>
+        <span class="osd" id="pgmOsd"></span>
+        <div class="osdb"><span id="pgmTc"></span><span id="pgmAngle"></span></div>
+        <div class="empty" id="pgmEmpty"><span id="pgmMsg">Looking for the program output…</span><button id="pgmRetry">Connect video</button></div>
+      </div>
+      <div class="mon mv" id="mvMon" title="Click an angle to put it on air">
+        <video id="mvVid" autoplay muted playsinline></video>
+        <span class="tag">ANGLES</span>
+        <div id="mvHits"></div>
+        <div class="empty" id="mvEmpty"><span id="mvMsg">No multiview output in this flow</span></div>
+      </div>
+      <div>
+        <div class="angles" id="angles"></div>
+        <div class="hint" id="angleHint" style="margin-top:6px"></div>
+      </div>
+      <div class="card">
+        <h3>ENGINE</h3>
+        <dl>
+          <dt>Buffer</dt><dd id="infBuf">-</dd>
+          <dt>Live edge</dt><dd id="infLive">-</dd>
+          <dt>Angles</dt><dd id="infAngles">-</dd>
+          <dt>Clip</dt><dd id="infClip">-</dd>
+        </dl>
+      </div>
+  </div>
+
+  <aside>
+    <div class="tabs">
+      <button class="on" data-tab="clips">Clips <span id="clipCount" class="note"></span></button>
+      <button data-tab="marks">Marks <span id="markCount" class="note"></span></button>
+    </div>
+    <div class="pane on" id="pane-clips">
+      <div class="form">
+        <input id="clipName" placeholder="Name for the next clip" autocomplete="off">
+        <input id="clipTags" placeholder="Tags, comma separated" autocomplete="off">
+        <div class="chips" id="quickTags"></div>
+      </div>
+      <ul class="list" id="clipList"></ul>
+    </div>
+    <div class="pane" id="pane-marks">
+      <ul class="list" id="markList"></ul>
+    </div>
+    <div class="sidefoot">
+      <button id="exportBtn" title="Download clips and marks as JSON">Export</button>
+      <button id="importBtn" title="Load clips and marks from a JSON file">Import</button>
+      <button id="clearMarksBtn">Clear marks</button>
+      <input type="file" id="importFile" accept="application/json,.json" hidden>
+    </div>
+  </aside>
+</main>
+
+<div class="surface">
+  <div id="tlWrap"><canvas id="tl"></canvas><div id="tlTip"></div></div>
+  <div class="tlrow">
+    <span id="tlStart">-</span>
+    <span class="zoom" id="zoom"></span>
+    <span id="tlEnd">LIVE</span>
+  </div>
+  <div class="controls">
+    <div class="tr">
+      <div class="row">
+        <button class="b live" id="liveBtn" title="Back to live (IN and OUT are kept)">LIVE<kbd>N</kbd></button>
+        <button class="b" data-rel="-20000">−20 s<kbd>E</kbd></button>
+        <button class="b" data-rel="-10000">−10 s<kbd>W</kbd></button>
+        <button class="b" data-rel="-5000">−5 s<kbd>Q</kbd></button>
+        <span class="sep"></span>
+        <button class="b" id="jogBack" title="One frame back">◀|<kbd>←</kbd></button>
+        <button class="b play" id="playBtn">▶ Play<kbd>Space</kbd></button>
+        <button class="b" id="jogFwd" title="One frame forward">|▶<kbd>→</kbd></button>
+        <span class="sep"></span>
+        <button class="b" id="revBtn" title="Shuttle reverse: press again for 2x, 4x">◀◀<kbd>J</kbd></button>
+        <button class="b" id="fwdBtn" title="Shuttle forward: press again for 2x, 4x">▶▶<kbd>L</kbd></button>
+        <button class="b" id="replayBtn" title="Replay the last 8 seconds at 50 %">REPLAY 8 s<kbd>R</kbd></button>
+      </div>
+      <div class="row">
+        <button class="b mark" id="markBtn">MARK<kbd>M</kbd></button>
+        <button class="b" id="prevMarkBtn">◀ MARK<kbd>D</kbd></button>
+        <button class="b" id="nextMarkBtn">MARK ▶<kbd>F</kbd></button>
+        <span class="sep"></span>
+        <button class="b in" id="inBtn">IN<kbd>I</kbd></button>
+        <button class="b out" id="outBtn">OUT<kbd>O</kbd></button>
+        <button class="b" id="goInBtn">GO IN<kbd>⇧I</kbd></button>
+        <button class="b" id="clearIoBtn" title="Clear IN and OUT">CLEAR<kbd>X</kbd></button>
+        <button class="b save" id="saveBtn">SAVE CLIP<kbd>⇧⏎</kbd></button>
+        <span id="inoutInfo"></span>
+      </div>
+    </div>
+    <div class="speed">
+      <div class="hd"><span>Speed</span><b id="speedVal">-</b></div>
+      <input type="range" id="speedSlider" min="0" max="100" step="1" value="100" title="Play speed (0–100 %)">
+      <div class="presets">
+        <button class="b" data-speed="0.25">25%</button>
+        <button class="b" data-speed="0.5">50%</button>
+        <button class="b" data-speed="0.75">75%</button>
+        <button class="b" data-speed="1">100%</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="help"><div class="box">
+  <h2>Keyboard</h2>
+  <table id="helpTable"></table>
+  <p class="note">Everything on screen comes from the server's replay engine: the page only sends commands. A clip's IN and OUT are held by the server (cue and play), so it stops at OUT however the page is doing.</p>
+</div></div>
+<div id="toast"></div>
+
+<script>
+'use strict';
+// ---------------------------------------------------------------------------
+// Address: /player/replay/{flow_id}/{group}
+const parts = location.pathname.split('/').filter(Boolean);
+const FLOW = parts[2], GROUP = decodeURIComponent(parts[3] || '');
+const $ = id => document.getElementById(id);
+$('grpName').textContent = `${GROUP} · ${FLOW ? FLOW.slice(0, 8) : '-'}`;
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (_) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} },
+};
+const KEY = `strom-replay:${FLOW}:${GROUP}`;
+let toastT = null;
+function toast(msg) {
+  $('toast').textContent = msg; $('toast').classList.add('on');
+  clearTimeout(toastT); toastT = setTimeout(() => $('toast').classList.remove('on'), 1800);
+}
+
+// ---------------------------------------------------------------------------
+// Time. The server sends TAI as a nanosecond string (too big for a double),
+// UTC as RFC 3339 and the frame within the second. The page keeps times as
+// nanoseconds relative to a base (BigInt) so they fit a double exactly.
+let BASE = null;                       // BigInt TAI ns
+const rel = s => { const b = BigInt(s); if (BASE == null) BASE = b; return Number(b - BASE); };
+const absStr = n => (BASE + BigInt(Math.round(n))).toString();
+const taiOfNs = ns => { const a = BigInt(ns); return `${a / 1000000000n}:${a % 1000000000n}`; };
+const taiArg = n => { const a = BASE + BigInt(Math.round(n)); return `${a / 1000000000n}:${a % 1000000000n}`; };
+let utcMinusTaiMs = null;              // from the server's own (UTC, TAI) pairs
+let fps = 50, frameNs = 20e6, fpsKnown = false;
+const pad = (n, w = 2) => String(n).padStart(w, '0');
+// Local time of day with frames, from a server FrameTime ({utc, frame_in_second}).
+function tcOf(ft) {
+  if (!ft) return '--:--:--:--';
+  const d = new Date(ft.utc);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}:${pad(ft.frame_in_second)}`;
+}
+// Local time of day for an arbitrary relative TAI time (labels, hover).
+function clockOf(n, withFrames) {
+  if (utcMinusTaiMs == null || BASE == null) return '--:--:--';
+  const ms = Number(BASE / 1000000n) + n / 1e6 + utcMinusTaiMs;
+  const d = new Date(ms);
+  let s = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  if (withFrames) s += ':' + pad(Math.floor(((ms % 1000) + 1000) % 1000 * 1e6 / frameNs));
+  return s;
+}
+// Durations: MM:SS:FF (HH: when needed).
+function durOf(ns) {
+  if (!(ns >= 0)) return '--:--:--';
+  const f = Math.round(ns / frameNs);
+  const ff = f % fps, s = Math.floor(f / fps), ss = s % 60, m = Math.floor(s / 60);
+  return (m >= 60 ? `${Math.floor(m / 60)}:${pad(m % 60)}` : pad(m)) + `:${pad(ss)}:${pad(ff)}`;
+}
+function deltaOf(ms) {
+  if (ms == null) return '-';
+  const s = Math.abs(ms) / 1000;
+  const sign = ms > 0 ? '−' : '+';
+  return s >= 60 ? `${sign}${Math.floor(s / 60)}:${pad(Math.floor(s % 60))}.${Math.floor(s * 10) % 10}` : `${sign}${pad(Math.floor(s))}.${Math.floor(s * 10) % 10}`;
+}
+// A server FrameTime made relative, keeping what the page shows from it.
+const ftRel = ft => ft && ft.tai_ns ? { t: rel(ft.tai_ns), utc: ft.utc, frame_in_second: ft.frame_in_second } : null;
+
+// ---------------------------------------------------------------------------
+// WebSocket: commands and 20 Hz state.
+let ws = null, seq = 0, lastMsgAt = 0, wsOpen = false;
+const acks = new Map();
+let S = null;                           // last state, with relative times
+let recvAt = 0;
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/api/replay/${FLOW}/${encodeURIComponent(GROUP)}/ws`);
+  ws.onopen = () => { wsOpen = true; };
+  ws.onclose = () => {
+    wsOpen = false;
+    // Commands in flight get no reply from this socket; let their callers settle.
+    const pending = [...acks.values()]; acks.clear();
+    for (const cb of pending) cb({ type: 'error', seq: null, error: 'disconnected' });
+    setTimeout(connectWs, 1000);
+  };
+  ws.onmessage = ev => {
+    lastMsgAt = performance.now();
+    const m = JSON.parse(ev.data);
+    if (m.type === 'state') onState(m);
+    else if (m.type === 'event') onEvent(m);
+    else if (m.type === 'ack' || m.type === 'error') {
+      const cb = acks.get(m.seq); acks.delete(m.seq);
+      if (m.type === 'error') toast('Server: ' + m.error);
+      if (cb) cb(m);
+    }
+  };
+}
+function send(cmd, onAck) {
+  if (!ws || ws.readyState !== 1) { toast('Not connected'); return false; }
+  cmd.seq = ++seq;
+  if (onAck) acks.set(cmd.seq, onAck);
+  ws.send(JSON.stringify(cmd));
+  return true;
+}
+function updateConn() {
+  const age = performance.now() - lastMsgAt;
+  const pill = $('connPill');
+  pill.classList.remove('ok', 'warn', 'bad');
+  if (!wsOpen) { pill.classList.add('bad'); $('connText').textContent = 'Disconnected, retrying'; }
+  else if (age > 1000) { pill.classList.add('warn'); $('connText').textContent = 'No data'; }
+  else if (S && S.noFrameRate.length) { pill.classList.add('warn'); $('connText').textContent = 'No frame rate: ' + S.noFrameRate.join(', '); }
+  else if (!S || S.start == null) { pill.classList.add('warn'); $('connText').textContent = 'Connected, no media'; }
+  else { pill.classList.add('ok'); $('connText').textContent = 'Connected'; }
+}
+setInterval(updateConn, 250);
+
+// The live edge moves in segment steps. For drawing only, the page runs a
+// smoothed live edge that advances in real time while the server's edge grows
+// and eases towards it; it never moves the playhead. The window ends a little
+// after it (LIVE_HEADROOM) so the real edge, drawn in red, stays in view.
+const LIVE_HEADROOM = 0.7e9;
+const live = { v: null, at: 0, grow: false, lastActual: null, lastChange: 0 };
+function trackLive(actual, now) {
+  if (live.v == null) { Object.assign(live, { v: actual, at: now, lastActual: actual, lastChange: now }); return; }
+  if (actual !== live.lastActual) { live.grow = actual > live.lastActual && now - live.lastChange < 5000; live.lastActual = actual; live.lastChange = now; }
+  if (now - live.lastChange > 3000) live.grow = false;
+  const shown = liveShown(now);
+  live.v = shown; live.at = now;
+  const err = actual - shown;
+  if (!live.grow || Math.abs(err) > 5e9) live.v = actual; else live.v += err * 0.01;
+}
+const liveShown = now => live.v == null ? null : live.v + (live.grow ? (now - live.at) * 1e6 : 0);
+
+function onState(m) {
+  const now = performance.now();
+  // frame_ns is null until a frame rate is known; 20 ms only keeps the
+  // arithmetic going, and the header says the rate is missing.
+  frameNs = m.frame_ns || 20e6; fps = Math.round(1e9 / frameNs); fpsKnown = !!m.frame_ns;
+  const pushed = m.pushed || m.cursor;
+  if (pushed && utcMinusTaiMs == null) {
+    const taiMs = Number(BigInt(pushed.tai_ns) / 1000000n);
+    utcMinusTaiMs = Math.round((Date.parse(pushed.utc) - taiMs) / 1000) * 1000;
+  }
+  const s = {
+    speed: +m.speed || 0,
+    domain: m.time_domain,
+    pushed: ftRel(pushed),
+    // Behind the server's smooth live-edge estimate (it does not jump per segment).
+    behindMs: pushed ? (pushed.behind_live_estimate_ms ?? pushed.behind_live_ms ?? m.behind_live_ms) : null,
+    start: m.start ? rel(m.start.tai_ns) : null,
+    end: m.end ? rel(m.end.tai_ns) : null,
+    live: m.live_edge ? rel(m.live_edge.tai_ns) : null,
+    players: (m.players || []).length,
+    noFrameRate: m.no_frame_rate || [],
+  };
+  s.cue = m.cue || null;
+  s.following = !!m.live;
+  S = s; recvAt = now;
+  if (s.live != null) trackLive(s.live, now);
+  // The server holds the clip's bounds; when it drops the cue (a seek out of
+  // it, live, end), the page's clip is no longer active.
+  if (activeClip && !s.cue && !activeClip.pending) { activeClip = null; renderClips(); }
+  renderHeader();
+}
+
+// What the server did by itself.
+function onEvent(m) {
+  if (m.event === 'ended') toast(activeClip ? `${activeClip.clip.name}: end` : 'End of cue');
+  else if (m.event === 'live') toast(m.reason === 'caught_up' ? 'Caught up: live' : m.reason === 'edge_moved' ? 'Live edge moved: jumped to live' : 'Live');
+}
+
+// Playhead between state messages: the server's pushed time advanced at the
+// server's speed, kept inside the media. Only for drawing.
+function playheadNow() {
+  if (!S || !S.pushed) return null;
+  let t = S.pushed.t + S.speed * (performance.now() - recvAt) * 1e6;
+  if (S.live != null) t = Math.min(t, S.live);
+  if (S.start != null) t = Math.max(t, S.start);
+  return t;
+}
+// The server says when the group follows the live edge (after LIVE, or after
+// fast play caught up with it).
+const isLive = () => !!(S && S.following);
+
+// ---------------------------------------------------------------------------
+// Header
+function renderHeader() {
+  const s = S;
+  const mode = $('mode');
+  mode.className = '';
+  if (!s || !s.pushed) mode.textContent = s && s.start == null ? 'NO MEDIA' : '-';
+  else if (isLive()) { mode.textContent = 'LIVE'; mode.className = 'live'; }
+  else if (s.speed === 0) { mode.textContent = 'PAUSED'; mode.className = 'paused'; }
+  else if (s.speed < 0) { mode.textContent = `REVERSE ${Math.round(-s.speed * 100)}%`; mode.className = 'rev'; }
+  else { mode.textContent = `PLAY ${Math.round(s.speed * 100)}%`; mode.className = 'play'; }
+  $('tcMain').textContent = tcOf(s && s.pushed);
+  $('tcMain').classList.toggle('unanchored', !!s && s.domain !== 'tai');
+  $('tcMain').title = s && s.domain === 'unanchored' ? 'The source has no absolute time: the clock is on an arbitrary base' : '';
+  const d = $('tcDelta');
+  d.textContent = s && s.behindMs != null ? (isLive() ? 'LIVE' : deltaOf(s.behindMs)) : '-';
+  d.classList.toggle('live', isLive());
+  $('pgmTc').textContent = tcOf(s && s.pushed);
+  $('pgmOsd').textContent = s && s.behindMs != null ? (isLive() ? 'LIVE' : deltaOf(s.behindMs)) : '';
+  $('pgmOsd').style.background = isLive() ? 'var(--red)' : '';
+  $('liveBtn').classList.toggle('on', isLive());
+  $('playBtn').innerHTML = (s && s.speed !== 0 ? '❚❚ Pause' : '▶ Play') + '<kbd>Space</kbd>';
+  $('speedVal').textContent = s ? `${Math.round(s.speed * 100)}%` : '-';
+  if (!sliderDragging && s) $('speedSlider').value = Math.max(0, Math.min(100, Math.round(Math.abs(s.speed) * 100)));
+  document.querySelectorAll('[data-speed]').forEach(b => b.classList.toggle('on', !!s && Math.abs(s.speed - +b.dataset.speed) < 1e-3));
+  renderInOut();
+  if (s) {
+    $('infBuf').textContent = s.start != null && s.live != null ? `${clockOf(s.start)} → ${clockOf(s.live)} (${durOf(s.live - s.start).slice(0, -3)})` : 'no media yet';
+    $('infLive').textContent = live.grow ? 'growing (live ingest)' : s.live != null ? 'not growing (recording)' : '-';
+    $('infAngles').textContent = `${s.players} player(s) · ${fpsKnown ? fps : 'unknown'} fps · time ${s.domain || '?'}`;
+    $('infClip').textContent = activeClip ? `${activeClip.clip.name} (${s.cue ? s.cue.end_action : 'cueing'})` : s.cue ? `cue (${s.cue.end_action})` : '-';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Transport
+let playSpeed = store.get('strom-replay-speed', 1);   // speed Space/Play resumes at
+const pause = () => send({ cmd: 'pause' });
+const setSpeed = v => send({ cmd: 'speed', speed: v });
+function togglePlay() {
+  if (S && S.speed !== 0) pause(); else setSpeed(playSpeed || 1);
+}
+const goLive = () => { activeClip = null; renderClips(); send({ cmd: 'live' }); };
+const jog = n => send({ cmd: 'jog', frames: n });
+const seekRel = ms => send({ cmd: 'seek_rel', ms });
+const seekTo = (t, cb) => BASE != null && send({ cmd: 'seek', tai: taiArg(t) }, cb);
+// A stored point is a frame's start time: seek to the middle of that frame so
+// the server's floor to the frame grid lands on it, whatever the rounding.
+const seekFrame = (t, cb) => seekTo(t + frameNs / 2, cb);
+// J/L: shuttle 1x, 2x, 4x in each direction; the other key first stops.
+function shuttle(dir) {
+  const v = S ? S.speed : 0;
+  let next;
+  if (dir > 0) next = v <= 0 ? (v < 0 ? 0 : 1) : Math.min(v >= 1 ? v * 2 : 1, 4);
+  else next = v >= 0 ? (v > 0 ? 0 : -1) : Math.max(v <= -1 ? v * 2 : -1, -4);
+  if (next === 0) pause(); else setSpeed(next);
+}
+// Replay the last 8 s at 50 %: one seek relative to the live edge, with speed.
+function replayLast(sec = 8, speed = 0.5) {
+  activeClip = null; renderClips();
+  send({ cmd: 'seek', from_live_ms: sec * 1000, speed });
+}
+
+$('liveBtn').onclick = goLive;
+$('playBtn').onclick = togglePlay;
+$('jogBack').onclick = () => jog(-1);
+$('jogFwd').onclick = () => jog(1);
+$('revBtn').onclick = () => shuttle(-1);
+$('fwdBtn').onclick = () => shuttle(1);
+$('replayBtn').onclick = () => replayLast();
+document.querySelectorAll('[data-rel]').forEach(b => b.onclick = () => seekRel(+b.dataset.rel));
+document.querySelectorAll('[data-speed]').forEach(b => b.onclick = () => {
+  playSpeed = +b.dataset.speed; store.set('strom-replay-speed', playSpeed); setSpeed(playSpeed);
+});
+// Slider: send at most one speed every 60 ms, and the final value on release.
+let sliderDragging = false, sliderTimer = null;
+const sl = $('speedSlider');
+sl.addEventListener('pointerdown', () => sliderDragging = true);
+sl.addEventListener('input', () => {
+  if (sliderTimer) return;
+  sliderTimer = setTimeout(() => { sliderTimer = null; setSpeed(+sl.value / 100); }, 60);
+});
+sl.addEventListener('change', () => {
+  sliderDragging = false;
+  playSpeed = +sl.value / 100 || 1; store.set('strom-replay-speed', playSpeed);
+  setSpeed(+sl.value / 100);
+});
+
+// ---------------------------------------------------------------------------
+// Marks, IN/OUT, clips. All data in the browser; times are the server's time
+// of the frame on screen (the last pushed frame in the state).
+const saved = store.get(KEY, {});
+let marks = saved.marks || [];          // {n, t (tai_ns string), utc, fis, name, live}
+let clips = saved.clips || [];
+let inPt = saved.inPt || null, outPt = saved.outPt || null;   // {tai_ns, utc, frame_in_second}
+let activeClip = null;
+const persist = () => store.set(KEY, { marks, clips, inPt, outPt });
+const tOf = p => p ? rel(p.tai_ns) : null;
+// The frame on screen, stamped by the server (`mark`): the frame the players
+// last pushed, not the state the page last heard (up to 50 ms old).
+function pointNow() {
+  return new Promise(res => {
+    const ok = send({ cmd: 'mark' }, m => {
+      if (m.type !== 'ack' || !m.mark) { res(null); return; }
+      const t = m.mark.time;
+      res({ tai_ns: t.tai_ns, utc: t.utc, frame_in_second: t.frame_in_second });
+    });
+    if (!ok) res(null);
+  });
+}
+
+async function addMark() {
+  const p = await pointNow(); if (!p) return;
+  const n = (marks.reduce((a, m) => Math.max(a, m.n), 0)) + 1;
+  marks.push({ n, ...p, name: `Mark ${n}`, live: isLive() });
+  persist(); renderMarks(); toast(`Mark ${n} at ${tcOf(p)}`);
+}
+function renameLastMark() {
+  const m = marks[marks.length - 1]; if (!m) return;
+  const v = prompt('Mark name', m.name); if (v == null) return;
+  m.name = v.trim() || m.name; persist(); renderMarks();
+}
+function gotoMark(m, preroll = 0) { activeClip = null; renderClips(); pause(); seekFrame(tOf(m) - preroll * 1e9); }
+let lastMarkIdx = null;
+function lastMark() {
+  if (!marks.length) return;
+  lastMarkIdx = lastMarkIdx == null || lastMarkIdx <= 0 ? marks.length - 1 : lastMarkIdx - 1;
+  const m = marks[lastMarkIdx];
+  gotoMark(m, 2); toast(`${m.name} (2 s pre-roll)`);
+}
+function stepMark(dir) {
+  const t = playheadNow(); if (t == null || !marks.length) return;
+  const sorted = marks.map(m => ({ m, t: tOf(m) })).sort((a, b) => a.t - b.t);
+  const eps = frameNs * 1.5;
+  const hit = dir > 0 ? sorted.find(x => x.t > t + eps) : [...sorted].reverse().find(x => x.t < t - eps);
+  if (hit) { gotoMark(hit.m); toast(hit.m.name); }
+}
+async function setIn() { const p = await pointNow(); if (!p) return; inPt = p; if (outPt && tOf(outPt) <= tOf(inPt)) outPt = null; persist(); renderInOut(); }
+async function setOut() { const p = await pointNow(); if (!p) return; outPt = p; if (inPt && tOf(inPt) >= tOf(outPt)) inPt = null; persist(); renderInOut(); }
+function clearInOut() { inPt = outPt = null; persist(); renderInOut(); }
+function goIn() { if (inPt) { pause(); seekFrame(tOf(inPt)); } }
+function goOut() { if (outPt) { pause(); seekFrame(tOf(outPt)); } }
+function renderInOut() {
+  $('tcIn').textContent = inPt ? tcOf(inPt) : '--:--:--:--';
+  $('tcOut').textContent = outPt ? tcOf(outPt) : '--:--:--:--';
+  $('tcIn').classList.toggle('set', !!inPt);
+  $('tcOut').classList.toggle('set', !!outPt);
+  let dur = null;
+  if (inPt) { const end = outPt ? tOf(outPt) : playheadNow(); if (end != null) dur = end - tOf(inPt); }
+  $('tcDur').textContent = dur != null && dur >= 0 ? durOf(dur) : '--:--:--';
+  $('tcDur').classList.toggle('set', dur != null && dur >= 0);
+  $('inoutInfo').textContent = !inPt && !outPt ? 'No IN/OUT: saves the last 6 s' : !outPt ? 'OUT = now' : !inPt ? 'IN = OUT − 6 s' : '';
+}
+
+// Group context, filled from the flow: players' sources, mixer, angle names.
+let ctx = { players: [], vm: null, numInputs: 0, labels: [], inputPlayer: [], numPips: 0, swap: false };
+let mixer = { program_input: null, preview_input: null, program_pip: null };
+
+async function saveClip() {
+  const now = await pointNow(); if (!now) return;
+  const DEF = 6e9;
+  let a = inPt ? tOf(inPt) : null, b = outPt ? tOf(outPt) : null;
+  if (a == null && b == null) { b = tOf(now); a = b - DEF; }
+  else if (b == null) b = tOf(now);
+  else if (a == null) a = b - DEF;
+  if (S && S.start != null) a = Math.max(a, S.start);
+  if (!(b > a)) { toast('OUT must be after IN'); return; }
+  const angle = mixer.program_pip == null ? mixer.program_input : null;
+  const name = $('clipName').value.trim() || `Clip ${clips.length + 1}`;
+  const tags = [...new Set([...$('clipTags').value.split(',').map(s => s.trim()).filter(Boolean), ...quickOn])];
+  const clip = {
+    id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())),
+    name, tags,
+    flow: FLOW, group: GROUP,
+    sources: ctx.players.map(p => ({ block: p.id, source: p.source })),
+    in_tai: absStr(a), out_tai: absStr(b),
+    in_utc: inPt && tOf(inPt) === a ? inPt.utc : null,
+    in_tc: clockOf(a, true),
+    angle, angle_label: angle != null ? ctx.labels[angle] : null,
+    speed: playSpeed || 1,
+    created: new Date().toISOString(),
+  };
+  clips.unshift(clip);
+  $('clipName').value = ''; $('clipTags').value = ''; quickOn.clear(); renderQuick();
+  inPt = outPt = null;
+  persist(); renderClips(); renderInOut();
+  toast(`Saved "${name}" (${durOf(b - a)})`);
+}
+// The server holds the clip's bounds: cue parks at IN, play runs to OUT and
+// freezes on the last frame before it (OUT is exclusive).
+// The clip is cued first and its angle cut to program once the cue has
+// landed, so program shows the clip's IN frame, not the frame the group was
+// on. If the cue or the cut fails, the clip does not play, so it cannot go out
+// on the wrong angle. A later clip, mark or deletion takes over: an ack that
+// comes after that changes nothing.
+function cueClip(c, play) {
+  const cue = { clip: c, pending: true };
+  const drop = () => { if (activeClip === cue) { activeClip = null; renderClips(); } };
+  activeClip = cue;
+  renderClips();
+  const sent = send({ cmd: 'cue', in: { tai: taiOfNs(c.in_tai) }, out: { tai: taiOfNs(c.out_tai) }, end_action: 'freeze' }, async m => {
+    if (activeClip !== cue) return;
+    if (m.type !== 'ack') { drop(); return; }
+    if (c.angle != null && !(await cutTo({ input: c.angle }))) { drop(); return; }
+    if (activeClip !== cue) return;
+    cue.pending = false;
+    renderClips();
+    if (play) send({ cmd: 'play', speed: c.speed || 1 });
+  });
+  if (!sent) drop();
+}
+function deleteClip(id) {
+  const c = clips.find(x => x.id === id);
+  if (!c || !confirm(`Delete "${c.name}"?`)) return;
+  clips = clips.filter(x => x.id !== id);
+  if (activeClip && activeClip.clip.id === id) activeClip = null;
+  persist(); renderClips();
+}
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function renderClips() {
+  $('clipCount').textContent = clips.length ? `(${clips.length})` : '';
+  const ul = $('clipList');
+  if (!clips.length) { ul.innerHTML = '<li class="empty">No clips yet. Set IN and OUT (I, O) and press Save clip, or save the last 6 s straight away.</li>'; return; }
+  ul.innerHTML = clips.map(c => {
+    const dur = rel(c.out_tai) - rel(c.in_tai);
+    const act = activeClip && activeClip.clip.id === c.id;
+    return `<li data-id="${esc(c.id)}" class="${act ? 'active' : ''}" title="Click to cue at IN">
+      <span class="nm">${esc(c.name)}</span>
+      <span class="acts"><button data-act="play" title="Play from IN to OUT">▶</button><button data-act="del" title="Delete">✕</button></span>
+      <span class="meta">${esc(c.in_tc || '')} · ${durOf(dur)} · ${esc(c.angle_label || 'angle ?')} · ${Math.round((c.speed || 1) * 100)}%</span>
+      ${c.tags && c.tags.length ? `<span class="tags">${c.tags.map(t => `<span>${esc(t)}</span>`).join('')}</span>` : ''}
+    </li>`;
+  }).join('');
+}
+$('clipList').addEventListener('click', e => {
+  const li = e.target.closest('li[data-id]'); if (!li) return;
+  const c = clips.find(x => x.id === li.dataset.id); if (!c) return;
+  const act = e.target.closest('button') && e.target.closest('button').dataset.act;
+  if (act === 'del') deleteClip(c.id);
+  else cueClip(c, act === 'play');
+});
+function renderMarks() {
+  $('markCount').textContent = marks.length ? `(${marks.length})` : '';
+  const ul = $('markList');
+  if (!marks.length) { ul.innerHTML = '<li class="empty">No marks. Press M when something happens.</li>'; return; }
+  ul.innerHTML = [...marks].reverse().map(m => `<li data-n="${m.n}" title="Click to go to the mark">
+      <span class="nm"><span class="mark-n ${m.live ? '' : 'ph'}">${m.n}</span>${esc(m.name)}</span>
+      <span class="acts"><button data-act="in" title="Use as IN">IN</button><button data-act="ren" title="Rename">✎</button><button data-act="del" title="Delete">✕</button></span>
+      <span class="meta">${esc(tcOf(m))}${m.live ? ' · live' : ''}</span></li>`).join('');
+}
+$('markList').addEventListener('click', e => {
+  const li = e.target.closest('li[data-n]'); if (!li) return;
+  const m = marks.find(x => x.n === +li.dataset.n); if (!m) return;
+  const act = e.target.closest('button') && e.target.closest('button').dataset.act;
+  if (act === 'del') { marks = marks.filter(x => x !== m); persist(); renderMarks(); }
+  else if (act === 'ren') { const v = prompt('Mark name', m.name); if (v != null) { m.name = v.trim() || m.name; persist(); renderMarks(); } }
+  else if (act === 'in') { inPt = { tai_ns: m.tai_ns, utc: m.utc, frame_in_second: m.frame_in_second }; persist(); renderInOut(); }
+  else gotoMark(m);
+});
+$('clearMarksBtn').onclick = () => { if (marks.length && confirm('Clear all marks?')) { marks = []; lastMarkIdx = null; persist(); renderMarks(); } };
+const QUICK = ['Goal', 'Save', 'Chance', 'Foul', 'Penalty', 'Card', 'Highlight'];
+const quickOn = new Set();
+function renderQuick() {
+  $('quickTags').innerHTML = QUICK.map(t => `<span class="chip ${quickOn.has(t) ? 'on' : ''}" data-t="${t}">${t}</span>`).join('');
+}
+$('quickTags').addEventListener('click', e => {
+  const t = e.target.dataset.t; if (!t) return;
+  quickOn.has(t) ? quickOn.delete(t) : quickOn.add(t); renderQuick();
+});
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('on', p.id === 'pane-' + b.dataset.tab));
+});
+$('exportBtn').onclick = () => {
+  const data = { kind: 'strom-replay-clips', version: 1, flow: FLOW, group: GROUP, exported: new Date().toISOString(), clips, marks };
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+  a.download = `replay-${GROUP}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.json`;
+  a.click();
+};
+$('importBtn').onclick = () => $('importFile').click();
+// An imported file is untrusted: check the types of what the page uses.
+const isTai = v => typeof v === 'string' && /^-?\d{1,25}$/.test(v);
+const optStr = v => v == null || typeof v === 'string';
+const optNum = v => v == null || (typeof v === 'number' && Number.isFinite(v));
+const validClip = c => c && typeof c === 'object' && typeof c.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(c.id)
+  && isTai(c.in_tai) && isTai(c.out_tai) && optStr(c.name) && optStr(c.in_tc) && optStr(c.angle_label) && optNum(c.speed)
+  && optStr(c.flow) && optStr(c.group) && (c.angle == null || (Number.isInteger(c.angle) && c.angle >= 0))
+  && (c.tags == null || (Array.isArray(c.tags) && c.tags.every(t => typeof t === 'string')));
+const validMark = m => m && typeof m === 'object' && isTai(m.tai_ns) && optStr(m.name) && optStr(m.utc)
+  && optNum(m.frame_in_second);
+$('importFile').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  try {
+    const d = JSON.parse(await f.text());
+    const ids = new Set(clips.map(c => c.id));
+    const add = (Array.isArray(d.clips) ? d.clips : []).filter(c => validClip(c) && !ids.has(c.id));
+    clips = [...add, ...clips];
+    const mn = marks.reduce((a, m) => Math.max(a, m.n), 0);
+    const addM = (Array.isArray(d.marks) ? d.marks : []).filter(m => validMark(m) && !marks.some(x => x.tai_ns === m.tai_ns)).map((m, i) => ({ ...m, n: mn + i + 1 }));
+    marks = [...marks, ...addM];
+    persist(); renderClips(); renderMarks();
+    toast(`Imported ${add.length} clips, ${addM.length} marks`);
+  } catch (err) { toast('Import failed: ' + err.message); }
+};
+$('saveBtn').onclick = saveClip;
+$('markBtn').onclick = addMark;
+$('prevMarkBtn').onclick = () => stepMark(-1);
+$('nextMarkBtn').onclick = () => stepMark(1);
+$('inBtn').onclick = setIn;
+$('outBtn').onclick = setOut;
+$('goInBtn').onclick = goIn;
+$('clearIoBtn').onclick = clearInOut;
+
+// ---------------------------------------------------------------------------
+// Timeline: one bar for every angle, right edge = live edge.
+const ZOOMS = [['15 s', 15], ['30 s', 30], ['2 min', 120], ['10 min', 600], ['All', 0]];
+let zoom = store.get('strom-replay-zoom', 30);
+$('zoom').innerHTML = ZOOMS.map(([l, s]) => `<button data-z="${s}">${l}</button>`).join('');
+const markZoom = () => document.querySelectorAll('#zoom button').forEach(b => b.classList.toggle('on', +b.dataset.z === zoom));
+document.querySelectorAll('#zoom button').forEach(b => b.onclick = () => { zoom = +b.dataset.z; store.set('strom-replay-zoom', zoom); markZoom(); });
+markZoom();
+
+const cv = $('tl'), g = cv.getContext('2d');
+let win = null, frozenWin = null;       // [a, b] relative ns
+function computeWindow(now) {
+  if (frozenWin) return frozenWin;
+  const lv = liveShown(now);
+  if (lv == null || !S) return null;
+  if (zoom === 0) {
+    const a = S.start != null ? S.start : lv - 30e9;
+    return [a, Math.max(lv + (live.grow ? LIVE_HEADROOM : 0), a + 5e9)];
+  }
+  const z = zoom * 1e9;
+  let b = lv + (live.grow ? LIVE_HEADROOM : 0), a = b - z;
+  // Follow the playhead when it is behind the window.
+  const p = playheadNow();
+  if (p != null && p < a + 0.03 * z) { a = p - 0.15 * z; b = a + z; }
+  return [a, b];
+}
+const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
+function drawTimeline() {
+  const now = performance.now();
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  g.fillStyle = '#0f1216'; g.fillRect(0, 0, W, H);
+  win = computeWindow(now);
+  if (!win) { requestAnimationFrame(drawTimeline); return; }
+  const [a, b] = win;
+  const x = t => (t - a) / (b - a) * W;
+  // No media before the buffer start.
+  if (S.start != null && S.start > a) {
+    const xs = Math.min(W, x(S.start));
+    g.save(); g.fillStyle = '#07080a'; g.fillRect(0, 0, xs, H);
+    g.strokeStyle = '#1b1f25'; g.lineWidth = 1;
+    for (let i = -H; i < xs; i += 8) { g.beginPath(); g.moveTo(i, H); g.lineTo(i + H, 0); g.stroke(); }
+    g.fillStyle = '#5d646f'; g.font = '10px ui-monospace, monospace';
+    if (xs > 60) g.fillText('buffer start', Math.max(4, xs - 70), H - 6);
+    g.restore();
+    g.fillStyle = '#5d646f'; g.fillRect(xs - 1, 0, 2, H);
+  }
+  // Time scale.
+  const span = (b - a) / 1e9;
+  const step = STEPS.find(s => W / (span / s) >= 90) || 3600;
+  const off = utcMinusTaiMs != null && BASE != null ? Number(BASE / 1000000n) + utcMinusTaiMs : 0;  // ticks on whole wall-clock steps
+  const first = Math.ceil(((a / 1e6 + off) / 1000) / step) * step * 1000 - off;   // ms
+  g.font = '10px ui-monospace, monospace';
+  for (let ms = first; ms * 1e6 <= b; ms += step * 1000) {
+    const xx = Math.round(x(ms * 1e6)) + 0.5;
+    g.strokeStyle = '#232830'; g.beginPath(); g.moveTo(xx, 14); g.lineTo(xx, H); g.stroke();
+    g.fillStyle = '#6b727d'; g.fillText(clockOf(ms * 1e6), xx + 3, 10);
+  }
+  // Saved clips: bars along the bottom.
+  for (const c of clips) {
+    if (c.flow !== FLOW || c.group !== GROUP) continue;
+    const ca = rel(c.in_tai), cb = rel(c.out_tai);
+    if (cb < a || ca > b) continue;
+    const act = activeClip && activeClip.clip.id === c.id;
+    g.fillStyle = act ? '#5fb0ff' : '#2f80c8';
+    const x0 = Math.max(0, x(ca)), x1 = Math.min(W, x(cb));
+    g.fillRect(x0, H - 7, Math.max(2, x1 - x0), 6);
+  }
+  // IN/OUT range (IN alone grows to the playhead).
+  const ph = playheadNow();
+  if (inPt || outPt) {
+    const ia = inPt ? tOf(inPt) : null, ob = outPt ? tOf(outPt) : null;
+    const ra = ia != null ? ia : (ob != null ? ob - 6e9 : null);
+    const rb = ob != null ? ob : ph;
+    if (ra != null && rb != null && rb > ra) {
+      g.fillStyle = 'rgba(59,158,255,0.16)'; g.fillRect(x(ra), 14, x(rb) - x(ra), H - 22);
+    }
+    if (ia != null) { g.fillStyle = '#3b9eff'; g.fillRect(x(ia) - 1, 14, 2, H - 22); }
+    if (ob != null) { g.fillStyle = '#b48cff'; g.fillRect(x(ob) - 1, 14, 2, H - 22); }
+  }
+  // Marks: ticks from the top, numbered.
+  g.font = 'bold 10px ui-monospace, monospace';
+  for (const m of marks) {
+    const t = tOf(m); if (t < a || t > b) continue;
+    const xx = x(t);
+    g.fillStyle = m.live ? '#f5a524' : '#ff6bb5';
+    g.fillRect(xx - 1, 14, 2, 18);
+    g.fillText(String(m.n), xx + 3, 26);
+  }
+  // Live edge.
+  if (S.live != null && S.live <= b) { g.fillStyle = '#e5484d'; g.fillRect(Math.min(W - 3, x(S.live) - 1), 0, 3, H); }
+  else if (S.live != null) {
+    g.fillStyle = '#e5484d'; g.font = 'bold 11px ui-monospace, monospace';
+    g.fillText(`LIVE ${deltaOf((S.live - b) / 1e6)} ▶`, W - 120, H - 18);
+  }
+  // Playhead.
+  if (ph != null && ph >= a && ph <= b) {
+    const xx = x(ph);
+    g.save(); g.shadowColor = '#fff'; g.shadowBlur = 6; g.fillStyle = '#fff'; g.fillRect(xx - 1, 0, 2, H); g.restore();
+    g.beginPath(); g.moveTo(xx - 5, 0); g.lineTo(xx + 5, 0); g.lineTo(xx, 6); g.closePath(); g.fill();
+  } else if (ph != null) {
+    g.fillStyle = '#fff'; g.font = 'bold 11px ui-monospace, monospace';
+    g.fillText(ph < a ? '◀ playhead' : 'playhead ▶', ph < a ? 4 : W - 80, H / 2 + 4);
+  }
+  if (hoverX != null) { g.fillStyle = '#ffffff40'; g.fillRect(hoverX, 0, 1, H); }
+  // Labels under the bar.
+  $('tlStart').textContent = clockOf(a, true);
+  const atLive = S.live != null && S.live <= b && b - S.live < 3e9;
+  $('tlEnd').textContent = atLive ? 'LIVE' : clockOf(b, true);
+  $('tlEnd').classList.toggle('live', atLive);
+  if (inPt && !outPt) renderInOut();
+  requestAnimationFrame(drawTimeline);
+}
+requestAnimationFrame(drawTimeline);
+
+// Click to seek, drag to scrub. While dragging only the latest position is
+// sent, one seek in flight at a time (the next goes when the ack is back).
+let hoverX = null, dragging = false, scrubWant = null, scrubBusy = false, scrubSent = null;
+const tAt = ev => { const r = cv.getBoundingClientRect(); return win ? win[0] + (ev.clientX - r.left) / r.width * (win[1] - win[0]) : null; };
+function clampMedia(t) {
+  if (!S) return t;
+  if (S.live != null) t = Math.min(t, S.live - frameNs);
+  if (S.start != null) t = Math.max(t, S.start);
+  return t;
+}
+let scrubLast = 0;
+function pumpScrub() {
+  if (scrubBusy || scrubWant == null || scrubWant === scrubSent) return;
+  const wait = scrubLast + 30 - performance.now();
+  if (wait > 0) { scrubBusy = true; setTimeout(() => { scrubBusy = false; pumpScrub(); }, wait); return; }
+  const t = scrubWant; scrubSent = t; scrubBusy = true; scrubLast = performance.now();
+  let tm = null;
+  const done = () => { if (!scrubBusy) return; scrubBusy = false; clearTimeout(tm); pumpScrub(); };
+  tm = setTimeout(done, 300);
+  if (!seekTo(t, done)) done();
+}
+function clipAt(ev) {
+  const r = cv.getBoundingClientRect();
+  if (ev.clientY - r.top < r.height - 9) return null;
+  const t = tAt(ev), tol = (win[1] - win[0]) / r.width * 3;
+  return clips.find(c => c.flow === FLOW && c.group === GROUP && t >= rel(c.in_tai) - tol && t <= rel(c.out_tai) + tol) || null;
+}
+cv.addEventListener('pointerdown', ev => {
+  if (!win || !S) return;
+  const c = clipAt(ev);
+  if (c) { cueClip(c, false); return; }
+  cv.setPointerCapture(ev.pointerId);
+  dragging = true; frozenWin = win.slice();
+  activeClip = null; renderClips();
+  if (S.speed !== 0) pause();
+  scrubWant = clampMedia(tAt(ev)); scrubSent = null; pumpScrub();
+});
+cv.addEventListener('pointermove', ev => {
+  const r = cv.getBoundingClientRect();
+  hoverX = ev.clientX - r.left;
+  const t = tAt(ev);
+  const tip = $('tlTip');
+  if (t != null && S) {
+    const c = clipAt(ev);
+    const m = marks.find(m => Math.abs(x2(tOf(m)) - hoverX) < 4);
+    tip.textContent = c ? `${c.name} · click to cue` : m ? `${m.name} · ${tcOf(m)}` : `${clockOf(t, true)}  ${S.live != null ? deltaOf((S.live - t) / 1e6) : ''}`;
+    tip.style.left = Math.max(60, Math.min(r.width - 60, hoverX)) + 'px'; tip.style.display = 'block';
+  }
+  if (dragging) { scrubWant = clampMedia(t); pumpScrub(); }
+});
+const x2 = t => win ? (t - win[0]) / (win[1] - win[0]) * cv.clientWidth : -1;
+function endDrag(ev) {
+  if (!dragging) return;
+  dragging = false;
+  const r = cv.getBoundingClientRect();
+  const atEdge = zoom !== 0 && (ev.clientX - r.left) / r.width > 0.995 && frozenWin && liveShown(performance.now()) - frozenWin[1] < 2e9;
+  frozenWin = null;
+  if (atEdge) { scrubWant = null; goLive(); }
+}
+cv.addEventListener('pointerup', endDrag);
+cv.addEventListener('pointercancel', endDrag);
+cv.addEventListener('pointerleave', () => { hoverX = null; $('tlTip').style.display = 'none'; });
+
+// ---------------------------------------------------------------------------
+// Flow context: players of the group, the vision mixer they feed, and the
+// WHEP outputs downstream of it.
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(`${r.status} ${path}`);
+  return r.json();
+}
+// The nearest WHEP output downstream of a block's output pad: breadth first
+// through every link of a pad and every output of the blocks on the way, so a
+// pad linked twice or a block with several outputs cannot hide it. Stops at a
+// vision mixer, whose outputs no longer show this player's picture (the
+// mixer's own outputs come from its pgm-endpoint and multiview-endpoint).
+function whepDownstream(flow, from) {
+  const wheps = new Map(flow.blocks.filter(b => b.block_definition_id === 'builtin.whep_output')
+    .map(b => [b.id, (b.runtime_data || {}).whep_endpoint_id]));
+  const mixers = new Set(flow.blocks.filter(b => b.block_definition_id === 'builtin.vision_mixer').map(b => b.id));
+  const queue = [from]; const seen = new Set([from.split(':')[0]]);
+  while (queue.length) {
+    const pad = queue.shift();
+    for (const l of flow.links.filter(l => l.from === pad)) {
+      const blk = l.to.split(':')[0];
+      if (seen.has(blk)) continue; seen.add(blk);
+      if (wheps.has(blk)) { if (wheps.get(blk)) return wheps.get(blk); continue; }
+      if (mixers.has(blk)) continue;
+      for (const out of new Set(flow.links.filter(n => n.from.startsWith(blk + ':')).map(n => n.from))) queue.push(out);
+    }
+  }
+  return null;
+}
+// A tams+http(s) source without credentials, for the clip record.
+function safeSource(s) {
+  if (!s) return null;
+  try {
+    const m = /^([a-z+]+:)(.*)$/i.exec(s);
+    const scheme = m[1].startsWith('tams+') ? 'tams+' : '';
+    const u = new URL(scheme ? s.slice(5) : s);
+    return scheme + u.origin + u.pathname;
+  } catch (_) { return s.split('?')[0]; }
+}
+const prop = (b, k) => { const v = (b.properties || {})[k]; return v && typeof v === 'object' && 'value' in v ? v.value : v; };
+async function loadFlow() {
+  const j = await api(`/api/flows/${FLOW}`);
+  const flow = j.flow || j;
+  // A timeline player's group: `group`, or its own group `@<block id>` when empty.
+  const groupOf = b => prop(b, 'mode') === 'timeline' ? (String(prop(b, 'group') ?? '').trim() || '@' + b.id) : null;
+  const players = flow.blocks.filter(b => b.block_definition_id === 'builtin.media_player' && groupOf(b) === GROUP);
+  ctx.players = players.map(b => ({ id: b.id, source: safeSource(prop(b, 'source')), whep: whepDownstream(flow, `${b.id}:video_out`) }));
+  const ids = new Set(players.map(p => p.id));
+  // The mixer that takes the group's players as inputs.
+  const vms = flow.blocks.filter(b => b.block_definition_id === 'builtin.vision_mixer');
+  const vm = vms.find(v => flow.links.some(l => l.to.startsWith(v.id + ':video_in_') && ids.has(l.from.split(':')[0]))) || null;
+  ctx.vm = vm ? vm.id : null;
+  if (vm) {
+    ctx.numInputs = +(prop(vm, 'num_inputs') ?? 4);
+    ctx.numPips = +(prop(vm, 'num_pips') ?? 0);
+    ctx.swap = !!prop(vm, 'swap_pvw_pgm');
+    ctx.inputPlayer = []; ctx.labels = [];
+    for (let i = 0; i < ctx.numInputs; i++) {
+      const l = flow.links.find(l => l.to === `${vm.id}:video_in_${i}`);
+      const src = l ? l.from.split(':')[0] : null;
+      ctx.inputPlayer[i] = src;
+      ctx.labels[i] = prop(vm, `input_${i}_label`) || src || `In ${i + 1}`;
+    }
+  }
+  return flow;
+}
+async function endpointOf(kind) {
+  try { const e = (await api(`/api/flows/${FLOW}/blocks/${ctx.vm}/${kind}-endpoint`)).endpoint; return e ? e.replace(/^\/whep\//, '') : null; }
+  catch (_) { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// WHEP playback, jitter buffer target 0 (as low latency as the browser allows).
+async function whep(video, endpointId) {
+  const pc = new RTCPeerConnection();
+  pc.addTransceiver('video', { direction: 'recvonly' });
+  pc.ontrack = ev => {
+    if (ev.track.kind !== 'video') return;
+    try { ev.receiver.jitterBufferTarget = 0; } catch (_) {}
+    try { ev.receiver.playoutDelayHint = 0; } catch (_) {}
+    video.srcObject = new MediaStream([ev.track]);
+  };
+  await pc.setLocalDescription(await pc.createOffer());
+  await new Promise(r => {
+    if (pc.iceGatheringState === 'complete') return r();
+    pc.onicegatheringstatechange = () => pc.iceGatheringState === 'complete' && r();
+    setTimeout(r, 1500);
+  });
+  const res = await fetch(`/whep/${endpointId}`, { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription.sdp });
+  if (!res.ok) { pc.close(); throw new Error('WHEP ' + res.status); }
+  await pc.setRemoteDescription({ type: 'answer', sdp: await res.text() });
+  return pc;
+}
+const conns = {};
+async function play(slot, video, ep, emptyEl, msgEl) {
+  if (conns[slot]) { conns[slot].close(); delete conns[slot]; }
+  if (!ep) return false;
+  msgEl.textContent = 'Connecting…';
+  try {
+    const pc = await whep(video, ep);
+    conns[slot] = pc;
+    const upd = () => {
+      const st = pc.connectionState;
+      emptyEl.style.display = st === 'connected' ? 'none' : 'flex';
+      if (st === 'failed' || st === 'disconnected') msgEl.textContent = `Video ${st}`;
+    };
+    pc.onconnectionstatechange = upd; upd();
+    return true;
+  } catch (e) {
+    msgEl.textContent = `Video unavailable (${e.message})`;
+    emptyEl.style.display = 'flex';
+    return false;
+  }
+}
+let pgmEp = null, mvEp = null;
+async function connectVideo() {
+  if (ctx.vm) { [pgmEp, mvEp] = await Promise.all([endpointOf('pgm'), endpointOf('multiview')]); }
+  // No mixer: the first player's own WHEP output is the monitor.
+  if (!pgmEp) pgmEp = (ctx.players.find(p => p.whep) || {}).whep || null;
+  if (!pgmEp) { $('pgmMsg').textContent = 'No WHEP output downstream of this group'; }
+  else play('pgm', $('pgmVid'), pgmEp, $('pgmEmpty'), $('pgmMsg'));
+  if (mvEp) play('mv', $('mvVid'), mvEp, $('mvEmpty'), $('mvMsg'));
+  else { $('mvMsg').textContent = ctx.vm ? 'The mixer has no multiview WHEP output' : 'No vision mixer in this flow'; }
+}
+$('pgmRetry').onclick = connectVideo;
+
+// ---------------------------------------------------------------------------
+// Angles: the vision mixer's inputs. Choosing an angle cuts it to program
+// through the mixer's API (angle choice is the mixer's job, not the player's).
+const vmApi = (path, method, body) => fetch(`/api/flows/${FLOW}/blocks/${ctx.vm}${path}`, {
+  method, headers: { 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) });
+// Whether the source is on program afterwards (true without a mixer).
+async function cutTo(source) {
+  if (!ctx.vm) return true;
+  // Already on air: nothing to do (the mixer refuses that angle as preview).
+  if (source.input != null && mixer.program_pip == null && mixer.program_input === source.input) return true;
+  try {
+    const r = await vmApi('/preview', 'PUT', { source });
+    if (!r.ok) throw new Error(r.status);
+    const j = await r.json();
+    const t = await vmApi('/transition', 'POST', { from_input: j.program_input ?? 0, to_input: j.preview_input ?? 0, transition_type: 'cut', duration_ms: 0 });
+    if (!t.ok) throw new Error(t.status);
+    return true;
+  } catch (e) { toast('Mixer: ' + e.message); return false; }
+  finally { refreshMixer(); }
+}
+function renderAngles() {
+  const el = $('angles');
+  if (!ctx.vm) {
+    el.innerHTML = '';
+    $('angleHint').textContent = ctx.players.length ? `${ctx.players.length} player(s) in the group, no vision mixer to choose angles with.` : 'No players in this group.';
+    return;
+  }
+  el.innerHTML = Array.from({ length: ctx.numInputs }, (_, i) => {
+    const on = mixer.program_pip == null && mixer.program_input === i;
+    const pv = mixer.preview_pip == null && mixer.preview_input === i && !on;
+    return `<button class="angle ${on ? 'pgm' : pv ? 'pvw' : ''}" data-a="${i}"><b>${esc(ctx.labels[i])}</b><kbd>${i + 1}</kbd><small>${on ? 'ON AIR' : pv ? 'PREVIEW' : 'ANGLE ' + (i + 1)}</small></button>`;
+  }).join('');
+  $('angleHint').textContent = 'Keys 1–9 or click an angle (here or in the multiview) to cut it to program.';
+  const pg = mixer.program_pip == null ? mixer.program_input : null;
+  $('pgmAngle').textContent = pg != null ? ctx.labels[pg] : mixer.program_pip != null ? `PiP ${mixer.program_pip + 1}` : '';
+}
+$('angles').addEventListener('click', e => { const b = e.target.closest('[data-a]'); if (b) cutTo({ input: +b.dataset.a }); });
+let mixerKey = '';
+async function refreshMixer() {
+  if (!ctx.vm) return;
+  try {
+    const st = await api(`/api/flows/${FLOW}/blocks/${ctx.vm}/state`);
+    mixer = st;
+    const k = `${st.program_input}|${st.preview_input}|${st.program_pip}|${st.preview_pip}`;
+    if (k !== mixerKey) { mixerKey = k; renderAngles(); }
+  } catch (_) {}
+}
+setInterval(refreshMixer, 500);
+
+// Click areas over the multiview thumbnails. Mirrors the vision mixer's
+// multiview layout (vision_mixer/layout.rs compute_layout); the mixer does
+// not publish its layout yet.
+function mvThumbRects(cw, ch, nIn, nPip, aspect) {
+  const fit = (bw, bh) => { if (bw <= 0 || bh <= 0) return [Math.max(bw, 1), Math.max(bh, 1)]; const w = bh * aspect; return w <= bw ? [Math.max(Math.floor(w), 1), Math.max(Math.floor(bh), 1)] : [Math.max(Math.floor(bw), 1), Math.max(Math.floor(bw / aspect), 1)]; };
+  const gap = Math.round(cw * 0.005);
+  const topH = Math.round(ch * 0.48);
+  const y0 = gap + topH + gap;
+  const gw = Math.max(cw - gap * 2, 0), gh = Math.max(ch - y0 - gap, 0);
+  const total = nIn + nPip;
+  let best = null;
+  for (let cols = 1; cols <= Math.min(Math.max(total, 1), 16); cols++) {
+    const rows = Math.ceil(total / cols), cwid = gw / cols, chei = gh / rows;
+    if (cwid <= 0 || chei <= 0) continue;
+    const cost = Math.abs(Math.log((cwid / chei) / aspect)) + (cols * rows - total) / total;
+    if (!best || cost < best[2] - 1e-9 || (cost < best[2] + 1e-9 && rows < best[1])) best = [cols, rows, cost];
+  }
+  const [cols, rows] = best || [Math.max(total, 1), 1];
+  const colW = Math.max((gw - gap * (cols - 1)) / cols, 1);
+  const rowH = Math.max(Math.min(Math.max(gh - gap * (rows - 1), 0) / rows, Math.round(ch * 0.235)), 1);
+  const lab = Math.max(rowH * 0.10, 1) * 1.6;
+  const [vw, vh] = fit(colW, Math.max(rowH - lab, 1));
+  const slotH = vh + lab;
+  const x0 = gap + Math.max((gw - (vw * cols + gap * (cols - 1))) / 2, 0);
+  return Array.from({ length: nIn }, (_, i) => ({ x: x0 + (i % cols) * (vw + gap), y: y0 + Math.floor(i / cols) * (slotH + gap), w: vw, h: slotH }));
+}
+function layoutHits() {
+  const v = $('mvVid'), box = $('mvHits');
+  if (!ctx.vm || !v.videoWidth) { box.innerHTML = ''; return; }
+  const cw = v.videoWidth, ch = v.videoHeight;
+  const W = v.clientWidth, H = v.clientHeight;
+  const s = Math.min(W / cw, H / ch), ox = (W - cw * s) / 2, oy = (H - ch * s) / 2;
+  const rects = mvThumbRects(cw, ch, ctx.numInputs, ctx.numPips, cw / ch);
+  box.innerHTML = rects.map((r, i) => `<div class="hit" data-a="${i}" title="${esc(ctx.labels[i])}: cut to program" style="left:${ox + r.x * s}px;top:${oy + r.y * s}px;width:${r.w * s}px;height:${r.h * s}px"></div>`).join('');
+}
+$('mvVid').addEventListener('resize', layoutHits);
+$('mvVid').addEventListener('loadedmetadata', layoutHits);
+window.addEventListener('resize', layoutHits);
+$('mvHits').addEventListener('click', e => { const h = e.target.closest('[data-a]'); if (h) cutTo({ input: +h.dataset.a }); });
+
+// ---------------------------------------------------------------------------
+// Keyboard (physical keys, layout independent).
+const KEYS = [
+  ['Space', 'Play / pause (at the chosen speed)'],
+  ['J / K / L', 'Shuttle reverse / pause / forward (press again: 2x, 4x)'],
+  ['← / →', 'One frame back / forward'],
+  ['⇧← / ⇧→', 'One second back / forward'],
+  ['Q / W / E', 'Jump back 5 / 10 / 20 s'],
+  ['N, ⇧Space', 'Back to live (IN and OUT are kept)'],
+  ['R', 'Replay the last 8 s at 50 %'],
+  ['M / ⇧M', 'Mark / rename the last mark'],
+  ['B', 'Last mark with 2 s pre-roll (again: older)'],
+  ['D / F', 'Previous / next mark'],
+  ['I / O', 'Set IN / OUT at the frame on screen'],
+  ['⇧I / ⇧O', 'Go to IN / OUT'],
+  ['X', 'Clear IN and OUT'],
+  ['⇧Enter', 'Save clip'],
+  ['1 – 9', 'Cut angle to program'],
+  ['Z', 'Cycle timeline zoom'],
+  ['?', 'This help'],
+  ['Esc', 'Close help'],
+];
+$('helpTable').innerHTML = KEYS.map(([k, d]) => `<tr><td>${k}</td><td>${d}</td></tr>`).join('');
+const help = on => $('help').classList.toggle('on', on);
+$('helpBtn').onclick = () => help(true);
+$('help').onclick = e => { if (e.target.id === 'help') help(false); };
+document.addEventListener('keydown', e => {
+  const tag = e.target.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') { if (e.key === 'Escape') e.target.blur(); return; }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const sh = e.shiftKey;
+  const digit = /^Digit([1-9])$/.exec(e.code);
+  if (digit) { const i = +digit[1] - 1; if (i < ctx.numInputs) cutTo({ input: i }); e.preventDefault(); return; }
+  if (e.key === '?') { help(!$('help').classList.contains('on')); e.preventDefault(); return; }
+  switch (e.code) {
+    case 'Escape': help(false); break;
+    case 'Space': sh ? goLive() : togglePlay(); break;
+    case 'KeyK': pause(); break;
+    case 'KeyJ': shuttle(-1); break;
+    case 'KeyL': shuttle(1); break;
+    case 'ArrowLeft': sh ? seekRel(-1000) : jog(-1); break;
+    case 'ArrowRight': sh ? seekRel(1000) : jog(1); break;
+    case 'KeyQ': seekRel(-5000); break;
+    case 'KeyW': seekRel(-10000); break;
+    case 'KeyE': seekRel(-20000); break;
+    case 'KeyN': goLive(); break;
+    case 'KeyR': replayLast(); break;
+    case 'KeyM': sh ? renameLastMark() : addMark(); break;
+    case 'KeyB': lastMark(); break;
+    case 'KeyD': stepMark(-1); break;
+    case 'KeyF': stepMark(1); break;
+    case 'KeyI': sh ? goIn() : setIn(); break;
+    case 'KeyO': sh ? goOut() : setOut(); break;
+    case 'KeyX': clearInOut(); break;
+    case 'Enter': case 'NumpadEnter': if (sh) saveClip(); else return; break;
+    case 'KeyZ': { const zs = ZOOMS.map(z => z[1]); zoom = zs[(zs.indexOf(zoom) + 1) % zs.length]; store.set('strom-replay-zoom', zoom); markZoom(); break; }
+    default: return;
+  }
+  e.preventDefault();
+});
+
+// ---------------------------------------------------------------------------
+// Buttons must not keep focus: Space would click them as well as play/pause.
+document.addEventListener('click', e => { const b = e.target.closest('button'); if (b) b.blur(); });
+renderQuick(); renderClips(); renderMarks(); renderInOut();
+connectWs();
+loadFlow().then(async () => { renderAngles(); await refreshMixer(); renderAngles(); connectVideo(); })
+  .catch(e => { $('pgmMsg').textContent = 'Could not read the flow: ' + e.message; });
+</script>
+</body>
+</html>
