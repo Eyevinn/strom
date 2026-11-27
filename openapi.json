@@ -1334,7 +1334,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MultiviewEndpointResponse"
+                  "$ref": "#/components/schemas/WhepEndpointResponse"
                 }
               }
             }
@@ -1439,7 +1439,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MultiviewEndpointResponse"
+                  "$ref": "#/components/schemas/WhepEndpointResponse"
                 }
               }
             }
@@ -8783,19 +8783,6 @@
           "Video"
         ]
       },
-      "MultiviewEndpointResponse": {
-        "type": "object",
-        "description": "Response for a vision mixer multiview endpoint query.",
-        "required": [
-          "endpoint"
-        ],
-        "properties": {
-          "endpoint": {
-            "type": "string",
-            "description": "WHEP endpoint path (e.g. \"/whep/my-endpoint\"), empty if not connected."
-          }
-        }
-      },
       "NdiDiscoveryStatus": {
         "type": "object",
         "description": "NDI discovery status response.",
@@ -14901,6 +14888,19 @@
           },
           "stats": {
             "$ref": "#/components/schemas/WebRtcStats"
+          }
+        }
+      },
+      "WhepEndpointResponse": {
+        "type": "object",
+        "description": "Response for a query for the WHEP endpoint fed by a block output (e.g. a\nvision mixer's `pgm-endpoint` and `multiview-endpoint`).",
+        "required": [
+          "endpoint"
+        ],
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "description": "WHEP endpoint path (e.g. \"/whep/my-endpoint\"), empty if not connected\nor not started yet."
           }
         }
       },

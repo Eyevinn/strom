@@ -324,7 +324,7 @@ use utoipa::OpenApi;
             strom_types::vision_mixer::SourceCrop,
             strom_types::vision_mixer::Zone,
             strom_types::vision_mixer::ZoneBorder,
-            strom_types::api::MultiviewEndpointResponse,
+            strom_types::api::WhepEndpointResponse,
             OverlayAlphaRequest,
             OverlayAlphaResponse,
             DskToggleRequest,
