@@ -557,7 +557,14 @@ pub struct Fetcher {
     pub store: Arc<SegmentStore>,
     source: Arc<dyn SourceIndex>,
     timeline: Arc<ReplayTimeline>,
-    stats: Arc<PlayerStats>,
+    /// Where what the fetcher learns about its source goes: the player's
+    /// stats, or, for a source being switched to, stats of its own until
+    /// the switch (see [`Fetcher::retarget`]). What the group reads (extent,
+    /// grid, time domain, index) is written under this lock.
+    stats: Mutex<Arc<PlayerStats>>,
+    /// Why the source cannot be played (unsupported container or codec);
+    /// the fetcher has stopped.
+    error: Mutex<Option<String>>,
     block_id: String,
     ahead_ns: i64,
     behind_ns: i64,
@@ -578,7 +585,8 @@ impl Fetcher {
             store: Arc::new(SegmentStore::default()),
             source,
             timeline,
-            stats,
+            stats: Mutex::new(stats),
+            error: Mutex::new(None),
             block_id: block_id.to_string(),
             ahead_ns,
             behind_ns: (ahead_ns / 2).max(2 * S),
@@ -588,6 +596,25 @@ impl Fetcher {
                 .unwrap_or(DEFAULT_CODED_BUDGET_MB)
                 .saturating_mul(1 << 20),
         }
+    }
+
+    /// The stats the fetcher reports to now.
+    pub fn stats(&self) -> Arc<PlayerStats> {
+        Arc::clone(&lock(&self.stats))
+    }
+
+    /// Report to `to` from now on. `adopt(from, to)` runs first, under the
+    /// same lock as every write the group reads: nothing the fetcher learns
+    /// lands between the two, or on the old stats after.
+    pub fn retarget(&self, to: Arc<PlayerStats>, adopt: impl FnOnce(&PlayerStats, &PlayerStats)) {
+        let mut s = lock(&self.stats);
+        adopt(&s, &to);
+        *s = to;
+    }
+
+    /// Why the source cannot be played, once the fetcher has found out.
+    pub fn error(&self) -> Option<String> {
+        lock(&self.error).clone()
     }
 
     /// Run on a dedicated thread until `stop` is set.
@@ -641,6 +668,7 @@ impl Fetcher {
             // failure per segment and a picture that never comes.
             if let Ok((info, _, _)) = &r {
                 if let Err(e) = check_supported(info.container.as_deref(), info.codec.as_deref()) {
+                    *lock(&self.error) = Some(e.clone());
                     warn!(
                         "Replay {}: {} cannot be played: {}; nothing is fetched or shown",
                         self.block_id,
@@ -660,14 +688,17 @@ impl Fetcher {
                         info.container,
                         info.codec
                     );
-                    if let Some((n, d)) = info.frame_rate {
-                        self.stats.init_grid(n, d, first.start_ns);
+                    {
+                        let stats = lock(&self.stats);
+                        if let Some((n, d)) = info.frame_rate {
+                            stats.init_grid(n, d, first.start_ns);
+                        }
+                        stats.set_time_domain(if info.absolute_time {
+                            TimeDomain::Tai
+                        } else {
+                            TimeDomain::Unanchored
+                        });
                     }
-                    self.stats.set_time_domain(if info.absolute_time {
-                        TimeDomain::Tai
-                    } else {
-                        TimeDomain::Unanchored
-                    });
                     *lock(&self.store.info) = Some(info);
                     return Some((first, last));
                 }
@@ -742,7 +773,7 @@ impl Fetcher {
             let (cursor, speed) = self
                 .timeline
                 .cursor_tai(rt)
-                .map_or((start, 0.0), |(t, v)| (t - self.stats.offset_ns(), v));
+                .map_or((start, 0.0), |(t, v)| (t - self.stats().offset_ns(), v));
             let forward = speed >= 0.0;
             // Offline play only goes forward: nothing behind the cursor is
             // needed again.
@@ -948,10 +979,11 @@ impl Fetcher {
                         };
                         let Some(seg) = tasks.remove(&id) else { continue };
                         inflight.remove(&seg.start_ns);
-                        self.stats.fetches.fetch_add(1, Ordering::Relaxed);
+                        let stats = self.stats();
+                        stats.fetches.fetch_add(1, Ordering::Relaxed);
                         match r {
                             Ok(bytes) => {
-                                self.stats
+                                stats
                                     .last_fetch_ms
                                     .store(took.as_millis() as u64, Ordering::Relaxed);
                                 failed.succeed(&seg.start_ns);
@@ -960,7 +992,7 @@ impl Fetcher {
                                     .insert(seg.start_ns, (seg.end_ns, Arc::new(bytes)));
                             }
                             Err(e) => {
-                                self.stats.fetch_errors.fetch_add(1, Ordering::Relaxed);
+                                stats.fetch_errors.fetch_add(1, Ordering::Relaxed);
                                 let attempts = failed.fail(seg.start_ns, Instant::now());
                                 if worth_warning(attempts) {
                                     warn!(
@@ -1035,7 +1067,7 @@ impl Fetcher {
             {
                 let mut index = lock(&self.store.index);
                 index.retain(|k, _| keep(chunk_of(*k)) || *k == start || Some(*k) == hold_key);
-                self.stats
+                self.stats()
                     .index_segments
                     .store(index.len() as u64, Ordering::Relaxed);
                 if Instant::now() >= next_view {
@@ -1047,10 +1079,10 @@ impl Fetcher {
                         let settled = end - LIVE_BACKFILL_NS;
                         view.gaps.retain(|g| g.1 <= settled);
                     }
-                    self.stats.set_index_view(view);
+                    lock(&self.stats).set_index_view(view);
                 }
             }
-            self.stats
+            self.stats()
                 .fetched_segments
                 .store(lock(&self.store.bytes).len() as u64, Ordering::Relaxed);
         }
@@ -1126,7 +1158,7 @@ impl Fetcher {
 
     /// The longest seam that is not a gap, for this source's frame rate.
     fn tolerance(&self) -> i64 {
-        seam_tolerance(self.stats.grid().map(|g| g.frame_ns()))
+        seam_tolerance(self.stats().grid().map(|g| g.frame_ns()))
     }
 
     /// Take the listing `r` of index chunk `c` into the index and the
@@ -1182,8 +1214,9 @@ impl Fetcher {
     }
 
     fn publish_extent(&self, start: i64, end: i64) {
-        self.stats.start_tai.store(start, Ordering::Relaxed);
-        self.stats.end_tai.store(end, Ordering::Relaxed);
+        let stats = lock(&self.stats);
+        stats.start_tai.store(start, Ordering::Relaxed);
+        stats.end_tai.store(end, Ordering::Relaxed);
     }
 }
 
@@ -1832,7 +1865,7 @@ mod tests {
                 .unwrap();
         };
         let t0 = Instant::now();
-        while f.stats.extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
+        while f.stats().extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(5));
         }
         // Into the edge segment: its chunk is listed.
@@ -1862,10 +1895,11 @@ mod tests {
         }
         let edge = at(LIVE0 + n);
         let t0 = Instant::now();
-        while f.stats.extent().map(|e| e.1) != Some(edge) && t0.elapsed() < Duration::from_secs(5) {
+        while f.stats().extent().map(|e| e.1) != Some(edge) && t0.elapsed() < Duration::from_secs(5)
+        {
             std::thread::sleep(Duration::from_millis(5));
         }
-        let moved = f.stats.extent().map(|e| e.1) == Some(edge);
+        let moved = f.stats().extent().map(|e| e.1) == Some(edge);
         let in_flight = !done.load(Ordering::Relaxed);
         // Into the stretch the poll skipped (the source has media there).
         let t = at(LIVE0 + 3) + 100 * ms;
@@ -1917,7 +1951,7 @@ mod tests {
         assert_eq!(wait_indexed(&f, 3, 200).len(), 3);
         mock.register(LIVE0 + 4, 200);
         let t0 = Instant::now();
-        while f.stats.extent().map(|e| e.1) != Some(100 * S + (LIVE0 + 5) * 200_000_000)
+        while f.stats().extent().map(|e| e.1) != Some(100 * S + (LIVE0 + 5) * 200_000_000)
             && t0.elapsed() < Duration::from_secs(5)
         {
             std::thread::sleep(Duration::from_millis(20));
@@ -1934,7 +1968,7 @@ mod tests {
             .collect();
         assert_eq!(have, vec![0, 1, 2, 4]);
         assert_eq!(
-            f.stats.index_view().gaps,
+            f.stats().index_view().gaps,
             vec![],
             "a hole at the live edge is not a gap yet"
         );
@@ -1958,11 +1992,12 @@ mod tests {
         }
         let edge = 100 * S + n * 200_000_000;
         let t0 = Instant::now();
-        while f.stats.extent().map(|e| e.1) != Some(edge) && t0.elapsed() < Duration::from_secs(5) {
+        while f.stats().extent().map(|e| e.1) != Some(edge) && t0.elapsed() < Duration::from_secs(5)
+        {
             std::thread::sleep(Duration::from_millis(20));
         }
         stop.store(true, Ordering::Relaxed);
-        assert_eq!(f.stats.extent().map(|e| e.1), Some(edge));
+        assert_eq!(f.stats().extent().map(|e| e.1), Some(edge));
     }
 
     #[test]
@@ -2057,7 +2092,8 @@ mod tests {
         }
         let edge = 100 * S + (LIVE0 + 17) * 200_000_000;
         let t0 = Instant::now();
-        while f.stats.extent().map(|e| e.1) != Some(edge) && t0.elapsed() < Duration::from_secs(5) {
+        while f.stats().extent().map(|e| e.1) != Some(edge) && t0.elapsed() < Duration::from_secs(5)
+        {
             std::thread::sleep(Duration::from_millis(20));
         }
         // Polls with the hole open: listed by time with backoff.
@@ -2068,7 +2104,7 @@ mod tests {
             .segments_in(a + 600_000_000, a + 800_000_000)
             .is_empty());
         assert_eq!(
-            f.stats.index_view().gaps,
+            f.stats().index_view().gaps,
             vec![],
             "a hole near the live edge is not a gap yet"
         );
@@ -2104,7 +2140,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         Arc::clone(&fetcher).spawn(Arc::clone(&stop));
         let t0 = Instant::now();
-        while fetcher.stats.extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
+        while fetcher.stats().extent().is_none() && t0.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(5));
         }
         timeline
@@ -2151,7 +2187,7 @@ mod tests {
             mock.register(i, 1000);
         }
         let got = wait_for_segment(&f, 110, Duration::from_secs(5));
-        let edge = f.stats.extent().map(|e| e.1);
+        let edge = f.stats().extent().map(|e| e.1);
         stop.store(true, Ordering::Relaxed);
         assert_eq!(edge, Some(500 * S));
         assert!(got, "the skipped stretch near the cursor is listed");
