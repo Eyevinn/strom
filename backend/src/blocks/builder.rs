@@ -97,6 +97,10 @@ pub type BusMessageConnectFn = Box<
 /// The GStreamer element(s) to connect signals on are captured in the closure during build time.
 pub type ElementSetupFn = Box<dyn FnOnce(FlowId, EventBroadcaster) + Send + Sync>;
 
+/// Work a block does when its flow is stopped, before the pipeline leaves
+/// PLAYING. See [`BlockBuildContext::register_stop_drain`].
+pub type StopDrainFn = Box<dyn FnOnce() + Send + Sync>;
+
 /// WHIP endpoint registration info (for WHIP Input blocks).
 #[derive(Debug, Clone)]
 pub struct WhipEndpointInfo {
@@ -177,6 +181,8 @@ pub struct BlockBuildContext {
     whip_registry: Option<WhipRegistry>,
     /// Element signal setup functions queued for connection at pipeline start
     element_setups: RefCell<Vec<ElementSetupFn>>,
+    /// Drains queued to run when the pipeline is stopped
+    stop_drains: RefCell<Vec<StopDrainFn>>,
     /// Thread priority config for dynamically created session pipelines (WHEP/WebRTC)
     session_thread_config: SessionThreadConfig,
     /// Live `gst::Device` map shared with the long-running `DeviceDiscovery`.
@@ -202,6 +208,7 @@ impl BlockBuildContext {
             dynamic_webrtcbins: Arc::new(Mutex::new(HashMap::new())),
             whip_registry: None,
             element_setups: RefCell::new(Vec::new()),
+            stop_drains: RefCell::new(Vec::new()),
             session_thread_config: SessionThreadConfig::new(),
             local_devices: Arc::new(Mutex::new(HashMap::new())),
             flow_link_targets: FlowLinkTargets::default(),
@@ -227,6 +234,7 @@ impl BlockBuildContext {
             dynamic_webrtcbins,
             whip_registry,
             element_setups: RefCell::new(Vec::new()),
+            stop_drains: RefCell::new(Vec::new()),
             session_thread_config,
             local_devices,
             flow_link_targets: FlowLinkTargets::default(),
@@ -498,6 +506,24 @@ impl BlockBuildContext {
     /// Called after block expansion to process the setups.
     pub fn take_element_setups(&self) -> Vec<ElementSetupFn> {
         self.element_setups.borrow_mut().drain(..).collect()
+    }
+
+    /// Register work to run when the flow is stopped, while the pipeline is
+    /// still PLAYING and data still flows.
+    ///
+    /// Stopping a flow sets the pipeline to NULL without EOS, so a muxer drops
+    /// what it has taken in but not yet written. A block that writes files
+    /// uses this to send EOS through its muxer and wait until the file is
+    /// complete. The drain must return within a few seconds on its own (wait
+    /// with a timeout); drains of one flow run in parallel, before the state
+    /// change, with the bus watch already removed.
+    pub fn register_stop_drain(&self, drain: StopDrainFn) {
+        self.stop_drains.borrow_mut().push(drain);
+    }
+
+    /// Take all queued stop drains.
+    pub fn take_stop_drains(&self) -> Vec<StopDrainFn> {
+        self.stop_drains.borrow_mut().drain(..).collect()
     }
 }
 

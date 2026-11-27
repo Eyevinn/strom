@@ -5,7 +5,7 @@ use gstreamer::prelude::*;
 use std::sync::mpsc;
 use std::time::Duration;
 use strom_types::PipelineState;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// How long teardown waits for `set_state(Null)` before giving up on it.
 pub(super) const NULL_STATE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -237,6 +237,25 @@ impl PipelineManager {
         );
     }
 
+    /// Run the blocks' stop drains in parallel and wait for all of them. Each
+    /// drain bounds its own wait (see `BlockBuildContext::register_stop_drain`).
+    fn run_stop_drains(&mut self) {
+        let drains = std::mem::take(&mut self.stop_drain_fns);
+        let handles: Vec<_> = drains
+            .into_iter()
+            .filter_map(|drain| {
+                std::thread::Builder::new()
+                    .name("strom-stop-drain".into())
+                    .spawn(drain)
+                    .map_err(|e| warn!("Failed to spawn a stop drain thread: {}", e))
+                    .ok()
+            })
+            .collect();
+        for handle in handles {
+            let _ = handle.join();
+        }
+    }
+
     /// Stop the pipeline (set to NULL state).
     pub fn stop(&mut self) -> Result<PipelineState, PipelineError> {
         info!("Stopping pipeline: {}", self.flow_name);
@@ -250,6 +269,11 @@ impl PipelineManager {
 
         // Remove bus watch when stopped to free resources
         self.remove_bus_watch();
+
+        // Let blocks finish their output (EOS through a muxer) while data still
+        // flows. After the bus watch is gone, so an EOS that reaches the
+        // pipeline is not reported as the flow ending on its own.
+        self.run_stop_drains();
 
         // Stop QoS broadcast task
         self.stop_qos_broadcast_task();
