@@ -41,6 +41,7 @@ pub mod gui;
 pub mod json_rejection;
 pub mod layout;
 pub mod macos_app_nap;
+pub mod macos_dock;
 pub mod mcp;
 pub mod media_download;
 pub mod network;

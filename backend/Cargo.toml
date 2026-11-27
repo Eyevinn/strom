@@ -161,6 +161,19 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSProcessInfo",
     "NSString",
 ] }
+# Keeps headless Strom out of the Dock: see backend/src/macos_dock.rs. Also
+# already in the tree via eframe/winit.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSResponder",
+    "NSRunningApplication",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFRunLoop",
+] }
 
 [target.'cfg(windows)'.dependencies]
 # Intel graphics driver version via DXGI (gst::demote_qsv_plugin, #1163).

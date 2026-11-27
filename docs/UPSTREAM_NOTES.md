@@ -138,6 +138,29 @@ workaround can go once we move past that version.
   measured capture delay.
 - **Found in:** #1183.
 
+### GL on macOS: every GL context gives the process a Dock icon
+- **Seen on:** GStreamer 1.28.6 (Homebrew, macOS on Apple Silicon) and 1.28.9 (the Open Live
+  Ingest bundle). Other versions not checked; the call is unchanged on `main`.
+- **Symptom:** a process without a window becomes a `Foreground` app with a Dock icon as
+  soon as it creates a GL context, even one that never shows a window. `LSUIElement` in a
+  bundle's `Info.plist` does not prevent it. Measured with `lsappinfo info -only
+  applicationtype -app <pid>`: `UIElement` before, `Foreground` after.
+- **Repro:** measured.
+  `gst-launch-1.0 videotestsrc is-live=true ! video/x-raw,width=64,height=64,framerate=5/1 ! glupload ! fakesink`
+  reports `Foreground` after a few seconds; the same line without `glupload` reports
+  `UIElement`.
+- **Hint:** read in the source, not traced: `gst_gl_window_cocoa_create_window`
+  (`gst-libs/gst/gl/cocoa/gstglwindow_cocoa.m`), which runs on the main thread for every
+  `GstGLContextCocoa`, ends with
+  `[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular]`, whether or not the
+  window is ever shown. `gst_macos_main` (`gst/gstmacos.m`) sets Accessory before that. Setting
+  Regular only when the window is shown would fix it upstream.
+- **Tests:** `macos_dock_test` (headless Strom stays `UIElement` after the startup GL probe
+  and a GL flow). Strom works around it in headless mode by setting Accessory again from a
+  main run loop observer.
+- **Upstream:** not searched. Not reported.
+- **Found in:** [#1279](https://github.com/Eyevinn/strom/issues/1279).
+
 ## HTTP
 
 ### libsoup HTTP/2: a paused download reads the whole file into memory
