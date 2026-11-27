@@ -1650,3 +1650,136 @@ mod flow_claims {
         state.stop_flow(&second_id).await.expect("stop second");
     }
 }
+
+/// Parked segments are uploaded by the server-wide drainer after their flow
+/// has stopped: the store is down while the flow runs, comes up after it
+/// stopped, and every parked segment reaches it.
+mod parked_drain {
+    use super::*;
+    use axum::extract::{Path as P, State};
+    use axum::routing::{post, put};
+    use axum::{Json, Router};
+    use std::sync::{Arc, Mutex};
+
+    type Registered = Arc<Mutex<Vec<(String, String)>>>;
+
+    /// A store on `addr` that accepts everything and records registrations.
+    fn start_store(runtime: &tokio::runtime::Runtime, addr: std::net::SocketAddr) -> Registered {
+        let registered: Registered = Arc::default();
+        let base = format!("http://{}", addr);
+        let app = Router::new()
+            .route("/flows/{id}", put(|| async { axum::http::StatusCode::CREATED }))
+            .route(
+                "/flows/{id}/storage",
+                post(move |P(id): P<String>| {
+                    let base = base.clone();
+                    async move {
+                        Json(serde_json::json!({ "media_objects": [{
+                            "object_id": format!("{}-{}", id, uuid::Uuid::new_v4()),
+                            "put_url": { "url": format!("{}/upload", base), "content-type": "video/mp2t" }
+                        }]}))
+                    }
+                }),
+            )
+            .route("/upload", put(|| async { axum::http::StatusCode::OK }))
+            .route(
+                "/flows/{id}/segments",
+                axum::routing::get(|| async { Json(serde_json::json!([])) }).post(
+                    |State(r): State<Registered>,
+                     P(id): P<String>,
+                     Json(body): Json<serde_json::Value>| async move {
+                        let tr = body["timerange"].as_str().unwrap_or_default().to_string();
+                        r.lock().unwrap().push((id, tr));
+                        axum::http::StatusCode::CREATED
+                    },
+                ),
+            )
+            .with_state(registered.clone());
+        let listener = runtime
+            .block_on(tokio::net::TcpListener::bind(addr))
+            .expect("bind the store on its old port");
+        runtime.spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        registered
+    }
+
+    fn sidecars(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".meta"))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn parked_segments_are_uploaded_after_the_flow_stopped() {
+        if !plugins_available() {
+            eprintln!("skipping: GStreamer plugins missing");
+            return;
+        }
+        gst::init().unwrap();
+        // Park whatever the free space of the developer's disk (the default
+        // keeps 10 % of the volume free).
+        std::env::set_var(strom::tams::park::MIN_FREE_MB_ENV, "0");
+        let runtime = runtime();
+        // A port nothing listens on while the flow runs.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let gateway = format!("http://{}", addr);
+
+        let pipeline = gst::Pipeline::new();
+        let mut out = add_tams_output_to(&pipeline, "tams_drain", &gateway, 1);
+        feed_audio(&pipeline, &out.input("audio_input_0"), -1);
+        out.run_setups(&runtime);
+        pipeline.set_state(gst::State::Playing).unwrap();
+        std::thread::sleep(Duration::from_millis(3500));
+        for drain in out.ctx.take_stop_drains() {
+            drain();
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        out.release_elements();
+        drop(pipeline);
+
+        // Every segment is parked once the uploader has given up on the last.
+        let dir = out.segment_dir();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let segs = out.segments().len();
+            if segs >= 2 && sidecars(&dir) == segs {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "segments not parked: {} files, {} sidecars: {:?}",
+                segs,
+                sidecars(&dir),
+                std::fs::read_dir(&dir).map(|rd| rd
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name())
+                    .collect::<Vec<_>>())
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let parked = out.segments().len();
+        assert!(dir.join(strom::tams::drain::MANIFEST_FILE).exists());
+
+        // The store comes up; nothing runs the flow any more.
+        let registered = start_store(&runtime, addr);
+        {
+            let _guard = runtime.enter();
+            strom::tams::drain::start(EventBroadcaster::with_capacity(16));
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !out.segments().is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert!(out.segments().is_empty(), "parked segments left");
+        assert_eq!(registered.lock().unwrap().len(), parked);
+        runtime.shutdown_background();
+    }
+}

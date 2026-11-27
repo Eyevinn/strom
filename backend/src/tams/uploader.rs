@@ -13,17 +13,21 @@
 //!   no time per segment and the channel does not fill;
 //! - a segment that finds the channel full is parked by the producer; one that
 //!   cannot be parked (the disk is full) is dropped with an error;
+//! - while failing, the uploader tries one fresh segment again every
+//!   [`RECOVERY_SWEEP_INTERVAL`] to see whether the gateway is back;
+//! - the uploader only uploads new segments. It never uploads a parked one, so
+//!   a backlog never holds back the live edge: the server-wide drainer
+//!   ([`crate::tams::drain`]) uploads parked segments, from server start and
+//!   whether or not their flow runs, and pauses while any live uploader is
+//!   busy (see [`crate::tams::drain::live`]);
 //! - a parked segment keeps its bytes plus a `.meta` sidecar holding its TAI
-//!   timerange and the gateway and TAMS flow it belongs to, so a background
-//!   recovery sweep — this run or a *later* one, after a full process restart —
-//!   can re-register it once the gateway/storage recovers; a segment parked for
-//!   another gateway or flow (the block's settings changed) is kept but never
-//!   sent to this one;
-//! - the sidecar is written to a temporary file and renamed, so the sweep never
-//!   reads one half written;
-//! - each parked segment that fails waits longer before it is tried again, and
-//!   the sweep moves on to the next one meanwhile, so one segment that always
-//!   fails never holds back the others;
+//!   timerange and the gateway and TAMS flow it belongs to, and its directory
+//!   a `park.json` manifest (see [`crate::tams::drain::Manifest`]) with what the
+//!   drainer needs to register it when the flow is not running; a segment
+//!   parked for another gateway or flow (the block's settings changed) is kept
+//!   but never sent to the manifest's;
+//! - the sidecar is written to a temporary file and renamed, so the drainer
+//!   never reads one half written;
 //! - what is parked can be capped in count and bytes per flow directory
 //!   ([`ParkedLimits`], off unless set); past the cap the oldest segments are
 //!   deleted, with an error event. Every segment is parked through
@@ -58,7 +62,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 /// Flow metadata detected from caps at runtime, read when the flow is created.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DetectedEssence {
     /// Codec label (e.g. `video/h264`); overrides the spec's fallback when set.
     pub codec: Option<String>,
@@ -70,7 +74,7 @@ pub struct DetectedEssence {
 }
 
 /// What caps say about one track of a muxed flow.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TrackEssence {
     /// TAMS codec label, e.g. `audio/aac`.
     pub codec: String,
@@ -278,26 +282,26 @@ pub fn new_tail_slot() -> TailSlot {
 }
 
 /// Bounded channel capacity. When it is full, the producer parks the segment on
-/// disk (see [`park_on_disk`]) instead of blocking the pipeline; the recovery
-/// sweep uploads it later.
+/// disk (see [`park_on_disk`]) instead of blocking the pipeline; the drainer
+/// uploads it later.
 pub const CHANNEL_CAPACITY: usize = 256;
 
 /// Upload/registration attempts for a fresh segment before it is parked on disk
-/// for the recovery sweep. Few and short (1 s, 2 s backoff): a segment that waits
+/// for the drainer. Few and short (1 s, 2 s backoff): a segment that waits
 /// longer holds back every segment behind it.
 const LIVE_ATTEMPTS: u32 = 3;
 
-/// Attempts for a parked segment per turn. The sweep comes back to it.
-const RECOVERY_ATTEMPTS: u32 = 1;
+/// Attempts for a parked segment per turn. The drainer comes back to it.
+pub(crate) const RECOVERY_ATTEMPTS: u32 = 1;
 
 /// Upper bound on a single backoff step. The exponential 1,2,4,8,16,32s schedule is
 /// clamped here so one attempt never stalls for minutes.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
-/// How often the uploader looks for segments parked on disk (failed, queued past
-/// a full channel, or left by a previous run), and, while the gateway is failing,
-/// tries one of them to see whether it is back.
-const RECOVERY_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+/// While the gateway is failing, how often the uploader tries a fresh segment
+/// to see whether it is back (the others are parked at once). Also the unit of
+/// [`parked_backoff`].
+pub(crate) const RECOVERY_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Suffix for the per-segment sidecar that persists a parked segment's timerange.
 const SIDECAR_SUFFIX: &str = ".meta";
@@ -307,10 +311,10 @@ const SIDECAR_SUFFIX: &str = ".meta";
 const SIDECAR_TMP_SUFFIX: &str = ".tmp";
 
 /// Longest wait before a parked segment that keeps failing is tried again.
-const PARKED_MAX_BACKOFF: Duration = Duration::from_secs(300);
+pub(crate) const PARKED_MAX_BACKOFF: Duration = Duration::from_secs(300);
 
 /// Failed tries after which a parked segment is reported as stuck (once).
-const PARKED_STUCK_FAILURES: u32 = 5;
+pub(crate) const PARKED_STUCK_FAILURES: u32 = 5;
 
 /// How often refused credentials are reported while they stay refused.
 const AUTH_REPORT_INTERVAL: Duration = Duration::from_secs(300);
@@ -324,7 +328,7 @@ pub fn channel() -> (mpsc::Sender<FragmentReady>, mpsc::Receiver<FragmentReady>)
 }
 
 /// The gateway and TAMS flow a parked segment is meant for, stored in its
-/// sidecar. The recovery sweep only uploads segments parked for its own target,
+/// sidecar. The drainer only uploads segments parked for their manifest's target,
 /// so changing a block's gateway or flow id never sends old segments to the
 /// new one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,7 +394,7 @@ static LIVE_RUNS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::defa
 
 /// One run of a TAMS Output (one pipeline start). Every segment file of the run
 /// carries its id (see [`segment_file_name`]), so a restarted flow never writes
-/// over files that an earlier run parked, and the recovery sweep never pairs one
+/// over files that an earlier run parked, and the drainer never pairs one
 /// run's bytes with another run's timerange. Live while the guard exists; the
 /// uploader holds it until it has stopped.
 pub struct RunGuard {
@@ -446,7 +450,7 @@ fn run_of(name: &str) -> Option<&str> {
 /// sidecar whose run is not live. Their timerange is lost, so they cannot be
 /// registered (a fragment mid-write when the process was killed, or one already
 /// uploaded but not yet deleted). Parked segments (with a sidecar) are kept for
-/// the recovery sweep, also across a restart, and so are the files of a run
+/// the drainer, also across a restart, and so are the files of a run
 /// whose uploader still runs (a previous run of a restarted flow flushing its
 /// last segment). Returns how many files were removed.
 pub fn clear_orphans(temp_dir: &Path) -> u32 {
@@ -474,9 +478,9 @@ pub fn clear_orphans(temp_dir: &Path) -> u32 {
     removed
 }
 
-/// Parked segments some uploader of this process is uploading right now. Two
-/// runs of one flow (a restart while the old uploader still drains) sweep the
-/// same directory; a claim keeps them from registering one segment twice.
+/// Parked segments the drainer is uploading, or a cap is deleting, right now. A
+/// claim keeps a segment from being uploaded twice, and from being deleted for
+/// space while it is uploaded.
 static CLAIMED: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
 
 /// A claim on a parked segment, released on drop.
@@ -500,13 +504,27 @@ impl Drop for Claim {
     }
 }
 
+/// Storage objects allocated for segments whose upload or registration
+/// failed, by segment path, reused when the segment is tried again. Global, so
+/// the drainer reuses the object the live uploader allocated before parking.
+static ALLOCATIONS: LazyLock<Mutex<HashMap<PathBuf, Allocation>>> = LazyLock::new(Default::default);
+
+fn allocations() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Allocation>> {
+    ALLOCATIONS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Forget the object allocated for `segment` (uploaded, or deleted).
+pub(crate) fn forget_allocation(segment: &Path) {
+    allocations().remove(segment);
+}
+
 // --- Uploader task ---------------------------------------------------------------
 
 /// Spawn the uploader task for one TAMS flow.
 ///
 /// `content_type` is the MIME of the segment files (`video/mp4` or `video/mp2t`).
-/// `temp_dir` is the per-flow directory of segment files, scanned by the recovery
-/// sweep. The TAMS flow is created lazily on the first segment, so an idle block
+/// `temp_dir` is the per-flow directory of segment files, where the uploader
+/// keeps the park manifest for the drainer. The TAMS flow is created lazily on the first segment, so an idle block
 /// never touches the gateway. `detected_codec` is filled in by the caps probe once
 /// the encoded format is known (codec, e.g. `video/h264`, and video essence parameters); by the time the first segment
 /// completes, caps have always arrived, so the stored codec reflects the real
@@ -541,6 +559,9 @@ pub fn spawn_uploader(
             block_id, tams_flow_id, flow_spec.format
         );
 
+        // Credentials the drainer may use for this flow's parked segments,
+        // held in memory only.
+        crate::tams::drain::remember_client(&tams_flow_id, &client);
         let mut ctx = UploadCtx {
             client: &client,
             registered: &mut registered,
@@ -552,54 +573,25 @@ pub fn spawn_uploader(
             block_id: &block_id,
             segments_registered: &mut segments_registered,
             failing: false,
-            objects: HashMap::new(),
+            next_probe: None,
             auth_reported_at: None,
+            manifest: Some(ManifestState {
+                dir: temp_dir.clone(),
+                written: None,
+            }),
         };
-        let mut parked = ParkedState::new(
-            temp_dir.clone(),
-            ParkTarget::new(client.base_url(), &tams_flow_id),
-            ParkedLimits::from_env(),
-        );
+        // Written now, so the drainer can upload what the streaming side parks
+        // (a full channel) even after this flow stops.
+        write_manifest(&mut ctx).await;
 
-        // Anything a previous run parked on disk is uploaded between new
-        // fragments, oldest first.
-        let mut backlog = parked.refresh(&mut ctx).await;
-        log_backlog(&ctx, &backlog);
-
-        let mut sweep = tokio::time::interval(RECOVERY_SWEEP_INTERVAL);
-        sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        sweep.tick().await; // consume the immediate first tick (we just looked)
-
-        // New fragments come first, so a backlog never holds the live edge back
-        // or fills the channel. Parked segments go one at a time in between,
-        // and not at all while the gateway is failing (one is tried at each
-        // sweep to see whether it is back). The backlog holds only segments
-        // that are due: one that failed waits out its backoff, and the oldest
-        // due segment after it is tried instead.
-        loop {
-            tokio::select! {
-                biased;
-                maybe = rx.recv() => match maybe {
-                    Some(frag) => {
-                        process_fragment(&mut ctx, frag).await;
-                    }
-                    None => break, // channel closed: pipeline tearing down
-                },
-                _ = sweep.tick() => {
-                    backlog = parked.refresh(&mut ctx).await;
-                    if ctx.failing {
-                        match backlog.pop_front() {
-                            Some(p) => parked.try_one(&mut ctx, p).await,
-                            // Nothing due to probe with: let the next fragment try.
-                            None => ctx.set_failing(false),
-                        }
-                    }
-                }
-                _ = std::future::ready(()), if !ctx.failing && !backlog.is_empty() => {
-                    if let Some(p) = backlog.pop_front() {
-                        parked.try_one(&mut ctx, p).await;
-                    }
-                }
+        // Only new segments: the drainer uploads parked ones, and pauses while
+        // this uploader has a segment in hand or queued.
+        let mut busy: Option<crate::tams::drain::LiveBusyGuard> = None;
+        while let Some(frag) = rx.recv().await {
+            busy.get_or_insert_with(|| crate::tams::drain::live().enter());
+            process_fragment(&mut ctx, frag).await;
+            if rx.is_empty() {
+                busy = None;
             }
         }
 
@@ -608,6 +600,7 @@ pub fn spawn_uploader(
         // flush it as the final segment.
         if let Some(tf) = tail.lock().ok().and_then(|mut t| t.take()) {
             if tokio::fs::try_exists(&tf.path).await.unwrap_or(false) {
+                let _busy = busy.get_or_insert_with(|| crate::tams::drain::live().enter());
                 debug!("TAMS {}: flushing final segment on shutdown", block_id);
                 let end_ns =
                     tail_end_ns(&tf, media_end_running_time_ns(&media_end), tail_segment_ns);
@@ -619,24 +612,7 @@ pub fn spawn_uploader(
                 process_fragment(&mut ctx, frag).await;
             }
         }
-
-        // Drain what is parked, so a graceful stop after a brief outage doesn't
-        // leave recoverable segments behind. Stops at the first failure; the
-        // next run picks up the rest.
-        ctx.failing = false;
-        let mut backlog = parked.refresh(&mut ctx).await;
-        while !ctx.failing {
-            let Some(p) = backlog.pop_front() else { break };
-            parked.try_one(&mut ctx, p).await;
-        }
-        if !backlog.is_empty() {
-            warn!(
-                "TAMS {}: {} segment(s) left parked in {} for the next run",
-                block_id,
-                backlog.len(),
-                temp_dir.display()
-            );
-        }
+        drop(busy);
 
         info!(
             "TAMS {}: uploader stopped for flow {}",
@@ -647,28 +623,36 @@ pub fn spawn_uploader(
 
 /// Shared mutable state for one uploader task, threaded through the fragment and
 /// recovery paths (avoids a dozen-argument function each).
-struct UploadCtx<'a> {
-    client: &'a TamsClient,
+pub(crate) struct UploadCtx<'a> {
+    pub(crate) client: &'a TamsClient,
     /// What the flow was last registered with (`None`: not yet, or it has to be
     /// created again).
-    registered: &'a mut Option<DetectedEssence>,
-    flow_spec: &'a mut FlowSpec,
-    detected_codec: &'a SharedDetected,
-    content_type: &'a str,
-    events: &'a EventBroadcaster,
-    strom_flow_id: FlowId,
-    block_id: &'a str,
-    segments_registered: &'a mut u64,
+    pub(crate) registered: &'a mut Option<DetectedEssence>,
+    pub(crate) flow_spec: &'a mut FlowSpec,
+    pub(crate) detected_codec: &'a SharedDetected,
+    pub(crate) content_type: &'a str,
+    pub(crate) events: &'a EventBroadcaster,
+    pub(crate) strom_flow_id: FlowId,
+    pub(crate) block_id: &'a str,
+    pub(crate) segments_registered: &'a mut u64,
     /// The gateway or storage failed the last segment (network, 5xx, auth).
     /// New segments are parked at once, without the inline backoff, so an
     /// outage costs no time per segment and the channel never fills.
-    failing: bool,
-    /// Storage objects allocated for parked segments whose upload or
-    /// registration failed, reused when the segment is tried again.
-    objects: HashMap<PathBuf, Allocation>,
+    pub(crate) failing: bool,
+    /// While failing: when a fresh segment is next tried instead of parked.
+    pub(crate) next_probe: Option<Instant>,
     /// When refused credentials were last reported (error log and event);
     /// `None` once a segment goes through again.
-    auth_reported_at: Option<Instant>,
+    pub(crate) auth_reported_at: Option<Instant>,
+    /// The live uploader keeps its directory's park manifest up to date; the
+    /// drainer (`None`) does not write it.
+    pub(crate) manifest: Option<ManifestState>,
+}
+
+/// The park manifest a live uploader writes, and what it last wrote.
+pub(crate) struct ManifestState {
+    dir: PathBuf,
+    written: Option<String>,
 }
 
 impl UploadCtx<'_> {
@@ -678,6 +662,7 @@ impl UploadCtx<'_> {
         }
         self.failing = failing;
         if failing {
+            self.next_probe = Some(Instant::now() + RECOVERY_SWEEP_INTERVAL);
             warn!(
                 "TAMS {}: gateway failing; parking segments on disk until it recovers \
                  (checked every {} s)",
@@ -686,8 +671,9 @@ impl UploadCtx<'_> {
             );
         } else {
             self.auth_reported_at = None;
+            self.next_probe = None;
             info!(
-                "TAMS {}: gateway back; uploading parked segments",
+                "TAMS {}: gateway back; parked segments are uploaded in the background",
                 self.block_id
             );
         }
@@ -711,7 +697,7 @@ impl UploadCtx<'_> {
 /// A storage object allocated for one segment, kept across tries so a retry
 /// does not allocate (and leave unused) a new one.
 #[derive(Debug, Clone)]
-struct Allocation {
+pub(crate) struct Allocation {
     object: crate::tams::client::AllocatedObject,
     /// The segment's bytes are in the object already; only the registration
     /// is left.
@@ -720,116 +706,25 @@ struct Allocation {
 
 /// Failed tries of one parked segment.
 #[derive(Debug, Clone, Copy)]
-struct Retry {
-    failures: u32,
-    next: Instant,
+pub(crate) struct Retry {
+    pub(crate) failures: u32,
+    pub(crate) next: Instant,
 }
 
 /// Wait before a parked segment that failed `failures` times is tried again:
-/// two sweeps, doubling per failure, up to [`PARKED_MAX_BACKOFF`]. At least two
-/// sweeps, so the next sweep always moves on to another segment.
-fn parked_backoff(failures: u32) -> Duration {
+/// two sweep intervals, doubling per failure, up to [`PARKED_MAX_BACKOFF`].
+pub(crate) fn parked_backoff(failures: u32) -> Duration {
     let sweeps = 1u32 << failures.clamp(1, 8);
     (RECOVERY_SWEEP_INTERVAL * sweeps).min(PARKED_MAX_BACKOFF)
 }
 
-/// The uploader's view of what is parked in its directory: which segments
-/// are its own, which are due, and the cap on what is kept.
-struct ParkedState {
-    temp_dir: PathBuf,
-    target: ParkTarget,
-    limits: ParkedLimits,
-    retries: HashMap<PathBuf, Retry>,
-    /// Segments parked for another gateway or flow, last reported.
-    foreign_reported: usize,
-}
-
-impl ParkedState {
-    fn new(temp_dir: PathBuf, target: ParkTarget, limits: ParkedLimits) -> Self {
-        Self {
-            temp_dir,
-            target,
-            limits,
-            retries: HashMap::new(),
-            foreign_reported: 0,
-        }
-    }
-
-    /// Scan the directory: enforce the cap, forget state of segments that are
-    /// gone, and return this target's segments that are due, oldest first.
-    async fn refresh(&mut self, ctx: &mut UploadCtx<'_>) -> VecDeque<Parked> {
-        let scanned_at = Instant::now();
-        let mut all = collect_parked(&self.temp_dir).await;
-        enforce_parked_limits(ctx, &self.limits, &mut all).await;
-        crate::tams::park::parking().sync_dir(
-            &self.temp_dir,
-            scanned_at,
-            all.iter().map(|p| (p.path.clone(), p.start_ns, p.bytes)),
-        );
-        let present: HashSet<&Path> = all.iter().map(|p| p.path.as_path()).collect();
-        self.retries
-            .retain(|path, _| present.contains(path.as_path()));
-        ctx.objects
-            .retain(|path, _| present.contains(path.as_path()));
-
-        let (own, foreign): (VecDeque<Parked>, VecDeque<Parked>) = all
-            .into_iter()
-            .partition(|p| p.target.as_ref().is_none_or(|t| *t == self.target));
-        if foreign.len() != self.foreign_reported {
-            self.foreign_reported = foreign.len();
-            if !foreign.is_empty() {
-                warn!(
-                    "TAMS {}: {} segment(s) in {} were parked for another gateway or flow; \
-                     they are kept but not uploaded to {} flow {}",
-                    ctx.block_id,
-                    foreign.len(),
-                    self.temp_dir.display(),
-                    self.target.gateway,
-                    self.target.flow_id
-                );
-            }
-        }
-        let now = Instant::now();
-        own.into_iter()
-            .filter(|p| self.retries.get(&p.path).is_none_or(|r| r.next <= now))
-            .collect()
-    }
-
-    /// Try one parked segment again and note how it went: a segment that is
-    /// parked again waits out a growing backoff.
-    async fn try_one(&mut self, ctx: &mut UploadCtx<'_>, p: Parked) {
-        let path = p.path.clone();
-        match recover_one(ctx, p).await {
-            Some(Outcome::Parked) => {
-                let retry = self.retries.entry(path.clone()).or_insert(Retry {
-                    failures: 0,
-                    next: Instant::now(),
-                });
-                retry.failures += 1;
-                retry.next = Instant::now() + parked_backoff(retry.failures);
-                if retry.failures == PARKED_STUCK_FAILURES {
-                    warn!(
-                        "TAMS {}: parked segment {} failed {} times; trying the others \
-                         first, and it again every {} s at most",
-                        ctx.block_id,
-                        path.display(),
-                        retry.failures,
-                        PARKED_MAX_BACKOFF.as_secs()
-                    );
-                }
-            }
-            Some(_) => {
-                self.retries.remove(&path);
-            }
-            None => {}
-        }
-    }
-}
-
 /// Delete the oldest parked segments until what is parked fits `limits`, with
-/// an error event. A segment another uploader is busy with is left alone.
-async fn enforce_parked_limits(
-    ctx: &UploadCtx<'_>,
+/// an error event for `strom_flow_id`/`block_id`. A segment an uploader is busy
+/// with is left alone.
+pub(crate) async fn enforce_parked_limits(
+    events: &EventBroadcaster,
+    strom_flow_id: FlowId,
+    block_id: &str,
     limits: &ParkedLimits,
     parked: &mut VecDeque<Parked>,
 ) {
@@ -864,8 +759,8 @@ async fn enforce_parked_limits(
             dropped,
             dropped_bytes / (1024 * 1024)
         );
-        warn!("TAMS {}: {}", ctx.block_id, msg);
-        emit_error(ctx.events, ctx.strom_flow_id, ctx.block_id, msg);
+        warn!("TAMS {}: {}", block_id, msg);
+        emit_error(events, strom_flow_id, block_id, msg);
     }
 }
 
@@ -998,9 +893,9 @@ async fn register_collected(
 
 /// What became of one segment.
 #[derive(Debug, PartialEq, Eq)]
-enum Outcome {
+pub(crate) enum Outcome {
     Registered,
-    /// Kept on disk with a sidecar for the recovery sweep.
+    /// Kept on disk with a sidecar for the drainer.
     Parked,
     /// Rejected for good, or could not be parked; deleted.
     Dropped,
@@ -1040,12 +935,12 @@ fn classify(e: &anyhow::Error) -> Failure {
 }
 
 /// Upload and register one segment, making `attempts` tries with backoff. On a
-/// transient or auth failure the segment is parked on disk for the recovery
-/// sweep; on a definitive rejection it is dropped with an error. With
+/// transient or auth failure the segment is parked on disk for the drainer;
+/// on a definitive rejection it is dropped with an error. With
 /// `maybe_registered` (a parked segment, whose earlier try may have succeeded
 /// without us hearing it), the gateway is asked first whether it already has
 /// the segment; every retry asks too.
-async fn upload_segment(
+pub(crate) async fn upload_segment(
     ctx: &mut UploadCtx<'_>,
     frag: &FragmentReady,
     attempts: u32,
@@ -1070,7 +965,7 @@ async fn upload_segment(
 
     let mut recreated = false;
     // The object an earlier try of this segment allocated, if any.
-    let slot = Mutex::new(ctx.objects.remove(&frag.path));
+    let slot = Mutex::new(allocations().remove(&frag.path));
     loop {
         if !ensure_flow(ctx, attempts).await {
             ctx.set_failing(true);
@@ -1105,14 +1000,18 @@ async fn upload_segment(
                 // A new flow has none of our segments, nor their objects.
                 maybe_registered = false;
                 *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                ctx.objects.clear();
+                // The objects of this flow's other segments (one directory per
+                // TAMS flow) are gone with it.
+                if let Some(dir) = frag.path.parent() {
+                    allocations().retain(|p, _| p.parent() != Some(dir));
+                }
             }
             Failure::Auth => {
                 let msg = format!(
                     "gateway refused the credentials, segment parked until they are fixed: {:#}",
                     e
                 );
-                // Reported once, then every few minutes: the sweep tries again
+                // Reported once, then every few minutes: the drainer tries again
                 // every few seconds while they stay refused.
                 if ctx.should_report_auth() {
                     error!("TAMS {}: {}", ctx.block_id, msg);
@@ -1170,7 +1069,7 @@ async fn park_kept(
     let outcome = park_segment(ctx, frag, reason).await;
     if outcome == Outcome::Parked {
         if let Some(a) = slot.into_inner().unwrap_or_else(|e| e.into_inner()) {
-            ctx.objects.insert(frag.path.clone(), a);
+            allocations().insert(frag.path.clone(), a);
         }
     }
     outcome
@@ -1179,62 +1078,34 @@ async fn park_kept(
 /// Upload and register one freshly-rotated fragment, or park it at once while
 /// the gateway is failing.
 async fn process_fragment(ctx: &mut UploadCtx<'_>, frag: FragmentReady) -> Outcome {
-    if ctx.failing {
-        return park_segment(ctx, &frag, "gateway failing").await;
-    }
+    let attempts = if ctx.failing {
+        // One fresh segment per interval checks whether the gateway is back,
+        // with a single attempt; the others are parked at once.
+        let now = Instant::now();
+        if ctx.next_probe.is_some_and(|at| now < at) {
+            return park_segment(ctx, &frag, "gateway failing").await;
+        }
+        ctx.next_probe = Some(now + RECOVERY_SWEEP_INTERVAL);
+        1
+    } else {
+        LIVE_ATTEMPTS
+    };
     // An unreadable fresh file is a local problem, unlikely to fix itself; it
     // is reported and left in place rather than deleting unverified data.
-    upload_segment(ctx, &frag, LIVE_ATTEMPTS, false).await
+    upload_segment(ctx, &frag, attempts, false).await
 }
 
 /// A segment parked on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Parked {
-    path: PathBuf,
-    start_ns: u64,
-    end_ns: u64,
+pub(crate) struct Parked {
+    pub(crate) path: PathBuf,
+    pub(crate) start_ns: u64,
+    pub(crate) end_ns: u64,
     /// Size of the segment file.
-    bytes: u64,
+    pub(crate) bytes: u64,
     /// Where it is meant to go; `None` for a sidecar written before sidecars
     /// carried it.
-    target: Option<ParkTarget>,
-}
-
-/// Try one parked segment again. Skipped (`None`) when another uploader has
-/// it, or it is gone already.
-async fn recover_one(ctx: &mut UploadCtx<'_>, p: Parked) -> Option<Outcome> {
-    let _claim = Claim::take(&p.path)?;
-    if !tokio::fs::try_exists(&p.path).await.unwrap_or(false) {
-        return None;
-    }
-    let frag = FragmentReady {
-        path: p.path,
-        start_ns: p.start_ns,
-        end_ns: p.end_ns,
-    };
-    let outcome = upload_segment(ctx, &frag, RECOVERY_ATTEMPTS, true).await;
-    match outcome {
-        Outcome::Registered => info!(
-            "TAMS {}: recovered parked segment {}",
-            ctx.block_id,
-            frag.path.display()
-        ),
-        // Sidecar without readable bytes is useless — drop the pair.
-        Outcome::Unreadable => discard_segment(&frag.path).await,
-        Outcome::Parked | Outcome::Dropped => {}
-    }
-    Some(outcome)
-}
-
-fn log_backlog(ctx: &UploadCtx<'_>, backlog: &VecDeque<Parked>) {
-    if !backlog.is_empty() {
-        info!(
-            "TAMS {}: {} parked segment(s) to upload for flow {}",
-            ctx.block_id,
-            backlog.len(),
-            ctx.flow_spec.flow_id
-        );
-    }
+    pub(crate) target: Option<ParkTarget>,
 }
 
 /// Record a successful registration: emit the event, bump the counter, delete the
@@ -1264,12 +1135,12 @@ async fn on_registered(
     discard_segment(segment).await;
 }
 
-/// Park a segment on disk for the recovery sweep: keep its bytes and write a `.meta`
+/// Park a segment on disk for the drainer: keep its bytes and write a `.meta`
 /// sidecar with the timerange so it can be re-registered later (even after a restart).
 /// When it cannot be parked (over the server's cap or short of free space even
 /// after deleting older parked segments, or the sidecar cannot be written), the
 /// segment cannot be recovered: it is deleted, to free the space, with an error.
-async fn park_segment(ctx: &UploadCtx<'_>, frag: &FragmentReady, reason: &str) -> Outcome {
+async fn park_segment(ctx: &mut UploadCtx<'_>, frag: &FragmentReady, reason: &str) -> Outcome {
     let target = ParkTarget::new(ctx.client.base_url(), &ctx.flow_spec.flow_id);
     let frag_owned = FragmentReady {
         path: frag.path.clone(),
@@ -1301,12 +1172,67 @@ async fn park_segment(ctx: &UploadCtx<'_>, frag: &FragmentReady, reason: &str) -
         frag.path.display(),
         reason
     );
+    // What the flow is registered with may have changed since the manifest
+    // was written (caps detected after the start).
+    write_manifest(ctx).await;
+    crate::tams::drain::wake();
     Outcome::Parked
+}
+
+/// Write the park manifest of the uploader's directory, when it changed since
+/// it was last written. Not for the drainer (`ctx.manifest` is `None`).
+async fn write_manifest(ctx: &mut UploadCtx<'_>) {
+    let Some(state) = ctx.manifest.as_ref() else {
+        return;
+    };
+    let detected = ctx
+        .detected_codec
+        .lock()
+        .map(|d| d.clone())
+        .unwrap_or_default();
+    let manifest = crate::tams::drain::Manifest::new(
+        ctx.client,
+        ctx.flow_spec,
+        detected,
+        ctx.content_type,
+        ctx.strom_flow_id,
+        ctx.block_id,
+    );
+    let json = match serde_json::to_string_pretty(&manifest) {
+        Ok(j) => j,
+        Err(e) => {
+            warn!("TAMS {}: park manifest not written: {}", ctx.block_id, e);
+            return;
+        }
+    };
+    if state.written.as_deref() == Some(json.as_str()) {
+        return;
+    }
+    let dir = state.dir.clone();
+    let contents = json.clone();
+    let written = tokio::task::spawn_blocking(move || {
+        crate::tams::drain::write_manifest_file(&dir, &contents)
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
+    match written {
+        Ok(()) => {
+            if let Some(state) = ctx.manifest.as_mut() {
+                state.written = Some(json);
+            }
+        }
+        Err(e) => warn!(
+            "TAMS {}: park manifest not written in {}: {}",
+            ctx.block_id,
+            state.dir.display(),
+            e
+        ),
+    }
 }
 
 /// Park a finished segment on disk from outside the uploader (the streaming
 /// side, when the uploader's channel is full or closed): write its sidecar so
-/// the recovery sweep of this run or a later one uploads it to `target`.
+/// the drainer uploads it to `target`, whether or not the flow still runs.
 /// Blocking; a small write, unless older parked segments must be deleted to
 /// make room (see [`crate::tams::park::Parking::park`]). On an error (over the
 /// server's cap or short of free space, or the disk is full) the caller drops
@@ -1501,7 +1427,7 @@ pub(crate) fn sidecar_tmp_path(segment: &Path) -> PathBuf {
 }
 
 /// Sidecar contents: the timerange and the target, as JSON.
-fn sidecar_contents(start_ns: u64, end_ns: u64, target: &ParkTarget) -> String {
+pub(crate) fn sidecar_contents(start_ns: u64, end_ns: u64, target: &ParkTarget) -> String {
     serde_json::json!({
         "start_ns": start_ns,
         "end_ns": end_ns,
@@ -1532,7 +1458,7 @@ pub(crate) fn parse_sidecar(s: &str) -> Option<(u64, u64, Option<ParkTarget>)> {
 /// Scan `temp_dir` for parked segments (a `.meta` sidecar plus its segment file),
 /// oldest first. A sidecar whose segment is gone, or that cannot be parsed, is
 /// cleaned up here. Empty when the directory can't be read.
-async fn collect_parked(temp_dir: &Path) -> VecDeque<Parked> {
+pub(crate) async fn collect_parked(temp_dir: &Path) -> VecDeque<Parked> {
     let mut parked = Vec::new();
     let Ok(mut entries) = tokio::fs::read_dir(temp_dir).await else {
         return VecDeque::new();
@@ -1576,8 +1502,9 @@ async fn collect_parked(temp_dir: &Path) -> VecDeque<Parked> {
 }
 
 /// Delete a segment file and its sidecar (if any). Used on success and on giving up.
-async fn discard_segment(segment: &Path) {
+pub(crate) async fn discard_segment(segment: &Path) {
     crate::tams::park::parking().forget(segment);
+    forget_allocation(segment);
     if let Err(e) = tokio::fs::remove_file(segment).await {
         if e.kind() != std::io::ErrorKind::NotFound {
             warn!(
@@ -1957,8 +1884,9 @@ mod tests {
             block_id: "t",
             segments_registered: &mut segments,
             failing: false,
-            objects: HashMap::new(),
+            next_probe: None,
             auth_reported_at: None,
+            manifest: None,
         };
         assert!(ensure_flow(&mut ctx, 1).await);
         assert!(ensure_flow(&mut ctx, 1).await);
@@ -2102,8 +2030,12 @@ mod tests {
             block_id: "t",
             segments_registered: &mut segments,
             failing: fresh.unwrap_or(false),
-            objects: HashMap::new(),
+            // A failing uploader that probed just now.
+            next_probe: fresh
+                .filter(|f| *f)
+                .map(|_| Instant::now() + RECOVERY_SWEEP_INTERVAL),
             auth_reported_at: None,
+            manifest: None,
         };
         let dir =
             std::env::temp_dir().join(format!("strom-tams-uploader-{}", uuid::Uuid::new_v4()));
@@ -2141,6 +2073,28 @@ mod tests {
         let (outcome, failing, _) = upload_as(&stub, false, Some(false)).await;
         assert_eq!(outcome, Outcome::Registered);
         assert!(!failing);
+    }
+
+    /// While failing, a fresh segment is tried again once the probe is due,
+    /// and its success ends the failing state.
+    #[tokio::test]
+    async fn failing_uploader_probes_with_a_fresh_segment() {
+        let stub = Stub::default();
+        let mut f = Fixture::new(start_stub(stub.clone()).await);
+        let dir = temp_dir();
+        let path = dir.join("seg_r1_00000.ts");
+        std::fs::write(&path, b"bytes").unwrap();
+        let mut ctx = f.ctx();
+        ctx.failing = true;
+        let frag = FragmentReady {
+            path: path.clone(),
+            start_ns: 10_000_000_000,
+            end_ns: 12_000_000_000,
+        };
+        assert_eq!(process_fragment(&mut ctx, frag).await, Outcome::Registered);
+        assert!(!ctx.failing && ctx.next_probe.is_none());
+        assert_eq!(stub.registrations.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A flow deleted on the gateway (404) is created again and the segment
@@ -2245,8 +2199,9 @@ mod tests {
                 block_id: "t",
                 segments_registered: &mut self.segments,
                 failing: false,
-                objects: HashMap::new(),
+                next_probe: None,
                 auth_reported_at: None,
+                manifest: None,
             }
         }
 
@@ -2295,58 +2250,40 @@ mod tests {
         );
     }
 
-    /// A parked segment that fails waits out a backoff, and the sweep moves on
-    /// to the next one instead of trying the same oldest segment forever.
-    #[tokio::test]
-    async fn a_failing_parked_segment_does_not_block_the_others() {
-        let stub = Stub::default();
-        stub.storage.lock().unwrap().push_back(500);
-        let mut f = Fixture::new(start_stub(stub.clone()).await);
-        let dir = temp_dir();
-        let target = f.target();
-        let old = park(&dir, 0, 10, 5, &target);
-        let new = park(&dir, 1, 11, 5, &target);
-        let mut ctx = f.ctx();
-        let mut state = ParkedState::new(dir.clone(), target, no_limits());
-
-        let mut backlog = state.refresh(&mut ctx).await;
-        assert_eq!(backlog.len(), 2);
-        state.try_one(&mut ctx, backlog.pop_front().unwrap()).await;
-        assert!(ctx.failing && old.exists());
-
-        // The next sweep probes the other segment, which goes through.
-        let mut backlog = state.refresh(&mut ctx).await;
-        assert_eq!(backlog.len(), 1);
-        assert_eq!(backlog[0].path, new);
-        state.try_one(&mut ctx, backlog.pop_front().unwrap()).await;
-        assert!(!ctx.failing && !new.exists());
-        assert!(state.refresh(&mut ctx).await.is_empty(), "old one waits");
-
+    /// A parked segment that keeps failing waits longer each time, up to a cap.
+    #[test]
+    fn parked_backoff_grows_to_a_cap() {
         assert!(parked_backoff(1) >= RECOVERY_SWEEP_INTERVAL * 2);
+        assert!(parked_backoff(2) > parked_backoff(1));
         assert_eq!(parked_backoff(30), PARKED_MAX_BACKOFF);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Past the cap in count or bytes, the oldest parked segments are deleted
     /// and an error event is sent.
     #[tokio::test]
     async fn parked_segments_are_capped() {
-        let mut f = Fixture::new("http://127.0.0.1:9".into());
+        let f = Fixture::new("http://127.0.0.1:9".into());
         let mut events = f.events.subscribe();
         let dir = temp_dir();
         let target = f.target();
         let paths: Vec<_> = (0..4)
             .map(|n| park(&dir, n, 10 + n as u64, 100, &target))
             .collect();
-        let mut ctx = f.ctx();
+        let capped = |limits: ParkedLimits| {
+            let dir = dir.clone();
+            let events = f.events.clone();
+            async move {
+                let mut all = collect_parked(&dir).await;
+                enforce_parked_limits(&events, FlowId::new_v4(), "t", &limits, &mut all).await;
+                all
+            }
+        };
 
         let limits = ParkedLimits {
             max_bytes: u64::MAX,
             max_segments: 3,
         };
-        let backlog = ParkedState::new(dir.clone(), target.clone(), limits)
-            .refresh(&mut ctx)
-            .await;
+        let backlog = capped(limits).await;
         assert_eq!(backlog.len(), 3);
         assert!(!paths[0].exists() && !sidecar_path(&paths[0]).exists());
         assert!(paths[1..].iter().all(|p| p.exists()));
@@ -2359,48 +2296,9 @@ mod tests {
             max_bytes: 150,
             max_segments: usize::MAX,
         };
-        let backlog = ParkedState::new(dir.clone(), target, limits)
-            .refresh(&mut ctx)
-            .await;
+        let backlog = capped(limits).await;
         assert_eq!(backlog.len(), 1);
         assert_eq!(backlog[0].path, paths[3]);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A segment parked for another gateway or flow stays on disk but is not
-    /// uploaded here; one from before sidecars named their target still is.
-    #[tokio::test]
-    async fn segments_parked_for_another_target_are_kept_back() {
-        let mut f = Fixture::new("http://127.0.0.1:9".into());
-        let dir = temp_dir();
-        let target = f.target();
-        let own = park(&dir, 0, 10, 5, &target);
-        let other_flow = park(
-            &dir,
-            1,
-            11,
-            5,
-            &ParkTarget::new("http://127.0.0.1:9", "flow-2"),
-        );
-        let other_gw = park(
-            &dir,
-            2,
-            12,
-            5,
-            &ParkTarget::new("http://elsewhere", "flow-1"),
-        );
-        let legacy = dir.join(segment_file_name("r1", 3, "ts"));
-        std::fs::write(&legacy, b"x").unwrap();
-        std::fs::write(sidecar_path(&legacy), "13000000000 14000000000").unwrap();
-        let mut ctx = f.ctx();
-
-        let backlog = ParkedState::new(dir.clone(), target, no_limits())
-            .refresh(&mut ctx)
-            .await;
-        let paths: Vec<_> = backlog.iter().map(|p| p.path.clone()).collect();
-        assert_eq!(paths, vec![own, legacy]);
-        assert!(other_flow.exists() && sidecar_path(&other_flow).exists());
-        assert!(other_gw.exists() && sidecar_path(&other_gw).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2452,14 +2350,14 @@ mod tests {
             upload_segment(&mut ctx, &frag, 1, false).await,
             Outcome::Parked
         );
-        assert!(ctx.objects.get(&path).is_some_and(|a| a.uploaded));
+        assert!(allocations().get(&path).is_some_and(|a| a.uploaded));
         assert_eq!(
             upload_segment(&mut ctx, &frag, 1, true).await,
             Outcome::Registered
         );
         assert_eq!(stub.allocations.load(Ordering::SeqCst), 1);
         assert_eq!(stub.registrations.lock().unwrap().len(), 1);
-        assert!(ctx.objects.is_empty());
+        assert!(!allocations().contains_key(&path));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
