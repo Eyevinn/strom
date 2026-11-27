@@ -32,7 +32,7 @@ The schema is in the OpenAPI spec under the `replay` tag. Every WebSocket messag
 ```json
 {
   "api_version": 2,
-  "features": ["follow_live", "client_ref", "mark_at", "offset_ms", "jog_grid", "start_mode", "diagnostics", "source_switch"],
+  "features": ["follow_live", "client_ref", "mark_at", "offset_ms", "jog_grid", "start_mode", "diagnostics", "source_switch", "cue_next"],
   "groups": [
     {
       "flow_id": "...", "group": "r1", "time_domain": "tai", "ready": "ready",
@@ -124,6 +124,8 @@ Every command may carry `client_ref` (a string of at most 64 characters). It is 
 | `mark` | `label?` (≤ 256 characters), `at?` | Stamp the picture going out now, or the point `at`. Changes nothing. |
 | `follow_live` | `on` | Whether the group goes live by itself (`false`: review mode). |
 | `source` | `source`, `block?` | Switch angle `block` to another source. The motion does not change. |
+| `cue_next` | `in`, `out`, `speed?` (0–8, not 0; default 1), `end_action?`, `source?`, `block?`, `replace?` | Queue a clip to play when the clip playing reaches its out point (see below). The motion does not change. |
+| `clear_queue` | | Empty the queue. The clip playing goes on to its out point and its end action. |
 
 `end_action` is `freeze` (default), `loop` or `live`.
 
@@ -146,6 +148,7 @@ Every command may carry `client_ref` (a string of at most 64 characters). It is 
 | `mark` | `=` | `=` | `=` | `=` | `=` |
 | `follow_live` | `=` | `=` | `=` | `=` (off if `on: false` and live) | `=` |
 | `source` | `=` | `=` | `=` | `=` | `=` |
+| `cue_next`, `clear_queue` | `=` | `=` | `=` | `=` | `=` |
 
 **Note:** with `follow_live` on, `play {speed: 2}` or a ramp towards 2x while the group is live reaches the live point almost at once and is 1x live again. A cue or `follow_live: false` stops that.
 
@@ -167,6 +170,19 @@ Every command may carry `client_ref` (a string of at most 64 characters). It is 
 - The switch gives up, and the old source stays, when the new source is not on real TAI, cannot be decoded, decodes into another layout (size, format) than the output, or gives no picture within 10 s. It sends `source_failed` with the reason. A later switch replaces one still pending (`source_failed`, "replaced").
 - Both events carry the `client_ref` of the command that asked for the switch. After the switch the group's range follows the new source (`range_changed`), and discovery shows the new `source`.
 - `offset_ms` stays the player's and applies to the new source too.
+
+### The clip queue
+
+`cue_next` queues clips that play one after the other without a gap, each from its `in` at its own `speed`. The queue only runs clips: the playlist (order, editing, several operators) is the client's, which fills the queue one clip ahead or more.
+
+- The clip playing is the group's cue. When forward play reaches its `out` and a clip is queued, the group plays that clip from the running time the out point was reached: the tick before shows the last frame before `out`, the next tick the new clip's `in` (moved on by the time since the out was reached, at the clip's speed). The clip becomes the cue, with its `end_action`, and its `client_ref` is the cue's.
+- With a clip queued the clip playing ends at its `out` even with `end_action: loop`. With nothing queued its own `end_action` applies (`freeze`, `loop`, `live`). A clip queued after the clip playing has ended (frozen) waits for the next `out` reached; `cue` and `play` start it by hand.
+- Each player prepares the next clip while the current one plays: a second lane, fetched and decoded at the clip's `in` with the clip's `source` for angle `block`, else with the source the angle shows. It is shown from the tick the clip starts on, with what is decoded by then (the last picture holds until the rest is). One clip ahead is prepared at a time; while it is, each lane gets half the decoded budget.
+- `source` and `block` are checked as for `source` (409 without a common time, 400 for an unknown angle or a source that does not open); `source_changed` (or `source_failed`) comes with the clip's `client_ref` when the angle shows it. A clip on the source the angle shows sends no source event.
+- `rel_ms` targets count from the cursor when `cue_next` arrives. `out` not after `in`, or a speed that is not forward, is 400; a range outside the media is 409 `out_of_range`; a full queue (64 clips) is 409 `conflict`.
+- `replace: true` empties the queue before the clip is added. `clear_queue` empties it. `live` and `end` leave clip play and empty it too; other commands keep it (pause a clip, play on, and the queue goes on at its out).
+- Events: `ended` with the ref of the clip that ended, then `item_started` with the ref of the clip that started, both with cause `cue_end`. The state's `queue` has the clip's ref (`clip_ref`) and how many clips wait (`waiting`).
+- `play {speed}` changes the clip playing only; the next clip plays at its own `speed`. Transitions other than a cut (a mix, a wipe) take two clip groups, A/B, through the mixer.
 
 ### Going live by itself
 
@@ -209,6 +225,7 @@ The result is the group's motion after the command, the command's `client_ref`, 
 | `ready` | `ready` | The group's readiness changed. |
 | `source_changed` | `block`, `source` | Angle `block` shows its new source (cause `source`). |
 | `source_failed` | `block`, `source`, `error` | Angle `block` gave up a switch and stays on its old source (cause `source`). |
+| `item_started` | `at`, `waiting` | The queue started its next clip at `at` (its `in`); `client_ref` is the clip's, `waiting` the clips still queued (cause `cue_end`). |
 
 - `event_seq` goes up by one per event of the group. A jump means a missed event.
 - `cause` is the command that caused the event (`seek`, `play`, `live`, ...), or what happened by itself: `cue_end`, `media_end`, `caught_up`, `edge_moved`, `retention`, `media` (the media changed otherwise, or readiness changed), `start_mode`.
@@ -229,6 +246,7 @@ The result is the group's motion after the command, the command's `client_ref`, 
 | `on_air` | The picture going out: `at`, `frame`, `behind_live_ms` (against `live_edge`, a sawtooth), `behind_live_estimate_ms` (against the estimate, smooth: the one to show), `age_ms` (only `tai`). `null` until a picture went out. |
 | `range` | `start` (the earliest angle's start), `live_edge` (the end of what every angle has), `end` (the last any angle has; the cursor is clamped to `end − 1`), `live_edge_estimate` (the edge between the index's steps: smooth, updated every tick, never steps back, not even when `live_edge` does, e.g. an angle with less media comes; it then holds until the edge passes it), `growing`. Instants, not floored to frames. |
 | `angles[]` | Per angle: `block`, `source` (without credentials), `pending_source` (the source it is switching to, else `null`), `ready`, `fps`, `frame_rate_missing`, `offset_ms`, `extent`, `shown` (the source frame going out, at its own time: a source that restarts can change its frame phase), `in_sync` (the last tick found the frame that holds the group time), `in_gap`, `gaps`. |
+| `queue` | `clip_ref` (the `client_ref` of the clip the group holds as its cue, from `cue` or the queue, else `null`), `waiting` (clips queued). |
 
 `gaps` are holes in the recording, each with `duration_ms`. A hole is reported once the index has listed it from the media before it to the media after it, so a long hole is one gap. Seams shorter than one frame period are not gaps; a single missing frame is. `in_gap` is the hole the group time is in: the angle shows the last frame before it.
 
@@ -269,6 +287,13 @@ curl -XPOST $G/command -H 'content-type: application/json' \
 # Cue a clip from another camera on the group's only player, then play it
 curl -XPOST $G/command -H 'content-type: application/json' \
   -d '{"cmd":"cue","in":{"t":"1795526557000000000"},"out":{"t":"1795526563000000000"},"source":"tams+https://gateway.example.com/flows/<cam2>","client_ref":"clip-18"}'
+
+# A playlist: play clip 18, then clip 19 from camera 2 at half speed right after it
+curl -XPOST $G/command -H 'content-type: application/json' \
+  -d '{"cmd":"cue","in":{"t":"1795526557000000000"},"out":{"t":"1795526563000000000"},"client_ref":"clip-18"}'
+curl -XPOST $G/command -H 'content-type: application/json' -d '{"cmd":"play"}'
+curl -XPOST $G/command -H 'content-type: application/json' \
+  -d '{"cmd":"cue_next","in":{"t":"1795526570000000000"},"out":{"t":"1795526574000000000"},"speed":0.5,"source":"tams+https://gateway.example.com/flows/<cam2>","client_ref":"clip-19"}'
 
 # Review mode: never go live by itself
 curl -XPOST $G/command -H 'content-type: application/json' -d '{"cmd":"follow_live","on":false}'
