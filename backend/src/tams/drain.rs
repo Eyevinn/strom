@@ -1484,7 +1484,6 @@ mod tests {
             tags: vec![],
             flow_collection: vec![],
             collected: vec![],
-            container_mapping: Default::default(),
             essence_parameters: Default::default(),
         }
     }

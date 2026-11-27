@@ -922,7 +922,6 @@ async fn register_collected(
                 serde_json::json!({ "channel_range": format!("0_{}", n - 1) }),
             );
         }
-        spec.container_mapping = mapping.clone();
         match retry(attempts, || ctx.client.ensure_flow(&spec)).await {
             Ok(()) => {
                 info!(
@@ -2256,7 +2255,6 @@ mod tests {
             tags: vec![],
             flow_collection: vec![],
             collected: vec![],
-            container_mapping: Default::default(),
             essence_parameters: Default::default(),
         };
         let detected: SharedDetected = Arc::default();
@@ -2509,7 +2507,6 @@ mod tests {
             tags: vec![],
             flow_collection: vec![],
             collected: vec![],
-            container_mapping: Default::default(),
             essence_parameters: Default::default(),
         }
     }
