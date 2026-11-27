@@ -18,8 +18,8 @@ use crate::state::AppState;
 /// Searches breadth first through every link of a pad and every output of the
 /// blocks on the way, so a pad linked twice (a tee) or an intermediate block
 /// with several outputs cannot hide the endpoint. Stops at another vision
-/// mixer, whose outputs no longer carry this pad's picture. Matches
-/// `whepDownstream` in `static/replay.html`.
+/// mixer, whose outputs no longer carry this pad's picture. A page that
+/// resolves WHEP endpoints in the browser should walk the flow the same way.
 pub fn find_whep_endpoint_for_pad(flow: &Flow, block_id: &str, pad_name: &str) -> String {
     use std::collections::{HashSet, VecDeque};
 
