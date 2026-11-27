@@ -365,6 +365,10 @@ struct State {
     /// is recorded, so the scan's merge does not bring it back.
     scanning: bool,
     removed_while_scanning: HashSet<PathBuf>,
+    /// When each segment was forgotten (uploaded or given up), so a rescan
+    /// that listed it before it went does not bring it back (see
+    /// [`Parking::sync_dir`]). Pruned by each rescan.
+    forgotten: HashMap<PathBuf, Instant>,
     total: u64,
     space: Option<(Instant, Option<Space>)>,
     /// Last usage warning: its level and when.
@@ -714,12 +718,16 @@ impl Parking {
 
     /// Forget a parked segment that was deleted (uploaded, or given up).
     pub fn forget(&self, segment: &Path) {
-        self.lock().remove(segment);
+        let mut st = self.lock();
+        st.remove(segment);
+        st.forgotten.insert(segment.to_path_buf(), Instant::now());
     }
 
     /// Replace what the index knows of `dir` with a fresh scan of it, taken
     /// at `scanned_at`: corrects segments deleted or added behind its back.
-    /// A segment parked after the scan began is kept.
+    /// A segment parked after the scan began is kept, and one forgotten after
+    /// it began (the drainer uploaded it while the scan ran) is not brought
+    /// back.
     pub(crate) fn sync_dir(
         &self,
         dir: &Path,
@@ -739,7 +747,8 @@ impl Parking {
             st.remove(&p);
         }
         for p in parked {
-            if !st.entries.contains_key(&p.path) {
+            let gone_since = st.forgotten.get(&p.path).is_some_and(|t| *t >= scanned_at);
+            if !gone_since && !st.entries.contains_key(&p.path) {
                 st.insert(
                     p.path,
                     Entry {
@@ -752,6 +761,9 @@ impl Parking {
                 );
             }
         }
+        // Rescans run one directory at a time: what was forgotten before
+        // this one began can no longer be in a listing still to come.
+        st.forgotten.retain(|_, t| *t >= scanned_at);
     }
 
     /// The flow directories that hold parked segments, in order.
@@ -999,6 +1011,48 @@ mod tests {
         assert!(!b20.exists() && !a30.exists());
         assert!(!crate::tams::uploader::sidecar_path(&b40).exists());
         assert_eq!(p.total_bytes(), 0);
+    }
+
+    /// A rescan lists a segment, the drainer uploads and forgets it, and the
+    /// rescan's result comes in after: the segment is not brought back, so
+    /// the total does not count it and no older segment is deleted for it.
+    #[test]
+    fn tams_sync_does_not_bring_back_a_segment_forgotten_meanwhile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let p = Parking::new(root.into(), None, Box::new(fake(u64::MAX)));
+        let (a10, _) = park_one(&p, root, "a", 10);
+        let (a20, _) = park_one(&p, root, "a", 20);
+        let listed = |seg: &Path, start_s: u64| crate::tams::uploader::Parked {
+            path: seg.to_path_buf(),
+            start_ns: start_s * 1_000_000_000,
+            end_ns: (start_s + 1) * 1_000_000_000,
+            target: None,
+            bytes: 100,
+        };
+        // The rescan begins and lists both.
+        let scanned_at = Instant::now();
+        let scan = vec![listed(&a10, 10), listed(&a20, 20)];
+        // Meanwhile the drainer uploads a10.
+        std::fs::remove_file(&a10).unwrap();
+        p.forget(&a10);
+        p.sync_dir(&root.join("a"), scanned_at, scan);
+        assert_eq!(p.total_bytes(), 100);
+        let page: Vec<PathBuf> = p
+            .page(&root.join("a"), None, 10)
+            .into_iter()
+            .map(|s| s.path)
+            .collect();
+        assert_eq!(page, vec![a20.clone()]);
+        // A later rescan that finds it on disk again (it was not deleted
+        // after all) takes it in.
+        std::fs::write(&a10, [0u8; 100]).unwrap();
+        p.sync_dir(
+            &root.join("a"),
+            Instant::now(),
+            vec![listed(&a10, 10), listed(&a20, 20)],
+        );
+        assert_eq!(p.total_bytes(), 200);
     }
 
     /// A segment parked again (a drain retry that failed) is on disk and
