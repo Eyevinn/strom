@@ -114,7 +114,6 @@ pub mod whep_input_video_test;
 pub mod whep_output_latency_test;
 pub mod whep_output_level_change_test;
 pub mod whep_output_profile_filter_test;
-pub mod whep_output_repeated_ice_complete_test;
 pub mod whip_idle_slot_test;
 pub mod whip_output_latency_test;
 pub mod whip_output_video_test;

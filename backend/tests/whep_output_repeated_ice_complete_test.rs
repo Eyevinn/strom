@@ -10,10 +10,11 @@
 //! The test builds the real block, connects one viewer, and once it has its
 //! answer sends `notify::ice-gathering-state` on the viewer's webrtcbin again,
 //! which is what the signaller sees when gathering completes a second time.
-//! Without the block's guard the test binary aborts there. A second viewer
+//! Without the block's guard the process aborts there, which is why this file
+//! has a test binary of its own (see `backend/Cargo.toml`). A second viewer
 //! must then still get an answer: the signaller's lock is not poisoned.
 
-use crate::common;
+pub mod common;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};

@@ -458,10 +458,13 @@ workaround can go once we move past that version.
   answer to the waiting POST out of `settings.sdp_response` with `.expect(...)`, while it holds
   the settings lock. The sender is there once per session, and webrtcbin can go from `complete`
   back to `gathering` and reach `complete` again. The WHIP server signaller
-  (`src/whip_signaller/imp.rs`, around line 685) has the same `.expect` on `sdp_answer`; not
-  checked whether it can be reached the same way.
-- **Tests:** `whep_output_repeated_ice_complete_test::second_ice_gathering_complete_does_not_abort`.
-- **Upstream:** not searched.
-- **Found in:** WHEP Output stops the emission on every `complete` after the first, in a handler
-  connected in `consumer-added`, before the signaller's own
+  (`src/whip_signaller/imp.rs`, around line 681) has the same `.expect` on `sdp_answer`, under
+  the same lock, in the `notify::ice-gathering-state` handler it connects in `webrtcbin-ready`
+  (read, not run). WHIP Input (`whipserversrc`) has no guard for it.
+- **Tests:** `whep_output_repeated_ice_complete_test::second_ice_gathering_complete_does_not_abort`
+  (a test binary of its own, since the panic aborts the process). WHEP Output works around it:
+  it stops the emission on every `complete` after the first, in a handler connected in
+  `consumer-added`, before the signaller's own
   (`backend/src/blocks/builtin/whep/output/ice_complete_guard.rs`).
+- **Upstream:** not searched.
+- **Found in:** #1283.
