@@ -1629,6 +1629,168 @@ mod audio_pairs {
         assert_eq!(mux["flow_collection"].as_array().unwrap().len(), 2);
         assert_eq!(mux["format"], "urn:x-nmos:format:multi");
     }
+
+    /// Languages of the audio streams `qtdemux` finds in an MP4 segment, as
+    /// ISO 639-2/T codes.
+    fn mp4_languages(mp4: &[u8]) -> Vec<String> {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), mp4).unwrap();
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("filesrc")
+            .property("location", file.path().to_str().unwrap())
+            .build()
+            .unwrap();
+        let demux = gst::ElementFactory::make("qtdemux").build().unwrap();
+        pipeline.add_many([&src, &demux]).unwrap();
+        src.link(&demux).unwrap();
+        let found = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = found.clone();
+        demux.connect_pad_added(move |demux, pad| {
+            let Some(pipeline) = demux.parent().and_then(|p| p.downcast::<gst::Bin>().ok()) else {
+                return;
+            };
+            let seen = seen.clone();
+            pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+                if let Some(gst::PadProbeData::Event(e)) = info.data.as_ref() {
+                    if let gst::EventView::Tag(t) = e.view() {
+                        if let Some(lang) = t.tag().get::<gst::tags::LanguageCode>() {
+                            let code =
+                                gstreamer_tag::language_codes::language_code_iso_639_2t(lang.get())
+                                    .map(|c| c.to_string())
+                                    .unwrap_or_else(|| lang.get().to_string());
+                            let mut seen = seen.lock().unwrap();
+                            if !seen.contains(&code) {
+                                seen.push(code);
+                            }
+                        }
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            });
+            let sink = gst::ElementFactory::make("fakesink").build().unwrap();
+            pipeline.add(&sink).unwrap();
+            sink.sync_state_with_parent().unwrap();
+            pad.link(&sink.static_pad("sink").unwrap()).unwrap();
+        });
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let ended = wait_for_eos(&pipeline, Duration::from_secs(10));
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert!(ended, "demuxing a segment never reached EOS");
+        let found = found.lock().unwrap().clone();
+        found
+    }
+
+    /// In MP4 each pair is its own audio flow: it carries the audio
+    /// `essence_parameters` itself, takes its role in the multi-flow from its
+    /// label, and its language is in its segments (as ISO 639-2/T, which
+    /// mp4mux writes) and on its tag.
+    #[test]
+    fn mp4_audio_flows_get_parameters_roles_and_languages() {
+        if !plugins_available() || !common::plugins_available(&["capsfilter", "mp4mux", "qtdemux"])
+        {
+            return;
+        }
+        let runtime = runtime();
+        let (gateway, registered, segments, flows) = stub_gateway::start_recording(&runtime);
+
+        let pipeline = gst::Pipeline::new();
+        let tams = add_tams_output_props(
+            &pipeline,
+            "tams_mp4_pairs",
+            &[
+                ("gateway_url", PropertyValue::String(gateway)),
+                ("segment_duration_ms", PropertyValue::UInt(1000)),
+                ("container", PropertyValue::String("mp4".into())),
+                ("num_video_tracks", PropertyValue::UInt(0)),
+                ("num_audio_tracks", PropertyValue::UInt(2)),
+                ("audio_labels", PropertyValue::String("PGM,IS".into())),
+                // German as ISO 639-2/B: the MP4 flow says 639-2/T.
+                ("audio_languages", PropertyValue::String("ger,eng".into())),
+                ("label", PropertyValue::String("Cam 1".into())),
+            ],
+        );
+        feed_pair(&pipeline, &tams.input("audio_input_0"), 440.0);
+        feed_pair(&pipeline, &tams.input("audio_input_1"), 880.0);
+        tams.run_setups(&runtime);
+
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let reached_eos = wait_for_eos(&pipeline, Duration::from_secs(30));
+        std::thread::sleep(Duration::from_millis(500));
+        pipeline.set_state(gst::State::Null).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let registered = registered.lock().unwrap().clone();
+        let segments = segments.lock().unwrap().clone();
+        let flows = flows.lock().unwrap().clone();
+        runtime.shutdown_background();
+        assert!(reached_eos, "pipeline never reached EOS");
+
+        let id = |suffix: &str| {
+            uuid::Uuid::new_v5(
+                &uuid::Uuid::from_u128(0x7a3f_2b10_5c84_4e6d_9f12_a8b7_c6d5_e4f3),
+                format!("{}:{}", tams.instance_id, suffix).as_bytes(),
+            )
+            .to_string()
+        };
+        let last_put = |flow: &str| {
+            flows
+                .iter()
+                .rev()
+                .find(|f| f["id"] == flow)
+                .cloned()
+                .unwrap_or_else(|| panic!("flow {} never registered: {:#?}", flow, flows))
+        };
+        let pairs = [("PGM", "deu"), ("IS", "eng")];
+        for (k, (role, lang)) in pairs.into_iter().enumerate() {
+            let flow_id = id(&format!("audio-{}", k));
+            let flow = last_put(&flow_id);
+            assert_eq!(flow["format"], "urn:x-nmos:format:audio");
+            assert_eq!(flow["codec"], "audio/aac");
+            assert_eq!(flow["container"], "video/mp4");
+            assert_eq!(flow["label"], format!("Cam 1 ({})", role));
+            assert_eq!(flow["tags"]["audio_label"], role);
+            assert_eq!(flow["tags"]["audio_language"], lang);
+            assert_eq!(
+                flow["essence_parameters"],
+                serde_json::json!({
+                    "sample_rate": 48000,
+                    "channels": 2,
+                    "codec_parameters": { "coded_frame_size": 1024, "mp4_oti": 2 }
+                }),
+                "{}",
+                role
+            );
+            assert!(
+                registered.iter().any(|(f, _)| *f == flow_id),
+                "no segment on the {} flow",
+                role
+            );
+        }
+
+        let multi = last_put(&id("mux"));
+        assert_eq!(multi["format"], "urn:x-nmos:format:multi");
+        let roles: Vec<_> = multi["flow_collection"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| (m["id"].as_str().unwrap().to_string(), m["role"].clone()))
+            .collect();
+        assert_eq!(
+            roles,
+            [(id("audio-0"), "PGM".into()), (id("audio-1"), "IS".into())]
+        );
+
+        // Each segment is one pair's; together they carry both languages.
+        let mut languages = Vec::new();
+        for (tr, bytes) in &segments {
+            let found = mp4_languages(bytes);
+            assert_eq!(found.len(), 1, "segment {}: {:?}", tr, found);
+            if !languages.contains(&found[0]) {
+                languages.push(found[0].clone());
+            }
+        }
+        languages.sort();
+        assert_eq!(languages, ["deu", "eng"]);
+    }
 }
 
 /// TAMS flow ids derive from the block id, and block ids are only unique
