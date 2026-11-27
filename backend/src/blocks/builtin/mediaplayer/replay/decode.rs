@@ -17,6 +17,7 @@
 
 use super::grid::FrameGrid;
 use super::source::Segment;
+use crate::gst::SessionThreadConfig;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -141,10 +142,44 @@ impl AsRef<[u8]> for SharedBytes {
     }
 }
 
+/// Whose streaming threads the threads of a decode pipeline are.
+#[derive(Clone, Default)]
+pub enum PipelineThreads {
+    /// No flow's (tests, tools): a pooled thread gets normal scheduling back.
+    #[default]
+    Outside,
+    /// A block's in a flow: they get the flow's priority, CPUs and thread
+    /// registry, filed under the block.
+    Block {
+        config: SessionThreadConfig,
+        block_id: Arc<str>,
+    },
+}
+
+impl PipelineThreads {
+    pub fn block(config: SessionThreadConfig, block_id: &str) -> Self {
+        Self::Block {
+            config,
+            block_id: block_id.into(),
+        }
+    }
+
+    /// Hand `pipeline`'s streaming threads their settings. Before it starts.
+    fn install(&self, pipeline: &gst::Pipeline) {
+        match self {
+            Self::Outside => crate::gst::thread_priority::reset_streaming_threads(pipeline),
+            Self::Block { config, block_id } => {
+                config.install_on_internal_pipeline(pipeline, block_id)
+            }
+        }
+    }
+}
+
 /// Decodes segments for one worker: a long-lived [`DecoderSession`], made on
 /// first use and made again after a failure.
 pub struct SegmentDecoder {
     decoder: &'static str,
+    threads: PipelineThreads,
     session: Option<DecoderSession>,
 }
 
@@ -152,8 +187,15 @@ impl SegmentDecoder {
     pub fn new(decoder: &'static str) -> Self {
         Self {
             decoder,
+            threads: PipelineThreads::Outside,
             session: None,
         }
+    }
+
+    /// Run its pipelines' streaming threads as `threads`.
+    pub fn with_threads(mut self, threads: PipelineThreads) -> Self {
+        self.threads = threads;
+        self
     }
 
     /// Decode one segment held in memory. Fails on a pipeline error, or when
@@ -167,7 +209,7 @@ impl SegmentDecoder {
         // decodebin has no sink pad to feed: one pipeline per segment.
         if self.decoder == "decodebin" {
             refuse_while_wedged()?;
-            return decode_bytes(bytes, container, self.decoder, timeout);
+            return decode_bytes(bytes, container, self.decoder, timeout, &self.threads);
         }
         let deadline = Instant::now() + timeout;
         if self.session.is_none() {
@@ -176,7 +218,7 @@ impl SegmentDecoder {
             // new ones until their teardown finishes.
             refuse_while_wedged()?;
             let started = Instant::now();
-            self.session = Some(DecoderSession::new(self.decoder)?);
+            self.session = Some(DecoderSession::new(self.decoder, &self.threads)?);
             debug!(
                 "Replay: {} session started in {} ms",
                 self.decoder,
@@ -185,7 +227,7 @@ impl SegmentDecoder {
         }
         let session = self.session.as_mut().expect("made above");
         let started = Instant::now();
-        let units = demux_bytes(bytes, container, &session.sink_caps, timeout)?;
+        let units = demux_bytes(bytes, container, &session.sink_caps, timeout, &self.threads)?;
         let demux_ms = started.elapsed().as_millis();
         // A slow demux must not leave the decoder no time and get a healthy
         // session given up as wedged: it gets at least a share of its own.
@@ -282,15 +324,26 @@ impl ErrorSlot {
     /// stream, latency and reset-time, a few per segment) would pile up for
     /// as long as the pipeline lives, and a decoder session lives as long as
     /// its worker.
+    ///
+    /// The bus emits `sync-message` only for what its sync handler does not
+    /// drop, and the thread settings ([`PipelineThreads::install`]) listen
+    /// there for `stream-status`: this handler emits that one itself.
     fn install(pipeline: &gst::Pipeline) -> Result<Self, String> {
         let slot = Self::default();
         let keep = slot.clone();
+        let stream_status = gst::glib::Quark::from_str("stream-status");
         pipeline
             .bus()
             .ok_or("no bus")?
-            .set_sync_handler(move |_, msg| {
-                if let gst::MessageView::Error(e) = msg.view() {
-                    lock(&keep.0).get_or_insert_with(|| e.error().to_string());
+            .set_sync_handler(move |bus, msg| {
+                match msg.view() {
+                    gst::MessageView::Error(e) => {
+                        lock(&keep.0).get_or_insert_with(|| e.error().to_string());
+                    }
+                    gst::MessageView::StreamStatus(_) => {
+                        bus.emit_by_name_with_details::<()>("sync-message", stream_status, &[msg]);
+                    }
+                    _ => {}
                 }
                 gst::BusSyncReply::Drop
             });
@@ -400,6 +453,7 @@ fn run_once(
     sink_caps: Option<&gst::Caps>,
     bytes: Arc<Vec<u8>>,
     timeout: Duration,
+    threads: &PipelineThreads,
 ) -> Result<(SinkOut, Option<u64>), DecodeError> {
     let pipeline = gst::parse::launch(desc)
         .map_err(|e| e.to_string())?
@@ -416,8 +470,7 @@ fn run_once(
         collect_into(&sink, &out, false);
         let first_pts = probe_first_pts(&pipeline);
         let streams = record_streams(&pipeline);
-        // A pipeline outside a flow: give its pool threads normal scheduling.
-        crate::gst::thread_priority::reset_streaming_threads(&pipeline);
+        threads.install(&pipeline);
         feed_appsrc(&pipeline, bytes)?;
         let deadline = Instant::now() + timeout;
         pipeline
@@ -451,6 +504,7 @@ pub fn demux_bytes(
     container: Option<&str>,
     sink_caps: &gst::Caps,
     timeout: Duration,
+    threads: &PipelineThreads,
 ) -> Result<Demuxed, DecodeError> {
     let (demux, src_caps) = demux_for(container).map_err(DecodeError::Unsupported)?;
     let desc = format!(
@@ -458,7 +512,7 @@ pub fn demux_bytes(
          h264parse name=parse ! appsink name=sink sync=false",
         src_caps, demux
     );
-    let (got, first_pts) = run_once(&desc, Some(sink_caps), bytes, timeout)?;
+    let (got, first_pts) = run_once(&desc, Some(sink_caps), bytes, timeout, threads)?;
     let caps = got.caps.ok_or("no access units demuxed")?;
     Ok(Demuxed {
         caps,
@@ -474,6 +528,7 @@ pub fn decode_bytes(
     container: Option<&str>,
     decoder: &str,
     timeout: Duration,
+    threads: &PipelineThreads,
 ) -> Result<Decoded, DecodeError> {
     let (demux, src_caps) = demux_for(container).map_err(DecodeError::Unsupported)?;
     let desc = format!(
@@ -481,7 +536,7 @@ pub fn decode_bytes(
          h264parse name=parse ! {} ! videoconvert ! video/x-raw,format=NV12 ! appsink name=sink sync=false",
         src_caps, demux, decoder
     );
-    let (got, first_pts) = run_once(&desc, None, bytes, timeout)?;
+    let (got, first_pts) = run_once(&desc, None, bytes, timeout, threads)?;
     let caps = got.caps.ok_or("no frames decoded")?;
     Ok(Decoded {
         frames: without_untimed(got.frames),
@@ -511,15 +566,15 @@ pub struct DecoderSession {
 }
 
 impl DecoderSession {
-    pub fn new(decoder: &str) -> Result<Self, String> {
+    pub fn new(decoder: &str, threads: &PipelineThreads) -> Result<Self, String> {
         let dec = gst::ElementFactory::make(decoder)
             .build()
             .map_err(|e| e.to_string())?;
-        Self::with_decoder(dec)
+        Self::with_decoder(dec, threads)
     }
 
     /// A session around a decoder element made by the caller.
-    fn with_decoder(dec: gst::Element) -> Result<Self, String> {
+    fn with_decoder(dec: gst::Element, threads: &PipelineThreads) -> Result<Self, String> {
         let decoder = dec
             .factory()
             .map_or("decoder".into(), |f| f.name().to_string());
@@ -561,7 +616,7 @@ impl DecoderSession {
             .build();
         feed.link(&dec_sink).map_err(|e| format!("link: {:?}", e))?;
         let errors = ErrorSlot::install(&pipeline)?;
-        crate::gst::thread_priority::reset_streaming_threads(&pipeline);
+        threads.install(&pipeline);
         let session = Self {
             pipeline,
             feed,
@@ -790,6 +845,7 @@ pub fn caps_frame_rate(caps: &gst::Caps) -> Option<(u32, u32)> {
 pub(super) mod tests {
     use super::*;
     use crate::blocks::builtin::mediaplayer::replay::source::Location;
+    use std::sync::atomic::AtomicBool;
 
     const BASE: i64 = 1_800_000_000_000_000_000;
 
@@ -937,7 +993,13 @@ pub(super) mod tests {
         gst::init().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(decode_bytes(Arc::new(bytes), None, pick_decoder(), timeout));
+            let _ = tx.send(decode_bytes(
+                Arc::new(bytes),
+                None,
+                pick_decoder(),
+                timeout,
+                &PipelineThreads::Outside,
+            ));
         });
         rx.recv_timeout(Duration::from_secs(30)).ok()
     }
@@ -1018,7 +1080,8 @@ pub(super) mod tests {
             .property("sleep-time", 5_000_000u32)
             .build()
             .unwrap();
-        let mut session = DecoderSession::with_decoder(dec).expect("session");
+        let mut session =
+            DecoderSession::with_decoder(dec, &PipelineThreads::Outside).expect("session");
         let caps = gst::Caps::builder("video/x-raw")
             .field("format", "NV12")
             .field("width", 64i32)
@@ -1102,7 +1165,8 @@ pub(super) mod tests {
         // Each segment posts end of stream, latency and reset-time on the
         // session's bus; a long-lived session must not keep them.
         gst::init().unwrap();
-        let mut session = DecoderSession::new(pick_decoder()).expect("session");
+        let mut session =
+            DecoderSession::new(pick_decoder(), &PipelineThreads::Outside).expect("session");
         let bytes = Arc::new(test_ts("x264enc", 10));
         for _ in 0..5 {
             let d = demux_bytes(
@@ -1110,6 +1174,7 @@ pub(super) mod tests {
                 None,
                 &session.sink_caps,
                 Duration::from_secs(10),
+                &PipelineThreads::Outside,
             )
             .expect("demux");
             let got = session.decode(d, Duration::from_secs(10)).expect("decode");
@@ -1120,6 +1185,95 @@ pub(super) mod tests {
             .map(|m| format!("{:?}", m.type_()))
             .collect();
         assert!(queued.is_empty(), "left on the bus: {:?}", queued);
+    }
+
+    /// A block's decode threads, with a flow's settings (thread registry)
+    /// populated as the flow does when it starts.
+    fn block_threads(registry: &crate::thread_registry::ThreadRegistry) -> PipelineThreads {
+        let config = SessionThreadConfig::new();
+        config.populate(
+            &crate::gst::ThreadPriorityState::new(strom_types::flow::ThreadPriority::Normal),
+            None,
+            strom_types::FlowId::new_v4(),
+            Some(registry.clone()),
+        );
+        PipelineThreads::block(config, "replay")
+    }
+
+    fn filed_under(registry: &crate::thread_registry::ThreadRegistry, block: &str) -> usize {
+        registry
+            .get_all()
+            .iter()
+            .filter(|t| t.block_id.as_deref() == Some(block))
+            .count()
+    }
+
+    /// A decoder session runs for a block in a flow: its streaming threads
+    /// (here a queue's, as a decoder with an output thread has) take the
+    /// flow's settings and are filed under the block. Also checks that the
+    /// session's bus, whose sync handler drops everything, still passes
+    /// `stream-status` on to them.
+    #[test]
+    fn a_session_files_its_threads_under_the_block() {
+        gst::init().unwrap();
+        let registry = crate::thread_registry::ThreadRegistry::new();
+        let queue = gst::ElementFactory::make("queue").build().unwrap();
+        let session =
+            DecoderSession::with_decoder(queue, &block_threads(&registry)).expect("session");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while filed_under(&registry, "replay") == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            filed_under(&registry, "replay"),
+            1,
+            "registry: {:?}",
+            registry
+                .get_all()
+                .iter()
+                .map(|t| (&t.element_name, &t.block_id))
+                .collect::<Vec<_>>()
+        );
+        drop(session);
+        assert_eq!(filed_under(&registry, "replay"), 0, "left when stopped");
+    }
+
+    /// The short-lived demux pipelines of a block's decoder: their streaming
+    /// thread (the appsrc's) is filed under the block while it runs.
+    #[test]
+    fn demux_threads_are_filed_under_the_block() {
+        gst::init().unwrap();
+        let registry = crate::thread_registry::ThreadRegistry::new();
+        let mut dec = SegmentDecoder::new(pick_decoder()).with_threads(block_threads(&registry));
+        let bytes = Arc::new(test_ts("x264enc", 50));
+        // The thread is registered only while its pipeline runs: watch
+        // from another thread over a few decodes.
+        let seen = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let (registry, seen, done) = (registry.clone(), Arc::clone(&seen), Arc::clone(&done));
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) && !seen.load(Ordering::Relaxed) {
+                    if filed_under(&registry, "replay") > 0 {
+                        seen.store(true, Ordering::Relaxed);
+                    }
+                    std::thread::yield_now();
+                }
+            })
+        };
+        for _ in 0..20 {
+            let d = dec.decode(Arc::clone(&bytes), None, Duration::from_secs(10));
+            assert_eq!(d.expect("decode").frames.len(), 50);
+            if seen.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+        done.store(true, Ordering::Relaxed);
+        watcher.join().unwrap();
+        assert!(
+            seen.load(Ordering::Relaxed),
+            "no demux thread was filed under the block"
+        );
     }
 
     #[test]
@@ -1167,6 +1321,7 @@ pub(super) mod tests {
                     None,
                     pick_decoder(),
                     Duration::from_secs(10),
+                    &PipelineThreads::Outside,
                 )
                 .unwrap()
             })
@@ -1228,6 +1383,7 @@ pub(super) mod tests {
                                     None,
                                     pick_decoder(),
                                     Duration::from_secs(20),
+                                    &PipelineThreads::Outside,
                                 )
                             };
                             assert!(d.is_ok());

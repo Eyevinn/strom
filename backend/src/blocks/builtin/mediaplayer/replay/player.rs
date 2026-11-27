@@ -19,7 +19,8 @@ use super::backoff::{worth_warning, Backoff};
 use super::cache::Hold;
 use super::cache::{by_urgency, within_budget, Fetcher, SegmentStore};
 use super::decode::{
-    caps_frame_rate, decode_timeout, map_to_grid, pick_decoder, DecodeError, SegmentDecoder,
+    caps_frame_rate, decode_timeout, map_to_grid, pick_decoder, DecodeError, PipelineThreads,
+    SegmentDecoder,
 };
 use super::source::{Segment, SourceIndex};
 use super::timeline::{PlayerStats, ReplayTimeline};
@@ -138,6 +139,8 @@ pub struct ReplayPlayer {
     failed: Mutex<Backoff<i64>>,
     caps: Mutex<Option<gst::Caps>>,
     decoder: &'static str,
+    /// Whose threads the decode pipelines' are: the block's, in its flow.
+    threads: PipelineThreads,
     workers: usize,
     /// Decoded window around the cursor, in its direction of travel.
     decode_behind_ns: i64,
@@ -155,6 +158,7 @@ pub struct ReplayPlayer {
 }
 
 impl ReplayPlayer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         block_id: &str,
         source: Arc<dyn SourceIndex>,
@@ -163,6 +167,7 @@ impl ReplayPlayer {
         cache_ahead_s: u64,
         prefetch_s: u64,
         output_rate: Option<(u32, u32)>,
+        threads: PipelineThreads,
     ) -> Arc<Self> {
         let stats = Arc::new(PlayerStats::new(block_id));
         timeline.register_player(&stats);
@@ -192,6 +197,7 @@ impl ReplayPlayer {
             )),
             caps: Mutex::new(None),
             decoder,
+            threads,
             workers: 2,
             decode_behind_ns: 2 * S,
             decode_ahead_ns: cache_ahead_s.clamp(1, MAX_DECODE_AHEAD_S) as i64 * S,
@@ -259,7 +265,7 @@ impl ReplayPlayer {
 
     fn decode_worker(self: Arc<Self>, rx: Arc<Mutex<mpsc::Receiver<Arc<Segment>>>>) {
         // One long-lived decoder per worker, kept across segments.
-        let mut decoder = SegmentDecoder::new(self.decoder);
+        let mut decoder = SegmentDecoder::new(self.decoder).with_threads(self.threads.clone());
         while self.alive() {
             let job = lock(&rx).recv_timeout(Duration::from_millis(100));
             let seg = match job {
@@ -1129,7 +1135,16 @@ mod tests {
             .unwrap();
         appsrc.link(&sink).unwrap();
         let timeline = super::super::timeline::get_or_create(uuid::Uuid::new_v4(), "g");
-        let player = ReplayPlayer::new("p", source, Arc::clone(&timeline), &appsrc, 2, 4, None);
+        let player = ReplayPlayer::new(
+            "p",
+            source,
+            Arc::clone(&timeline),
+            &appsrc,
+            2,
+            4,
+            None,
+            PipelineThreads::Outside,
+        );
         pipeline.set_state(gst::State::Playing).unwrap();
         player.start();
         (player, timeline, pipeline, sink)

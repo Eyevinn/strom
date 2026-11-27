@@ -29,6 +29,7 @@ use crate::blocks::{
     live_bridge_appsrc, BlockBuildError, BlockBuildResult, BusMessageConnectFn,
     APPSRC_MAX_BYTES_VIDEO,
 };
+use crate::gst::SessionThreadConfig;
 use crate::tams::auth::TamsAuth;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -68,9 +69,12 @@ fn prop_str(properties: &HashMap<String, PropertyValue>, key: &str) -> Option<St
 }
 
 /// Build a timeline player. `properties` are current names (migrated).
+/// `thread_config` is the flow's (`BlockBuildContext::session_thread_config`):
+/// the player's decode pipelines run with the flow's thread settings.
 pub fn build(
     instance_id: &str,
     properties: &HashMap<String, PropertyValue>,
+    thread_config: SessionThreadConfig,
 ) -> Result<BlockBuildResult, BlockBuildError> {
     let invalid =
         |e: String| BlockBuildError::InvalidProperty(format!("Media Player timeline mode: {}", e));
@@ -154,6 +158,7 @@ pub fn build(
         decoded_ahead_s,
         read_ahead_s,
         output_rate,
+        decode::PipelineThreads::block(thread_config, instance_id),
     );
 
     // The bus handler owns the player for the flow's run: when the flow
@@ -203,7 +208,9 @@ mod tests {
             SOURCE_PROPERTY.to_string(),
             PropertyValue::String("tams+https://gateway.example/flows/f".to_string()),
         )]);
-        let e = build("p", &props).err().expect("an error");
+        let e = build("p", &props, crate::gst::SessionThreadConfig::new())
+            .err()
+            .expect("an error");
         assert!(e.to_string().contains("flow id"), "{}", e);
     }
 
