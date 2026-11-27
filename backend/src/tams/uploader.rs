@@ -516,9 +516,36 @@ fn allocations() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Allocation>>
     ALLOCATIONS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Forget the object allocated for `segment` (uploaded, or deleted).
+/// Forget the object allocated for `segment` (uploaded, or deleted), and what
+/// is known of its registration.
 pub(crate) fn forget_allocation(segment: &Path) {
     allocations().remove(segment);
+    known_history().remove(segment);
+}
+
+/// Parked segments whose registration history this process knows in full: it
+/// parked them itself, or asked the store and heard it does not have them.
+/// Every try of such a segment that could have registered it kept its object
+/// in [`ALLOCATIONS`], and the next try registers that same object again,
+/// which the store takes as the same segment (TAMS gateway: one document per
+/// flow, start and object; same `X-Idempotency-Key`). So the next try need not
+/// first ask the store whether it has the segment: that listing is a round
+/// trip per segment, and a slow one on a store with a long flow. A segment
+/// parked before a restart is not in it and is asked about once.
+static KNOWN_HISTORY: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
+
+fn known_history() -> std::sync::MutexGuard<'static, HashSet<PathBuf>> {
+    KNOWN_HISTORY.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether a try of the parked `segment` must first ask the store whether it
+/// has it already (see [`KNOWN_HISTORY`]).
+pub(crate) fn maybe_registered(segment: &Path) -> bool {
+    !known_history().contains(segment)
+}
+
+pub(crate) fn mark_history_known(segment: &Path) {
+    known_history().insert(segment.to_path_buf());
 }
 
 // --- Uploader task ---------------------------------------------------------------
@@ -892,7 +919,7 @@ async fn register_collected(
 }
 
 /// What became of one segment.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Registered,
     /// Kept on disk with a sidecar for the drainer.
@@ -1083,6 +1110,254 @@ async fn park_kept(
     park_segment(ctx, frag, reason).await
 }
 
+/// Upload and register several parked segments of one TAMS flow (in time
+/// order) together, for the drainer: one listing asks which ones the store has
+/// already, one request allocates the objects, the bytes go up in parallel, and
+/// one request registers them all, in time order. A segment the batch could not
+/// finish (unreadable, a failed PUT, refused by the store, or a request of the
+/// batch failed) then goes the single-segment way ([`upload_segment`], with its
+/// error handling), in time order; once one of those is parked (the gateway
+/// fails), the rest are left parked without a try. One outcome per fragment,
+/// in order.
+pub(crate) async fn upload_batch(
+    ctx: &mut UploadCtx<'_>,
+    frags: &[FragmentReady],
+    attempts: u32,
+) -> Vec<Outcome> {
+    let mut outcomes: Vec<Option<Outcome>> = vec![None; frags.len()];
+    if frags.len() > 1 {
+        batch_requests(ctx, frags, &mut outcomes).await;
+    }
+    let mut parked = false;
+    for (frag, outcome) in frags.iter().zip(outcomes.iter_mut()) {
+        if outcome.is_none() {
+            *outcome = Some(if parked {
+                Outcome::Parked
+            } else {
+                upload_segment(ctx, frag, attempts, maybe_registered(&frag.path)).await
+            });
+            parked = *outcome == Some(Outcome::Parked);
+        }
+    }
+    outcomes
+        .into_iter()
+        .map(|o| o.unwrap_or(Outcome::Parked))
+        .collect()
+}
+
+/// The batched requests of [`upload_batch`], one try each. Sets the outcome of
+/// each segment it registers (or finds registered); leaves the others `None`,
+/// with any object allocated for them kept for their next try.
+async fn batch_requests(
+    ctx: &mut UploadCtx<'_>,
+    frags: &[FragmentReady],
+    outcomes: &mut [Option<Outcome>],
+) {
+    use crate::tams::client::format_timerange;
+    let started = Instant::now();
+    let mut timing = Timing::default();
+    let reads =
+        futures::future::join_all(frags.iter().map(|f| tokio::fs::read(f.path.clone()))).await;
+    // Unreadable ones are left to the single path, which reports them.
+    let bytes: Vec<Option<Vec<u8>>> = reads.into_iter().map(Result::ok).collect();
+    let mut todo: Vec<usize> = (0..frags.len()).filter(|&i| bytes[i].is_some()).collect();
+    if todo.is_empty() || !ensure_flow(ctx, 1).await {
+        return;
+    }
+    let client: &TamsClient = ctx.client;
+    let flow_id = ctx.flow_spec.flow_id.clone();
+    let timerange = |i: usize| format_timerange(frags[i].start_ns, frags[i].end_ns);
+
+    // Which of them the store has already (an earlier try registered it, but
+    // its answer was lost), for those whose history is not known. A listing
+    // cut short leaves them all to the single path, which asks one by one.
+    let unknown: Vec<usize> = todo
+        .iter()
+        .copied()
+        .filter(|&i| maybe_registered(&frags[i].path))
+        .collect();
+    if !unknown.is_empty() {
+        let t = Instant::now();
+        let span = format_timerange(
+            unknown
+                .iter()
+                .map(|&i| frags[i].start_ns)
+                .min()
+                .unwrap_or(0),
+            unknown.iter().map(|&i| frags[i].end_ns).max().unwrap_or(0),
+        );
+        let query = crate::tams::client::SegmentQuery {
+            timerange: Some(span),
+            limit: Some(((unknown.len() * 2).max(100)) as u32),
+            reverse_order: false,
+        };
+        let listed = match client.list_segments_paged(&flow_id, &query, 4).await {
+            Ok((listed, false)) => listed,
+            Ok((_, true)) => return,
+            Err(e) => {
+                debug!(
+                    "TAMS {}: batch check on flow {} failed, segment by segment instead: {:#}",
+                    ctx.block_id, flow_id, e
+                );
+                return;
+            }
+        };
+        timing.check = Some(t.elapsed());
+        let have: HashMap<(i64, i64), String> = listed
+            .into_iter()
+            .filter_map(|s| {
+                let t = strom_types::tams::parse_timerange(&s.timerange)?.half_open()?;
+                Some((t, s.object_id))
+            })
+            .collect();
+        let mut found = Vec::new();
+        for &i in &unknown {
+            match have.get(&(frags[i].start_ns as i64, frags[i].end_ns as i64)) {
+                Some(object_id) => found.push((i, object_id.clone())),
+                None => mark_history_known(&frags[i].path),
+            }
+        }
+        todo.retain(|i| !found.iter().any(|(f, _)| f == i));
+        for (i, object_id) in found {
+            on_registered(ctx, &frags[i].path, object_id, timerange(i)).await;
+            outcomes[i] = Some(Outcome::Registered);
+        }
+    }
+
+    // Objects: those an earlier try allocated, the others in one request.
+    let mut allocs: Vec<Option<Allocation>> = todo
+        .iter()
+        .map(|&i| allocations().remove(&frags[i].path))
+        .collect();
+    let need = allocs.iter().filter(|a| a.is_none()).count();
+    if need > 0 {
+        let t = Instant::now();
+        match client
+            .allocate_objects(&flow_id, ctx.content_type, need)
+            .await
+        {
+            Ok(objects) => {
+                timing.alloc = Some(t.elapsed());
+                let mut objects = objects.into_iter();
+                for a in allocs.iter_mut().filter(|a| a.is_none()) {
+                    *a = objects.next().map(|object| Allocation {
+                        object,
+                        uploaded: false,
+                    });
+                }
+            }
+            Err(e) => debug!(
+                "TAMS {}: batch allocation of {} objects on flow {} failed: {:#}",
+                ctx.block_id, need, flow_id, e
+            ),
+        }
+    }
+
+    // The bytes, in parallel.
+    let t = Instant::now();
+    let puts = futures::future::join_all(todo.iter().zip(allocs.iter()).map(|(&i, a)| {
+        let body = bytes[i].clone().unwrap_or_default();
+        async move {
+            match a {
+                Some(a) if !a.uploaded => Some(
+                    client
+                        .upload_object(&a.object.put_url, &a.object.content_type, body)
+                        .await,
+                ),
+                Some(_) => Some(Ok(())),
+                None => None,
+            }
+        }
+    }))
+    .await;
+    timing.put = Some(t.elapsed());
+    let mut uploaded = Vec::new();
+    for (k, put) in puts.into_iter().enumerate() {
+        match put {
+            Some(Ok(())) => {
+                if let Some(a) = allocs[k].as_mut() {
+                    a.uploaded = true;
+                }
+                uploaded.push(k);
+            }
+            Some(Err(e)) => {
+                // As in `upload_one`: storage refusing the PUT (an expired
+                // signature) needs a new object.
+                if classify(&e) != Failure::Transient {
+                    allocs[k] = None;
+                }
+                debug!(
+                    "TAMS {}: batch PUT of {} failed: {:#}",
+                    ctx.block_id,
+                    frags[todo[k]].path.display(),
+                    e
+                );
+            }
+            None => {}
+        }
+    }
+
+    // One registration for all, in time order.
+    let mut registered = 0usize;
+    let segments: Vec<(usize, String, String)> = uploaded
+        .iter()
+        .filter_map(|&k| {
+            let a = allocs[k].as_ref()?;
+            Some((k, a.object.object_id.clone(), timerange(todo[k])))
+        })
+        .collect();
+    if !segments.is_empty() {
+        let pairs: Vec<(String, String)> = segments
+            .iter()
+            .map(|(_, o, t)| (o.clone(), t.clone()))
+            .collect();
+        let t = Instant::now();
+        match client.register_segments(&flow_id, &pairs).await {
+            Ok(failed) => {
+                timing.register = Some(t.elapsed());
+                let failed: HashSet<String> = failed.into_iter().map(|(o, _)| o).collect();
+                for (k, object_id, tr) in segments {
+                    if failed.contains(&object_id) {
+                        continue;
+                    }
+                    let i = todo[k];
+                    allocs[k] = None;
+                    on_registered(ctx, &frags[i].path, object_id, tr).await;
+                    outcomes[i] = Some(Outcome::Registered);
+                    registered += 1;
+                }
+            }
+            Err(e) => debug!(
+                "TAMS {}: batch registration of {} segments on flow {} failed: {:#}",
+                ctx.block_id,
+                pairs.len(),
+                flow_id,
+                e
+            ),
+        }
+    }
+    if registered > 0 {
+        ctx.set_failing(false);
+    }
+    // What is left keeps its object for the single path.
+    for (k, a) in allocs.into_iter().enumerate() {
+        if let Some(a) = a {
+            allocations().insert(frags[todo[k]].path.clone(), a);
+        }
+    }
+    debug!(
+        "TAMS {}: batch of {} parked segments on flow {}: {} registered, {} found \
+         registered already ({}, total {} ms)",
+        ctx.block_id,
+        frags.len(),
+        flow_id,
+        registered,
+        outcomes.iter().filter(|o| o.is_some()).count() - registered,
+        timing,
+        started.elapsed().as_millis()
+    );
+}
+
 /// Upload and register one freshly-rotated fragment, or park it at once while
 /// the gateway is failing.
 async fn process_fragment(ctx: &mut UploadCtx<'_>, frag: FragmentReady) -> Outcome {
@@ -1155,7 +1430,9 @@ async fn park_segment(ctx: &mut UploadCtx<'_>, frag: &FragmentReady, reason: &st
         start_ns: frag.start_ns,
         end_ns: frag.end_ns,
     };
-    let written = tokio::task::spawn_blocking(move || park_on_disk(&frag_owned, &target))
+    // The live uploader's own segment; the drainer's was parked before.
+    let own = ctx.manifest.is_some();
+    let written = tokio::task::spawn_blocking(move || park_on_disk_as(&frag_owned, &target, own))
         .await
         .unwrap_or_else(|e| {
             Err(crate::tams::park::ParkError::Io(std::io::Error::other(
@@ -1249,11 +1526,25 @@ pub fn park_on_disk(
     frag: &FragmentReady,
     target: &ParkTarget,
 ) -> Result<(), crate::tams::park::ParkError> {
+    park_on_disk_as(frag, target, true)
+}
+
+/// [`park_on_disk`]; with `own`, the segment was made by this process and every
+/// try of it is known (see [`KNOWN_HISTORY`]). The drainer parks again a
+/// segment it failed with, and keeps what was known of it.
+fn park_on_disk_as(
+    frag: &FragmentReady,
+    target: &ParkTarget,
+    own: bool,
+) -> Result<(), crate::tams::park::ParkError> {
     crate::tams::park::parking().park(
         &frag.path,
         frag.start_ns,
         &sidecar_contents(frag.start_ns, frag.end_ns, target),
     )?;
+    if own {
+        mark_history_known(&frag.path);
+    }
     #[cfg(test)]
     tests::on_parked(&frag.path);
     Ok(())
@@ -1365,8 +1656,15 @@ async fn upload_one(
 ) -> anyhow::Result<(String, String)> {
     let lock = || slot.lock().unwrap_or_else(|e| e.into_inner());
     let timerange = crate::tams::client::format_timerange(frag.start_ns, frag.end_ns);
+    let mut timing = Timing::default();
     if check_existing {
-        if let Some(object_id) = registered_object(client, tams_flow_id, frag).await? {
+        let t = Instant::now();
+        let existing = registered_object(client, tams_flow_id, frag).await?;
+        timing.check = Some(t.elapsed());
+        if existing.is_none() {
+            mark_history_known(&frag.path);
+        }
+        if let Some(object_id) = existing {
             debug!(
                 "TAMS: segment {} already registered on flow {} as {}",
                 timerange, tams_flow_id, object_id
@@ -1378,7 +1676,9 @@ async fn upload_one(
     let alloc = match cached {
         Some(a) => a,
         None => {
+            let t = Instant::now();
             let object = client.allocate_object(tams_flow_id, content_type).await?;
+            timing.alloc = Some(t.elapsed());
             let a = Allocation {
                 object,
                 uploaded: false,
@@ -1389,10 +1689,12 @@ async fn upload_one(
     };
     let obj = &alloc.object;
     if !alloc.uploaded {
-        if let Err(e) = client
+        let t = Instant::now();
+        let put = client
             .upload_object(&obj.put_url, &obj.content_type, bytes.to_vec())
-            .await
-        {
+            .await;
+        timing.put = Some(t.elapsed());
+        if let Err(e) = put {
             if classify(&e) != Failure::Transient {
                 *lock() = None;
             }
@@ -1402,15 +1704,46 @@ async fn upload_one(
             a.uploaded = true;
         }
     }
+    let t = Instant::now();
     client
         .register_segment(tams_flow_id, &obj.object_id, &timerange)
         .await?;
+    timing.register = Some(t.elapsed());
 
     debug!(
-        "TAMS: registered segment {} {} on flow {}",
-        obj.object_id, timerange, tams_flow_id
+        "TAMS: registered segment {} {} ({} bytes) on flow {} ({})",
+        obj.object_id,
+        timerange,
+        bytes.len(),
+        tams_flow_id,
+        timing
     );
     Ok((alloc.object.object_id, timerange))
+}
+
+/// How long the requests of one segment upload took, for the debug log. A step
+/// that was skipped (an object or upload reused from an earlier try) is `None`.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Timing {
+    /// Asking the store whether it has the segment already.
+    pub(crate) check: Option<Duration>,
+    pub(crate) alloc: Option<Duration>,
+    pub(crate) put: Option<Duration>,
+    pub(crate) register: Option<Duration>,
+}
+
+impl std::fmt::Display for Timing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ms = |d: Option<Duration>| d.map_or("-".to_string(), |d| d.as_millis().to_string());
+        write!(
+            f,
+            "check {} ms, alloc {} ms, put {} ms, register {} ms",
+            ms(self.check),
+            ms(self.alloc),
+            ms(self.put),
+            ms(self.register)
+        )
+    }
 }
 
 fn emit_error(events: &EventBroadcaster, flow_id: FlowId, block_id: &str, error: String) {
