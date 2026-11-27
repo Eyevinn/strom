@@ -564,6 +564,12 @@ impl TamsClient {
             }
             return Err(PartialFailure { body }.into());
         }
+        // 409: the store is still working on an earlier try with this key
+        // (OpenTAMS). Its outcome is unknown, so it is retried with the same
+        // key, not treated as a rejection.
+        if status == reqwest::StatusCode::CONFLICT {
+            return Err(RegistrationInFlight(status_error(resp, context).await).into());
+        }
         if !status.is_success() {
             return Err(status_error(resp, context).await);
         }
@@ -681,11 +687,28 @@ impl std::fmt::Display for PartialFailure {
 
 impl std::error::Error for PartialFailure {}
 
+/// A segment registration the store answered with 409: an earlier try with
+/// the same idempotency key is still in flight (OpenTAMS, e.g. after our
+/// request timed out while the store was still processing it). Not an
+/// [`HttpStatusError`], so the uploader treats it as transient: it retries
+/// with the same key (or parks the segment), and does not discard it.
+#[derive(Debug)]
+pub struct RegistrationInFlight(pub anyhow::Error);
+
+impl std::fmt::Display for RegistrationInFlight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "segment registration still in flight: {:#}", self.0)
+    }
+}
+
+impl std::error::Error for RegistrationInFlight {}
+
 /// Whether the store answered a segment registration with a failure it may
 /// keep under the idempotency key, so that a retry needs a new key: a 200
 /// partial failure, or a 4xx other than 408 and 429 (which ask to retry) and
 /// 409 (OpenTAMS: the same key is still in flight, so the same key is
-/// retried). Timeouts, network errors and 5xx keep the key.
+/// retried; [`TamsClient::register_segment`] returns it as
+/// [`RegistrationInFlight`]). Timeouts, network errors and 5xx keep the key.
 pub fn needs_new_idempotency_key(e: &anyhow::Error) -> bool {
     if e.downcast_ref::<PartialFailure>().is_some() {
         return true;
