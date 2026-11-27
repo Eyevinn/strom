@@ -1168,8 +1168,8 @@ impl PropertyInspector {
                         }
                     }
 
-                    // Show media player controls for media player blocks. A
-                    // timeline player is controlled through its group's page.
+                    // Show media player controls for media player blocks. They
+                    // are playlist controls; a timeline player has none here.
                     if definition.id == "builtin.media_player" && !is_timeline_player(block) {
                         ui.separator();
                         if let Some(flow_id) = flow_id {

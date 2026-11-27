@@ -305,7 +305,7 @@ impl AppState {
             }
             if PlayerMode::from_properties(&source_block.properties) != Ok(PlayerMode::Stinger) {
                 return Err(format!(
-                    "Media Player {} is not a stinger clip source (set its Mode to Stinger)",
+                    "Media Player {} is not a stinger clip source (set its Mode to Stinger clip source)",
                     source
                 ));
             }

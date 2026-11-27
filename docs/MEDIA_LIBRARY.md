@@ -24,16 +24,17 @@ that mode:
 - **Stinger clip source**: the playlist is a stinger library for a Vision Mixer's stinger
   input (see [VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md)).
 - **Timeline (replay)**: plays an indexed **Source** (a TAMS flow,
-  `tams+https://<gateway>/flows/<flow_id>`) on a timeline
-  you can scrub, jog and play at any speed. Players with the same **Group** share one timeline;
+  `tams+https://<gateway>/flows/<flow_id>`) on a timeline (the timeline engine; its control
+  API follows). Players with the same **Group** share one timeline;
   an empty group is a group of its own. **Output Framerate** (empty = the source's rate) sets
   the player's own frame grid, e.g. the mixer's rate for slow motion from a 100p source. TAMS
   sources authenticate as TAMS Output does (**Authentication**, **API Token**, **OSC Service
   ID**), with the same rule: the instance's `STROM_TAMS_API_TOKEN` and OSC SATs go only to an
   allowed gateway.
 
-Flows saved before **Mode** existed keep working: `stinger_mode` and the `replay_*`
-properties are rewritten to the current names when a flow is loaded or saved.
+Flows saved before **Mode** existed keep working: `stinger_mode` is rewritten to **Mode**
+when a flow is loaded or saved.
+
 **Video Tracks** and **Audio Tracks** (default 1, 0 discards that kind) set how many tracks of a file get an
 output: `video_out`, `video_out_1`, … and `audio_out`, `audio_out_1`, ….
 

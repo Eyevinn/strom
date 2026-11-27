@@ -318,7 +318,7 @@ fn vision_mixer_definition() -> BlockDefinition {
         ExposedProperty {
             name: strom_types::stinger::ENABLE_STINGER_PROPERTY.to_string(),
             label: "Stinger Input".to_string(),
-            description: "Add a stinger input: wire a Media Player in Stinger mode into it, and take stingers from the vision mixer panel. Classic stingers run on both backends; track-matte and mask-only stingers need the GPU backend and play as classic on the CPU one.".to_string(),
+            description: "Add a stinger input: wire a Media Player with Mode set to Stinger clip source into it, and take stingers from the vision mixer panel. Classic stingers run on both backends; track-matte and mask-only stingers need the GPU backend and play as classic on the CPU one.".to_string(),
             property_type: PropertyType::Bool,
             default_value: Some(PropertyValue::Bool(false)),
             mapping: PropertyMapping {
