@@ -96,7 +96,7 @@ impl Queue {
     }
 
     /// Empty the queue (and forget the clip playing): a new run, `live`,
-    /// `end`.
+    /// `end`, `uncue`.
     pub(super) fn clear(&mut self) {
         self.items.clear();
         self.current = None;
