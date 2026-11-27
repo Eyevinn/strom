@@ -189,7 +189,7 @@
       <th>player</th><th>fps</th><th class="l">shown UTC</th><th class="l">shown TAI</th><th title="shown TAI minus the first angle's">Δ ms</th>
       <th title="shown frame within its second">f</th><th class="l" title="group time the last tick asked for">wanted</th><th>sync</th><th class="l">gap now</th><th>gaps</th><th>gap ms</th>
       <th>misses</th><th>late</th><th>rep</th><th>skip</th>
-      <th>index</th><th>fetched</th><th>fetch ms</th><th>fetch err</th><th>cached</th>
+      <th>index</th><th>fetched</th><th>fetch ms</th><th>fetch err</th><th title="segments a fetch found deleted from the store (retention)">gone</th><th>cached</th>
       <th>strip</th><th>strip ≠</th><th title="burned-in times read on the server / not holding the tick">time chk / err</th>
     </tr></thead><tbody></tbody></table></div>
   </section>
@@ -284,6 +284,7 @@ function view(st, dg) {
       return {
         ...d, block: a.block, fps: a.fps, frame_ns: periodOf(a.fps), ready: a.ready, offset_ms: a.offset_ms,
         extent: a.extent && { start: inst(a.extent.start), end: inst(a.extent.end) },
+        available_from: inst(a.available_from),
         gaps: (a.gaps || []).map(span), indexed: (d.indexed || []).map(span),
         in_gap: span(a.in_gap), in_sync: a.in_sync,
         shown: a.shown ? { tai_ns: a.shown.t, utc: a.shown.utc, frame_in_second: a.shown.frame_in_second } : null,
@@ -422,7 +423,7 @@ function players(m) {
       <td class="${cls(p.misses, 1)}">${p.misses}</td><td class="${cls(p.late_ticks)}">${p.late_ticks}</td>
       <td>${p.repeated_ticks}</td><td>${p.skipped_frames}</td>
       <td>${p.index_segments}</td><td>${p.fetched_segments}</td><td>${p.last_fetch_ms}</td>
-      <td class="${cls(p.fetch_errors, 1)}">${p.fetch_errors}</td><td>${p.cached_segments}</td>
+      <td class="${cls(p.fetch_errors, 1)}">${p.fetch_errors}</td><td>${p.gone_segments ?? '-'}</td><td>${p.cached_segments}</td>
       <td>${p.strip_frame < 0 ? '-' : p.strip_frame}</td><td class="${cls(p.strip_mismatches)}">${p.strip_mismatches}</td>
       <td class="${cls(p.time_errors, 1)}">${p.time_checked} / ${p.time_errors}</td></tr>`;
   }).join('');
@@ -436,6 +437,7 @@ function extents(m) {
     const list = gaps.slice(-6).map(g => `<div>${esc(hms(g.start.utc))} → ${esc(hms(g.end.utc))} <span class="mut">${g.duration_ms} ms</span></div>`).join('');
     return `<div><strong>${esc(p.block)}</strong>
       <div class="kv"><span>extent</span><span>${ex}</span>
+      <span title="the first media the store still has (follows retention)">available from</span><span>${p.available_from ? esc(hms(p.available_from.utc || p.available_from.tai_clock)) : '-'}</span>
       <span>indexed ranges</span><span>${(p.indexed || []).length}</span>
       <span>gaps</span><span>${gaps.length}${gaps.length > 6 ? ' (last 6)' : ''}</span></div>
       <div style="font:12px var(--mono)">${list}</div></div>`;
