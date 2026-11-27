@@ -43,12 +43,20 @@
 //! When there is none, the flow's segments wait
 //! ([`DrainState::WaitingForCredentials`], logged once per gateway); a PAT set
 //! through the API wakes the drainer ([`wake`]).
+//!
+//! A manifest with a retention window (`retention_s`, the TAMS Output's rolling
+//! buffer) bounds what is worth uploading: a parked segment that ends before
+//! `now − window`, on the TAI clock the retention task cuts with, would only
+//! be deleted from the store again. It is deleted locally instead, with a log
+//! line, and counted ([`expired_discarded`]).
 
 use crate::client_auth::AuthMethod;
 use crate::events::EventBroadcaster;
 use crate::osc::SatProvider;
 use crate::tams::client::{gateway_is_allow_listed, FlowSpec, TamsClient};
 use crate::tams::park::Parking;
+use crate::tams::retention;
+use crate::tams::tai_mapping::HostTai;
 use crate::tams::uploader::{
     collect_parked_blocking, discard_segment, enforce_parked_limits, parked_backoff, upload_batch,
     Claim, DetectedEssence, FragmentReady, Outcome, ParkTarget, ParkedLimits, Retry,
@@ -57,6 +65,7 @@ use crate::tams::uploader::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use strom_types::FlowId;
@@ -315,6 +324,11 @@ pub struct Manifest {
     /// What caps said about the essence.
     #[serde(default)]
     pub detected: DetectedEssence,
+    /// The writer's retention window in seconds (`retention_s` of the TAMS
+    /// Output); 0, or absent in a manifest written before it, is none. Parked
+    /// segments older than the window are deleted, not uploaded.
+    #[serde(default)]
+    pub retention_s: u64,
 }
 
 impl Manifest {
@@ -336,7 +350,14 @@ impl Manifest {
             auth: AuthRef::of(client.auth()),
             flow_spec: flow_spec.clone(),
             detected,
+            retention_s: 0,
         }
+    }
+
+    /// With the writer's retention window, in seconds (0: none).
+    pub fn with_retention(mut self, retention_s: u64) -> Self {
+        self.retention_s = retention_s;
+        self
     }
 
     fn target(&self) -> ParkTarget {
@@ -466,6 +487,22 @@ static STATUS: LazyLock<Mutex<HashMap<String, DrainState>>> = LazyLock::new(Defa
 /// parked segments.
 pub fn status() -> HashMap<String, DrainState> {
     STATUS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+static EXPIRED: AtomicU64 = AtomicU64::new(0);
+
+/// Parked segments deleted without upload since server start because they
+/// were older than their flow's retention window.
+pub fn expired_discarded() -> u64 {
+    EXPIRED.load(Ordering::Relaxed)
+}
+
+/// TAI now in ns, as the retention task reads it.
+type TaiNow = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+fn host_tai_now() -> TaiNow {
+    static HOST: OnceLock<HostTai> = OnceLock::new();
+    Arc::new(|| HOST.get_or_init(HostTai::new).now_ns())
 }
 
 // --- Drainer -------------------------------------------------------------------------
@@ -722,6 +759,10 @@ pub struct Drainer {
     jobs: tokio::task::JoinSet<JobDone>,
     /// The directory and segment count of each job in flight.
     busy: HashMap<tokio::task::Id, (PathBuf, usize)>,
+    /// TAI now, for the retention cutoff; read only for a flow with one.
+    tai_now: TaiNow,
+    /// Parked segments this drainer deleted as older than their retention.
+    expired: u64,
 }
 
 impl Drainer {
@@ -750,6 +791,8 @@ impl Drainer {
             no_manifest_reported: HashSet::new(),
             jobs: tokio::task::JoinSet::new(),
             busy: HashMap::new(),
+            tai_now: host_tai_now(),
+            expired: 0,
         }
     }
 
@@ -985,6 +1028,12 @@ impl Drainer {
                 }
             }
             let target = manifest.target();
+            // What ends before this lies outside the writer's retention window:
+            // the retention task deletes it from the store (or will), so it is
+            // not uploaded. The same cutoff without the grid floor.
+            let expired_before = retention::window_from_secs(manifest.retention_s)
+                .and_then(|w| retention::cutoff_ns((self.tai_now)(), w, 0));
+            let mut expired: Vec<(PathBuf, Claim)> = Vec::new();
             // Oldest first, a page at a time from the index: what the
             // sidecars say is in it, so none is read here.
             let mut picked = VecDeque::new();
@@ -994,6 +1043,14 @@ impl Drainer {
                 let full = page.len() == PAGE;
                 after = page.last().map(|p| (p.start_ns, p.path.clone()));
                 for seg in page {
+                    if expired_before.is_some_and(|c| seg.end_ns <= c)
+                        && seg.target.as_ref().is_none_or(|t| *t == target)
+                    {
+                        if let Some(claim) = Claim::take(&seg.path) {
+                            expired.push((seg.path, claim));
+                        }
+                        continue;
+                    }
                     if let Some(r) = self.retries.get(&seg.path) {
                         if r.next > now {
                             due(r.next);
@@ -1026,6 +1083,9 @@ impl Drainer {
                 if !full {
                     break;
                 }
+            }
+            if !expired.is_empty() {
+                self.discard_expired(&manifest, expired).await;
             }
             if !picked.is_empty() {
                 candidates.push((dir, auth, picked));
@@ -1106,6 +1166,29 @@ impl Drainer {
             return Step::Idle(MIN_IDLE_WAIT);
         }
         Step::Tried
+    }
+
+    /// Delete `expired` (claimed) segments of `m`'s directory, older than its
+    /// retention window, without uploading them.
+    async fn discard_expired(&mut self, m: &Manifest, expired: Vec<(PathBuf, Claim)>) {
+        let n = expired.len();
+        for (path, _claim) in expired {
+            discard_segment(&path).await;
+            // The process-wide index is told by `discard_segment`; this one
+            // may be another (tests).
+            self.parking.forget(&path);
+            self.retries.remove(&path);
+        }
+        self.expired += n as u64;
+        EXPIRED.fetch_add(n as u64, Ordering::Relaxed);
+        info!(
+            "TAMS: deleted {} parked segment(s) of flow {} older than its {} s retention, \
+             without uploading ({} in all)",
+            n,
+            m.tams_flow_id,
+            m.retention_s,
+            expired_discarded()
+        );
     }
 
     /// Whether a drain upload may start now, beside the live uploads:
@@ -1417,6 +1500,7 @@ mod tests {
             auth,
             flow_spec: spec(flow),
             detected: DetectedEssence::default(),
+            retention_s: 0,
         };
         write_manifest_file(&root.join(flow), &serde_json::to_string(&m).unwrap()).unwrap();
         m
@@ -2193,6 +2277,7 @@ mod tests {
                 auth: AuthRef::None,
                 flow_spec: spec("fa"),
                 detected: DetectedEssence::default(),
+                retention_s: 0,
             };
             write_manifest_file(&dir, &serde_json::to_string(&m).unwrap()).unwrap();
             let seg = dir.join(format!("seg_r{}_{:05}.ts", start_s, start_s));
@@ -2304,6 +2389,92 @@ mod tests {
             .unwrap();
         sync(p, &events, &mut unchanged).await;
         assert!(!p.contains(&b));
+    }
+
+    /// With a retention window, parked segments that end before
+    /// `now − window` (TAI) are deleted without upload and counted; the
+    /// rest are uploaded.
+    #[tokio::test]
+    async fn tams_drain_deletes_parked_segments_older_than_retention() {
+        let store = Store::default();
+        let gw = start_store(store.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        let mut m = manifest(&root, &gw, "fa", AuthRef::None);
+        m.retention_s = 60;
+        write_manifest_file(&root.join("fa"), &serde_json::to_string(&m).unwrap()).unwrap();
+        // Segments are 1 s long; now = 150 s, so the cutoff is 90 s.
+        let old: Vec<PathBuf> = [10, 11, 89]
+            .iter()
+            .map(|&s| park(p, &root, &gw, "fa", s))
+            .collect();
+        let edge = park(p, &root, &gw, "fa", 90);
+        let fresh = park(p, &root, &gw, "fa", 100);
+        let before = expired_discarded();
+        let mut d = drainer_n(p, leak(LiveBusy::new()), 8);
+        d.tai_now = Arc::new(|| 150_000_000_000);
+
+        assert_eq!(d.step().await, Step::Tried);
+        assert!(matches!(d.step().await, Step::Idle(_)));
+        for seg in &old {
+            assert!(!seg.exists() && !sidecar_path(seg).exists());
+            assert!(!p.contains(seg));
+        }
+        assert_eq!(d.expired, 3);
+        assert!(expired_discarded() >= before + 3);
+        let starts: Vec<u64> = store
+            .registered
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, tr)| start_s(tr))
+            .collect();
+        assert_eq!(starts, vec![90, 100]);
+        assert!(!edge.exists() && !fresh.exists());
+        assert!(p.dirs().is_empty());
+    }
+
+    /// Without a retention window every parked segment is uploaded, however
+    /// old.
+    #[tokio::test]
+    async fn tams_drain_without_retention_uploads_everything() {
+        let store = Store::default();
+        let gw = start_store(store.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        manifest(&root, &gw, "fa", AuthRef::None);
+        park(p, &root, &gw, "fa", 10);
+        park(p, &root, &gw, "fa", 11);
+        let mut d = drainer_n(p, leak(LiveBusy::new()), 8);
+        d.tai_now = Arc::new(|| u64::MAX / 2);
+
+        assert_eq!(d.step().await, Step::Tried);
+        assert_eq!(d.expired, 0);
+        assert_eq!(store.registered.lock().unwrap().len(), 2);
+    }
+
+    /// A `park.json` written before `retention_s` existed still loads, as no
+    /// retention; a written one carries it.
+    #[test]
+    fn tams_manifest_retention_is_optional() {
+        let client = TamsClient::new("https://gw.example", AuthMethod::None).unwrap();
+        let m = Manifest::new(
+            &client,
+            &spec("f1"),
+            DetectedEssence::default(),
+            "video/mp2t",
+            FlowId::new_v4(),
+            "out",
+        );
+        let mut v = serde_json::to_value(&m).unwrap();
+        v.as_object_mut().unwrap().remove("retention_s");
+        let old: Manifest = serde_json::from_value(v).unwrap();
+        assert_eq!(old.retention_s, 0);
+        let json = serde_json::to_string(&m.with_retention(120)).unwrap();
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.retention_s, 120);
     }
 
     #[test]

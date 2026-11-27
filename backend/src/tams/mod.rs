@@ -8,6 +8,7 @@ pub mod client;
 pub mod drain;
 pub mod flow_claims;
 pub mod park;
+pub mod retention;
 pub mod segmenter;
 pub mod tai_mapping;
 pub mod uploader;
