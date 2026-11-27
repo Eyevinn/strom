@@ -374,6 +374,15 @@ pub struct FlowProperties {
     /// ISO 8601 format with timezone
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
+
+    /// Time offset per source, ms: a source's media sits this much later on
+    /// a replay group's time axis, in every player that shows it (any group,
+    /// before and after a source switch). The key is the source as a player
+    /// shows it (`source`, the URI without credentials) or its own id
+    /// (`source_id`, e.g. a TAMS flow id). A player's own `offset_ms` applies
+    /// only to a source not listed here.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub source_offsets_ms: std::collections::BTreeMap<String, i64>,
 }
 
 impl FlowProperties {

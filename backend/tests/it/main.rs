@@ -78,6 +78,7 @@ pub mod property_not_found_status_test;
 pub mod property_type_panic_test;
 pub mod recorder_stall_test;
 pub mod recorder_test;
+pub mod replay_source_offsets_test;
 pub mod rtmp_output_test;
 pub mod rtp_hdrext_aggregation_test;
 pub mod shader_validation_test;

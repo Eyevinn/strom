@@ -2,14 +2,17 @@
 //! grid and index, what it pushed, its counters, and its configuration.
 //!
 //! Times stored here are the source's own (TAMS) times. The accessors that
-//! say "group" move them by the player's `offset_ms` onto the group's axis.
+//! say "group" move them by the offset onto the group's axis: the shown
+//! source's (the flow's `source_offsets_ms`), else the player's `offset_ms`.
 
 use super::super::grid::FrameGrid;
+use super::super::source_offsets;
 use super::switch::SourceControl;
 use super::{lock, TimeDomain, UNKNOWN};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use strom_types::replay::{ReplayJogGrid, ReplayReady};
+use strom_types::FlowId;
 
 /// Consecutive in-sync ticks before an angle counts as ready (decoding keeps
 /// up with play).
@@ -54,8 +57,12 @@ pub struct PlayerConfig {
     pub start_mode: StartMode,
     /// `None`: computed from the live edge's steps.
     pub live_margin_ms: Option<u64>,
-    /// Trim: the source's media sits this much later on the group's axis.
+    /// The player's own trim (`offset_ms`): the source's media sits this
+    /// much later on the group's axis. Only for a source the flow gives no
+    /// offset of its own (`source_offsets_ms`).
     pub offset_ns: i64,
+    /// The flow the player is in, for its sources' offsets.
+    pub flow_id: Option<FlowId>,
 }
 
 impl Default for PlayerConfig {
@@ -70,6 +77,7 @@ impl Default for PlayerConfig {
             start_mode: StartMode::Paused,
             live_margin_ms: None,
             offset_ns: 0,
+            flow_id: None,
         }
     }
 }
@@ -167,7 +175,7 @@ pub struct PlayerStats {
     index_view: Mutex<IndexView>,
     /// The source shown now (the build's, or the last one switched to).
     ident: Mutex<SourceIdent>,
-    /// The trim of the source shown now, ns.
+    /// The trim of the source shown now, ns ([`Self::refresh_offset`]).
     offset_ns: AtomicI64,
     /// The source being switched to, without credentials.
     pending_source: Mutex<Option<String>>,
@@ -182,14 +190,16 @@ impl PlayerStats {
     }
 
     pub fn with_config(block_id: &str, config: PlayerConfig) -> Self {
+        let ident = SourceIdent {
+            source: config.source.clone(),
+            source_id: config.source_id.clone(),
+            store: config.store.clone(),
+        };
+        let offset_ns = source_offsets::lookup(config.flow_id, &ident).unwrap_or(config.offset_ns);
         Self {
             block_id: block_id.to_string(),
-            ident: Mutex::new(SourceIdent {
-                source: config.source.clone(),
-                source_id: config.source_id.clone(),
-                store: config.store.clone(),
-            }),
-            offset_ns: AtomicI64::new(config.offset_ns),
+            ident: Mutex::new(ident),
+            offset_ns: AtomicI64::new(offset_ns),
             pending_source: Mutex::new(None),
             control: Mutex::new(None),
             config,
@@ -238,6 +248,15 @@ impl PlayerStats {
         self.offset_ns.load(Ordering::Relaxed)
     }
 
+    /// Resolve the trim again for the source shown now: the flow's offset
+    /// for it, else the player's own. After a source switch, and when the
+    /// flow's offsets change.
+    pub fn refresh_offset(&self) {
+        let o = source_offsets::lookup(self.config.flow_id, &lock(&self.ident))
+            .unwrap_or(self.config.offset_ns);
+        self.offset_ns.store(o, Ordering::Relaxed);
+    }
+
     /// The source shown now.
     pub fn source_ident(&self) -> SourceIdent {
         lock(&self.ident).clone()
@@ -261,11 +280,11 @@ impl PlayerStats {
     }
 
     /// Take over what `from` (the stats a new source was read into) knows
-    /// about its source: identity, trim, extent, grid, time domain and
-    /// index. The counters stay: they are the player's.
+    /// about its source: identity, extent, grid, time domain and index; the
+    /// trim is the new source's. The counters stay: they are the player's.
     pub fn adopt_source(&self, from: &PlayerStats, ident: SourceIdent) {
         *lock(&self.ident) = ident;
-        self.offset_ns.store(from.offset_ns(), Ordering::Relaxed);
+        self.refresh_offset();
         self.start_tai
             .store(from.start_tai.load(Ordering::Relaxed), Ordering::Relaxed);
         self.end_tai

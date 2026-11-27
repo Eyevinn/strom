@@ -197,6 +197,8 @@ use utoipa::OpenApi;
         crate::api::replay::replay_command,
         crate::api::replay::replay_state,
         crate::api::replay::replay_diagnostics,
+        crate::api::replay::get_source_offsets,
+        crate::api::replay::patch_source_offsets,
         crate::api::mediaplayer::seek_player,
         crate::api::mediaplayer::goto_file,
         // Probe endpoints
@@ -341,6 +343,8 @@ use utoipa::OpenApi;
             strom_types::replay::ReplayTarget,
             strom_types::replay::ReplayEndAction,
             strom_types::replay::ReplayCommand,
+            strom_types::replay::ReplaySourceOffsets,
+            strom_types::replay::ReplaySourceOffsetsPatch,
             strom_types::replay::ReplayRequest,
             strom_types::replay::ReplayCue,
             strom_types::replay::ReplayRampState,

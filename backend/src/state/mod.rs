@@ -767,6 +767,11 @@ impl AppState {
             let mut flows = self.inner.flows.write().await;
             flows.insert(flow.id, flow.clone()).is_none()
         };
+        // Running replay players follow the flow's source offsets at once.
+        crate::blocks::builtin::mediaplayer::replay::source_offsets::set_flow(
+            flow.id,
+            &flow.properties.source_offsets_ms,
+        );
 
         self.persist_flow(&flow, is_new).await
     }
@@ -881,6 +886,7 @@ impl AppState {
 
         // Unregister from PTP monitor
         self.inner.ptp_monitor.unregister_flow(*id);
+        crate::blocks::builtin::mediaplayer::replay::source_offsets::remove_flow(*id);
 
         // The flow is stopped, so its pages are closed. Their profiles hold
         // whatever they were logged in to; nothing would use them again. A
@@ -988,6 +994,11 @@ impl AppState {
             error!("Flow not found: {}", id);
             return Err(PipelineError::FlowNotFound(id.to_string()));
         };
+        // The players built below take their sources' offsets from here.
+        crate::blocks::builtin::mediaplayer::replay::source_offsets::set_flow(
+            *id,
+            &flow.properties.source_offsets_ms,
+        );
 
         // Check if pipeline is already running
         info!("Checking if pipeline is already running...");

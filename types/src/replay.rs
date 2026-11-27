@@ -28,7 +28,11 @@ pub const REPLAY_FEATURES: &[&str] = &[
     "diagnostics",
     "source_switch",
     "cue_next",
+    "source_offsets",
 ];
+
+/// Largest time offset of a source (or a player), ms: 24 h either way.
+pub const MAX_SOURCE_OFFSET_MS: i64 = 86_400_000;
 
 /// Most clips a group's queue holds (`cue_next`).
 pub const MAX_QUEUE_LEN: usize = 64;
@@ -490,7 +494,9 @@ pub struct ReplayAngleState {
     /// No frame rate is known (index, caps, timestamps): nothing of this
     /// angle can be placed on the time axis.
     pub frame_rate_missing: bool,
-    /// Trim: the angle's media is moved this far on the group's axis.
+    /// Trim: the angle's media is moved this far on the group's axis. The
+    /// offset of the source it shows (the flow's `source_offsets_ms`), else
+    /// the player's own `offset_ms`.
     pub offset_ms: i64,
     /// On the group's axis.
     pub extent: Option<ReplayExtent>,
@@ -830,6 +836,24 @@ pub struct ReplayGroupInfo {
     /// The store the angles play from, without credentials (e.g.
     /// `tams+https://gateway.example.com`), when they share one.
     pub source: Option<String>,
+}
+
+/// A flow's time offset per source, ms (`GET`/`PATCH
+/// /api/flows/{id}/source-offsets`): the flow property `source_offsets_ms`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ReplaySourceOffsets {
+    /// Source (`source` or `source_id` as an angle shows it) to offset, ms.
+    pub offsets_ms: std::collections::BTreeMap<String, i64>,
+}
+
+/// A change to a flow's source offsets: each key is set to its value, or
+/// removed with `null`. Sources not named keep theirs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ReplaySourceOffsetsPatch {
+    /// Source to offset, ms, or `null` to remove it.
+    pub offsets_ms: std::collections::BTreeMap<String, Option<i64>>,
 }
 
 /// The replay groups of the server (or of a flow).
