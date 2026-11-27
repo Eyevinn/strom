@@ -9,6 +9,7 @@
 //!   `srtsink`, Strom 0.8.1) (`leaky`).
 //! - `STALL_SYNC`: receiver sinks sync (true).
 //! - `STALL_RUN_S`: how long to watch after the receiver starts (60).
+//! - `STALL_DECODE`: the block's `decode` property (true).
 //! - `STALL_RECEIVER_FIRST`: control, start the receiver 3 s before the
 //!   caller instead (false).
 
@@ -88,6 +89,10 @@ fn build_receiver(port: u16, sync: bool) -> Receiver {
         PropertyValue::String(format!("srt://:{}?mode=listener", port)),
     );
     props.insert("latency".to_string(), PropertyValue::Int(125));
+    props.insert(
+        "decode".to_string(),
+        PropertyValue::Bool(env("STALL_DECODE", true)),
+    );
 
     let ctx = BlockBuildContext::new(vec![], "all".to_string());
     let built = MpegTsSrtInputBuilder
