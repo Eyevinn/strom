@@ -309,11 +309,32 @@ async fn handle(
     flow_id: FlowId,
     group: String,
     held: Weak<timeline::ReplayTimeline>,
-    mut events: tokio::sync::broadcast::Receiver<ReplayEvent>,
+    events: tokio::sync::broadcast::Receiver<ReplayEvent>,
     params: WsParams,
 ) {
-    let (mut tx, mut rx) = socket.split();
+    let (tx, rx) = socket.split();
+    run_socket(tx, rx, flow_id, group, held, events, params).await;
+}
+
+/// The socket's loop, on any sink and stream of messages (a test drives it
+/// with channels). A command's `ack` goes out before the events it caused:
+/// they are sent on a later turn of the loop.
+async fn run_socket<T, R, E>(
+    mut tx: T,
+    mut rx: R,
+    flow_id: FlowId,
+    group: String,
+    held: Weak<timeline::ReplayTimeline>,
+    mut events: tokio::sync::broadcast::Receiver<ReplayEvent>,
+    params: WsParams,
+) where
+    T: futures::Sink<Message> + Unpin,
+    R: futures::Stream<Item = Result<Message, E>> + Unpin,
+{
     let mut tick = tokio::time::interval(params.state_every());
+    // A slow client gets the latest state, not a burst of the ticks it
+    // missed (which would crowd out events and push it into `lagged`).
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let diagnostics = params.diagnostics();
     loop {
         tokio::select! {
@@ -444,6 +465,108 @@ mod tests {
             command_error(CommandError::OutOfRange("x".into())).1.error,
             "out_of_range"
         );
+    }
+
+    /// The socket loop: an `ack` goes out before the event its command
+    /// caused; a socket that fell behind gets `lagged` with the number
+    /// missed, and `event_seq` then goes on without a jump.
+    #[tokio::test]
+    async fn the_socket_acks_before_events_and_reports_lag() {
+        use futures::channel::mpsc;
+        use std::sync::atomic::Ordering;
+        let flow = uuid::Uuid::new_v4();
+        let tl = timeline::get_or_create(flow, "g");
+        let p = Arc::new(timeline::PlayerStats::new("cam0"));
+        let base: i64 = 1_800_000_000_000_000_000;
+        p.start_tai.store(base, Ordering::Relaxed);
+        p.end_tai.store(base + 60_000_000_000, Ordering::Relaxed);
+        p.init_grid(50, 1, base);
+        tl.register_player(&p);
+        let events = tl.subscribe();
+        // More events than the channel holds (64) before the socket reads.
+        let n = 70u64;
+        for _ in 0..n {
+            tl.apply(timeline::Request {
+                command: timeline::Command::Live { margin_ms: None },
+                client_ref: None,
+            })
+            .unwrap();
+        }
+        let (to_server, from_client) =
+            mpsc::unbounded::<Result<Message, std::convert::Infallible>>();
+        let (to_client, mut from_server) = mpsc::unbounded::<Message>();
+        let params = WsParams {
+            diagnostics: None,
+            state_ms: Some(1000),
+        };
+        let task = tokio::spawn(run_socket(
+            to_client,
+            from_client,
+            flow,
+            "g".to_string(),
+            Arc::downgrade(&tl),
+            events,
+            params,
+        ));
+        to_server
+            .unbounded_send(Ok(Message::Text(
+                r#"{"cmd":"live","seq":9,"client_ref":"go"}"#.into(),
+            )))
+            .unwrap();
+        // Read until the command's event has come.
+        let mut got: Vec<serde_json::Value> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !got
+            .iter()
+            .any(|v| v["type"] == "event" && v["client_ref"] == "go")
+        {
+            let m = tokio::time::timeout_at(deadline, from_server.next())
+                .await
+                .expect("the socket stalled")
+                .expect("the socket closed");
+            if let Message::Text(t) = m {
+                let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                if v["type"] != "state" {
+                    got.push(v);
+                }
+            }
+        }
+        drop(to_server);
+        task.await.unwrap();
+        // The lag before any event, with what was missed (the channel keeps
+        // the last 64; the command's own event may be among them).
+        let lag = got
+            .iter()
+            .position(|v| v["type"] == "lagged")
+            .expect("no lagged");
+        let first_event = got.iter().position(|v| v["type"] == "event").unwrap();
+        assert!(lag < first_event, "{:?}", got);
+        let missed = got[lag]["missed"].as_u64().unwrap();
+        assert!(
+            missed == n - 64 || missed == n + 1 - 64,
+            "missed {}",
+            missed
+        );
+        // Then the events it kept, numbered on from the missed ones, no jump.
+        let seqs: Vec<u64> = got
+            .iter()
+            .filter(|v| v["type"] == "event")
+            .map(|v| v["event_seq"].as_u64().unwrap())
+            .collect();
+        let want: Vec<u64> = (missed + 1..=n + 1).collect();
+        assert_eq!(seqs, want);
+        // The ack comes before the event its command caused.
+        let ack = got
+            .iter()
+            .position(|v| v["type"] == "ack" && v["seq"] == 9)
+            .expect("no ack");
+        let ev = got
+            .iter()
+            .position(|v| v["type"] == "event" && v["client_ref"] == "go")
+            .unwrap();
+        assert!(ack < ev, "{:?}", got);
+        assert_eq!(got[ev]["event_seq"], n + 1);
+        tl.unregister_player(&p);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Strom replay diagnostics page, version 2 (replay API v2) -->
+<!-- Strom replay diagnostics page, version 3 (replay API v2) -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -132,7 +132,7 @@
       <button id="startBtn">⏮ start</button>
       <button id="endBtn" title="the live edge, paused">end ⏭</button>
       <button id="liveBtn" title="1× from the live edge minus the margin">LIVE</button>
-      margin <input class="n" id="marginMs" type="number" value="1500" min="0" step="100"> ms
+      margin <input class="n" id="marginMs" type="number" placeholder="auto" min="0" max="60000" step="100" title="Empty: the server's margin. A value sets it for the group for the rest of the run."> ms
     </div>
     <div class="row">
       <input id="gotoUtc" placeholder="HH:MM:SS.mmm or ISO UTC" style="width:220px">
@@ -474,7 +474,12 @@ document.querySelectorAll('[data-jog]').forEach(b => b.onclick = () => jog(+b.da
 document.querySelectorAll('[data-rel]').forEach(b => b.onclick = () => send({ cmd: 'seek', to: { rel_ms: +b.dataset.rel } }, true));
 $('startBtn').onclick = () => last && last.start && send({ cmd: 'seek', to: { t: last.start.tai_ns } }, true);
 $('endBtn').onclick = () => send({ cmd: 'end' }, true);
-$('liveBtn').onclick = () => send({ cmd: 'live', margin_ms: Math.max(0, +$('marginMs').value || 0) });
+// A margin only when one is typed in: `live {margin_ms}` sets it for the
+// whole group for the rest of the run.
+$('liveBtn').onclick = () => {
+  const v = $('marginMs').value.trim();
+  send(v === '' ? { cmd: 'live' } : { cmd: 'live', margin_ms: Math.min(60000, Math.max(0, Math.round(+v) || 0)) });
+};
 
 // A random paused position with media in every angle: inside the common
 // indexed range, away from the gaps.

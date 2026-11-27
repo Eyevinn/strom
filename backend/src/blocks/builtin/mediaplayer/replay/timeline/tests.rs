@@ -1,6 +1,6 @@
 use super::*;
-use strom_types::replay::MAX_CLIENT_REF_LEN;
 use strom_types::replay::{ReplayLiveMarginSource, ReplayTimeDomain};
+use strom_types::replay::{MAX_CLIENT_REF_LEN, MAX_LIVE_MARGIN_SET_MS, MAX_MARK_LABEL_LEN};
 use strom_types::tai::{format_utc_ms, parse_utc, tai_to_utc_ns, utc_to_tai_ns};
 
 const BASE: i64 = 1_800_000_000_000_000_000;
@@ -1227,10 +1227,12 @@ fn live_edge_estimate_runs_smoothly_between_steps() {
     // No step for over three step lengths: the edge stopped growing; the
     // estimate does not step back.
     assert_eq!(t.estimate(8 * S, edge), (edge + S, false));
-    // Repeats change nothing; a jump back starts over.
+    // Repeats change nothing; a jump back starts the steps over, but the
+    // estimate does not go back with it.
     t.observe(9 * S, edge);
     t.observe(9 * S, BASE);
-    assert_eq!(t.estimate(9 * S + 1, BASE), (BASE, false));
+    assert_eq!(t.estimate(9 * S + 1, BASE), (edge + S, false));
+    assert_eq!(t.step(), None);
 }
 
 #[test]

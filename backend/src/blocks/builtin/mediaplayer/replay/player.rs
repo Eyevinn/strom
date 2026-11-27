@@ -515,7 +515,10 @@ impl ReplayPlayer {
         while self.alive() {
             // The group's cursor, in this source's own time.
             let offset = self.stats.offset_ns();
-            if let Some((cursor, speed)) = self.timeline.cursor_now().map(|(t, v)| (t - offset, v))
+            if let Some((cursor, speed)) = self
+                .timeline
+                .cursor_now()
+                .map(|(t, v)| (t.saturating_sub(offset), v))
             {
                 let forward = speed >= 0.0;
                 let (lo, hi) = if forward {
@@ -708,7 +711,7 @@ impl ReplayPlayer {
             if let Some(t) = want_group {
                 self.stats.wanted_tai.store(t, Ordering::Relaxed);
             }
-            let want = want_group.map(|t| t - offset);
+            let want = want_group.map(|t| t.saturating_sub(offset));
             let mut hit =
                 want.and_then(|t| self.frame_holding(t, period_ns).map(|(ft, b)| (ft, t, b)));
             // No frame holds the time: in a hole of the recording, the last
@@ -757,7 +760,7 @@ impl ReplayPlayer {
                 let out = out_buffer(b, rt, fd as i64, *shown_tai, &grid, &tai_caps);
                 let pushed = appsrc.push_buffer(out);
                 if let Some(t) = hit {
-                    self.timeline.note_pushed(rt, t + offset);
+                    self.timeline.note_pushed(rt, t.saturating_add(offset));
                 }
                 if let Err(e) = pushed {
                     debug!("Replay {}: push stopped: {:?}", self.block_id, e);
@@ -869,7 +872,7 @@ impl ReplayPlayer {
                 return Ok(k as u64);
             };
             self.stats.wanted_tai.store(t_group, Ordering::Relaxed);
-            let t = t_group - self.stats.offset_ns();
+            let t = t_group.saturating_sub(self.stats.offset_ns());
             let (ft, b, gap) = self.wait_frame(t, period_ns)?;
             self.stats.set_gap(gap);
             if self.read_strip && gap.is_none() && last_frame != Some(ft) {

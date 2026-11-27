@@ -138,14 +138,30 @@ pub(crate) struct Watch {
     range: Option<RangeSig>,
 }
 
-/// What a `range_changed` is about: the start, the angles that have media,
-/// the holes, and an end that went back.
+/// What a `range_changed` is about: the start, the angles that have media
+/// (which ones, not only how many), the holes, and an end or a live edge that
+/// went back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RangeSig {
     start: i64,
     end: i64,
-    angles: usize,
+    live_end: i64,
+    angles: u64,
     gaps: u64,
+}
+
+/// Which angles have media: their block ids, in any order.
+fn angles_signature(players: &[Arc<PlayerStats>]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    players
+        .iter()
+        .filter(|p| p.extent().is_some())
+        .fold(0u64, |acc, p| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            p.block_id.hash(&mut h);
+            // Order-free; the count tells one angle from the same twice.
+            acc.wrapping_add(h.finish()).wrapping_add(1)
+        })
 }
 
 impl ReplayTimeline {
@@ -158,17 +174,13 @@ impl ReplayTimeline {
 
     /// Send `ready` and `range_changed` when they change, and arm
     /// `start_mode: live` when the group becomes ready.
-    pub(super) fn watch_changes(
-        &self,
-        players: &[Arc<PlayerStats>],
-        b: Option<&Bounds>,
-        with_media: usize,
-    ) {
+    pub(super) fn watch_changes(&self, players: &[Arc<PlayerStats>], b: Option<&Bounds>) {
         let ready = group_ready(players);
         let sig = b.map(|b| RangeSig {
             start: b.start,
             end: b.end,
-            angles: with_media,
+            live_end: b.live_end,
+            angles: angles_signature(players),
             gaps: players.iter().fold(0u64, |h, p| {
                 h.wrapping_mul(31).wrapping_add(p.gaps_signature())
             }),
@@ -196,7 +208,8 @@ impl ReplayTimeline {
         let changed = old.start != sig.start
             || old.angles != sig.angles
             || old.gaps != sig.gaps
-            || sig.end < old.end;
+            || sig.end < old.end
+            || sig.live_end < old.live_end;
         if changed {
             let cause = if sig.start > old.start && old.angles == sig.angles {
                 ReplayCause::Retention

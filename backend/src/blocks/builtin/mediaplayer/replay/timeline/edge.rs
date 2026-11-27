@@ -11,8 +11,9 @@ const EDGE_COALESCE_NS: i64 = 250_000_000;
 /// to which instant was known; the media grows at 1x, so the edge now is at
 /// least `m_now + max(e_k - m_k)` over recent steps (the step seen with the
 /// least delay sets the line). Kept within one step of the known edge, and
-/// only while the edge grows. The estimate never steps back (until the edge
-/// itself goes back: a new run or another source).
+/// only while the edge grows. The estimate never steps back, not even when
+/// the edge itself goes back (another source, an angle with less media): it
+/// holds until the edge passes it again. A new run starts a new tracker.
 #[derive(Debug, Default)]
 pub struct EdgeTracker {
     steps: std::collections::VecDeque<(i64, i64)>,
@@ -25,10 +26,11 @@ impl EdgeTracker {
     pub fn observe(&mut self, mono: i64, edge: i64) {
         match self.steps.back() {
             Some(&(_, last)) if edge == last => return,
-            // Went back: a new run or another source. Start over.
+            // Went back: another source or angle. The steps start over (the
+            // estimate is not growing until the edge has stepped again); the
+            // estimate keeps its floor.
             Some(&(_, last)) if edge < last => {
                 self.steps.clear();
-                self.last = None;
             }
             _ => {}
         }
