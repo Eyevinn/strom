@@ -4,8 +4,9 @@
 
 use super::super::grid::FrameGrid;
 use super::{
-    eval, frame_centre, frame_in, lock, ms_to_ns, nearest_frame_start, ramp_view, Anchor, Applied,
-    Bounds, Clip, EndAction, Ramp, Region, ReplayTimeline, TimeDomain, MAX_RAMP_MS, MAX_SPEED, MS,
+    covering_frame_start, eval, frame_centre, frame_in, lock, ms_to_ns, nearest_frame_start,
+    ramp_view, Anchor, Applied, Bounds, Clip, EndAction, Ramp, Region, ReplayTimeline, TimeDomain,
+    MAX_RAMP_MS, MAX_SPEED, MS,
 };
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -522,9 +523,19 @@ impl ReplayTimeline {
                 clip.speed
             )));
         }
+        // A UTC in-point names the frame that covers it, as the player shows
+        // it, not the nearest frame start: the clip starts with the picture
+        // that was on screen when the in-point was set.
+        let in_point = match (&clip.in_point.utc, self.output_grid(), self.bounds()) {
+            (Some(_), Some(g), Some(b)) => {
+                let t = self.resolve(&clip.in_point, &b, 0, self.time_domain(), None, "clip in")?;
+                ReplayTarget::t(covering_frame_start(&g, t))
+            }
+            _ => clip.in_point.clone(),
+        };
         self.apply_at(
             Command::Cue {
-                in_point: clip.in_point.clone(),
+                in_point,
                 out: clip.out.clone(),
                 end_action: Some(EndAction::Freeze),
                 source: None,

@@ -128,7 +128,7 @@ pub fn media_player_definition() -> BlockDefinition {
             ExposedProperty {
                 name: CLIP_IN_PROPERTY.to_string(),
                 label: "Clip In".to_string(),
-                description: "Offline: first instant of the clip, UTC (2026-11-24T13:21:56.080Z) or TAI (<seconds>:<nanoseconds>)."
+                description: "Offline: the clip starts with the frame that covers this instant, UTC (2026-11-24T13:21:56.080Z) or TAI (<seconds>:<nanoseconds>)."
                     .to_string(),
                 property_type: PropertyType::String,
                 default_value: Some(PropertyValue::String(String::new())),

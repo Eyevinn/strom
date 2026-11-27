@@ -19,6 +19,8 @@
 //! the same player on a frame counter instead of the flow clock, with a
 //! non-live, blocking appsrc, ending the stream at the out point. Follow it
 //! with an encoder, a muxer and a sink with `sync=false` (e.g. `filesink`).
+//! The clip starts with the frame that covers `clip_in`, the frame the player
+//! shows at that instant.
 
 pub mod backoff;
 pub mod cache;
@@ -553,12 +555,6 @@ mod tests {
         assert!(clip_of(&props(&[(PACING_PROPERTY, st("fast"))])).is_err());
     }
 
-    /// Four 1 s segments of 25p H.264 (with B-frames) in MPEG-TS and an
-    /// `index.json`, from TAI `BASE`, under `root/segs`.
-    fn write_segments(root: &std::path::Path) {
-        write_segments_as(root, "segs", "smpte", false);
-    }
-
     /// The same under `root/dir`, of videotestsrc `pattern`; `absolute`:
     /// the index says its times are real TAI.
     fn write_segments_as(root: &std::path::Path, dir: &str, pattern: &str, absolute: bool) {
@@ -609,18 +605,24 @@ mod tests {
     /// Run an offline player over the segments to end of stream: each
     /// buffer's PTS and the TAI of the source frame it shows.
     fn export(speed: f64) -> Vec<(u64, u64)> {
+        export_clip("1800000001:0", "1800000003:0", speed, false)
+    }
+
+    /// The same for the clip `[clip_in, clip_out)`; `absolute`: the
+    /// segments are on real TAI (a UTC in-point needs it).
+    fn export_clip(clip_in: &str, clip_out: &str, speed: f64, absolute: bool) -> Vec<(u64, u64)> {
         gst::init().unwrap();
         let root = tempfile::tempdir().unwrap();
-        write_segments(root.path());
+        write_segments_as(root.path(), "segs", "smpte", absolute);
         let props = props(&[
             ("_media_path", st(root.path().to_str().unwrap())),
             (SOURCE_PROPERTY, st("segs")),
             (PACING_PROPERTY, st("offline")),
-            (CLIP_IN_PROPERTY, st("1800000001:0")),
-            (CLIP_OUT_PROPERTY, st("1800000003:0")),
+            (CLIP_IN_PROPERTY, st(clip_in)),
+            (CLIP_OUT_PROPERTY, st(clip_out)),
             (CLIP_SPEED_PROPERTY, PropertyValue::Float(speed)),
         ]);
-        let built = build(&format!("export_test_{}", speed), &props).unwrap();
+        let built = build(&format!("export_test_{}_{}", clip_in, speed), &props).unwrap();
         let pipeline = gst::Pipeline::new();
         let mut elements = HashMap::new();
         for (id, e) in &built.elements {
@@ -689,6 +691,25 @@ mod tests {
             assert_eq!(*pts, k * 40_000_000);
             assert_eq!(*tai, 1_800_000_001_000_000_000 + k / 2 * 40_000_000);
         }
+    }
+
+    /// The first frame of the file is the one that covers the in-point (the
+    /// latest frame that starts at or before it), as the player shows it,
+    /// not the first frame that starts after it.
+    #[test]
+    fn an_offline_clip_starts_with_the_frame_that_covers_the_in_point() {
+        // TAI 1.030 s is inside the frame that starts at 1.000 s (25p).
+        let frames = export_clip("1800000001:030000000", "1800000002:0", 1.0, false);
+        assert_eq!(frames[0].1, 1_800_000_001_000_000_000);
+        assert_eq!(frames.len(), 25);
+        // Late in a frame, as UTC with milliseconds: 1.035 s is in the same
+        // frame, which starts at 1.000 s.
+        let utc = strom_types::tai::format_utc_ms(strom_types::tai::tai_to_utc_ns(
+            1_800_000_001_035_000_000,
+        ));
+        let frames = export_clip(&utc, "1800000002:0", 1.0, true);
+        assert_eq!(frames[0].1, 1_800_000_001_000_000_000);
+        assert_eq!(frames.len(), 25);
     }
 
     /// A switch stays in the player's store: a TAMS player does not take a
