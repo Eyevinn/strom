@@ -7,10 +7,12 @@
 //!
 //! Contract (verified against the tams-gateway source):
 //! - `PUT  /flows/{id}`           create/replace a flow (auto-creates its source)
-//! - `POST /flows/{id}/storage`   allocate media objects, returns presigned PUT URLs
+//! - `POST /flows/{id}/storage`   allocate media objects (`limit` per request),
+//!   returns presigned PUT URLs
 //! - `PUT  <presigned url>`       upload the segment bytes to S3
 //! - `POST /flows/{id}/segments`  register a segment on the flow timeline, with
-//!   an `X-Idempotency-Key` derived from the segment (required by some stores)
+//!   an `X-Idempotency-Key` derived from the segment (required by some stores);
+//!   the body may be an array of segments (the drainer registers in batches)
 //! - `GET  /flows/{id}/segments?timerange=[..)`  list segments (presigned GET URLs)
 //! - `GET  /flows/{id}`           read a flow (frame rate, container)
 //!
@@ -29,7 +31,7 @@
 use crate::client_auth::{redact_url, same_origin, same_origin_redirects, AuthMethod};
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::warn;
 
@@ -185,8 +187,10 @@ impl HttpStatusError {
     }
 }
 
-/// Metadata describing a flow to create on the gateway.
-#[derive(Debug, Clone)]
+/// Metadata describing a flow to create on the gateway. Serializable so a
+/// park manifest can register the flow when its block is not running (see
+/// `crate::tams::drain`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowSpec {
     pub flow_id: String,
     pub source_id: String,
@@ -225,7 +229,7 @@ pub struct FlowSpec {
 /// (free text, e.g. `video`, `PGM`, `IS`) and its `container_mapping` (where
 /// its essence is in the collecting flow's container; an empty map is left
 /// out).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CollectionItem {
     pub id: String,
     pub role: String,
@@ -236,7 +240,7 @@ pub struct CollectionItem {
 /// container: it has no segments of its own. `spec` is registered with the
 /// essence detected for `track` (see `DetectedEssence::tracks`), and the
 /// collection item gets `container_mapping` plus the track's channel range.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectedFlow {
     /// Key into `DetectedEssence::tracks` (`video`, `audio-0`, ...).
     pub track: String,
@@ -459,8 +463,23 @@ impl TamsClient {
         flow_id: &str,
         content_type: &str,
     ) -> Result<AllocatedObject> {
+        self.allocate_objects(flow_id, content_type, 1)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("gateway returned no media objects"))
+    }
+
+    /// Allocate up to `limit` media objects in one request (TAMS `limit`).
+    /// The store may return fewer; never more than `limit` are returned.
+    pub async fn allocate_objects(
+        &self,
+        flow_id: &str,
+        content_type: &str,
+        limit: usize,
+    ) -> Result<Vec<AllocatedObject>> {
         let url = self.url(&format!("/flows/{}/storage", flow_id))?;
-        let body = serde_json::json!({ "limit": 1, "content_type": content_type });
+        let body = serde_json::json!({ "limit": limit, "content_type": content_type });
         let context = format!("POST {}", redact_url(url.as_str()));
         let resp = self
             .send_authed(reqwest::Method::POST, url, Some(&body), &[])
@@ -469,16 +488,16 @@ impl TamsClient {
             return Err(status_error(resp, context).await);
         }
         let parsed: StorageResponse = resp.json().await.context("parsing storage response")?;
-        let obj = parsed
+        Ok(parsed
             .media_objects
             .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("gateway returned no media objects"))?;
-        Ok(AllocatedObject {
-            object_id: obj.object_id,
-            put_url: obj.put_url.url,
-            content_type: obj.put_url.content_type,
-        })
+            .take(limit)
+            .map(|obj| AllocatedObject {
+                object_id: obj.object_id,
+                put_url: obj.put_url.url,
+                content_type: obj.put_url.content_type,
+            })
+            .collect())
     }
 
     /// Upload segment bytes to a presigned S3 PUT URL.
@@ -534,6 +553,70 @@ impl TamsClient {
             return Err(status_error(resp, context).await);
         }
         Ok(())
+    }
+
+    /// Register several segments in one request (a JSON array, as the TAMS
+    /// spec allows). Returns the `(object_id, timerange)` of each segment the
+    /// store reports as failed (a 200 with `failed_segments`); empty when all
+    /// are registered (201).
+    pub async fn register_segments(
+        &self,
+        flow_id: &str,
+        segments: &[(String, String)],
+    ) -> Result<Vec<(String, Option<String>)>> {
+        #[derive(Deserialize)]
+        struct Failed {
+            object_id: String,
+            #[serde(default)]
+            timerange: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct FailedBody {
+            #[serde(default)]
+            failed_segments: Vec<Failed>,
+        }
+        let url = self.url(&format!("/flows/{}/segments", flow_id))?;
+        let body = serde_json::Value::Array(
+            segments
+                .iter()
+                .map(|(o, t)| serde_json::json!({ "object_id": o, "timerange": t }))
+                .collect(),
+        );
+        let context = format!("POST {}", redact_url(url.as_str()));
+        // One key for the whole batch, derived from what it registers, so a
+        // retry of the same batch sends the same key.
+        let key = segment_idempotency_key(
+            flow_id,
+            &segments
+                .iter()
+                .map(|(o, t)| format!("{}@{}", o, t))
+                .collect::<Vec<_>>()
+                .join(","),
+            "batch",
+        );
+        let resp = self
+            .send_authed(
+                reqwest::Method::POST,
+                url,
+                Some(&body),
+                &[(IDEMPOTENCY_KEY_HEADER, key)],
+            )
+            .await?;
+        let status = resp.status();
+        if status.as_u16() == 200 {
+            let text = resp.text().await.unwrap_or_default();
+            let failed: FailedBody = serde_json::from_str(&text)
+                .with_context(|| format!("parsing failed_segments of {}", context))?;
+            return Ok(failed
+                .failed_segments
+                .into_iter()
+                .map(|f| (f.object_id, f.timerange))
+                .collect());
+        }
+        if !status.is_success() {
+            return Err(status_error(resp, context).await);
+        }
+        Ok(Vec::new())
     }
 }
 
@@ -643,6 +726,11 @@ impl TamsClient {
     /// Base URL without trailing slash.
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// How the client authenticates.
+    pub fn auth(&self) -> &AuthMethod {
+        &self.auth
     }
 
     /// `GET /flows/{id}` as JSON.
