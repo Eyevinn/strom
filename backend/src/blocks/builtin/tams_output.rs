@@ -313,10 +313,11 @@ pub fn tams_id_key(instance_id: &str, properties: &HashMap<String, PropertyValue
 }
 
 /// The segment directory of the TAMS flow chain `suffix` (`video`, `audio-0`,
-/// `mux`) of the block whose TAMS ids derive from `key` (see [`tams_id_key`]):
-/// [`crate::tams::park::flow_dir`] of the TAMS flow that chain writes.
-pub fn segment_dir(key: &str, suffix: &str) -> std::path::PathBuf {
-    crate::tams::park::flow_dir(&derive_id(key, suffix))
+/// `mux`) of the block whose TAMS ids derive from `key` (see [`tams_id_key`]),
+/// writing to `gateway_url`: [`crate::tams::park::flow_dir`] of the TAMS flow
+/// that chain writes.
+pub fn segment_dir(gateway_url: &str, key: &str, suffix: &str) -> std::path::PathBuf {
+    crate::tams::park::flow_dir(gateway_url, &derive_id(key, suffix))
 }
 
 /// The TAMS flow ids a block writes to (registers, or uploads segments to),
@@ -798,9 +799,10 @@ fn build_flow_chain(
     }
 
     // Directory for this TAMS flow's segment files, parked ones included. Keyed
-    // by the TAMS flow id, so a backlog survives a restart of Strom and a
-    // recreated Strom flow (see `crate::tams::park`).
-    let temp_dir = crate::tams::park::flow_dir(&spec.flow_id);
+    // by the TAMS flow id and the gateway, so a backlog survives a restart of
+    // Strom and a recreated Strom flow, and is never pointed at another
+    // gateway (see `crate::tams::park`).
+    let temp_dir = crate::tams::park::flow_dir(&gateway_url, &spec.flow_id);
     if let Err(e) = std::fs::create_dir_all(&temp_dir) {
         return Err(BlockBuildError::InvalidConfiguration(format!(
             "TAMS Output: cannot create segment dir {} (STROM_TAMS_PARK_DIR): {}",
@@ -1982,7 +1984,8 @@ mod tests {
                 written_flow_ids("b7c1e0f2-random-1", container, 1, 2)
             );
         }
-        assert_eq!(segment_dir(&a, "mux"), segment_dir(&b, "mux"));
+        let gw = "https://gw.example";
+        assert_eq!(segment_dir(gw, &a, "mux"), segment_dir(gw, &b, "mux"));
         assert_eq!(
             derive_id(&a, "source"),
             Uuid::new_v5(&TAMS_NAMESPACE, b"prod-42/cam1:source").to_string()

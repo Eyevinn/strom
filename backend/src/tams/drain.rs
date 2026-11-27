@@ -1509,6 +1509,67 @@ mod tests {
         assert_eq!(store.registered.lock().unwrap().len(), 1);
     }
 
+    /// A backlog parked for one gateway, then a run of the same TAMS flow on
+    /// another gateway that parks too: each directory keeps its own manifest,
+    /// and each backlog goes to its own gateway. (With one directory per TAMS
+    /// flow the second run's manifest pointed the first backlog at the second
+    /// gateway, and the drainer kept it for ever.)
+    #[tokio::test]
+    async fn tams_drain_uploads_a_backlog_to_its_own_gateway_after_a_gateway_change() {
+        use crate::tams::park::flow_dir_in;
+        let (s1, s2) = (Store::default(), Store::default());
+        let gw1 = start_store(s1.clone()).await;
+        let gw2 = start_store(s2.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let p = parking(root, u64::MAX);
+        // As the uploader does: the manifest in the flow's directory, then
+        // a segment parked there with its target in the sidecar.
+        let run = |gw: &str, start_s: u64| {
+            let dir = flow_dir_in(root, gw, "fa");
+            let m = Manifest {
+                gateway: ParkTarget::new(gw, "fa").gateway,
+                tams_flow_id: "fa".into(),
+                strom_flow_id: FlowId::new_v4(),
+                block_id: "out".into(),
+                content_type: "video/mp2t".into(),
+                auth: AuthRef::None,
+                flow_spec: spec("fa"),
+                detected: DetectedEssence::default(),
+            };
+            write_manifest_file(&dir, &serde_json::to_string(&m).unwrap()).unwrap();
+            let seg = dir.join(format!("seg_r{}_{:05}.ts", start_s, start_s));
+            std::fs::write(&seg, [0u8; 100]).unwrap();
+            let start = start_s * 1_000_000_000;
+            let target = ParkTarget::new(gw, "fa");
+            p.park(
+                &seg,
+                start,
+                &sidecar_contents(start, start + 1_000_000_000, &target),
+            )
+            .unwrap();
+            seg
+        };
+        let old = run(&gw1, 10);
+        let new = run(&gw2, 20);
+        let mut d = drainer(p, leak(LiveBusy::new()));
+        for _ in 0..2 {
+            assert_eq!(d.step().await, Step::Tried);
+        }
+        assert!(matches!(d.step().await, Step::Idle(_)));
+        assert!(!old.exists() && !new.exists());
+        let starts = |s: &Store| -> Vec<u64> {
+            s.registered
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, tr)| start_s(tr))
+                .collect()
+        };
+        assert_eq!(starts(&s1), vec![10]);
+        assert_eq!(starts(&s2), vec![20]);
+    }
+
     /// A parked segment that cannot be read for a reason other than being
     /// gone (here: a directory in its place, as an I/O error would) is kept
     /// with its sidecar, and tried again after its backoff.

@@ -4,17 +4,24 @@
 //! Strom, and of the machine, to be uploaded later, so the files live under
 //! Strom's data directory rather than the system temp directory:
 //!
-//! `<root>/<tams flow id>`
+//! `<root>/<tams flow id>_<gateway hash>`
 //!
 //! - `<root>` is `STROM_TAMS_PARK_DIR` when set, else `<data_dir>/tams-park`,
 //!   else (no data directory known, e.g. a bare builder in a test)
 //!   `<temp_dir>/strom-tams-park`.
-//! - One directory per TAMS flow the block writes to, named by its id. The
-//!   TAMS flow id is the recording's identity: it survives a restart of the
-//!   Strom flow, and a production that recreates its Strom flow (new flow id,
-//!   new random block ids) with the same TAMS ids finds its backlog again. A
-//!   Strom flow id or block id in the path would orphan that backlog. Two
-//!   running blocks never write one TAMS flow (see `crate::tams::flow_claims`).
+//! - One directory per TAMS flow the block writes to and gateway it writes
+//!   it on, named by the flow id and a hash of the gateway URL (without
+//!   credentials). The TAMS flow id is the recording's identity: it survives
+//!   a restart of the Strom flow, and a production that recreates its Strom
+//!   flow (new flow id, new random block ids) with the same TAMS ids finds its
+//!   backlog again. A Strom flow id or block id in the path would orphan that
+//!   backlog. The gateway is in it because the directory's `park.json` names
+//!   one gateway: a run that writes the same TAMS flow on another gateway
+//!   would otherwise point a backlog parked for the first one at the second,
+//!   and the drainer would keep it for ever. Two running blocks never write
+//!   one TAMS flow (see `crate::tams::flow_claims`).
+//! - Directories named by the flow id alone (before the gateway was in the
+//!   name) are drained as before, by their own `park.json`.
 //!
 //! Directories of the old layout (`<temp_dir>/strom-tams-<block>-<suffix>`) are
 //! not migrated; [`init`] warns once at startup when they still hold parked
@@ -111,9 +118,31 @@ pub fn root() -> PathBuf {
     }
 }
 
-/// The segment directory of the TAMS flow `tams_flow_id`.
-pub fn flow_dir(tams_flow_id: &str) -> PathBuf {
-    root().join(sanitize(tams_flow_id))
+/// The segment directory of the TAMS flow `tams_flow_id` on the gateway
+/// `gateway_url`.
+pub fn flow_dir(gateway_url: &str, tams_flow_id: &str) -> PathBuf {
+    flow_dir_in(&root(), gateway_url, tams_flow_id)
+}
+
+/// [`flow_dir`] under `root`: `<tams flow id>_<gateway>`, the gateway as a
+/// hash of its URL without credentials. One directory has one target, so the
+/// manifest a run writes there never points a backlog parked for another
+/// gateway elsewhere.
+pub fn flow_dir_in(root: &Path, gateway_url: &str, tams_flow_id: &str) -> PathBuf {
+    let target = ParkTarget::new(gateway_url, tams_flow_id);
+    root.join(format!(
+        "{}_{:016x}",
+        sanitize(tams_flow_id),
+        fnv1a64(target.gateway.as_bytes())
+    ))
+}
+
+/// FNV-1a, 64 bits: stable across builds and platforms, unlike the std
+/// hasher, so a directory name stays the same across upgrades.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// A path component from an id: letters, digits, `-` and `_` are kept, all
@@ -365,6 +394,10 @@ struct State {
     /// is recorded, so the scan's merge does not bring it back.
     scanning: bool,
     removed_while_scanning: HashSet<PathBuf>,
+    /// When each segment was forgotten (uploaded or given up), so a rescan
+    /// that listed it before it went does not bring it back (see
+    /// [`Parking::sync_dir`]). Pruned by each rescan.
+    forgotten: HashMap<PathBuf, Instant>,
     total: u64,
     space: Option<(Instant, Option<Space>)>,
     /// Last usage warning: its level and when.
@@ -714,12 +747,16 @@ impl Parking {
 
     /// Forget a parked segment that was deleted (uploaded, or given up).
     pub fn forget(&self, segment: &Path) {
-        self.lock().remove(segment);
+        let mut st = self.lock();
+        st.remove(segment);
+        st.forgotten.insert(segment.to_path_buf(), Instant::now());
     }
 
     /// Replace what the index knows of `dir` with a fresh scan of it, taken
     /// at `scanned_at`: corrects segments deleted or added behind its back.
-    /// A segment parked after the scan began is kept.
+    /// A segment parked after the scan began is kept, and one forgotten after
+    /// it began (the drainer uploaded it while the scan ran) is not brought
+    /// back.
     pub(crate) fn sync_dir(
         &self,
         dir: &Path,
@@ -739,7 +776,8 @@ impl Parking {
             st.remove(&p);
         }
         for p in parked {
-            if !st.entries.contains_key(&p.path) {
+            let gone_since = st.forgotten.get(&p.path).is_some_and(|t| *t >= scanned_at);
+            if !gone_since && !st.entries.contains_key(&p.path) {
                 st.insert(
                     p.path,
                     Entry {
@@ -752,6 +790,9 @@ impl Parking {
                 );
             }
         }
+        // Rescans run one directory at a time: what was forgotten before
+        // this one began can no longer be in a listing still to come.
+        st.forgotten.retain(|_, t| *t >= scanned_at);
     }
 
     /// The flow directories that hold parked segments, in order.
@@ -867,11 +908,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tams_park_dir_is_one_level_per_tams_flow() {
+    fn tams_park_dir_is_one_level_per_tams_flow_and_gateway() {
         let id = "6f1c2a4e-0b7d-5c3e-9a1f-2d4b6c8e0a1b";
-        assert_eq!(flow_dir(id), root().join(id));
+        let gw = "https://gw.example/tams";
+        let dir = flow_dir(gw, id);
+        assert_eq!(dir.parent(), Some(root().as_path()));
+        assert!(dir.file_name().unwrap().to_string_lossy().starts_with(id));
+        // The same gateway, written another way, is the same directory.
+        assert_eq!(flow_dir("https://user:secret@gw.example/tams/", id), dir);
+        // Another gateway is another directory.
+        assert_ne!(flow_dir("https://other.example/tams", id), dir);
         // An id never escapes the root or adds a level.
-        let odd = flow_dir("../x/y");
+        let odd = flow_dir(gw, "../x/y");
         assert_eq!(odd.strip_prefix(root()).unwrap().iter().count(), 1);
     }
 
@@ -999,6 +1047,48 @@ mod tests {
         assert!(!b20.exists() && !a30.exists());
         assert!(!crate::tams::uploader::sidecar_path(&b40).exists());
         assert_eq!(p.total_bytes(), 0);
+    }
+
+    /// A rescan lists a segment, the drainer uploads and forgets it, and the
+    /// rescan's result comes in after: the segment is not brought back, so
+    /// the total does not count it and no older segment is deleted for it.
+    #[test]
+    fn tams_sync_does_not_bring_back_a_segment_forgotten_meanwhile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let p = Parking::new(root.into(), None, Box::new(fake(u64::MAX)));
+        let (a10, _) = park_one(&p, root, "a", 10);
+        let (a20, _) = park_one(&p, root, "a", 20);
+        let listed = |seg: &Path, start_s: u64| crate::tams::uploader::Parked {
+            path: seg.to_path_buf(),
+            start_ns: start_s * 1_000_000_000,
+            end_ns: (start_s + 1) * 1_000_000_000,
+            target: None,
+            bytes: 100,
+        };
+        // The rescan begins and lists both.
+        let scanned_at = Instant::now();
+        let scan = vec![listed(&a10, 10), listed(&a20, 20)];
+        // Meanwhile the drainer uploads a10.
+        std::fs::remove_file(&a10).unwrap();
+        p.forget(&a10);
+        p.sync_dir(&root.join("a"), scanned_at, scan);
+        assert_eq!(p.total_bytes(), 100);
+        let page: Vec<PathBuf> = p
+            .page(&root.join("a"), None, 10)
+            .into_iter()
+            .map(|s| s.path)
+            .collect();
+        assert_eq!(page, vec![a20.clone()]);
+        // A later rescan that finds it on disk again (it was not deleted
+        // after all) takes it in.
+        std::fs::write(&a10, [0u8; 100]).unwrap();
+        p.sync_dir(
+            &root.join("a"),
+            Instant::now(),
+            vec![listed(&a10, 10), listed(&a20, 20)],
+        );
+        assert_eq!(p.total_bytes(), 200);
     }
 
     /// A segment parked again (a drain retry that failed) is on disk and
