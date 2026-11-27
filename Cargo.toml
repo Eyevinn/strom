@@ -32,6 +32,7 @@ gstreamer-base = { version = "0.25", features = ["v1_22"] }
 gstreamer-controller = { version = "0.25", features = ["v1_22"] }
 gstreamer-net = { version = "0.25", features = ["v1_22"] }
 gstreamer-rtp = { version = "0.25", features = ["v1_22"] }
+gstreamer-tag = { version = "0.25", features = ["v1_22"] }
 gstreamer-gl = { version = "0.25", features = ["v1_22"] }
 gstreamer-video = { version = "0.25", features = ["v1_22"] }
 gstreamer-webrtc = { version = "0.25", features = ["v1_22"] }
