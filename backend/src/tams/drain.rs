@@ -786,7 +786,8 @@ impl Drainer {
         let outcome = upload_segment(&mut ctx, frag, RECOVERY_ATTEMPTS, true).await;
         flow.auth_reported_at = ctx.auth_reported_at;
         if outcome == Outcome::Unreadable {
-            // A sidecar without readable bytes is useless.
+            // A sidecar whose segment is gone is useless. A segment that
+            // could not be read for another reason is kept and tried again.
             discard_segment(&frag.path).await;
         }
         outcome
@@ -795,6 +796,16 @@ impl Drainer {
     fn after_upload(&mut self, dir: &Path, gateway: &str, path: &Path, outcome: Outcome) {
         let now = Instant::now();
         match outcome {
+            Outcome::ReadFailed => {
+                // A local problem: the segment waits out its own backoff; the
+                // gateway is not to blame.
+                let retry = self.retries.entry(path.to_path_buf()).or_insert(Retry {
+                    failures: 0,
+                    next: now,
+                });
+                retry.failures += 1;
+                retry.next = now + parked_backoff(retry.failures);
+            }
             Outcome::Parked => {
                 let retry = self.retries.entry(path.to_path_buf()).or_insert(Retry {
                     failures: 0,
@@ -1253,6 +1264,32 @@ mod tests {
         assert!(matches!(d.step().await, Step::Idle(_)));
         assert!(foreign.exists());
         assert_eq!(store.registered.lock().unwrap().len(), 1);
+    }
+
+    /// A parked segment that cannot be read for a reason other than being
+    /// gone (here: a directory in its place, as an I/O error would) is kept
+    /// with its sidecar, and tried again after its backoff.
+    #[tokio::test]
+    async fn tams_drain_keeps_a_segment_it_could_not_read() {
+        let store = Store::default();
+        let gw = start_store(store.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let p = parking(&root, u64::MAX);
+        let m = manifest(&root, &gw, "fa", AuthRef::None);
+        let seg = park(p, &root, &gw, "fa", 10);
+        std::fs::remove_file(&seg).unwrap();
+        std::fs::create_dir(&seg).unwrap();
+        let mut d = drainer(p, leak(LiveBusy::new()));
+
+        assert_eq!(d.step().await, Step::Tried);
+        assert!(
+            sidecar_path(&seg).exists(),
+            "the parked segment was deleted"
+        );
+        assert!(d.retries.contains_key(&seg));
+        assert_eq!(d.gateways.get(&m.gateway).map_or(0, |g| g.failures), 0);
+        assert!(matches!(d.step().await, Step::Idle(w) if w > Duration::from_secs(1)));
     }
 
     #[test]

@@ -895,8 +895,11 @@ pub(crate) enum Outcome {
     Parked,
     /// Rejected for good, or could not be parked; deleted.
     Dropped,
-    /// Its file could not be read; left to the caller.
+    /// Its file is gone; left to the caller.
     Unreadable,
+    /// Its file could not be read for another reason (`EIO`, `EMFILE`, ...),
+    /// which may pass; kept, left to the caller.
+    ReadFailed,
 }
 
 /// Why an upload failed, and so what to do with the segment.
@@ -948,7 +951,11 @@ pub(crate) async fn upload_segment(
             let msg = format!("reading segment {}: {}", frag.path.display(), e);
             error!("TAMS {}: {}", ctx.block_id, msg);
             emit_error(ctx.events, ctx.strom_flow_id, ctx.block_id, msg);
-            return Outcome::Unreadable;
+            return if e.kind() == std::io::ErrorKind::NotFound {
+                Outcome::Unreadable
+            } else {
+                Outcome::ReadFailed
+            };
         }
     };
     debug!(
