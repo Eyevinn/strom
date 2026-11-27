@@ -1802,6 +1802,31 @@ mod flow_claims {
     }
 }
 
+/// The harness turns the parking limits off, so a park in these tests never
+/// depends on the host disk's free space (a CI runner after a full build is
+/// often below the default floor). Parks through the streaming side's path,
+/// which goes through the limits like every park.
+#[test]
+fn tams_parking_in_tests_does_not_depend_on_the_host_disk() {
+    use strom::tams::uploader::{park_on_disk, FragmentReady, ParkTarget};
+    common::init_static_plugins();
+    let flow = format!("harness-{}", uuid::Uuid::new_v4().simple());
+    let dir = strom::tams::park::flow_dir(&flow);
+    std::fs::create_dir_all(&dir).unwrap();
+    let segment = dir.join("seg_r1_00001.ts");
+    std::fs::write(&segment, [0u8; 188]).unwrap();
+    let frag = FragmentReady {
+        path: segment.clone(),
+        start_ns: 1_000_000_000,
+        end_ns: 2_000_000_000,
+    };
+    let parked = park_on_disk(&frag, &ParkTarget::new(UNREACHABLE_GATEWAY, &flow));
+    let sidecar_exists = dir.join("seg_r1_00001.ts.meta").exists();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(parked.is_ok(), "{}", parked.unwrap_err());
+    assert!(sidecar_exists);
+}
+
 /// OSC PAT/SAT mode mints a SAT and sends it to `gateway_url`. An explicit
 /// `osc_service_id` used to skip the host check, so a flow could name any host
 /// and collect the instance's SAT (review of #1286).
