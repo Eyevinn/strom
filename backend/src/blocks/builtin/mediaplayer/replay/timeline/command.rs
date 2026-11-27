@@ -120,7 +120,7 @@ impl ReplayTimeline {
     /// The instant a command names. Exactly one field; `rel_ms` counts from
     /// `cursor`; `utc` names the start of the frame of `output` (the grid
     /// the API's timecodes are on) nearest it. Not clamped to the media.
-    fn resolve(
+    pub(super) fn resolve(
         &self,
         at: &ReplayTarget,
         b: &Bounds,
@@ -251,6 +251,9 @@ impl ReplayTimeline {
                 mark: Some(mark),
                 client_ref,
             });
+        }
+        if let Command::CueNext { .. } | Command::ClearQueue {} = cmd {
+            return self.apply_queue(cmd, client_ref, now, &b, self.output_grid());
         }
         if let Command::Source { .. } = cmd {
             // The switch is the player's (see `apply`): the motion stays.
@@ -451,7 +454,10 @@ impl ReplayTimeline {
                 ramp = a.ramp_left(now);
                 (cur, cur_speed, Cue::Keep)
             }
-            Command::Mark { .. } | Command::Source { .. } => unreachable!("handled above"),
+            Command::Mark { .. }
+            | Command::Source { .. }
+            | Command::CueNext { .. }
+            | Command::ClearQueue {} => unreachable!("handled above"),
         };
         // Clamp to the media, so later moves start from what is shown, then
         // keep the cue only if it holds the cursor.
@@ -485,6 +491,16 @@ impl ReplayTimeline {
                 *r = None;
             } else if let Some(new) = cue_ref {
                 *r = new;
+            }
+        }
+        {
+            // `live` and `end` leave clip play: the queue goes. Otherwise the
+            // clip the queue started stays while its cue is held.
+            let mut q = lock(&self.queue);
+            match &cmd {
+                Command::Live { .. } | Command::End {} => q.clear(),
+                Command::Cue { .. } | Command::Play { until: Some(_), .. } => q.commanded(false),
+                _ => q.commanded(region.is_some()),
             }
         }
         // `follow_live` does not change the motion: the line's ref stays.

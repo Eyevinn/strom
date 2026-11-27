@@ -578,6 +578,10 @@ pub struct Fetcher {
     coded_budget: u64,
     /// How often the start of a growing source is looked up.
     first_every: Duration,
+    /// Fetch around this group time instead of the cursor, as if play went
+    /// forward from it: a clip queued to play next, prepared while the
+    /// current one plays.
+    aim: Mutex<Option<i64>>,
 }
 
 impl Fetcher {
@@ -604,6 +608,7 @@ impl Fetcher {
                 .unwrap_or(DEFAULT_CODED_BUDGET_MB)
                 .saturating_mul(1 << 20),
             first_every: FIRST_POLL,
+            aim: Mutex::new(None),
         }
     }
 
@@ -619,6 +624,17 @@ impl Fetcher {
         let mut s = lock(&self.stats);
         adopt(&s, &to);
         *s = to;
+    }
+
+    /// Fetch around group time `t` (forward) instead of the cursor; `None`
+    /// follows the cursor again.
+    pub fn set_aim(&self, t: Option<i64>) {
+        *lock(&self.aim) = t;
+    }
+
+    /// The group time fetched around instead of the cursor, if any.
+    pub fn aim(&self) -> Option<i64> {
+        *lock(&self.aim)
     }
 
     /// Why the source cannot be played, once the fetcher has found out.
@@ -785,10 +801,13 @@ impl Fetcher {
             // Where the group is, or this angle's start before it knows.
             let rt = self.timeline.now_rt();
             // In this source's own time (the group's minus the trim).
-            let (cursor, speed) = self
-                .timeline
-                .cursor_tai(rt)
-                .map_or((start, 0.0), |(t, v)| (t - self.stats().offset_ns(), v));
+            let (cursor, speed) = match self.aim() {
+                Some(t) => (t - self.stats().offset_ns(), 1.0),
+                None => self
+                    .timeline
+                    .cursor_tai(rt)
+                    .map_or((start, 0.0), |(t, v)| (t - self.stats().offset_ns(), v)),
+            };
             let forward = speed >= 0.0;
             // Offline play only goes forward: nothing behind the cursor is
             // needed again.

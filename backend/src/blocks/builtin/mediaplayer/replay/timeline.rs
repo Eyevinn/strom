@@ -35,12 +35,14 @@
 
 mod command;
 mod edge;
+mod queue;
 mod state;
 mod stats;
 mod switch;
 
 pub use command::{parse_command, take_client_ref, Command, CommandError, Request};
 pub use edge::EdgeTracker;
+pub use queue::QueueItem;
 pub use stats::{
     DecodeRecord, IndexView, PlayerConfig, PlayerStats, SourceIdent, StartMode, READY_TICKS,
 };
@@ -533,6 +535,9 @@ pub struct ReplayTimeline {
     watch: Mutex<state::Watch>,
     /// Number of the next event.
     event_seq: Mutex<u64>,
+    /// The clip queue (`cue_next`). Taken after `anchor`; nothing else is
+    /// taken while it is held.
+    queue: Mutex<queue::Queue>,
     /// What the group does by itself (a bounded play ends, it goes live).
     events: tokio::sync::broadcast::Sender<ReplayEvent>,
 }
@@ -615,6 +620,7 @@ impl ReplayTimeline {
             resume_live: AtomicBool::new(false),
             watch: Mutex::new(state::Watch::default()),
             event_seq: Mutex::new(0),
+            queue: Mutex::new(queue::Queue::default()),
             events: tokio::sync::broadcast::channel(64).0,
         }
     }
@@ -671,6 +677,7 @@ impl ReplayTimeline {
             self.start_live.store(false, Ordering::Relaxed);
             self.resume_live.store(false, Ordering::Relaxed);
             *lock(&self.watch) = state::Watch::default();
+            lock(&self.queue).clear();
             self.cmd_to_push_us.store(0, Ordering::Relaxed);
         }
         lock(&self.players).push(Arc::downgrade(stats));
@@ -1048,6 +1055,17 @@ impl ReplayTimeline {
             );
             return (to, 1.0);
         }
+        if rt < a.rt {
+            // A tick from before the last swap of the queue, asking after
+            // it: the clip it belongs to.
+            if let Some(prev) = self.line_before(a, rt) {
+                let growing = prev.region.is_some_and(|r| r.end > b.end) && l.growing;
+                let e = eval(&prev, rt, b, Live { growing, ..l });
+                return (e.tai, e.speed);
+            }
+        }
+        // The cue's out reached with a clip queued: the clip starts.
+        self.run_queue(a, rt, b, l.growing);
         let growing = a.region.is_some_and(|r| r.end > b.end) && l.growing;
         let e = eval(a, rt, b, Live { growing, ..l });
         let Some(hit) = e.hit else {
@@ -1127,6 +1145,7 @@ impl ReplayTimeline {
             live,
             catch_up: false,
         };
+        lock(&self.queue).commanded(region.is_some());
         let at = self.view().instant(to);
         let kind = if kind_live {
             ReplayEventKind::Live { at }

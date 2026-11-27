@@ -43,7 +43,7 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -220,6 +220,9 @@ pub struct ReplayPlayer {
     read_strip: bool,
     started: AtomicBool,
     stop: Arc<AtomicBool>,
+    /// The last queued clip a lane was prepared for (see
+    /// `prepare_queued`): each clip is prepared once.
+    prepared: AtomicU64,
 }
 
 impl ReplayPlayer {
@@ -272,7 +275,7 @@ impl ReplayPlayer {
         let player = Arc::new(Self {
             block_id: block_id.to_string(),
             lanes: Mutex::new(Lanes {
-                current: Lane::new(fetcher, uri, ident, None),
+                current: Lane::new(fetcher, uri, ident, None, 0, false),
                 pending: None,
             }),
             switching,
@@ -297,6 +300,7 @@ impl ReplayPlayer {
                 .is_some_and(|v| v == "1" || v == "true"),
             started: AtomicBool::new(false),
             stop: Arc::new(AtomicBool::new(false)),
+            prepared: AtomicU64::new(0),
         });
         if player.switching.is_some() {
             let control: Weak<dyn SourceControl> = Arc::downgrade(&player) as Weak<ReplayPlayer>;
@@ -576,6 +580,7 @@ impl ReplayPlayer {
 
     fn scheduler(self: Arc<Self>, tx: mpsc::Sender<DecodeJob>) {
         while self.alive() {
+            self.prepare_queued();
             let (current, pending) = self.lanes();
             // The source switched to first: it is what the picture waits
             // for. Two sources share the budget.
@@ -584,7 +589,9 @@ impl ReplayPlayer {
             if let Some((cursor, speed)) = self.timeline.cursor_now() {
                 for lane in &lanes {
                     let busy: usize = lanes.iter().map(|l| lock(&l.inflight).len()).sum();
-                    if !self.schedule(lane, &tx, cursor, speed, budget, busy) {
+                    // A queued clip's lane: at its in point, forward.
+                    let (at, v) = lane.fetcher.aim().map_or((cursor, speed), |t| (t, 1.0));
+                    if !self.schedule(lane, &tx, at, v, budget, busy) {
                         return;
                     }
                 }
@@ -703,7 +710,8 @@ impl ReplayPlayer {
                     // the cursor (and prefetch) can start before any decode.
                     self.timeline.set_clock_source(appsrc.upcast_ref());
                     // A source switched to before the first picture.
-                    self.settle_switch(self.timeline.cursor_now().map(|c| c.0));
+                    let c = self.timeline.cursor_item_now();
+                    self.settle_switch(c.map(|c| c.0), c.map_or(0, |c| c.1));
                     if let (true, Some(grid)) = (has_caps, self.stats.grid()) {
                         break (appsrc, clock, base, grid);
                     }
@@ -791,14 +799,18 @@ impl ReplayPlayer {
             }
 
             // The group's time at this tick, and this angle's frame for it.
-            let want_group = self.timeline.tai_at(rt);
+            // And the queued clip that plays then (0: none).
+            let (want_group, item) = self
+                .timeline
+                .cursor_item(rt)
+                .map_or((None, 0), |(t, i)| (Some(t), i));
             if let Some(t) = want_group {
                 self.stats.wanted_tai.store(t, Ordering::Relaxed);
             }
             // Switching source: the last picture holds until the new source
             // has the one for this time; from then on it is the source shown,
             // with its own grid and trim.
-            let switching = match self.settle_switch(want_group) {
+            let switching = match self.settle_switch(want_group, item) {
                 Settle::Waiting => true,
                 Settle::Committed => {
                     if let Some(g) = self.stats.grid() {

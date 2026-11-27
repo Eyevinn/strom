@@ -27,7 +27,11 @@ pub const REPLAY_FEATURES: &[&str] = &[
     "start_mode",
     "diagnostics",
     "source_switch",
+    "cue_next",
 ];
+
+/// Most clips a group's queue holds (`cue_next`).
+pub const MAX_QUEUE_LEN: usize = 64;
 
 /// Longest `client_ref` a command may carry.
 pub const MAX_CLIENT_REF_LEN: usize = 64;
@@ -245,6 +249,35 @@ pub enum ReplayCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block: Option<String>,
     },
+    /// Queue a clip `[in, out)` to play when the clip playing reaches its
+    /// out point: the engine prepares it while the current clip plays and
+    /// swaps it in on the tick where the out point is reached, at its own
+    /// `speed`. With `source`, angle `block` shows that source for the
+    /// clip. The clip's `end_action` applies when it ends with nothing
+    /// queued after it. `replace` empties the queue first. The motion does
+    /// not change.
+    CueNext {
+        #[serde(rename = "in")]
+        in_point: ReplayTarget,
+        /// Exclusive.
+        out: ReplayTarget,
+        /// Forward, 0 .. 8 (not 0); default 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        speed: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_action: Option<ReplayEndAction>,
+        /// A source URI for angle `block` to show for this clip.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        /// The angle that switches; may be left out when the group has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        /// Empty the queue before this clip is added.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replace: Option<bool>,
+    },
+    /// Empty the queue. The clip playing goes on to its out point.
+    ClearQueue {},
     /// Drop the cue. The cursor, the speed and a running ramp stay.
     Uncue {},
     /// Play at 1x from the live edge minus the margin. `margin_ms` sets the
@@ -284,6 +317,8 @@ impl ReplayCommand {
             Self::Mark { .. } => "mark",
             Self::FollowLive { .. } => "follow_live",
             Self::Source { .. } => "source",
+            Self::CueNext { .. } => "cue_next",
+            Self::ClearQueue {} => "clear_queue",
         }
     }
 
@@ -303,6 +338,8 @@ impl ReplayCommand {
             Self::Mark { .. } => ReplayCause::Mark,
             Self::FollowLive { .. } => ReplayCause::FollowLive,
             Self::Source { .. } => ReplayCause::Source,
+            Self::CueNext { .. } => ReplayCause::CueNext,
+            Self::ClearQueue {} => ReplayCause::ClearQueue,
         }
     }
 }
@@ -487,6 +524,18 @@ pub struct ReplayState {
     /// `null` until the group has media.
     pub range: Option<ReplayRange>,
     pub angles: Vec<ReplayAngleState>,
+    pub queue: ReplayQueueState,
+}
+
+/// The group's clip queue (`cue_next`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ReplayQueueState {
+    /// The `client_ref` of the clip the group holds (its cue), whether a
+    /// `cue` or the queue started it.
+    pub clip_ref: Option<String>,
+    /// Clips waiting in the queue.
+    pub waiting: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -618,7 +667,10 @@ pub enum ReplayCause {
     Mark,
     FollowLive,
     Source,
-    /// Bounded play reached the end of its cue.
+    CueNext,
+    ClearQueue,
+    /// Bounded play reached the end of its cue (and, with a clip queued,
+    /// the queue started it).
     CueEnd,
     /// Forward play reached the live point (with `follow_live`).
     CaughtUp,
@@ -661,6 +713,9 @@ pub enum ReplayEventKind {
         source: Option<String>,
         error: String,
     },
+    /// The queue started its next clip at `at` (its in point); the event's
+    /// `client_ref` is the clip's. `waiting`: clips still queued after it.
+    ItemStarted { at: ReplayInstant, waiting: usize },
 }
 
 /// Something the group did, sent on the WebSocket.
@@ -850,6 +905,10 @@ mod tests {
                    "source": "tams+https://gw.example.com/flows/b", "block": "p1"}),
             json!({"cmd": "source", "source": "cam2"}),
             json!({"cmd": "source", "source": "cam2", "block": "p1"}),
+            json!({"cmd": "cue_next", "in": {"t": "1"}, "out": {"t": "2"}}),
+            json!({"cmd": "cue_next", "in": {"t": "1"}, "out": {"t": "2"}, "speed": 0.5,
+                   "end_action": "live", "source": "cam2", "block": "p1", "replace": true}),
+            json!({"cmd": "clear_queue"}),
         ] {
             let parsed: ReplayCommand = serde_json::from_value(c.clone()).unwrap();
             assert_eq!(serde_json::to_value(&parsed).unwrap(), c);
