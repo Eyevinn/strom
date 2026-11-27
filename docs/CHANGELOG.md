@@ -14,6 +14,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - API: `GET /api/flows/{flow_id}/blocks/{block_id}/pgm-endpoint` returns the WHEP endpoint fed by a vision mixer's PGM output, like `multiview-endpoint`
 
 ### Changed
+- API: `multiview-endpoint` and `pgm-endpoint` respond with `WhepEndpointResponse` (same JSON shape; `MultiviewEndpointResponse` remains as an alias)
 - Media Player: an explicit `mode` property (`playlist`, `stinger`, `timeline`) selects what the block does, and the properties panel shows only the properties of that mode. `stinger_mode=true` becomes `mode=stinger`. The Playlist button and transport controls are hidden for a timeline player
 - TAMS Output and the Media Player's timeline mode share the auth properties `auth_mode`, `api_token` and `osc_service_id`
 - TAMS Output: one segment length property, `segment_duration_ms` (default 2000, at least 200), instead of `segment_duration_secs` and `segment_duration_ms`
@@ -33,6 +34,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - TAMS Output: in OSC PAT/SAT mode a SAT goes only to an HTTPS OSC instance of its service, also when the OSC Service ID is set explicitly. A gateway outside OSC that should get SATs is allowed with `STROM_TAMS_ALLOWED_GATEWAYS` (comma-separated URLs) or by being `STROM_TAMS_GATEWAY_URL`. A gateway URL without a scheme fails with a message that it must be an absolute `https://` URL
 - OSC: a SAT is refreshed before its own `exp` when that comes sooner than the usual 50 minutes, and never after it
 - Vision mixer: `pgm-endpoint` and `multiview-endpoint` find a WHEP output behind a pad linked more than once or a block with several outputs (breadth first, not only the first link)
+- Vision mixer: the WHEP search stops at blocks that combine inputs (compositor, audio mixer/router, vision mixer), follows the matching output of a block with several inputs, and returns no endpoint while the nearest WHEP output is not started
 - Replay WebSocket: the socket is closed with a close frame when its group's flow stops, not dropped
 
 ### Upgrade notes
