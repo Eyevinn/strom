@@ -32,7 +32,6 @@ pub mod source_offsets;
 pub mod timeline;
 
 use super::bridge::NetworkBuffer;
-use super::definition::DEFAULT_DECODED_AHEAD_S;
 use crate::blocks::{
     live_bridge_appsrc, BlockBuildError, BlockBuildResult, BusMessageConnectFn,
     APPSRC_MAX_BYTES_VIDEO,
@@ -46,10 +45,10 @@ use std::collections::HashMap;
 use strom_types::element::ElementPadRef;
 use strom_types::mediaplayer::{
     timeline_group, CLIP_IN_PROPERTY, CLIP_OUT_PROPERTY, CLIP_SPEED_PROPERTY,
-    DECODED_AHEAD_PROPERTY, FOLLOW_LIVE_PROPERTY, GROUP_PROPERTY, JOG_GRID_PROPERTY,
-    LIVE_MARGIN_PROPERTY, OFFSET_MS_PROPERTY, OUTPUT_FRAMERATE_PROPERTY, PACING_OFFLINE,
-    PACING_PROPERTY, PACING_REALTIME, PRIVATE_GROUP_PREFIX, READ_AHEAD_PROPERTY, SOURCE_PROPERTY,
-    START_MODE_PROPERTY,
+    DECODED_AHEAD_PROPERTY, DEFAULT_DECODED_AHEAD_S, FOLLOW_LIVE_PROPERTY, GROUP_PROPERTY,
+    JOG_GRID_PROPERTY, LIVE_MARGIN_PROPERTY, OFFSET_MS_PROPERTY, OUTPUT_FRAMERATE_PROPERTY,
+    PACING_OFFLINE, PACING_PROPERTY, PACING_REALTIME, PRIVATE_GROUP_PREFIX, READ_AHEAD_PROPERTY,
+    SOURCE_PROPERTY, START_MODE_PROPERTY,
 };
 use strom_types::replay::{ReplayJogGrid, ReplayTarget};
 use strom_types::{FlowId, PropertyValue};

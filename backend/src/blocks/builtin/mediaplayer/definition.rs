@@ -4,17 +4,14 @@ use super::bridge::Decoder;
 use strom_types::block::*;
 use strom_types::mediaplayer::{
     PlayerMode, CLIP_IN_PROPERTY, CLIP_OUT_PROPERTY, CLIP_SPEED_PROPERTY, DECODED_AHEAD_PROPERTY,
-    GROUP_PROPERTY, MODE_PROPERTY, OUTPUT_FRAMERATE_PROPERTY, PACING_OFFLINE, PACING_PROPERTY,
-    PACING_REALTIME, READ_AHEAD_PROPERTY, SOURCE_PROPERTY,
+    DEFAULT_DECODED_AHEAD_S, GROUP_PROPERTY, MODE_PROPERTY, OUTPUT_FRAMERATE_PROPERTY,
+    PACING_OFFLINE, PACING_PROPERTY, PACING_REALTIME, READ_AHEAD_PROPERTY, SOURCE_PROPERTY,
 };
 use strom_types::mediaplayer::{
     FOLLOW_LIVE_PROPERTY, JOG_GRID_PROPERTY, LIVE_MARGIN_PROPERTY, OFFSET_MS_PROPERTY,
     START_MODE_PROPERTY,
 };
 use strom_types::{MediaType, PropertyValue};
-
-/// Default of `decoded_ahead_s`.
-pub const DEFAULT_DECODED_AHEAD_S: u64 = 3;
 
 /// Show and apply a property only in these modes.
 fn in_modes(modes: &[PlayerMode]) -> Option<PropertyCondition> {
