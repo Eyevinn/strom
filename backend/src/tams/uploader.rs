@@ -1307,10 +1307,11 @@ async fn park_segment(ctx: &UploadCtx<'_>, frag: &FragmentReady, reason: &str) -
 /// Park a finished segment on disk from outside the uploader (the streaming
 /// side, when the uploader's channel is full or closed): write its sidecar so
 /// the recovery sweep of this run or a later one uploads it to `target`.
-/// Blocking; a small write, unless older parked segments must be deleted to
-/// make room (see [`crate::tams::park::Parking::park`]). On an error (over the
-/// server's cap or short of free space, or the disk is full) the caller drops
-/// the segment.
+/// Blocking: a small write and a sync to disk, and older parked segments may
+/// be deleted to make room (see [`crate::tams::park::Parking::park`]); from a
+/// streaming thread, call it through [`crate::tams::park::park_off_thread`].
+/// On an error (over the server's cap or short of free space, or the disk is
+/// full) the caller drops the segment.
 pub fn park_on_disk(
     frag: &FragmentReady,
     target: &ParkTarget,
