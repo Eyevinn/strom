@@ -73,7 +73,7 @@ impl NetworkBuffer {
     /// From the block's `read_ahead_s` property. A negative value means 0,
     /// the element's default.
     pub fn from_properties(properties: &HashMap<String, PropertyValue>) -> Self {
-        let read_ahead_s = match properties.get("read_ahead_s") {
+        let read_ahead_s = match properties.get(strom_types::mediaplayer::READ_AHEAD_PROPERTY) {
             Some(PropertyValue::UInt(u)) => *u,
             Some(PropertyValue::Int(i)) => u64::try_from(*i).unwrap_or(0),
             _ => Self::DEFAULT_READ_AHEAD_S,

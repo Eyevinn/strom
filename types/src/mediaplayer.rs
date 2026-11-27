@@ -107,7 +107,7 @@ pub const GROUP_PROPERTY: &str = "group";
 pub const DECODED_AHEAD_PROPERTY: &str = "decoded_ahead_s";
 /// Timeline mode: output frame rate (empty = the source's rate).
 pub const OUTPUT_FRAMERATE_PROPERTY: &str = "output_framerate";
-/// Playlist and timeline mode: seconds of coded media fetched ahead.
+/// Every mode: seconds of coded media fetched ahead.
 pub const READ_AHEAD_PROPERTY: &str = "read_ahead_s";
 /// TAMS source auth, named as on TAMS Output.
 pub const AUTH_MODE_PROPERTY: &str = "auth_mode";
