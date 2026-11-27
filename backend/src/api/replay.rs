@@ -16,9 +16,8 @@
 
 use crate::blocks::builtin::mediaplayer::replay::timeline::{self, CommandError};
 use crate::json_rejection::JsonBody;
-use crate::state::AppState;
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
@@ -111,14 +110,29 @@ pub async fn replay_page(Path((_flow_id, _group)): Path<(String, String)>) -> Ht
     Html(REPLAY_HTML)
 }
 
-/// GET /api/replay/{flow_id}/{group}/ws
+/// A WebSocket that controls a replay group and streams its state and
+/// events. Commands are JSON text frames, as for `POST .../command`, with an
+/// optional `seq`; see docs/REPLAY_API.md for the messages.
+#[utoipa::path(
+    get,
+    path = "/api/replay/{flow_id}/{group}/ws",
+    tag = "replay",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("group" = String, Path, description = "Replay group")
+    ),
+    responses(
+        (status = 101, description = "WebSocket connection upgraded"),
+        (status = 401, description = "Authentication required"),
+        (status = 404, description = "Replay group not found", body = ErrorResponse)
+    )
+)]
 pub async fn replay_ws(
     ws: WebSocketUpgrade,
-    State(_state): State<AppState>,
     Path((flow_id, group)): Path<(FlowId, String)>,
 ) -> Response {
     let Some(tl) = timeline::get(flow_id, &group) else {
-        return (StatusCode::NOT_FOUND, "replay group not found").into_response();
+        return not_found().into_response();
     };
     let events = tl.subscribe();
     let held = Arc::downgrade(&tl);
@@ -173,21 +187,59 @@ fn group_ended() -> Message {
     }))
 }
 
+/// The reply to a command that came after the socket's group was gone.
+fn gone_reply(text: &str) -> serde_json::Value {
+    let seq = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v.get("seq").cloned())
+        .unwrap_or(serde_json::Value::Null);
+    serde_json::json!({
+        "type": "error", "seq": seq, "code": "gone", "error": "replay group ended",
+    })
+}
+
 async fn handle(
     socket: WebSocket,
     flow_id: FlowId,
     group: String,
     held: Weak<timeline::ReplayTimeline>,
-    mut events: tokio::sync::broadcast::Receiver<strom_types::replay::ReplayEvent>,
+    events: tokio::sync::broadcast::Receiver<strom_types::replay::ReplayEvent>,
 ) {
-    let (mut tx, mut rx) = socket.split();
+    let (tx, rx) = socket.split();
+    run_socket(tx, rx, flow_id, group, held, events).await;
+}
+
+/// The socket's loop, on any sink and stream of messages (tests drive it
+/// with channels). The group is held strongly only to build a message, never
+/// across a send: a slow client must not keep a stopped flow's group alive.
+async fn run_socket<T, R, E>(
+    mut tx: T,
+    mut rx: R,
+    flow_id: FlowId,
+    group: String,
+    held: Weak<timeline::ReplayTimeline>,
+    mut events: tokio::sync::broadcast::Receiver<strom_types::replay::ReplayEvent>,
+) where
+    T: futures::Sink<Message> + Unpin,
+    R: futures::Stream<Item = Result<Message, E>> + Unpin,
+{
     let mut tick = tokio::time::interval(Duration::from_millis(50));
+    // A slow client gets the latest state, not a burst of the ticks it missed.
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             ev = events.recv() => {
-                let ev = match ev {
-                    Ok(ev) => ev,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                let msg = match ev {
+                    Ok(ev) => {
+                        let mut msg = serde_json::to_value(ev).unwrap_or_default();
+                        msg["type"] = "event".into();
+                        msg
+                    }
+                    // The socket fell behind and lost events: say so, so a
+                    // client waiting for one reads the state instead.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        serde_json::json!({"type": "lagged", "missed": n})
+                    }
                     // The timeline was dropped (its flow stopped): close
                     // the socket the same way as when a new run replaced it.
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -195,8 +247,6 @@ async fn handle(
                         break;
                     }
                 };
-                let mut msg = serde_json::to_value(ev).unwrap_or_default();
-                msg["type"] = "event".into();
                 if tx.send(Message::Text(msg.to_string().into())).await.is_err() {
                     break;
                 }
@@ -207,6 +257,7 @@ async fn handle(
                     break;
                 };
                 let msg = tl.telemetry().to_string();
+                drop(tl);
                 if tx.send(Message::Text(msg.into())).await.is_err() {
                     break;
                 }
@@ -214,9 +265,15 @@ async fn handle(
             msg = rx.next() => {
                 let Some(Ok(msg)) = msg else { break };
                 let Message::Text(text) = msg else { continue };
-                // The next tick closes the socket if the group is gone.
-                let Some(tl) = current(flow_id, &group, &held) else { continue };
+                let Some(tl) = current(flow_id, &group, &held) else {
+                    // Answer the command, then close.
+                    let reply = gone_reply(&text);
+                    let _ = tx.send(Message::Text(reply.to_string().into())).await;
+                    let _ = tx.send(group_ended()).await;
+                    break;
+                };
                 let reply = ws_reply(&tl, &text);
+                drop(tl);
                 if tx.send(Message::Text(reply.to_string().into())).await.is_err() {
                     break;
                 }
@@ -261,5 +318,303 @@ mod tests {
         let a = timeline::get_or_create(flow, "a");
         let _b = timeline::get_or_create(flow, "b");
         assert!(current(flow, "b", &Arc::downgrade(&a)).is_none());
+    }
+
+    /// A sink that takes messages until one matches `stall_on`, then never
+    /// finishes sending it: a client that stopped reading.
+    struct StallingSink {
+        stall_on: fn(&str) -> bool,
+        stalled: Option<tokio::sync::oneshot::Sender<()>>,
+        stalling: bool,
+    }
+
+    impl futures::Sink<Message> for StallingSink {
+        type Error = std::convert::Infallible;
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn start_send(mut self: std::pin::Pin<&mut Self>, m: Message) -> Result<(), Self::Error> {
+            if let Message::Text(t) = &m {
+                if (self.stall_on)(t) {
+                    self.stalling = true;
+                    if let Some(s) = self.stalled.take() {
+                        let _ = s.send(());
+                    }
+                }
+            }
+            Ok(())
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            if self.stalling {
+                std::task::Poll::Pending
+            } else {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            self.poll_flush(cx)
+        }
+    }
+
+    /// Start a socket loop on `flow`/`g` whose client stalls on the first
+    /// message matching `stall_on`; returns once it has stalled.
+    async fn stalled_socket(
+        flow: FlowId,
+        player: &Arc<timeline::ReplayTimeline>,
+        stall_on: fn(&str) -> bool,
+        command: Option<&str>,
+    ) -> tokio::task::JoinHandle<()> {
+        let (stalled_tx, stalled_rx) = tokio::sync::oneshot::channel();
+        let sink = StallingSink {
+            stall_on,
+            stalled: Some(stalled_tx),
+            stalling: false,
+        };
+        let (to_server, from_client) =
+            futures::channel::mpsc::unbounded::<Result<Message, std::convert::Infallible>>();
+        if let Some(c) = command {
+            to_server
+                .unbounded_send(Ok(Message::Text(c.to_string().into())))
+                .unwrap();
+        }
+        let task = tokio::spawn(run_socket(
+            sink,
+            from_client,
+            flow,
+            "g".to_string(),
+            Arc::downgrade(player),
+            player.subscribe(),
+        ));
+        tokio::time::timeout(Duration::from_secs(10), stalled_rx)
+            .await
+            .expect("the socket never sent")
+            .unwrap();
+        // Keep the command stream open while the socket is stalled.
+        std::mem::forget(to_server);
+        task
+    }
+
+    /// A client that stops reading while the state is being sent does not
+    /// keep the group: once the players are gone, the group is gone.
+    #[tokio::test]
+    async fn a_stalled_state_send_does_not_keep_the_group() {
+        let flow = uuid::Uuid::new_v4();
+        let player = timeline::get_or_create(flow, "g");
+        let task = stalled_socket(flow, &player, |_| true, None).await;
+        drop(player);
+        assert!(timeline::get(flow, "g").is_none());
+        task.abort();
+    }
+
+    /// The same while the reply to a command is being sent.
+    #[tokio::test]
+    async fn a_stalled_reply_does_not_keep_the_group() {
+        let flow = uuid::Uuid::new_v4();
+        let player = timeline::get_or_create(flow, "g");
+        let task = stalled_socket(
+            flow,
+            &player,
+            |t| t.contains("\"seq\":4"),
+            Some(r#"{"cmd":"jog","frames":1,"seq":4}"#),
+        )
+        .await;
+        drop(player);
+        assert!(timeline::get(flow, "g").is_none());
+        task.abort();
+    }
+
+    /// Drive a socket loop with channels: (commands in, messages out, task).
+    fn channel_socket(
+        flow: FlowId,
+        player: &Arc<timeline::ReplayTimeline>,
+    ) -> (
+        futures::channel::mpsc::UnboundedSender<Result<Message, std::convert::Infallible>>,
+        futures::channel::mpsc::UnboundedReceiver<Message>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (to_server, from_client) = futures::channel::mpsc::unbounded();
+        let (to_client, from_server) = futures::channel::mpsc::unbounded::<Message>();
+        let task = tokio::spawn(run_socket(
+            to_client,
+            from_client,
+            flow,
+            "g".to_string(),
+            Arc::downgrade(player),
+            player.subscribe(),
+        ));
+        (to_server, from_server, task)
+    }
+
+    /// The next message other than a state frame.
+    async fn next_reply(rx: &mut futures::channel::mpsc::UnboundedReceiver<Message>) -> Message {
+        loop {
+            let m = tokio::time::timeout(Duration::from_secs(10), rx.next())
+                .await
+                .expect("the socket stalled")
+                .expect("the socket closed");
+            if let Message::Text(t) = &m {
+                let v: serde_json::Value = serde_json::from_str(t).unwrap();
+                if v.get("type").is_none() || v["type"] == "state" {
+                    continue;
+                }
+            }
+            return m;
+        }
+    }
+
+    fn json(m: &Message) -> serde_json::Value {
+        match m {
+            Message::Text(t) => serde_json::from_str(t).unwrap(),
+            other => panic!("not text: {:?}", other),
+        }
+    }
+
+    fn is_group_ended(m: &Message) -> bool {
+        matches!(m, Message::Close(Some(f)) if f.code == close_code::AWAY)
+    }
+
+    /// Each command's reply echoes its `seq`, with an `invalid` or
+    /// `conflict` code on a refusal.
+    #[tokio::test]
+    async fn the_socket_echoes_seq() {
+        let flow = uuid::Uuid::new_v4();
+        let player = timeline::get_or_create(flow, "g");
+        let (tx, mut rx, task) = channel_socket(flow, &player);
+        let send = |t: &str| {
+            tx.unbounded_send(Ok(Message::Text(t.to_string().into())))
+                .unwrap()
+        };
+        send(r#"{"cmd":"jog","frames":1,"seq":7}"#);
+        let r = json(&next_reply(&mut rx).await);
+        assert_eq!(r["type"], "error");
+        assert_eq!(r["seq"], 7);
+        assert_eq!(r["code"], "conflict");
+        send(r#"{"cmd":"nope","seq":"a"}"#);
+        let r = json(&next_reply(&mut rx).await);
+        assert_eq!(
+            (&r["type"], &r["seq"], &r["code"]),
+            (&"error".into(), &"a".into(), &"invalid".into())
+        );
+        send("not json");
+        let r = json(&next_reply(&mut rx).await);
+        assert_eq!(
+            (&r["seq"], &r["code"]),
+            (&serde_json::Value::Null, &"invalid".into())
+        );
+        drop(tx);
+        task.await.unwrap();
+    }
+
+    /// An applied command is acked with its result and `seq`.
+    #[test]
+    fn an_applied_command_is_acked_with_seq() {
+        use std::sync::atomic::Ordering;
+        let flow = uuid::Uuid::new_v4();
+        let tl = timeline::get_or_create(flow, "g");
+        let p = Arc::new(timeline::PlayerStats::new("cam0"));
+        let base: i64 = 1_800_000_000_000_000_000;
+        p.start_tai.store(base, Ordering::Relaxed);
+        p.end_tai.store(base + 60_000_000_000, Ordering::Relaxed);
+        p.init_grid(50, 1, base);
+        tl.register_player(&p);
+        let r = ws_reply(&tl, r#"{"cmd":"live","seq":12}"#);
+        assert_eq!(r["type"], "ack", "{}", r);
+        assert_eq!(r["seq"], 12);
+        assert_eq!(r["live"], true);
+        assert!(
+            r.get("speed").is_some() && r.get("cursor_tai").is_some(),
+            "{}",
+            r
+        );
+        tl.unregister_player(&p);
+    }
+
+    /// When the group goes, the socket closes with 1001 (going away).
+    #[tokio::test]
+    async fn the_socket_closes_with_1001_when_the_group_goes() {
+        let flow = uuid::Uuid::new_v4();
+        let player = timeline::get_or_create(flow, "g");
+        let (_tx, mut rx, task) = channel_socket(flow, &player);
+        drop(player);
+        let m = next_reply(&mut rx).await;
+        assert!(is_group_ended(&m), "{:?}", m);
+        task.await.unwrap();
+    }
+
+    /// A command after the group is gone gets an error with its `seq`
+    /// (code `gone`) before the close. The loop picks its branches at
+    /// random, so run it until it has read the command.
+    #[tokio::test]
+    async fn a_command_after_the_group_is_answered() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut answered = 0;
+        for _ in 0..100 {
+            let flow = uuid::Uuid::new_v4();
+            let player = timeline::get_or_create(flow, "g");
+            let held = Arc::downgrade(&player);
+            let events = player.subscribe();
+            drop(player);
+            let read = Arc::new(AtomicBool::new(false));
+            let flag = read.clone();
+            let cmd: Result<Message, std::convert::Infallible> =
+                Ok(Message::Text(r#"{"cmd":"jog","frames":1,"seq":3}"#.into()));
+            let from_client = futures::stream::iter(vec![cmd])
+                .chain(futures::stream::pending())
+                .inspect(move |_| flag.store(true, Ordering::SeqCst));
+            let (to_client, mut from_server) = futures::channel::mpsc::unbounded::<Message>();
+            run_socket(to_client, from_client, flow, "g".to_string(), held, events).await;
+            let first = next_reply(&mut from_server).await;
+            if !read.load(Ordering::SeqCst) {
+                // The tick or the closed events won: the command was not read.
+                assert!(is_group_ended(&first), "{:?}", first);
+                continue;
+            }
+            let r = json(&first);
+            assert_eq!(
+                (&r["type"], &r["seq"], &r["code"]),
+                (&"error".into(), &3.into(), &"gone".into())
+            );
+            assert!(is_group_ended(&next_reply(&mut from_server).await));
+            answered += 1;
+        }
+        assert!(answered > 0, "the socket never read the command");
+    }
+
+    /// The socket reports lost events instead of dropping them silently.
+    #[tokio::test]
+    async fn a_lagging_socket_is_told() {
+        let flow = uuid::Uuid::new_v4();
+        let player = timeline::get_or_create(flow, "g");
+        let events = player.subscribe();
+        let (_tx, from_client) =
+            futures::channel::mpsc::unbounded::<Result<Message, std::convert::Infallible>>();
+        let (to_client, mut from_server) = futures::channel::mpsc::unbounded::<Message>();
+        for _ in 0..70 {
+            player.emit(strom_types::replay::ReplayEvent::Ended {
+                at: timeline::instant(0),
+            });
+        }
+        let task = tokio::spawn(run_socket(
+            to_client,
+            from_client,
+            flow,
+            "g".to_string(),
+            Arc::downgrade(&player),
+            events,
+        ));
+        let r = json(&next_reply(&mut from_server).await);
+        assert_eq!(r["type"], "lagged", "{}", r);
+        assert_eq!(r["missed"], 6);
+        drop(player);
+        task.await.unwrap();
     }
 }

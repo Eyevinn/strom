@@ -549,3 +549,78 @@ async fn test_export_gst_launch_empty() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+/// POST a replay command to the router and return the status and JSON body.
+async fn replay_command(
+    app: Router,
+    flow: &str,
+    group: &str,
+    body: &str,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/replay/{}/{}/command", flow, group))
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+/// The replay routes map a missing group to 404, a malformed command to 400
+/// and a command that does not apply now (no media) to 409, each with a JSON
+/// error body.
+#[tokio::test]
+async fn test_replay_command_status_mapping() {
+    use strom::blocks::builtin::mediaplayer::replay::timeline;
+    let (app, _dir) = create_test_app().await;
+    let flow = uuid::Uuid::new_v4();
+
+    let (status, body) =
+        replay_command(app.clone(), &flow.to_string(), "g", r#"{"cmd":"live"}"#).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body["error"].is_string(), "{}", body);
+
+    // A group without players: it exists, but has no media.
+    let _group = timeline::get_or_create(flow, "g");
+    let (status, body) =
+        replay_command(app.clone(), &flow.to_string(), "g", r#"{"cmd":"nope"}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
+    assert!(body["error"].is_string(), "{}", body);
+    let (status, body) = replay_command(
+        app.clone(),
+        &flow.to_string(),
+        "g",
+        r#"{"cmd":"jog","frames":1,"extra":1}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
+    let (status, body) = replay_command(
+        app.clone(),
+        &flow.to_string(),
+        "g",
+        r#"{"cmd":"jog","frames":1}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{}", body);
+    assert!(body["error"].is_string(), "{}", body);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/replay/{}/other/state", flow))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}

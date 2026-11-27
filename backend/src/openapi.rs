@@ -193,6 +193,7 @@ use utoipa::OpenApi;
         crate::api::mediaplayer::control_player,
         crate::api::replay::replay_command,
         crate::api::replay::replay_state,
+        crate::api::replay::replay_ws,
         crate::api::mediaplayer::seek_player,
         crate::api::mediaplayer::goto_file,
         // Probe endpoints

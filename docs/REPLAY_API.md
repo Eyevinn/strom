@@ -8,7 +8,7 @@ The built-in operator page `/player/replay/{flow_id}/{group}` drives the group w
 
 - reads the flow (`GET /api/flows/{flow_id}`) to find the group's players and the vision mixer they feed;
 - picks angles through the vision mixer API (`PUT .../blocks/{mixer}/preview`, `POST .../transition`, `GET .../state`);
-- finds its monitors with `GET .../blocks/{mixer}/pgm-endpoint` and `multiview-endpoint`, or without a mixer the nearest WHEP Output downstream of a player, and plays them over WHEP;
+- finds its monitors with `GET .../blocks/{mixer}/pgm-endpoint` and `multiview-endpoint` (without a vision mixer it has no monitors), and plays them with the shared WHEP client (`/static/whep.js`);
 - keeps marks and clips in the browser's `localStorage`, so they belong to that browser.
 
 ## Endpoints
@@ -19,7 +19,7 @@ The built-in operator page `/player/replay/{flow_id}/{group}` drives the group w
 | `GET` | `/api/replay/{flow_id}/{group}/state` | | the group state |
 | `GET` (WebSocket) | `/api/replay/{flow_id}/{group}/ws` | commands | acks, errors, events, state every 50 ms |
 
-A WebSocket ends with its group: it closes (code 1001) once the group's players are gone, when the flow stops or is deleted, or when a new run of the flow makes a new group. Reconnect to follow the next run. An open socket does not keep the group alive.
+A WebSocket ends with its group: it closes (code 1001) once the group's players are gone, when the flow stops or is deleted, or when a new run of the flow makes a new group. Reconnect to follow the next run. An open socket does not keep the group alive, also while a slow client holds up a send. A command that arrives after the group is gone is answered with `{"type": "error", "seq": ..., "code": "gone", ...}` before the close. Opening a socket on a group that does not exist returns 404 with a JSON error, like REST.
 
 The schema is in the OpenAPI spec (`ReplayCommand`, `ReplayCommandResult`, `ReplayEvent`, under the `replay` tag).
 
@@ -30,7 +30,7 @@ REST and the WebSocket take the same commands and return the same result. On the
 | HTTP | WS `code` | When |
 |---|---|---|
 | 400 | `invalid` | Malformed command, unknown `cmd` or field, a value out of range (speed outside ±8, bad UTC/TAI text, more than one target, `out` before `in`). |
-| 404 | | No replay group with that name in that flow (the flow is not running). |
+| 404 | `gone` | No replay group with that name in that flow (the flow is not running). On the WebSocket: the group ended while the socket was open. |
 | 409 | `conflict` | The command is valid but does not apply now: no media yet, frame numbers before the frame rate is known or frame 0 is fixed, `until` behind the cursor, a cue outside the media, a mark before any picture has gone out. |
 
 A refused command changes nothing.
@@ -117,6 +117,8 @@ Things the group does by itself, as `{"type": "event", "event": ..., ...}`:
 |---|---|---|
 | `ended` | `at` | Bounded play reached its end with `freeze`. |
 | `live` | `reason` (`end_action`, `caught_up` or `edge_moved`), `at` | The group went live by itself. |
+
+A socket that falls behind (more than 64 events unread) gets `{"type": "lagged", "missed": n}` in place of the events it lost. Read the state to catch up.
 
 ## State
 
