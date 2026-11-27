@@ -348,15 +348,16 @@ mod tests {
         assert!(clip_of(&props(&[(PACING_PROPERTY, st("fast"))])).is_err());
     }
 
-    /// Four 1 s segments of 25p H.264 (with B-frames) in MPEG-TS and an
-    /// `index.json`, from TAI `BASE`, under `root/segs`.
-    fn write_segments(root: &std::path::Path) {
+    /// Four 1 s segments of 25p H.264 (with `bframes` B-frames) in MPEG-TS
+    /// and an `index.json`, from TAI `BASE`, under `root/segs`.
+    fn write_segments(root: &std::path::Path, bframes: u32) {
         const BASE: i64 = 1_800_000_000_000_000_000;
-        let p = gst::parse::launch(
+        let p = gst::parse::launch(&format!(
             "videotestsrc num-buffers=25 ! video/x-raw,width=320,height=240,framerate=25/1 ! \
-             x264enc bframes=2 key-int-max=25 ! h264parse ! mpegtsmux ! \
+             x264enc bframes={} key-int-max=25 ! h264parse ! mpegtsmux ! \
              appsink name=sink sync=false",
-        )
+            bframes
+        ))
         .unwrap()
         .downcast::<gst::Pipeline>()
         .unwrap();
@@ -397,7 +398,7 @@ mod tests {
     fn export(speed: f64) -> Vec<(u64, u64)> {
         gst::init().unwrap();
         let root = tempfile::tempdir().unwrap();
-        write_segments(root.path());
+        write_segments(root.path(), 2);
         let props = props(&[
             ("_media_path", st(root.path().to_str().unwrap())),
             (SOURCE_PROPERTY, st("segs")),
@@ -452,6 +453,111 @@ mod tests {
         pipeline.set_state(gst::State::Null).unwrap();
         bus.disconnect(handler);
         frames
+    }
+
+    /// GL frames from the player's decode pipeline convert in the flow: the
+    /// decode session shares the flow's GL context through
+    /// `context_forward::install`. Without it `vtdec_hw` makes a GL context
+    /// of its own, and the flow's first GL converter fails on the first
+    /// frame: "input memory OpenGL context is different" in the log, "Failed
+    /// to convert video buffer" on the bus (#1099).
+    ///
+    /// The real block, an offline clip over a local `index.json`, into
+    /// `glcolorconvert` (to RGBA, so it converts rather than passes through).
+    /// Runs only where `vtdec_hw` exists, the one decoder that outputs GL
+    /// memory (macOS: this runs in the macOS CI job); skipped elsewhere.
+    #[test]
+    fn gl_frames_from_the_decode_pipeline_convert_in_the_flow() {
+        gst::init().unwrap();
+        if ["vtdec_hw", "glcolorconvert", "gldownload", "x264enc"]
+            .iter()
+            .any(|f| gst::ElementFactory::find(f).is_none())
+        {
+            eprintln!("skipped: needs vtdec_hw and GL (macOS)");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        // No B-frames: vtdec_hw loses two frames of the first segment a
+        // session decodes with them, and an offline clip waits for every
+        // source frame.
+        write_segments(root.path(), 0);
+        let props = props(&[
+            ("_media_path", st(root.path().to_str().unwrap())),
+            (SOURCE_PROPERTY, st("segs")),
+            (PACING_PROPERTY, st("offline")),
+            (CLIP_IN_PROPERTY, st("1800000001:0")),
+            (CLIP_OUT_PROPERTY, st("1800000003:0")),
+        ]);
+        decode::test_decoder::set(Some("vtdec_hw"));
+        let built = build("gl_context_test", &props);
+        decode::test_decoder::set(None);
+        let built = built.unwrap();
+
+        let pipeline = gst::Pipeline::new();
+        let mut elements = HashMap::new();
+        for (id, e) in &built.elements {
+            pipeline.add(e).unwrap();
+            elements.insert(id.clone(), e.clone());
+        }
+        for (a, b) in &built.internal_links {
+            elements[&a.element_id]
+                .link_pads(
+                    a.pad_name.as_deref(),
+                    &elements[&b.element_id],
+                    b.pad_name.as_deref(),
+                )
+                .unwrap();
+        }
+        let consumer = gst::parse::bin_from_description(
+            "glcolorconvert ! video/x-raw(memory:GLMemory),format=RGBA ! gldownload ! \
+             appsink name=sink sync=false",
+            true,
+        )
+        .unwrap();
+        pipeline.add(&consumer).unwrap();
+        elements["gl_context_test:video_out"]
+            .link(&consumer)
+            .unwrap();
+        let sink = consumer
+            .by_name("sink")
+            .unwrap()
+            .downcast::<gst_app::AppSink>()
+            .unwrap();
+        let bus = pipeline.bus().unwrap();
+        let handler = (built.bus_message_handler.unwrap())(
+            &bus,
+            Uuid::nil(),
+            crate::events::EventBroadcaster::default(),
+        );
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let mut frames = 0;
+        let mut error = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline && !sink.is_eos() {
+            if let Some(msg) = bus.pop_filtered(&[gst::MessageType::Error]) {
+                if let gst::MessageView::Error(e) = msg.view() {
+                    error = Some(format!("{} ({:?})", e.error(), e.debug()));
+                }
+                break;
+            }
+            if sink
+                .try_pull_sample(gst::ClockTime::from_mseconds(50))
+                .is_some()
+            {
+                frames += 1;
+            }
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        bus.disconnect(handler);
+
+        assert!(
+            error.is_none(),
+            "the flow's GL converter failed on the player's frames: {:?}",
+            error
+        );
+        // [1 s, 3 s) of 25p: 50 frames, then end of stream.
+        assert_eq!(frames, 50, "frames that reached the flow's sink");
     }
 
     #[test]

@@ -34,6 +34,10 @@ use tracing::{debug, warn};
 
 /// Pick the best available H.264 decoder.
 pub fn pick_decoder() -> &'static str {
+    #[cfg(test)]
+    if let Some(name) = test_decoder::get() {
+        return name;
+    }
     // vtdec_hw comes after avdec_h264: in replay it sometimes drops the
     // last frame of a segment (docs/UPSTREAM_NOTES.md), and per-segment
     // decodes were slower with it (seek outside cache p50 235 vs 134 ms).
@@ -43,6 +47,27 @@ pub fn pick_decoder() -> &'static str {
         }
     }
     "decodebin"
+}
+
+/// A test picks the decoder of the players it builds on its own thread:
+/// `pick_decoder` prefers `avdec_h264` to `vtdec_hw`, and the GL path is only
+/// reached with `vtdec_hw`.
+#[cfg(test)]
+pub(super) mod test_decoder {
+    use std::cell::Cell;
+
+    thread_local! {
+        static DECODER: Cell<Option<&'static str>> = const { Cell::new(None) };
+    }
+
+    pub fn get() -> Option<&'static str> {
+        DECODER.with(Cell::get)
+    }
+
+    /// `pick_decoder` on this thread returns `name` (`None`: the usual pick).
+    pub fn set(name: Option<&'static str>) {
+        DECODER.with(|d| d.set(name));
+    }
 }
 
 /// Where decoded frames live, from the decoder to the flow.
@@ -108,6 +133,16 @@ impl FrameMemory {
 ///
 /// `STROM_REPLAY_FRAME_MEMORY` = `system`, `cuda` or `gl` narrows the choice
 /// (`system` always goes to system memory); unset or `auto`, all are tried.
+///
+/// Asking the consumer goes against the BLOCK_GUIDELINES rule that a producer
+/// emits its natural memory and the consumer adapts. The player decides once,
+/// for every segment, and cannot switch later: the frame store holds frames
+/// for seconds, and a segment whose memory differs from the output's is
+/// refused. Device memory with no taker would then fail the flow in the cases
+/// the rule does not cover: an output that is not linked yet when the first
+/// segment decodes, or a `tee` to branches of mixed memory (a GL mixer and an
+/// encoder in system memory), whose caps query answers only what every branch
+/// takes. Those get system memory; a consumer that takes device memory gets it.
 pub fn choose_memory(decoder: &str, consumer: Option<&gst::Pad>) -> FrameMemory {
     static WANTED: OnceLock<Option<String>> = OnceLock::new();
     let wanted = WANTED
