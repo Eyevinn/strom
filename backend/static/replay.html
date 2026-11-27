@@ -187,7 +187,7 @@
   <div class="stage">
       <div class="mon pgm" id="pgmMon">
         <video id="pgmVid" autoplay muted playsinline></video>
-        <span class="tag">PGM</span>
+        <span class="tag" id="pgmTag">PGM</span>
         <span class="osd" id="pgmOsd"></span>
         <div class="osdb"><span id="pgmTc"></span><span id="pgmAngle"></span></div>
         <div class="empty" id="pgmEmpty"><span id="pgmMsg">Looking for the program output…</span><button id="pgmRetry">Connect video</button></div>
@@ -628,7 +628,7 @@ function renderInOut() {
 }
 
 // Group context, filled from the flow: players' sources, mixer, angle names.
-let ctx = { players: [], vm: null, numInputs: 0, labels: [], inputPlayer: [], numPips: 0, swap: false };
+let ctx = { players: [], monitor: 0, vm: null, numInputs: 0, labels: [], inputPlayer: [], numPips: 0, swap: false };
 let mixer = { program_input: null, preview_input: null, program_pip: null };
 
 async function saveClip() {
@@ -972,7 +972,8 @@ cv.addEventListener('pointerleave', () => { hoverX = null; $('tlTip').style.disp
 
 // ---------------------------------------------------------------------------
 // Flow context: players of the group and the vision mixer they feed. The
-// server finds the mixer's WHEP outputs (pgm-endpoint, multiview-endpoint).
+// server finds the WHEP outputs: the mixer's (pgm-endpoint,
+// multiview-endpoint), or without a mixer each player's own (whep-endpoint).
 async function api(path, opts) {
   const r = await fetch(path, opts);
   if (!r.ok) throw new Error(`${r.status} ${path}`);
@@ -1019,6 +1020,11 @@ async function endpointOf(kind) {
   try { return (await api(`/api/flows/${FLOW}/blocks/${encodeURIComponent(ctx.vm)}/${kind}-endpoint`)).endpoint || null; }
   catch (_) { return null; }
 }
+// The WHEP output a player's video feeds (its monitor), without a mixer.
+async function playerEndpointOf(id) {
+  try { return (await api(`/api/flows/${FLOW}/blocks/${encodeURIComponent(id)}/whep-endpoint?pad=video_out`)).endpoint || null; }
+  catch (_) { return null; }
+}
 
 // ---------------------------------------------------------------------------
 // WHEP playback through the shared client (static/whep.js), which ends the
@@ -1055,13 +1061,36 @@ function play(slot, video, ep, emptyEl, msgEl) {
 }
 window.addEventListener('pagehide', () => { stopVideo('pgm'); stopVideo('mv'); });
 let pgmEp = null, mvEp = null;
+// Without a mixer the main monitor shows one player's own WHEP output
+// (ctx.monitor: index into ctx.players), chosen with the angle buttons.
 async function connectVideo() {
   pgmEp = mvEp = null;
   if (ctx.vm) { [pgmEp, mvEp] = await Promise.all([endpointOf('pgm'), endpointOf('multiview')]); }
+  else {
+    const eps = await Promise.all(ctx.players.map(p => playerEndpointOf(p.id)));
+    ctx.players.forEach((p, i) => { p.endpoint = eps[i]; });
+    if (!ctx.players[ctx.monitor]?.endpoint) {
+      const i = ctx.players.findIndex(p => p.endpoint);
+      ctx.monitor = i < 0 ? 0 : i;
+    }
+    pgmEp = ctx.players[ctx.monitor]?.endpoint || null;
+    renderAngles();
+  }
+  $('pgmTag').textContent = ctx.vm ? 'PGM' : 'PLAYER';
   if (pgmEp) play('pgm', $('pgmVid'), pgmEp, $('pgmEmpty'), $('pgmMsg'));
-  else { stopVideo('pgm'); $('pgmMsg').textContent = ctx.vm ? 'The mixer has no program WHEP output' : 'No vision mixer in this flow'; }
+  else { stopVideo('pgm'); $('pgmMsg').textContent = ctx.vm ? 'The mixer has no program WHEP output' : ctx.players.length ? 'No player in this group feeds a started WHEP output' : 'No players in this group'; }
   if (mvEp) play('mv', $('mvVid'), mvEp, $('mvEmpty'), $('mvMsg'));
-  else { stopVideo('mv'); $('mvMsg').textContent = ctx.vm ? 'The mixer has no multiview WHEP output' : 'No vision mixer in this flow'; }
+  else { stopVideo('mv'); $('mvMsg').textContent = ctx.vm ? 'The mixer has no multiview WHEP output' : 'No multiview without a vision mixer'; }
+}
+// Without a mixer: show player `i` on the main monitor (a view choice in
+// this page only, nothing is cut).
+function showPlayer(i) {
+  const p = ctx.players[i];
+  if (!p) return;
+  ctx.monitor = i;
+  renderAngles();
+  if (p.endpoint) { pgmEp = p.endpoint; play('pgm', $('pgmVid'), pgmEp, $('pgmEmpty'), $('pgmMsg')); }
+  else { stopVideo('pgm'); $('pgmEmpty').style.display = 'flex'; $('pgmMsg').textContent = `${p.id} feeds no started WHEP output`; }
 }
 $('pgmRetry').onclick = connectVideo;
 
@@ -1088,8 +1117,12 @@ async function cutTo(source) {
 function renderAngles() {
   const el = $('angles');
   if (!ctx.vm) {
-    el.innerHTML = '';
-    $('angleHint').textContent = ctx.players.length ? `${ctx.players.length} player(s) in the group, no vision mixer to choose angles with.` : 'No players in this group.';
+    el.innerHTML = ctx.players.map((p, i) => {
+      const on = i === ctx.monitor;
+      return `<button class="angle ${on ? 'pvw' : ''}" data-p="${i}"><b>${esc(p.id)}</b>${i < 9 ? `<kbd>${i + 1}</kbd>` : ''}<small>${on ? 'ON MONITOR' : p.endpoint ? 'PLAYER ' + (i + 1) : 'NO WHEP OUTPUT'}</small></button>`;
+    }).join('');
+    $('angleHint').textContent = ctx.players.length ? 'No vision mixer: keys 1–9 or click a player to show its own WHEP output on the monitor.' : 'No players in this group.';
+    $('pgmAngle').textContent = ctx.players[ctx.monitor]?.id || '';
     return;
   }
   el.innerHTML = Array.from({ length: ctx.numInputs }, (_, i) => {
@@ -1101,7 +1134,12 @@ function renderAngles() {
   const pg = mixer.program_pip == null ? mixer.program_input : null;
   $('pgmAngle').textContent = pg != null ? ctx.labels[pg] : mixer.program_pip != null ? `PiP ${mixer.program_pip + 1}` : '';
 }
-$('angles').addEventListener('click', e => { const b = e.target.closest('[data-a]'); if (b) cutTo({ input: +b.dataset.a }); });
+$('angles').addEventListener('click', e => {
+  const b = e.target.closest('[data-a]');
+  if (b) { cutTo({ input: +b.dataset.a }); return; }
+  const p = e.target.closest('[data-p]');
+  if (p) showPlayer(+p.dataset.p);
+});
 let mixerKey = '';
 async function refreshMixer() {
   if (!ctx.vm) return;
@@ -1171,7 +1209,7 @@ const KEYS = [
   ['⇧I / ⇧O', 'Go to IN / OUT'],
   ['X', 'Clear IN and OUT'],
   ['⇧Enter', 'Save clip'],
-  ['1 – 9', 'Cut angle to program'],
+  ['1 – 9', 'Cut angle to program (no mixer: show that player)'],
   ['Z', 'Cycle timeline zoom'],
   ['?', 'This help'],
   ['Esc', 'Close help'],
@@ -1186,7 +1224,7 @@ document.addEventListener('keydown', e => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   const sh = e.shiftKey;
   const digit = /^Digit([1-9])$/.exec(e.code);
-  if (digit) { const i = +digit[1] - 1; if (i < ctx.numInputs) cutTo({ input: i }); e.preventDefault(); return; }
+  if (digit) { const i = +digit[1] - 1; if (!ctx.vm) showPlayer(i); else if (i < ctx.numInputs) cutTo({ input: i }); e.preventDefault(); return; }
   if (e.key === '?') { help(!$('help').classList.contains('on')); e.preventDefault(); return; }
   switch (e.code) {
     case 'Escape': help(false); break;

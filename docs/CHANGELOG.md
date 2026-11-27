@@ -12,6 +12,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - TAMS Output: segments are cut on a TAI grid, and `segment_duration_ms` allows segments shorter than a second. The block asks upstream for a keyframe on each grid point, warns when a boundary still leaves the grid, and writes video `essence_parameters` on its flows
 - Video Encoder: `min_keyframe_request_interval_ms` (default 1000, at most 60000; 0 honours every request) sets the floor on keyframes forced by downstream requests, which was a fixed 1 s
 - API: `GET /api/flows/{flow_id}/blocks/{block_id}/pgm-endpoint` returns the WHEP endpoint fed by a vision mixer's PGM output, like `multiview-endpoint`
+- API: `GET /api/flows/{flow_id}/blocks/{block_id}/whep-endpoint?pad=<output pad>` returns the WHEP endpoint fed by an output pad of any block, with the same search as `pgm-endpoint`. The replay page uses it to show each player's own WHEP output when the flow has no vision mixer
 
 ### Changed
 - API: `multiview-endpoint` and `pgm-endpoint` respond with `WhepEndpointResponse` (same JSON shape; `MultiviewEndpointResponse` remains as an alias)

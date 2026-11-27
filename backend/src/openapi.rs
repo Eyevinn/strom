@@ -95,6 +95,7 @@ use utoipa::OpenApi;
         crate::api::flows::set_vision_mixer_effect,
         crate::api::vision_mixer_page::get_multiview_endpoint,
         crate::api::vision_mixer_page::get_pgm_endpoint,
+        crate::api::whep_endpoint::get_whep_endpoint,
         crate::api::flows::animate_input,
         crate::api::flows::debug_graph,
         crate::api::flows::get_flow_pad_caps,

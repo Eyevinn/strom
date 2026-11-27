@@ -287,6 +287,10 @@ pub async fn create_app_with_config(
             get(api::vision_mixer_page::get_pgm_endpoint),
         )
         .route(
+            "/flows/{flow_id}/blocks/{block_id}/whep-endpoint",
+            get(api::whep_endpoint::get_whep_endpoint),
+        )
+        .route(
             "/flows/{flow_id}/blocks/{block_id}/animate",
             post(api::flows::animate_input),
         )

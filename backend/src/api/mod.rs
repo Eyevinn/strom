@@ -22,6 +22,7 @@ pub mod system_clock;
 pub mod version;
 pub mod vision_mixer_page;
 pub mod websocket;
+pub mod whep_endpoint;
 pub mod whep_h265_pt;
 pub mod whep_player;
 pub mod whip_ingest;
