@@ -2,7 +2,7 @@
 
 use crate::blocks::builtin;
 use crate::blocks::{
-    BlockBuildContext, BusMessageConnectFn, DynamicWebrtcbinStore, ElementSetupFn,
+    BlockBuildContext, BusMessageConnectFn, DynamicWebrtcbinStore, ElementSetupFn, StopDrainFn,
     WhepEndpointInfo, WhipEndpointInfo,
 };
 use crate::gst::SessionThreadConfig;
@@ -27,6 +27,8 @@ pub struct ExpandedPipeline {
     pub bus_message_handlers: Vec<BusMessageConnectFn>,
     /// Element signal setup functions from blocks
     pub element_setups: Vec<ElementSetupFn>,
+    /// Stop drain functions from blocks
+    pub stop_drains: Vec<StopDrainFn>,
     /// Pad properties from blocks (element_id -> pad_name -> property_name -> value)
     pub pad_properties: HashMap<String, HashMap<String, HashMap<String, PropertyValue>>>,
     /// WHEP endpoints registered by blocks
@@ -190,6 +192,8 @@ pub async fn expand_blocks(
         );
     }
 
+    let stop_drains = ctx.take_stop_drains();
+
     // Collect WHEP endpoints from context
     let whep_endpoints = ctx.take_whep_endpoints();
     if !whep_endpoints.is_empty() {
@@ -237,6 +241,7 @@ pub async fn expand_blocks(
         links: all_links,
         bus_message_handlers,
         element_setups,
+        stop_drains,
         pad_properties: all_pad_properties,
         whep_endpoints,
         whip_endpoints,

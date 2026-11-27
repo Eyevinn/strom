@@ -466,3 +466,29 @@ workaround can go once we move past that version.
   (`srt_uri_key_without_value_test`).
 - **Upstream:** not searched.
 - **Found in:** #1257 (capabilities review).
+
+### `whepserversink` (`whep_signaller`): a second ICE gathering `complete` aborts the process
+- **Seen on:** gst-plugin-webrtc 0.15.4. Seen in the field (Linux) and reproduced on macOS.
+- **Symptom:** when a viewer's webrtcbin reports `ice-gathering-state` `complete` a second time,
+  the signaller panics with "SDP answer Sender needs to be valid". The panic is in a GObject
+  signal callback, which cannot unwind, so the whole process aborts; other threads that wait for
+  the signaller's settings lock panic on `PoisonError`. Seen when viewers connect and drop within
+  a second.
+- **Repro:** untested as `gst-launch`. POST a WHEP offer to `whepserversink`, and after the
+  answer has gone out, emit `notify::ice-gathering-state` on that viewer's webrtcbin again.
+- **Hint:** read in `src/whep_signaller/server.rs` of the gst-plugin-webrtc 0.15.4 crate
+  (around line 112). The signaller connects a `notify::ice-gathering-state` handler to every
+  viewer's webrtcbin. Each time it reads `complete`, it takes the sender that carries the SDP
+  answer to the waiting POST out of `settings.sdp_response` with `.expect(...)`, while it holds
+  the settings lock. The sender is there once per session, and webrtcbin can go from `complete`
+  back to `gathering` and reach `complete` again. The WHIP server signaller
+  (`src/whip_signaller/imp.rs`, around line 681) has the same `.expect` on `sdp_answer`, under
+  the same lock, in the `notify::ice-gathering-state` handler it connects in `webrtcbin-ready`
+  (read, not run). WHIP Input (`whipserversrc`) has no guard for it.
+- **Tests:** `whep_output_repeated_ice_complete_test::second_ice_gathering_complete_does_not_abort`
+  (a test binary of its own, since the panic aborts the process). WHEP Output works around it:
+  it stops the emission on every `complete` after the first, in a handler connected in
+  `consumer-added`, before the signaller's own
+  (`backend/src/blocks/builtin/whep/output/ice_complete_guard.rs`).
+- **Upstream:** not searched.
+- **Found in:** #1283.
