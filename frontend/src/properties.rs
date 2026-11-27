@@ -179,6 +179,8 @@ pub struct BlockInspectorResult {
     pub recorder_download_requested: Option<String>,
     /// Vision mixer control page requested - contains (flow_id, block_id)
     pub vision_mixer_url: Option<(FlowId, String)>,
+    /// Replay operator page requested - contains (flow_id, replay group)
+    pub replay_page_url: Option<(FlowId, String)>,
     /// Live property updates to send to running pipeline elements
     pub live_property_updates: Vec<LivePropertyUpdate>,
     /// Inspector rendered a VideoDevice/AudioDevice property — caller should
@@ -834,6 +836,24 @@ impl PropertyInspector {
                         .clicked()
                     {
                         result.vision_mixer_url = Some((fid, block.id.clone()));
+                    }
+                }
+            }
+
+            // Open the replay operator page for the block's replay group
+            if definition.id == "builtin.media_player" && is_timeline_player(block) {
+                if let Some(fid) = flow_id {
+                    let group =
+                        strom_types::mediaplayer::timeline_group(&block.properties, &block.id);
+                    if ui
+                        .button(format!("{} Replay", egui_phosphor::regular::ARROW_SQUARE_OUT))
+                        .on_hover_text(format!(
+                            "Open the replay control page for group '{}' in browser",
+                            group
+                        ))
+                        .clicked()
+                    {
+                        result.replay_page_url = Some((fid, group));
                     }
                 }
             }
