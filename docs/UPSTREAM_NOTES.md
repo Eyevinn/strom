@@ -39,7 +39,7 @@ workaround can go once we move past that version.
   `.property("clock-type", gst::ClockType::Tai)` and compare `time()` with a `Realtime` one.
 - **Hint:** macOS has no `CLOCK_TAI`; `gstsystemclock.c` seems to fall back to the monotonic
   clock id for unknown clock types instead of the realtime one. Not read in detail.
-- **Tests:** `tams::timeline::tests::clock_domains` and
+- **Tests:** `tams::tai_mapping::tests::clock_domains` and
   `host_clocks_without_tai_offset_fall_back_to_37s` cover Strom's check for it.
 - **Upstream:** not searched.
 - **Found in:** TAMS Output shared timeline work (#966). Strom treats a TAI reading that is not
